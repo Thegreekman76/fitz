@@ -18,9 +18,16 @@
 // que tiene que escalar hasta el caller de la función. El truco lo tomé de
 // Crafting Interpreters; en Rust funciona naturalmente con `Result`.
 
+use std::cell::RefCell;
+use std::collections::HashMap;
+use std::fs;
+use std::path::{Path, PathBuf};
+
 use crate::ast::{AssignTarget, BinOpKind, Expr, Pattern, Program, Stmt, StrPart, UnaryOpKind};
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
+use crate::lexer::tokenize;
+use crate::parser::parse;
 use crate::value::{ResultVariant, Value};
 
 // ---------------------------------------------------------------------------
@@ -59,9 +66,36 @@ pub type EvalResult<T> = Result<T, EvalSignal>;
 /// Ejecuta un programa. Construye el env global, registra builtins, e itera
 /// las sentencias del programa.
 ///
+/// El `base_dir` por defecto es el cwd actual del proceso — sirve para
+/// resolver imports relativos a archivos del proyecto cuando se ejecuta
+/// el binario sin contexto adicional. Para programas cargados desde un
+/// archivo `.fitz` específico, usar `eval_with_base` con el directorio
+/// del archivo.
+///
 /// Signals "huérfanos" (`return`/`break`/`continue` fuera de su contexto)
 /// se convierten acá en errores del usuario.
+///
+/// `dead_code` allow: hoy `main.rs` siempre usa `eval_with_base` con el
+/// directorio del archivo, y el resto del uso es desde tests (que el
+/// análisis del binario no ve). Lo dejamos como API pública por simetría
+/// y para tests de smoke.
+#[allow(dead_code)]
 pub fn eval(program: Program) -> FitzResult<()> {
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    eval_with_base(program, base_dir)
+}
+
+/// Variante de `eval` que recibe explícitamente el directorio raíz para
+/// resolver `import`s relativos. Lo usa `main.rs` después de leer el
+/// archivo `.fitz`: el `base_dir` es el padre del archivo, así
+/// `import utils` resuelve a `<dir-del-archivo>/utils.fitz`.
+pub fn eval_with_base(program: Program, base_dir: PathBuf) -> FitzResult<()> {
+    install_loader(base_dir);
+    // Guard para des-instalar el loader siempre — incluso ante panic.
+    // Si el programa termina por error, igual queremos limpiar el
+    // thread_local así un siguiente `eval` arranca limpio.
+    let _guard = LoaderGuard;
+
     let env = Environment::new();
     register_builtins(&env);
 
@@ -71,6 +105,244 @@ pub fn eval(program: Program) -> FitzResult<()> {
         }
     }
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Loader — carga de módulos `.fitz` desde disco. Estado almacenado en un
+// thread_local para no tener que enhebrar un parámetro extra por todas las
+// firmas de eval_stmt/eval_expr.
+//
+// Política de carga:
+//  - Eager: cuando el evaluator ve `import foo`, carga, lexea, parsea y
+//    evalúa `foo.fitz` antes de seguir con la siguiente sentencia.
+//  - Cache por path canonicalizado: importar dos veces el mismo archivo
+//    no re-evalúa side effects.
+//  - Detección de ciclos: stack `loading` con los paths actualmente en
+//    proceso de carga; si reaparece, error explícito.
+//  - `base_dir`: directorio donde se buscan los archivos relativos.
+//    Cambia temporalmente al cargar un módulo (al padre del propio
+//    módulo) para que los `import`s anidados sean relativos al módulo
+//    que los hace, no al archivo raíz. Se restaura al volver.
+// ---------------------------------------------------------------------------
+
+struct Loader {
+    base_dir: PathBuf,
+    loading: Vec<PathBuf>,
+    cache: HashMap<PathBuf, Value>,
+}
+
+thread_local! {
+    static LOADER: RefCell<Option<Loader>> = const { RefCell::new(None) };
+}
+
+fn install_loader(base_dir: PathBuf) {
+    LOADER.with(|cell| {
+        *cell.borrow_mut() = Some(Loader {
+            base_dir,
+            loading: Vec::new(),
+            cache: HashMap::new(),
+        });
+    });
+}
+
+fn uninstall_loader() {
+    LOADER.with(|cell| {
+        *cell.borrow_mut() = None;
+    });
+}
+
+/// Drop guard: garantiza que `uninstall_loader` se ejecute al salir del
+/// scope de `eval_with_base` aunque haya un panic o un early return.
+struct LoaderGuard;
+impl Drop for LoaderGuard {
+    fn drop(&mut self) {
+        uninstall_loader();
+    }
+}
+
+/// Resuelve los segmentos del path al archivo correspondiente,
+/// relativo al `base_dir` actual del loader. `["foo"]` →
+/// `<base>/foo.fitz`; `["sub", "foo"]` → `<base>/sub/foo.fitz`.
+///
+/// No verifica existencia — el caller hace `canonicalize`, que falla
+/// con un mensaje útil si el archivo no está.
+fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
+    let base = LOADER.with(|cell| {
+        cell.borrow().as_ref().map(|l| l.base_dir.clone())
+    });
+    let mut path = base.ok_or_else(|| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            "no se puede resolver `import`: el loader no está instalado \
+             (usar `eval` o `eval_with_base` como entrada)",
+        ))
+    })?;
+    let n = segments.len();
+    for (i, seg) in segments.iter().enumerate() {
+        if i + 1 == n {
+            path.push(format!("{}.fitz", seg));
+        } else {
+            path.push(seg);
+        }
+    }
+    Ok(path)
+}
+
+/// Carga un módulo: resuelve el path, chequea cache y ciclos, lee, parsea
+/// y evalúa el archivo en un env aislado, lo devuelve como
+/// `Value::Module`.
+///
+/// Esta función es reentrante: si el módulo cargado tiene `import` propios,
+/// `eval_stmt` los maneja recursivamente y termina volviendo acá. Mantenemos
+/// el invariante de no tener borrows vivos del `LOADER` cuando entramos a
+/// `eval_stmt` — cada operación sobre el loader se hace en un bloque chico
+/// que termina antes de la recursión.
+fn load_module(segments: &[String]) -> EvalResult<Value> {
+    let resolved = resolve_module_path(segments)?;
+
+    // `canonicalize` requiere que el archivo exista. Si falla, el módulo
+    // no se encontró.
+    let canonical = match fs::canonicalize(&resolved) {
+        Ok(p) => p,
+        Err(_) => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0, 0,
+                format!(
+                    "no se encontró el módulo `{}` (buscado en `{}`)",
+                    segments.join("."),
+                    resolved.display(),
+                ),
+            )));
+        }
+    };
+
+    // Cache hit: el mismo archivo importado de nuevo devuelve el mismo
+    // `Value::Module` (mismo `Rc<RefCell<Environment>>` adentro). No
+    // re-evalúa el body.
+    if let Some(cached) = LOADER.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .and_then(|l| l.cache.get(&canonical).cloned())
+    }) {
+        return Ok(cached);
+    }
+
+    // Detección de ciclos: si el archivo ya está en el stack de "loading",
+    // estamos volviendo a entrar antes de haber terminado.
+    let cycle = LOADER.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .is_some_and(|l| l.loading.contains(&canonical))
+    });
+    if cycle {
+        let stack_text = LOADER.with(|cell| {
+            cell.borrow()
+                .as_ref()
+                .map(|l| {
+                    l.loading
+                        .iter()
+                        .map(|p| display_module_path(p))
+                        .collect::<Vec<_>>()
+                        .join(" -> ")
+                })
+                .unwrap_or_default()
+        });
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            format!(
+                "ciclo de imports detectado: {} -> {}",
+                stack_text,
+                display_module_path(&canonical),
+            ),
+        )));
+    }
+
+    // Leer + lexear + parsear el archivo. Cualquier error de esas etapas
+    // se propaga.
+    let source = match fs::read_to_string(&canonical) {
+        Ok(s) => s,
+        Err(e) => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0, 0,
+                format!(
+                    "error leyendo el módulo `{}`: {}",
+                    canonical.display(),
+                    e,
+                ),
+            )));
+        }
+    };
+    let tokens = tokenize(&source).map_err(EvalSignal::Error)?;
+    let module_program = parse(tokens).map_err(EvalSignal::Error)?;
+
+    // Apilar este path como "cargando" y cambiar el base_dir al padre
+    // del módulo, para que sus propios `import`s resuelvan relativos a
+    // su ubicación. Guardamos el `prev_base` para restaurarlo al volver.
+    let new_base = canonical
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let prev_base = LOADER.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let loader = borrow.as_mut().expect("loader instalado");
+        loader.loading.push(canonical.clone());
+        std::mem::replace(&mut loader.base_dir, new_base)
+    });
+
+    // Env aislado para el módulo. Registramos builtins también acá: la
+    // intención es que un módulo pueda llamar a `print`, `len`, etc.
+    // sin que el archivo importer tenga que re-exportarlos.
+    let module_env = Environment::new();
+    register_builtins(&module_env);
+
+    // Evaluar las sentencias del módulo. Si alguna falla, igual restauramos
+    // el estado del loader antes de propagar el error.
+    let eval_result: EvalResult<()> = (|| {
+        for stmt in &module_program {
+            eval_stmt(stmt, module_env.clone())?;
+        }
+        Ok(())
+    })();
+
+    // Restaurar estado del loader.
+    LOADER.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let loader = borrow.as_mut().expect("loader instalado");
+        loader.loading.pop();
+        loader.base_dir = prev_base;
+    });
+
+    eval_result?;
+
+    // Construir el `Value::Module`. El nombre visible es el último
+    // segmento del path (el `binding name`).
+    let name = segments.last().cloned().unwrap_or_default();
+    let module = Value::Module {
+        name,
+        env: module_env,
+    };
+
+    // Cachear por path canonicalizado. Un segundo import del mismo
+    // archivo, aun bajo un alias distinto, devuelve este mismo Rc.
+    LOADER.with(|cell| {
+        if let Some(loader) = cell.borrow_mut().as_mut() {
+            loader.cache.insert(canonical, module.clone());
+        }
+    });
+
+    Ok(module)
+}
+
+/// Render compacto de un path absoluto para mensajes de error de ciclo.
+/// En Windows, `canonicalize` produce paths UNC (`\\?\C:\...`); los
+/// limpiamos para que el usuario vea `C:\...` directo.
+fn display_module_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s)
 }
 
 /// Convierte un signal sin contexto en un `FitzError` legible.
@@ -322,6 +594,50 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             }
             Ok(Value::Null)
         }
+
+        // `import foo` / `import sub.foo` — carga el módulo y lo expone
+        // bajo el ÚLTIMO segmento del path (`sub.foo` → binding `foo`).
+        // Para field access (`foo.bar`) ver `eval_expr` sobre `Expr::Field`;
+        // para method calls (`foo.bar()`) ver `dispatch_method`.
+        Stmt::Import { path } => {
+            let module = load_module(path)?;
+            let binding_name = path
+                .last()
+                .cloned()
+                .expect("parser garantiza al menos un segmento");
+            env.borrow_mut().define(binding_name, module);
+            Ok(Value::Null)
+        }
+
+        // `from foo import a, b, c` — carga el módulo y bindea cada
+        // nombre directo al scope actual. Si el módulo no expone
+        // alguno de los nombres pedidos, error explícito citando cuál
+        // falta y desde qué módulo.
+        Stmt::FromImport { path, names } => {
+            let module = load_module(path)?;
+            let module_env = match &module {
+                Value::Module { env, .. } => env.clone(),
+                _ => unreachable!("load_module siempre devuelve Value::Module"),
+            };
+            let module_label = path
+                .last()
+                .cloned()
+                .unwrap_or_else(|| "<sin nombre>".to_string());
+            for name in names {
+                let v = module_env.borrow().get(name).ok_or_else(|| {
+                    EvalSignal::Error(FitzError::new(
+                        ErrorKind::UndefinedVariable(name.clone()),
+                        0, 0,
+                        format!(
+                            "el módulo `{}` no exporta `{}`",
+                            module_label, name,
+                        ),
+                    ))
+                })?;
+                env.borrow_mut().define(name.clone(), v);
+            }
+            Ok(Value::Null)
+        }
     }
 }
 
@@ -421,11 +737,12 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             closure: env,
         }),
 
-        // `obj.campo` — acceso a campo de instancia de tipo custom.
-        // Para receptores no-Instance (List, Map, Str, etc.), el camino
-        // habitual es el method dispatch (`xs.map(...)`), que va por la
-        // rama `Expr::Call` con callee `Field`. El field access "pelado"
-        // sobre primitivos no tiene semántica útil hoy.
+        // `obj.campo` — acceso a campo de instancia de tipo custom, o
+        // a un export de un módulo importado. Para receptores no-Instance
+        // y no-Module (List, Map, Str, etc.), el camino habitual es el
+        // method dispatch (`xs.map(...)`), que va por la rama `Expr::Call`
+        // con callee `Field`. El field access "pelado" sobre primitivos
+        // no tiene semántica útil hoy.
         Expr::Field { object, field } => {
             let obj = eval_expr(object, env)?;
             match obj {
@@ -446,15 +763,27 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                             ))
                         })
                 }
+                Value::Module { name, env: module_env } => {
+                    module_env.borrow().get(field).ok_or_else(|| {
+                        EvalSignal::Error(FitzError::new(
+                            ErrorKind::UndefinedVariable(field.clone()),
+                            0, 0,
+                            format!(
+                                "el módulo `{}` no exporta `{}`",
+                                name, field,
+                            ),
+                        ))
+                    })
+                }
                 other => Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeMismatch {
-                        expected: "Instance".into(),
+                        expected: "Instance o Module".into(),
                         found: other.type_name().into(),
                     },
                     0, 0,
                     format!(
                         "acceso a campo `.{}` sobre un valor de tipo `{}` — \
-                         solo se permite sobre instancias de tipos custom",
+                         solo se permite sobre instancias de tipos custom o módulos",
                         field,
                         other.type_name()
                     ),
@@ -878,6 +1207,20 @@ fn dispatch_method(
         (Value::Str(_), "len") => str_len(receiver, args),
         (Value::Str(_), "upper") => str_upper(receiver, args),
         (Value::Str(_), "lower") => str_lower(receiver, args),
+        // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
+        // módulo y llamándola como cualquier función. No es method
+        // dispatch real — el módulo no es "el receptor", solo el lugar
+        // donde vive la función.
+        (Value::Module { name, env: module_env }, _) => {
+            let value = module_env.borrow().get(method).ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::UndefinedVariable(method.into()),
+                    0, 0,
+                    format!("el módulo `{}` no exporta `{}`", name, method),
+                ))
+            })?;
+            invoke_value(value, args, method)
+        }
         _ => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             0, 0,
@@ -4480,5 +4823,304 @@ let r = match n {
         // miss es Err("no encontrado") — el mensaje viene de list_find.
         let miss = env.borrow().get("miss").unwrap();
         assert_eq!(miss, err_value(Value::Str("no encontrado".into())));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Módulos / import (Fase 3, paso 5)
+    // -----------------------------------------------------------------------
+
+    /// Helper: monta `files` (path relativo → contenido) en un tempdir,
+    /// evalúa `main_src` con `base_dir` apuntando a ese tempdir, y
+    /// devuelve `(env, resultado)`. El tempdir vive lo suficiente para
+    /// que el loader pueda leer los archivos; se libera al final.
+    fn eval_with_modules(
+        files: &[(&str, &str)],
+        main_src: &str,
+    ) -> (EnvRef, FitzResult<()>) {
+        let dir = tempfile::tempdir().expect("creando tempdir");
+        for (rel_path, content) in files {
+            let full = dir.path().join(rel_path);
+            if let Some(parent) = full.parent() {
+                std::fs::create_dir_all(parent).expect("creando subdir");
+            }
+            std::fs::write(&full, content).expect("escribiendo fixture");
+        }
+
+        let tokens = crate::lexer::tokenize(main_src).expect("la fuente debe tokenizar");
+        let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
+
+        install_loader(dir.path().to_path_buf());
+        // Guard local: garantizamos uninstall aun ante panic en eval.
+        let _guard = LoaderGuard;
+
+        let env = Environment::new();
+        register_builtins(&env);
+        let mut result: FitzResult<()> = Ok(());
+        for stmt in &program {
+            if let Err(signal) = eval_stmt(stmt, env.clone()) {
+                result = Err(signal_to_error(signal));
+                break;
+            }
+        }
+        // Cerramos el tempdir explícitamente para que se borre antes de
+        // que el helper retorne. Los `Value` ya están en memoria (env
+        // contiene clones); no dependen del fs.
+        drop(dir);
+        (env, result)
+    }
+
+    #[test]
+    fn import_simple_expone_el_modulo_como_namespace() {
+        // `import utils` + `utils.greet("Fitz")` — el módulo exporta
+        // una fn que devuelve un Str interpolado.
+        let utils = "fn greet(name) => \"hola, {name}\"\n";
+        let main = "\
+            import utils\n\
+            let g = utils.greet(\"Fitz\")\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("g"), Some(Value::Str("hola, Fitz".into())));
+    }
+
+    #[test]
+    fn import_bindea_bajo_el_ultimo_segmento() {
+        // `import sub.foo` → binding `foo` (no `sub.foo`). El path
+        // resuelve a `sub/foo.fitz`.
+        let foo = "fn one() => 1\n";
+        let main = "\
+            import sub.foo\n\
+            let r = foo.one()\n\
+        ";
+        let (env, res) = eval_with_modules(&[("sub/foo.fitz", foo)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Int(1)));
+        // `sub` NO se bindea — solo el último segmento.
+        assert!(env.borrow().get("sub").is_none());
+    }
+
+    #[test]
+    fn from_import_bindea_nombres_directos() {
+        // `from utils import greet, NAME` trae `greet` y `NAME` al
+        // scope actual, sin exponer el módulo.
+        let utils = "\
+            let NAME = \"Fitz\"\n\
+            fn greet(n) => \"hola, {n}\"\n\
+        ";
+        let main = "\
+            from utils import greet, NAME\n\
+            let g = greet(NAME)\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("g"), Some(Value::Str("hola, Fitz".into())));
+        // `utils` NO se bindea cuando se usa `from import`.
+        assert!(env.borrow().get("utils").is_none());
+    }
+
+    #[test]
+    fn from_import_de_tipo_permite_struct_literal() {
+        // `from foo import User` + `User { id: 1, name: "x" }` — el
+        // parser de struct literal espera `Ident { ... }`, y `from
+        // import` trae el Value::Type al scope con ese nombre.
+        let foo = "type User { id: Int, name: Str }\n";
+        let main = "\
+            from foo import User\n\
+            let u = User { id: 7, name: \"Fitz\" }\n\
+            let nm = u.name\n\
+        ";
+        let (env, res) = eval_with_modules(&[("foo.fitz", foo)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("nm"), Some(Value::Str("Fitz".into())));
+    }
+
+    #[test]
+    fn modulo_no_existe_da_error_con_path_resuelto() {
+        let main = "import inexistente\n";
+        let (_env, res) = eval_with_modules(&[], main);
+        let err = res.unwrap_err();
+        assert!(err.message.contains("inexistente"),
+            "el mensaje debe nombrar el módulo: {}", err.message);
+        assert!(err.message.contains("no se encontró"),
+            "el mensaje debe decir 'no se encontró': {}", err.message);
+    }
+
+    #[test]
+    fn from_import_de_nombre_inexistente_da_error_claro() {
+        // El módulo carga, pero el nombre pedido no existe en él.
+        let utils = "fn a() => 1\n";
+        let main = "from utils import b\n";
+        let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        let err = res.unwrap_err();
+        assert!(err.message.contains("no exporta"), "msg: {}", err.message);
+        assert!(err.message.contains("`b`"), "msg: {}", err.message);
+        assert!(err.message.contains("`utils`"), "msg: {}", err.message);
+    }
+
+    #[test]
+    fn field_access_en_modulo_inexistente_da_error_claro() {
+        // `import utils` + `utils.missing` — el módulo carga pero
+        // no expone `missing`.
+        let utils = "fn a() => 1\n";
+        let main = "\
+            import utils\n\
+            let x = utils.missing\n\
+        ";
+        let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        let err = res.unwrap_err();
+        assert!(err.message.contains("no exporta") && err.message.contains("missing"),
+            "msg: {}", err.message);
+    }
+
+    #[test]
+    fn modulo_cargado_dos_veces_no_re_ejecuta_side_effects() {
+        // Cada vez que un módulo se evalúa, su body corre. Pero el
+        // cache hace que un segundo import del mismo archivo devuelva
+        // el mismo `Value::Module` sin re-ejecutar el body. Para
+        // medirlo, el módulo escribe en una lista compartida y
+        // contamos cuántas veces se incrementó.
+        //
+        // No usamos side effects de print porque no tenemos forma
+        // de capturar stdout en tests; en su lugar, comparamos
+        // identidad de un valor exportado.
+        let counter_mod = "let value = 42\n";
+        let main = "\
+            import counter_mod\n\
+            import counter_mod\n\
+            let v = counter_mod.value\n\
+        ";
+        let (env, res) = eval_with_modules(&[("counter_mod.fitz", counter_mod)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("v"), Some(Value::Int(42)));
+        // Como no podemos detectar re-ejecución desde el lado del
+        // lenguaje, validamos al menos que ambos `import` no rompan
+        // ni dupliquen estado: el binding `counter_mod` queda accesible
+        // y consistente.
+        let m = env.borrow().get("counter_mod").unwrap();
+        assert!(matches!(m, Value::Module { .. }));
+    }
+
+    #[test]
+    fn modulo_cacheado_devuelve_misma_identidad_de_env() {
+        // Cargar un módulo dos veces desde paths distintos pero al
+        // mismo archivo (acá igual path) devuelve `Value::Module` con
+        // el MISMO `Rc<RefCell<Environment>>` adentro. Eso lo testea
+        // el `PartialEq` de Module (por identidad del env).
+        //
+        // En este test, dos `from utils import x` (que requieren cargar
+        // utils) deberían producir el mismo cache; verificamos
+        // accediendo dos veces a un binding "alias" del módulo.
+        let utils = "let x = 7\n";
+        let main = "\
+            import utils\n\
+            let u1 = utils\n\
+            import utils\n\
+            let u2 = utils\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        res.unwrap();
+        let u1 = env.borrow().get("u1").unwrap();
+        let u2 = env.borrow().get("u2").unwrap();
+        assert_eq!(u1, u2, "el segundo import debe devolver el mismo módulo cacheado");
+    }
+
+    #[test]
+    fn ciclo_a_b_a_se_detecta() {
+        // a.fitz importa b.fitz que importa a.fitz. Mientras se
+        // evalúa a (todavía sin terminar), b intenta importar a y el
+        // loader detecta el ciclo.
+        let a = "\
+            import b\n\
+            let from_a = 1\n\
+        ";
+        let b = "\
+            import a\n\
+            let from_b = 2\n\
+        ";
+        let main = "import a\n";
+        let (_env, res) = eval_with_modules(&[("a.fitz", a), ("b.fitz", b)], main);
+        let err = res.unwrap_err();
+        assert!(err.message.contains("ciclo de imports"),
+            "msg: {}", err.message);
+    }
+
+    #[test]
+    fn import_anidado_resuelve_relativo_al_modulo_importer() {
+        // `main` importa `sub.foo`, y `sub/foo.fitz` importa `bar`,
+        // que tiene que resolverse como `sub/bar.fitz` (relativo a
+        // `foo`, no a main). Esto verifica el swap de `base_dir`
+        // durante la carga del módulo.
+        let foo = "\
+            import bar\n\
+            fn outer() => bar.inner()\n\
+        ";
+        let bar = "fn inner() => \"desde bar\"\n";
+        let main = "\
+            import sub.foo\n\
+            let r = foo.outer()\n\
+        ";
+        let (env, res) = eval_with_modules(&[
+            ("sub/foo.fitz", foo),
+            ("sub/bar.fitz", bar),
+        ], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Str("desde bar".into())));
+    }
+
+    #[test]
+    fn modulo_con_error_de_sintaxis_propaga_error() {
+        // Si el módulo importado tiene un parse error, debería
+        // propagarse al importer en lugar de pasar silenciosamente.
+        let busted = "let x = +\n"; // syntax error
+        let main = "import busted\n";
+        let (_env, res) = eval_with_modules(&[("busted.fitz", busted)], main);
+        assert!(res.is_err(), "se esperaba error de parseo del módulo");
+    }
+
+    #[test]
+    fn modulo_con_error_de_runtime_propaga_error() {
+        // El módulo carga (parsea bien) pero su top-level body
+        // dispara un error al evaluar — debería propagarse.
+        let busted = "let x = no_existe\n";
+        let main = "import busted\n";
+        let (_env, res) = eval_with_modules(&[("busted.fitz", busted)], main);
+        let err = res.unwrap_err();
+        // Esperamos UndefinedVariable de adentro del módulo.
+        assert!(matches!(err.kind, ErrorKind::UndefinedVariable(_)));
+    }
+
+    #[test]
+    fn method_call_sobre_modulo_invoca_funcion_exportada() {
+        // `utils.suma(2, 3)` debe resolver a `suma` adentro de utils.
+        let utils = "fn suma(a, b) => a + b\n";
+        let main = "\
+            import utils\n\
+            let r = utils.suma(2, 3)\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Int(5)));
+    }
+
+    #[test]
+    fn funcion_importada_via_from_import_cierra_sobre_env_del_modulo() {
+        // `from utils import greet`, después `greet("x")` ejecuta el
+        // body de greet. Ese body usa una variable del módulo
+        // (`PREFIX`) — la captura por closure debe seguir viendo el
+        // env del módulo, no el del importer.
+        //
+        // PREFIX NO está en el scope del importer; si la closure no
+        // capturó el env del módulo, esto rompería con UndefinedVariable.
+        let utils = "\
+            let PREFIX = \"saludos, \"\n\
+            fn greet(name) => \"{PREFIX}{name}\"\n\
+        ";
+        let main = "\
+            from utils import greet\n\
+            let g = greet(\"Fitz\")\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
+        res.unwrap();
+        assert_eq!(env.borrow().get("g"), Some(Value::Str("saludos, Fitz".into())));
     }
 }

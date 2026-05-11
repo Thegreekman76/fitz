@@ -1,0 +1,18 @@
+// 16-modulos.fitz — capítulo 16 de la guía.
+//
+// Carga `guide_utils.fitz` (en el mismo directorio) de dos formas:
+//  - `import guide_utils` expone el módulo entero como namespace,
+//    accesible vía `guide_utils.greet(...)`.
+//  - `from guide_utils import User` trae el tipo `User` al scope
+//    para poder usar la sintaxis de struct literal:
+//    `User { id: ..., name: ... }`.
+//
+// Para correrlo:
+//   cargo run -- run examples/guide/16-modulos.fitz
+
+import guide_utils
+from guide_utils import User
+
+let u = User { id: 7, name: "Fitz" }
+print(guide_utils.greet(u.name))
+print(u)

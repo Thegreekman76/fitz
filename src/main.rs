@@ -103,8 +103,17 @@ fn run_file(path: &PathBuf) {
     };
 
     // Fase 2.4: evaluador
+    // Base dir para resolver `import`s: el directorio del archivo que
+    // se está ejecutando. Si por algún motivo no podemos derivarlo
+    // (path sin parent), caemos al cwd.
+    let base_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
     println!("\n--- Ejecución ---");
-    if let Err(e) = evaluator::eval(program) {
+    if let Err(e) = evaluator::eval_with_base(program, base_dir) {
         eprintln!("{}", e);
         std::process::exit(1);
     }

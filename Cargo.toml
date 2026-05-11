@@ -28,6 +28,9 @@ serde_json = "1"
 
 [dev-dependencies]
 # Para tests
+# Directorios temporales para tests del loader de módulos (3.5):
+# permite armar fixtures en disco y limpiarlos automáticamente.
+tempfile = "3"
 
 [profile.release]
 opt-level = 3

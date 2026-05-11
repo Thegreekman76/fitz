@@ -207,7 +207,7 @@ print(double(x))
 ---
 
 ## Fase 3 — El lenguaje crece 🌱
-**Estado: EN CURSO**
+**Estado: COMPLETADA**
 
 Agregar las features que hacen a Fitz expresivo. La fase está dividida
 en cinco pasos; cada uno cierra una pieza independiente y suma su
@@ -434,10 +434,77 @@ Renumeración 13→14, 14→15, 15→16. Cap 9 (Listas/mapas) y cap 12
 - **Anotaciones compuestas (`List<T>`, `Result<T>`, `Map<K,V>`)** —
   sigue deuda de 2.3.
 
-#### 3.5 Módulos / `import`
-**Pendiente** — infraestructural.
+#### 3.5 Módulos / `import` ✓
+**Completado** — el último paso de Fase 3. Carga de archivos, dos
+formas de importar, namespaces aislados, cache por path canonicalizado
+y detección de ciclos.
 
-- File loading, name resolution, namespaces.
+- AST nuevo: `Stmt::Import { path: Vec<String> }` y
+  `Stmt::FromImport { path: Vec<String>, names: Vec<String> }`.
+- Parser:
+  - `import foo` / `import sub.foo.bar` — paths puntudos
+    acumulando segmentos. El parser garantiza al menos un
+    segmento.
+  - `from foo import a, b, c` — lista de nombres (al menos
+    uno; acepta trailing comma). Path puede ser punteado
+    (`from sub.foo import bar`).
+- Value: `Value::Module { name, env: EnvRef }`. Display
+  `<module name>`. Igualdad por identidad del `Rc<RefCell>>`
+  del env (dos imports del mismo archivo dan módulos iguales
+  porque el cache devuelve el mismo Rc).
+- Evaluator:
+  - Loader como thread_local (`Option<Loader>`). Estado:
+    `base_dir` (rotativo al cargar módulos anidados, vuelve
+    al salir), `loading: Vec<PathBuf>` (stack para ciclos),
+    `cache: HashMap<PathBuf, Value>` (por path canonicalizado).
+  - Resolución relativa al `base_dir` actual: `["sub","foo"]`
+    → `<base>/sub/foo.fitz`. `canonicalize` valida existencia
+    y normaliza para cache + cycle.
+  - Eager: al ver `Stmt::Import`/`FromImport`, carga, lexea,
+    parsea y evalúa el archivo entero en un env aislado antes
+    de seguir. El env del módulo registra builtins propios.
+  - `import` bindea bajo el último segmento del path
+    (`sub.foo` → `foo`). `from import` bindea cada nombre
+    directo y NO expone el módulo.
+  - Field access sobre `Value::Module` resuelve en el env
+    del módulo (`utils.foo` → `utils.env.get("foo")`).
+  - Method dispatch sobre `Value::Module` busca el método en
+    el env del módulo y lo invoca con `invoke_value`
+    (reuso del path de llamada normal).
+- `eval_with_base(program, base_dir)` como entrada explícita;
+  `eval(program)` queda como wrapper que usa el cwd. `main.rs`
+  pasa el directorio del archivo `.fitz` que se está ejecutando.
+- Cierra deuda original de 2.1: los tokens `Import` y `From`
+  del lexer dejan de ser huérfanos.
+- Tests del proyecto al cerrar 3.5: 503 (472 al cerrar 3.4 +
+  31 nuevos: 3 en ast, 10 en parser, 3 en value, 15 en
+  evaluator — incluyendo E2E con fixtures en tempdir).
+
+Guía: capítulo 16 nuevo "Módulos" entre Errores (15) y "Qué
+sigue" (que pasa a 17). Ejemplo nuevo
+`examples/guide/16-modulos.fitz` + auxiliar
+`examples/guide/guide_utils.fitz` (sin numeración para que el
+binding generado por `import` sea un identificador válido).
+
+**Deuda explícita — retomar después:**
+- **Qualified struct literals** (`foo.User { ... }`) — el parser
+  de struct literal espera `Ident { ... }`. Para usar el literal,
+  hoy hay que `from foo import User`. Se puede extender el parser
+  para aceptar paths como type name si la asimetría molesta.
+- **`as` / aliasing** (`import foo as f`, `from foo import bar as b`)
+  — sin soporte. Cuando importe se suma; es palabra contextual,
+  no necesita token nuevo.
+- **`pub` / privacidad** — hoy todo top-level del módulo es
+  público. Si más adelante queremos marcar internos, se suma
+  `pub` o convención `_underscore` validada.
+- **stdlib** (`from fitz import http`) — sin soporte. El prefijo
+  `fitz/` no es especial todavía; se reserva para Fase 4+.
+- **Multi-línea en `from ... import (...)` con paréntesis** — sin
+  soporte. La lista de nombres tiene que ir en una línea.
+- **Imports anidados en bloques/funciones** — hoy nada lo
+  prohíbe sintácticamente, pero el caso no está pensado: el
+  binding queda en el env donde se ejecuta el import. Si
+  conviene restringir a top-level, se suma flag en el parser.
 
 ### Criterio de completitud
 ```fitz

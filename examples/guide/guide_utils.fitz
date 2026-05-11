@@ -1,0 +1,17 @@
+// guide_utils.fitz — módulo auxiliar para el capítulo 16 de la guía.
+//
+// Cargado desde 16-modulos.fitz con `import guide_utils` y
+// `from guide_utils import User`. Por qué no `16-utils.fitz`:
+// el binding generado por `import` toma el último segmento del
+// path, y "16-utils" no es un identificador válido (arranca con
+// dígito, contiene `-`). Con un nombre limpio queda usable como
+// `guide_utils.greet(...)`.
+
+let PREFIX = "saludos, "
+
+fn greet(name) => "{PREFIX}{name}"
+
+type User {
+    id: Int
+    name: Str
+}

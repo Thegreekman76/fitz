@@ -1,7 +1,7 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 3 — paso 4: funciones anónimas + method calls + mutación, 472 tests pasando).
+> Última actualización: 2026-05-11 (Fase 3 — paso 5: módulos / `import`, 503 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -40,8 +40,11 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 14. [Result y manejo de errores](#14-result-y-manejo-de-errores)
 15. [Errores y mensajes](#15-errores-y-mensajes)
 
-**Parte 6 — Cerrando**
-16. [Qué sigue](#16-qué-sigue)
+**Parte 6 — Organización**
+16. [Módulos](#16-módulos)
+
+**Parte 7 — Cerrando**
+17. [Qué sigue](#17-qué-sigue)
 
 ---
 
@@ -3345,14 +3348,318 @@ Error en línea 0:0 — `add` espera 2 argumento(s), recibió 1
 
 ---
 
-Con esto ya sabés interpretar lo que te tira el intérprete. En el
-último capítulo te paso un mapa para seguir: lo que viene en Fase 3 y
-4, qué pueden esperar los próximos capítulos de la guía, y cómo
-contribuir.
+Con el mapa de errores del intérprete a mano, podemos pasar a un
+tema distinto: cómo partir el código en archivos. Hasta ahora todos
+los ejemplos vivieron en un solo `.fitz`. En el próximo capítulo
+vemos cómo separar pedazos y traerlos con `import`.
 
 ---
 
-## 16. Qué sigue
+## 16. Módulos
+
+Hasta acá, todos los programas vivieron en un archivo. Cuando los
+proyectos crecen, querés partir el código: una pieza por archivo,
+con sus tipos, funciones y constantes, y traerlos donde haga falta.
+Fitz tiene dos formas de hacerlo: `import foo` para usar el archivo
+como namespace, y `from foo import a, b` para traer nombres directo
+al scope.
+
+### Tu primer módulo
+
+Pongamos dos archivos lado a lado:
+
+`utils.fitz`:
+
+```fitz
+let PREFIX = "saludos, "
+
+fn greet(name) {
+    return "{PREFIX}{name}"
+}
+```
+
+`main.fitz`:
+
+```fitz
+import utils
+
+let g = utils.greet("Fitz")
+print(g)
+```
+
+Salida:
+
+```
+saludos, Fitz
+```
+
+Lo que pasa:
+
+1. Al ver `import utils`, el intérprete busca un archivo
+   `utils.fitz` **relativo a `main.fitz`** y lo evalúa entero, en
+   un scope aislado.
+2. `utils` queda bindeado en el scope de `main.fitz` como un
+   **módulo**: un valor que responde a `utils.<nombre>` con lo que
+   el módulo tenga top-level.
+3. `utils.greet("Fitz")` busca `greet` adentro del env del módulo,
+   lo invoca, y devuelve el `Str` interpolado. La closure de
+   `greet` ve `PREFIX` porque está en el mismo env.
+
+### `from ... import` — traer nombres directos
+
+Si no querés escribir `utils.` cada vez, podés pedir nombres
+específicos:
+
+`main.fitz`:
+
+```fitz
+from utils import greet, PREFIX
+
+print(greet("Fitz"))     // saludos, Fitz
+print(PREFIX)            // saludos,
+```
+
+Diferencias con `import utils`:
+
+- `from import` **no expone** el módulo como tal — solo bindea los
+  nombres pedidos.
+- El módulo igual se carga entero (eager): si tiene side effects
+  top-level, pasan al evaluar el `from`.
+- Si el módulo no exporta uno de los nombres, error explícito al
+  evaluar el `from`.
+
+Trailing comma admitida: `from utils import greet, PREFIX,` (la
+coma final se ignora). La forma multi-línea con paréntesis
+(`from utils import (\ngreet,\nPREFIX\n)`) todavía no se soporta;
+si la lista se hace larga, mantenela en una línea.
+
+### Paths con puntos — subdirectorios
+
+Los segmentos separados por `.` mapean a subdirectorios:
+
+`sub/foo.fitz`:
+
+```fitz
+fn one() => 1
+```
+
+`main.fitz`:
+
+```fitz
+import sub.foo
+
+print(foo.one())     // 1
+```
+
+Reglas:
+
+- `import sub.foo` resuelve a `<dir-del-archivo-importer>/sub/foo.fitz`.
+- El **binding** es el **último segmento** (`foo`), no
+  `sub.foo`. Para acceder al módulo: `foo.one()`. No hay un
+  binding `sub` que tenga `foo` adentro.
+- `from sub.foo import bar` también funciona: misma resolución
+  de path, pero el binding es `bar` directo (sin pasar por
+  `foo`).
+
+### Tipos importados y struct literals
+
+Los `type` declarados en un módulo son valores comunes: se
+exportan como cualquier otro. Para usarlos con la sintaxis de
+struct literal (`User { id: 1, name: "x" }`), hay que traer el
+tipo al scope con `from ... import`:
+
+`models.fitz`:
+
+```fitz
+type User {
+    id: Int
+    name: Str
+}
+```
+
+`main.fitz`:
+
+```fitz
+from models import User
+
+let u = User { id: 7, name: "Fitz" }
+print(u)             // User { id: 7, name: "Fitz" }
+print(u.name)        // Fitz
+```
+
+Por qué hace falta el `from import`: el parser de struct literal
+espera un `Ident { ... }` simple. `import models` +
+`models.User { ... }` no parsea hoy — el parser no sabe que
+`models.User` es el "type name". El `from import` te trae `User`
+directo y resuelve el problema sin extender el parser. (Asimetría
+que se va a cerrar cuando moleste.)
+
+### Aislamiento
+
+Cada módulo tiene su propio env. Las variables, funciones y tipos
+top-level del módulo viven ahí; **el scope del importer NO ve esas
+definiciones** salvo lo que se traiga vía `import` o `from import`.
+
+Eso significa que dos módulos pueden tener nombres iguales sin
+chocar:
+
+`a.fitz`:
+
+```fitz
+fn ping() => "desde a"
+```
+
+`b.fitz`:
+
+```fitz
+fn ping() => "desde b"
+```
+
+`main.fitz`:
+
+```fitz
+import a
+import b
+
+print(a.ping())     // desde a
+print(b.ping())     // desde b
+```
+
+Y las **closures** de funciones exportadas siguen viendo el env
+**del módulo donde se definieron**, no el del importer. Por eso
+`greet` en el primer ejemplo encontró `PREFIX` aunque `PREFIX` no
+está en el scope de `main.fitz`.
+
+### Cache — el mismo archivo no se ejecuta dos veces
+
+Si dos partes del proyecto importan el mismo archivo, se carga una
+sola vez. La segunda vez devuelve el módulo ya cargado, sin
+re-evaluar el body:
+
+```fitz
+import utils       // primera vez: utils.fitz se evalúa
+import utils       // segunda vez: hit en cache, no se re-evalúa
+```
+
+Esto es importante si tu módulo tiene side effects top-level (un
+`print` o un `let` con cómputo): pasan una sola vez. La identidad
+del módulo es la misma — si guardás el resultado de los dos
+imports en dos variables, son iguales (`u1 == u2`).
+
+### Ciclos
+
+Un módulo no puede importar (directa o transitivamente) un módulo
+que todavía no terminó de cargarse. El intérprete detecta el ciclo
+y corta con un error explícito:
+
+`a.fitz`:
+
+```fitz
+import b
+let from_a = 1
+```
+
+`b.fitz`:
+
+```fitz
+import a
+let from_b = 2
+```
+
+`main.fitz`:
+
+```fitz
+import a
+```
+
+Salida:
+
+```
+Error en línea 0:0 — ciclo de imports detectado: ...\a.fitz -> ...\b.fitz -> ...\a.fitz
+```
+
+(Los paths van canonicalizados — vas a ver los absolutos.)
+
+No intentamos resolver ciclos automáticamente: son raros en código
+bien organizado y agregan complejidad sin payoff. Si te encontraste
+con uno, reorganizá: típicamente significa que las dos piezas
+querían ser una sola, o que hay un tercer módulo "core" que las dos
+tendrían que importar.
+
+### Qué se exporta
+
+Hoy, **todo lo top-level del módulo es público**: variables,
+funciones, tipos. No hay marcador `pub` ni convención de
+underscore. Si por ahora querés indicar que algo es "interno",
+ponele un nombre claro (`_helper`) por convención — pero no hay
+chequeo del intérprete.
+
+Cuando aparezca la necesidad real (módulos con superficie pública
+pequeña y privada grande), se va a sumar `pub` explícito o
+convención de underscore validada por el compilador estático.
+
+### Qué no se puede hacer todavía
+
+- **`import foo as f`** — sin aliases. La forma actual es
+  `import foo` (binding `foo`).
+- **`from foo import bar as b`** — mismo deal.
+- **`foo.User { ... }`** — el struct literal con namespace no
+  parsea. La forma actual es `from foo import User`.
+- **`stdlib`** (`from fitz import http`) — el prefijo `fitz/` se
+  reserva para Fase 4 cuando entre HTTP nativo. Hoy todo es código
+  de usuario.
+- **Multi-línea en `from import (...)` con paréntesis** — sin
+  soporte. Una línea sola.
+
+### Ejemplo completo
+
+[examples/guide/16-modulos.fitz](../examples/guide/16-modulos.fitz):
+
+```fitz
+import guide_utils
+from guide_utils import User
+
+let u = User { id: 7, name: "Fitz" }
+print(guide_utils.greet(u.name))
+print(u)
+```
+
+[examples/guide/guide_utils.fitz](../examples/guide/guide_utils.fitz):
+
+```fitz
+let PREFIX = "saludos, "
+
+fn greet(name) => "{PREFIX}{name}"
+
+type User {
+    id: Int
+    name: Str
+}
+```
+
+Por qué `guide_utils.fitz` y no `16-utils.fitz`: el binding que
+produce `import` es el último segmento del path, y tiene que ser
+un identificador válido. `16-utils` arranca con dígito y contiene
+`-`, así que no se puede usar como nombre de variable en Fitz. El
+auxiliar va con nombre limpio.
+
+Salida (los paths del dump de tokens/AST se omiten):
+
+```
+saludos, Fitz
+User { id: 7, name: "Fitz" }
+```
+
+---
+
+Con módulos se cierra la Fase 3. Tenés todas las piezas básicas
+del lenguaje: tipos, control de flujo, colecciones, funciones,
+errores y organización en archivos. El próximo capítulo es el
+mapa de lo que viene.
+
+---
+
+## 17. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
@@ -3384,20 +3691,17 @@ Con los capítulos 1 a 15 podés:
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
 
-### Lo que viene — el resto de Fase 3
+### Lo que viene — más allá de Fase 3
 
-Fase 3 ya cerró cuatro pasos (1: listas/mapas/rangos/`for`; 2: tipos
-custom instanciables; 3: `Result` + `Ok`/`Err` + `?`; 4: funciones
-anónimas, method calls y mutación). Lo que falta:
+Fase 3 cerró sus cinco pasos (1: listas/mapas/rangos/`for`; 2:
+tipos custom instanciables; 3: `Result` + `Ok`/`Err` + `?`; 4:
+funciones anónimas, method calls y mutación; 5: módulos /
+`import`). El lenguaje base está completo. Lo que viene:
 
-- **Módulos e `import`s** — separar tu código en archivos.
 - **Tipado gradual con validación** — las anotaciones que hoy se
   ignoran van a empezar a chequearse (probablemente Fase 5).
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo.
-
-A medida que estas piezas se van cerrando, esta guía suma capítulos
-nuevos.
 
 ### Más adelante
 
@@ -3419,10 +3723,9 @@ que va a romper a quien lo lea.
 
 Cada vez que se cierre un grupo de features (típicamente al cerrar
 una sub-fase del roadmap), la guía gana un capítulo o varios. Lo
-próximo que probablemente se sume, a medida que avancen los pasos
-de Fase 3:
+próximo que va a sumarse cuando avance la implementación:
 
-- Capítulo de **módulos** una vez que tengamos `import`.
+- Capítulo de **HTTP nativo** cuando entre Fase 4.
 
 ### Recursos
 

@@ -124,6 +124,25 @@ pub enum Value {
     /// ser especiales si lo reusáramos sobre `Instance`; mejor un tipo
     /// dedicado.
     Result(ResultVariant),
+
+    /// Módulo cargado desde otro archivo. Resultado de un `import` que
+    /// expone el módulo entero como namespace: `import utils` bindea
+    /// un `Value::Module` bajo el nombre `utils`, y `utils.foo()`
+    /// resuelve `foo` en el env del módulo.
+    ///
+    /// `name` es el último segmento del path original (`import sub.foo`
+    /// → `name = "foo"`), útil para Display y mensajes de error.
+    ///
+    /// `env` es el environment donde se evaluó el body del módulo. El
+    /// loader lo congela ahí: las top-level definitions (let, fn, type)
+    /// del archivo viven en ese env y son visibles vía field access.
+    /// La igualdad es por identidad del `Rc` (dos `Value::Module` son
+    /// iguales si comparten el mismo env — sirve para detectar que dos
+    /// imports del mismo archivo dieron el mismo módulo).
+    Module {
+        name: String,
+        env: EnvRef,
+    },
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -173,6 +192,7 @@ impl Value {
             Value::Range { .. } => "Range",
             Value::Instance { .. } => "Instance",
             Value::Result(_) => "Result",
+            Value::Module { .. } => "Module",
         }
     }
 }
@@ -254,6 +274,7 @@ impl std::fmt::Display for Value {
                 write_inline_value(f, inner)?;
                 write!(f, ")")
             }
+            Value::Module { name, .. } => write!(f, "<module {}>", name),
         }
     }
 }
@@ -313,6 +334,16 @@ impl PartialEq for Value {
                 (ResultVariant::Err(va), ResultVariant::Err(vb)) => va == vb,
                 _ => false,
             },
+            // Módulos se comparan por identidad del env (mismo Rc). El
+            // loader cachea por path canonicalizado, así que dos
+            // imports del mismo archivo dan dos `Value::Module` con el
+            // mismo `Rc<RefCell<Environment>>`. Estructural no tiene
+            // sentido — el env puede contener funciones y otros
+            // valores no-comparables.
+            (
+                Value::Module { env: e1, .. },
+                Value::Module { env: e2, .. },
+            ) => Rc::ptr_eq(e1, e2),
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }
@@ -631,5 +662,40 @@ mod tests {
     fn igualdad_result_con_otros_tipos_es_false() {
         assert_ne!(ok(Value::Int(1)), Value::Int(1));
         assert_ne!(err(Value::Str("x".into())), Value::Str("x".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Module (Fase 3, paso 5: módulos / import)
+    // -----------------------------------------------------------------------
+
+    use crate::env::Environment;
+
+    #[test]
+    fn type_name_de_module() {
+        let env = Environment::new();
+        let m = Value::Module { name: "utils".into(), env };
+        assert_eq!(m.type_name(), "Module");
+    }
+
+    #[test]
+    fn display_module_muestra_nombre() {
+        let env = Environment::new();
+        let m = Value::Module { name: "utils".into(), env };
+        assert_eq!(m.to_string(), "<module utils>");
+    }
+
+    #[test]
+    fn igualdad_module_es_por_identidad_del_env() {
+        // Mismo env → iguales. Esto modela "el mismo archivo importado
+        // dos veces es el mismo módulo".
+        let env = Environment::new();
+        let m1 = Value::Module { name: "utils".into(), env: env.clone() };
+        let m2 = Value::Module { name: "utils".into(), env: env.clone() };
+        assert_eq!(m1, m2);
+
+        // Distinto env → desiguales aunque el nombre coincida.
+        let other_env = Environment::new();
+        let m3 = Value::Module { name: "utils".into(), env: other_env };
+        assert_ne!(m1, m3);
     }
 }

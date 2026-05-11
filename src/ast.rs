@@ -250,6 +250,28 @@ pub enum Stmt {
         iter: Expr,
         body: Vec<Stmt>,
     },
+
+    /// `import foo` o `import foo.bar.baz` — carga un módulo desde
+    /// disco y lo expone en el scope actual como `Value::Module` bajo
+    /// el ÚLTIMO segmento del path (`import foo.bar` → binding `bar`).
+    /// Resolución: relativo al archivo importer, `foo.bar` → `./foo/bar.fitz`.
+    ///
+    /// Para acceder a algo adentro: `bar.fn(...)`. Para traer nombres
+    /// directos al scope, usar `Stmt::FromImport`.
+    Import {
+        /// Segmentos del path en orden. Siempre tiene al menos un elemento.
+        path: Vec<String>,
+    },
+
+    /// `from foo import a, b, c` o `from foo.bar import x` — carga el
+    /// módulo y bindea cada nombre listado en el scope actual. El módulo
+    /// no queda expuesto como tal.
+    ///
+    /// El parser garantiza que `names` no esté vacío.
+    FromImport {
+        path: Vec<String>,
+        names: Vec<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -655,6 +677,52 @@ mod tests {
                 assert!(matches!(body[0], Stmt::Return(_)));
             }
             _ => panic!("se esperaba FnExpr"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Fase 3, paso 5 (módulos / import)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn import_simple_guarda_path_de_un_segmento() {
+        // `import utils` → Stmt::Import { path: ["utils"] }
+        let s = Stmt::Import { path: vec!["utils".into()] };
+        match s {
+            Stmt::Import { path } => {
+                assert_eq!(path, vec!["utils".to_string()]);
+            }
+            _ => panic!("se esperaba Import"),
+        }
+    }
+
+    #[test]
+    fn import_punteado_guarda_segmentos_en_orden() {
+        // `import sub.foo` → Stmt::Import { path: ["sub", "foo"] }
+        let s = Stmt::Import { path: vec!["sub".into(), "foo".into()] };
+        match s {
+            Stmt::Import { path } => {
+                assert_eq!(path.len(), 2);
+                assert_eq!(path[0], "sub");
+                assert_eq!(path[1], "foo");
+            }
+            _ => panic!("se esperaba Import"),
+        }
+    }
+
+    #[test]
+    fn from_import_guarda_path_y_nombres() {
+        // `from utils import slugify, parse`
+        let s = Stmt::FromImport {
+            path: vec!["utils".into()],
+            names: vec!["slugify".into(), "parse".into()],
+        };
+        match s {
+            Stmt::FromImport { path, names } => {
+                assert_eq!(path, vec!["utils".to_string()]);
+                assert_eq!(names, vec!["slugify".to_string(), "parse".to_string()]);
+            }
+            _ => panic!("se esperaba FromImport"),
         }
     }
 

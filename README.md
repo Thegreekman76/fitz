@@ -66,11 +66,12 @@ Un binario. Sin dependencias en producción.
 
 ## Estado del proyecto
 
-🏔️ **Fase 3 en curso — el lenguaje crece.** Cerrado el paso 1:
-listas, mapas, rangos, `for ... in`, indexing y `len`. El intérprete
-ejecuta colecciones end-to-end (366 tests pasando). Siguientes pasos
-en Fase 3: tipos custom instanciables, `Result`/`?`, funciones de
-orden superior, módulos.
+🏔️ **Fase 3 completada — el lenguaje creció.** Los cinco pasos
+cerraron: listas/mapas/rangos con `for ... in`, tipos custom
+instanciables con field access y mutación, `Result` + `Ok`/`Err` + `?`,
+funciones anónimas + method calls + mutación, y módulos / `import`.
+El intérprete ejecuta programas multi-archivo end-to-end (503 tests
+pasando). Próximo: Fase 4 — HTTP nativo.
 
 Ver [roadmap](docs/roadmap.md) para el estado detallado.
 

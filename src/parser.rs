@@ -664,8 +664,64 @@ impl Parser {
             Token::While => self.parse_while(),
             Token::Loop => self.parse_loop(),
             Token::For => self.parse_for(),
+            Token::Import => self.parse_import(),
+            Token::From => self.parse_from_import(),
             _ => self.parse_expr_or_assign_stmt(),
         }
+    }
+
+    /// `import foo` o `import foo.bar.baz`. El path se acumula como
+    /// `Ident ( '.' Ident )*`. No admite `as` (sin aliases en esta
+    /// iteración). No anida — corta en el siguiente terminador.
+    fn parse_import(&mut self) -> FitzResult<Stmt> {
+        self.expect(&Token::Import, "se esperaba 'import'")?;
+        let path = self.parse_module_path()?;
+        Ok(Stmt::Import { path })
+    }
+
+    /// `from foo import a, b, c` — el path puede tener puntos (`from
+    /// sub.foo import bar`). La lista de nombres tiene que tener al
+    /// menos uno. Acepta trailing comma.
+    fn parse_from_import(&mut self) -> FitzResult<Stmt> {
+        self.expect(&Token::From, "se esperaba 'from'")?;
+        let path = self.parse_module_path()?;
+        self.expect(
+            &Token::Import,
+            "se esperaba 'import' después del path en 'from ... import ...'",
+        )?;
+        let mut names: Vec<String> = Vec::new();
+        names.push(self.expect_ident(
+            "se esperaba al menos un identificador después de 'import'",
+        )?);
+        while matches!(self.peek(), Token::Comma) {
+            self.advance();
+            // Trailing comma: `from foo import a,` — paramos sin error.
+            if matches!(self.peek(), Token::Newline | Token::EOF | Token::RBrace) {
+                break;
+            }
+            names.push(self.expect_ident(
+                "se esperaba identificador después de ',' en 'from ... import'",
+            )?);
+        }
+        Ok(Stmt::FromImport { path, names })
+    }
+
+    /// Path de módulo: `Ident ( '.' Ident )*`. Devuelve los segmentos.
+    /// Siempre tiene al menos un elemento. Sirve para `import` y para
+    /// `from ... import`.
+    fn parse_module_path(&mut self) -> FitzResult<Vec<String>> {
+        let first = self.expect_ident(
+            "se esperaba nombre de módulo (identificador)",
+        )?;
+        let mut segments = vec![first];
+        while matches!(self.peek(), Token::Dot) {
+            self.advance();
+            let next = self.expect_ident(
+                "se esperaba nombre de módulo después de '.'",
+            )?;
+            segments.push(next);
+        }
+        Ok(segments)
     }
 
     fn parse_assign_with_let(&mut self) -> FitzResult<Stmt> {
@@ -4012,5 +4068,104 @@ mod tests {
         } else {
             panic!("se esperaba un match");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Módulos / import (Fase 3, paso 5)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn import_simple_se_parsea() {
+        // `import utils` → Stmt::Import { path: ["utils"] }
+        assert_eq!(
+            parse_one_stmt("import utils"),
+            Stmt::Import { path: vec!["utils".into()] },
+        );
+    }
+
+    #[test]
+    fn import_punteado_acumula_segmentos() {
+        // `import sub.foo.bar` → Stmt::Import { path: ["sub", "foo", "bar"] }
+        assert_eq!(
+            parse_one_stmt("import sub.foo.bar"),
+            Stmt::Import {
+                path: vec!["sub".into(), "foo".into(), "bar".into()],
+            },
+        );
+    }
+
+    #[test]
+    fn import_sin_nombre_es_error() {
+        let err = parse_program_str("import").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn import_path_terminado_en_punto_es_error() {
+        // `import foo.` — falta el segmento siguiente.
+        let err = parse_program_str("import foo.").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn from_import_un_nombre() {
+        // `from utils import slugify`
+        assert_eq!(
+            parse_one_stmt("from utils import slugify"),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec!["slugify".into()],
+            },
+        );
+    }
+
+    #[test]
+    fn from_import_varios_nombres_separados_por_coma() {
+        // `from utils import a, b, c`
+        assert_eq!(
+            parse_one_stmt("from utils import a, b, c"),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec!["a".into(), "b".into(), "c".into()],
+            },
+        );
+    }
+
+    #[test]
+    fn from_import_con_path_punteado() {
+        // `from sub.foo import bar`
+        assert_eq!(
+            parse_one_stmt("from sub.foo import bar"),
+            Stmt::FromImport {
+                path: vec!["sub".into(), "foo".into()],
+                names: vec!["bar".into()],
+            },
+        );
+    }
+
+    #[test]
+    fn from_import_acepta_trailing_comma() {
+        // `from utils import a, b,` — coma final permitida.
+        assert_eq!(
+            parse_one_stmt("from utils import a, b,"),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec!["a".into(), "b".into()],
+            },
+        );
+    }
+
+    #[test]
+    fn from_sin_import_es_error() {
+        // `from utils slugify` — falta la keyword `import`.
+        let err = parse_program_str("from utils slugify").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn from_import_sin_nombres_es_error() {
+        // `from utils import` — al menos un nombre obligatorio.
+        let err = parse_program_str("from utils import").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 }
