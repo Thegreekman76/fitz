@@ -1,0 +1,34 @@
+[package]
+name = "fitz"
+version = "0.1.0"
+edition = "2021"
+description = "The Fitz programming language"
+authors = ["El Chaltén, Patagonia, Argentina"]
+license = "MIT"
+
+[[bin]]
+name = "fitz"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+# Errores con diagnósticos bonitos
+miette = { version = "5", features = ["fancy"] }
+
+# Serialización
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# HTTP (Fase 4 — comentado hasta entonces)
+# axum = "0.7"
+# tokio = { version = "1", features = ["full"] }
+
+[dev-dependencies]
+# Para tests
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

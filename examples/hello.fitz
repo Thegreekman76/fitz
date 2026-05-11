@@ -1,0 +1,6 @@
+// hello.fitz — El primer programa en Fitz
+
+print("Hola desde Fitz 🏔️")
+
+name = "Patagonia"
+print("Hola, {name}!")

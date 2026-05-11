@@ -1,0 +1,4 @@
+/target
+Cargo.lock
+*.fitz.compiled
+.DS_Store

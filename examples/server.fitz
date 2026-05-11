@@ -1,0 +1,51 @@
+// server.fitz — API REST completa en Fitz
+
+type User {
+    id: Int
+    name: Str
+    email: Str?
+}
+
+type UserInput {
+    name: Str
+    email: Str
+}
+
+// "base de datos" en memoria
+let users: List<User> = []
+
+@get("/")
+async fn index() -> Str {
+    return "Fitz API corriendo 🏔️"
+}
+
+@get("/users")
+async fn list_users() -> List<User> {
+    return users
+}
+
+@get("/users/{id}")
+async fn get_user(id: Int) -> User {
+    let user = users.find(fn(u) => u.id == id)
+    match user {
+        Ok(u)  => return u
+        Err(_) => return 404 { message: "Usuario no encontrado" }
+    }
+}
+
+@post("/users")
+async fn create_user(body: UserInput) -> User {
+    let user = User {
+        id: users.len() + 1,
+        name: body.name,
+        email: body.email
+    }
+    users.push(user)
+    return 201 user
+}
+
+@delete("/users/{id}")
+async fn delete_user(id: Int) -> Str {
+    users.remove(fn(u) => u.id == id)?
+    return "eliminado"
+}

@@ -1,0 +1,33 @@
+// types.fitz — Tipos y funciones en Fitz
+
+type User {
+    id: Int
+    name: Str
+    email: Str?
+    active: Bool = true
+}
+
+type UserInput {
+    name: Str
+    email: Str
+}
+
+fn create_user(input: UserInput, id: Int) -> User {
+    return User {
+        id: id,
+        name: input.name,
+        email: input.email
+    }
+}
+
+fn greet_user(user: User) -> Str {
+    if user.active {
+        return "Hola, {user.name}!"
+    } else {
+        return "Usuario {user.name} inactivo"
+    }
+}
+
+let input = UserInput { name: "Fitz", email: "fitz@patagonia.ar" }
+let user = create_user(input, 1)
+print(greet_user(user))
