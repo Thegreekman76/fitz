@@ -199,28 +199,25 @@ pub enum Stmt {
     /// Definición de función. Soporta forma de bloque y forma de flecha
     /// (`fn f(n) => n * 2`) — esta última la convierte el parser a
     /// `body: vec![Stmt::Return(Expr)]`.
+    ///
+    /// `decorators` lista los `@deco(args...)` que envuelven la función,
+    /// en el orden en que aparecen en el código fuente. El parser solo
+    /// los acumula; la semántica (qué hace cada decorator) la decide el
+    /// evaluador despachando por `Decorator.name`. Para una función sin
+    /// decoradores el vector está vacío.
     FnDef {
         name: String,
         params: Vec<Param>,
         return_type: Option<String>,
         body: Vec<Stmt>,
         is_async: bool,
+        decorators: Vec<Decorator>,
     },
 
     /// Definición de tipo custom: `type User { id: Int, name: Str }`.
     TypeDef {
         name: String,
         fields: Vec<Field>,
-    },
-
-    /// Endpoint HTTP: `@get("/path") async fn handler(...) -> T { ... }`.
-    /// TODO Fase 4: reemplazar por un esquema de decoradores genérico
-    /// (`decorators: Vec<Decorator>` adentro de `FnDef`) para soportar
-    /// `@server(...)` y futuros decoradores custom.
-    HttpEndpoint {
-        method: HttpMethod,
-        path: String,
-        handler: Box<Stmt>,
     },
 
     /// `break` dentro de loop/while/for.
@@ -333,12 +330,18 @@ pub enum Pattern {
     Range { start: i64, end: i64 },
 }
 
+/// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args...)`.
+///
+/// En 4.1 el parser solo acumula decoradores; el evaluador es quien
+/// despacha por nombre (`@get`/`@post`/`@put`/`@delete` registran rutas
+/// HTTP cuando llegue 4.2, `@server` configura el runtime, cualquier
+/// otro → error explícito "decorator desconocido"). Args son
+/// expresiones cualquiera, validadas en runtime por el decorator
+/// específico (ej.: `@get` exige un único `Str` con la ruta).
 #[derive(Debug, Clone, PartialEq)]
-pub enum HttpMethod {
-    Get,
-    Post,
-    Put,
-    Delete,
+pub struct Decorator {
+    pub name: String,
+    pub args: Vec<Expr>,
 }
 
 /// Un programa Fitz es una lista de sentencias.
@@ -404,6 +407,7 @@ mod tests {
                     right: Box::new(Expr::Int(2)),
                 })],
                 is_async: false,
+                decorators: vec![],
             },
             // print(double(x))
             Stmt::Expr(Expr::Call {
@@ -723,6 +727,63 @@ mod tests {
                 assert_eq!(names, vec!["slugify".to_string(), "parse".to_string()]);
             }
             _ => panic!("se esperaba FromImport"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Fase 4, paso 4.1 (decoradores genéricos sobre FnDef)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decorator_guarda_nombre_y_args() {
+        // `@get("/users/{id}")` — un decorator con un arg string.
+        let d = Decorator {
+            name: "get".into(),
+            args: vec![Expr::Str("/users/{id}".into())],
+        };
+        assert_eq!(d.name, "get");
+        assert_eq!(d.args.len(), 1);
+        assert_eq!(d.args[0], Expr::Str("/users/{id}".into()));
+    }
+
+    #[test]
+    fn fndef_default_sin_decorators_vector_vacio() {
+        // Una fn declarada sin `@...` arriba debe tener `decorators` vacío.
+        let f = Stmt::FnDef {
+            name: "f".into(),
+            params: vec![],
+            return_type: None,
+            body: vec![],
+            is_async: false,
+            decorators: vec![],
+        };
+        if let Stmt::FnDef { decorators, .. } = f {
+            assert!(decorators.is_empty());
+        } else {
+            panic!("se esperaba FnDef");
+        }
+    }
+
+    #[test]
+    fn fndef_admite_varios_decorators_en_orden() {
+        // `@get("/x") @auth("admin") fn h() {}` — dos decoradores apilados.
+        let f = Stmt::FnDef {
+            name: "h".into(),
+            params: vec![],
+            return_type: None,
+            body: vec![],
+            is_async: false,
+            decorators: vec![
+                Decorator { name: "get".into(), args: vec![Expr::Str("/x".into())] },
+                Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into())] },
+            ],
+        };
+        if let Stmt::FnDef { decorators, .. } = f {
+            assert_eq!(decorators.len(), 2);
+            assert_eq!(decorators[0].name, "get");
+            assert_eq!(decorators[1].name, "auth");
+        } else {
+            panic!("se esperaba FnDef");
         }
     }
 

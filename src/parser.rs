@@ -10,7 +10,7 @@
 // y deuda explícita.
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Expr, Field, HttpMethod, MatchArm, Param, Pattern, Program, Stmt,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, Param, Pattern, Program, Stmt,
     StrPart, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError, FitzResult};
@@ -652,7 +652,7 @@ impl Parser {
             Token::Return => self.parse_return(),
             Token::Fn | Token::Async => self.parse_fndef(),
             Token::Type => self.parse_typedef(),
-            Token::At => self.parse_http_endpoint(),
+            Token::At => self.parse_decorated_fndef(),
             Token::Break => {
                 self.advance();
                 Ok(Stmt::Break)
@@ -873,6 +873,10 @@ impl Parser {
             return_type,
             body,
             is_async,
+            // El parser de fn "pelada" no conoce decorators. Cuando se
+            // entra por `parse_decorated_fndef`, ese path reconstruye el
+            // FnDef pegándole los decorators acumulados.
+            decorators: vec![],
         })
     }
 
@@ -1288,86 +1292,86 @@ impl Parser {
         }
     }
 
-    // ---------- decoradores HTTP ----------
+    // ---------- decoradores ----------
     //
     // Forma:
-    //   @get("/path")
+    //   @nombre(arg1, arg2, ...)
+    //   [@otro_deco(...)]*
     //   [async] fn handler(...) [-> Type] { ... }
     //
-    // Producimos `Stmt::HttpEndpoint { method, path, handler }` donde
-    // `handler` envuelve un `Stmt::FnDef`. El AST nota que esto cambia
-    // en Fase 4 a un esquema genérico de decoradores; hasta entonces
-    // solo soportamos los 4 verbos básicos.
+    // Acumulamos los decoradores en `Decorator { name, args }` y los
+    // pegamos al `Stmt::FnDef` resultante. La semántica (qué hace cada
+    // decorator) es responsabilidad del evaluador: el parser solo
+    // garantiza que estructuralmente vienen antes de una fn y que la
+    // sintaxis es `@Ident(args)`. Args son expresiones cualquiera —
+    // el decorator específico decide qué tipos acepta en runtime.
+    //
+    // Hasta 4.1 el evaluador corta con error explícito en cuanto ve
+    // decorators no vacíos; 4.2 cablea `@get`/`@post`/`@put`/`@delete`
+    // contra el runtime HTTP.
 
-    fn parse_http_endpoint(&mut self) -> FitzResult<Stmt> {
-        self.expect(&Token::At, "se esperaba '@'")?;
-        // El nombre del decorador llega como Ident (get/post/put/delete).
-        let (deco_line, deco_col) = self.current_pos();
-        let method_name = self.expect_ident(
-            "se esperaba nombre de decorador HTTP después de '@'",
-        )?;
-        let method = match method_name.as_str() {
-            "get" => HttpMethod::Get,
-            "post" => HttpMethod::Post,
-            "put" => HttpMethod::Put,
-            "delete" => HttpMethod::Delete,
-            other => {
-                return Err(FitzError::new(
-                    ErrorKind::UnexpectedToken,
-                    deco_line,
-                    deco_col,
-                    format!(
-                        "decorador HTTP desconocido: '@{}' — esperaba get/post/put/delete",
-                        other
-                    ),
-                ));
+    fn parse_decorated_fndef(&mut self) -> FitzResult<Stmt> {
+        let mut decorators: Vec<Decorator> = Vec::new();
+        // Al menos uno: el llamador entró acá viendo `@`.
+        loop {
+            decorators.push(self.parse_one_decorator()?);
+            // Permitimos newline entre decorators apilados.
+            self.skip_newlines();
+            if !matches!(self.peek(), Token::At) {
+                break;
             }
-        };
-
-        self.expect(
-            &Token::LParen,
-            "se esperaba '(' después del decorador HTTP",
-        )?;
-        // La ruta tiene que ser un string literal (no una expresión).
-        let path_tok = self.advance();
-        let path = match path_tok.token {
-            Token::Str(s) => s,
-            other => {
-                return Err(FitzError::new(
-                    ErrorKind::UnexpectedToken,
-                    path_tok.line,
-                    path_tok.column,
-                    format!(
-                        "se esperaba una ruta string como '/users', se encontró '{:?}'",
-                        other
-                    ),
-                ));
-            }
-        };
-        self.expect(
-            &Token::RParen,
-            "se esperaba ')' al cerrar el decorador HTTP",
-        )?;
-
-        // Permitimos un newline entre el decorador y la fn def, que
-        // es la forma canónica de escribirlos.
-        self.skip_newlines();
+        }
 
         // El handler debe ser una FnDef (con `async` opcional). Si el
-        // usuario pone otra cosa, parse_fndef da error claro.
+        // usuario pone otra cosa, error claro y temprano.
         if !matches!(self.peek(), Token::Fn | Token::Async) {
             return Err(self.error(
                 ErrorKind::UnexpectedToken,
-                "después de un decorador HTTP debe venir una definición de función",
+                "después de un decorador debe venir una definición de función",
             ));
         }
-        let handler = self.parse_fndef()?;
+        let fndef = self.parse_fndef()?;
+        // `parse_fndef` siempre devuelve un `Stmt::FnDef`; le pegamos los
+        // decoradores acumulados.
+        match fndef {
+            Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                body,
+                is_async,
+                decorators: _,
+            } => Ok(Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                body,
+                is_async,
+                decorators,
+            }),
+            // Inalcanzable: parse_fndef es total.
+            other => Ok(other),
+        }
+    }
 
-        Ok(Stmt::HttpEndpoint {
-            method,
-            path,
-            handler: Box::new(handler),
-        })
+    /// Parsea un único decorador (`@ Ident ( args )`), con el `@` aún
+    /// sin consumir. Devuelve el `Decorator` listo; el caller decide
+    /// si seguir acumulando.
+    fn parse_one_decorator(&mut self) -> FitzResult<Decorator> {
+        self.expect(&Token::At, "se esperaba '@'")?;
+        let name = self.expect_ident(
+            "se esperaba nombre de decorador después de '@'",
+        )?;
+        // Args entre paréntesis. Por simetría con llamadas a función,
+        // los paréntesis son obligatorios incluso sin args: `@server()`
+        // y no `@server`. Mantenemos la sintaxis predecible; si más
+        // adelante queremos `@server` sin args se relaja.
+        self.expect(
+            &Token::LParen,
+            "se esperaba '(' después del nombre de decorador",
+        )?;
+        let args = self.parse_call_args()?;
+        Ok(Decorator { name, args })
     }
 
     /// Parsea los argumentos de una llamada, ya con '(' consumido.
@@ -2554,6 +2558,7 @@ mod tests {
                     right: Box::new(Expr::Int(2)),
                 })],
                 is_async: false,
+                decorators: vec![],
             },
         );
     }
@@ -2576,6 +2581,7 @@ mod tests {
                     right: Box::new(Expr::Int(2)),
                 })],
                 is_async: false,
+                decorators: vec![],
             },
         );
     }
@@ -2592,6 +2598,7 @@ mod tests {
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("name".into())],
                 })],
                 is_async: false,
+                decorators: vec![],
             },
         );
     }
@@ -2617,6 +2624,7 @@ mod tests {
                     Stmt::Return(Expr::Ident("x".into())),
                 ],
                 is_async: false,
+                decorators: vec![],
             },
         );
     }
@@ -2626,7 +2634,7 @@ mod tests {
         // fn add(a: Int, b: Int) -> Int { return a + b }
         let stmt = parse_one_stmt("fn add(a: Int, b: Int) -> Int { return a + b }");
         match stmt {
-            Stmt::FnDef { name, params, return_type, body, is_async } => {
+            Stmt::FnDef { name, params, return_type, body, is_async, decorators } => {
                 assert_eq!(name, "add");
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "a");
@@ -2636,6 +2644,7 @@ mod tests {
                 assert_eq!(return_type.as_deref(), Some("Int"));
                 assert_eq!(body.len(), 1);
                 assert!(!is_async);
+                assert!(decorators.is_empty());
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
@@ -3066,97 +3075,165 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — HTTP endpoints (paso 8)
+    // Tests — decoradores sobre FnDef (Fase 4, paso 4.1)
     // -----------------------------------------------------------------------
+    //
+    // El parser no entiende qué hace cada decorator (eso lo decide el
+    // evaluador). Acá validamos pura estructura: nombre, args, y que se
+    // peguen al FnDef en el orden correcto.
 
     #[test]
-    fn http_get_minimal() {
+    fn decorator_get_pega_decorator_al_fndef() {
         // @get("/")
         // fn index() => "hola"
         let src = "@get(\"/\")\nfn index() => \"hola\"";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::HttpEndpoint { method, path, handler } => {
-                assert_eq!(method, HttpMethod::Get);
-                assert_eq!(path, "/");
-                match *handler {
-                    Stmt::FnDef { name, is_async, .. } => {
-                        assert_eq!(name, "index");
-                        assert!(!is_async);
-                    }
-                    other => panic!("handler debe ser FnDef, fue {:?}", other),
-                }
+            Stmt::FnDef { name, is_async, decorators, .. } => {
+                assert_eq!(name, "index");
+                assert!(!is_async);
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "get");
+                assert_eq!(decorators[0].args, vec![Expr::Str("/".into())]);
             }
-            other => panic!("se esperaba HttpEndpoint, se obtuvo {:?}", other),
+            other => panic!("se esperaba FnDef con decorators, se obtuvo {:?}", other),
         }
     }
 
     #[test]
-    fn http_post_with_async_block_handler() {
+    fn decorator_post_con_async_handler() {
         let src = "@post(\"/users\")\nasync fn create_user(body: UserInput) -> User {\n  return body\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::HttpEndpoint { method, path, handler } => {
-                assert_eq!(method, HttpMethod::Post);
-                assert_eq!(path, "/users");
-                match *handler {
-                    Stmt::FnDef { name, is_async, return_type, params, .. } => {
-                        assert_eq!(name, "create_user");
-                        assert!(is_async);
-                        assert_eq!(return_type.as_deref(), Some("User"));
-                        assert_eq!(params.len(), 1);
-                        assert_eq!(params[0].name, "body");
-                    }
-                    other => panic!("handler debe ser FnDef, fue {:?}", other),
+            Stmt::FnDef { name, is_async, return_type, params, decorators, .. } => {
+                assert_eq!(name, "create_user");
+                assert!(is_async);
+                assert_eq!(return_type.as_deref(), Some("User"));
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "body");
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "post");
+                assert_eq!(decorators[0].args, vec![Expr::Str("/users".into())]);
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decorator_put_y_delete_reconocidos_por_nombre() {
+        // Nota sobre `/users/{id}`: el parser lo interpreta como
+        // `StrInterp` porque `{id}` es la sintaxis de interpolación de
+        // strings de Fitz. Para el runtime HTTP esto es una buena
+        // noticia, no un bug: en 4.2, los `StrPart::Expr(Ident(...))`
+        // del path se reconocen directamente como path params, sin
+        // necesidad de un mini parser dedicado dentro del decorator.
+        let put = parse_one_stmt("@put(\"/users/{id}\")\nasync fn upd(id: Int) -> User => user");
+        let del = parse_one_stmt("@delete(\"/users\")\nasync fn del(id: Int) => 0");
+        match put {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "put");
+                // El path tiene `{id}` → llega como StrInterp.
+                assert_eq!(decorators[0].args.len(), 1);
+                assert!(matches!(decorators[0].args[0], Expr::StrInterp(_)));
+                if let Expr::StrInterp(parts) = &decorators[0].args[0] {
+                    assert_eq!(parts[0], StrPart::Lit("/users/".into()));
+                    assert_eq!(parts[1], StrPart::Expr(Expr::Ident("id".into())));
                 }
             }
-            other => panic!("se esperaba HttpEndpoint, se obtuvo {:?}", other),
-        }
-    }
-
-    #[test]
-    fn http_put_and_delete_methods() {
-        let put = parse_one_stmt("@put(\"/users/{id}\")\nasync fn upd(id: Int) -> User => user");
-        let del = parse_one_stmt("@delete(\"/users/{id}\")\nasync fn del(id: Int) => 0");
-        match put {
-            Stmt::HttpEndpoint { method, path, .. } => {
-                assert_eq!(method, HttpMethod::Put);
-                assert_eq!(path, "/users/{id}");
-            }
-            _ => panic!(),
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
         match del {
-            Stmt::HttpEndpoint { method, .. } => assert_eq!(method, HttpMethod::Delete),
-            _ => panic!(),
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators[0].name, "delete");
+                // Sin path params: llega como Str pelado.
+                assert_eq!(decorators[0].args, vec![Expr::Str("/users".into())]);
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
     }
 
     #[test]
-    fn http_unknown_decorator_errors() {
-        let err = parse_program_str("@patch(\"/x\")\nfn h() => 0").unwrap_err();
-        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
-        assert!(err.message.contains("@patch"));
+    fn decorator_sin_args_admite_parens_vacios() {
+        // `@server()` — paréntesis vacíos válidos por simetría con
+        // llamadas a función.
+        let stmt = parse_one_stmt("@server()\nfn config() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "server");
+                assert!(decorators[0].args.is_empty());
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
     }
 
     #[test]
-    fn http_non_string_path_errors() {
-        // @get(42) — la ruta tiene que ser string literal.
-        let err = parse_program_str("@get(42)\nfn h() => 0").unwrap_err();
+    fn decorator_admite_multiples_args_y_expresiones() {
+        // `@server(8080, "0.0.0.0")` — args positionals con tipos
+        // mezclados. El evaluador validará semántica; el parser solo
+        // los guarda.
+        let stmt = parse_one_stmt("@server(8080, \"0.0.0.0\")\nfn cfg() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators[0].args, vec![
+                    Expr::Int(8080),
+                    Expr::Str("0.0.0.0".into()),
+                ]);
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decorators_apilados_se_acumulan_en_orden() {
+        // @get("/admin") + @auth("admin") apilados sobre la misma fn.
+        // Cada uno con su propia línea.
+        let src = "@get(\"/admin\")\n@auth(\"admin\")\nfn dash() => \"ok\"";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators.len(), 2);
+                assert_eq!(decorators[0].name, "get");
+                assert_eq!(decorators[1].name, "auth");
+                assert_eq!(decorators[1].args, vec![Expr::Str("admin".into())]);
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decorator_sin_parens_errores() {
+        // `@get fn h() => 0` — falta `(`. Reportamos error claro.
+        let err = parse_program_str("@get\nfn h() => 0").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn http_decorator_without_handler_errors() {
-        // @get("/x") y nada después.
+    fn decorator_sin_handler_errores() {
+        // @get("/x") y nada después: el parser corta porque no hay fn.
         let err = parse_program_str("@get(\"/x\")").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     #[test]
-    fn http_decorator_followed_by_non_fn_errors() {
+    fn decorator_seguido_de_no_fn_errores() {
         // @get("/x") let x = 1  → error claro
         let err = parse_program_str("@get(\"/x\")\nlet x = 1").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn decorator_desconocido_no_es_error_de_parser() {
+        // Cualquier `@nombre(args)` válido sintácticamente parsea.
+        // Que `@patch` no esté implementado lo decide el evaluator.
+        let stmt = parse_one_stmt("@patch(\"/x\")\nfn h() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators[0].name, "patch");
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -3218,6 +3295,7 @@ mod tests {
                     right: Box::new(Expr::Int(2)),
                 })],
                 is_async: false,
+                decorators: vec![],
             }
         );
 

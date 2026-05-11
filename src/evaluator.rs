@@ -464,8 +464,32 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // propia definición — puede llamarse a sí misma sin hacer nada extra.
         //
         // `return_type` y `is_async` se ignoran en runtime (deuda explícita
-        // para type-checker estático en Fase 5 y async en Fase 4).
-        Stmt::FnDef { name, params, return_type: _, body, is_async: _ } => {
+        // para type-checker estático en Fase 5 y async real en Fase 4.x).
+        //
+        // `decorators`: en 4.1 los aceptamos sintácticamente pero el
+        // evaluador todavía no sabe qué hacer con ellos. Cualquier
+        // decorator dispara error explícito acá — el cableado real con
+        // el runtime HTTP llega en 4.2. Esto es un puente intencional:
+        // mantiene el parser y el AST listos sin habilitar semántica
+        // a medias.
+        Stmt::FnDef { name, params, return_type: _, body, is_async: _, decorators } => {
+            if !decorators.is_empty() {
+                let names: Vec<String> = decorators
+                    .iter()
+                    .map(|d| format!("@{}", d.name))
+                    .collect();
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!(
+                        "decorators {} sobre fn '{}' todavía no implementados \
+                         (requieren Fase 4.2 — runtime HTTP)",
+                        names.join(", "),
+                        name,
+                    ),
+                )));
+            }
             let func = Value::Function {
                 params: params.clone(),
                 body: body.clone(),
@@ -486,11 +510,6 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             env.borrow_mut().define(name.clone(), t);
             Ok(Value::Null)
         }
-        Stmt::HttpEndpoint { .. } => Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
-            0, 0,
-            "Los endpoints HTTP requieren la Fase 4 (HTTP nativo)",
-        ))),
         Stmt::Break => Err(EvalSignal::Break),
         Stmt::Continue => Err(EvalSignal::Continue),
 
@@ -2492,6 +2511,7 @@ mod tests {
             return_type: None,
             body,
             is_async: false,
+            decorators: vec![],
         }
     }
 
@@ -5122,5 +5142,39 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main);
         res.unwrap();
         assert_eq!(env.borrow().get("g"), Some(Value::Str("saludos, Fitz".into())));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — decoradores (Fase 4, paso 4.1)
+    // -----------------------------------------------------------------------
+    //
+    // En 4.1 el evaluador todavía no sabe ejecutar decorators: corta
+    // con error explícito apenas evalúa la FnDef. Es un puente
+    // intencional hasta que llegue el runtime HTTP en 4.2.
+
+    #[test]
+    fn fndef_con_decorator_corta_con_error_explicito() {
+        let src = "@get(\"/\")\nfn index() => \"hola\"";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(
+            err.message.contains("@get") && err.message.contains("Fase 4.2"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn fndef_con_decorator_desconocido_corta_igual() {
+        // El parser acepta cualquier `@nombre(args)`; el evaluator
+        // todavía rechaza todos por igual hasta 4.2. Lo importante es
+        // que el error mencione el nombre del decorator para que el
+        // usuario sepa qué quitar.
+        let src = "@patch(\"/x\")\nfn h() => 0";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(
+            err.message.contains("@patch"),
+            "mensaje no menciona '@patch': {}",
+            err.message,
+        );
     }
 }
