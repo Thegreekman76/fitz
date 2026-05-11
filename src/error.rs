@@ -32,6 +32,10 @@ pub enum ErrorKind {
     TypeMismatch { expected: String, found: String },
     DivisionByZero,
     NullReference,
+    ReturnOutsideFunction,
+    BreakOutsideLoop,
+    ContinueOutsideLoop,
+    WrongArgCount { expected: usize, found: usize },
 }
 
 impl FitzError {

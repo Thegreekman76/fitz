@@ -1,0 +1,9 @@
+// phase2.fitz — Criterio de éxito de Fase 2
+// Demuestra: asignación, aritmética, interpolación, funciones y llamadas.
+
+name = "Fitz"
+x = 10 + 5
+print("Hola {name}, x es {x}")
+
+fn double(n) => n * 2
+print(double(x))

@@ -134,6 +134,18 @@ pub enum Stmt {
 
     /// `continue` dentro de loop/while/for.
     Continue,
+
+    /// `while cond { body }`. Itera mientras `cond` evalúe a `Bool(true)`.
+    /// `break` corta el loop; `continue` salta a la próxima iteración.
+    While {
+        condition: Expr,
+        body: Vec<Stmt>,
+    },
+
+    /// `loop { body }` — loop infinito. Solo se sale con `break` (o `return`).
+    Loop {
+        body: Vec<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -175,10 +187,21 @@ pub struct MatchArm {
 /// Patrones para `match`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Pattern {
+    /// `42` — matchea si el valor es ese int exacto. Igual para float/str/bool.
+    Int(i64),
+    Float(f64),
+    Str(String),
+    Bool(bool),
+    /// `null` — matchea si el valor es Null.
+    Null,
+    /// `nombre` — siempre matchea, bindea el valor a ese nombre.
     Ident(String),
-    Wildcard,            // _
-    OkBinding(String),   // Ok(x)
-    ErrBinding(String),  // Err(e)
+    /// `_` — siempre matchea, sin binding.
+    Wildcard,
+    /// `Ok(x)` — bloqueado hasta tener tipo Result (Fase 3).
+    OkBinding(String),
+    /// `Err(e)` — bloqueado hasta tener tipo Result (Fase 3).
+    ErrBinding(String),
 }
 
 #[derive(Debug, Clone, PartialEq)]

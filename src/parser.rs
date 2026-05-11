@@ -154,7 +154,39 @@ impl Parser {
     // expresión completa.
 
     fn expression(&mut self) -> FitzResult<Expr> {
-        self.equality()
+        self.logic_or()
+    }
+
+    /// `a or b or c` — `or` es izquierda-asociativo y tiene menor
+    /// precedencia que `and`. Esto da `a and b or c` = `(a and b) or c`.
+    fn logic_or(&mut self) -> FitzResult<Expr> {
+        let mut left = self.logic_and()?;
+        while matches!(self.peek(), Token::Or) {
+            self.advance();
+            let right = self.logic_and()?;
+            left = Expr::BinOp {
+                op: BinOpKind::Or,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
+    }
+
+    /// `a and b and c` — más alto que `or`, más bajo que `==`. Resultado:
+    /// `a == 1 and b == 2` se parsea como `(a == 1) and (b == 2)`.
+    fn logic_and(&mut self) -> FitzResult<Expr> {
+        let mut left = self.equality()?;
+        while matches!(self.peek(), Token::And) {
+            self.advance();
+            let right = self.equality()?;
+            left = Expr::BinOp {
+                op: BinOpKind::And,
+                left: Box::new(left),
+                right: Box::new(right),
+            };
+        }
+        Ok(left)
     }
 
     fn equality(&mut self) -> FitzResult<Expr> {
@@ -373,6 +405,12 @@ impl Parser {
                 self.advance();
                 Ok(Stmt::Continue)
             }
+            Token::While => self.parse_while(),
+            Token::Loop => self.parse_loop(),
+            Token::For => Err(self.error(
+                ErrorKind::InvalidSyntax,
+                "`for` requiere rangos o listas para iterar, que llegan en Fase 3",
+            )),
             Token::Ident(_) => {
                 // Lookahead: `x =` o `x :` arrancan asignación.
                 // OJO: `x ==` es comparación (EqEq, no Eq), va por
@@ -424,10 +462,13 @@ impl Parser {
 
     fn parse_return(&mut self) -> FitzResult<Stmt> {
         self.expect(&Token::Return, "se esperaba 'return'")?;
-        // Por ahora `return` siempre lleva un valor. `return` solo
-        // (sin valor) lo agregamos cuando definamos `void`/null
-        // implícito — se hace `Option<Expr>` en el AST.
-        let value = self.expression()?;
+        // `return` sin valor devuelve null implícito. Detectamos los
+        // terminadores válidos para una sentencia: fin de línea, cierre
+        // de bloque o fin de archivo.
+        let value = match self.peek() {
+            Token::Newline | Token::RBrace | Token::EOF => Expr::Null,
+            _ => self.expression()?,
+        };
         Ok(Stmt::Return(value))
     }
 
@@ -554,6 +595,24 @@ impl Parser {
         }
     }
 
+    // ---------- loops ----------
+
+    /// `while cond { body }`. Iteración condicional. La condición se evalúa
+    /// antes de cada iteración; si es `false`, termina el loop.
+    fn parse_while(&mut self) -> FitzResult<Stmt> {
+        self.expect(&Token::While, "se esperaba 'while'")?;
+        let condition = self.expression()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::While { condition, body })
+    }
+
+    /// `loop { body }` — loop infinito. Solo se sale con `break` o `return`.
+    fn parse_loop(&mut self) -> FitzResult<Stmt> {
+        self.expect(&Token::Loop, "se esperaba 'loop'")?;
+        let body = self.parse_block()?;
+        Ok(Stmt::Loop { body })
+    }
+
     // ---------- if / match / type ----------
 
     /// `if cond { ... }` o `if cond { ... } else { ... }` o
@@ -637,12 +696,69 @@ impl Parser {
         })
     }
 
-    /// Patrones soportados por el AST actual:
+    /// Patrones soportados:
     ///   _           → Wildcard
     ///   nombre      → Ident(nombre)        (captura, matchea todo)
-    ///   Ok(name)    → OkBinding(name)
-    ///   Err(name)   → ErrBinding(name)
+    ///   42 / -3     → Int (con `-` para negativos)
+    ///   3.14        → Float
+    ///   "texto"     → Str
+    ///   true/false  → Bool
+    ///   null        → Null
+    ///   Ok(name)    → OkBinding(name)      (bloqueado runtime hasta Fase 3)
+    ///   Err(name)   → ErrBinding(name)     (bloqueado runtime hasta Fase 3)
     fn parse_pattern(&mut self) -> FitzResult<Pattern> {
+        // Literales. Clonamos el peek antes de avanzar para no chocar con
+        // el borrow checker.
+        match self.peek().clone() {
+            Token::Int(n) => {
+                self.advance();
+                return Ok(Pattern::Int(n));
+            }
+            Token::Float(x) => {
+                self.advance();
+                return Ok(Pattern::Float(x));
+            }
+            Token::Str(s) => {
+                self.advance();
+                return Ok(Pattern::Str(s));
+            }
+            Token::True => {
+                self.advance();
+                return Ok(Pattern::Bool(true));
+            }
+            Token::False => {
+                self.advance();
+                return Ok(Pattern::Bool(false));
+            }
+            Token::Null => {
+                self.advance();
+                return Ok(Pattern::Null);
+            }
+            Token::Minus => {
+                // Soporte para literales negativos: `-42`, `-3.14`. Si tras
+                // el `-` no viene un número, es error (no aceptamos `-x`
+                // como patrón).
+                self.advance();
+                match self.peek().clone() {
+                    Token::Int(n) => {
+                        self.advance();
+                        return Ok(Pattern::Int(-n));
+                    }
+                    Token::Float(x) => {
+                        self.advance();
+                        return Ok(Pattern::Float(-x));
+                    }
+                    _ => {
+                        return Err(self.error(
+                            ErrorKind::InvalidSyntax,
+                            "se esperaba número después de '-' en patrón",
+                        ));
+                    }
+                }
+            }
+            _ => {}
+        }
+
         // Casos especiales: Ok(...) y Err(...).
         if let Token::Ident(name) = self.peek() {
             if name == "Ok" || name == "Err" {
@@ -900,16 +1016,22 @@ pub fn parse(tokens: Vec<TokenWithPos>) -> FitzResult<Program> {
 ///  - `}` suelto (sin `{` previo) es error — el usuario debe escapar
 ///    como `\}`.
 ///
-/// Deuda explícita (ver docs/roadmap.md 2.3):
-///  - La posición de los errores en subexpresiones es aproximada
-///    (apunta al inicio del string, no al `{...}` específico).
+/// Limitación residual:
 ///  - Strings dentro de la interpolación no se soportan: el buscador
 ///    de `}` es ingenuo y se confunde con `}` dentro de `"..."` anidados.
+///  - Si el string contiene escapes (`\n`, `\t`, etc.), la columna
+///    reportada en errores de interpolación está corrida un char por cada
+///    escape anterior al error. Sin acceso al source original no podemos
+///    reconstruir el mapping exacto.
 fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> {
     let chars: Vec<char> = raw.chars().collect();
     let mut parts: Vec<StrPart> = Vec::new();
     let mut current_lit = String::new();
     let mut i = 0;
+
+    // Columna del primer char del contenido del string en el source:
+    // el `column` que recibimos apunta a la comilla de apertura `"`.
+    let content_col = column + 1;
 
     while i < chars.len() {
         let c = chars[i];
@@ -923,6 +1045,10 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
 
         // Inicio de interpolación.
         if c == '{' {
+            // Columna del `{` en el source original (aproximada — ver
+            // limitación residual sobre escapes).
+            let interp_col = content_col + i;
+
             if !current_lit.is_empty() {
                 parts.push(StrPart::Lit(std::mem::take(&mut current_lit)));
             }
@@ -937,23 +1063,36 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     line,
-                    column,
+                    interp_col,
                     "Interpolación de string sin '}' de cierre",
                 ));
             }
             let expr_src: String = chars[expr_start..i].iter().collect();
 
-            // Re-tokenizamos y parseamos la subexpresión.
-            let sub_tokens = tokenize(&expr_src)?;
+            // La subexpresión empieza un char después del `{` en el source.
+            let sub_col_base = interp_col + 1;
+
+            // Re-tokenizamos. Cualquier error del sub-lexer lleva la
+            // posición relativa al inicio de expr_src — la trasladamos al
+            // source real para que el usuario vea la línea/columna correcta.
+            let sub_tokens = tokenize(&expr_src).map_err(|mut e| {
+                e.line = line;
+                e.column = sub_col_base + e.column.saturating_sub(1);
+                e
+            })?;
             let mut sub_parser = Parser::new(sub_tokens);
-            let expr = sub_parser.expression()?;
+            let expr = sub_parser.expression().map_err(|mut e| {
+                e.line = line;
+                e.column = sub_col_base + e.column.saturating_sub(1);
+                e
+            })?;
             // No debe quedar nada después de la expresión (más allá
             // del EOF que pone el lexer).
             if !sub_parser.is_at_end() {
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     line,
-                    column,
+                    sub_col_base,
                     format!("Tokens extra dentro de interpolación: '{}'", expr_src),
                 ));
             }
@@ -967,7 +1106,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
             return Err(FitzError::new(
                 ErrorKind::InvalidSyntax,
                 line,
-                column,
+                content_col + i,
                 "'}' suelto en string — escapá como '\\}' para incluirlo literal",
             ));
         }
@@ -1645,6 +1784,27 @@ mod tests {
     }
 
     #[test]
+    fn return_sin_expresion_devuelve_null() {
+        // `return` solo (con newline al final). El parser lo modela como
+        // `Stmt::Return(Expr::Null)`.
+        assert_eq!(parse_one_stmt("return"), Stmt::Return(Expr::Null));
+    }
+
+    #[test]
+    fn return_sin_expresion_dentro_de_fn_body() {
+        // fn early_exit() { return }
+        let src = "fn early_exit() { return }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let program = parse(tokens).unwrap();
+        match &program[0] {
+            Stmt::FnDef { body, .. } => {
+                assert_eq!(body, &vec![Stmt::Return(Expr::Null)]);
+            }
+            _ => panic!("se esperaba FnDef"),
+        }
+    }
+
+    #[test]
     fn expression_statement_with_call() {
         assert_eq!(
             parse_one_stmt("print(x)"),
@@ -1663,6 +1823,112 @@ mod tests {
     #[test]
     fn continue_statement() {
         assert_eq!(parse_one_stmt("continue"), Stmt::Continue);
+    }
+
+    #[test]
+    fn while_basic_parses() {
+        let stmt = parse_one_stmt("while x < 10 { x = x + 1 }");
+        match stmt {
+            Stmt::While { condition, body } => {
+                assert!(matches!(condition, Expr::BinOp { op: BinOpKind::Lt, .. }));
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0], Stmt::Assign { .. }));
+            }
+            other => panic!("se esperaba Stmt::While, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn while_with_break_inside() {
+        let stmt = parse_one_stmt("while true { break }");
+        match stmt {
+            Stmt::While { body, .. } => {
+                assert_eq!(body, vec![Stmt::Break]);
+            }
+            _ => panic!("se esperaba while"),
+        }
+    }
+
+    #[test]
+    fn loop_basic_parses() {
+        let stmt = parse_one_stmt("loop { x = 1 }");
+        match stmt {
+            Stmt::Loop { body } => {
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0], Stmt::Assign { .. }));
+            }
+            _ => panic!("se esperaba Stmt::Loop"),
+        }
+    }
+
+    #[test]
+    fn and_basic_parses() {
+        assert_eq!(
+            parse_one_stmt("x and y"),
+            Stmt::Expr(Expr::BinOp {
+                op: BinOpKind::And,
+                left: Box::new(Expr::Ident("x".into())),
+                right: Box::new(Expr::Ident("y".into())),
+            }),
+        );
+    }
+
+    #[test]
+    fn or_basic_parses() {
+        assert_eq!(
+            parse_one_stmt("x or y"),
+            Stmt::Expr(Expr::BinOp {
+                op: BinOpKind::Or,
+                left: Box::new(Expr::Ident("x".into())),
+                right: Box::new(Expr::Ident("y".into())),
+            }),
+        );
+    }
+
+    #[test]
+    fn and_tiene_mayor_precedencia_que_or() {
+        // `a and b or c` → `(a and b) or c`
+        let stmt = parse_one_stmt("a and b or c");
+        let expected = Stmt::Expr(Expr::BinOp {
+            op: BinOpKind::Or,
+            left: Box::new(Expr::BinOp {
+                op: BinOpKind::And,
+                left: Box::new(Expr::Ident("a".into())),
+                right: Box::new(Expr::Ident("b".into())),
+            }),
+            right: Box::new(Expr::Ident("c".into())),
+        });
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn comparacion_tiene_mayor_precedencia_que_and() {
+        // `a > 0 and a < 10` → `(a > 0) and (a < 10)`
+        let stmt = parse_one_stmt("a > 0 and a < 10");
+        let expected = Stmt::Expr(Expr::BinOp {
+            op: BinOpKind::And,
+            left: Box::new(Expr::BinOp {
+                op: BinOpKind::Gt,
+                left: Box::new(Expr::Ident("a".into())),
+                right: Box::new(Expr::Int(0)),
+            }),
+            right: Box::new(Expr::BinOp {
+                op: BinOpKind::Lt,
+                left: Box::new(Expr::Ident("a".into())),
+                right: Box::new(Expr::Int(10)),
+            }),
+        });
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn for_emite_error_explicito_de_deuda() {
+        // `for` no está implementado aún (espera Fase 3).
+        let src = "for x in lista { print(x) }";
+        let tokens = crate::lexer::tokenize(src).unwrap();
+        let err = parse(tokens).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(err.message.contains("Fase 3"));
     }
 
     #[test]
@@ -2048,6 +2314,33 @@ mod tests {
         // "hola }"  — '}' suelto sin '{' previo
         let err = parse_expr(r#""hola }""#).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+    }
+
+    #[test]
+    fn unclosed_interpolation_reporta_columna_del_brace_abierto() {
+        // `"a{x"` — el `{` está en columna 3 (después de la comilla en col 1
+        // y del 'a' en col 2). El error tiene que apuntar ahí, no a la
+        // columna 1 del string.
+        let tokens = crate::lexer::tokenize(r#""a{x""#).unwrap();
+        let err = parse(tokens).unwrap_err();
+        assert_eq!(err.column, 3);
+    }
+
+    #[test]
+    fn error_en_subexpresion_de_interp_apunta_dentro_del_string() {
+        // `"foo{1 +}"` — el `+}` (subexpresión inválida) debe reportarse
+        // con columna apuntando dentro del bloque de interpolación,
+        // no a la columna 1.
+        let tokens = crate::lexer::tokenize(r#""foo{1 +}""#).unwrap();
+        let err = parse(tokens).unwrap_err();
+        // El string empieza en col 1, el contenido en col 2, el `{` en col 5.
+        // La subexpresión empieza en col 6. Cualquier columna > 1 confirma
+        // que la traducción está activa.
+        assert!(
+            err.column > 1,
+            "se esperaba columna > 1, se obtuvo {} (msg: {})",
+            err.column, err.message,
+        );
     }
 
     #[test]

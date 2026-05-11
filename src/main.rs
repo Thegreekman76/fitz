@@ -6,6 +6,8 @@
 mod lexer;      // Fase 2.1 — tokenización
 mod ast;        // Fase 2.2 — definición del AST
 mod parser;     // Fase 2.3 — construcción del AST
+mod value;      // Fase 2.4 — valores en runtime
+mod env;        // Fase 2.4 — entornos / scopes
 mod evaluator;  // Fase 2.4 — ejecución
 mod error;      // manejo de errores del compilador
 
@@ -86,19 +88,24 @@ fn run_file(path: &PathBuf) {
     };
 
     // Fase 2.3: parser
-    match parser::parse(tokens) {
+    let program = match parser::parse(tokens) {
         Ok(program) => {
             println!("\n--- AST ---");
             for (i, stmt) in program.iter().enumerate() {
                 println!("  [{}] {:#?}", i, stmt);
             }
+            program
         }
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
         }
-    }
+    };
 
-    // TODO Fase 2.4:
-    // evaluator::eval(program);
+    // Fase 2.4: evaluador
+    println!("\n--- Ejecución ---");
+    if let Err(e) = evaluator::eval(program) {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
 }

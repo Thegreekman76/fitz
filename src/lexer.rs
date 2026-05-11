@@ -42,6 +42,8 @@ pub enum Token {
     In,
     Break,
     Continue,
+    And,
+    Or,
 
     // Operadores
     Plus,     // +
@@ -342,6 +344,8 @@ impl Lexer {
             "in" => Token::In,
             "break" => Token::Break,
             "continue" => Token::Continue,
+            "and" => Token::And,
+            "or" => Token::Or,
             _ => Token::Ident(s),
         }
     }
@@ -558,6 +562,8 @@ mod tests {
             ("in", Token::In),
             ("break", Token::Break),
             ("continue", Token::Continue),
+            ("and", Token::And),
+            ("or", Token::Or),
         ];
         for (src, expected) in cases {
             assert_eq!(toks(src), vec![expected.clone(), Token::EOF], "src = {}", src);

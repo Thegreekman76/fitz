@@ -25,10 +25,14 @@ Poder escribir un lexer básico en Rust sin consultar el libro en cada línea.
 ---
 
 ## Fase 2 — Intérprete base 🔬
-**Estado: EN PROGRESO**
+**Estado: COMPLETADA**
 
 El corazón del lenguaje. Al final de esta fase, Fitz puede ejecutar
 programas básicos.
+
+El criterio de éxito se cumple: `cargo run -- run examples/phase2.fitz`
+ejecuta el programa de referencia end-to-end (270 tests pasando, incluida
+la deuda accionable de 2.3/2.4 cerrada).
 
 ### Módulos a implementar
 
@@ -97,22 +101,30 @@ end-to-end (lexer → parser → AST).
 - Decoradores HTTP: `@get`/`@post`/`@put`/`@delete` envolviendo una `FnDef`.
 
 **Fuera de alcance — deuda explícita, retomar después:**
-- **Operadores lógicos `and` / `or`** — el lexer aún no emite tokens
-  correspondientes; `BinOpKind::And` y `Or` quedan definidos pero sin uso.
-  Retomar antes del evaluador si los necesitamos, o en Fase 3.
-- **`while`, `for`, `loop`** — el AST aún no tiene estas variantes como
-  `Stmt`. Retomar en Fase 3.
+- ~~**Operadores lógicos `and` / `or`**~~ ✓ cerrado tras Fase 2 — tokens
+  emitidos por el lexer, precedencia en parser (`or` < `and` < `==`),
+  short-circuit ya estaba implementado en el evaluador.
+- ~~**`while` / `loop`**~~ ✓ cerrado tras Fase 2 — AST tiene las variantes,
+  parser y evaluador funcionan, `break`/`continue` se capturan dentro del
+  loop.
+- **`for`** — queda como deuda. Necesita rangos (`0..10`) o listas como
+  fuente de iteración; espera Fase 3. El parser emite error explícito.
 - **Method calls (`expr.method(args)`)** — `Expr::Call` solo admite
   `name: String`. Cuando mute a `callee: Box<Expr>` se desbloquea. Por
   ahora, el parser tira error explícito.
 - **Asignación a campos (`user.name = ...`)** — `Stmt::Assign` solo admite
   identificador como destino. Retomar cuando definamos mutabilidad.
-- **Posición de errores en subexpresiones de interpolación** — se reporta
-  la posición del string entero, no la posición interna del `{...}`
-  ofensor. Aceptable para v0.1.
-- **Patrones de match** — solo `Ident`, `_` (wildcard), `Ok(x)`, `Err(e)`.
-  No hay patrones literales (`"active"`), rangos (`0..12`), tuples ni
-  listas. El AST tampoco los modela todavía.
+- ~~**Posición de errores en subexpresiones de interpolación**~~ ✓ mejorado
+  tras Fase 2 — ahora apunta al `{` específico y traslada errores del
+  sub-parser. Limitación residual: un char menos de precisión por cada
+  escape (`\n`, `\t`) anterior al error, porque no tenemos el source
+  original.
+- ~~**`return` sin expresión**~~ ✓ cerrado tras Fase 2 — `return` solo
+  equivale a `return null` implícito.
+- **Patrones de match** — soporta `Int`, `Float`, `Str`, `Bool`, `Null`
+  (con negativos), `Ident`, `_`, y `Ok(x)`/`Err(e)` (estos últimos parsean
+  pero el evaluador emite error hasta Fase 3). Faltan rangos (`0..12`),
+  tuples y listas.
 - **Struct literals (`User { id: 1, name: "x" }`)** — el AST no los
   modela. Por ahora la instanciación tiene que hacerse vía función
   constructora.
@@ -125,8 +137,54 @@ end-to-end (lexer → parser → AST).
 - **Error recovery** — el primer error mata el parseo. Sin paniqueo y
   resincronización todavía.
 
-#### 2.4 Evaluador — PENDIENTE
-Recorre el AST y ejecuta el programa.
+#### 2.4 Evaluador ✓
+**Completado** — `src/evaluator.rs`, `src/value.rs`, `src/env.rs` con 113
+tests pasando (92 evaluador + 12 value + 9 env). Recorre el AST y ejecuta
+el programa.
+
+**Alcance de 2.4 (lo que SÍ se implementa):**
+- Valores en runtime: `Int`, `Float`, `Str`, `Bool`, `Null`, `Function`
+  (con closures), `Builtin`, `Type` (inerte hasta Fase 3).
+- Operaciones: aritmética con promoción Int↔Float, comparación numérica
+  y de strings, igualdad con coerción, `and`/`or` con short-circuit,
+  unario `-`. División por cero → error explícito.
+- Strings: concatenación con `+`, interpolación de expresiones con `{...}`.
+- Control de flujo: `if`/`else`/`else if` como expresión y como sentencia.
+- Funciones: `fn`/`=>`, closures con captura léxica, recursión, validación
+  de aridad, `return` propagado vía `EvalSignal::Return`.
+- `match` con patrones `Ident` (bind) y `Wildcard`.
+- `type` registrado en el env como marcador inerte.
+- Builtins: `print` (sigue la semántica de Python — args separados por
+  espacio, newline final).
+- Manejo unificado de errores y control de flujo vía `EvalSignal`
+  (`Error` / `Return` / `Break` / `Continue`). Signals "huérfanos" (return
+  fuera de función, break/continue fuera de loop) se reportan al usuario.
+
+**Fuera de alcance — deuda explícita, retomar después:**
+- ~~**Operadores `and`/`or`**~~ ✓ cerrado tras Fase 2 — lexer emite tokens,
+  parser inserta en la cadena de precedencia, evaluador con short-circuit.
+- ~~**`break` / `continue`** sin loops~~ ✓ cerrado tras Fase 2 —
+  `while`/`loop` los capturan correctamente vía `run_loop_body`.
+- **Patrones `Ok(x)` / `Err(e)`** — el evaluador emite error explícito
+  citando "requiere el tipo Result (Fase 3)". Bloqueado hasta tener
+  `Value::Result` o similar.
+- **Field access (`obj.campo`)** — error explícito "requiere tipos custom
+  instanciados (Fase 3)" porque sin struct literals no hay struct values
+  en runtime.
+- **Instanciación de tipos (`User { id: 1, name: "x" }`)** — el AST no
+  los modela. `Value::Type` está listo para recibir instancias cuando se
+  agregue.
+- **HTTP endpoints (`@get`, etc.)** — Fase 4. El evaluador devuelve error
+  explícito si se evalúan.
+- **Async** — `is_async` en `FnDef` se ignora silenciosamente. Fase 4.
+- **Anotaciones de tipo** — `let x: Int = ...` parsea, pero el evaluador
+  ignora la anotación. El tipado gradual sin checks runtime es la
+  intención; el type checker estático llega en Fase 5.
+- **Scope de bloques (if/match/función)** — los bloques de `if` no crean
+  scope nuevo (estilo Python). Variables definidas adentro persisten
+  afuera. Si esto trae sorpresas, revisamos.
+- **Overflow numérico** — `Int + Int` puede overflowear (paniquea en
+  debug, wrappea en release). Sin `checked_*` por ahora.
 
 ### Criterio de completitud
 Este programa funciona:
