@@ -1,0 +1,8 @@
+// 11-errores.fitz — Ejemplo de error.
+// Este programa está mal a propósito: la función `add` espera dos
+// argumentos y le pasamos solo uno. Corré el archivo para ver cómo
+// se ve un error de runtime de Fitz.
+
+fn add(a, b) => a + b
+
+print(add(5))

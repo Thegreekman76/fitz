@@ -66,9 +66,18 @@ Un binario. Sin dependencias en producción.
 
 ## Estado del proyecto
 
-🚧 **En desarrollo activo — Fase 2: Intérprete base** (lexer y AST completos, parser en camino)
+🏔️ **Fase 2 completa — Intérprete base** (lexer, parser y evaluador end-to-end, 270 tests). Próximo: Fase 3.
 
 Ver [roadmap](docs/roadmap.md) para el estado detallado.
+
+## Empezar
+
+¿Querés aprender Fitz hoy? Leé la **[guía del lenguaje](docs/guide.md)**.
+Es una guía viva en español que solo cubre lo que ya funciona, con
+ejemplos ejecutables en [`examples/guide/`](examples/guide/).
+
+Para la especificación completa de sintaxis (incluye features futuras
+todavía no implementadas), ver [docs/syntax-spec.md](docs/syntax-spec.md).
 
 ## Nombre
 

@@ -1,0 +1,41 @@
+// 06-if.fitz — Decisiones con if / else / else if.
+
+// Como sentencia.
+age = 20
+if age >= 18 {
+    print("mayor")
+} else {
+    print("menor")
+}
+
+// Encadenando con else if.
+score = 75
+if score >= 90 {
+    print("A")
+} else if score >= 80 {
+    print("B")
+} else if score >= 70 {
+    print("C")
+} else {
+    print("F")
+}
+
+// Como expresión: el valor del bloque es la última expresión.
+active = true
+status = if active { "on" } else { "off" }
+print(status)
+
+// Una expresión con else if.
+n = 0
+sign = if n > 0 { "positivo" } else if n < 0 { "negativo" } else { "cero" }
+print(sign)
+
+// El bloque puede tener varias sentencias; el valor es la última expresión.
+total = if true {
+    let a = 10
+    let b = 20
+    a + b
+} else {
+    0
+}
+print(total)

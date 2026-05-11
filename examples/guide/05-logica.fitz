@@ -1,0 +1,28 @@
+// 05-logica.fitz — Operadores lógicos.
+
+// and / or operan sobre Bool y devuelven Bool.
+print(true and true)
+print(true and false)
+print(false or true)
+print(false or false)
+
+// Combinando con comparación: los usos típicos.
+age = 20
+print(age >= 18 and age < 65)   // ¿en edad de trabajar?
+print(age < 13 or age >= 65)    // ¿aplica descuento?
+
+// Short-circuit:
+//   - `or`: si el izquierdo ya es true, no evalúa el derecho.
+//   - `and`: si el izquierdo ya es false, no evalúa el derecho.
+fn ruido() {
+    print("¡me llamaron!")
+    return true
+}
+
+print(true or ruido())     // imprime solo "true"
+print(false and ruido())   // imprime solo "false"
+print(true and ruido())    // imprime "¡me llamaron!" y luego "true"
+
+// Precedencia: `and` ata más fuerte que `or`.
+print(true or false and false)     // true: (false and false) se resuelve primero
+print((true or false) and false)   // false: los paréntesis cambian el orden

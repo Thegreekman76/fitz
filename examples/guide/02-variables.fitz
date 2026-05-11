@@ -1,0 +1,31 @@
+// 02-variables.fitz — Variables y tipos primitivos.
+// Muestra: los cinco tipos básicos, inferencia, anotación, reasignación.
+
+// Sin tipo: se infiere del valor.
+name = "Fitz"
+count = 42
+ratio = 3.14
+active = true
+nothing = null
+
+print(name)
+print(count)
+print(ratio)
+print(active)
+print(nothing)
+
+// Con anotación de tipo (se acepta y todavía no se valida).
+age: Int = 30
+city: Str = "El Chaltén"
+
+print(age)
+print(city)
+
+// `let` es opcional — útil si querés marcar explícito que la variable
+// es nueva.
+let mountain = "Fitz Roy"
+print(mountain)
+
+// Reasignar es volver a usar el mismo nombre.
+count = count + 1
+print(count)

@@ -1,0 +1,42 @@
+// 07-loops.fitz — Repetición con while, loop, break y continue.
+
+// while: repite mientras la condición sea true.
+i = 0
+while i < 3 {
+    print("i = {i}")
+    i = i + 1
+}
+
+// loop: infinito hasta que aparezca un break.
+n = 0
+loop {
+    if n >= 3 {
+        break
+    }
+    print("n = {n}")
+    n = n + 1
+}
+
+// continue: salta al inicio de la próxima iteración.
+j = 0
+while j < 5 {
+    j = j + 1
+    if j == 3 {
+        continue
+    }
+    print("j = {j}")
+}
+
+// Loops anidados: break rompe solo el más interno.
+fila = 0
+while fila < 2 {
+    col = 0
+    while col < 3 {
+        if col == 2 {
+            break
+        }
+        print("({fila},{col})")
+        col = col + 1
+    }
+    fila = fila + 1
+}

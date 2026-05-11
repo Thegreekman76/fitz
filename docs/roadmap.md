@@ -34,6 +34,13 @@ El criterio de éxito se cumple: `cargo run -- run examples/phase2.fitz`
 ejecuta el programa de referencia end-to-end (270 tests pasando, incluida
 la deuda accionable de 2.3/2.4 cerrada).
 
+Tras cerrar la fase se publicó **docs/guide.md v0.1**: guía pedagógica
+en español, 13 capítulos, 11 ejemplos ejecutables en `examples/guide/`.
+La guía solo documenta lo que el intérprete ejecuta hoy; crece con
+cada feature que se cierre. **Regla operativa**: cualquier cambio al
+proyecto exige verificar la guía y sus ejemplos antes de declarar el
+trabajo cerrado.
+
 ### Módulos a implementar
 
 #### 2.1 Lexer ✓

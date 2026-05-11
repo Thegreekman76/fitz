@@ -1,0 +1,30 @@
+// 03-operadores.fitz — Aritmética, comparación e igualdad.
+
+// Aritmética entre Int — el resultado también es Int.
+print(2 + 3)
+print(10 - 4)
+print(6 * 7)
+print(10 / 3)     // 3 — división entera (ambos son Int)
+
+// Con Float — el resultado es Float.
+print(10.0 / 3.0)
+
+// Mezclar Int y Float promueve a Float.
+print(1 + 1.0)
+print(10 / 3.0)
+
+// Unario negativo.
+print(-5)
+x = 10
+print(-x)
+
+// Comparación.
+print(1 < 2)
+print(3 >= 3)
+print("a" < "b")    // strings se comparan lexicográficamente
+
+// Igualdad.
+print(1 == 1)
+print(1 == 1.0)     // Int y Float numéricamente iguales
+print(1 == "1")     // false — tipos distintos, sin coerción
+print(null == null)

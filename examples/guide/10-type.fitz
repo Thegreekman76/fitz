@@ -1,0 +1,19 @@
+// 10-type.fitz — Declaración de tipos (preview).
+// La instanciación llega en Fase 3; hoy solo declarás.
+
+type User {
+    id: Int
+    name: Str
+    email: Str?
+    active: Bool = true
+}
+
+type Config {
+    host: Str
+    port: Int = 3000
+    debug: Bool = false
+}
+
+// Las declaraciones quedan registradas y se pueden imprimir.
+print(User)
+print(Config)

@@ -1,0 +1,7 @@
+// 01-hola.fitz — El primer programa de la guía.
+// Muestra: print, asignación sin tipo, interpolación de strings.
+
+print("Hola desde Fitz 🏔️")
+
+name = "Patagonia"
+print("Hola, {name}!")

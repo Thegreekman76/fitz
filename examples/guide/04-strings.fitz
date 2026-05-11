@@ -1,0 +1,31 @@
+// 04-strings.fitz — Strings, concatenación e interpolación.
+
+name = "Fitz"
+print(name)
+
+// Concatenación con + (solo Str + Str).
+greeting = "Hola, " + name
+print(greeting)
+
+// Interpolación con {}.
+print("Hola, {name}!")
+
+// Cualquier tipo primitivo se interpola.
+count = 42
+ratio = 3.14
+active = true
+nothing = null
+print("count={count}, ratio={ratio}, active={active}, nothing={nothing}")
+
+// Adentro de {...} pueden ir expresiones, no solo identificadores.
+print("dos más dos es {2 + 2}")
+print("doble: {count * 2}")
+
+// Escapes.
+print("línea 1\nlínea 2")
+print("nombre:\tFitz")
+print("dijo: \"hola\"")
+print("barra: \\")
+
+// Para una llave literal, escapala con \{ y \}.
+print("config: \{ port: 3000 \}")

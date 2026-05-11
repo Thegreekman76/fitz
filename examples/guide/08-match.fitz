@@ -1,0 +1,51 @@
+// 08-match.fitz — match con patrones literales.
+
+// Patrones literales — Str.
+status = "active"
+match status {
+    "active"   => print("activo")
+    "inactive" => print("inactivo")
+    _          => print("desconocido")
+}
+
+// Patrones con Int (incluso negativos).
+n = -1
+match n {
+    0  => print("cero")
+    -1 => print("menos uno")
+    _  => print("otro")
+}
+
+// Bind: un identificador captura el valor cuando no coincide con
+// ningún literal anterior.
+val = 42
+match val {
+    0 => print("cero")
+    x => print("otro: {x}")
+}
+
+// Como expresión.
+day = 3
+name = match day {
+    1 => "lunes"
+    2 => "martes"
+    3 => "miércoles"
+    _ => "otro día"
+}
+print(name)
+
+// Float, Bool, Null también funcionan como patrones literales.
+match 3.14 {
+    3.14 => print("pi")
+    _    => print("otro")
+}
+
+match true {
+    true  => print("sí")
+    false => print("no")
+}
+
+match null {
+    null => print("vacío")
+    _    => print("algo")
+}

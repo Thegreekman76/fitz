@@ -1,6 +1,14 @@
 # Especificación de Sintaxis — Fitz
 
-> Estado: BORRADOR v0.1 — sujeto a cambios durante la implementación
+> Estado: BORRADOR v0.1 — sujeto a cambios durante la implementación.
+>
+> **Importante**: este documento describe el **diseño completo** del
+> lenguaje, incluidas features que todavía no están implementadas
+> (HTTP, async, listas, tipos custom instanciables, Result, etc.).
+> Tomalo como dirección, no como contrato.
+>
+> Para ver solo lo que el intérprete ejecuta hoy, con ejemplos que
+> corren, leé [docs/guide.md](guide.md).
 
 ---
 
