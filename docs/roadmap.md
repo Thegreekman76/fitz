@@ -229,8 +229,8 @@ capítulo a la guía.
   encontradas, tipos no indexables.
 - Builtin: `len` para List/Map/Str/Range.
 
-Tests del proyecto: 366 (270 al cerrar Fase 2 + 96 nuevos repartidos
-entre ast, parser, value y evaluator).
+Tests del proyecto al cerrar 3.1: 366 (270 al cerrar Fase 2 + 96
+nuevos repartidos entre ast, parser, value y evaluator).
 
 Guía: capítulo 9 "Listas, mapas y rangos" sumado, capítulo de Match
 extendido con patrones de rango, capítulo de Loops limpiado de la
@@ -251,14 +251,46 @@ deuda de `for`. Ejemplo nuevo: `examples/guide/08-listas-mapas.fitz`.
 - **Rango inclusivo `..=`** — sin soporte, se suma si aparece la
   necesidad.
 
-#### 3.2 Tipos custom instanciables
-**Pendiente** — siguiente paso.
+#### 3.2 Tipos custom instanciables ✓
+**Completado** — los tipos declarados con `type` ahora se pueden
+instanciar y consultar.
 
-- Struct literal: `User { id: 1, name: "Fitz" }` como expresión.
-- `Value::Struct` con campos accesibles vía `obj.campo` en runtime.
-- Cierra deuda de 2.3 (struct literals no parseaban) y 2.4 (field
-  access en runtime).
-- Capítulo 12 ("Tipos con `type` (preview)") pasa de preview a real.
+- AST nuevo: `Expr::StructLit { type_name, fields }`.
+- Parser: `Nombre { campo: expr, ... }` como expresión, en cualquier
+  posición salvo las condiciones directas de `if`/`while`/`for`/`match`
+  (donde el `{` arranca un bloque). En esas posiciones, el flag
+  `no_struct_literal` corta con un error explícito sugiriendo
+  paréntesis. Adentro de `(...)`, `[...]`, args de llamada e
+  indexing, los struct literals están permitidos sin envolver.
+- Evaluator: `Value::Instance { type_name, fields }`. Al instanciar
+  se valida campo extra → error, falta de campo sin default ni
+  nullable → error; se aplican defaults (evaluados en el env de
+  instanciación) y nullables (`Null` por omisión); los campos
+  quedan ordenados según la declaración del `type`. Field access
+  (`obj.campo`) implementado sobre `Value::Instance`. Igualdad
+  estructural (mismo tipo, mismos campos en orden, coerción
+  Int↔Float adentro).
+- Cierra deuda de 2.3 (struct literals no parseaban) y de 2.4 (field
+  access e instanciación en runtime).
+- Capítulo 12 de la guía sale del estado "preview" y pasa a documentar
+  el feature real; se sumó al ejemplo
+  `examples/guide/11-type.fitz` la parte de instanciación y acceso a
+  campos.
+
+Tests del proyecto al cerrar 3.2: 405 (366 al cerrar 3.1 + 39 nuevos
+repartidos entre ast, parser, value y evaluator).
+
+**Deuda explícita — retomar después:**
+- **Mutación de campos** (`user.name = "x"`) — espera 3.4
+  (asignación a destinos no-identificador). Hoy `Stmt::Assign.name`
+  es `String`; cuando mute a un destino más rico se desbloquea.
+- **Métodos sobre instancias** (`user.greet()`) — espera 3.4
+  (mutación de `Expr::Call` a `callee: Box<Expr>`).
+- **Chequeo de tipos en runtime** — descartado por diseño (tipado
+  gradual). Las anotaciones se guardan pero no se validan en
+  runtime; el chequeo estático llega con el compilador en Fase 5.
+- **Tipos compuestos en anotaciones de campo** (`emails: List<Str>`)
+  — sigue siendo deuda de 2.3 (`Field.type_` es `String` simple).
 
 #### 3.3 Result + Ok/Err + `?`
 **Pendiente** — manejo de errores estilo Rust.

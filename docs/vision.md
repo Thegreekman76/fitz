@@ -31,6 +31,194 @@ Con Rust:
 - Pero aprender Rust para hacer una API CRUD es matar moscas con un cañón
 - La curva de aprendizaje ahuyenta a la mayoría
 
+## Cómo se compara con otros lenguajes
+
+Esta sección es honesta. Fitz no es mejor en todo y no quiere serlo —
+está optimizado para un nicho específico: **servicios web y APIs que
+hoy se escriben en Python o TypeScript**. Para todo lo demás, hay
+mejores herramientas.
+
+| Dimensión              | Fitz       | Python   | TypeScript | Rust      | Go        |
+|------------------------|------------|----------|------------|-----------|-----------|
+| Sintaxis ergonómica    | ✓          | ✓        | ✓          | △         | △         |
+| Tipado gradual         | ✓          | △ (mypy) | ✓          | ✗ estricto| ✗ estricto|
+| Compila a binario      | ✓          | ✗        | ✗          | ✓         | ✓         |
+| HTTP en el core        | ✓          | ✗        | ✗          | ✗         | △ (net/http)|
+| Errores como valores   | ✓          | ✗        | ✗          | ✓         | △ (idiomático)|
+| Sin runtime en prod    | ✓          | ✗        | ✗          | ✓         | ✓         |
+| Performance            | (objetivo) | bajo     | medio      | alto      | alto      |
+| Ecosistema             | naciente   | enorme   | enorme     | grande    | grande    |
+| Curva de aprendizaje   | suave      | suave    | suave      | empinada  | suave     |
+
+✓ = lo hace bien · △ = parcial · ✗ = no lo hace
+
+### vs. Python
+
+**Por qué Fitz** — si ya escribís FastAPI todos los días, sabés dónde
+duele: en producción necesitás Python instalado, un virtualenv, ~50
+dependencias transitivas, y aun así el endpoint tarda más de lo que
+debería. Fitz toma la ergonomía que te gusta y la compila a un
+binario sin runtime; tus anotaciones de tipo se chequean estáticamente
+en vez de quedar como decoración; los errores son `Result` en vez de
+excepciones que se escapan del scope.
+
+**Por qué Python igual** — el ecosistema. NumPy, pandas, scikit-learn,
+PyTorch, Django, Jupyter, 30 años de librerías. Cualquier cosa con
+ML, ciencia de datos o scripting de pegamento, Python sigue ganando.
+Por eso Fitz va a tener **interop nativo con Python** (Fase 6, vía
+PyO3): para que no tengas que elegir entre el ecosistema y la
+performance.
+
+```fitz
+// Fitz
+@get("/users/{id}")
+fn get_user(id: Int) -> User {
+    return User { id: id, name: "Fitz" }
+}
+```
+
+```python
+# Python + FastAPI
+from fastapi import FastAPI
+from pydantic import BaseModel
+
+app = FastAPI()
+
+class User(BaseModel):
+    id: int
+    name: str
+
+@app.get("/users/{id}")
+def get_user(id: int) -> User:
+    return User(id=id, name="Fitz")
+```
+
+Mismo resultado. En Fitz no importás nada, no instalás `fastapi`, no
+necesitás `pydantic` ni `uvicorn`. El `fitz build` te da un binario.
+
+### vs. TypeScript
+
+**Por qué Fitz** — TypeScript te da tipado gradual, pero en runtime
+no existe: el código que corre es JavaScript con todos sus defectos
+históricos (`undefined`, coerciones raras, `==` vs `===`). Y aunque
+quieras compilar a algo "rápido", arrastrás V8 o Node. Fitz toma la
+idea del tipado gradual y la lleva al binario: lo que ves en el
+código es lo que corre.
+
+**Por qué TypeScript igual** — frontend. Fitz no tiene intención de
+competir en el browser (al menos no por ahora; WebAssembly aparece
+en Fase 6 como visión). Si necesitás un componente UI, TypeScript +
+React/Vue es la respuesta correcta. Y el ecosistema npm, con todos
+sus problemas, sigue siendo el más grande del mundo dev.
+
+```fitz
+// Fitz
+type User { id: Int, name: Str, email: Str? }
+
+@post("/users")
+async fn create_user(input: UserInput) -> User {
+    // tipos se chequean en compile-time; nada de "string | undefined"
+}
+```
+
+```typescript
+// TypeScript + Express
+import express from 'express';
+const app = express();
+app.use(express.json());
+
+interface User { id: number; name: string; email?: string; }
+interface UserInput { name: string; email?: string; }
+
+app.post('/users', async (req, res) => {
+    const input = req.body as UserInput;  // sin validación real
+    res.json({ id: 1, name: input.name });
+});
+```
+
+Notá las dos diferencias: tipos validados de verdad, y el endpoint
+es parte del lenguaje en vez de una llamada `app.post(...)`.
+
+### vs. Rust
+
+**Por qué Fitz** — Rust es brutalmente potente, pero para una API
+CRUD es matar moscas a cañonazos. `ownership`, lifetimes, `Arc<Mutex<T>>`,
+elegir entre `tokio`/`async-std`, configurar `axum` o `actix-web`...
+todo eso es deuda mental para escribir lógica de negocio simple.
+Fitz toma decisiones por vos (gestión de memoria implícita, runtime
+HTTP integrado, tipado opcional) para que el camino feliz sea
+trivial.
+
+**Por qué Rust igual** — todo lo que esté por debajo del nivel de
+aplicación web. Sistemas operativos, motores de juego, embedded,
+intérpretes de otros lenguajes (¡como el propio Fitz!), código donde
+cada byte y cada microsegundo importan. Y la garantía de memory
+safety estricta de Rust no la vas a tener en Fitz: el tipado gradual
+implica que algunas verificaciones quedan para runtime.
+
+Fitz **está escrito en Rust**, no es un competidor — es lo que
+construís cuando ya conocés Rust y querés un lenguaje con menos
+fricción para el day-to-day web.
+
+### vs. Go
+
+**Por qué Fitz** — Go gana en simplicidad y compilación rápida, pero
+la sintaxis es austera al punto de la verborragia: `if err != nil`
+en cada línea, structs sin métodos, sin pattern matching, sin
+interpolación de strings. Fitz toma la decisión "lenguaje simple,
+binario nativo" de Go y le suma la ergonomía moderna: `Result` con
+`?`, `match` con patrones, `f"Hola, {name}"`, tipos genéricos
+(cuando lleguen).
+
+**Por qué Go igual** — el ecosistema cloud-native. Kubernetes,
+Docker, Terraform, gRPC, etcd, todo el stack de infraestructura
+moderna está escrito en Go. Las goroutines + channels son un modelo
+de concurrencia limpio y probado en producción a escala enorme.
+Para herramientas de infra y servicios distribuidos a gran escala,
+Go tiene años de ventaja.
+
+```fitz
+// Fitz
+fn parse_age(s: Str) -> Result<Int> {
+    let n = to_int(s)?
+    return Ok(n)
+}
+```
+
+```go
+// Go
+func parseAge(s string) (int, error) {
+    n, err := strconv.Atoi(s)
+    if err != nil {
+        return 0, err
+    }
+    return n, nil
+}
+```
+
+Tres líneas vs siete. La diferencia se acumula en un codebase real.
+
+### Resumen honesto
+
+Fitz tiene sentido si:
+
+- Estás escribiendo **APIs o servicios web** y la mayoría del trabajo
+  es endpoints HTTP + lógica de dominio + persistencia.
+- Vas y volvés entre **Python y TypeScript** y sufrís deploys,
+  performance, o el tipado que no se valida.
+- Querés un **binario** en producción sin runtime ni dependencias.
+
+Fitz **no** tiene sentido (todavía) si:
+
+- Necesitás un **ecosistema enorme y maduro** ya mismo (cualquier
+  cosa de ML, frontend, infra de bajo nivel).
+- Estás haciendo **sistemas de bajo nivel** o **embedded** — usá Rust.
+- Tu equipo o producto necesita **estabilidad de un lenguaje
+  consolidado** — Fitz es joven, las APIs pueden cambiar.
+
+El nicho no es "reemplazar todo": es "ser la mejor opción cuando
+estás escribiendo el backend de una app moderna".
+
 ## La solución que Fitz propone
 
 Un lenguaje que se siente como Python, tipea como TypeScript, compila como Go,

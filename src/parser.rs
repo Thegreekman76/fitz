@@ -26,11 +26,29 @@ use crate::lexer::{tokenize, Token, TokenWithPos};
 struct Parser {
     tokens: Vec<TokenWithPos>,
     pos: usize,
+    /// Cuando es `true`, un `Ident` seguido de `{` NO se interpreta como
+    /// struct literal — se rompe el postfix y el `{` queda para el
+    /// caller (típicamente un bloque controlado: `if/while/for/match`).
+    ///
+    /// El flag se setea al entrar a la condición de `if`/`while`, al
+    /// iterable de `for`, y al scrutinee de `match`. Se limpia en
+    /// subexpresiones delimitadas (paréntesis, args de llamada,
+    /// cuerpos de listas/mapas/struct literals, indexing), donde no
+    /// hay ambigüedad con bloques.
+    ///
+    /// Si en modo bloqueado se ve un cuerpo que tiene pinta de struct
+    /// literal (`{ Ident : ...`), el parser corta con un error
+    /// explícito sugiriendo envolver en paréntesis.
+    no_struct_literal: bool,
 }
 
 impl Parser {
     fn new(tokens: Vec<TokenWithPos>) -> Self {
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            no_struct_literal: false,
+        }
     }
 
     // ---------- navegación ----------
@@ -159,6 +177,71 @@ impl Parser {
 
     fn expression(&mut self) -> FitzResult<Expr> {
         self.logic_or()
+    }
+
+    /// Igual que `expression()`, pero con el flag `no_struct_literal`
+    /// activo: `Ident { ... }` NO se intentará parsear como struct
+    /// literal dentro de esta expresión. Se usa en posiciones donde
+    /// el `{` que sigue es la apertura de un bloque controlado
+    /// (condición de `if`/`while`, iterable de `for`, scrutinee de
+    /// `match`).
+    ///
+    /// Subexpresiones delimitadas dentro de la llamada (paréntesis,
+    /// args, indexing, cuerpos de literales) restauran el flag a
+    /// `false` localmente — así se permite `if x == (User { id: 1 })`
+    /// sin pelearse con el flag.
+    fn expression_no_struct_lit(&mut self) -> FitzResult<Expr> {
+        let prev = std::mem::replace(&mut self.no_struct_literal, true);
+        let result = self.expression();
+        self.no_struct_literal = prev;
+        result
+    }
+
+    /// Heurística para distinguir `Ident { ... }` como struct literal
+    /// vs. como Ident seguido de un bloque controlado. Solo se usa
+    /// para emitir un error con hint cuando estamos en modo
+    /// `no_struct_literal` y el cuerpo tiene pinta inequívoca de
+    /// struct literal.
+    ///
+    /// Pre: `peek()` es `Token::LBrace`. Mira hacia adelante saltando
+    /// newlines y retorna `true` si el cuerpo arranca con `Ident :` —
+    /// patrón de campo de struct literal que no podría ser, en
+    /// condiciones normales, el principio de un bloque (`x: Int = 1`
+    /// sí podría, pero hace falta `Ident` después del `:`).
+    fn looks_like_struct_lit_body(&self) -> bool {
+        if !matches!(self.peek(), Token::LBrace) {
+            return false;
+        }
+        // Saltar newlines después del `{`.
+        let mut i = 1;
+        while matches!(self.peek_at(i), Token::Newline) {
+            i += 1;
+        }
+        // Cuerpo vacío `{ }` → tratamos como struct literal (en un
+        // bloque controlado, `{}` vacío en posición de expresión no
+        // tiene sentido, así que el hint sigue siendo útil).
+        if matches!(self.peek_at(i), Token::RBrace) {
+            return true;
+        }
+        // Tiene que arrancar con `Ident` seguido de `:`. Si después
+        // del `:` hay `Ident =` esto es una asignación tipada de
+        // bloque, no un struct literal — esa distinción la dejamos
+        // pasar (preferimos un error claro en el caller para ese caso
+        // raro).
+        let p1 = self.peek_at(i);
+        let p2 = self.peek_at(i + 1);
+        if !matches!(p1, Token::Ident(_)) || !matches!(p2, Token::Colon) {
+            return false;
+        }
+        // Si tras `Ident :` viene `Ident =`, parece asignación tipada
+        // dentro de un bloque (`{ x: Int = 1 }`). En ese caso no es
+        // un struct literal y no metemos el hint.
+        let after_colon = self.peek_at(i + 2);
+        let after_after = self.peek_at(i + 3);
+        if matches!(after_colon, Token::Ident(_)) && matches!(after_after, Token::Eq) {
+            return false;
+        }
+        true
     }
 
     /// `a or b or c` — `or` es izquierda-asociativo y tiene menor
@@ -360,12 +443,21 @@ impl Parser {
                         }
                     };
                     self.advance(); // consume '('
-                    let args = self.parse_call_args()?;
-                    expr = Expr::Call { name, args };
+                    // Adentro de los args no hay ambigüedad con bloques:
+                    // limpiamos el flag para permitir struct literals
+                    // libremente en cada argumento.
+                    let prev = std::mem::replace(&mut self.no_struct_literal, false);
+                    let args_result = self.parse_call_args();
+                    self.no_struct_literal = prev;
+                    expr = Expr::Call { name, args: args_result? };
                 }
                 Token::LBracket => {
                     self.advance(); // consume '['
-                    let index = self.expression()?;
+                    // Indexing está delimitado por `]` — limpiamos el flag.
+                    let prev = std::mem::replace(&mut self.no_struct_literal, false);
+                    let idx_result = self.expression();
+                    self.no_struct_literal = prev;
+                    let index = idx_result?;
                     self.expect(
                         &Token::RBracket,
                         "se esperaba ']' para cerrar el indexing",
@@ -375,10 +467,110 @@ impl Parser {
                         index: Box::new(index),
                     };
                 }
+                Token::LBrace => {
+                    // Posible struct literal: `Ident { campo: valor, ... }`.
+                    // Solo aplica si el receptor es un Ident y no estamos
+                    // en un contexto que prohíbe struct literals
+                    // (condición de if/while/for/match).
+                    let ident_name = match &expr {
+                        Expr::Ident(n) => Some(n.clone()),
+                        _ => None,
+                    };
+                    let Some(name) = ident_name else { break };
+
+                    if self.no_struct_literal {
+                        // En modo bloqueado: si el cuerpo tiene pinta
+                        // inequívoca de struct literal, damos un error
+                        // con hint para usar paréntesis. Si no, dejamos
+                        // que el `{` lo agarre el caller (parse_block).
+                        if self.looks_like_struct_lit_body() {
+                            return Err(self.error(
+                                ErrorKind::UnexpectedToken,
+                                "los struct literals no se permiten \
+                                 directamente en condiciones de \
+                                 if/while/for/match — envolvélo en \
+                                 paréntesis: `(User { id: 1 })`",
+                            ));
+                        }
+                        break;
+                    }
+
+                    // Modo normal: el `{` arranca un struct literal.
+                    // Reemplazamos `expr` para soltar el Ident antes de
+                    // consumir el cuerpo.
+                    expr = self.parse_struct_lit_body(name)?;
+                }
                 _ => break,
             }
         }
         Ok(expr)
+    }
+
+    /// Cuerpo de un struct literal: `{ campo: expr, campo: expr, ... }`.
+    /// El receptor (nombre del tipo) ya está consumido y se pasa como
+    /// `type_name`. Acepta:
+    ///   - Vacío: `{}`.
+    ///   - Trailing comma.
+    ///   - Newlines entre campos (literal multilínea).
+    ///   - Coma o newline como separador entre campos.
+    ///
+    /// Dentro de los valores el flag `no_struct_literal` se restaura a
+    /// `false` (cada valor está delimitado por `,` o `}`), así
+    /// permitimos nidos: `Order { user: User { id: 1, name: "x" } }`.
+    fn parse_struct_lit_body(&mut self, type_name: String) -> FitzResult<Expr> {
+        self.expect(&Token::LBrace, "se esperaba '{'")?;
+        let prev = std::mem::replace(&mut self.no_struct_literal, false);
+        let result = self.parse_struct_lit_fields(type_name);
+        self.no_struct_literal = prev;
+        result
+    }
+
+    fn parse_struct_lit_fields(&mut self, type_name: String) -> FitzResult<Expr> {
+        let mut fields: Vec<(String, Expr)> = Vec::new();
+        self.skip_newlines();
+        // Vacío: `Empty {}`.
+        if matches!(self.peek(), Token::RBrace) {
+            self.advance();
+            return Ok(Expr::StructLit { type_name, fields });
+        }
+        loop {
+            self.skip_newlines();
+            if matches!(self.peek(), Token::RBrace) {
+                self.advance();
+                return Ok(Expr::StructLit { type_name, fields });
+            }
+            if self.is_at_end() {
+                return Err(self.error(
+                    ErrorKind::MissingClosingBrace,
+                    "se esperaba '}' para cerrar el struct literal",
+                ));
+            }
+            let field_name =
+                self.expect_ident("se esperaba nombre de campo en struct literal")?;
+            self.expect(
+                &Token::Colon,
+                "se esperaba ':' después del nombre del campo en struct literal",
+            )?;
+            self.skip_newlines();
+            let value = self.expression()?;
+            fields.push((field_name, value));
+            // Separadores aceptados: coma o newline. RBrace cierra el
+            // literal en la próxima iter del loop. Otra cosa → error.
+            match self.peek() {
+                Token::Comma => {
+                    self.advance();
+                }
+                Token::Newline | Token::RBrace => {
+                    // skip_newlines en la próxima iter consume el newline.
+                }
+                _ => {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        "se esperaba ',', salto de línea o '}' entre campos del struct literal",
+                    ));
+                }
+            }
+        }
     }
 
     // ---------- sentencias ----------
@@ -636,7 +828,9 @@ impl Parser {
     /// antes de cada iteración; si es `false`, termina el loop.
     fn parse_while(&mut self) -> FitzResult<Stmt> {
         self.expect(&Token::While, "se esperaba 'while'")?;
-        let condition = self.expression()?;
+        // La condición no permite struct literal a primer nivel — el `{`
+        // siguiente arranca el cuerpo del while. Adentro de paréntesis sí.
+        let condition = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
         Ok(Stmt::While { condition, body })
     }
@@ -657,7 +851,10 @@ impl Parser {
             "se esperaba nombre de variable después de 'for'",
         )?;
         self.expect(&Token::In, "se esperaba 'in' después de la variable de 'for'")?;
-        let iter = self.expression()?;
+        // El iterable no permite struct literal a primer nivel — el `{`
+        // siguiente arranca el cuerpo del for. Adentro de paréntesis o
+        // listas sí: `for u in [User { id: 1 }]`.
+        let iter = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
         Ok(Stmt::For { var, iter, body })
     }
@@ -670,7 +867,9 @@ impl Parser {
     /// sola sentencia: el `if` siguiente envuelto en `Stmt::Expr`.
     fn parse_if_expr(&mut self) -> FitzResult<Expr> {
         self.expect(&Token::If, "se esperaba 'if'")?;
-        let condition = self.expression()?;
+        // La condición no permite struct literal a primer nivel — el `{`
+        // siguiente arranca el bloque then. Adentro de paréntesis sí.
+        let condition = self.expression_no_struct_lit()?;
         let then = self.parse_block()?;
         let else_ = if self.eat(&Token::Else) {
             if matches!(self.peek(), Token::If) {
@@ -698,7 +897,9 @@ impl Parser {
     /// patrones son deuda explícita.
     fn parse_match_expr(&mut self) -> FitzResult<Expr> {
         self.expect(&Token::Match, "se esperaba 'match'")?;
-        let value = self.expression()?;
+        // El scrutinee no permite struct literal a primer nivel — el `{`
+        // siguiente arranca el bloque de arms. Adentro de paréntesis sí.
+        let value = self.expression_no_struct_lit()?;
         self.expect(
             &Token::LBrace,
             "se esperaba '{' después de la expresión de match",
@@ -1080,7 +1281,13 @@ impl Parser {
             Token::Null => Ok(Expr::Null),
             Token::Ident(name) => Ok(Expr::Ident(name)),
             Token::LParen => {
-                let expr = self.expression()?;
+                // Adentro de paréntesis no hay ambigüedad con bloques:
+                // limpiamos el flag para permitir struct literals.
+                // Esto es lo que habilita `if (User { id: 1 }) == other`.
+                let prev = std::mem::replace(&mut self.no_struct_literal, false);
+                let inner = self.expression();
+                self.no_struct_literal = prev;
+                let expr = inner?;
                 self.expect(
                     &Token::RParen,
                     "se esperaba ')' para cerrar el paréntesis",
@@ -1101,6 +1308,15 @@ impl Parser {
     /// multilínea).
     fn parse_list_literal(&mut self) -> FitzResult<Expr> {
         self.expect(&Token::LBracket, "se esperaba '['")?;
+        // Adentro de la lista cada item está delimitado por `,` o `]` —
+        // limpiamos el flag para permitir struct literals adentro.
+        let prev = std::mem::replace(&mut self.no_struct_literal, false);
+        let result = self.parse_list_literal_items();
+        self.no_struct_literal = prev;
+        result
+    }
+
+    fn parse_list_literal_items(&mut self) -> FitzResult<Expr> {
         let mut items: Vec<Expr> = Vec::new();
         self.skip_newlines();
         if matches!(self.peek(), Token::RBracket) {
@@ -1137,6 +1353,15 @@ impl Parser {
     /// hasheable en runtime.
     fn parse_map_literal(&mut self) -> FitzResult<Expr> {
         self.expect(&Token::LBrace, "se esperaba '{'")?;
+        // Adentro del mapa cada clave y cada valor están delimitados —
+        // limpiamos el flag para permitir struct literals.
+        let prev = std::mem::replace(&mut self.no_struct_literal, false);
+        let result = self.parse_map_literal_pairs();
+        self.no_struct_literal = prev;
+        result
+    }
+
+    fn parse_map_literal_pairs(&mut self) -> FitzResult<Expr> {
         let mut pairs: Vec<(Expr, Expr)> = Vec::new();
         self.skip_newlines();
         if matches!(self.peek(), Token::RBrace) {
@@ -3338,5 +3563,273 @@ mod tests {
         let src = "match n { 0..1.5 => \"x\", _ => \"y\" }";
         let err = parse_program_str(src).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Struct literals (Fase 3, paso 2)
+    //
+    // El parser reconoce `Nombre { campo: expr, ... }` como `Expr::StructLit`
+    // adentro de un postfix de Ident. La ambigüedad con bloques se resuelve
+    // con el flag `no_struct_literal`: en condiciones de if/while/for/match
+    // los struct literals exigen paréntesis.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn struct_lit_simple_en_asignacion() {
+        let src = "let u = User { id: 1, name: \"x\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::StructLit { type_name, fields }, .. } => {
+                assert_eq!(type_name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "id");
+                assert_eq!(fields[0].1, Expr::Int(1));
+                assert_eq!(fields[1].0, "name");
+                assert_eq!(fields[1].1, Expr::Str("x".into()));
+            }
+            other => panic!("se esperaba Assign(StructLit), se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_vacio() {
+        let src = "let u = Empty {}";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::StructLit { type_name, fields }, .. } => {
+                assert_eq!(type_name, "Empty");
+                assert!(fields.is_empty());
+            }
+            other => panic!("se esperaba StructLit vacío, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_con_trailing_comma() {
+        let src = "let u = User { id: 1, name: \"x\", }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::StructLit { fields, .. }, .. } => {
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("se esperaba StructLit, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_multilinea_con_newlines_entre_campos() {
+        // Sin coma entre líneas — newline como separador.
+        let src = "let u = User {\n    id: 1\n    name: \"x\"\n}";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::StructLit { fields, .. }, .. } => {
+                assert_eq!(fields.len(), 2);
+            }
+            other => panic!("se esperaba StructLit multilínea, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_anidado() {
+        let src = "let o = Order { user: User { id: 1, name: \"x\" } }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign {
+                value: Expr::StructLit { type_name, fields }, ..
+            } => {
+                assert_eq!(type_name, "Order");
+                assert_eq!(fields.len(), 1);
+                assert_eq!(fields[0].0, "user");
+                match &fields[0].1 {
+                    Expr::StructLit { type_name: inner_name, fields: inner_fields } => {
+                        assert_eq!(inner_name, "User");
+                        assert_eq!(inner_fields.len(), 2);
+                    }
+                    other => panic!("se esperaba StructLit anidado, se obtuvo {:?}", other),
+                }
+            }
+            other => panic!("se esperaba Assign(StructLit), se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_con_expresion_compleja_como_valor() {
+        // El valor del campo puede ser cualquier expresión.
+        let src = "let p = Point { x: 1 + 2, y: f(3) }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::StructLit { fields, .. }, .. } => {
+                assert!(matches!(fields[0].1, Expr::BinOp { .. }));
+                assert!(matches!(fields[1].1, Expr::Call { .. }));
+            }
+            other => panic!("se esperaba StructLit, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_como_argumento_de_funcion() {
+        // Adentro de paréntesis no hay ambigüedad — el struct literal
+        // se permite sin envolver.
+        let src = "print(User { id: 1, name: \"x\" })";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Call { args, .. }) => {
+                assert_eq!(args.len(), 1);
+                assert!(matches!(args[0], Expr::StructLit { .. }));
+            }
+            other => panic!("se esperaba Call con StructLit arg, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_dentro_de_lista() {
+        // Adentro de `[...]` cada item está delimitado por `,` o `]` —
+        // sin ambigüedad con bloques.
+        let src = "let xs = [User { id: 1, name: \"a\" }, User { id: 2, name: \"b\" }]";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::List(items), .. } => {
+                assert_eq!(items.len(), 2);
+                assert!(matches!(items[0], Expr::StructLit { .. }));
+                assert!(matches!(items[1], Expr::StructLit { .. }));
+            }
+            other => panic!("se esperaba List con StructLits, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_en_return() {
+        let src = "fn make() => User { id: 1, name: \"x\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::FnDef { body, .. } => match &body[0] {
+                Stmt::Return(Expr::StructLit { .. }) => {}
+                other => panic!("se esperaba Return(StructLit), se obtuvo {:?}", other),
+            },
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_lit_como_indice_y_receptor_de_index() {
+        // El struct literal puede aparecer adentro de `[...]` de indexing.
+        let src = "let v = m[Key { id: 1 }]";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::Index { index, .. }, .. } => {
+                assert!(matches!(*index, Expr::StructLit { .. }));
+            }
+            other => panic!("se esperaba Index con StructLit, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn while_con_struct_literal_sin_parens_da_error_con_hint() {
+        // `while User { id: 1 } { body }` — el parser ve el `{` después
+        // de `User` y, como estamos en condición, detecta que parece
+        // struct literal y emite un error con hint para usar paréntesis.
+        let src = "while User { id: 1 } { print(x) }";
+        let err = parse_program_str(src).unwrap_err();
+        let msg = err.message.to_lowercase();
+        assert!(
+            msg.contains("paréntesis") || msg.contains("parentesis"),
+            "el error debería mencionar paréntesis, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn if_con_struct_literal_sin_parens_da_error_con_hint() {
+        let src = "if User { id: 1 } == other { print(x) }";
+        let err = parse_program_str(src).unwrap_err();
+        let msg = err.message.to_lowercase();
+        assert!(
+            msg.contains("paréntesis") || msg.contains("parentesis"),
+            "el error debería mencionar paréntesis, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn for_con_struct_literal_sin_parens_da_error_con_hint() {
+        let src = "for u in User { id: 1 } { print(u) }";
+        let err = parse_program_str(src).unwrap_err();
+        let msg = err.message.to_lowercase();
+        assert!(
+            msg.contains("paréntesis") || msg.contains("parentesis"),
+            "el error debería mencionar paréntesis, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn match_con_struct_literal_sin_parens_da_error_con_hint() {
+        let src = "match User { id: 1 } { _ => \"x\" }";
+        let err = parse_program_str(src).unwrap_err();
+        let msg = err.message.to_lowercase();
+        assert!(
+            msg.contains("paréntesis") || msg.contains("parentesis"),
+            "el error debería mencionar paréntesis, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn if_con_struct_literal_envuelto_en_parens_parsea() {
+        // Con paréntesis sí: la condición ve un struct literal entero.
+        let src = "if (User { id: 1 }) == other { print(x) }";
+        let stmts = parse_program_str(src).expect("debería parsear con paréntesis");
+        assert_eq!(stmts.len(), 1);
+        match &stmts[0] {
+            Stmt::Expr(Expr::If { condition, .. }) => match condition.as_ref() {
+                Expr::BinOp { left, .. } => {
+                    assert!(matches!(**left, Expr::StructLit { .. }));
+                }
+                other => panic!("se esperaba BinOp como condición, se obtuvo {:?}", other),
+            },
+            other => panic!("se esperaba If, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn while_con_ident_y_bloque_sin_struct_pattern_sigue_andando() {
+        // `while x { print(x) }` — el cuerpo del bloque no tiene shape
+        // de struct literal, así que el flag deja pasar el `{` para
+        // que `parse_block` lo agarre.
+        let src = "while x { print(x) }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::While { condition, body } => {
+                assert_eq!(condition, Expr::Ident("x".into()));
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("se esperaba While, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_sobre_lista_de_struct_literals_parsea() {
+        // Adentro de `[...]` los struct literals están permitidos
+        // incluso cuando el `for` está en modo no_struct_literal.
+        let src = "for u in [User { id: 1, name: \"a\" }] { print(u) }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::For { var, iter, body } => {
+                assert_eq!(var, "u");
+                assert!(matches!(iter, Expr::List(_)));
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("se esperaba For, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn if_con_typed_assignment_en_bloque_no_se_confunde_con_struct_literal() {
+        // `if x { y: Int = 1 }` — el bloque tiene una asignación tipada,
+        // que comparte shape inicial con un struct literal (`Ident :`).
+        // El parser debe distinguir y dejar pasar el bloque sin error.
+        let src = "if x { y: Int = 1 }";
+        let stmts = parse_program_str(src).expect("debería parsear");
+        assert_eq!(stmts.len(), 1);
     }
 }

@@ -72,6 +72,20 @@ pub enum Value {
     /// Rango exclusivo de Int. Iterable. Por ahora solo Int (Float
     /// no tiene una semántica discreta clara para iteración).
     Range { start: i64, end: i64 },
+
+    /// Instancia de un tipo custom: el resultado de evaluar un struct
+    /// literal `User { id: 1, name: "x" }`. Guarda el nombre del tipo
+    /// (para `Display` y mensajes de error) y los pares `(campo,
+    /// valor)` en orden de declaración del `type`.
+    ///
+    /// El orden es estable: el evaluador lo arma siguiendo la lista
+    /// de campos del `Value::Type`, no la del literal. Eso garantiza
+    /// que dos instancias del mismo tipo se imprimen igual aunque el
+    /// usuario haya tipeado los campos en otro orden.
+    Instance {
+        type_name: String,
+        fields: Vec<(String, Value)>,
+    },
 }
 
 impl Value {
@@ -89,6 +103,7 @@ impl Value {
             Value::List(_) => "List",
             Value::Map(_) => "Map",
             Value::Range { .. } => "Range",
+            Value::Instance { .. } => "Instance",
         }
     }
 }
@@ -140,6 +155,23 @@ impl std::fmt::Display for Value {
                 write!(f, "}}")
             }
             Value::Range { start, end } => write!(f, "{}..{}", start, end),
+            Value::Instance { type_name, fields } => {
+                // Formato: `User { id: 1, name: "x" }`. Strings con
+                // comillas adentro (mismo criterio que List/Map), para
+                // distinguir `42` de `"42"` a simple vista.
+                write!(f, "{} {{", type_name)?;
+                for (i, (k, v)) in fields.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ",")?;
+                    }
+                    write!(f, " {}: ", k)?;
+                    write_inline_value(f, v)?;
+                }
+                if !fields.is_empty() {
+                    write!(f, " ")?;
+                }
+                write!(f, "}}")
+            }
         }
     }
 }
@@ -176,6 +208,14 @@ impl PartialEq for Value {
                 Value::Range { start: s1, end: e1 },
                 Value::Range { start: s2, end: e2 },
             ) => s1 == s2 && e1 == e2,
+            // Instancias se comparan estructuralmente: mismo tipo y mismo
+            // contenido de campos (con el mismo orden, que está garantizado
+            // por el evaluador porque sigue la declaración del `type`).
+            // La coerción Int↔Float vale recursivamente vía esta misma impl.
+            (
+                Value::Instance { type_name: t1, fields: f1 },
+                Value::Instance { type_name: t2, fields: f2 },
+            ) => t1 == t2 && f1 == f2,
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }
@@ -384,5 +424,72 @@ mod tests {
             Value::List(vec![Value::Int(0), Value::Int(1)]),
             Value::Range { start: 0, end: 2 },
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Instance (Fase 3, paso 2: tipos custom instanciables)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn type_name_de_instance() {
+        let i = Value::Instance {
+            type_name: "User".into(),
+            fields: vec![],
+        };
+        assert_eq!(i.type_name(), "Instance");
+    }
+
+    #[test]
+    fn display_instance_vacia_muestra_llaves_juntas() {
+        let i = Value::Instance {
+            type_name: "Empty".into(),
+            fields: vec![],
+        };
+        assert_eq!(i.to_string(), "Empty {}");
+    }
+
+    #[test]
+    fn display_instance_con_campos() {
+        let i = Value::Instance {
+            type_name: "User".into(),
+            fields: vec![
+                ("id".into(), Value::Int(1)),
+                ("name".into(), Value::Str("Fitz".into())),
+            ],
+        };
+        // Strings llevan comillas adentro, igual que en List/Map.
+        assert_eq!(i.to_string(), "User { id: 1, name: \"Fitz\" }");
+    }
+
+    #[test]
+    fn igualdad_instance_estructural() {
+        let a = Value::Instance {
+            type_name: "Point".into(),
+            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+        };
+        let b = Value::Instance {
+            type_name: "Point".into(),
+            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+        };
+        let c = Value::Instance {
+            type_name: "Point".into(),
+            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(3))],
+        };
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn igualdad_instance_distinto_type_name_es_false() {
+        // Misma forma de campos, distinto tipo → no son iguales.
+        let a = Value::Instance {
+            type_name: "User".into(),
+            fields: vec![("id".into(), Value::Int(1))],
+        };
+        let b = Value::Instance {
+            type_name: "Admin".into(),
+            fields: vec![("id".into(), Value::Int(1))],
+        };
+        assert_ne!(a, b);
     }
 }

@@ -348,11 +348,139 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // (`Value::Function`) llegan en el próximo paso.
         Expr::Call { name, args } => eval_call(name, args, env),
 
-        Expr::Field { .. } => Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
-            0, 0,
-            "Field access requiere tipos custom instanciados (Fase 3)",
-        ))),
+        // `obj.campo` — acceso a campo. Solo válido sobre instancias de
+        // tipos custom. Otros tipos (Int, Str, List, etc.) van a tener
+        // métodos en el paso 4 de Fase 3 (`xs.map(...)`), pero el AST
+        // los modelará distinto.
+        Expr::Field { object, field } => {
+            let obj = eval_expr(object, env)?;
+            match obj {
+                Value::Instance { type_name, fields } => {
+                    fields
+                        .iter()
+                        .find(|(k, _)| k == field)
+                        .map(|(_, v)| v.clone())
+                        .ok_or_else(|| {
+                            EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                0, 0,
+                                format!(
+                                    "el tipo `{}` no tiene un campo llamado `{}`",
+                                    type_name, field
+                                ),
+                            ))
+                        })
+                }
+                other => Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Instance".into(),
+                        found: other.type_name().into(),
+                    },
+                    0, 0,
+                    format!(
+                        "acceso a campo `.{}` sobre un valor de tipo `{}` — \
+                         solo se permite sobre instancias de tipos custom",
+                        field,
+                        other.type_name()
+                    ),
+                ))),
+            }
+        }
+
+        // `User { id: 1, name: "x" }` — instanciación de un tipo custom.
+        //
+        // Validación en runtime (no en parse, porque el `type` puede
+        // declararse después en el archivo o venir de otro scope):
+        //  1. Resolver `type_name` en el env: tiene que existir y ser
+        //     un `Value::Type`. Otro caso → error explícito.
+        //  2. Detectar campos extra en el literal (no declarados en el
+        //     `type`).
+        //  3. Para cada campo declarado, en orden de declaración:
+        //      a. Si el literal lo provee, usar ese valor.
+        //      b. Si no y tiene `default`, evaluar el default en el env
+        //         de la INSTANCIACIÓN (no el de la declaración del
+        //         tipo) — los defaults son típicamente literales y
+        //         este criterio es más predecible.
+        //      c. Si no y es `nullable`, usar `Null`.
+        //      d. Si no, error: falta el campo.
+        //  4. Las anotaciones de tipo NO se chequean en runtime
+        //     (tipado gradual; el chequeo estático llega en Fase 5).
+        //
+        // El orden de los campos en la instancia sigue la declaración
+        // del `type`, no el del literal — eso garantiza un `Display`
+        // estable y comparaciones estructurales consistentes.
+        Expr::StructLit { type_name, fields } => {
+            let ty = env.borrow().get(type_name).ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::UndefinedVariable(type_name.clone()),
+                    0, 0,
+                    format!("tipo `{}` no definido", type_name),
+                ))
+            })?;
+            let declared = match ty {
+                Value::Type { fields, .. } => fields,
+                other => {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Type".into(),
+                            found: other.type_name().into(),
+                        },
+                        0, 0,
+                        format!(
+                            "`{}` no es un tipo — no se puede instanciar (es `{}`)",
+                            type_name,
+                            other.type_name()
+                        ),
+                    )));
+                }
+            };
+
+            // Detectar campos extra: cada nombre del literal tiene que
+            // estar entre los declarados.
+            for (provided_name, _) in fields {
+                if !declared.iter().any(|f| f.name == *provided_name) {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        0, 0,
+                        format!(
+                            "el tipo `{}` no tiene un campo llamado `{}`",
+                            type_name, provided_name
+                        ),
+                    )));
+                }
+            }
+
+            // Armar la instancia en orden de declaración. Para cada
+            // campo declarado: usar el del literal si está; si no,
+            // default; si no, null si es nullable; si no, error.
+            let mut instance_fields: Vec<(String, Value)> =
+                Vec::with_capacity(declared.len());
+            for f in &declared {
+                let provided = fields.iter().find(|(n, _)| n == &f.name);
+                let value = if let Some((_, expr)) = provided {
+                    eval_expr(expr, env.clone())?
+                } else if let Some(default_expr) = &f.default {
+                    eval_expr(default_expr, env.clone())?
+                } else if f.nullable {
+                    Value::Null
+                } else {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        0, 0,
+                        format!(
+                            "falta el campo `{}` al instanciar `{}` \
+                             (no tiene default y no es nullable)",
+                            f.name, type_name
+                        ),
+                    )));
+                };
+                instance_fields.push((f.name.clone(), value));
+            }
+            Ok(Value::Instance {
+                type_name: type_name.clone(),
+                fields: instance_fields,
+            })
+        }
 
         // `[e1, e2, ...]` — evaluamos los elementos en orden.
         Expr::List(items) => {
@@ -3084,5 +3212,243 @@ let r = match n {
         let res = parse_and_eval(src);
         let err = res.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::WrongArgCount { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Tipos custom instanciables (Fase 3, paso 2)
+    //
+    // El evaluador resuelve `User { id: 1, name: "x" }` contra el `type`
+    // declarado, aplica defaults y nullables, valida campos faltantes y
+    // extras, y permite `obj.campo` sobre la instancia resultante.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn struct_literal_basico_con_todos_los_campos() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1, name: \"Fitz\" }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let u = env.borrow().get("u").unwrap();
+        match u {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0], ("id".into(), Value::Int(1)));
+                assert_eq!(fields[1], ("name".into(), Value::Str("Fitz".into())));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_literal_ordena_campos_segun_la_declaracion() {
+        // El literal tipea los campos al revés; la instancia debe seguir
+        // el orden del `type`.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { name: \"Fitz\", id: 1 }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let u = env.borrow().get("u").unwrap();
+        match u {
+            Value::Instance { fields, .. } => {
+                assert_eq!(fields[0].0, "id");
+                assert_eq!(fields[1].0, "name");
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_literal_aplica_default_cuando_se_omite_un_campo() {
+        let src = "\
+            type Config { host: Str, port: Int = 3000 }\n\
+            let c = Config { host: \"localhost\" }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::Instance { fields, .. } => {
+                assert_eq!(fields[0], ("host".into(), Value::Str("localhost".into())));
+                assert_eq!(fields[1], ("port".into(), Value::Int(3000)));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_literal_default_se_evalua_en_el_env_de_instanciacion() {
+        // El default es una expresión: se evalúa al instanciar, en el
+        // scope donde ocurre el literal. Si el usuario define una var
+        // con ese nombre, el default la ve.
+        let src = "\
+            type Cfg { port: Int = base + 1 }\n\
+            let base = 4000\n\
+            let c = Cfg {}\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::Instance { fields, .. } => {
+                assert_eq!(fields[0], ("port".into(), Value::Int(4001)));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_literal_campo_nullable_omitido_es_null() {
+        let src = "\
+            type User { id: Int, email: Str? }\n\
+            let u = User { id: 1 }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let u = env.borrow().get("u").unwrap();
+        match u {
+            Value::Instance { fields, .. } => {
+                assert_eq!(fields[1], ("email".into(), Value::Null));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_literal_campo_nullable_explicito_a_null() {
+        let src = "\
+            type User { id: Int, email: Str? }\n\
+            let u = User { id: 1, email: null }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let u = env.borrow().get("u").unwrap();
+        match u {
+            Value::Instance { fields, .. } => {
+                assert_eq!(fields[1], ("email".into(), Value::Null));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn struct_literal_campo_faltante_sin_default_ni_nullable_es_error() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1 }\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(
+            err.message.contains("name"),
+            "el error debería mencionar el campo faltante `name`: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn struct_literal_campo_extra_no_declarado_es_error() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1, name: \"x\", color: \"red\" }\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(
+            err.message.contains("color"),
+            "el error debería mencionar el campo extra `color`: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn struct_literal_de_tipo_no_definido_es_error() {
+        let src = "let u = NoExiste { id: 1 }";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UndefinedVariable(_)));
+    }
+
+    #[test]
+    fn struct_literal_sobre_no_tipo_es_type_error() {
+        // `x` es Int, no un Type — instanciarlo es error.
+        let src = "\
+            let x = 42\n\
+            let u = x { id: 1 }\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn field_access_sobre_instance_devuelve_el_valor() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1, name: \"Fitz\" }\n\
+            let n = u.name\n\
+            let i = u.id\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Str("Fitz".into())));
+        assert_eq!(env.borrow().get("i"), Some(Value::Int(1)));
+    }
+
+    #[test]
+    fn field_access_campo_inexistente_es_error() {
+        let src = "\
+            type User { id: Int }\n\
+            let u = User { id: 1 }\n\
+            let x = u.nope\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(
+            err.message.contains("nope"),
+            "el error debería mencionar el campo `nope`: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn field_access_sobre_no_instance_es_type_error() {
+        // Field access sobre un Int debe explotar — no hay métodos
+        // sobre primitivos todavía (eso es paso 4 de Fase 3).
+        let src = "\
+            let x = 42\n\
+            let n = x.foo\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn struct_literal_anidado_y_field_access_encadenado() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            type Order { user: User, total: Int }\n\
+            let o = Order { user: User { id: 1, name: \"Fitz\" }, total: 100 }\n\
+            let n = o.user.name\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Str("Fitz".into())));
+    }
+
+    #[test]
+    fn instance_se_imprime_con_display_esperado() {
+        // Sanity: el print de una instancia muestra el formato canónico.
+        // (No capturamos stdout — usamos `to_string` del Value retornado.)
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1, name: \"Fitz\" }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let u = env.borrow().get("u").unwrap();
+        assert_eq!(u.to_string(), "User { id: 1, name: \"Fitz\" }");
     }
 }

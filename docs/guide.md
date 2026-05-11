@@ -1,7 +1,7 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 3 — paso 1: listas, mapas, rangos y `for`, 366 tests pasando).
+> Última actualización: 2026-05-11 (Fase 3 — paso 2: tipos custom instanciables, 405 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -33,9 +33,9 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 
 **Parte 4 — Abstracción**
 11. [Funciones](#11-funciones)
+12. [Tipos con `type`](#12-tipos-con-type)
 
-**Parte 5 — Lo que está por venir**
-12. [Tipos con `type` (preview)](#12-tipos-con-type-preview)
+**Parte 5 — Cerrando**
 13. [Errores y mensajes](#13-errores-y-mensajes)
 14. [Qué sigue](#14-qué-sigue)
 
@@ -78,7 +78,8 @@ Solo lo que el intérprete ejecuta hoy:
 - `for x in xs` y `for i in 0..n`.
 - `match` con patrones literales, binding por identificador, `_` y rangos `0..10`.
 - Funciones (`fn` en bloque y `=>` en flecha), closures, recursión.
-- Declaración de tipos con `type` (declarar sí, instanciar todavía no).
+- Declaración de tipos con `type`, instanciación (`User { id: 1, name: "x" }`)
+  y acceso a campos (`user.name`), con defaults y nullables.
 - Builtins: `print`, `len`.
 
 ### Qué todavía no anda
@@ -89,8 +90,8 @@ error explícito:
 
 - Tuplas (`(1, "a", true)`).
 - Mutación de listas (`push`, `pop`, etc.) — espera method calls.
-- Instanciación de tipos custom (`User { id: 1, name: "x" }`).
-- Acceso a campos y métodos (`user.name`, `users.push(...)`).
+- Mutación de campos de una instancia (`user.name = "x"`).
+- Métodos sobre instancias (`user.greet()`).
 - `Result`, `Ok(x)`, `Err(e)`, propagación con `?`.
 - `async` / `await`.
 - Decoradores HTTP (`@get`, `@post`, …).
@@ -2291,19 +2292,14 @@ instanciar — y por qué.
 
 ---
 
-## 12. Tipos con `type` (preview)
+## 12. Tipos con `type`
 
-Este capítulo es un anticipo. La declaración de tipos custom ya está
-en el lenguaje: el lexer, el parser y el evaluador la aceptan. Lo
-que **todavía no anda** es la parte interesante: crear instancias y
-acceder a sus campos. Eso es lo central de la Fase 3.
-
-Lo incluyo igual en la guía porque:
-
-- Si lo ves en la [especificación de sintaxis](syntax-spec.md) te vas a
-  preguntar por qué no aparece acá.
-- Marca la dirección del lenguaje: cuando llegue Fase 3, vas a poder
-  modelar entidades del dominio sin librerías ni JSON ni magia.
+Hasta acá tu código modeló datos sueltos: ints, strings, listas,
+mapas. Para varios casos eso alcanza, pero apenas tenés "un usuario
+con id, nombre y email" empezás a pasar tres cosas relacionadas como
+si fueran independientes. Los **tipos custom** son la forma de
+nombrar esa relación: declarás una vez la forma de un dato, y después
+trabajás con instancias enteras.
 
 ### Declarar un tipo
 
@@ -2339,74 +2335,212 @@ type Config {
 }
 ```
 
-### Qué hace el intérprete hoy
+Una declaración de `type` no crea ninguna instancia por sí sola — solo
+registra la forma. Para crear datos concretos, usás un **struct
+literal**.
 
-Cuando declarás un `type`, el evaluador lo registra como un **valor
-inerte** en el scope. Podés imprimirlo, pero no hacer mucho más:
-
-```fitz
-print(User)              // <type User>
-print(Config)            // <type Config>
-```
-
-Esto te confirma que la declaración se aceptó, pero el `<type X>` que
-ves no es un constructor todavía. Es un placeholder que se va a llenar
-de funcionalidad en Fase 3.
-
-### Lo que todavía no se puede hacer
-
-**Instanciar** un tipo, con la sintaxis prevista por la
-especificación, no parsea todavía:
+### Instanciar un tipo
 
 ```fitz
-u = User { id: 1, name: "Fitz" }
-// Error en línea 2:10 — se esperaba salto de línea o fin de bloque entre sentencias
-```
-
-(El error no es muy descriptivo porque la sintaxis `Nombre { ... }`
-como expresión ni siquiera está en el parser todavía. Se mejora cuando
-se implemente.)
-
-**Acceder a un campo** sí parsea, pero el evaluador corta con un
-mensaje explícito:
-
-```fitz
-x = User
-print(x.name)
-// Error en línea 0:0 — Field access requiere tipos custom instanciados (Fase 3)
-```
-
-Mientras tanto, si lo que necesitás es agrupar dos o tres valores
-relacionados, la opción más fea pero funcional es usar variables
-sueltas o pasar varios parámetros entre funciones. No es elegante, y
-es exactamente la fricción que Fase 3 viene a resolver.
-
-### Cómo va a verse en Fase 3
-
-Solo como anticipo —**esto no funciona todavía**:
-
-```fitz
-// EN FASE 3 — preview, no compila aún:
-
-type User {
-    id: Int
-    name: Str
-    email: Str?
-}
-
-let user = User {
+let u = User {
     id: 1,
     name: "Fitz",
-    email: "fitz@example.com"
+    email: "fitz@example.com",
 }
-
-print(user.name)            // Fitz
-print(user.email)           // fitz@example.com
 ```
 
-Y todavía más adelante (Fase 4), ese mismo `type` se va a poder usar
-en endpoints HTTP, con serialización JSON automática. Pero eso es
-para otra guía.
+Los campos van entre llaves, separados por coma o newline, con la
+forma `nombre: valor`. El valor puede ser cualquier expresión:
+
+```fitz
+let p = Point { x: 1 + 2, y: f(3) }
+```
+
+El **orden** en el literal es libre — la instancia se ordena según la
+declaración del `type`. Así dos instancias del mismo tipo se imprimen
+igual, sin importar en qué orden las tipeaste:
+
+```fitz
+let a = User { id: 1, name: "Fitz" }
+let b = User { name: "Fitz", id: 1 }
+// a y b son iguales (==) y se imprimen idéntico.
+```
+
+### Acceder a campos
+
+Con `.` sacás un campo de una instancia:
+
+```fitz
+print(u.name)     // Fitz
+print(u.email)    // fitz@example.com
+```
+
+Funciona encadenado, si un campo es otra instancia:
+
+```fitz
+type Order {
+    user: User
+    total: Int
+}
+
+let o = Order { user: u, total: 100 }
+print(o.user.name)    // Fitz
+```
+
+Si pedís un campo que no existe, el intérprete corta:
+
+```fitz
+print(u.color)
+// Error en línea 0:0 — el tipo `User` no tiene un campo llamado `color`
+```
+
+### Defaults
+
+Si un campo tiene un valor por defecto en la declaración, podés
+omitirlo al instanciar y se aplica el default:
+
+```fitz
+let c = Config { host: "localhost" }
+print(c.port)     // 3000
+print(c.debug)    // false
+```
+
+Los defaults son **expresiones** y se evalúan **cuando instanciás**,
+no cuando declarás el tipo. Eso permite cosas como derivar el default
+de una variable del scope:
+
+```fitz
+let base = 4000
+type Cfg { port: Int = base + 1 }
+
+let c = Cfg {}
+print(c.port)     // 4001
+```
+
+### Campos nullables
+
+Un campo declarado con `Tipo?` puede valer `null`. Si lo omitís al
+instanciar, queda en `null` automáticamente:
+
+```fitz
+let anon = User { id: 2, name: "Anon" }
+print(anon.email)    // null
+```
+
+También podés ponerlo explícito:
+
+```fitz
+let anon = User { id: 2, name: "Anon", email: null }
+```
+
+Si un campo **no** es nullable y **no** tiene default, omitirlo es
+error:
+
+```fitz
+let u = User { id: 1 }
+// Error en línea 0:0 — falta el campo `name` al instanciar `User`
+//                     (no tiene default y no es nullable)
+```
+
+Y si pasás un campo que no está declarado en el tipo, también es
+error:
+
+```fitz
+let u = User { id: 1, name: "x", color: "red" }
+// Error en línea 0:0 — el tipo `User` no tiene un campo llamado `color`
+```
+
+### Instancias en condiciones — usá paréntesis
+
+Esto es la única fricción de sintaxis a tener en cuenta. Mirá:
+
+```fitz
+if User { id: 1 } == other { print("igual") }
+```
+
+¿Dónde termina la condición y dónde empieza el bloque del `if`? El
+parser no tiene cómo adivinarlo sin lookahead arbitrario, así que
+**los struct literals no se permiten directamente** como condición
+de `if`, `while`, `for` o `match`. Si los tipeás ahí, el intérprete
+te corta con un mensaje claro:
+
+```
+Error en línea 1:11 — los struct literals no se permiten directamente
+en condiciones de if/while/for/match — envolvélo en paréntesis:
+`(User { id: 1 })`
+```
+
+La solución es exactamente lo que el mensaje dice: envolver el struct
+literal en paréntesis.
+
+```fitz
+if (User { id: 1 }) == other { print("igual") }
+```
+
+Adentro de paréntesis, listas (`[User { id: 1 }]`), argumentos de
+llamada (`print(User { id: 1 })`) e indexing (`m[Key { id: 1 }]`) los
+struct literals están permitidos sin envolver — no hay ambigüedad
+porque cada uno de esos contextos tiene un cierre propio.
+
+Es el mismo trade-off que hacen Rust y Go.
+
+### Comparar instancias
+
+`==` compara instancias **estructuralmente**: mismo tipo y mismos
+valores en los mismos campos. La coerción Int↔Float que vimos en el
+cap. 4 sigue valiendo dentro de los campos.
+
+```fitz
+let a = User { id: 1, name: "Fitz" }
+let b = User { id: 1, name: "Fitz" }
+let c = User { id: 1, name: "Otro" }
+
+print(a == b)    // true
+print(a == c)    // false
+```
+
+Dos instancias de tipos distintos son siempre desiguales aunque
+tengan la misma forma:
+
+```fitz
+type Admin { id: Int, name: Str }
+
+let user  = User  { id: 1, name: "x" }
+let admin = Admin { id: 1, name: "x" }
+print(user == admin)    // false
+```
+
+### Imprimir instancias
+
+`print(u)` muestra el formato canónico — nombre del tipo, llaves,
+campos en orden de declaración:
+
+```
+User { id: 1, name: "Fitz", email: "fitz@example.com", active: true }
+```
+
+Los strings adentro van con comillas (mismo criterio que listas y
+mapas), para distinguir `1` de `"1"`. La interpolación de un campo
+suelto en un string sigue sin comillas, como cualquier `Str`:
+
+```fitz
+print("Hola, {u.name}!")    // Hola, Fitz!
+```
+
+### Lo que todavía no anda
+
+- **Mutación de campos** (`u.name = "otro"`) — espera al paso 4 de
+  Fase 3 (asignación a destinos no-identificador).
+- **Métodos sobre instancias** (`u.greet()`) — también paso 4 de
+  Fase 3. Hoy todo se hace con funciones que reciben la instancia
+  como parámetro.
+- **Chequeo de tipos en runtime** — las anotaciones se guardan pero
+  no se validan. Podés pasarle un Str a un campo declarado `Int` y
+  el evaluador lo acepta. El chequeo estático llega con el
+  compilador (Fase 5).
+- **Tipos compuestos en campos** (`emails: List<Str>`) — se parsea el
+  nombre del tipo pero no las anotaciones genéricas tipo `List<T>`.
+  Por ahora se anota con el nombre suelto y el contenido es libre.
 
 ### Ejemplo completo
 
@@ -2426,15 +2560,29 @@ type Config {
     debug: Bool = false
 }
 
-print(User)
-print(Config)
+let u = User { id: 1, name: "Fitz", email: "fitz@example.com" }
+print(u.name)
+print(u.email)
+
+let c = Config { host: "localhost" }
+print(c.port)
+
+let anon = User { id: 2, name: "Anon" }
+print(anon.email)
+
+print(u)
+print(c)
 ```
 
 Salida:
 
 ```
-<type User>
-<type Config>
+Fitz
+fitz@example.com
+3000
+null
+User { id: 1, name: "Fitz", email: "fitz@example.com", active: true }
+Config { host: "localhost", port: 3000, debug: false }
 ```
 
 ---
@@ -2508,7 +2656,8 @@ Error en línea 1:5 — String sin cerrar — salto de línea antes de la comill
 | `Se esperaba una expresión, se encontró 'X'` | Faltó la expresión donde el parser la esperaba (después de `+`, después de `=`, dentro de paréntesis). |
 | `se esperaba ')' para cerrar la llamada` | Una llamada quedó sin cerrar paréntesis. |
 | `se esperaba '=>' después del patrón` | Brazo de `match` mal formado, típicamente por un patrón no soportado (cap. 10). |
-| `se esperaba salto de línea o fin de bloque entre sentencias` | Aparece, entre otras cosas, al intentar instanciar un `type` (cap. 12). |
+| `los struct literals no se permiten directamente en condiciones de if/while/for/match` | Un `User { id: 1 }` adentro de la condición de un `if`/`while`/`for`/`match`. Envolvelo en paréntesis (cap. 12). |
+| `se esperaba ',', salto de línea o '}' entre campos del struct literal` | Faltó el separador entre dos campos de una instancia (cap. 12). |
 | `índice fuera de rango: N en lista de tamaño M` | `xs[i]` con `i` por fuera de la lista (cap. 9). |
 | `clave no encontrada en mapa: k` | `m[k]` con clave que no existe (cap. 9). |
 | `el tipo 'X' no soporta indexing con '[]'` | Intentaste `[i]` sobre algo que no es lista ni mapa (cap. 9). |
@@ -2540,7 +2689,10 @@ Estos son los que más vas a ver mientras escribís lógica:
 | `'return' solo puede usarse adentro de una función` | `return` en el nivel global. Cap. 11. |
 | `el 'match' no matcheó ningún brazo` | El `match` no tenía wildcard y ningún patrón coincidió. Cap. 10. |
 | `no se puede iterar sobre un valor de tipo 'X'` | `for x in v` con `v` que no es List ni Range (cap. 9). |
-| `Field access requiere tipos custom instanciados (Fase 3)` | Tocás `obj.campo` sobre algo que no es una instancia de tipo. Cap. 11. |
+| `el tipo 'X' no tiene un campo llamado 'Y'` | Acceso a un campo que no existe, o instanciación con un campo no declarado. Cap. 12. |
+| `falta el campo 'Y' al instanciar 'X' (no tiene default y no es nullable)` | Omitiste un campo obligatorio en un struct literal. Cap. 12. |
+| `tipo 'X' no definido` | Instanciaste un tipo que no fue declarado con `type` (o lo escribiste mal). Cap. 12. |
+| `acceso a campo '.X' sobre un valor de tipo 'Y'` | Hiciste `obj.campo` sobre algo que no es una instancia (Int, Str, List, etc.). Cap. 12. |
 | `patrones 'Ok(...)' / 'Err(...)' requieren el tipo Result (Fase 3)` | Pattern `Ok`/`Err` en `match`. Cap. 9. |
 
 Ejemplo (el archivo de este capítulo):
@@ -2632,22 +2784,23 @@ Con los capítulos 1 a 13 podés:
   índice o clave, recorrerlos e iterarlos.
 - Definir **funciones** con su forma de bloque y su forma flecha,
   hacer **recursión** y crear **closures** con captura léxica.
-- Declarar **tipos custom** con `type` (todavía sin instanciar).
+- Declarar **tipos custom** con `type`, **instanciarlos**
+  (`User { id: 1, name: "x" }`) y acceder a sus campos
+  (`user.name`), con defaults y campos nullables.
 - Leer un mensaje de error y ubicar de qué fase del intérprete vino.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
 
 ### Lo que viene — el resto de Fase 3
 
-Fase 3 ya arrancó (paso 1: listas, mapas, rangos y `for`). Lo que falta:
+Fase 3 ya cerró dos pasos (1: listas/mapas/rangos/`for`; 2: tipos
+custom instanciables). Lo que falta:
 
-- **Tipos custom instanciables** — `User { id: 1, name: "Fitz" }` va
-  a ser una expresión válida; vas a poder acceder a `user.name`.
 - **`Result` y manejo de errores** — `Ok(x)`, `Err(e)`, operador `?`
   para propagar errores. Sin excepciones, como en Rust.
 - **Funciones de orden superior y method calls** — `xs.map(fn(x) => ...)`,
   `xs.filter(...)`, `xs.find(...)`. También desbloquea mutación de
-  listas (`xs.push(...)`).
+  listas (`xs.push(...)`) y de campos (`user.name = "x"`).
 - **Módulos e `import`s** — separar tu código en archivos.
 - **Tipado gradual con validación** — las anotaciones que hoy se
   ignoran van a empezar a chequearse (probablemente Fase 5).
@@ -2680,12 +2833,11 @@ una sub-fase del roadmap), la guía gana un capítulo o varios. Lo
 próximo que probablemente se sume, a medida que avancen los pasos
 de Fase 3:
 
-- Capítulo de **tipos custom** instanciables, reescribiendo el
-  preview de hoy con ejemplos reales (`User { id: 1 }`, `user.name`).
 - Capítulo de **errores con `Result`**, que va a reemplazar (o
   complementar) el actual de errores del intérprete.
 - Capítulo de **funciones de orden superior** — `xs.map(...)`,
-  `xs.filter(...)`, funciones anónimas, method calls.
+  `xs.filter(...)`, funciones anónimas, method calls. También trae
+  mutación de listas y de campos de instancias.
 - Capítulo de **módulos** una vez que tengamos `import`.
 
 ### Recursos

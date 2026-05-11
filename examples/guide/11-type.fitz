@@ -1,5 +1,5 @@
-// 10-type.fitz — Declaración de tipos (preview).
-// La instanciación llega en Fase 3; hoy solo declarás.
+// 11-type.fitz — Tipos custom: declaración, instanciación y campos.
+// Cubierto en el capítulo 12 de la guía.
 
 type User {
     id: Int
@@ -14,6 +14,21 @@ type Config {
     debug: Bool = false
 }
 
-// Las declaraciones quedan registradas y se pueden imprimir.
-print(User)
-print(Config)
+// Instanciar — los campos van entre llaves, separados por coma o newline.
+let u = User { id: 1, name: "Fitz", email: "fitz@example.com" }
+
+// Acceso a campos con `.`.
+print(u.name)
+print(u.email)
+
+// Defaults: si omitís un campo con default, se aplica.
+let c = Config { host: "localhost" }
+print(c.port)
+
+// Nullables: si omitís un campo `Tipo?`, queda null.
+let anon = User { id: 2, name: "Anon" }
+print(anon.email)
+
+// Imprimir una instancia entera muestra el formato canónico.
+print(u)
+print(c)

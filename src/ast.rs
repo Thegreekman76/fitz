@@ -96,6 +96,16 @@ pub enum Expr {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
     },
+
+    /// Instanciación de un tipo custom: `User { id: 1, name: "x" }`.
+    /// `type_name` es el nombre del `type` declarado; los campos son
+    /// pares `(nombre, expresión)` y se evalúan en orden de aparición.
+    /// La validación contra los campos declarados (faltantes, extras,
+    /// defaults, nullables) la hace el evaluador, no el parser.
+    StructLit {
+        type_name: String,
+        fields: Vec<(String, Expr)>,
+    },
 }
 
 /// Pieza de un string con interpolación.
@@ -453,6 +463,29 @@ mod tests {
                 assert_eq!(end, 10);
             }
             _ => panic!("se esperaba Range"),
+        }
+    }
+
+    #[test]
+    fn struct_lit_guarda_tipo_y_campos_en_orden() {
+        // `User { id: 1, name: "x" }`
+        let lit = Expr::StructLit {
+            type_name: "User".into(),
+            fields: vec![
+                ("id".into(), Expr::Int(1)),
+                ("name".into(), Expr::Str("x".into())),
+            ],
+        };
+        match lit {
+            Expr::StructLit { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                assert_eq!(fields.len(), 2);
+                assert_eq!(fields[0].0, "id");
+                assert_eq!(fields[0].1, Expr::Int(1));
+                assert_eq!(fields[1].0, "name");
+                assert_eq!(fields[1].1, Expr::Str("x".into()));
+            }
+            _ => panic!("se esperaba StructLit"),
         }
     }
 
