@@ -1,7 +1,7 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 3 — paso 2: tipos custom instanciables, 405 tests pasando).
+> Última actualización: 2026-05-11 (Fase 3 — paso 3: Result + Ok/Err + `?`, 441 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -35,9 +35,12 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 11. [Funciones](#11-funciones)
 12. [Tipos con `type`](#12-tipos-con-type)
 
-**Parte 5 — Cerrando**
-13. [Errores y mensajes](#13-errores-y-mensajes)
-14. [Qué sigue](#14-qué-sigue)
+**Parte 5 — Errores**
+13. [Result y manejo de errores](#13-result-y-manejo-de-errores)
+14. [Errores y mensajes](#14-errores-y-mensajes)
+
+**Parte 6 — Cerrando**
+15. [Qué sigue](#15-qué-sigue)
 
 ---
 
@@ -80,6 +83,8 @@ Solo lo que el intérprete ejecuta hoy:
 - Funciones (`fn` en bloque y `=>` en flecha), closures, recursión.
 - Declaración de tipos con `type`, instanciación (`User { id: 1, name: "x" }`)
   y acceso a campos (`user.name`), con defaults y nullables.
+- Manejo de errores con `Result`, `Ok(x)`, `Err(e)`, `match` sobre las
+  variantes y operador `?` para propagar.
 - Builtins: `print`, `len`.
 
 ### Qué todavía no anda
@@ -92,7 +97,6 @@ error explícito:
 - Mutación de listas (`push`, `pop`, etc.) — espera method calls.
 - Mutación de campos de una instancia (`user.name = "x"`).
 - Métodos sobre instancias (`user.greet()`).
-- `Result`, `Ok(x)`, `Err(e)`, propagación con `?`.
 - `async` / `await`.
 - Decoradores HTTP (`@get`, `@post`, …).
 - `import` / `from ... import`.
@@ -1959,16 +1963,22 @@ match temperatura {
 Si el valor no es `Int` (por ejemplo, un `Float`), el patrón de
 rango simplemente no matchea, y se evalúa el siguiente brazo.
 
+### `Ok(x)` / `Err(e)` — un adelanto
+
+Si el valor matcheado es un `Result`, los patrones `Ok(v)` y `Err(e)`
+matchean cada variante y bindean el inner:
+
+```fitz
+match find_user(1) {
+    Ok(u)  => print("hola, {u.name}")
+    Err(e) => print("falló: {e}")
+}
+```
+
+Lo cubrimos en detalle en [el próximo capítulo](#13-result-y-manejo-de-errores).
+
 ### Lo que todavía no anda
 
-- **`Ok(x)` / `Err(e)`** — los patrones parsean, pero el evaluador
-  corta con:
-
-  ```
-  Error — patrones `Ok(...)` / `Err(...)` requieren el tipo Result (Fase 3)
-  ```
-
-  Vienen con el manejo de errores en Fase 3.
 - **Tuples y listas como patrón** — `(a, b)`, `[head, ...rest]`,
   etc. Cuando lleguen los tipos compuestos.
 - **Guards** (`patrón if condición => ...`).
@@ -2587,17 +2597,218 @@ Config { host: "localhost", port: 3000, debug: false }
 
 ---
 
-En el próximo capítulo damos un paseo corto por los errores comunes
-del intérprete: cómo leer un mensaje, qué significa cada uno, y las
-limitaciones de precisión que todavía tiene.
+En el próximo capítulo vemos cómo Fitz maneja errores del programa
+sin excepciones: el tipo `Result`, los constructores `Ok` y `Err`, y
+el operador `?` para propagar.
 
 ---
 
-## 13. Errores y mensajes
+## 13. Result y manejo de errores
+
+Fitz no tiene excepciones. Cuando una operación puede fallar, su
+resultado se modela explícitamente con el tipo built-in `Result`,
+que tiene dos variantes: `Ok(valor)` para éxito y `Err(error)` para
+falla. El caller siempre ve "esto puede fallar" en el tipo, y decide
+qué hacer con la falla.
+
+Es el mismo modelo que Rust. En Python y JavaScript, los errores
+viajan "por el costado" vía excepciones; en Fitz, los errores son
+valores comunes que viajan por el mismo camino que el resto.
+
+### Construir un `Result`
+
+`Ok(v)` y `Err(e)` son constructores: envolvés un valor cualquiera
+en la variante correspondiente.
+
+```fitz
+fn divide(a, b) {
+    if (b == 0) {
+        return Err("división por cero")
+    }
+    return Ok(a / b)
+}
+
+print(divide(10, 2))   // Ok(5)
+print(divide(10, 0))   // Err("división por cero")
+```
+
+Por convención, el inner de un `Err` suele ser un `Str` con el
+mensaje, pero el lenguaje no lo obliga: podés meter ahí cualquier
+valor (un código, una instancia de un tipo de error custom, lo que
+quieras). Lo mismo aplica al inner de `Ok`.
+
+### Consumir un `Result` con `match`
+
+`match` sobre un `Result` usa los patrones `Ok(v)` y `Err(e)`. Cada
+uno matchea su variante y bindea el inner al nombre que pongas.
+
+```fitz
+match divide(10, 2) {
+    Ok(v)  => print("resultado: {v}")
+    Err(e) => print("falló: {e}")
+}
+// resultado: 5
+```
+
+Reglas a tener en cuenta:
+
+- `Ok(v)` solo matchea si el valor es `Value::Result` de variante
+  exitosa. No matchea contra un Int o un Str pelados.
+- Mismo criterio con `Err(e)`.
+- El binding (`v`, `e`) vive solo dentro del cuerpo del brazo, como
+  cualquier binding de `match` (cap. 10).
+- Si querés ignorar el inner, hoy igual hay que poner un nombre
+  (`Ok(_)` también funciona — `_` queda como una variable basura en
+  el scope del arm). El soporte para `_` real adentro de Ok/Err es
+  deuda menor; cuando moleste lo agregamos.
+
+### El operador `?` — propagar el `Err`
+
+Escribir `match` cada vez que llamás algo que puede fallar es
+verboso. Cuando lo único que querés es "si falla, devolver el mismo
+error", el operador `?` lo hace por vos:
+
+```fitz
+fn find_user(id) {
+    if (id == 1) {
+        return Ok(User { id: 1, name: "Fitz" })
+    }
+    return Err("usuario no encontrado")
+}
+
+fn describe_user(id) {
+    let u = find_user(id)?     // si find_user devuelve Err, describe_user
+                               // corta y devuelve ese mismo Err.
+                               // Si devuelve Ok(u), `u` queda con el User.
+    return Ok("#{u.id} es {u.name}")
+}
+
+print(describe_user(1))    // Ok("#1 es Fitz")
+print(describe_user(42))   // Err("usuario no encontrado")
+```
+
+Mentalmente, `expr?` se lee así:
+
+```fitz
+match expr {
+    Ok(v)  => v                  // desempaqueta y seguí
+    Err(e) => return Err(e)      // propagá inmediatamente
+}
+```
+
+Pero más corto y encadenable: `find_user(id)?.name` desempaqueta
+primero y después accede al campo.
+
+### Result en una variable o `print`
+
+Como cualquier otro valor, un `Result` se puede asignar, comparar,
+imprimir, pasar a otra función. El `print` muestra el formato
+canónico:
+
+```fitz
+let r = Ok(42)
+let e = Err("boom")
+print(r)            // Ok(42)
+print(e)            // Err("boom")
+```
+
+La igualdad es estructural: dos `Ok(1)` son iguales, dos `Err("x")`
+también, y `Ok(1) == Err(1)` da `false`.
+
+### Lo que todavía no anda
+
+- **`?` fuera de una función** — la implementación reutiliza el
+  mecanismo de `return` del lenguaje: cuando `?` ve un `Err`, emite
+  un `return` con ese `Err`. Si lo usás en top-level, vas a ver el
+  mensaje genérico `` `return` solo puede usarse adentro de una
+  función ``. Vamos a darle un mensaje propio más adelante.
+- **No hay chequeo de tipo en runtime** — usar `?` adentro de una
+  función que no estaba pensada para devolver `Result` te va a dejar
+  con un `Value::Result(Err(...))` saliendo por la puerta de
+  retorno. Mientras tanto, la convención es: usá `?` solo en
+  funciones que ya devuelven `Result`. El type checker estático
+  (Fase 5) va a chequearlo.
+- **Anotaciones genéricas `Result<T>`** — el parser todavía no
+  acepta tipos compuestos en `-> ...` o en `: ...`. Hoy se anota con
+  `Result` a secas o no se anota. Mismo límite que `List<Str>`.
+- **`Ok(_)` / `Err(_)` con wildcard real** — hoy `_` adentro funciona
+  como nombre, no como wildcard. No hace daño pero ensucia el scope.
+
+### Ejemplo completo
+
+[examples/guide/12-result.fitz](../examples/guide/12-result.fitz):
+
+```fitz
+type User { id: Int, name: Str }
+
+fn divide(a, b) {
+    if (b == 0) {
+        return Err("división por cero")
+    }
+    return Ok(a / b)
+}
+
+match divide(10, 2) {
+    Ok(v) => print("ok: {v}")
+    Err(e) => print("err: {e}")
+}
+
+match divide(10, 0) {
+    Ok(v) => print("ok: {v}")
+    Err(e) => print("err: {e}")
+}
+
+fn find_user(id) {
+    if (id == 1) {
+        return Ok(User { id: 1, name: "Fitz" })
+    }
+    return Err("usuario no encontrado")
+}
+
+fn describe_user(id) {
+    let u = find_user(id)?
+    return Ok("#{u.id} es {u.name}")
+}
+
+match describe_user(1) {
+    Ok(desc) => print(desc)
+    Err(e) => print("falló: {e}")
+}
+
+match describe_user(42) {
+    Ok(desc) => print(desc)
+    Err(e) => print("falló: {e}")
+}
+```
+
+Salida:
+
+```
+ok: 5
+err: división por cero
+#1 es Fitz
+falló: usuario no encontrado
+```
+
+---
+
+En el próximo capítulo damos un paseo corto por los errores **del
+intérprete**: cómo leer un mensaje, qué significa cada uno, y las
+limitaciones de precisión que todavía tiene. Ojo a la distinción:
+acá hablamos de errores que maneja tu programa Fitz; allá, de
+errores que te cuenta el intérprete cuando tu programa está mal
+escrito.
+
+---
+
+## 14. Errores y mensajes
 
 Tarde o temprano vas a tipear algo mal y el intérprete te va a cortar.
-Este capítulo es un mapa de los errores que vas a ver: de dónde
-salen, cómo leerlos y qué significan.
+Este capítulo es un mapa de los errores **del intérprete**: los que
+aparecen cuando tu programa Fitz está mal escrito o intenta algo
+inválido en runtime. No los confundas con los errores **del
+programa** — los `Err(...)` que devuelve una función — que cubrimos
+en el [cap. 13](#13-result-y-manejo-de-errores).
 
 ### Formato general
 
@@ -2693,7 +2904,8 @@ Estos son los que más vas a ver mientras escribís lógica:
 | `falta el campo 'Y' al instanciar 'X' (no tiene default y no es nullable)` | Omitiste un campo obligatorio en un struct literal. Cap. 12. |
 | `tipo 'X' no definido` | Instanciaste un tipo que no fue declarado con `type` (o lo escribiste mal). Cap. 12. |
 | `acceso a campo '.X' sobre un valor de tipo 'Y'` | Hiciste `obj.campo` sobre algo que no es una instancia (Int, Str, List, etc.). Cap. 12. |
-| `patrones 'Ok(...)' / 'Err(...)' requieren el tipo Result (Fase 3)` | Pattern `Ok`/`Err` en `match`. Cap. 9. |
+| `'Ok' espera exactamente 1 argumento, recibió N` | Constructor `Ok` / `Err` con aridad incorrecta (cap. 13). |
+| `` el operador `?` requiere un valor `Result`, recibió 'X' `` | Usaste `?` sobre algo que no es un `Result` (cap. 13). |
 
 Ejemplo (el archivo de este capítulo):
 
@@ -2743,7 +2955,7 @@ no tengamos posiciones finas.
 
 ### Ejemplo completo
 
-[examples/guide/12-errores.fitz](../examples/guide/12-errores.fitz):
+[examples/guide/13-errores.fitz](../examples/guide/13-errores.fitz):
 
 ```fitz
 fn add(a, b) => a + b
@@ -2766,14 +2978,14 @@ contribuir.
 
 ---
 
-## 14. Qué sigue
+## 15. Qué sigue
 
-Si llegaste hasta acá: gracias. Esta es la primera versión de la
+Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 13 podés:
+Con los capítulos 1 a 14 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -2787,17 +2999,17 @@ Con los capítulos 1 a 13 podés:
 - Declarar **tipos custom** con `type`, **instanciarlos**
   (`User { id: 1, name: "x" }`) y acceder a sus campos
   (`user.name`), con defaults y campos nullables.
-- Leer un mensaje de error y ubicar de qué fase del intérprete vino.
+- Manejar errores con **`Result`**, **`Ok`**, **`Err`** y el
+  operador **`?`** para propagar, sin excepciones.
+- Leer un mensaje de error del intérprete y ubicar de qué fase vino.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
 
 ### Lo que viene — el resto de Fase 3
 
-Fase 3 ya cerró dos pasos (1: listas/mapas/rangos/`for`; 2: tipos
-custom instanciables). Lo que falta:
+Fase 3 ya cerró tres pasos (1: listas/mapas/rangos/`for`; 2: tipos
+custom instanciables; 3: `Result` + `Ok`/`Err` + `?`). Lo que falta:
 
-- **`Result` y manejo de errores** — `Ok(x)`, `Err(e)`, operador `?`
-  para propagar errores. Sin excepciones, como en Rust.
 - **Funciones de orden superior y method calls** — `xs.map(fn(x) => ...)`,
   `xs.filter(...)`, `xs.find(...)`. También desbloquea mutación de
   listas (`xs.push(...)`) y de campos (`user.name = "x"`).
@@ -2833,8 +3045,6 @@ una sub-fase del roadmap), la guía gana un capítulo o varios. Lo
 próximo que probablemente se sume, a medida que avancen los pasos
 de Fase 3:
 
-- Capítulo de **errores con `Result`**, que va a reemplazar (o
-  complementar) el actual de errores del intérprete.
 - Capítulo de **funciones de orden superior** — `xs.map(...)`,
   `xs.filter(...)`, funciones anónimas, method calls. También trae
   mutación de listas y de campos de instancias.

@@ -106,6 +106,24 @@ pub enum Expr {
         type_name: String,
         fields: Vec<(String, Expr)>,
     },
+
+    /// Constructor de la variante exitosa del tipo built-in `Result`:
+    /// `Ok(expr)`. El parser lo reconoce como keyword contextual cuando
+    /// ve el identificador `Ok` seguido de `(`. `Ok` no es una keyword
+    /// en el lexer; sigue siendo un `Token::Ident`, pero el parser le
+    /// da semántica especial acá (mismo criterio que en `parse_pattern`).
+    Ok(Box<Expr>),
+
+    /// Constructor de la variante de error: `Err(expr)`. Mismas reglas
+    /// que `Ok`. Convención (no validada en runtime hasta el type checker
+    /// de Fase 5): el inner suele ser un `Str` con el mensaje.
+    Err(Box<Expr>),
+
+    /// Operador `?` postfix: `expr?`. En runtime, si el operando es
+    /// `Ok(v)` la expresión vale `v`; si es `Err(e)` corta la función
+    /// contenedora con `return Err(e)`. Aplicable a cualquier expresión;
+    /// el chequeo de que sea un `Result` ocurre en el evaluador, no acá.
+    Try(Box<Expr>),
 }
 
 /// Pieza de un string con interpolación.
@@ -486,6 +504,54 @@ mod tests {
                 assert_eq!(fields[1].1, Expr::Str("x".into()));
             }
             _ => panic!("se esperaba StructLit"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Result (Fase 3, paso 3: Result + Ok/Err + `?`)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ok_ctor_envuelve_inner() {
+        // `Ok(42)` → Expr::Ok(Box(Int(42)))
+        let e = Expr::Ok(Box::new(Expr::Int(42)));
+        match e {
+            Expr::Ok(inner) => assert_eq!(*inner, Expr::Int(42)),
+            _ => panic!("se esperaba Ok"),
+        }
+    }
+
+    #[test]
+    fn err_ctor_envuelve_inner() {
+        // `Err("boom")` → Expr::Err(Box(Str("boom")))
+        let e = Expr::Err(Box::new(Expr::Str("boom".into())));
+        match e {
+            Expr::Err(inner) => assert_eq!(*inner, Expr::Str("boom".into())),
+            _ => panic!("se esperaba Err"),
+        }
+    }
+
+    #[test]
+    fn try_expr_envuelve_operando() {
+        // `x?` → Expr::Try(Box(Ident("x")))
+        let e = Expr::Try(Box::new(Expr::Ident("x".into())));
+        match e {
+            Expr::Try(inner) => assert_eq!(*inner, Expr::Ident("x".into())),
+            _ => panic!("se esperaba Try"),
+        }
+    }
+
+    #[test]
+    fn try_y_ctors_son_componibles() {
+        // `Ok(get(id)?)` — un `?` adentro de un constructor `Ok`.
+        let e = Expr::Ok(Box::new(Expr::Try(Box::new(Expr::Call {
+            name: "get".into(),
+            args: vec![Expr::Ident("id".into())],
+        }))));
+        if let Expr::Ok(inner) = e {
+            assert!(matches!(*inner, Expr::Try(_)));
+        } else {
+            panic!("se esperaba Ok");
         }
     }
 

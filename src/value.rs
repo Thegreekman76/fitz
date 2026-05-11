@@ -86,6 +86,25 @@ pub enum Value {
         type_name: String,
         fields: Vec<(String, Value)>,
     },
+
+    /// Sum type built-in `Result`: representa el desenlace de una
+    /// operación que pudo fallar. Variante exitosa o de error, cada
+    /// una con un valor cualquiera adentro.
+    ///
+    /// Se modela con variante propia (no como `Instance`) porque
+    /// `Result` es sum type, no product type: tiene alternativas, no
+    /// campos. La reglas de Display, igualdad y matching tendrían que
+    /// ser especiales si lo reusáramos sobre `Instance`; mejor un tipo
+    /// dedicado.
+    Result(ResultVariant),
+}
+
+/// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
+/// recursivo de tamaño infinito (mismo truco que `Box<Expr>` en el AST).
+#[derive(Debug, Clone)]
+pub enum ResultVariant {
+    Ok(Box<Value>),
+    Err(Box<Value>),
 }
 
 impl Value {
@@ -104,6 +123,7 @@ impl Value {
             Value::Map(_) => "Map",
             Value::Range { .. } => "Range",
             Value::Instance { .. } => "Instance",
+            Value::Result(_) => "Result",
         }
     }
 }
@@ -172,6 +192,16 @@ impl std::fmt::Display for Value {
                 }
                 write!(f, "}}")
             }
+            Value::Result(ResultVariant::Ok(inner)) => {
+                write!(f, "Ok(")?;
+                write_inline_value(f, inner)?;
+                write!(f, ")")
+            }
+            Value::Result(ResultVariant::Err(inner)) => {
+                write!(f, "Err(")?;
+                write_inline_value(f, inner)?;
+                write!(f, ")")
+            }
         }
     }
 }
@@ -216,6 +246,13 @@ impl PartialEq for Value {
                 Value::Instance { type_name: t1, fields: f1 },
                 Value::Instance { type_name: t2, fields: f2 },
             ) => t1 == t2 && f1 == f2,
+            // Result se compara variante por variante, recursivamente.
+            // Misma coerción Int↔Float adentro vía esta misma impl.
+            (Value::Result(a), Value::Result(b)) => match (a, b) {
+                (ResultVariant::Ok(va), ResultVariant::Ok(vb)) => va == vb,
+                (ResultVariant::Err(va), ResultVariant::Err(vb)) => va == vb,
+                _ => false,
+            },
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }
@@ -491,5 +528,72 @@ mod tests {
             fields: vec![("id".into(), Value::Int(1))],
         };
         assert_ne!(a, b);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Result (Fase 3, paso 3: Result + Ok/Err + `?`)
+    // -----------------------------------------------------------------------
+
+    fn ok(v: Value) -> Value {
+        Value::Result(ResultVariant::Ok(Box::new(v)))
+    }
+
+    fn err(v: Value) -> Value {
+        Value::Result(ResultVariant::Err(Box::new(v)))
+    }
+
+    #[test]
+    fn type_name_de_result() {
+        assert_eq!(ok(Value::Int(1)).type_name(), "Result");
+        assert_eq!(err(Value::Str("boom".into())).type_name(), "Result");
+    }
+
+    #[test]
+    fn display_ok_envuelve_inner() {
+        // Mismo criterio que List/Map: strings adentro llevan comillas.
+        assert_eq!(ok(Value::Int(42)).to_string(), "Ok(42)");
+        assert_eq!(ok(Value::Str("hola".into())).to_string(), "Ok(\"hola\")");
+    }
+
+    #[test]
+    fn display_err_envuelve_inner() {
+        assert_eq!(err(Value::Str("boom".into())).to_string(), "Err(\"boom\")");
+        assert_eq!(err(Value::Int(404)).to_string(), "Err(404)");
+    }
+
+    #[test]
+    fn display_result_anidado() {
+        // Ok(Err("x")) — improbable pero legal estructuralmente.
+        let inner = err(Value::Str("x".into()));
+        assert_eq!(ok(inner).to_string(), "Ok(Err(\"x\"))");
+    }
+
+    #[test]
+    fn igualdad_ok_estructural() {
+        assert_eq!(ok(Value::Int(1)), ok(Value::Int(1)));
+        assert_ne!(ok(Value::Int(1)), ok(Value::Int(2)));
+    }
+
+    #[test]
+    fn igualdad_err_estructural() {
+        assert_eq!(err(Value::Str("x".into())), err(Value::Str("x".into())));
+        assert_ne!(err(Value::Str("x".into())), err(Value::Str("y".into())));
+    }
+
+    #[test]
+    fn igualdad_ok_vs_err_es_false() {
+        assert_ne!(ok(Value::Int(1)), err(Value::Int(1)));
+    }
+
+    #[test]
+    fn igualdad_result_coerciona_int_float_adentro() {
+        // La coerción Int↔Float vale recursivamente dentro del inner.
+        assert_eq!(ok(Value::Int(1)), ok(Value::Float(1.0)));
+    }
+
+    #[test]
+    fn igualdad_result_con_otros_tipos_es_false() {
+        assert_ne!(ok(Value::Int(1)), Value::Int(1));
+        assert_ne!(err(Value::Str("x".into())), Value::Str("x".into()));
     }
 }

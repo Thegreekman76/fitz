@@ -1,0 +1,49 @@
+// 12-result.fitz — Manejo de errores con Result, Ok, Err y `?`.
+
+type User { id: Int, name: Str }
+
+// `divide` puede fallar. Devolvemos Err con un mensaje cuando b == 0,
+// y Ok con el resultado cuando la operación es válida.
+fn divide(a, b) {
+    if (b == 0) {
+        return Err("división por cero")
+    }
+    return Ok(a / b)
+}
+
+// Match para consumir el Result: cada variante con su binding.
+match divide(10, 2) {
+    Ok(v) => print("ok: {v}")
+    Err(e) => print("err: {e}")
+}
+
+match divide(10, 0) {
+    Ok(v) => print("ok: {v}")
+    Err(e) => print("err: {e}")
+}
+
+// `find_user` también devuelve Result; falla si el id no está.
+fn find_user(id) {
+    if (id == 1) {
+        return Ok(User { id: 1, name: "Fitz" })
+    }
+    return Err("usuario no encontrado")
+}
+
+// `?` propaga el Err automáticamente: si find_user devuelve Err,
+// describe_user corta y devuelve ese mismo Err sin tocar el resto.
+// Si devuelve Ok(u), `?` desempaqueta y `u` es el User.
+fn describe_user(id) {
+    let u = find_user(id)?
+    return Ok("#{u.id} es {u.name}")
+}
+
+match describe_user(1) {
+    Ok(desc) => print(desc)
+    Err(e) => print("falló: {e}")
+}
+
+match describe_user(42) {
+    Ok(desc) => print(desc)
+    Err(e) => print("falló: {e}")
+}

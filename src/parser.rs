@@ -449,7 +449,41 @@ impl Parser {
                     let prev = std::mem::replace(&mut self.no_struct_literal, false);
                     let args_result = self.parse_call_args();
                     self.no_struct_literal = prev;
-                    expr = Expr::Call { name, args: args_result? };
+                    let args = args_result?;
+
+                    // Constructores built-in de Result: `Ok(x)` / `Err(e)`.
+                    // Se detectan como keyword contextual: si el receptor de
+                    // la llamada es literalmente el identificador `Ok` o
+                    // `Err`, lo modelamos como `Expr::Ok`/`Expr::Err` en
+                    // vez de `Expr::Call`. Aridad obligatoria: 1.
+                    if name == "Ok" || name == "Err" {
+                        if args.len() != 1 {
+                            return Err(self.error(
+                                ErrorKind::InvalidSyntax,
+                                format!(
+                                    "`{}` espera exactamente 1 argumento, recibió {}",
+                                    name,
+                                    args.len()
+                                ),
+                            ));
+                        }
+                        let inner = args.into_iter().next().unwrap();
+                        expr = if name == "Ok" {
+                            Expr::Ok(Box::new(inner))
+                        } else {
+                            Expr::Err(Box::new(inner))
+                        };
+                    } else {
+                        expr = Expr::Call { name, args };
+                    }
+                }
+                Token::Question => {
+                    // Operador `?` postfix: `expr?`. Envuelve la expresión
+                    // construida hasta acá en `Expr::Try`. Se encadena con
+                    // otros postfix: `get(id)?.name` parsea `get(id)?`
+                    // primero, después `.name`.
+                    self.advance();
+                    expr = Expr::Try(Box::new(expr));
                 }
                 Token::LBracket => {
                     self.advance(); // consume '['
@@ -3831,5 +3865,119 @@ mod tests {
         let src = "if x { y: Int = 1 }";
         let stmts = parse_program_str(src).expect("debería parsear");
         assert_eq!(stmts.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Result + Ok/Err + ? (Fase 3, paso 3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn ok_ctor_se_parsea_a_expr_ok() {
+        let e = parse_expr("Ok(42)").unwrap();
+        assert_eq!(e, Expr::Ok(Box::new(Expr::Int(42))));
+    }
+
+    #[test]
+    fn err_ctor_se_parsea_a_expr_err() {
+        let e = parse_expr(r#"Err("boom")"#).unwrap();
+        assert_eq!(e, Expr::Err(Box::new(Expr::Str("boom".into()))));
+    }
+
+    #[test]
+    fn ok_con_expresion_compleja_adentro() {
+        // Ok(1 + 2 * 3) → Ok(Add(1, Mul(2, 3)))
+        let e = parse_expr("Ok(1 + 2 * 3)").unwrap();
+        let inner = Expr::BinOp {
+            op: BinOpKind::Add,
+            left: Box::new(Expr::Int(1)),
+            right: Box::new(Expr::BinOp {
+                op: BinOpKind::Mul,
+                left: Box::new(Expr::Int(2)),
+                right: Box::new(Expr::Int(3)),
+            }),
+        };
+        assert_eq!(e, Expr::Ok(Box::new(inner)));
+    }
+
+    #[test]
+    fn ok_sin_argumentos_es_error_de_aridad() {
+        let err = parse_expr("Ok()").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(err.message.contains("`Ok`") && err.message.contains("1 argumento"));
+    }
+
+    #[test]
+    fn err_con_dos_argumentos_es_error_de_aridad() {
+        let err = parse_expr("Err(1, 2)").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(err.message.contains("`Err`"));
+    }
+
+    #[test]
+    fn try_postfix_envuelve_expresion() {
+        // f(x)? → Try(Call(f, [x]))
+        let e = parse_expr("f(x)?").unwrap();
+        assert_eq!(
+            e,
+            Expr::Try(Box::new(Expr::Call {
+                name: "f".into(),
+                args: vec![Expr::Ident("x".into())],
+            })),
+        );
+    }
+
+    #[test]
+    fn try_sobre_identificador() {
+        // x? → Try(Ident("x"))
+        let e = parse_expr("x?").unwrap();
+        assert_eq!(e, Expr::Try(Box::new(Expr::Ident("x".into()))));
+    }
+
+    #[test]
+    fn try_se_encadena_con_field_access() {
+        // get(id)?.name → Field { object: Try(Call(get, [id])), field: "name" }
+        let e = parse_expr("get(id)?.name").unwrap();
+        let inner_call = Expr::Call {
+            name: "get".into(),
+            args: vec![Expr::Ident("id".into())],
+        };
+        assert_eq!(
+            e,
+            Expr::Field {
+                object: Box::new(Expr::Try(Box::new(inner_call))),
+                field: "name".into(),
+            },
+        );
+    }
+
+    #[test]
+    fn try_anidado_con_ok_y_err() {
+        // Ok(get(id)?) → Ok(Try(Call(get, [id])))
+        let e = parse_expr("Ok(get(id)?)").unwrap();
+        let inner = Expr::Try(Box::new(Expr::Call {
+            name: "get".into(),
+            args: vec![Expr::Ident("id".into())],
+        }));
+        assert_eq!(e, Expr::Ok(Box::new(inner)));
+    }
+
+    #[test]
+    fn match_con_patrones_ok_y_err_parsea() {
+        // Sanity: el parser de patrones ya soportaba Ok/Err; verificamos
+        // que el conjunto entero (match + Ok/Err en valor) compone bien.
+        let stmt = parse_one_stmt(
+            "match Ok(1) {\n\
+             \tOk(v) => v\n\
+             \tErr(e) => -1\n\
+             }",
+        );
+        if let Stmt::Expr(Expr::Match { value, arms }) = stmt {
+            assert_eq!(*value, Expr::Ok(Box::new(Expr::Int(1))));
+            assert_eq!(arms.len(), 2);
+            assert_eq!(arms[0].pattern, Pattern::OkBinding("v".into()));
+            assert_eq!(arms[1].pattern, Pattern::ErrBinding("e".into()));
+        } else {
+            panic!("se esperaba un match");
+        }
     }
 }

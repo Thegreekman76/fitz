@@ -292,13 +292,54 @@ repartidos entre ast, parser, value y evaluator).
 - **Tipos compuestos en anotaciones de campo** (`emails: List<Str>`)
   — sigue siendo deuda de 2.3 (`Field.type_` es `String` simple).
 
-#### 3.3 Result + Ok/Err + `?`
-**Pendiente** — manejo de errores estilo Rust.
+#### 3.3 Result + Ok/Err + `?` ✓
+**Completado** — el lenguaje maneja errores estilo Rust, sin
+excepciones.
 
-- Sum type built-in para Result.
-- Pattern matching de `Ok(x)` / `Err(e)` (los patrones ya parsean,
-  el evaluador hoy corta con error explícito).
-- Operador `?` postfix para propagación.
+- AST nuevo: `Expr::Ok(Box<Expr>)`, `Expr::Err(Box<Expr>)`,
+  `Expr::Try(Box<Expr>)` (operador `?` postfix).
+- Parser: `Ok` y `Err` se detectan como keywords contextuales
+  cuando aparecen como receptor de llamada (aridad 1 obligatoria);
+  `?` se parsea en la cadena de postfix junto a `.`, `(...)`,
+  `[...]`, encadenable con field access (`get(id)?.name`).
+- Value: variante propia `Value::Result(ResultVariant)`, con
+  `ResultVariant::Ok(Box<Value>)` y `ResultVariant::Err(Box<Value>)`.
+  Display: `Ok(v)` / `Err(e)`, strings con comillas adentro (mismo
+  criterio que List/Map/Instance). Igualdad estructural con la
+  coerción Int↔Float recursiva.
+- Evaluator: `Ok`/`Err` envuelven el inner evaluado. `?` desempaqueta
+  cuando es `Ok`, y emite `EvalSignal::Return(Value::Result(Err))`
+  cuando es `Err`, reusando la maquinaria existente de `return`.
+  Sobre un valor que no es `Result`, `?` corta con error de tipo.
+- Patrones `Ok(x)`/`Err(e)` en `match` ahora matchean contra
+  `Value::Result` y bindean el inner — cierra deuda explícita de
+  2.4.
+
+Tests del proyecto al cerrar 3.3: 441 (405 al cerrar 3.2 + 36
+nuevos repartidos entre ast, parser, value y evaluator —
+incluyendo dos tests end-to-end con `find_user` y `divide` desde
+fuente).
+
+Guía: capítulo 13 nuevo "Result y manejo de errores" entre el cap
+de Tipos y el de Errores del intérprete. Renumeración: cap 13
+(Errores y mensajes) → 14; cap 14 (Qué sigue) → 15. Ejemplo nuevo
+`examples/guide/12-result.fitz`; el antiguo `12-errores.fitz`
+renombró a `13-errores.fitz`.
+
+**Deuda explícita — retomar después:**
+- **Mensaje específico para `?` fuera de función** — hoy reutiliza
+  el signal de `return`, así que el usuario ve `` `return` solo
+  puede usarse adentro de una función ``. Querido: signal propio
+  (`EvalSignal::TryOutsideFunction`) con texto dedicado.
+- **`Ok(_)` / `Err(_)` con wildcard real** — hoy `_` adentro del
+  patrón funciona como nombre, no como wildcard, así que ensucia
+  el scope con una variable llamada `_`. Solución: variantes
+  `Pattern::OkWildcard` / `Pattern::ErrWildcard`.
+- **Anotación `Result<T>` en parámetros y retorno** — sigue siendo
+  deuda de 2.3 (`Param.type_` y `FnDef.return_type` son `String`
+  simple, no admiten genéricos).
+- **Chequeo de tipo del retorno cuando se usa `?`** — descartado por
+  diseño hasta el type checker estático (Fase 5). Tipado gradual.
 
 #### 3.4 Funciones anónimas + higher-order + method calls
 **Pendiente** — el paso más grande.

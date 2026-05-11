@@ -21,7 +21,7 @@
 use crate::ast::{BinOpKind, Expr, Pattern, Program, Stmt, StrPart, UnaryOpKind};
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
-use crate::value::Value;
+use crate::value::{ResultVariant, Value};
 
 // ---------------------------------------------------------------------------
 // EvalSignal — el canal único de "salida no normal" de eval_stmt/eval_expr.
@@ -558,64 +558,112 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // arms en orden y devuelve el body del primero que matchee.
         //
         // Patrones soportados:
-        //  - `Ident(name)`: siempre matchea, bindea el valor a `name` para
-        //    el body. Igual semántica que `n =>` en Rust.
+        //  - `Ident(name)`: siempre matchea, bindea el valor entero a `name`.
         //  - `Wildcard`: siempre matchea, sin binding.
-        //  - `Ok(x)` / `Err(e)`: requieren el tipo Result en runtime, que
-        //    no existe aún. Error explícito hasta Fase 3.
+        //  - Literales (`Int`, `Float`, `Str`, `Bool`, `Null`): matchean por
+        //    igualdad estructural.
+        //  - `Range { start, end }`: matchea Int en [start, end).
+        //  - `Ok(name)` / `Err(name)`: matchean solo contra `Value::Result`
+        //    de la variante correspondiente y bindean el inner a `name`.
         //
-        // Cada arm crea un scope hijo para que el binding no contamine el
-        // scope contenedor.
+        // Cada arm con binding crea un scope hijo para que la variable no
+        // contamine el scope contenedor.
         Expr::Match { value, arms } => {
             let v = eval_expr(value, env.clone())?;
 
             for arm in arms {
-                // Patrones literales — igualdad ESTRUCTURAL (sin coerción
-                // Int↔Float, a diferencia del operador `==`). Si no matchea,
-                // probamos el siguiente arm.
-                let matched = match (&arm.pattern, &v) {
-                    (Pattern::Int(p), Value::Int(vv)) => p == vv,
-                    (Pattern::Float(p), Value::Float(vv)) => p == vv,
-                    (Pattern::Str(p), Value::Str(vv)) => p == vv,
-                    (Pattern::Bool(p), Value::Bool(vv)) => p == vv,
-                    (Pattern::Null, Value::Null) => true,
-                    (Pattern::Wildcard, _) => true,
-                    // Ident matchea todo, pero con efecto secundario.
-                    (Pattern::Ident(_), _) => true,
-                    // Patrón de rango: solo aplica a Int. start <= v < end.
-                    (Pattern::Range { start, end }, Value::Int(vv)) => start <= vv && vv < end,
-                    // Ok/Err sin tipo Result — error explícito.
-                    (Pattern::OkBinding(_) | Pattern::ErrBinding(_), _) => {
-                        return Err(EvalSignal::Error(FitzError::new(
-                            ErrorKind::InvalidSyntax,
-                            0, 0,
-                            "patrones `Ok(...)` / `Err(...)` requieren el tipo Result (Fase 3)",
-                        )));
+                // Resultado del intento de match para este arm:
+                //   None             → no matcheó, probar el siguiente.
+                //   Some(None)       → matcheó sin binding.
+                //   Some(Some((n, val))) → matcheó y bindea `val` a `n`.
+                //
+                // Esto unifica patrones literales (sin binding) con los que
+                // bindean (`Ident`, `OkBinding`, `ErrBinding`).
+                let outcome: Option<Option<(String, Value)>> = match (&arm.pattern, &v) {
+                    (Pattern::Int(p), Value::Int(vv)) if p == vv => Some(None),
+                    (Pattern::Float(p), Value::Float(vv)) if p == vv => Some(None),
+                    (Pattern::Str(p), Value::Str(vv)) if p == vv => Some(None),
+                    (Pattern::Bool(p), Value::Bool(vv)) if p == vv => Some(None),
+                    (Pattern::Null, Value::Null) => Some(None),
+                    (Pattern::Wildcard, _) => Some(None),
+                    (Pattern::Ident(name), _) => Some(Some((name.clone(), v.clone()))),
+                    (Pattern::Range { start, end }, Value::Int(vv))
+                        if start <= vv && vv < end => Some(None),
+                    (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
+                        Some(Some((name.clone(), (**inner).clone())))
                     }
-                    _ => false,
+                    (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
+                        Some(Some((name.clone(), (**inner).clone())))
+                    }
+                    _ => None,
                 };
 
-                if !matched {
+                let Some(binding) = outcome else {
                     continue;
-                }
+                };
 
-                // Matcheó. Si es Ident, creamos scope con el binding.
-                if let Pattern::Ident(name) = &arm.pattern {
+                if let Some((name, bound)) = binding {
                     let arm_env = Environment::new_child(env.clone());
-                    arm_env.borrow_mut().define(name.clone(), v.clone());
+                    arm_env.borrow_mut().define(name, bound);
                     return eval_expr(&arm.body, arm_env);
                 }
                 return eval_expr(&arm.body, env.clone());
             }
 
             // Ningún arm matcheó. Con Ident/Wildcard presentes es imposible;
-            // ocurre solo si el match no tiene arms o todos son Ok/Err y el
-            // valor no es un Result (caso futuro).
+            // ocurre típicamente con Ok/Err mal cubiertos.
             Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
                 0, 0,
                 "el `match` no matcheó ningún brazo",
             )))
+        }
+
+        // `Ok(inner)` — constructor de la variante exitosa de Result.
+        // Evaluamos el inner y lo envolvemos.
+        Expr::Ok(inner) => {
+            let v = eval_expr(inner, env)?;
+            Ok(Value::Result(ResultVariant::Ok(Box::new(v))))
+        }
+
+        // `Err(inner)` — constructor de la variante de error.
+        Expr::Err(inner) => {
+            let v = eval_expr(inner, env)?;
+            Ok(Value::Result(ResultVariant::Err(Box::new(v))))
+        }
+
+        // `expr?` — operador de propagación de errores.
+        //
+        // Semántica:
+        //  - Ok(v)  → la expresión vale `v` (desempaqueta).
+        //  - Err(e) → corta la función contenedora devolviendo Err(e) sin
+        //    ejecutar el resto. Se emite vía `EvalSignal::Return(...)`,
+        //    que `eval_call` captura y convierte en el valor de retorno.
+        //  - Cualquier otro tipo → error de runtime explícito.
+        //
+        // Si `?` se evalúa fuera de una función, el `Return` sintetizado
+        // burbujea hasta `eval` y se reporta como "`return` solo puede
+        // usarse adentro de una función". Mensaje genérico (deuda
+        // explícita; mejora pendiente con un signal dedicado).
+        Expr::Try(inner) => {
+            let v = eval_expr(inner, env)?;
+            match v {
+                Value::Result(ResultVariant::Ok(x)) => Ok(*x),
+                Value::Result(ResultVariant::Err(e)) => Err(EvalSignal::Return(
+                    Value::Result(ResultVariant::Err(e)),
+                )),
+                other => Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Result".into(),
+                        found: other.type_name().into(),
+                    },
+                    0, 0,
+                    format!(
+                        "el operador `?` requiere un valor `Result`, recibió `{}`",
+                        other.type_name()
+                    ),
+                ))),
+            }
         }
     }
 }
@@ -2148,43 +2196,62 @@ mod tests {
     }
 
     #[test]
-    fn match_ok_binding_es_error_explicito() {
-        // match x { Ok(v) => v } → error "Result requiere Fase 3"
-        let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(5));
-
+    fn match_ok_binding_bindea_inner() {
+        // match Ok(5) { Ok(v) => v + 1, Err(e) => -1 } → 6
         let e = Expr::Match {
-            value: Box::new(Expr::Ident("x".into())),
-            arms: vec![match_arm(
-                Pattern::OkBinding("v".into()),
-                Expr::Ident("v".into()),
-            )],
+            value: Box::new(Expr::Ok(Box::new(Expr::Int(5)))),
+            arms: vec![
+                match_arm(
+                    Pattern::OkBinding("v".into()),
+                    Expr::BinOp {
+                        op: BinOpKind::Add,
+                        left: Box::new(Expr::Ident("v".into())),
+                        right: Box::new(Expr::Int(1)),
+                    },
+                ),
+                match_arm(Pattern::ErrBinding("e".into()), Expr::Int(-1)),
+            ],
         };
-        match eval_expr(&e, env) {
-            Err(EvalSignal::Error(err)) => {
-                assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
-                assert!(err.message.contains("Result"));
-            }
-            _ => panic!("se esperaba error de patrón Ok no soportado"),
-        }
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Int(6));
     }
 
     #[test]
-    fn match_err_binding_es_error_explicito() {
-        let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(5));
-
+    fn match_err_binding_bindea_inner() {
+        // match Err("boom") { Ok(v) => "ok", Err(e) => e } → "boom"
         let e = Expr::Match {
-            value: Box::new(Expr::Ident("x".into())),
-            arms: vec![match_arm(
-                Pattern::ErrBinding("e".into()),
-                Expr::Ident("e".into()),
-            )],
+            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into())))),
+            arms: vec![
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
+                match_arm(Pattern::ErrBinding("e".into()), Expr::Ident("e".into())),
+            ],
         };
-        assert!(matches!(
-            eval_expr(&e, env).unwrap_err(),
-            EvalSignal::Error(_)
-        ));
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Str("boom".into()));
+    }
+
+    #[test]
+    fn match_ok_no_matchea_err() {
+        // El patrón Ok(_) NO matchea contra Err(_) — sigue al siguiente arm.
+        let e = Expr::Match {
+            value: Box::new(Expr::Err(Box::new(Expr::Int(1)))),
+            arms: vec![
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
+            ],
+        };
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Str("otro".into()));
+    }
+
+    #[test]
+    fn match_ok_no_matchea_no_result() {
+        // Ok(v) sobre un valor que no es Result → no matchea, cae en wildcard.
+        let e = Expr::Match {
+            value: Box::new(Expr::Int(5)),
+            arms: vec![
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
+                match_arm(Pattern::Wildcard, Expr::Str("no-result".into())),
+            ],
+        };
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Str("no-result".into()));
     }
 
     #[test]
@@ -3450,5 +3517,201 @@ let r = match n {
         res.unwrap();
         let u = env.borrow().get("u").unwrap();
         assert_eq!(u.to_string(), "User { id: 1, name: \"Fitz\" }");
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Result + Ok/Err + ? (Fase 3, paso 3)
+    //
+    // Estos tests construyen el AST a mano para evitar depender del parser,
+    // que recibe el soporte para `Ok`/`Err`/`?` en este mismo paso.
+    // -----------------------------------------------------------------------
+
+    fn ok_value(v: Value) -> Value {
+        Value::Result(ResultVariant::Ok(Box::new(v)))
+    }
+
+    fn err_value(v: Value) -> Value {
+        Value::Result(ResultVariant::Err(Box::new(v)))
+    }
+
+    #[test]
+    fn ok_ctor_evalua_a_value_result_ok() {
+        // Ok(42) → Value::Result(Ok(Int(42)))
+        let e = Expr::Ok(Box::new(Expr::Int(42)));
+        assert_eq!(eval_expr_test(e).unwrap(), ok_value(Value::Int(42)));
+    }
+
+    #[test]
+    fn err_ctor_evalua_a_value_result_err() {
+        // Err("boom") → Value::Result(Err(Str("boom")))
+        let e = Expr::Err(Box::new(Expr::Str("boom".into())));
+        assert_eq!(
+            eval_expr_test(e).unwrap(),
+            err_value(Value::Str("boom".into())),
+        );
+    }
+
+    #[test]
+    fn ok_ctor_evalua_inner_antes_de_envolver() {
+        // Ok(1 + 2) → Value::Result(Ok(Int(3)))
+        let e = Expr::Ok(Box::new(Expr::BinOp {
+            op: BinOpKind::Add,
+            left: Box::new(Expr::Int(1)),
+            right: Box::new(Expr::Int(2)),
+        }));
+        assert_eq!(eval_expr_test(e).unwrap(), ok_value(Value::Int(3)));
+    }
+
+    #[test]
+    fn try_sobre_ok_desempaqueta() {
+        // Ok(7)? evaluado adentro de una función debería ser 7.
+        // Lo testeamos directamente: como no hay return contenedor, el `?`
+        // sobre Ok no emite ningún signal y la expresión vale 7.
+        let e = Expr::Try(Box::new(Expr::Ok(Box::new(Expr::Int(7)))));
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Int(7));
+    }
+
+    #[test]
+    fn try_sobre_err_emite_signal_return_con_err() {
+        // Err("boom")? emite EvalSignal::Return(Value::Result(Err("boom"))).
+        let e = Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("boom".into())))));
+        let env = Environment::new();
+        match eval_expr(&e, env) {
+            Err(EvalSignal::Return(v)) => {
+                assert_eq!(v, err_value(Value::Str("boom".into())));
+            }
+            other => panic!("se esperaba EvalSignal::Return(Err(...)), se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn try_sobre_no_result_es_type_error() {
+        // 42? → error: el operador `?` requiere un Result, no Int.
+        let e = Expr::Try(Box::new(Expr::Int(42)));
+        let env = Environment::new();
+        match eval_expr(&e, env) {
+            Err(EvalSignal::Error(err)) => {
+                assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+                assert!(
+                    err.message.contains("operador `?`"),
+                    "mensaje inesperado: {}",
+                    err.message,
+                );
+            }
+            other => panic!("se esperaba error de tipo, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn try_adentro_de_funcion_con_ok_devuelve_inner() {
+        // fn pass() { return Ok(5)? }  → pass() == 5  (porque return de un
+        // valor "pelado" de Int sale como Int, no como Result).
+        //
+        // Acá lo que probamos es que `Ok(5)?` desempaqueta a 5 sin emitir
+        // signal de retorno. La función devuelve ese 5 vía su return propio.
+        let env = Environment::new();
+        let body = vec![Stmt::Return(Expr::Try(Box::new(Expr::Ok(Box::new(
+            Expr::Int(5),
+        )))))];
+        eval_stmt(&fn_def("pass", vec![], body), env.clone()).unwrap();
+
+        let call = Expr::Call { name: "pass".into(), args: vec![] };
+        assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(5));
+    }
+
+    #[test]
+    fn try_adentro_de_funcion_con_err_propaga() {
+        // fn boom() { let _ = Err("nope")? ; return Ok("nunca llega") }
+        // boom() devuelve Value::Result(Err("nope")) sin ejecutar el return.
+        let env = Environment::new();
+        let body = vec![
+            Stmt::Assign {
+                name: "_".into(),
+                type_: None,
+                value: Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("nope".into()))))),
+            },
+            Stmt::Return(Expr::Ok(Box::new(Expr::Str("nunca llega".into())))),
+        ];
+        eval_stmt(&fn_def("boom", vec![], body), env.clone()).unwrap();
+
+        let call = Expr::Call { name: "boom".into(), args: vec![] };
+        assert_eq!(
+            eval_expr(&call, env).unwrap(),
+            err_value(Value::Str("nope".into())),
+        );
+    }
+
+    #[test]
+    fn programa_e2e_find_user_con_result_y_try() {
+        // Programa similar al criterio de éxito de Fase 3:
+        // un find_user manual que devuelve Result, con `?` y `match`.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            \n\
+            fn find(target) {\n\
+            \tif (target == 1) {\n\
+            \t\treturn Ok(User { id: 1, name: \"Fitz\" })\n\
+            \t}\n\
+            \treturn Err(\"no encontrado\")\n\
+            }\n\
+            \n\
+            fn lookup_name(id) {\n\
+            \tlet u = find(id)?\n\
+            \treturn Ok(u.name)\n\
+            }\n\
+            \n\
+            let hit = lookup_name(1)\n\
+            let miss = lookup_name(99)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("hit"),
+            Some(ok_value(Value::Str("Fitz".into()))),
+        );
+        assert_eq!(
+            env.borrow().get("miss"),
+            Some(err_value(Value::Str("no encontrado".into()))),
+        );
+    }
+
+    #[test]
+    fn match_e2e_sobre_result_con_ok_y_err() {
+        let src = "\
+            fn divide(a, b) {\n\
+            \tif (b == 0) {\n\
+            \t\treturn Err(\"división por cero\")\n\
+            \t}\n\
+            \treturn Ok(a / b)\n\
+            }\n\
+            \n\
+            let ok_msg = match divide(10, 2) {\n\
+            \tOk(v) => \"ok: {v}\"\n\
+            \tErr(e) => \"err: {e}\"\n\
+            }\n\
+            let err_msg = match divide(10, 0) {\n\
+            \tOk(v) => \"ok: {v}\"\n\
+            \tErr(e) => \"err: {e}\"\n\
+            }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("ok_msg"), Some(Value::Str("ok: 5".into())));
+        assert_eq!(
+            env.borrow().get("err_msg"),
+            Some(Value::Str("err: divisi\u{00f3}n por cero".into())),
+        );
+    }
+
+    #[test]
+    fn try_top_level_con_err_genera_error_de_return_huerfano() {
+        // En top-level, `Err(...)?` emite Return; el evaluador global lo
+        // convierte en "return solo puede usarse adentro de una función".
+        let env = Environment::new();
+        let stmt = Stmt::Expr(Expr::Try(Box::new(Expr::Err(Box::new(Expr::Int(1))))));
+        match eval_stmt(&stmt, env.clone()) {
+            Err(EvalSignal::Return(_)) => {} // ok — el global lo traduciría.
+            other => panic!("se esperaba EvalSignal::Return, se obtuvo {:?}", other),
+        }
     }
 }
