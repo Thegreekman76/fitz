@@ -1,7 +1,7 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 3 — paso 5: módulos / `import`, 503 tests pasando).
+> Última actualización: 2026-05-11 (Fase 4 — paso 5: HTTP nativo, 595 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -43,8 +43,11 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 **Parte 6 — Organización**
 16. [Módulos](#16-módulos)
 
-**Parte 7 — Cerrando**
-17. [Qué sigue](#17-qué-sigue)
+**Parte 7 — HTTP nativo**
+17. [HTTP nativo](#17-http-nativo)
+
+**Parte 8 — Cerrando**
+18. [Qué sigue](#18-qué-sigue)
 
 ---
 
@@ -60,10 +63,10 @@ bagaje histórico del segundo. Algunas ideas centrales:
   parsean y todavía no se chequean — el chequeo estático llega más
   adelante en el roadmap.
 - **HTTP como ciudadano de primera clase** — `@get`, `@post`, etc. son
-  parte del lenguaje, no de una librería. (Esto vive en Fase 4. Hoy
-  no funciona aún.)
+  parte del lenguaje, no de una librería. El servidor arranca solo
+  si tu programa registra rutas. Lo vas a ver en el [capítulo 17](#17-http-nativo).
 - **Sin excepciones**: los errores se manejan con `Result` y `match`,
-  estilo Rust. (También Fase 3 en adelante.)
+  estilo Rust.
 - **Objetivo final: binario nativo**. Hoy Fitz es un intérprete escrito
   en Rust, y eso es lo que cubre esta guía.
 
@@ -93,6 +96,11 @@ Solo lo que el intérprete ejecuta hoy:
   `xs.map(fn(n) => n*2)`, `xs.push(v)`, `m.get("k")`, `s.upper()`.
 - Manejo de errores con `Result`, `Ok(x)`, `Err(e)`, `match` sobre las
   variantes y operador `?` para propagar.
+- Organización en archivos con `import foo` y `from foo import bar`.
+- **HTTP nativo**: decoradores `@get`, `@post`, `@put`, `@delete` para
+  registrar rutas, path params tipados, body deserializado contra un
+  `type`, serialización JSON automática, `@server(port, host)` para
+  configurar.
 - Builtins globales: `print`, `len`.
 
 ### Qué todavía no anda
@@ -105,23 +113,29 @@ error explícito:
 - Asignación a índice (`xs[0] = v`).
 - Métodos custom declarados por el usuario sobre `type`
   (`type User { ... fn greet() => ... }`).
-- `async` / `await`.
-- Decoradores HTTP (`@get`, `@post`, …).
-- `import` / `from ... import`.
+- `async` / `await` reales (la palabra `async` parsea sobre handlers
+  HTTP pero no aporta nada en runtime; el bridge es síncrono).
+- Status codes custom en handlers HTTP (`return 401 { ... }`) —
+  hoy se traducen automático con `Result`.
+- Query params en handlers HTTP (`?page=1`).
+- Named args en decoradores (`@server(port: 8080)`) — hoy positional.
 
 Todo eso está mapeado en el [roadmap](roadmap.md). Cada vez que una de
 estas piezas se cierra, esta guía suma el capítulo correspondiente.
 
 ### Cómo está organizada
 
-La guía está dividida en cinco partes que se leen en orden:
+La guía está dividida en partes que se leen en orden:
 
 1. **Empezando** — qué es Fitz y cómo correr tu primer programa.
 2. **Datos y expresiones** — los tipos básicos y cómo se combinan.
 3. **Control de flujo y colecciones** — decidir, repetir, agrupar datos.
-4. **Abstracción** — funciones, closures, recursión.
-5. **Lo que está por venir** — `type` como anticipo de la Fase 3,
-   cómo leer errores, y a dónde mirar para seguir.
+4. **Abstracción** — funciones, tipos custom, métodos, mutación.
+5. **Errores** — `Result` y mensajes del intérprete.
+6. **Organización** — partir el código en módulos.
+7. **HTTP nativo** — el diferencial de Fitz: decoradores y server
+   automático.
+8. **Cerrando** — el mapa de lo que viene.
 
 ### Cómo usar los ejemplos
 
@@ -331,8 +345,8 @@ variable; las siguientes la reasignan. El tipo se infiere del valor.
 
 ### Los cinco tipos primitivos
 
-Por ahora Fitz tiene cinco tipos básicos. Todo lo demás (listas,
-mapas, tipos custom instanciados) llega en Fase 3.
+Fitz tiene cinco tipos básicos. Los compuestos (listas, mapas,
+tipos custom instanciados) los ves en capítulos posteriores.
 
 | Tipo   | Qué es                | Ejemplos             |
 |--------|-----------------------|----------------------|
@@ -855,8 +869,9 @@ entre `{` y `}` como una expresión a interpolar.
 
 - Strings multilínea con `"""..."""`.
 - Comillas simples como alternativa a las dobles.
-- Métodos sobre strings (`.upper()`, `.split(...)`, `.len()`, etc.) —
-  llegan junto con method calls en Fase 3.
+- Métodos como `.split(...)`, `.contains(...)`, `.starts_with(...)`
+  — los tres básicos (`.upper()`, `.lower()`, `.len()`) sí están,
+  y los ves en el [capítulo 13](#13-métodos-y-mutación).
 - Format specifiers dentro de la interpolación (`{ratio:.2f}` y
   similares).
 
@@ -3653,20 +3668,428 @@ User { id: 7, name: "Fitz" }
 ---
 
 Con módulos se cierra la Fase 3. Tenés todas las piezas básicas
-del lenguaje: tipos, control de flujo, colecciones, funciones,
-errores y organización en archivos. El próximo capítulo es el
-mapa de lo que viene.
+del lenguaje. Lo que viene en el próximo capítulo es lo que
+hace a Fitz distinto: HTTP nativo.
 
 ---
 
-## 17. Qué sigue
+## 17. HTTP nativo
+
+Hasta acá Fitz fue un lenguaje "normal" — tipos, control de flujo,
+funciones, módulos. El capítulo de HTTP es donde se nota el
+diferencial: no hay librería que importar, no hay framework que
+inicializar. Decorás una función con `@get` o `@post`, corrés el
+archivo con `fitz run`, y hay un servidor HTTP escuchando.
+
+### Tu primer endpoint
+
+`hola_server.fitz`:
+
+```fitz
+@get("/")
+fn index() => "hola desde Fitz"
+```
+
+Corrélo:
+
+```bash
+fitz run hola_server.fitz
+```
+
+Salida en consola:
+
+```
+🏔️  Fitz HTTP escuchando en http://127.0.0.1:3000
+   GET /
+```
+
+En otra terminal:
+
+```bash
+curl http://127.0.0.1:3000/
+```
+
+Respuesta:
+
+```
+"hola desde Fitz"
+```
+
+Para bajarlo, **Ctrl-C** en la terminal del server. El intérprete
+termina de procesar las requests en vuelo y cierra limpio.
+
+Lo que pasó:
+
+1. Al ver `@get("/")` arriba de `fn index`, el intérprete registra
+   la ruta en una tabla interna. La fn queda definida como
+   cualquier otra; el decorator solo asocia método + path con ella.
+2. Al terminar de evaluar el archivo, el intérprete nota que hay
+   rutas registradas y arranca el server en `127.0.0.1:3000`.
+3. Cuando llega un `GET /`, el server llama a `index()` con los
+   args que correspondan (en este caso ninguno), serializa el
+   valor de retorno a JSON, y responde 200.
+
+### Verbos: `@get`, `@post`, `@put`, `@delete`
+
+Cada decorator HTTP toma un único argumento: la ruta. Mismas reglas
+para todos:
+
+```fitz
+@get("/users")
+fn list_users() => []
+
+@post("/users")
+fn create_user(body) => body
+
+@put("/users/{id}")
+fn update_user(id: Int, body) => body
+
+@delete("/users/{id}")
+fn delete_user(id: Int) => "ok"
+```
+
+Si un decorator no es de los cuatro de arriba (ni `@server`), el
+intérprete corta con error explícito.
+
+### Path params: `/users/{id}`
+
+Las llaves dentro del path son params:
+
+```fitz
+@get("/users/{id}")
+fn get_user(id: Int) {
+    return User { id: id, name: "fitz" }
+}
+```
+
+El nombre adentro de `{...}` tiene que coincidir con un parámetro
+de la función. El tipo declarado del parámetro decide cómo se
+convierte:
+
+- `id: Int` → el path param se parsea como entero. Si la URL trae
+  `/users/abc`, la respuesta es **400** con
+  `{"error":"path param 'id': se esperaba Int, recibió 'abc'"}`.
+- `id: Float`, `id: Bool`, `id: Str` — mismas reglas, según
+  el tipo.
+- Sin anotación: llega como `Str`.
+
+Una ruta puede tener varios path params:
+
+```fitz
+@get("/orgs/{org}/users/{id}")
+fn get_user(org: Str, id: Int) => "{org}/{id}"
+```
+
+Repetir un nombre (`/a/{x}/b/{x}`) es error al registrar.
+
+### Body: JSON deserializado a un `type`
+
+Para handlers que reciben datos (típicamente POST y PUT), declarás
+un parámetro extra cuyo nombre **no** está en el path. Ese
+parámetro es el **body**:
+
+```fitz
+type UserInput {
+    name: Str
+    email: Str?
+}
+
+@post("/users")
+fn create_user(body: UserInput) {
+    return User { id: 1, name: body.name, email: body.email }
+}
+```
+
+Cuando llega un `POST /users` con
+`{"name":"fitz","email":"fitz@example.com"}`:
+
+1. El intérprete parsea el body como JSON.
+2. Lo valida contra el `type UserInput`: cada campo declarado tiene
+   que estar (con default o ser nullable, o presente).
+3. Construye una `Value::Instance` y la pasa como `body` al
+   handler.
+
+Si el JSON no parsea, o falta un campo no nullable sin default, o
+trae un campo extra, **400** con un mensaje claro:
+
+```
+{"error":"body para 'UserInput': falta el campo 'name'"}
+{"error":"body para 'UserInput': campo no declarado: age"}
+{"error":"body no es JSON válido: ..."}
+```
+
+Reglas de la convención:
+
+- Cualquier parámetro del handler que **no** está en `path_params`
+  cuenta como body.
+- **Máximo uno por handler.** Más de uno → error al registrar.
+- Si el body no tiene anotación de tipo (`fn h(body)`), llega como
+  `Value` libre — `Map<Str,Value>` para un objeto, `List<Value>`
+  para un array, etc. Útil para webhooks o APIs sin schema fijo.
+
+Mezclando path params y body:
+
+```fitz
+@put("/users/{id}")
+fn update(id: Int, body: UserInput) {
+    return User { id: id, name: body.name, email: body.email }
+}
+```
+
+`id` viene del path, `body` del cuerpo de la request.
+
+### Respuestas: serialización JSON automática
+
+Lo que devolvés del handler se serializa a JSON, sin que tengas
+que tocar nada:
+
+| `Value` que devolvés | JSON | Status |
+|---|---|---|
+| `Int`, `Float`, `Str`, `Bool`, `Null` | el primitivo | 200 |
+| `List(...)` | array | 200 |
+| `Map(...)` con claves `Str` | object | 200 |
+| `Instance` de un `type` | object con campos en orden de declaración | 200 |
+| `Ok(v)` | `v` serializado | 200 |
+| `Err(e)` | `{"error": e}` | **500** |
+
+Por eso podés escribir el handler como cualquier función Fitz:
+
+```fitz
+fn divide(a: Float, b: Float) -> Result<Float> {
+    if b == 0.0 {
+        return Err("división por cero")
+    }
+    return Ok(a / b)
+}
+
+@get("/half/{n}")
+fn half(n: Float) {
+    return divide(n, 2.0)
+}
+```
+
+`GET /half/10` → 200 con `5.0`. `GET /half/0` (si lo armaras para
+fallar) → 500 con `{"error":"división por cero"}`.
+
+Tipos que **no** se pueden serializar (funciones, tipos opacos,
+módulos, rangos) generan 500 con un mensaje explícito. No te va a
+pasar por accidente — pasaría si devolvieras una función entera,
+por ejemplo.
+
+### `@server(port, host)` — configurar el server
+
+Por default el server escucha en `127.0.0.1:3000`. Para cambiar
+puerto o host, decorá una fn con `@server`:
+
+```fitz
+@server(8080, "0.0.0.0")
+fn main() => 0
+
+@get("/")
+fn index() => "escuchando en todas las interfaces"
+```
+
+Reglas:
+
+- Args positional: primero `port: Int`, después `host: Str`. Cualquiera
+  se puede omitir (`@server(8080)` deja el host default).
+- `port` tiene que estar en `[1, 65535]`. Fuera → error al registrar.
+- `host` tiene que parsear como **IP literal** (IPv4 o IPv6). No
+  hay resolución DNS — `"localhost"` no funciona, usar
+  `"127.0.0.1"`.
+- Solo un `@server` por programa. Dos → error con el config previo.
+
+La fn que decora `@server` queda definida en el env como cualquier
+otra: no se ejecuta automáticamente. La convención es ponerlo
+sobre un placeholder como `fn main() => 0`, pero el nombre no es
+mágico.
+
+### Result + ? = handlers limpios
+
+Por la regla de "Result se desempaqueta automático", podés usar
+el operador `?` adentro del handler para propagar errores hacia
+la respuesta 500:
+
+```fitz
+type User { id: Int, name: Str }
+
+let users = [
+    User { id: 1, name: "ana" },
+    User { id: 2, name: "luis" },
+]
+
+fn find_user(id) {
+    let found = users.find(fn(u) => u.id == id)
+    return match found {
+        Ok(u)  => Ok(u)
+        Err(_) => Err("usuario {id} no encontrado")
+    }
+}
+
+@get("/users/{id}")
+fn get_user(id: Int) {
+    let u = find_user(id)?
+    return u
+}
+```
+
+`GET /users/1` → 200 con `{"id":1,"name":"ana"}`.
+`GET /users/99` → 500 con `{"error":"usuario 99 no encontrado"}`.
+
+El `?` corta la fn devolviendo `Err(...)`, el runtime lo destila a
+status 500 con `{"error": e}`. Sin try/catch, sin if-not-found,
+sin hacer nada raro.
+
+Detalle de sintaxis: hoy un brazo de `match` admite una expresión
+como cuerpo, no un statement. Es decir, **`return adentro de un
+brazo no parsea**: tenés que hacer `return match { ... }` y poner
+el valor directo en cada brazo, como en el ejemplo. Está en la
+lista de deuda del lenguaje; cuando se cierre, ambas formas van
+a funcionar.
+
+### Qué pasa adentro
+
+Mientras corre, Fitz tiene dos threads:
+
+- **El intérprete** (thread main): owns todos los handlers
+  registrados y procesa requests síncronamente, una a la vez.
+- **tokio + axum** (thread aparte): acepta conexiones, parsea
+  requests, manda un task al intérprete por un canal y espera la
+  respuesta.
+
+Esto es por una restricción real: los `Value` de Fitz usan
+`Rc<RefCell<>>` por dentro, que no es `Send` (no puede cruzar
+threads). Tener el intérprete en su propio thread, dueño absoluto
+de esos `Rc`s, es la forma de mantenerlo todo síncrono adentro
+del lenguaje sin meterse en líos con tokio.
+
+En la práctica: hoy un handler lento bloquea a los siguientes.
+Para un proyecto chico o un servicio interno alcanza. Cuando
+agreguemos `async` real adentro del lenguaje, el bridge va a
+mover el handler a un pool y no vas a tener que cambiar nada.
+
+### Qué todavía no anda
+
+- **`async` / `await` adentro del lenguaje** — la keyword `async`
+  parsea sobre handlers HTTP, pero no aporta nada en runtime. El
+  bridge es síncrono. Cuando se sume async real, los handlers de
+  hoy van a seguir funcionando.
+- **Status codes custom** — `return 401 { ... }` está en el
+  syntax-spec pero el intérprete aún no lo entiende. Hoy: Result
+  destila a 200/500 automático, o tipos no serializables → 500
+  explícito.
+- **Query params** (`?page=1&size=10`) — sin soporte.
+- **Headers de request y de respuesta** — sin acceso desde Fitz.
+- **Validación de Content-Type** — cualquier body se intenta
+  parsear como JSON. Multipart o urlencoded → cuando hagan falta.
+- **Named args en decoradores** (`@server(port: 8080)`) — hoy
+  positional.
+- **Middleware** (`@auth`, `@cached`, etc.) — los decoradores se
+  apilan en el AST y el parser ya los soporta, pero el evaluator
+  solo cablea los 5 actuales. El resto entra cuando lo necesitemos.
+
+### Ejemplo completo
+
+[examples/guide/17-http.fitz](../examples/guide/17-http.fitz):
+
+```fitz
+@server(3000)
+fn main() => 0
+
+type User {
+    id: Int
+    name: Str
+    email: Str?
+}
+
+type UserInput {
+    name: Str
+    email: Str?
+}
+
+let users = [
+    User { id: 1, name: "ana", email: "ana@x.com" },
+    User { id: 2, name: "luis", email: null },
+]
+
+@get("/")
+fn index() => "Fitz HTTP corriendo"
+
+@get("/users")
+fn list_users() => users
+
+@get("/users/{id}")
+fn get_user(id: Int) {
+    let found = users.find(fn(u) => u.id == id)
+    return match found {
+        Ok(u)  => Ok(u)
+        Err(_) => Err("usuario {id} no encontrado")
+    }
+}
+
+@post("/users")
+fn create_user(body: UserInput) {
+    let new_id = users.len() + 1
+    let u = User { id: new_id, name: body.name, email: body.email }
+    users.push(u)
+    return u
+}
+```
+
+Levantalo con:
+
+```bash
+cargo run -- run examples/guide/17-http.fitz
+```
+
+Y probalo:
+
+```bash
+curl http://127.0.0.1:3000/
+# "Fitz HTTP corriendo"
+
+curl http://127.0.0.1:3000/users
+# [{"id":1,"name":"ana","email":"ana@x.com"},{"id":2,"name":"luis","email":null}]
+
+curl http://127.0.0.1:3000/users/1
+# {"id":1,"name":"ana","email":"ana@x.com"}
+
+curl http://127.0.0.1:3000/users/99
+# {"error":"usuario 99 no encontrado"}
+
+curl -X POST http://127.0.0.1:3000/users \
+     -H "Content-Type: application/json" \
+     -d '{"name":"sofi"}'
+# {"id":3,"name":"sofi","email":null}
+
+curl http://127.0.0.1:3000/users
+# (ahora sofi está adentro)
+```
+
+Las modificaciones de `users.push(...)` persisten entre requests
+porque `users` es una `List` (compartida por referencia) y todos
+los handlers cierran sobre el mismo env del módulo top-level.
+**Sin estado externo, sin base de datos: la "memoria" del server
+es el env del programa.** Para producción real querés persistir
+en disco o en una DB; para prototipos y juguetes, alcanza.
+
+---
+
+Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
+escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
+errores propagable, configuración del server. Lo que viene en el
+último capítulo es el mapa hacia adelante.
+
+---
+
+## 18. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 15 podés:
+Con los capítulos 1 a 17 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -3687,28 +4110,38 @@ Con los capítulos 1 a 15 podés:
   **funciones anónimas inline** (`fn(n) => n * 2`) como callbacks.
 - Manejar errores con **`Result`**, **`Ok`**, **`Err`** y el
   operador **`?`** para propagar, sin excepciones.
+- Partir el código en **módulos** con `import foo` y
+  `from foo import a, b`.
+- Escribir **APIs HTTP** con `@get`/`@post`/`@put`/`@delete`,
+  path params tipados, body deserializado contra `type`,
+  serialización JSON automática, y `@server(port, host)` para
+  configurar.
 - Leer un mensaje de error del intérprete y ubicar de qué fase vino.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
 
-### Lo que viene — más allá de Fase 3
+### Lo que viene — más allá de Fase 4
 
-Fase 3 cerró sus cinco pasos (1: listas/mapas/rangos/`for`; 2:
-tipos custom instanciables; 3: `Result` + `Ok`/`Err` + `?`; 4:
-funciones anónimas, method calls y mutación; 5: módulos /
-`import`). El lenguaje base está completo. Lo que viene:
+Fase 4 cerró sus cinco pasos (1: decoradores genéricos sobre `FnDef`;
+2: runtime HTTP mínimo con GET y Result auto-handling; 3: body +
+deserialización JSON; 4: `@server(...)` configurable; 5: guía,
+ejemplos y cierre). Las piezas grandes que siguen:
 
-- **Tipado gradual con validación** — las anotaciones que hoy se
-  ignoran van a empezar a chequearse (probablemente Fase 5).
+- **Tipado gradual con validación estática** — las anotaciones que
+  hoy se ignoran van a empezar a chequearse en compile time
+  (Fase 5).
+- **Compilador a binario nativo** — el salto de intérprete a binario
+  via LLVM o Cranelift. Type checker estático completo.
+- **`async` / `await` reales en el lenguaje** — destrabar handlers
+  HTTP concurrentes sin bloquear el reactor (probablemente Fase 4.x).
+- **Status codes custom y response builder** (`return 401 { ... }`),
+  query params, headers, middleware.
 
-Ver [docs/roadmap.md](roadmap.md) para el detalle completo.
+Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
+deuda explícita acumulada por fase.
 
 ### Más adelante
 
-- **Fase 4 — HTTP nativo**: `@get`, `@post`, etc. como parte del
-  lenguaje. El diferencial principal de Fitz. Servidor que arranca
-  automáticamente si hay rutas definidas, serialización JSON
-  automática por tipo.
 - **Fase 5 — Compilador**: el salto de intérprete a binario nativo,
   via LLVM o Cranelift. Type checker estático completo.
 - **Fase 6 — Ecosistema**: package manager, registry, LSP, formatter,
@@ -3722,10 +4155,7 @@ medias, no entra todavía. Mejor decir "no se puede" que prometer algo
 que va a romper a quien lo lea.
 
 Cada vez que se cierre un grupo de features (típicamente al cerrar
-una sub-fase del roadmap), la guía gana un capítulo o varios. Lo
-próximo que va a sumarse cuando avance la implementación:
-
-- Capítulo de **HTTP nativo** cuando entre Fase 4.
+una sub-fase del roadmap), la guía gana un capítulo o varios.
 
 ### Recursos
 

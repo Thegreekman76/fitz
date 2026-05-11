@@ -1,0 +1,59 @@
+// 17-http.fitz — Ejemplo del capítulo 17 "HTTP nativo".
+//
+// Mini API REST en memoria con dos tipos, lista de usuarios, y
+// endpoints para listar, traer por id y crear. Sin base de datos:
+// la "memoria" del server es el env del programa.
+//
+// Levantalo:
+//   cargo run -- run examples/guide/17-http.fitz
+//
+// Probalo:
+//   curl http://127.0.0.1:3000/
+//   curl http://127.0.0.1:3000/users
+//   curl http://127.0.0.1:3000/users/1
+//   curl http://127.0.0.1:3000/users/99
+//   curl -X POST http://127.0.0.1:3000/users \
+//        -H "Content-Type: application/json" \
+//        -d '{"name":"sofi"}'
+
+@server(3000)
+fn main() => 0
+
+type User {
+    id: Int
+    name: Str
+    email: Str?
+}
+
+type UserInput {
+    name: Str
+    email: Str?
+}
+
+let users = [
+    User { id: 1, name: "ana", email: "ana@x.com" },
+    User { id: 2, name: "luis", email: null },
+]
+
+@get("/")
+fn index() => "Fitz HTTP corriendo"
+
+@get("/users")
+fn list_users() => users
+
+@get("/users/{id}")
+fn get_user(id: Int) {
+    let found = users.find(fn(u) => u.id == id)
+    return match found {
+        Ok(u)  => Ok(u)
+        Err(_) => Err("usuario {id} no encontrado")
+    }
+}
+
+@post("/users")
+fn create_user(body: UserInput) {
+    let new_id = users.len() + 1
+    let u = User { id: new_id, name: body.name, email: body.email }
+    users.push(u)
+    return u
+}

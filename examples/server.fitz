@@ -1,4 +1,31 @@
-// server.fitz — API REST completa en Fitz
+// server.fitz — API REST completa en Fitz.
+//
+// Criterio de éxito de Fase 4: este archivo corre end-to-end con
+// `fitz run examples/server.fitz` y atiende las requests siguientes
+// con respuestas correctas:
+//
+//   curl http://127.0.0.1:3000/
+//   curl http://127.0.0.1:3000/users
+//   curl http://127.0.0.1:3000/users/1
+//   curl http://127.0.0.1:3000/users/99
+//   curl -X POST http://127.0.0.1:3000/users \
+//        -H "Content-Type: application/json" \
+//        -d '{"name":"sofi","email":"sofi@x.com"}'
+//   curl -X PUT http://127.0.0.1:3000/users/1 \
+//        -H "Content-Type: application/json" \
+//        -d '{"name":"ana actualizada","email":"ana2@x.com"}'
+//   curl -X DELETE http://127.0.0.1:3000/users/2
+//
+// Las features que el syntax-spec adelanta (status codes custom
+// como `return 201 user` o `return 404 { ... }`) todavía no están
+// implementadas — esa parte del syntax-spec es dirección, no
+// contrato. Lo que sí tenemos:
+//   - Ok(v)  → 200 con v serializado
+//   - Err(e) → 500 con {"error": e}
+//   - Cualquier otro Value → 200 directo
+
+@server(3000)
+fn main() => 0
 
 type User {
     id: Int
@@ -8,44 +35,70 @@ type User {
 
 type UserInput {
     name: Str
-    email: Str
+    email: Str?
 }
 
-// "base de datos" en memoria
-let users: List<User> = []
+// "Base de datos" en memoria: una `List<User>` que vive en el env
+// top-level. Como `List` es Rc<RefCell<>>, todos los handlers
+// comparten la misma instancia y las mutaciones (push, mutación de
+// campos) se ven entre requests.
+let users = [
+    User { id: 1, name: "ana", email: "ana@x.com" },
+    User { id: 2, name: "luis", email: null },
+]
 
 @get("/")
-async fn index() -> Str {
-    return "Fitz API corriendo 🏔️"
-}
+fn index() => "Fitz API corriendo 🏔️"
 
 @get("/users")
-async fn list_users() -> List<User> {
-    return users
-}
+fn list_users() => users
 
 @get("/users/{id}")
-async fn get_user(id: Int) -> User {
-    let user = users.find(fn(u) => u.id == id)
-    match user {
-        Ok(u)  => return u
-        Err(_) => return 404 { message: "Usuario no encontrado" }
+fn get_user(id: Int) {
+    let found = users.find(fn(u) => u.id == id)
+    return match found {
+        Ok(u)  => Ok(u)
+        Err(_) => Err("usuario {id} no encontrado")
     }
 }
 
 @post("/users")
-async fn create_user(body: UserInput) -> User {
-    let user = User {
-        id: users.len() + 1,
-        name: body.name,
-        email: body.email
-    }
-    users.push(user)
-    return 201 user
+fn create_user(body: UserInput) {
+    let new_id = users.len() + 1
+    let u = User { id: new_id, name: body.name, email: body.email }
+    users.push(u)
+    return u
 }
 
+// Update: si el usuario existe, mutamos sus campos y lo devolvemos.
+// Si no, Err → 500. Usamos `?` para destrabar el Ok y dejar que el
+// Err se propague hasta el caller (handler → runtime → 500).
+@put("/users/{id}")
+fn update_user(id: Int, body: UserInput) {
+    let u = users.find(fn(u) => u.id == id)?
+    u.name = body.name
+    u.email = body.email
+    return Ok(u)
+}
+
+// Delete: filtramos y reconstruimos la lista para preservar la
+// referencia compartida que ven los otros handlers.
 @delete("/users/{id}")
-async fn delete_user(id: Int) -> Str {
-    users.remove(fn(u) => u.id == id)?
-    return "eliminado"
+fn delete_user(id: Int) {
+    let exists = users.find(fn(u) => u.id == id)
+    return match exists {
+        Err(_) => Err("usuario {id} no encontrado")
+        Ok(_)  => do_delete(id)
+    }
+}
+
+fn do_delete(id: Int) {
+    let kept = users.filter(fn(u) => u.id != id)
+    while (users.len() > 0) {
+        users.pop()
+    }
+    for u in kept {
+        users.push(u)
+    }
+    return Ok("usuario {id} eliminado")
 }

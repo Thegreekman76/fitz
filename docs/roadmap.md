@@ -525,7 +525,7 @@ fn find_user(users: List<User>, id: Int) -> Result<User> {
 ---
 
 ## Fase 4 — HTTP nativo 🌐
-**Estado: EN CURSO — paso 4.1 cerrado.**
+**Estado: COMPLETADA**
 
 La feature que diferencia a Fitz. HTTP como ciudadano de primera clase.
 Cinco pasos cerrables; cada uno suma su tanda de tests y, al final, su
@@ -738,11 +738,40 @@ doble decorator).
 Validado a mano: `@server(8181, "127.0.0.1")` levanta en 8181 y
 3000 no responde.
 
-#### 4.5 — Guía + ejemplos + cierre de fase
-**Pendiente.** Capítulo 17 "HTTP nativo" entre Módulos y Qué sigue
-(17 → 18). Ejemplo `examples/guide/17-http.fitz`. Validar que
-`examples/server.fitz` corra end-to-end (test de aceptación de la
-fase).
+#### 4.5 — Guía + ejemplos + cierre de fase ✓
+**Completado** — cierre formal de Fase 4 con documentación viva.
+
+- Capítulo 17 nuevo "HTTP nativo" entre Módulos (16) y Qué sigue
+  (renumerado a 18). Cubre: primer endpoint, los cuatro verbos,
+  path params tipados, body con `type` o libre, serialización JSON
+  automática, `@server(port, host)`, integración con `Result + ?`,
+  modelo de threading (intérprete sync + tokio en thread aparte),
+  qué todavía no anda (`async` real, status codes custom, query
+  params, headers, middleware, named args).
+- `examples/guide/17-http.fitz` ejecutable: mini API con `/`,
+  `/users`, `/users/{id}`, `POST /users`. Memoria del server =
+  env del programa.
+- `examples/server.fitz` reescrito como criterio de éxito de Fase 4:
+  CRUD completo (GET/POST/PUT/DELETE) con `Result + ?`. Validado
+  a mano contra `curl` end-to-end.
+- Guía pre-cap-17: actualizado preámbulo (fecha, número de tests,
+  HTTP movido de "no funciona aún" a "feature core"), índice
+  reorganizado en 8 partes, "Qué cubre" y "Qué no anda"
+  reactualizados, cierres de cap obsoletos limpiados, deuda del
+  cap 5 (métodos sobre strings) corregida (los básicos sí existen
+  desde 3.4).
+- Cierre cap 18 "Qué sigue" reescrito a post-Fase-4: lo aprendido
+  incluye HTTP, el "más adelante" apunta a Fase 5 (compilador) y
+  Fase 6 (ecosistema).
+
+**Decisión de implementación documentada en la guía**: `return`
+adentro de un brazo de match no parsea (deuda viva del 3.4) — el
+ejemplo del cap 17 usa `return match { ... }` con el valor directo
+en cada brazo. Sigue siendo deuda explícita; cuando se cierre,
+ambas formas van a funcionar.
+
+Tests al cerrar 4.5: 595 (sin cambios respecto de 4.4 — el cierre
+de fase es documentación + ejemplos, sin código nuevo).
 
 ### Deuda explícita ya identificada para Fase 4
 
