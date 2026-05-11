@@ -121,25 +121,73 @@ pub struct BodyParam {
     pub declared_type_name: Option<String>,
 }
 
+/// Configuración del servidor que un `@server(...)` pudo haber
+/// declarado en el programa. Si está en `None`, se usan defaults
+/// (127.0.0.1:3000). Solo se admite un `@server` por programa —
+/// la unicidad la enforcea el evaluator durante el registro.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ServerConfig {
+    pub host: String,
+    pub port: u16,
+}
+
+impl ServerConfig {
+    /// Defaults aplicados cuando no hay `@server` en el programa.
+    pub fn default_addr() -> Self {
+        ServerConfig {
+            host: "127.0.0.1".into(),
+            port: 3000,
+        }
+    }
+
+    /// Traduce a `SocketAddr`. Falla si el host no parsea como IP
+    /// numérica (no resolvemos DNS — para evitar surpresas con un
+    /// host literal que no es IP).
+    pub fn to_socket_addr(&self) -> Result<std::net::SocketAddr, String> {
+        let ip: std::net::IpAddr = self
+            .host
+            .parse()
+            .map_err(|_| format!("host '{}' no es una IP válida (esperado IPv4/IPv6 literal)", self.host))?;
+        Ok(std::net::SocketAddr::new(ip, self.port))
+    }
+}
+
 /// Acumulador de rutas registradas durante `eval`. Construido por
 /// `main.rs` antes de evaluar; consultado después para decidir si
 /// arrancar el server.
 #[derive(Debug, Default)]
 pub struct HttpRegistry {
     pub routes: Vec<RouteSpec>,
+    /// Configuración del server declarada con `@server(...)`. `None`
+    /// si el programa no la declaró — el caller (main.rs) aplica
+    /// `ServerConfig::default_addr()`.
+    pub server_config: Option<ServerConfig>,
 }
 
 impl HttpRegistry {
     pub fn new() -> Self {
-        Self { routes: Vec::new() }
+        Self {
+            routes: Vec::new(),
+            server_config: None,
+        }
     }
 
     pub fn is_empty(&self) -> bool {
+        // El registry está "vacío" si no tiene rutas. Un `@server`
+        // sin rutas no levanta nada (no hay endpoints a servir);
+        // ignorarlo es lo más útil.
         self.routes.is_empty()
     }
 
     pub fn push(&mut self, route: RouteSpec) {
         self.routes.push(route);
+    }
+
+    /// Devuelve el config explícito o el default. Útil para `main.rs`.
+    pub fn resolved_config(&self) -> ServerConfig {
+        self.server_config
+            .clone()
+            .unwrap_or_else(ServerConfig::default_addr)
     }
 }
 
@@ -196,6 +244,23 @@ pub fn push_route(route: RouteSpec) {
             .expect("push_route llamado sin registry activo");
         reg.push(route);
     });
+}
+
+/// Setea la `ServerConfig` del registry activo. Falla si ya había
+/// una (mantiene la unicidad de `@server`). Devuelve `Err(())` y el
+/// evaluator emite un error explícito.
+pub fn set_server_config(config: ServerConfig) -> Result<(), ServerConfig> {
+    HTTP_REGISTRY.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let reg = borrow
+            .as_mut()
+            .expect("set_server_config llamado sin registry activo");
+        if let Some(existing) = &reg.server_config {
+            return Err(existing.clone());
+        }
+        reg.server_config = Some(config);
+        Ok(())
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -1458,6 +1523,68 @@ mod tests {
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
+    }
+
+    // ---- ServerConfig (Fase 4.4) ----
+
+    #[test]
+    fn server_config_default_es_localhost_3000() {
+        let c = ServerConfig::default_addr();
+        assert_eq!(c.host, "127.0.0.1");
+        assert_eq!(c.port, 3000);
+    }
+
+    #[test]
+    fn server_config_to_socket_addr_ipv4_ok() {
+        let c = ServerConfig {
+            host: "0.0.0.0".into(),
+            port: 8080,
+        };
+        let addr = c.to_socket_addr().unwrap();
+        assert_eq!(addr.to_string(), "0.0.0.0:8080");
+    }
+
+    #[test]
+    fn server_config_to_socket_addr_host_invalido_es_error() {
+        let c = ServerConfig {
+            host: "no-es-ip".into(),
+            port: 80,
+        };
+        let err = c.to_socket_addr().unwrap_err();
+        assert!(err.contains("no-es-ip"));
+    }
+
+    #[test]
+    fn set_server_config_segunda_vez_devuelve_existente() {
+        let ((), _reg) = with_active_registry(|| {
+            let first = ServerConfig {
+                host: "127.0.0.1".into(),
+                port: 8080,
+            };
+            assert!(set_server_config(first.clone()).is_ok());
+            let second = ServerConfig {
+                host: "0.0.0.0".into(),
+                port: 9090,
+            };
+            let err = set_server_config(second).unwrap_err();
+            // El error contiene el config existente, no el nuevo.
+            assert_eq!(err, first);
+        });
+    }
+
+    #[test]
+    fn registry_resolved_config_devuelve_default_si_no_hay_explicito() {
+        let mut reg = HttpRegistry::new();
+        assert!(reg.server_config.is_none());
+        assert_eq!(reg.resolved_config(), ServerConfig::default_addr());
+        // Con config explícito sí.
+        reg.server_config = Some(ServerConfig {
+            host: "0.0.0.0".into(),
+            port: 80,
+        });
+        let resolved = reg.resolved_config();
+        assert_eq!(resolved.port, 80);
+        assert_eq!(resolved.host, "0.0.0.0");
     }
 
     // ---- json_to_value (deserialización libre) ----

@@ -702,9 +702,41 @@ Validado manualmente con `curl`:
   — sigue siendo deuda vieja del type system (Fase 5).
 - Query params siguen sin soporte.
 
-#### 4.4 — `@server(...)` configuración
-**Pendiente.** Parsear args (positionals: port, host?). Default
-3000/127.0.0.1. Log de arranque con la URL final.
+#### 4.4 — `@server(...)` configuración ✓
+**Completado** — el programa puede declarar puerto y host del
+server con `@server(port, host)` sobre cualquier `fn` (típicamente
+`fn main()` como placeholder; la fn queda definida en el env pero
+no se ejecuta automáticamente).
+
+- `http::ServerConfig { host: String, port: u16 }` con
+  `default_addr()` (127.0.0.1:3000) y `to_socket_addr()` (parsea
+  el host como IP literal, sin DNS).
+- `HttpRegistry.server_config: Option<ServerConfig>` y
+  `resolved_config()` que devuelve el explícito o el default.
+- `http::set_server_config` impone unicidad: dos `@server` →
+  `Err` con el config previo.
+- Evaluator `register_server_config`:
+  - 0/1/2 args positionals; >2 → error.
+  - Port: Int en `[1, 65535]`, otro tipo/literal → error.
+  - Host: Str literal que parsea como IP (IPv4/IPv6), otro → error.
+  - Sin registry activo → error explícito.
+- `main.rs` usa `registry.resolved_config().to_socket_addr()` antes
+  de llamar a `http::serve`.
+
+Razón de diseño documentada en código: `@server` se aplica como
+decorator sobre una fn (la fn queda definida pero no se ejecuta).
+Mantiene uniformidad con `@get/@post/etc` y evita un caso especial
+en el parser. La forma con named args (`@server(port: 8080)`) sigue
+siendo deuda — espera a que el lenguaje tenga named args en `Call`.
+
+Tests al cerrar 4.4: 595 (581 al cerrar 4.3 + 14 nuevos: 5 en
+`http::tests` para `ServerConfig`/`set_server_config`/
+`resolved_config`, 9 en `evaluator::tests` cubriendo registro
+válido, defaults parciales, errores de tipo, rango, IP inválida,
+doble decorator).
+
+Validado a mano: `@server(8181, "127.0.0.1")` levanta en 8181 y
+3000 no responde.
 
 #### 4.5 — Guía + ejemplos + cierre de fase
 **Pendiente.** Capítulo 17 "HTTP nativo" entre Módulos y Qué sigue

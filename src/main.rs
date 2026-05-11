@@ -111,9 +111,16 @@ fn run_file(path: &PathBuf) {
     }
 
     if !registry.is_empty() {
-        // Default: 127.0.0.1:3000. `@server(...)` configurable llega
-        // en 4.4.
-        let addr: std::net::SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        // Si el programa declaró `@server(port, host)`, usamos eso;
+        // si no, default 127.0.0.1:3000.
+        let config = registry.resolved_config();
+        let addr = match config.to_socket_addr() {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("Error en @server: {}", e);
+                std::process::exit(1);
+            }
+        };
         if let Err(e) = http::serve(registry, addr) {
             eprintln!("Error del servidor HTTP: {}", e);
             std::process::exit(1);

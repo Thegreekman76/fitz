@@ -29,7 +29,8 @@ use crate::ast::{
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::http::{
-    has_active_registry, parse_path_template, push_route, BodyParam, HttpMethod, RouteSpec,
+    has_active_registry, parse_path_template, push_route, set_server_config, BodyParam, HttpMethod,
+    RouteSpec, ServerConfig,
 };
 use crate::lexer::tokenize;
 use crate::parser::parse;
@@ -142,18 +143,109 @@ fn process_decorator(
         return register_http_route(method, deco, fn_name, params, handler, env);
     }
 
-    // Mensaje claro para los que no son HTTP. Cuando 4.4 implemente
-    // `@server`, lo separamos en su propia rama.
+    // `@server(port?, host?)`: configura el server. La fn que decora
+    // queda en el env como cualquier otra (el patrón típico es
+    // ponerlo arriba de `fn main()`).
+    if deco.name == "server" {
+        return register_server_config(deco, fn_name);
+    }
+
+    // Decorador desconocido. Mensaje listo para guiar al usuario.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
         0,
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server.",
             deco.name, fn_name,
         ),
     )))
+}
+
+/// Procesa `@server(port?, host?)`. Args positionals; cualquiera
+/// puede omitirse y se aplica el default correspondiente. La
+/// validación de uniqueness (un solo `@server` por programa) la
+/// hace `http::set_server_config`.
+fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
+    };
+
+    if !has_active_registry() {
+        return Err(err(format!(
+            "@server sobre fn '{}': no hay servidor HTTP activo en este contexto. \
+             Los decoradores HTTP solo funcionan ejecutando el archivo con `fitz run`.",
+            fn_name,
+        )));
+    }
+
+    if deco.args.len() > 2 {
+        return Err(err(format!(
+            "@server(...) sobre fn '{}': admite hasta 2 args positionals \
+             (port, host), recibió {}",
+            fn_name,
+            deco.args.len(),
+        )));
+    }
+
+    // Arrancamos del default y vamos sobreescribiendo.
+    let mut config = ServerConfig::default_addr();
+
+    if let Some(port_expr) = deco.args.first() {
+        match port_expr {
+            Expr::Int(n) => {
+                if *n < 1 || *n > 65535 {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': port {} fuera de rango (debe estar entre 1 y 65535)",
+                        fn_name, n,
+                    )));
+                }
+                config.port = *n as u16;
+            }
+            other => {
+                return Err(err(format!(
+                    "@server sobre fn '{}': primer argumento (port) debe ser Int literal, \
+                     recibió {:?}",
+                    fn_name, other,
+                )));
+            }
+        }
+    }
+
+    if let Some(host_expr) = deco.args.get(1) {
+        match host_expr {
+            Expr::Str(s) => {
+                // Validamos en el momento del registro para no
+                // diferirlo a la hora de levantar el server.
+                if s.parse::<std::net::IpAddr>().is_err() {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': host '{}' no es una IP válida \
+                         (esperado IPv4 o IPv6 literal, sin resolver DNS)",
+                        fn_name, s,
+                    )));
+                }
+                config.host = s.clone();
+            }
+            other => {
+                return Err(err(format!(
+                    "@server sobre fn '{}': segundo argumento (host) debe ser Str literal, \
+                     recibió {:?}",
+                    fn_name, other,
+                )));
+            }
+        }
+    }
+
+    if let Err(existing) = set_server_config(config) {
+        return Err(err(format!(
+            "@server sobre fn '{}': el programa ya tenía un @server configurado \
+             ({}:{}). Solo se admite uno por programa.",
+            fn_name, existing.host, existing.port,
+        )));
+    }
+
+    Ok(())
 }
 
 fn register_http_route(
@@ -5484,6 +5576,124 @@ let r = match n {
         let (res, reg) = with_active_registry(|| parse_and_eval(src));
         res.unwrap();
         assert!(reg.routes[0].body_param.is_some());
+    }
+
+    // ---- @server (Fase 4.4) ----
+
+    #[test]
+    fn server_decorator_setea_port_y_host() {
+        use crate::http::with_active_registry;
+        let src = "\
+            @server(8080, \"0.0.0.0\")\nfn main() => 0\n\
+            @get(\"/\")\nfn h() => \"ok\"\n\
+        ";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert_eq!(cfg.port, 8080);
+        assert_eq!(cfg.host, "0.0.0.0");
+    }
+
+    #[test]
+    fn server_decorator_sin_args_no_pisa_default() {
+        use crate::http::with_active_registry;
+        let src = "@server()\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert_eq!(cfg.port, 3000);
+        assert_eq!(cfg.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn server_decorator_solo_port_usa_host_default() {
+        use crate::http::with_active_registry;
+        let src = "@server(9090)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert_eq!(cfg.port, 9090);
+        assert_eq!(cfg.host, "127.0.0.1");
+    }
+
+    #[test]
+    fn server_port_no_int_es_error() {
+        use crate::http::with_active_registry;
+        let src = "@server(\"8080\")\nfn cfg() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("port") && err.message.contains("Int"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn server_port_fuera_de_rango_es_error() {
+        use crate::http::with_active_registry;
+        let src = "@server(99999)\nfn cfg() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("rango"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn server_host_invalido_es_error() {
+        use crate::http::with_active_registry;
+        let src = "@server(8080, \"no-es-ip\")\nfn cfg() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("no-es-ip") && err.message.contains("IP"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn server_demasiados_args_es_error() {
+        use crate::http::with_active_registry;
+        let src = "@server(8080, \"0.0.0.0\", 42)\nfn cfg() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("2 args"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn server_dos_decorators_es_error() {
+        use crate::http::with_active_registry;
+        let src = "\
+            @server(8080)\nfn a() => 0\n\
+            @server(9090)\nfn b() => 0\n\
+        ";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("ya tenía un @server"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn programa_sin_server_decorator_da_resolved_config_default() {
+        use crate::http::with_active_registry;
+        let src = "@get(\"/\")\nfn h() => 0";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        assert!(reg.server_config.is_none());
+        let cfg = reg.resolved_config();
+        assert_eq!(cfg.host, "127.0.0.1");
+        assert_eq!(cfg.port, 3000);
     }
 
     #[test]
