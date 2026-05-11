@@ -29,7 +29,7 @@ use crate::ast::{
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::http::{
-    has_active_registry, parse_path_template, push_route, HttpMethod, RouteSpec,
+    has_active_registry, parse_path_template, push_route, BodyParam, HttpMethod, RouteSpec,
 };
 use crate::lexer::tokenize;
 use crate::parser::parse;
@@ -135,10 +135,11 @@ fn process_decorator(
     fn_name: &str,
     params: &[Param],
     handler: &Value,
+    env: &EnvRef,
 ) -> Result<(), EvalSignal> {
     // ¿Es un decorator HTTP conocido?
     if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
-        return register_http_route(method, deco, fn_name, params, handler);
+        return register_http_route(method, deco, fn_name, params, handler, env);
     }
 
     // Mensaje claro para los que no son HTTP. Cuando 4.4 implemente
@@ -161,30 +162,31 @@ fn register_http_route(
     fn_name: &str,
     params: &[Param],
     handler: &Value,
+    env: &EnvRef,
 ) -> Result<(), EvalSignal> {
+    // Helper local para mantener los mensajes consistentes.
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
+    };
+
     // Validación 1: el decorator HTTP necesita un único arg con el path.
     if deco.args.len() != 1 {
-        return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
-            0,
-            0,
-            format!(
-                "@{}(...) sobre fn '{}' espera un único argumento (la ruta), \
-                 recibió {}",
-                deco.name,
-                fn_name,
-                deco.args.len(),
-            ),
+        return Err(err(format!(
+            "@{}(...) sobre fn '{}' espera un único argumento (la ruta), \
+             recibió {}",
+            deco.name,
+            fn_name,
+            deco.args.len(),
         )));
     }
 
     // Validación 2: el path se puede traducir a template de axum.
     let template = parse_path_template(&deco.args[0]).map_err(|e| {
-        EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
-            0,
-            0,
-            format!("@{} sobre fn '{}': {}", deco.name, fn_name, e.message()),
+        err(format!(
+            "@{} sobre fn '{}': {}",
+            deco.name,
+            fn_name,
+            e.message()
         ))
     })?;
 
@@ -193,15 +195,10 @@ fn register_http_route(
     // valor por cada `{x}` y simplifica el dispatch.
     for param_name in &template.params {
         if !params.iter().any(|p| &p.name == param_name) {
-            return Err(EvalSignal::Error(FitzError::new(
-                ErrorKind::InvalidSyntax,
-                0,
-                0,
-                format!(
-                    "@{} sobre fn '{}': el path declara '{{{}}}' pero el handler \
-                     no tiene un parámetro con ese nombre",
-                    deco.name, fn_name, param_name,
-                ),
+            return Err(err(format!(
+                "@{} sobre fn '{}': el path declara '{{{}}}' pero el handler \
+                 no tiene un parámetro con ese nombre",
+                deco.name, fn_name, param_name,
             )));
         }
     }
@@ -210,17 +207,44 @@ fn register_http_route(
     // corriendo afuera de `fitz run` (REPL, test, eval embebido) y los
     // decorators HTTP no tienen dónde registrarse.
     if !has_active_registry() {
-        return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
-            0,
-            0,
-            format!(
-                "@{} sobre fn '{}': no hay servidor HTTP activo en este contexto. \
-                 Los decoradores HTTP solo funcionan ejecutando el archivo con \
-                 `fitz run`.",
-                deco.name, fn_name,
-            ),
+        return Err(err(format!(
+            "@{} sobre fn '{}': no hay servidor HTTP activo en este contexto. \
+             Los decoradores HTTP solo funcionan ejecutando el archivo con \
+             `fitz run`.",
+            deco.name, fn_name,
         )));
+    }
+
+    // Identificar el body param: cualquier parámetro que NO esté en
+    // template.params. Máximo uno por handler.
+    let mut body_param: Option<BodyParam> = None;
+    for p in params {
+        if template.params.contains(&p.name) {
+            continue; // es path param
+        }
+        if body_param.is_some() {
+            return Err(err(format!(
+                "@{} sobre fn '{}': solo se admite un parámetro body por handler \
+                 (encontrado '{}', ya había otro)",
+                deco.name, fn_name, p.name,
+            )));
+        }
+        // Resolver el tipo declarado, si lo hay y es un `type` custom
+        // del programa. Si la anotación es un primitivo (`Int`, `Str`,
+        // etc.), un tipo que el env no conoce, o no hay anotación,
+        // `declared_type` queda en `None` y el runtime deserializa
+        // como `Value` libre (Map/List/primitivos).
+        let declared_type = p.type_.as_ref().and_then(|name| {
+            match env.borrow().get(name) {
+                Some(v @ Value::Type { .. }) => Some(v),
+                _ => None,
+            }
+        });
+        body_param = Some(BodyParam {
+            name: p.name.clone(),
+            declared_type,
+            declared_type_name: p.type_.clone(),
+        });
     }
 
     // Empacar tipos de parámetros en el orden declarado del handler.
@@ -238,6 +262,7 @@ fn register_http_route(
         handler: handler.clone(),
         handler_name: fn_name.to_string(),
         param_types,
+        body_param,
     });
 
     Ok(())
@@ -631,8 +656,11 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
 
             // Procesar decorators ANTES de definir la fn en el env. Si
             // alguno falla, no queremos un binding mitad-registrado.
+            // Pasamos el env actual para que el resolver del decorator
+            // pueda mirar el `type` declarado de un parámetro body
+            // (los `type` ya fueron registrados en este mismo env).
             for deco in decorators {
-                process_decorator(deco, name, params, &func)?;
+                process_decorator(deco, name, params, &func, &env)?;
             }
 
             env.borrow_mut().define(name.clone(), func);
@@ -5391,6 +5419,71 @@ let r = match n {
             "mensaje inesperado: {}",
             err.message,
         );
+    }
+
+    #[test]
+    fn fndef_body_se_registra_y_resuelve_type_si_existe() {
+        use crate::http::with_active_registry;
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body\n\
+        ";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        assert_eq!(reg.routes.len(), 1);
+        let route = &reg.routes[0];
+        let bp = route.body_param.as_ref().expect("se esperaba body_param");
+        assert_eq!(bp.name, "body");
+        assert_eq!(bp.declared_type_name.as_deref(), Some("UserInput"));
+        assert!(
+            matches!(&bp.declared_type, Some(Value::Type { name, .. }) if name == "UserInput"),
+            "declared_type debería ser Value::Type 'UserInput'",
+        );
+    }
+
+    #[test]
+    fn fndef_body_sin_tipo_declarado_queda_sin_resolver() {
+        // `body` sin anotación: declared_type = None, runtime
+        // deserializa como Value libre.
+        use crate::http::with_active_registry;
+        let src = "@post(\"/log\")\nfn log(body) => body";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        let bp = reg.routes[0].body_param.as_ref().unwrap();
+        assert_eq!(bp.name, "body");
+        assert!(bp.declared_type.is_none());
+        assert!(bp.declared_type_name.is_none());
+    }
+
+    #[test]
+    fn fndef_dos_body_params_es_error_al_registrar() {
+        use crate::http::with_active_registry;
+        let src = "\
+            type A { x: Int }\n\
+            type B { y: Int }\n\
+            @post(\"/x\")\nfn h(a: A, b: B) => a\n\
+        ";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("solo se admite un parámetro body"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn fndef_get_con_body_se_registra_sin_problema() {
+        // Permitimos body en cualquier verbo; el evaluator no fuerza
+        // semántica de HTTP acá (axum/curl aceptan body en GET).
+        use crate::http::with_active_registry;
+        let src = "\
+            type Q { name: Str }\n\
+            @get(\"/search\")\nfn s(body: Q) => body.name\n\
+        ";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        assert!(reg.routes[0].body_param.is_some());
     }
 
     #[test]

@@ -647,10 +647,60 @@ std::thread propio. Lo que cruza el canal son strings y números.
 - `async fn` se acepta sintácticamente pero no aporta nada en
   runtime (deuda vieja: async real adentro del lenguaje).
 
-#### 4.3 — Body, deserialización, Result auto-handling
-**Pendiente.** `@post`/`@put`/`@delete`. Body validado contra el
-`type` declarado. `Ok(v)`→200, `Err(e)`→500 con `{"error": e}`.
-Errores de deserialización → 400 con mensaje.
+#### 4.3 — Body + deserialización JSON ✓
+**Completado** — handlers POST/PUT/DELETE (y cualquier método)
+pueden declarar un body. El runtime parsea el JSON, valida contra
+el `type` declarado y construye una `Value::Instance` antes de
+invocar al handler. Body sin anotación de tipo llega como
+`Value` libre (Map/List/primitivos).
+
+- AST/Parser: sin cambios (decorators ya genéricos desde 4.1, body
+  es simplemente un parámetro del handler).
+- `http::RouteSpec.body_param: Option<BodyParam>` y
+  `RouteMeta.expects_body: bool`. `BodyParam` lleva nombre, el
+  `Value::Type` declarado (clonado del env durante registro) y el
+  nombre del tipo para mensajes.
+- `http::json_to_value`: deserialización total sin schema. Números
+  enteros → Int, con parte fraccional → Float, objects → Map con
+  claves Str, arrays → List.
+- `http::json_to_instance`: con schema — valida contra los campos
+  del `type` (faltantes con default OK, faltantes nullables → Null,
+  extras → 400 mencionando el nombre, body no objeto → 400). Los
+  defaults soportan literales constantes; defaults complejos
+  (expresiones que usan otros bindings) son deuda explícita.
+- `http::InterpTask` gana `body: Vec<u8>`. `handle_task` parsea el
+  body antes de armar args; body roto o inválido → 400 con mensaje;
+  body vacío con handler que lo espera → 400 ("body requerido").
+- `build_method_router` ahora tiene 4 ramas (path × body) porque
+  los extractors de axum aparecen como args del handler. El helper
+  `wrap(method, h)` evita repetir el match por verbo en cada rama.
+- Convención de registro: cada parámetro del handler es path param
+  (su nombre está en `path_params`) o body. Máximo un body por
+  handler — más de uno → error explícito al registrar.
+- `serde_json` con feature `preserve_order` para que el JSON de
+  respuesta respete el orden declarado del `type`.
+
+Tests al cerrar 4.3: 581 (558 al cerrar 4.2 + 23 nuevos: 15 en el
+módulo http — 3 de `json_to_value`, 6 de `json_to_instance`,
+6 de `handle_task` con body — 4 E2E nuevos sobre `Router::oneshot`,
+y 4 nuevos del evaluator validando registro de body).
+
+Validado manualmente con `curl`:
+  - POST `/users` body válido → 200 con orden de campos preservado.
+  - Campo nullable faltante → `email: null`.
+  - Campo extra → 400 con nombre.
+  - Body JSON roto → 400 con error de parseo.
+  - PUT con path param + body mezclando ambos.
+  - POST con body sin anotación → echo como Value libre.
+
+**Limitaciones de 4.3 (deuda explícita):**
+- Defaults complejos (no literales) en campos del body — fallan
+  silencioso al validar; mensaje sugerente "pasalo explícito".
+- Sin validación de Content-Type: cualquier body se intenta como
+  JSON. Multipart/form-data, urlencoded → cuando hagan falta.
+- Sin validación de tipos compuestos en campos del body (`emails: List<Str>`)
+  — sigue siendo deuda vieja del type system (Fase 5).
+- Query params siguen sin soporte.
 
 #### 4.4 — `@server(...)` configuración
 **Pendiente.** Parsear args (positionals: port, host?). Default

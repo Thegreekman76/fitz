@@ -92,6 +92,33 @@ pub struct RouteSpec {
     /// convertir path params crudos (siempre llegan como string desde
     /// axum) al tipo Fitz correspondiente antes de invocar al handler.
     pub param_types: Vec<(String, Option<String>)>,
+    /// Si el handler declara un parámetro que no es path param, lo
+    /// tratamos como body. Acá guardamos su nombre y, opcionalmente,
+    /// el `Value::Type` declarado (resuelto del env en momento de
+    /// registro). Si el tipo no está declarado, deserializamos el
+    /// JSON como `Value` libre (Map/List/primitivos).
+    ///
+    /// Máximo un body por handler. La validación de cuántos hay y
+    /// que sean compatibles la hace el evaluator durante el registro.
+    pub body_param: Option<BodyParam>,
+}
+
+/// Descripción del parámetro body de un handler: su nombre (para
+/// armar args en el orden correcto) y el `Value::Type` esperado, si
+/// el usuario lo declaró. Sin tipo declarado, deserializamos como
+/// `Value` libre (forma flexible — útil para webhooks o APIs sin
+/// schema).
+#[derive(Debug, Clone)]
+pub struct BodyParam {
+    pub name: String,
+    /// `Some(Value::Type{...})` si el usuario declaró un tipo custom.
+    /// `None` si el parámetro no tiene anotación o si la anotación es
+    /// un primitivo (`Int`, `Str`, etc. — soportamos eso también).
+    pub declared_type: Option<Value>,
+    /// Cuando `declared_type` es `None`, este campo guarda el nombre
+    /// del tipo (si lo hay) para mensajes de error. Si tampoco está
+    /// declarado, `None`.
+    pub declared_type_name: Option<String>,
 }
 
 /// Acumulador de rutas registradas durante `eval`. Construido por
@@ -424,6 +451,185 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
 }
 
 // ---------------------------------------------------------------------------
+// JSON → Value (deserialización del body)
+// ---------------------------------------------------------------------------
+
+/// Convierte un `serde_json::Value` a un `Value` de Fitz "libre" —
+/// sin chequear contra un schema. Útil cuando el handler declara un
+/// body sin anotación de tipo, o con un tipo que no es `type` custom.
+///
+/// Mapeo:
+///   - números enteros → `Int`; con parte fraccional → `Float`.
+///   - strings → `Str`. Bools → `Bool`. null → `Null`.
+///   - arrays → `List` con cada elemento traducido recursivo.
+///   - objects → `Map` con claves `Str` (mantiene orden de inserción
+///     del parser de serde_json).
+///
+/// No falla nunca: cualquier JSON válido produce un `Value`. La
+/// validación contra un `type` específico se hace en
+/// `json_to_instance`.
+pub fn json_to_value(json: &serde_json::Value) -> Value {
+    use crate::value::shared;
+    use serde_json::Value as J;
+
+    match json {
+        J::Null => Value::Null,
+        J::Bool(b) => Value::Bool(*b),
+        J::Number(n) => {
+            if let Some(i) = n.as_i64() {
+                Value::Int(i)
+            } else if let Some(f) = n.as_f64() {
+                Value::Float(f)
+            } else {
+                // u64 que no entra en i64. Lo guardamos como Float
+                // para no perder. Mejor opción hasta que tengamos
+                // BigInt o u64 en el lenguaje.
+                Value::Float(n.as_f64().unwrap_or(0.0))
+            }
+        }
+        J::String(s) => Value::Str(s.clone()),
+        J::Array(items) => {
+            let vs: Vec<Value> = items.iter().map(json_to_value).collect();
+            Value::List(shared(vs))
+        }
+        J::Object(obj) => {
+            let pairs: Vec<(Value, Value)> = obj
+                .iter()
+                .map(|(k, v)| (Value::Str(k.clone()), json_to_value(v)))
+                .collect();
+            Value::Map(shared(pairs))
+        }
+    }
+}
+
+/// Convierte un `serde_json::Value` que se espera sea un objeto a un
+/// `Value::Instance` validado contra los campos del `type` declarado.
+///
+/// Reglas (mismas que `StructLit` en el evaluador):
+///   - Objeto JSON requerido — array, string o número → error.
+///   - Cada campo del type debe estar presente, o tener default, o
+///     ser nullable. Campo faltante sin default ni nullable → error.
+///   - Campos extra (en el JSON pero no en el type) → error explícito.
+///   - El valor de cada campo se convierte recursivamente con
+///     `json_to_value` (sin validación adicional contra el tipo
+///     declarado del campo — la validación de tipos compuestos llega
+///     con el type-checker estático de Fase 5).
+///
+/// Devuelve `Err(msg)` con un mensaje listo para mandar como 400.
+pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<Value, String> {
+    // 1. El segundo arg tiene que ser un Value::Type.
+    let (type_name, fields) = match type_value {
+        Value::Type { name, fields } => (name.clone(), fields.clone()),
+        other => {
+            return Err(format!(
+                "json_to_instance recibió un {} en lugar de un Type",
+                other.type_name(),
+            ));
+        }
+    };
+
+    // 2. El JSON tiene que ser un objeto.
+    let obj = match json {
+        serde_json::Value::Object(map) => map,
+        other => {
+            return Err(format!(
+                "body para '{}' debe ser un objeto JSON, se recibió {}",
+                type_name,
+                json_shape_name(other),
+            ));
+        }
+    };
+
+    // 3. Detectar campos extra antes de construir nada. Mensaje más
+    //    útil acumulando todos los extra, no solo el primero.
+    let field_names: std::collections::HashSet<&str> =
+        fields.iter().map(|f| f.name.as_str()).collect();
+    let extras: Vec<&str> = obj
+        .keys()
+        .filter(|k| !field_names.contains(k.as_str()))
+        .map(|k| k.as_str())
+        .collect();
+    if !extras.is_empty() {
+        return Err(format!(
+            "body para '{}': campo{} no declarado{}: {}",
+            type_name,
+            if extras.len() == 1 { "" } else { "s" },
+            if extras.len() == 1 { "" } else { "s" },
+            extras.join(", "),
+        ));
+    }
+
+    // 4. Recorrer los campos declarados en orden y construir los
+    //    pares. Para cada uno: usar valor del JSON si está, o el
+    //    default evaluado en este contexto si no, o Null si es
+    //    nullable, o error.
+    let mut out: Vec<(String, Value)> = Vec::with_capacity(fields.len());
+    for field in &fields {
+        if let Some(json_val) = obj.get(&field.name) {
+            out.push((field.name.clone(), json_to_value(json_val)));
+        } else if field.default.is_some() {
+            // Los defaults son `Expr` y se evalúan en el env de
+            // instanciación. Acá no tenemos env porque el body se
+            // valida lejos del eval. Para 4.3, los defaults sólo
+            // funcionan si son literales constantes simples; otros
+            // casos requieren más cableado. Lo manejamos en
+            // `default_to_value` (helper local).
+            match default_to_value(field.default.as_ref().unwrap()) {
+                Ok(v) => out.push((field.name.clone(), v)),
+                Err(_) => {
+                    return Err(format!(
+                        "body para '{}': el campo '{}' tiene un default que no se \
+                         puede evaluar sin contexto (Fase 4.3); pasalo explícito \
+                         en el body",
+                        type_name, field.name,
+                    ));
+                }
+            }
+        } else if field.nullable {
+            out.push((field.name.clone(), Value::Null));
+        } else {
+            return Err(format!(
+                "body para '{}': falta el campo '{}'",
+                type_name, field.name,
+            ));
+        }
+    }
+
+    Ok(Value::new_instance(type_name, out))
+}
+
+/// Nombre humano para el shape de un JSON value, útil en mensajes.
+fn json_shape_name(v: &serde_json::Value) -> &'static str {
+    match v {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "bool",
+        serde_json::Value::Number(_) => "número",
+        serde_json::Value::String(_) => "string",
+        serde_json::Value::Array(_) => "array",
+        serde_json::Value::Object(_) => "object",
+    }
+}
+
+/// Evalúa un default literal del AST a un `Value`. Soporta literales
+/// directos (los más comunes en defaults de `type`); cualquier otra
+/// cosa devuelve `Err(())` y el caller decide qué hacer.
+///
+/// No tenemos un env aquí porque corremos del lado del runtime HTTP,
+/// no adentro de eval. En 4.x, si necesitamos defaults complejos,
+/// evaluamos al momento de registrar la ruta y guardamos el valor
+/// resuelto.
+fn default_to_value(expr: &Expr) -> Result<Value, ()> {
+    match expr {
+        Expr::Int(n) => Ok(Value::Int(*n)),
+        Expr::Float(f) => Ok(Value::Float(*f)),
+        Expr::Str(s) => Ok(Value::Str(s.clone())),
+        Expr::Bool(b) => Ok(Value::Bool(*b)),
+        Expr::Null => Ok(Value::Null),
+        _ => Err(()),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Path params crudos → Value con el tipo declarado
 // ---------------------------------------------------------------------------
 
@@ -518,6 +724,11 @@ pub struct RouteMeta {
     pub method: HttpMethod,
     pub path: String,
     pub has_path_params: bool,
+    /// `true` si el handler declara un parámetro body. Sirve para
+    /// que el handler de axum sepa si extraer el body de la request
+    /// y mandarlo al intérprete. Cuando es `false`, ignoramos
+    /// cualquier body recibido.
+    pub expects_body: bool,
 }
 
 impl HttpRegistry {
@@ -530,6 +741,7 @@ impl HttpRegistry {
                 method: r.method,
                 path: r.path.clone(),
                 has_path_params: !r.path_params.is_empty(),
+                expects_body: r.body_param.is_some(),
             })
             .collect()
     }
@@ -543,6 +755,11 @@ pub struct InterpTask {
     /// Path params crudos extraídos por axum (siempre llegan como
     /// strings; la coerción al tipo declarado la hace el intérprete).
     pub path_params: HashMap<String, String>,
+    /// Body crudo de la request. Vacío cuando el handler no declara
+    /// body — axum no lo extrae en ese caso, pero igual mandamos
+    /// `Vec` para uniformidad. Bytes para no forzar UTF-8 acá; la
+    /// validación de que sea JSON parseable la hace el intérprete.
+    pub body: Vec<u8>,
     pub reply: oneshot::Sender<HandlerOutcome>,
 }
 
@@ -561,47 +778,83 @@ pub type TaskTx = mpsc::UnboundedSender<InterpTask>;
 pub fn build_router(metas: &[RouteMeta], tx: TaskTx) -> Router {
     let mut router = Router::new();
     for (idx, meta) in metas.iter().enumerate() {
-        let route_handler = build_method_router(meta.method, idx, tx.clone(), meta.has_path_params);
+        let route_handler = build_method_router(
+            meta.method,
+            idx,
+            tx.clone(),
+            meta.has_path_params,
+            meta.expects_body,
+        );
         router = router.route(&meta.path, route_handler);
     }
     router
 }
 
 /// Construye un `MethodRouter` con el handler async correspondiente
-/// al verbo. Separamos dos variantes según haya o no path params para
-/// que axum nos extraiga los params automáticamente cuando hace falta.
+/// al verbo. Las cuatro combinaciones (path_params × body) viven en
+/// cuatro closures distintos porque los extractors de axum aparecen
+/// como argumentos del handler — no se pueden hacer condicionales.
 fn build_method_router(
     method: HttpMethod,
     route_idx: usize,
     tx: TaskTx,
     has_path_params: bool,
+    expects_body: bool,
 ) -> MethodRouter {
     use axum::routing::{delete, get, post, put};
 
-    if has_path_params {
-        // Handler con extracción de `Path<HashMap<String,String>>`.
-        let h = move |AxumPath(params): AxumPath<HashMap<String, String>>| {
-            let tx = tx.clone();
-            async move { dispatch_request(route_idx, params, tx).await }
-        };
-        match method {
-            HttpMethod::Get => get(h),
-            HttpMethod::Post => post(h),
-            HttpMethod::Put => put(h),
-            HttpMethod::Delete => delete(h),
+    match (has_path_params, expects_body) {
+        (false, false) => {
+            let h = move || {
+                let tx = tx.clone();
+                async move {
+                    dispatch_request(route_idx, HashMap::new(), Vec::new(), tx).await
+                }
+            };
+            wrap(method, h)
         }
-    } else {
-        // Handler sin path params.
-        let h = move || {
-            let tx = tx.clone();
-            async move { dispatch_request(route_idx, HashMap::new(), tx).await }
-        };
-        match method {
-            HttpMethod::Get => get(h),
-            HttpMethod::Post => post(h),
-            HttpMethod::Put => put(h),
-            HttpMethod::Delete => delete(h),
+        (true, false) => {
+            let h = move |AxumPath(params): AxumPath<HashMap<String, String>>| {
+                let tx = tx.clone();
+                async move { dispatch_request(route_idx, params, Vec::new(), tx).await }
+            };
+            wrap(method, h)
         }
+        (false, true) => {
+            let h = move |body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    dispatch_request(route_idx, HashMap::new(), body.to_vec(), tx).await
+                }
+            };
+            wrap(method, h)
+        }
+        (true, true) => {
+            let h = move |AxumPath(params): AxumPath<HashMap<String, String>>,
+                          body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    dispatch_request(route_idx, params, body.to_vec(), tx).await
+                }
+            };
+            wrap(method, h)
+        }
+    }
+}
+
+/// Mapea `HttpMethod` al constructor de axum (`get`/`post`/`put`/`delete`)
+/// aplicado al handler dado.
+fn wrap<H, T>(method: HttpMethod, h: H) -> MethodRouter
+where
+    H: axum::handler::Handler<T, ()>,
+    T: 'static,
+{
+    use axum::routing::{delete, get, post, put};
+    match method {
+        HttpMethod::Get => get(h),
+        HttpMethod::Post => post(h),
+        HttpMethod::Put => put(h),
+        HttpMethod::Delete => delete(h),
     }
 }
 
@@ -611,12 +864,14 @@ fn build_method_router(
 async fn dispatch_request(
     route_idx: usize,
     path_params: HashMap<String, String>,
+    body: Vec<u8>,
     tx: TaskTx,
 ) -> Response {
     let (reply_tx, reply_rx) = oneshot::channel();
     let task = InterpTask {
         route_idx,
         path_params,
+        body,
         reply: reply_tx,
     };
     if tx.send(task).is_err() {
@@ -664,7 +919,7 @@ pub fn run_interpreter_loop(
     mut rx: mpsc::UnboundedReceiver<InterpTask>,
 ) {
     while let Some(task) = rx.blocking_recv() {
-        let outcome = handle_task(&registry, task.route_idx, task.path_params);
+        let outcome = handle_task(&registry, task.route_idx, task.path_params, task.body);
         // Si el oneshot del lado axum se cerró (cliente desconectado,
         // timeout), no hay nada que hacer con el outcome — descartar.
         let _ = task.reply.send(outcome);
@@ -676,6 +931,7 @@ fn handle_task(
     registry: &HttpRegistry,
     route_idx: usize,
     raw_path_params: HashMap<String, String>,
+    body_bytes: Vec<u8>,
 ) -> HandlerOutcome {
     let Some(route) = registry.routes.get(route_idx) else {
         return HandlerOutcome::internal_error(format!(
@@ -684,16 +940,33 @@ fn handle_task(
         ));
     };
 
+    // Si el handler espera body, parsearlo y prepararlo. Lo hacemos
+    // antes de armar args para fallar temprano si el JSON está roto.
+    let body_value: Option<Value> = if let Some(bp) = &route.body_param {
+        match parse_body(&body_bytes, bp) {
+            Ok(v) => Some(v),
+            Err(msg) => {
+                return HandlerOutcome::json(
+                    400,
+                    serde_json::json!({ "error": msg }),
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     // Armar args en el orden declarado del handler. Para cada
     // parámetro:
     //   - si su nombre coincide con un path param, coercionar el
     //     valor crudo al tipo declarado;
-    //   - si no, error explícito (en 4.2 no soportamos otros params:
-    //     query y body llegan en 4.3+).
+    //   - si es el body param, usar el valor parseado;
+    //   - cualquier otro caso (no path, no body) es un bug del
+    //     registro: el evaluator no permite registrarlo.
     let mut args = Vec::with_capacity(route.param_types.len());
     for (name, declared_type) in &route.param_types {
-        match raw_path_params.get(name) {
-            Some(raw) => match coerce_path_param(raw, declared_type.as_deref()) {
+        if let Some(raw) = raw_path_params.get(name) {
+            match coerce_path_param(raw, declared_type.as_deref()) {
                 Ok(v) => args.push(v),
                 Err(msg) => {
                     return HandlerOutcome::json(
@@ -703,17 +976,17 @@ fn handle_task(
                         }),
                     );
                 }
-            },
-            None => {
-                // Parámetro del handler que no es path param. En 4.2
-                // esto es un error de diseño del usuario: no tenemos
-                // body ni query, así que el param queda sin valor.
-                return HandlerOutcome::internal_error(format!(
-                    "parámetro '{}' del handler '{}' no es un path param y \
-                     body/query aún no están soportados (Fase 4.3)",
-                    name, route.handler_name,
-                ));
             }
+        } else if route.body_param.as_ref().map(|bp| bp.name.as_str()) == Some(name) {
+            // Body param: ya parseado arriba; tomarlo de `body_value`.
+            // unwrap es seguro porque body_value es Some sii hay body_param.
+            args.push(body_value.clone().unwrap());
+        } else {
+            return HandlerOutcome::internal_error(format!(
+                "parámetro '{}' del handler '{}' no es ni path param ni body — \
+                 esto es un bug interno del registro",
+                name, route.handler_name,
+            ));
         }
     }
 
@@ -722,6 +995,31 @@ fn handle_task(
     match call_handler(route.handler.clone(), args, &route.handler_name) {
         Ok(value) => value_to_outcome(&value),
         Err(err) => HandlerOutcome::internal_error(err.message),
+    }
+}
+
+/// Parsea los bytes del body en un `Value` Fitz según la convención
+/// del body param:
+///   - JSON inválido → error 400 con mensaje claro.
+///   - Si el body param tiene `declared_type: Some(Value::Type)`,
+///     validamos contra el type (campos faltantes, extras, etc.) y
+///     construimos un `Value::Instance`.
+///   - Si no, deserializamos a `Value` libre (Map/List/primitivos).
+fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
+    // Body vacío para un handler que espera body → error claro. Esto
+    // pasa con `POST /users` sin body cuando el handler declara
+    // `body: User`.
+    if bytes.is_empty() {
+        return Err(format!(
+            "body requerido para el parámetro '{}' pero la request no trajo body",
+            bp.name,
+        ));
+    }
+    let json: serde_json::Value = serde_json::from_slice(bytes)
+        .map_err(|e| format!("body no es JSON válido: {}", e))?;
+    match &bp.declared_type {
+        Some(t) => json_to_instance(&json, t),
+        None => Ok(json_to_value(&json)),
     }
 }
 
@@ -1112,7 +1410,7 @@ mod tests {
         // `@get("/") fn hello() => "hola"`
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"hola\"");
     }
@@ -1123,7 +1421,7 @@ mod tests {
         let registry = registry_from_source(src);
         let mut params = HashMap::new();
         params.insert("id".into(), "21".into());
-        let outcome = handle_task(&registry, 0, params);
+        let outcome = handle_task(&registry, 0, params, Vec::new());
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "42");
     }
@@ -1134,7 +1432,7 @@ mod tests {
         let registry = registry_from_source(src);
         let mut params = HashMap::new();
         params.insert("id".into(), "no-es-int".into());
-        let outcome = handle_task(&registry, 0, params);
+        let outcome = handle_task(&registry, 0, params, Vec::new());
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("Int"));
     }
@@ -1144,7 +1442,7 @@ mod tests {
         // El handler devuelve Err("boom"): runtime lo traduce a 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("boom"));
     }
@@ -1156,10 +1454,251 @@ mod tests {
             @get(\"/u\")\nfn h() => User { id: 1, name: \"ana\" }\n\
         ";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
+    }
+
+    // ---- json_to_value (deserialización libre) ----
+
+    #[test]
+    fn json_to_value_primitivos() {
+        assert_eq!(json_to_value(&serde_json::json!(null)), Value::Null);
+        assert_eq!(json_to_value(&serde_json::json!(true)), Value::Bool(true));
+        assert_eq!(json_to_value(&serde_json::json!(42)), Value::Int(42));
+        assert_eq!(json_to_value(&serde_json::json!(3.14)), Value::Float(3.14));
+        assert_eq!(
+            json_to_value(&serde_json::json!("hola")),
+            Value::Str("hola".into())
+        );
+    }
+
+    #[test]
+    fn json_to_value_array_se_vuelve_list() {
+        let v = json_to_value(&serde_json::json!([1, 2, "tres"]));
+        match v {
+            Value::List(items) => {
+                let items = items.borrow();
+                assert_eq!(items.len(), 3);
+                assert_eq!(items[0], Value::Int(1));
+                assert_eq!(items[2], Value::Str("tres".into()));
+            }
+            _ => panic!("se esperaba List"),
+        }
+    }
+
+    #[test]
+    fn json_to_value_object_se_vuelve_map_con_claves_str() {
+        let v = json_to_value(&serde_json::json!({ "a": 1, "b": "x" }));
+        match v {
+            Value::Map(pairs) => {
+                let pairs = pairs.borrow();
+                assert_eq!(pairs.len(), 2);
+                // El orden de serde_json::Map depende de la feature
+                // `preserve_order`. No la asumimos: convertimos a un
+                // map auxiliar para comparar.
+                let as_map: std::collections::HashMap<String, Value> = pairs
+                    .iter()
+                    .map(|(k, v)| {
+                        let k = match k {
+                            Value::Str(s) => s.clone(),
+                            _ => panic!("clave no Str"),
+                        };
+                        (k, v.clone())
+                    })
+                    .collect();
+                assert_eq!(as_map.get("a"), Some(&Value::Int(1)));
+                assert_eq!(as_map.get("b"), Some(&Value::Str("x".into())));
+            }
+            _ => panic!("se esperaba Map"),
+        }
+    }
+
+    // ---- json_to_instance (validación contra Value::Type) ----
+
+    /// Helper: arma un `Value::Type` con los campos dados. Cada
+    /// campo es `(nombre, tipo, nullable, default)`.
+    fn type_value(name: &str, fields: Vec<(&str, &str, bool, Option<Expr>)>) -> Value {
+        Value::Type {
+            name: name.into(),
+            fields: fields
+                .into_iter()
+                .map(|(n, t, nullable, default)| crate::ast::Field {
+                    name: n.into(),
+                    type_: t.into(),
+                    nullable,
+                    default,
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn json_to_instance_caso_feliz() {
+        let t = type_value("User", vec![
+            ("id", "Int", false, None),
+            ("name", "Str", false, None),
+        ]);
+        let json = serde_json::json!({ "id": 1, "name": "ana" });
+        let v = json_to_instance(&json, &t).unwrap();
+        match v {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                let fields = fields.borrow();
+                assert_eq!(fields[0].0, "id");
+                assert_eq!(fields[0].1, Value::Int(1));
+                assert_eq!(fields[1].0, "name");
+                assert_eq!(fields[1].1, Value::Str("ana".into()));
+            }
+            _ => panic!("se esperaba Instance"),
+        }
+    }
+
+    #[test]
+    fn json_to_instance_campo_faltante_sin_default_ni_nullable_es_error() {
+        let t = type_value("User", vec![
+            ("id", "Int", false, None),
+            ("name", "Str", false, None),
+        ]);
+        let json = serde_json::json!({ "id": 1 });
+        let err = json_to_instance(&json, &t).unwrap_err();
+        assert!(err.contains("name"));
+        assert!(err.contains("falta"));
+    }
+
+    #[test]
+    fn json_to_instance_campo_extra_es_error() {
+        let t = type_value("User", vec![("id", "Int", false, None)]);
+        let json = serde_json::json!({ "id": 1, "rogue": "x" });
+        let err = json_to_instance(&json, &t).unwrap_err();
+        assert!(err.contains("rogue"));
+        assert!(err.contains("no declarado"));
+    }
+
+    #[test]
+    fn json_to_instance_campo_nullable_faltante_queda_null() {
+        let t = type_value("User", vec![
+            ("id", "Int", false, None),
+            ("email", "Str", true, None),
+        ]);
+        let json = serde_json::json!({ "id": 1 });
+        let v = json_to_instance(&json, &t).unwrap();
+        match v {
+            Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
+                assert_eq!(fields[1].0, "email");
+                assert_eq!(fields[1].1, Value::Null);
+            }
+            _ => panic!("se esperaba Instance"),
+        }
+    }
+
+    #[test]
+    fn json_to_instance_default_literal_se_usa_si_falta() {
+        let t = type_value("User", vec![
+            ("id", "Int", false, None),
+            ("active", "Bool", false, Some(Expr::Bool(true))),
+        ]);
+        let json = serde_json::json!({ "id": 1 });
+        let v = json_to_instance(&json, &t).unwrap();
+        match v {
+            Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
+                assert_eq!(fields[1].0, "active");
+                assert_eq!(fields[1].1, Value::Bool(true));
+            }
+            _ => panic!("se esperaba Instance"),
+        }
+    }
+
+    #[test]
+    fn json_to_instance_body_no_objeto_es_error() {
+        let t = type_value("User", vec![("id", "Int", false, None)]);
+        let json = serde_json::json!([1, 2, 3]);
+        let err = json_to_instance(&json, &t).unwrap_err();
+        assert!(err.contains("objeto"));
+        assert!(err.contains("array"));
+    }
+
+    // ---- handle_task con body ----
+
+    #[test]
+    fn handle_task_post_sin_body_pero_handler_lo_espera_es_400() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body\n\
+        ";
+        let registry = registry_from_source(src);
+        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
+        assert_eq!(outcome.status, 400);
+        assert!(outcome.body.contains("body requerido"));
+    }
+
+    #[test]
+    fn handle_task_post_con_body_valido_construye_instance() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body.name\n\
+        ";
+        let registry = registry_from_source(src);
+        let body = br#"{"name":"fitz"}"#.to_vec();
+        let outcome = handle_task(&registry, 0, HashMap::new(), body);
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, "\"fitz\"");
+    }
+
+    #[test]
+    fn handle_task_post_body_json_invalido_es_400() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body\n\
+        ";
+        let registry = registry_from_source(src);
+        let outcome = handle_task(&registry, 0, HashMap::new(), b"not json".to_vec());
+        assert_eq!(outcome.status, 400);
+        assert!(outcome.body.contains("JSON"));
+    }
+
+    #[test]
+    fn handle_task_post_body_campo_faltante_es_400() {
+        let src = "\
+            type UserInput { name: Str, email: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body\n\
+        ";
+        let registry = registry_from_source(src);
+        let body = br#"{"name":"fitz"}"#.to_vec();
+        let outcome = handle_task(&registry, 0, HashMap::new(), body);
+        assert_eq!(outcome.status, 400);
+        assert!(outcome.body.contains("email"));
+    }
+
+    #[test]
+    fn handle_task_put_con_path_param_y_body() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @put(\"/users/{id}\")\nfn upd(id: Int, body: UserInput) => body.name\n\
+        ";
+        let registry = registry_from_source(src);
+        let mut params = HashMap::new();
+        params.insert("id".into(), "7".into());
+        let body = br#"{"name":"ana"}"#.to_vec();
+        let outcome = handle_task(&registry, 0, params, body);
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, "\"ana\"");
+    }
+
+    #[test]
+    fn handle_task_body_sin_anotacion_de_tipo_acepta_libre() {
+        // `body` sin tipo → llega como Map<Str,Value>.
+        let src = "\
+            @post(\"/log\")\nfn log(body) => body[\"name\"]\n\
+        ";
+        let registry = registry_from_source(src);
+        let body = br#"{"name":"x"}"#.to_vec();
+        let outcome = handle_task(&registry, 0, HashMap::new(), body);
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, "\"x\"");
     }
 
     // ---- build_router + oneshot E2E ----
@@ -1185,6 +1724,18 @@ mod tests {
         method: axum::http::Method,
         path: &str,
     ) -> (u16, String) {
+        run_oneshot_with_body(src, method, path, None).await
+    }
+
+    /// Como `run_oneshot` pero con body opcional. Si `body` es
+    /// `Some(s)`, se manda como `application/json` (aunque el runtime
+    /// hoy no valida content-type).
+    async fn run_oneshot_with_body(
+        src: &str,
+        method: axum::http::Method,
+        path: &str,
+        body: Option<&'static str>,
+    ) -> (u16, String) {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
@@ -1196,10 +1747,15 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async move {
+                let req_body = match body {
+                    Some(s) => Body::from(s),
+                    None => Body::empty(),
+                };
                 let req = axum::http::Request::builder()
                     .method(method)
                     .uri(path)
-                    .body(Body::empty())
+                    .header("content-type", "application/json")
+                    .body(req_body)
                     .unwrap();
                 let mut resp_fut = Box::pin(router.oneshot(req));
 
@@ -1222,6 +1778,7 @@ mod tests {
                                 &registry,
                                 task.route_idx,
                                 task.path_params,
+                                task.body,
                             );
                             let _ = task.reply.send(outcome);
                         }
@@ -1314,6 +1871,73 @@ mod tests {
         assert_eq!(parsed, serde_json::json!({ "error": "boom" }));
     }
 
+    #[tokio::test]
+    async fn e2e_post_con_body_valido_construye_instance() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body.name\n\
+        ";
+        let (status, body) = run_oneshot_with_body(
+            src,
+            axum::http::Method::POST,
+            "/users",
+            Some(r#"{"name":"fitz"}"#),
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"fitz\"");
+    }
+
+    #[tokio::test]
+    async fn e2e_post_body_invalido_devuelve_400() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body\n\
+        ";
+        let (status, body) = run_oneshot_with_body(
+            src,
+            axum::http::Method::POST,
+            "/users",
+            Some("not json"),
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("JSON"));
+    }
+
+    #[tokio::test]
+    async fn e2e_put_con_path_param_y_body() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @put(\"/users/{id}\")\nfn upd(id: Int, body: UserInput) {\n\
+                return User { id: id, name: body.name }\n\
+            }\n\
+            type User { id: Int, name: Str }\n\
+        ";
+        let (status, body) = run_oneshot_with_body(
+            src,
+            axum::http::Method::PUT,
+            "/users/42",
+            Some(r#"{"name":"ana"}"#),
+        )
+        .await;
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "id": 42, "name": "ana" }));
+    }
+
+    #[tokio::test]
+    async fn e2e_post_sin_body_pero_handler_espera_es_400() {
+        let src = "\
+            type UserInput { name: Str }\n\
+            @post(\"/users\")\nfn create(body: UserInput) => body\n\
+        ";
+        let (status, body) =
+            run_oneshot(src, axum::http::Method::POST, "/users").await;
+        assert_eq!(status, 400);
+        assert!(body.contains("body requerido"));
+    }
+
     #[test]
     fn push_route_acumula_en_el_registry_activo() {
         let ((), reg) = with_active_registry(|| {
@@ -1330,6 +1954,7 @@ mod tests {
                 handler,
                 handler_name: "index".into(),
                 param_types: vec![],
+                body_param: None,
             });
         });
         assert_eq!(reg.routes.len(), 1);
