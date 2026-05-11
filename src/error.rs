@@ -19,6 +19,7 @@ pub enum ErrorKind {
     // Errores de lexer
     UnexpectedChar(char),
     UnterminatedString,
+    UnterminatedComment,
 
     // Errores de parser
     UnexpectedToken,

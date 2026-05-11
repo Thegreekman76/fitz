@@ -6,3 +6,6 @@ Cargo.lock
 # Windows
 Thumbs.db
 desktop.ini
+
+# Editor/tooling local config
+.claude/

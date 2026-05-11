@@ -3,16 +3,16 @@
 ---
 
 ## Fase 1 — Aprender Rust 🦀
-**Estado: EN PROGRESO**
+**Estado: COMPLETADA**
 
 Antes de escribir el compilador, dominar las herramientas.
 
 ### Objetivos
-- [ ] The Book capítulos 1-10 (rustlang-es.org)
-- [ ] Rustlings — ejercicios básicos completos
-- [ ] Entender ownership, borrowing y lifetimes
-- [ ] Entender enums y pattern matching
-- [ ] Primer proyecto Rust propio (pequeño)
+- [x] The Book capítulos 1-10 (rustlang-es.org)
+- [x] Rustlings — ejercicios básicos completos
+- [x] Entender ownership, borrowing y lifetimes
+- [x] Entender enums y pattern matching
+- [x] Primer proyecto Rust propio (pequeño)
 
 ### Recursos
 - https://book.rustlang-es.org
@@ -25,14 +25,15 @@ Poder escribir un lexer básico en Rust sin consultar el libro en cada línea.
 ---
 
 ## Fase 2 — Intérprete base 🔬
-**Estado: PENDIENTE**
+**Estado: EN PROGRESO**
 
 El corazón del lenguaje. Al final de esta fase, Fitz puede ejecutar
 programas básicos.
 
 ### Módulos a implementar
 
-#### 2.1 Lexer
+#### 2.1 Lexer ✓
+**Completado** — `src/lexer.rs` con 16 tests pasando.
 Convierte texto fuente en tokens.
 
 ```
@@ -48,7 +49,8 @@ Tokens necesarios:
 - Decoradores: @get, @post, @put, @delete, @server
 - Identificadores y comentarios
 
-#### 2.2 AST (Abstract Syntax Tree)
+#### 2.2 AST (Abstract Syntax Tree) ✓
+**Completado** — `src/ast.rs` con 3 tests pasando. Soporta el programa del criterio de éxito de Fase 2 (incluye `StrInterp` para interpolación).
 Define las estructuras de datos que representan el programa.
 
 ```rust
@@ -72,7 +74,7 @@ enum Stmt {
 }
 ```
 
-#### 2.3 Parser
+#### 2.3 Parser — PENDIENTE
 Convierte tokens en AST.
 
 ```
@@ -80,7 +82,7 @@ Convierte tokens en AST.
 → Let { name: "x", value: BinOp { op: Add, left: Int(42), right: Int(1) } }
 ```
 
-#### 2.4 Evaluador
+#### 2.4 Evaluador — PENDIENTE
 Recorre el AST y ejecuta el programa.
 
 ### Criterio de completitud

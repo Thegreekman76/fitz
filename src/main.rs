@@ -70,12 +70,21 @@ fn run_file(path: &PathBuf) {
     println!("   Ejecutando: {}", path.display());
     println!("   (intérprete en construcción — Fase 2)\n");
 
-    // TODO Fase 2:
-    // let tokens = lexer::tokenize(&source);
+    // Fase 2.1: lexer
+    match lexer::tokenize(&source) {
+        Ok(tokens) => {
+            println!("--- Tokens ---");
+            for tok in &tokens {
+                println!("  {:>4}:{:<3}  {:?}", tok.line, tok.column, tok.token);
+            }
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    }
+
+    // TODO Fase 2.2–2.4:
     // let ast = parser::parse(tokens);
     // evaluator::eval(ast);
-
-    // Por ahora, mostrar el source como placeholder
-    println!("--- Fuente ---");
-    println!("{}", source);
 }

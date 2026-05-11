@@ -66,7 +66,7 @@ Un binario. Sin dependencias en producción.
 
 ## Estado del proyecto
 
-🚧 **En desarrollo activo — Fase 1: Intérprete base**
+🚧 **En desarrollo activo — Fase 2: Intérprete base** (lexer y AST completos, parser en camino)
 
 Ver [roadmap](docs/roadmap.md) para el estado detallado.
 

@@ -32,8 +32,12 @@ Fitz intenta resolver exactamente eso.
 
 ## Estado actual
 
-Fase 1 — Aprender Rust (en progreso)
-Fase 2 — Intérprete base (pendiente)
+Fase 1 — Aprender Rust (completada)
+Fase 2 — Intérprete base (en progreso)
+  - 2.1 Lexer ✓ (16 tests pasando)
+  - 2.2 AST ✓ (3 tests pasando, soporta el programa del criterio de éxito de Fase 2)
+  - 2.3 Parser — pendiente
+  - 2.4 Evaluador — pendiente
 
 Ver docs/roadmap.md para detalle completo.
 
@@ -47,7 +51,7 @@ Ver docs/syntax-spec.md para la especificación completa de sintaxis.
 fitz/
 ├── CLAUDE.md              # este archivo
 ├── README.md              # presentación pública
-├── Cargo.toml             # proyecto Rust (cuando arranque Fase 2)
+├── Cargo.toml             # proyecto Rust
 ├── src/
 │   ├── main.rs            # entry point
 │   ├── lexer.rs           # tokenización
@@ -60,11 +64,11 @@ fitz/
 │   ├── types.fitz
 │   └── server.fitz
 └── docs/
-    ├── vision.md          # por qué y para quién
-    ├── syntax-spec.md     # especificación de sintaxis
-    ├── roadmap.md         # fases de desarrollo
-    ├── naming.md          # decisiones de diseño
-    └── references.md      # recursos y referencias
+    ├── vision.md            # por qué y para quién
+    ├── syntax-spec.md       # especificación de sintaxis
+    ├── roadmap.md           # fases de desarrollo
+    ├── design-decisions.md  # decisiones de diseño y razones
+    └── references.md        # recursos y referencias
 ```
 
 ## Decisiones de diseño importantes
