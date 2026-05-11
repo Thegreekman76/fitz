@@ -74,8 +74,10 @@ enum Stmt {
 }
 ```
 
-#### 2.3 Parser — EN PROGRESO
-Convierte tokens en AST mediante recursive descent.
+#### 2.3 Parser ✓
+**Completado** — `src/parser.rs` con 111 tests pasando. Convierte tokens
+en AST mediante recursive descent. El criterio de éxito de Fase 2 parsea
+end-to-end (lexer → parser → AST).
 
 ```
 [Let, Ident("x"), Eq, Int(42), Plus, Int(1)]
@@ -108,6 +110,18 @@ Convierte tokens en AST mediante recursive descent.
 - **Posición de errores en subexpresiones de interpolación** — se reporta
   la posición del string entero, no la posición interna del `{...}`
   ofensor. Aceptable para v0.1.
+- **Patrones de match** — solo `Ident`, `_` (wildcard), `Ok(x)`, `Err(e)`.
+  No hay patrones literales (`"active"`), rangos (`0..12`), tuples ni
+  listas. El AST tampoco los modela todavía.
+- **Struct literals (`User { id: 1, name: "x" }`)** — el AST no los
+  modela. Por ahora la instanciación tiene que hacerse vía función
+  constructora.
+- **Listas y mapas literales (`[]`, `[1,2]`, `{"k": v}`)** — ni el lexer
+  los reconoce especialmente ni el AST tiene `Expr::List`/`Expr::Map`.
+- **Tipos compuestos en anotaciones (`List<T>`, `Map<K,V>`, `Str?`)** —
+  `Stmt::Assign.type_` y `Param.type_` son `Option<String>`, solo
+  nombres simples. (El `?` post-tipo SÍ se modela en campos de `type`
+  vía `Field.nullable`, pero no en anotaciones de variables/parámetros.)
 - **Error recovery** — el primer error mata el parseo. Sin paniqueo y
   resincronización todavía.
 
