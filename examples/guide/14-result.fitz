@@ -1,4 +1,4 @@
-// 12-result.fitz — Manejo de errores con Result, Ok, Err y `?`.
+// 14-result.fitz — Manejo de errores con Result, Ok, Err y `?`.
 
 type User { id: Int, name: Str }
 

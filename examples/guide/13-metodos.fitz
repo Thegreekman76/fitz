@@ -1,0 +1,54 @@
+// 13-metodos.fitz — Métodos sobre listas, mapas y strings; mutación de campos.
+
+type User { id: Int, name: Str }
+
+let usuarios = [
+    User { id: 1, name: "Fitz" },
+    User { id: 2, name: "Roy" },
+]
+
+// `.push` muta la lista — agrega al final.
+usuarios.push(User { id: 3, name: "Cerro" })
+print(usuarios.len())
+
+// `.map` devuelve una lista nueva con cada elemento transformado.
+let nombres = usuarios.map(fn(u) => u.name)
+print(nombres)
+
+// `.filter` devuelve los que cumplen el predicado.
+let con_o = usuarios.filter(fn(u) => u.name.lower() == "roy")
+print(con_o)
+
+// `.find` devuelve Ok(elemento) o Err si no encuentra.
+let buscado = usuarios.find(fn(u) => u.id == 1)
+print(buscado)
+
+let no_encontrado = usuarios.find(fn(u) => u.id == 99)
+print(no_encontrado)
+
+// Combinado con match: el patrón típico para consumir un Result.
+let primero = usuarios.find(fn(u) => u.id == 1)
+match primero {
+    Ok(u)  => print("hola, {u.name}!")
+    Err(e) => print("no debería pasar: {e}")
+}
+
+// Mutación de campo: visible vía cualquier alias a la misma instancia.
+// `usuarios[0]` y `primer` apuntan a la misma User (alias por referencia),
+// así que mutar por `primer` se ve en la lista original.
+let primer = usuarios[0]
+primer.name = "Patagonia"
+print(usuarios)
+
+// Métodos sobre mapas.
+let m = {"a": 1, "b": 2, "c": 3}
+print(m.has("a"))
+print(m.get("z"))
+print(m.keys())
+print(m.values())
+print(m.len())
+
+// Métodos sobre strings.
+print("Hola".upper())
+print("MUNDO".lower())
+print("hola".len())

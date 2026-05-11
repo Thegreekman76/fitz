@@ -1,4 +1,4 @@
-// 03-operadores.fitz — Aritmética, comparación e igualdad.
+// 04-operadores.fitz — Aritmética, comparación e igualdad.
 
 // Aritmética entre Int — el resultado también es Int.
 print(2 + 3)

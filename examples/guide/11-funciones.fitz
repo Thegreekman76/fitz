@@ -1,4 +1,4 @@
-// 09-funciones.fitz — Funciones, recursión y closures.
+// 11-funciones.fitz — Funciones, recursión y closures.
 
 // Forma de bloque.
 fn greet(name) {
@@ -43,3 +43,13 @@ print(add5(3))
 fn apply(f, x) => f(x)
 fn square(n) => n * n
 print(apply(square, 7))
+
+// Funciones anónimas inline — útiles cuando la función es chica y de un solo uso.
+print(apply(fn(n) => n * 10, 7))
+let abs = fn(n) {
+    if (n < 0) {
+        return -n
+    }
+    return n
+}
+print(abs(-5))

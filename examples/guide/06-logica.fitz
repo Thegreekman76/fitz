@@ -1,4 +1,4 @@
-// 05-logica.fitz — Operadores lógicos.
+// 06-logica.fitz — Operadores lógicos.
 
 // and / or operan sobre Bool y devuelven Bool.
 print(true and true)

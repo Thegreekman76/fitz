@@ -1,4 +1,4 @@
-// 11-type.fitz — Tipos custom: declaración, instanciación y campos.
+// 12-type.fitz — Tipos custom: declaración, instanciación y campos.
 // Cubierto en el capítulo 12 de la guía.
 
 type User {

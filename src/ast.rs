@@ -44,13 +44,33 @@ pub enum Expr {
         operand: Box<Expr>,
     },
 
-    /// Llamada a función: `name(arg1, arg2, ...)`.
-    /// Por ahora solo soporta llamadas con nombre simple (no expresiones que
-    /// resulten en función). Cuando agreguemos closures como valores de
-    /// primera clase esto cambia a `callee: Box<Expr>`.
+    /// Llamada a función: `callee(arg1, arg2, ...)`. El `callee` es cualquier
+    /// expresión que en runtime tiene que evaluar a algo invocable: un
+    /// `Ident` (`f(1, 2)`), un `Field` (`xs.map(...)` — method call),
+    /// una `FnExpr` invocada al vuelo (`(fn(x) => x + 1)(2)`), etc.
+    ///
+    /// El evaluador despacha por la forma sintáctica del callee:
+    ///  - `Expr::Field { object, field }` → method call. Evalúa el receptor
+    ///    y busca el método en una tabla por tipo (`(tipo, nombre) → fn`).
+    ///  - otra cosa → llamada "normal". Evalúa el callee y espera
+    ///    `Value::Function` o `Value::Builtin`.
+    ///
+    /// `Ok(...)` y `Err(...)` son keywords contextuales: cuando el callee es
+    /// literalmente `Expr::Ident("Ok"|"Err")`, el parser los convierte en
+    /// `Expr::Ok`/`Expr::Err` antes de construir el `Call`.
     Call {
-        name: String,
+        callee: Box<Expr>,
         args: Vec<Expr>,
+    },
+
+    /// Función anónima en posición de expresión: `fn(x) => x * 2` o
+    /// `fn(x) { return x * 2 }`. La forma flecha la convierte el parser a
+    /// `body: vec![Stmt::Return(expr)]` — mismo truco que `Stmt::FnDef`.
+    /// No tiene nombre; se evalúa a un `Value::Function` con closure
+    /// capturando el env del lugar de definición.
+    FnExpr {
+        params: Vec<Param>,
+        body: Vec<Stmt>,
     },
 
     /// Acceso a campo: `objeto.campo`.
@@ -137,13 +157,35 @@ pub enum StrPart {
     Expr(Expr),
 }
 
+/// Destino de una asignación: a qué se le está asignando.
+///
+/// Hasta 3.3 solo soportábamos asignación a un identificador. En 3.4
+/// abrimos asignación a campo (`user.name = "x"`) para destrabar mutación
+/// de instancias. Asignación a índice (`xs[0] = v`) sigue siendo deuda
+/// explícita: cuando entre, se suma una variante acá.
+#[derive(Debug, Clone, PartialEq)]
+pub enum AssignTarget {
+    /// `x = ...` — declaración o reasignación de una variable.
+    Ident(String),
+    /// `objeto.campo = ...` — mutación de un campo de una `Instance`.
+    /// `object` es cualquier expresión que evalúe a `Value::Instance`;
+    /// el evaluador chequea esto en runtime y emite error si no.
+    Field {
+        object: Box<Expr>,
+        field: String,
+    },
+}
+
 /// Una sentencia: ejecuta un efecto, opcionalmente produce un valor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// Asignación / declaración. Ej: `x = 42` o `name: Str = "Fitz"`.
-    /// En Fitz no diferenciamos `let x = ...` de `x = ...` a nivel AST.
+    /// Asignación / declaración. Ej: `x = 42`, `name: Str = "Fitz"`,
+    /// `user.name = "Otro"`. En Fitz no diferenciamos `let x = ...` de
+    /// `x = ...` a nivel AST. La anotación de tipo `type_` solo es
+    /// válida cuando `target` es `Ident` (asignar a un campo no admite
+    /// reanotar el tipo); el parser lo enforcea.
     Assign {
-        name: String,
+        target: AssignTarget,
         type_: Option<String>,
         value: Expr,
     },
@@ -306,13 +348,13 @@ mod tests {
         let program: Program = vec![
             // name = "Fitz"
             Stmt::Assign {
-                name: "name".into(),
+                target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into()),
             },
             // x = 10 + 5
             Stmt::Assign {
-                name: "x".into(),
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -322,7 +364,7 @@ mod tests {
             },
             // print("Hola, {name}!")
             Stmt::Expr(Expr::Call {
-                name: "print".into(),
+                callee: Box::new(Expr::Ident("print".into())),
                 args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
                     StrPart::Expr(Expr::Ident("name".into())),
@@ -343,9 +385,9 @@ mod tests {
             },
             // print(double(x))
             Stmt::Expr(Expr::Call {
-                name: "print".into(),
+                callee: Box::new(Expr::Ident("print".into())),
                 args: vec![Expr::Call {
-                    name: "double".into(),
+                    callee: Box::new(Expr::Ident("double".into())),
                     args: vec![Expr::Ident("x".into())],
                 }],
             }),
@@ -457,7 +499,7 @@ mod tests {
             var: "x".into(),
             iter: Expr::Ident("xs".into()),
             body: vec![Stmt::Expr(Expr::Call {
-                name: "print".into(),
+                callee: Box::new(Expr::Ident("print".into())),
                 args: vec![Expr::Ident("x".into())],
             })],
         };
@@ -545,7 +587,7 @@ mod tests {
     fn try_y_ctors_son_componibles() {
         // `Ok(get(id)?)` — un `?` adentro de un constructor `Ok`.
         let e = Expr::Ok(Box::new(Expr::Try(Box::new(Expr::Call {
-            name: "get".into(),
+            callee: Box::new(Expr::Ident("get".into())),
             args: vec![Expr::Ident("id".into())],
         }))));
         if let Expr::Ok(inner) = e {
@@ -568,6 +610,82 @@ mod tests {
                 assert_eq!(*operand, Expr::Ident("x".into()));
             }
             _ => panic!("se esperaba UnaryOp"),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Fase 3, paso 4 (funciones anónimas + method calls + mutación)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn call_admite_callee_como_expresion() {
+        // `xs.map(f)` → Call con callee = Field { object: xs, field: "map" }.
+        let call = Expr::Call {
+            callee: Box::new(Expr::Field {
+                object: Box::new(Expr::Ident("xs".into())),
+                field: "map".into(),
+            }),
+            args: vec![Expr::Ident("f".into())],
+        };
+        match call {
+            Expr::Call { callee, args } => {
+                assert!(matches!(*callee, Expr::Field { .. }));
+                assert_eq!(args.len(), 1);
+            }
+            _ => panic!("se esperaba Call"),
+        }
+    }
+
+    #[test]
+    fn fn_expr_envuelve_params_y_body() {
+        // `fn(x) => x * 2` — versión sin nombre.
+        let fnexpr = Expr::FnExpr {
+            params: vec![Param { name: "x".into(), type_: None }],
+            body: vec![Stmt::Return(Expr::BinOp {
+                op: BinOpKind::Mul,
+                left: Box::new(Expr::Ident("x".into())),
+                right: Box::new(Expr::Int(2)),
+            })],
+        };
+        match fnexpr {
+            Expr::FnExpr { params, body } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0], Stmt::Return(_)));
+            }
+            _ => panic!("se esperaba FnExpr"),
+        }
+    }
+
+    #[test]
+    fn assign_target_admite_ident_y_field() {
+        // `x = 1` — target Ident.
+        let s1 = Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
+            type_: None,
+            value: Expr::Int(1),
+        };
+        if let Stmt::Assign { target, .. } = s1 {
+            assert_eq!(target, AssignTarget::Ident("x".into()));
+        } else {
+            panic!("se esperaba Assign");
+        }
+
+        // `user.name = "x"` — target Field.
+        let s2 = Stmt::Assign {
+            target: AssignTarget::Field {
+                object: Box::new(Expr::Ident("user".into())),
+                field: "name".into(),
+            },
+            type_: None,
+            value: Expr::Str("x".into()),
+        };
+        if let Stmt::Assign { target: AssignTarget::Field { object, field }, .. } = s2 {
+            assert_eq!(*object, Expr::Ident("user".into()));
+            assert_eq!(field, "name");
+        } else {
+            panic!("se esperaba Assign con target Field");
         }
     }
 }

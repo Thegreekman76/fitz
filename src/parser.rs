@@ -10,8 +10,8 @@
 // y deuda explícita.
 
 use crate::ast::{
-    BinOpKind, Expr, Field, HttpMethod, MatchArm, Param, Pattern, Program, Stmt, StrPart,
-    UnaryOpKind,
+    AssignTarget, BinOpKind, Expr, Field, HttpMethod, MatchArm, Param, Pattern, Program, Stmt,
+    StrPart, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::lexer::{tokenize, Token, TokenWithPos};
@@ -408,14 +408,15 @@ impl Parser {
         }
     }
 
-    /// Operadores postfix: acceso a campo (`.field`), llamada (`(args)`)
-    /// e indexing (`[expr]`). Iteran en loop porque se pueden encadenar:
-    /// `user.profile.email`, `xs[0][1]`, `m["clave"]`.
+    /// Operadores postfix: acceso a campo (`.field`), llamada (`(args)`),
+    /// indexing (`[expr]`) y `?` postfix. Iteran en loop porque se pueden
+    /// encadenar: `user.profile.email`, `xs[0][1]`, `m["clave"]`,
+    /// `xs.map(f).filter(g)`.
     ///
-    /// Restricción documentada en roadmap 2.3: `Expr::Call` solo admite
-    /// `name: String`. Por eso solo permitimos llamadas cuando el
-    /// receptor inmediato es un `Ident`. Llamadas a métodos
-    /// (`foo.bar()`) dan error explícito hasta que `Call` mute.
+    /// Desde Fase 3.4 el callee de una llamada es cualquier expresión
+    /// postfix — `Expr::Call.callee` es `Box<Expr>`. Eso destraba method
+    /// calls (`xs.map(...)`), invocación de fn anónima al vuelo
+    /// (`(fn(x) => x + 1)(2)`), y futuros patrones de orden superior.
     fn postfix(&mut self) -> FitzResult<Expr> {
         let mut expr = self.primary()?;
         loop {
@@ -431,17 +432,6 @@ impl Parser {
                     };
                 }
                 Token::LParen => {
-                    // Solo Ident soportado como receptor de llamada.
-                    let name = match expr {
-                        Expr::Ident(n) => n,
-                        _ => {
-                            return Err(self.error(
-                                ErrorKind::UnexpectedToken,
-                                "method calls (expr.method()) aún no soportados — \
-                                 ver docs/roadmap.md sección 2.3",
-                            ));
-                        }
-                    };
                     self.advance(); // consume '('
                     // Adentro de los args no hay ambigüedad con bloques:
                     // limpiamos el flag para permitir struct literals
@@ -452,11 +442,13 @@ impl Parser {
                     let args = args_result?;
 
                     // Constructores built-in de Result: `Ok(x)` / `Err(e)`.
-                    // Se detectan como keyword contextual: si el receptor de
-                    // la llamada es literalmente el identificador `Ok` o
-                    // `Err`, lo modelamos como `Expr::Ok`/`Expr::Err` en
-                    // vez de `Expr::Call`. Aridad obligatoria: 1.
-                    if name == "Ok" || name == "Err" {
+                    // Se detectan como keyword contextual: si el callee es
+                    // literalmente el identificador `Ok` o `Err`, lo
+                    // modelamos como `Expr::Ok`/`Expr::Err` en vez de
+                    // `Expr::Call`. Aridad obligatoria: 1.
+                    let is_ok_or_err = matches!(&expr, Expr::Ident(n) if n == "Ok" || n == "Err");
+                    if is_ok_or_err {
+                        let name = if let Expr::Ident(n) = &expr { n.clone() } else { unreachable!() };
                         if args.len() != 1 {
                             return Err(self.error(
                                 ErrorKind::InvalidSyntax,
@@ -474,7 +466,7 @@ impl Parser {
                             Expr::Err(Box::new(inner))
                         };
                     } else {
-                        expr = Expr::Call { name, args };
+                        expr = Expr::Call { callee: Box::new(expr), args };
                     }
                 }
                 Token::Question => {
@@ -672,18 +664,7 @@ impl Parser {
             Token::While => self.parse_while(),
             Token::Loop => self.parse_loop(),
             Token::For => self.parse_for(),
-            Token::Ident(_) => {
-                // Lookahead: `x =` o `x :` arrancan asignación.
-                // OJO: `x ==` es comparación (EqEq, no Eq), va por
-                // expr-stmt. La comparación con `Eq` exacto en
-                // `peek_at(1)` evita ese falso positivo.
-                if matches!(self.peek_at(1), Token::Eq | Token::Colon) {
-                    self.parse_assign_no_let()
-                } else {
-                    self.parse_expr_stmt()
-                }
-            }
-            _ => self.parse_expr_stmt(),
+            _ => self.parse_expr_or_assign_stmt(),
         }
     }
 
@@ -695,15 +676,72 @@ impl Parser {
         let type_ = self.parse_optional_type_annotation()?;
         self.expect(&Token::Eq, "se esperaba '=' en la declaración")?;
         let value = self.expression()?;
-        Ok(Stmt::Assign { name, type_, value })
+        Ok(Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            type_,
+            value,
+        })
     }
 
-    fn parse_assign_no_let(&mut self) -> FitzResult<Stmt> {
-        let name = self.expect_ident("se esperaba identificador")?;
-        let type_ = self.parse_optional_type_annotation()?;
-        self.expect(&Token::Eq, "se esperaba '=' en la asignación")?;
-        let value = self.expression()?;
-        Ok(Stmt::Assign { name, type_, value })
+    /// Parsea una sentencia que arranca con una expresión. Tres casos:
+    ///   1. `expr` — sentencia-expresión (típicamente una llamada).
+    ///   2. `Ident: Tipo = expr` — declaración/reasignación con anotación.
+    ///   3. `lvalue = expr` — asignación. El lvalue puede ser `Ident`
+    ///      (variable) o `Expr::Field` (mutación de campo de instancia).
+    ///      Cualquier otra forma (`f() = ...`, `xs[0] = ...`) es error.
+    ///
+    /// Unifica el camino antes separado entre `parse_assign_no_let` y
+    /// `parse_expr_stmt`: parseamos la expresión completa primero, y
+    /// recién después decidimos si era asignación, según el token que
+    /// haya quedado. Eso resuelve naturalmente `user.name = "x"` y
+    /// elimina el lookahead duro que antes solo miraba `peek_at(1)`.
+    fn parse_expr_or_assign_stmt(&mut self) -> FitzResult<Stmt> {
+        let lhs = self.expression()?;
+
+        // Caso 2: `Ident : Tipo = expr`. La anotación solo se acepta
+        // sobre un identificador pelado.
+        if matches!(self.peek(), Token::Colon) {
+            let name = match lhs {
+                Expr::Ident(n) => n,
+                _ => {
+                    return Err(self.error(
+                        ErrorKind::InvalidSyntax,
+                        "anotación de tipo solo se admite al declarar una variable",
+                    ));
+                }
+            };
+            self.advance(); // consume ':'
+            let type_name = self.expect_ident(
+                "se esperaba nombre de tipo después de ':'",
+            )?;
+            self.expect(&Token::Eq, "se esperaba '=' en la asignación")?;
+            let value = self.expression()?;
+            return Ok(Stmt::Assign {
+                target: AssignTarget::Ident(name),
+                type_: Some(type_name),
+                value,
+            });
+        }
+
+        // Caso 3: `lvalue = expr`.
+        if self.eat(&Token::Eq) {
+            let value = self.expression()?;
+            let target = match lhs {
+                Expr::Ident(n) => AssignTarget::Ident(n),
+                Expr::Field { object, field } => AssignTarget::Field { object, field },
+                _ => {
+                    return Err(self.error(
+                        ErrorKind::InvalidSyntax,
+                        "destino de asignación no soportado (solo identificador \
+                         o expr.campo)",
+                    ));
+                }
+            };
+            return Ok(Stmt::Assign { target, type_: None, value });
+        }
+
+        // Caso 1: sentencia-expresión.
+        Ok(Stmt::Expr(lhs))
     }
 
     /// Anotación de tipo opcional: `: Ident`. Devuelve `Some(nombre)`
@@ -731,11 +769,6 @@ impl Parser {
             _ => self.expression()?,
         };
         Ok(Stmt::Return(value))
-    }
-
-    fn parse_expr_stmt(&mut self) -> FitzResult<Stmt> {
-        let expr = self.expression()?;
-        Ok(Stmt::Expr(expr))
     }
 
     // ---------- definición de función ----------
@@ -785,6 +818,39 @@ impl Parser {
             body,
             is_async,
         })
+    }
+
+    /// Función anónima en posición de expresión: `fn(x) => x * 2` o
+    /// `fn(x) { return x * 2 }`. Diferencias con `parse_fndef`: no hay
+    /// nombre y no se admite `async` (no tendría dónde aplicarse hasta
+    /// Fase 4). El cuerpo y el tipo de retorno se parsean igual.
+    fn parse_fn_expr(&mut self) -> FitzResult<Expr> {
+        self.expect(&Token::Fn, "se esperaba 'fn'")?;
+        self.expect(
+            &Token::LParen,
+            "se esperaba '(' después de 'fn' en función anónima",
+        )?;
+        let params = self.parse_params()?;
+        // `-> Tipo` opcional, aunque hoy las anotaciones de retorno
+        // no se chequean. Lo aceptamos por simetría con `parse_fndef`.
+        let _return_type = self.parse_optional_return_type()?;
+
+        let body = match self.peek() {
+            Token::FatArrow => {
+                self.advance();
+                let expr = self.expression()?;
+                vec![Stmt::Return(expr)]
+            }
+            Token::LBrace => self.parse_block()?,
+            _ => {
+                return Err(self.error(
+                    ErrorKind::UnexpectedToken,
+                    "se esperaba '{' o '=>' para el cuerpo de la función anónima",
+                ));
+            }
+        };
+
+        Ok(Expr::FnExpr { params, body })
     }
 
     /// Lista de parámetros, ya con '(' consumido. Termina consumiendo
@@ -1299,6 +1365,12 @@ impl Parser {
             Token::Match => return self.parse_match_expr(),
             Token::LBracket => return self.parse_list_literal(),
             Token::LBrace => return self.parse_map_literal(),
+            // `fn(...)` o `fn(...) => expr` — función anónima en posición
+            // de expresión. `fn name(...)` no es válido acá: una function
+            // con nombre es `Stmt::FnDef`, sentencia, no expresión.
+            Token::Fn if matches!(self.peek_at(1), Token::LParen) => {
+                return self.parse_fn_expr();
+            }
             _ => {}
         }
         let tok = self.advance();
@@ -1967,9 +2039,7 @@ mod tests {
     fn call_no_args() {
         assert_eq!(
             parse_expr("hello()").unwrap(),
-            Expr::Call {
-                name: "hello".into(),
-                args: vec![],
+            Expr::Call { callee: Box::new(Expr::Ident("hello".into())), args: vec![],
             }
         );
     }
@@ -1978,9 +2048,7 @@ mod tests {
     fn call_single_arg() {
         assert_eq!(
             parse_expr("print(42)").unwrap(),
-            Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::Int(42)],
+            Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Int(42)],
             }
         );
     }
@@ -1989,9 +2057,7 @@ mod tests {
     fn call_multiple_args() {
         assert_eq!(
             parse_expr("sum(1, 2, 3)").unwrap(),
-            Expr::Call {
-                name: "sum".into(),
-                args: vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)],
+            Expr::Call { callee: Box::new(Expr::Ident("sum".into())), args: vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)],
             }
         );
     }
@@ -2001,9 +2067,7 @@ mod tests {
         // Coma trailing válida — útil para diffs limpios.
         assert_eq!(
             parse_expr("sum(1, 2,)").unwrap(),
-            Expr::Call {
-                name: "sum".into(),
-                args: vec![Expr::Int(1), Expr::Int(2)],
+            Expr::Call { callee: Box::new(Expr::Ident("sum".into())), args: vec![Expr::Int(1), Expr::Int(2)],
             }
         );
     }
@@ -2014,9 +2078,7 @@ mod tests {
         let src = "sum(\n  1,\n  2,\n  3\n)";
         assert_eq!(
             parse_expr(src).unwrap(),
-            Expr::Call {
-                name: "sum".into(),
-                args: vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)],
+            Expr::Call { callee: Box::new(Expr::Ident("sum".into())), args: vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)],
             }
         );
     }
@@ -2026,9 +2088,7 @@ mod tests {
         // print(1 + 2 * 3)
         assert_eq!(
             parse_expr("print(1 + 2 * 3)").unwrap(),
-            Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::BinOp {
+            Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(1)),
                     right: Box::new(Expr::BinOp {
@@ -2046,11 +2106,7 @@ mod tests {
         // print(double(x))
         assert_eq!(
             parse_expr("print(double(x))").unwrap(),
-            Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::Call {
-                    name: "double".into(),
-                    args: vec![Expr::Ident("x".into())],
+            Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Ident("x".into())],
                 }],
             }
         );
@@ -2063,11 +2119,21 @@ mod tests {
     }
 
     #[test]
-    fn method_call_errors_explicitly() {
-        // foo.bar() — deuda explícita: Call solo admite name simple.
-        let err = parse_expr("foo.bar()").unwrap_err();
-        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
-        assert!(err.message.contains("method"));
+    fn method_call_parses_as_call_with_field_callee() {
+        // `foo.bar()` ahora parsea: `Call { callee: Field { foo, bar }, args: [] }`.
+        // Antes el parser tiraba error (deuda explícita de 2.3). El dispatch
+        // de método como tal lo verifica el evaluador.
+        let expr = parse_expr("foo.bar()").unwrap();
+        assert_eq!(
+            expr,
+            Expr::Call {
+                callee: Box::new(Expr::Field {
+                    object: Box::new(Expr::Ident("foo".into())),
+                    field: "bar".into(),
+                }),
+                args: vec![],
+            }
+        );
     }
 
     #[test]
@@ -2080,9 +2146,7 @@ mod tests {
                 left: Box::new(Expr::Int(1)),
                 right: Box::new(Expr::BinOp {
                     op: BinOpKind::Mul,
-                    left: Box::new(Expr::Call {
-                        name: "f".into(),
-                        args: vec![Expr::Int(2)],
+                    left: Box::new(Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(2)],
                     }),
                     right: Box::new(Expr::Int(3)),
                 }),
@@ -2136,8 +2200,7 @@ mod tests {
     fn assign_with_let_no_type() {
         assert_eq!(
             parse_one_stmt("let x = 42"),
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(42),
             }
@@ -2148,8 +2211,7 @@ mod tests {
     fn assign_with_let_and_type() {
         assert_eq!(
             parse_one_stmt("let x: Int = 42"),
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: Some("Int".into()),
                 value: Expr::Int(42),
             }
@@ -2160,8 +2222,7 @@ mod tests {
     fn assign_without_let_no_type() {
         assert_eq!(
             parse_one_stmt("x = 42"),
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(42),
             }
@@ -2172,8 +2233,7 @@ mod tests {
     fn assign_without_let_with_type() {
         assert_eq!(
             parse_one_stmt("name: Str = \"Fitz\""),
-            Stmt::Assign {
-                name: "name".into(),
+            Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: Some("Str".into()),
                 value: Expr::Str("Fitz".into()),
             }
@@ -2185,8 +2245,7 @@ mod tests {
         // x = 10 + 5
         assert_eq!(
             parse_one_stmt("x = 10 + 5"),
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -2242,9 +2301,7 @@ mod tests {
     fn expression_statement_with_call() {
         assert_eq!(
             parse_one_stmt("print(x)"),
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::Ident("x".into())],
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("x".into())],
             }),
         );
     }
@@ -2376,17 +2433,14 @@ mod tests {
         assert_eq!(program.len(), 3);
         assert_eq!(
             program[0],
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(1),
             }
         );
         assert_eq!(
             program[2],
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::Ident("x".into())],
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("x".into())],
             })
         );
     }
@@ -2479,9 +2533,7 @@ mod tests {
                 name: "greet".into(),
                 params: vec![Param { name: "name".into(), type_: None }],
                 return_type: None,
-                body: vec![Stmt::Expr(Expr::Call {
-                    name: "print".into(),
-                    args: vec![Expr::Ident("name".into())],
+                body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("name".into())],
                 })],
                 is_async: false,
             },
@@ -2498,8 +2550,7 @@ mod tests {
                 params: vec![Param { name: "n".into(), type_: None }],
                 return_type: None,
                 body: vec![
-                    Stmt::Assign {
-                        name: "x".into(),
+                    Stmt::Assign { target: AssignTarget::Ident("x".into()),
                         type_: None,
                         value: Expr::BinOp {
                             op: BinOpKind::Mul,
@@ -2839,7 +2890,7 @@ mod tests {
         // status = if active { "on" } else { "off" }
         let stmt = parse_one_stmt(r#"status = if active { "on" } else { "off" }"#);
         match stmt {
-            Stmt::Assign { name, value: Expr::If { .. }, .. } => {
+            Stmt::Assign { target: AssignTarget::Ident(name), value: Expr::If { .. }, .. } => {
                 assert_eq!(name, "status");
             }
             other => panic!("se esperaba Assign con If como valor, se obtuvo {:?}", other),
@@ -3068,8 +3119,7 @@ mod tests {
         // 1. name = "Fitz"
         assert_eq!(
             program[0],
-            Stmt::Assign {
-                name: "name".into(),
+            Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into()),
             }
@@ -3078,8 +3128,7 @@ mod tests {
         // 2. x = 10 + 5
         assert_eq!(
             program[1],
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -3092,9 +3141,7 @@ mod tests {
         // 3. print("Hola, {name}!")
         assert_eq!(
             program[2],
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::StrInterp(vec![
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit("!".into()),
@@ -3121,11 +3168,7 @@ mod tests {
         // 5. print(double(x))
         assert_eq!(
             program[4],
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::Call {
-                    name: "double".into(),
-                    args: vec![Expr::Ident("x".into())],
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Ident("x".into())],
                 }],
             }),
         );
@@ -3425,8 +3468,7 @@ mod tests {
         let stmt = parse_one_stmt("let xs = [1, 2, 3]");
         assert_eq!(
             stmt,
-            Stmt::Assign {
-                name: "xs".into(),
+            Stmt::Assign { target: AssignTarget::Ident("xs".into()),
                 type_: None,
                 value: Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]),
             },
@@ -3439,8 +3481,7 @@ mod tests {
         let stmt = parse_one_stmt(r#"let m = {"a": 1, "b": 2}"#);
         assert_eq!(
             stmt,
-            Stmt::Assign {
-                name: "m".into(),
+            Stmt::Assign { target: AssignTarget::Ident("m".into()),
                 type_: None,
                 value: Expr::Map(vec![
                     (Expr::Str("a".into()), Expr::Int(1)),
@@ -3463,9 +3504,7 @@ mod tests {
             Stmt::For {
                 var: "x".into(),
                 iter: Expr::Ident("xs".into()),
-                body: vec![Stmt::Expr(Expr::Call {
-                    name: "print".into(),
-                    args: vec![Expr::Ident("x".into())],
+                body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("x".into())],
                 })],
             },
         );
@@ -3919,9 +3958,7 @@ mod tests {
         let e = parse_expr("f(x)?").unwrap();
         assert_eq!(
             e,
-            Expr::Try(Box::new(Expr::Call {
-                name: "f".into(),
-                args: vec![Expr::Ident("x".into())],
+            Expr::Try(Box::new(Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Ident("x".into())],
             })),
         );
     }
@@ -3937,9 +3974,7 @@ mod tests {
     fn try_se_encadena_con_field_access() {
         // get(id)?.name → Field { object: Try(Call(get, [id])), field: "name" }
         let e = parse_expr("get(id)?.name").unwrap();
-        let inner_call = Expr::Call {
-            name: "get".into(),
-            args: vec![Expr::Ident("id".into())],
+        let inner_call = Expr::Call { callee: Box::new(Expr::Ident("get".into())), args: vec![Expr::Ident("id".into())],
         };
         assert_eq!(
             e,
@@ -3954,9 +3989,7 @@ mod tests {
     fn try_anidado_con_ok_y_err() {
         // Ok(get(id)?) → Ok(Try(Call(get, [id])))
         let e = parse_expr("Ok(get(id)?)").unwrap();
-        let inner = Expr::Try(Box::new(Expr::Call {
-            name: "get".into(),
-            args: vec![Expr::Ident("id".into())],
+        let inner = Expr::Try(Box::new(Expr::Call { callee: Box::new(Expr::Ident("get".into())), args: vec![Expr::Ident("id".into())],
         }));
         assert_eq!(e, Expr::Ok(Box::new(inner)));
     }

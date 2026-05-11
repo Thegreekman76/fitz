@@ -1,4 +1,4 @@
-// 04-strings.fitz — Strings, concatenación e interpolación.
+// 05-strings.fitz — Strings, concatenación e interpolación.
 
 name = "Fitz"
 print(name)

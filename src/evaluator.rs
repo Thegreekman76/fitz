@@ -18,7 +18,7 @@
 // que tiene que escalar hasta el caller de la función. El truco lo tomé de
 // Crafting Interpreters; en Rust funciona naturalmente con `Result`.
 
-use crate::ast::{BinOpKind, Expr, Pattern, Program, Stmt, StrPart, UnaryOpKind};
+use crate::ast::{AssignTarget, BinOpKind, Expr, Pattern, Program, Stmt, StrPart, UnaryOpKind};
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::value::{ResultVariant, Value};
@@ -105,24 +105,73 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
     match stmt {
         Stmt::Expr(expr) => eval_expr(expr, env),
 
-        // `name = value` o `name: Tipo = value`. La anotación de tipo se
-        // ignora en runtime — tipado gradual, los checks de tipos los hará
-        // un type-checker estático más adelante.
+        // `x = value`, `x: Tipo = value`, o `obj.campo = value`. La anotación
+        // de tipo se ignora en runtime — tipado gradual, los checks de tipos
+        // los hará un type-checker estático más adelante.
         //
-        // Política: si la variable ya existe en algún scope visible, reasignar
-        // ahí. Si no, crear local. Ver comentario de env.rs.
-        Stmt::Assign { name, type_: _, value } => {
+        // Dos formas según el target:
+        //  - `Ident`: si la variable ya existe en algún scope visible,
+        //    reasignar ahí; si no, crear local (ver env.rs).
+        //  - `Field`: evaluamos el objeto receptor (tiene que ser
+        //    `Value::Instance`), validamos que el campo exista, y mutamos
+        //    la celda compartida `Rc<RefCell<...>>` de `fields`.
+        Stmt::Assign { target, type_: _, value } => {
             let v = eval_expr(value, env.clone())?;
-            // Borrows separados: `has` toma borrow inmutable, lo soltamos
-            // antes de pedir un borrow mutable. RefCell paniquea en runtime
-            // si los anidamos.
-            let already_defined = env.borrow().has(name);
-            if already_defined {
-                env.borrow_mut()
-                    .assign(name, v)
-                    .expect("la variable existe — acabamos de chequear con has()");
-            } else {
-                env.borrow_mut().define(name.clone(), v);
+            match target {
+                AssignTarget::Ident(name) => {
+                    // Borrows separados: `has` toma borrow inmutable, lo
+                    // soltamos antes de pedir un borrow mutable.
+                    let already_defined = env.borrow().has(name);
+                    if already_defined {
+                        env.borrow_mut()
+                            .assign(name, v)
+                            .expect("la variable existe — acabamos de chequear con has()");
+                    } else {
+                        env.borrow_mut().define(name.clone(), v);
+                    }
+                }
+                AssignTarget::Field { object, field } => {
+                    let receiver = eval_expr(object, env.clone())?;
+                    let fields = match &receiver {
+                        Value::Instance { fields, .. } => fields.clone(),
+                        other => {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::TypeMismatch {
+                                    expected: "instancia de un tipo".into(),
+                                    found: other.type_name().into(),
+                                },
+                                0, 0,
+                                format!(
+                                    "no se puede asignar a un campo de {} (no es una instancia)",
+                                    other.type_name(),
+                                ),
+                            )));
+                        }
+                    };
+                    let mut borrowed = fields.borrow_mut();
+                    let slot = borrowed.iter_mut().find(|(name, _)| name == field);
+                    match slot {
+                        Some((_, slot_value)) => {
+                            *slot_value = v;
+                        }
+                        None => {
+                            // Capturamos type_name fuera del borrow para el mensaje.
+                            let type_name = match &receiver {
+                                Value::Instance { type_name, .. } => type_name.clone(),
+                                _ => unreachable!(),
+                            };
+                            drop(borrowed);
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::InvalidSyntax,
+                                0, 0,
+                                format!(
+                                    "el tipo `{}` no tiene un campo llamado `{}`",
+                                    type_name, field
+                                ),
+                            )));
+                        }
+                    }
+                }
             }
             Ok(Value::Null)
         }
@@ -181,17 +230,26 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // Iterables soportados:
         //  - List: itera los elementos en orden.
         //  - Range: itera los Int de start a end-1.
-        //  - Map: aún no (necesita el tipo `Pair`/`entry`; paso 4 de Fase 3).
+        //  - Map: aún no (necesita el tipo `Pair`/`entry`; deuda abierta).
         //  - Otros: type error explícito.
         Stmt::For { var, iter, body } => {
             let iter_v = eval_expr(iter, env.clone())?;
             let items_iter: Box<dyn Iterator<Item = Value>> = match iter_v {
-                Value::List(items) => Box::new(items.into_iter()),
+                // La lista va por referencia compartida (`Rc<RefCell<>>`).
+                // Para iterar tomamos un snapshot del Vec (cloneando los
+                // valores): si el body muta la lista misma, el iterator
+                // ya tiene su copia y no se altera a mitad de iteración.
+                // Eso evita problemas estilo "modifying a list while
+                // iterating" sin renunciar a mutación.
+                Value::List(items) => {
+                    let snapshot: Vec<Value> = items.borrow().clone();
+                    Box::new(snapshot.into_iter())
+                }
                 Value::Range { start, end } => Box::new((start..end).map(Value::Int)),
                 Value::Map(_) => return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     0, 0,
-                    "`for` sobre Map aún no soportado — esperá al tipo Pair (paso 4 de Fase 3)",
+                    "`for` sobre Map aún no soportado — necesita el tipo Pair",
                 ))),
                 other => return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeMismatch {
@@ -344,19 +402,36 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Str(result))
         }
 
-        // Llamada a función. Por ahora solo builtins; las user-defined
-        // (`Value::Function`) llegan en el próximo paso.
-        Expr::Call { name, args } => eval_call(name, args, env),
+        // Llamada a función. Dos caminos según la forma sintáctica del
+        // callee:
+        //  - `Expr::Field { object, field }` → method call. Evaluamos el
+        //    receptor y consultamos la tabla de métodos built-in del
+        //    evaluador para el tipo del receptor. Si no hay método, caemos
+        //    al field access normal y eso emite error de "no es invocable".
+        //  - cualquier otra cosa → llamada normal. Evaluamos el callee y
+        //    esperamos `Value::Function` o `Value::Builtin`.
+        Expr::Call { callee, args } => eval_call(callee, args, env),
 
-        // `obj.campo` — acceso a campo. Solo válido sobre instancias de
-        // tipos custom. Otros tipos (Int, Str, List, etc.) van a tener
-        // métodos en el paso 4 de Fase 3 (`xs.map(...)`), pero el AST
-        // los modelará distinto.
+        // `fn(x) => x * 2` o `fn(x) { return x * 2 }` — función anónima.
+        // Se evalúa a `Value::Function` con el env actual como closure,
+        // igual que un `Stmt::FnDef`, pero sin nombre ni binding en el env.
+        Expr::FnExpr { params, body } => Ok(Value::Function {
+            params: params.clone(),
+            body: body.clone(),
+            closure: env,
+        }),
+
+        // `obj.campo` — acceso a campo de instancia de tipo custom.
+        // Para receptores no-Instance (List, Map, Str, etc.), el camino
+        // habitual es el method dispatch (`xs.map(...)`), que va por la
+        // rama `Expr::Call` con callee `Field`. El field access "pelado"
+        // sobre primitivos no tiene semántica útil hoy.
         Expr::Field { object, field } => {
             let obj = eval_expr(object, env)?;
             match obj {
                 Value::Instance { type_name, fields } => {
                     fields
+                        .borrow()
                         .iter()
                         .find(|(k, _)| k == field)
                         .map(|(_, v)| v.clone())
@@ -476,10 +551,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 };
                 instance_fields.push((f.name.clone(), value));
             }
-            Ok(Value::Instance {
-                type_name: type_name.clone(),
-                fields: instance_fields,
-            })
+            Ok(Value::new_instance(type_name.clone(), instance_fields))
         }
 
         // `[e1, e2, ...]` — evaluamos los elementos en orden.
@@ -488,7 +560,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             for item in items {
                 values.push(eval_expr(item, env.clone())?);
             }
-            Ok(Value::List(values))
+            Ok(Value::new_list(values))
         }
 
         // `{k1: v1, ...}` — evaluamos cada par en orden (clave, valor).
@@ -500,7 +572,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 let v = eval_expr(v_expr, env.clone())?;
                 entries.push((k, v));
             }
-            Ok(Value::Map(entries))
+            Ok(Value::new_map(entries))
         }
 
         // `start..end` — ambos extremos tienen que ser Int (no hay rangos
@@ -681,32 +753,56 @@ fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
     Ok(last)
 }
 
-/// Resolver de llamadas. Hace lookup del nombre en el env, evalúa los args
-/// en orden, y despacha según el tipo del valor encontrado.
+/// Resolver de llamadas. Despacha según la forma sintáctica del callee:
 ///
-/// En este paso solo soportamos `Value::Builtin`. La rama de `Value::Function`
-/// (user-defined) viene en el próximo paso junto con `FnDef`.
-fn eval_call(name: &str, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
-    let callee = env.borrow().get(name).ok_or_else(|| {
-        EvalSignal::Error(FitzError::new(
-            ErrorKind::UndefinedFunction(name.to_string()),
-            0, 0,
-            format!("función `{}` no definida", name),
-        ))
-    })?;
+///  - `Expr::Field { object, field }` → method call. Evalúa el receptor,
+///    los args, y consulta la tabla de métodos built-in
+///    (`dispatch_method`). Si el receptor es una instancia y el "método"
+///    no existe en la tabla, caemos al field access (por si el usuario
+///    guardó una función en un campo) y lo invocamos.
+///  - cualquier otra expresión → llamada normal. Evalúa el callee y
+///    despacha sobre `Value::Builtin` / `Value::Function`.
+///
+/// El identificador para mensajes de error se deriva de la forma del
+/// callee: `Expr::Ident(n)` → `"n"`, otro → `"<expr>"`.
+fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
+    // Method call.
+    if let Expr::Field { object, field } = callee {
+        let receiver = eval_expr(object, env.clone())?;
+        let mut arg_values = Vec::with_capacity(args.len());
+        for arg in args {
+            arg_values.push(eval_expr(arg, env.clone())?);
+        }
+        return dispatch_method(receiver, field, arg_values);
+    }
 
-    // Evaluamos args de izquierda a derecha. Si alguno falla, el `?` corta.
+    // Llamada normal.
+    let callee_value = eval_expr(callee, env.clone())?;
     let mut arg_values = Vec::with_capacity(args.len());
     for arg in args {
         arg_values.push(eval_expr(arg, env.clone())?);
     }
+    let display_name = callee_display_name(callee);
+    invoke_value(callee_value, arg_values, &display_name)
+}
 
+/// Devuelve un nombre legible para usar en mensajes de error de una
+/// llamada. Para callees con nombre (`Ident`) usa el nombre; para todo
+/// lo demás usa un placeholder.
+fn callee_display_name(callee: &Expr) -> String {
     match callee {
+        Expr::Ident(n) => n.clone(),
+        _ => "<expr>".to_string(),
+    }
+}
+
+/// Invoca un valor que ya sabemos que tiene que ser una función. Maneja
+/// builtins, user-defined functions y errores de "no es invocable".
+fn invoke_value(value: Value, arg_values: Vec<Value>, display_name: &str) -> EvalResult<Value> {
+    match value {
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
 
         Value::Function { params, body, closure } => {
-            // Validación de aridad. Defaults / args opcionales pueden venir
-            // más adelante; por ahora cantidades estrictamente iguales.
             if arg_values.len() != params.len() {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::WrongArgCount {
@@ -716,26 +812,19 @@ fn eval_call(name: &str, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
                     0, 0,
                     format!(
                         "`{}` espera {} argumento(s), recibió {}",
-                        name,
+                        display_name,
                         params.len(),
                         arg_values.len(),
                     ),
                 )));
             }
 
-            // Nuevo scope hijo del CLOSURE, no del caller. Esto es lo que
-            // hace que las funciones vean las variables del lugar donde se
-            // definieron, no del lugar donde se llaman. Lexical scoping.
+            // Nuevo scope hijo del CLOSURE, no del caller. Lexical scoping.
             let call_env = Environment::new_child(closure);
             for (param, value) in params.iter().zip(arg_values) {
                 call_env.borrow_mut().define(param.name.clone(), value);
-                // param.type_ se ignora — tipado gradual sin checks runtime.
             }
 
-            // Ejecutamos el body sentencia por sentencia. Si alguna emite
-            // `EvalSignal::Return(v)`, la capturamos acá y la convertimos
-            // en el valor de retorno. Cualquier otro signal (Error, Break,
-            // Continue) se propaga al caller.
             for stmt in &body {
                 match eval_stmt(stmt, call_env.clone()) {
                     Ok(_) => {}
@@ -743,10 +832,6 @@ fn eval_call(name: &str, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
                     Err(other) => return Err(other),
                 }
             }
-
-            // Sin `return` explícito, la función devuelve Null. Más adelante
-            // podemos cambiar esto a "el valor del último stmt" si queremos
-            // estilo Rust, pero por ahora lo dejamos explícito.
             Ok(Value::Null)
         }
 
@@ -756,9 +841,310 @@ fn eval_call(name: &str, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
                 found: other.type_name().into(),
             },
             0, 0,
-            format!("`{}` no es invocable (es {})", name, other.type_name()),
+            format!("`{}` no es invocable (es {})", display_name, other.type_name()),
         ))),
     }
+}
+
+/// Dispatch de método built-in. Lookup por `(tipo del receptor, nombre
+/// del método)` en una tabla estática. Las implementaciones reciben el
+/// receptor (por valor, pero las colecciones internas son
+/// `Rc<RefCell<...>>`, así que las mutaciones se propagan a los aliases)
+/// y los args ya evaluados.
+///
+/// Si no hay un método registrado para `(tipo, nombre)`, devuelve error
+/// "método no encontrado". El usuario lo va a ver como
+/// `xs.metodo_inexistente(...) — Lista no tiene un método llamado ...`.
+fn dispatch_method(
+    receiver: Value,
+    method: &str,
+    args: Vec<Value>,
+) -> EvalResult<Value> {
+    match (&receiver, method) {
+        // List
+        (Value::List(_), "push") => list_push(receiver, args),
+        (Value::List(_), "pop") => list_pop(receiver, args),
+        (Value::List(_), "map") => list_map(receiver, args),
+        (Value::List(_), "filter") => list_filter(receiver, args),
+        (Value::List(_), "find") => list_find(receiver, args),
+        (Value::List(_), "len") => list_len(receiver, args),
+        // Map
+        (Value::Map(_), "get") => map_get(receiver, args),
+        (Value::Map(_), "has") => map_has(receiver, args),
+        (Value::Map(_), "keys") => map_keys(receiver, args),
+        (Value::Map(_), "values") => map_values(receiver, args),
+        (Value::Map(_), "len") => map_len(receiver, args),
+        // Str
+        (Value::Str(_), "len") => str_len(receiver, args),
+        (Value::Str(_), "upper") => str_upper(receiver, args),
+        (Value::Str(_), "lower") => str_lower(receiver, args),
+        _ => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            format!(
+                "el tipo `{}` no tiene un método llamado `{}`",
+                receiver.type_name(),
+                method,
+            ),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Métodos built-in — implementaciones
+// ---------------------------------------------------------------------------
+//
+// Cada función toma el receptor (consumido por valor — pero como las
+// colecciones internas son `Rc<RefCell<>>`, lo que importa es el Rc, no
+// el clone) y los args ya evaluados. Devuelve un `EvalResult<Value>`.
+//
+// Convenciones:
+//  - Aridad chequeada arriba de todo con `expect_arity`.
+//  - Métodos que mutan (push, pop) devuelven `Value::Null` o el valor
+//    extraído; los puros (map, filter, find) devuelven la colección o
+//    elemento computado.
+//  - "Buscar y no encontrar" se modela con `Result`: `find` y `get`
+//    devuelven `Ok(v)` / `Err(<msg>)`.
+
+/// Helper: chequea que `args.len() == expected`; si no, devuelve error
+/// de aridad citando el método.
+fn expect_arity(method: &str, args: &[Value], expected: usize) -> EvalResult<()> {
+    if args.len() != expected {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected,
+                found: args.len(),
+            },
+            0, 0,
+            format!(
+                "`.{}()` espera {} argumento(s), recibió {}",
+                method, expected, args.len(),
+            ),
+        )));
+    }
+    Ok(())
+}
+
+/// Helper: invoca un `Value` que tiene que ser callable, con UN solo
+/// argumento. Para `map`/`filter`/`find`, donde la callback es siempre
+/// unaria.
+fn invoke_callback(callback: &Value, arg: Value, method: &str) -> EvalResult<Value> {
+    invoke_value(callback.clone(), vec![arg], &format!("callback de .{}()", method))
+}
+
+// ---- List ----
+
+fn list_push(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("push", &args, 1)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let mut v = args.into_iter().next().unwrap();
+    // Si quien empuja se pasó a sí mismo, evitamos un re-borrow doble.
+    items.borrow_mut().push(std::mem::replace(&mut v, Value::Null));
+    Ok(Value::Null)
+}
+
+fn list_pop(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("pop", &args, 0)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let popped = items.borrow_mut().pop();
+    match popped {
+        Some(v) => Ok(v),
+        None => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            "`.pop()` sobre lista vacía".to_string(),
+        ))),
+    }
+}
+
+fn list_map(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("map", &args, 1)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    // Snapshot del Vec para evitar re-entrancia al RefCell si la callback
+    // mutase la lista original.
+    let snapshot: Vec<Value> = items.borrow().clone();
+    let mut out = Vec::with_capacity(snapshot.len());
+    for item in snapshot {
+        out.push(invoke_callback(callback, item, "map")?);
+    }
+    Ok(Value::new_list(out))
+}
+
+fn list_filter(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("filter", &args, 1)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.borrow().clone();
+    let mut out = Vec::new();
+    for item in snapshot {
+        let keep = invoke_callback(callback, item.clone(), "filter")?;
+        match keep {
+            Value::Bool(true) => out.push(item),
+            Value::Bool(false) => {}
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    0, 0,
+                    format!(
+                        "la callback de `.filter()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::new_list(out))
+}
+
+fn list_find(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("find", &args, 1)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.borrow().clone();
+    for item in snapshot {
+        let keep = invoke_callback(callback, item.clone(), "find")?;
+        match keep {
+            Value::Bool(true) => {
+                return Ok(Value::Result(ResultVariant::Ok(Box::new(item))));
+            }
+            Value::Bool(false) => {}
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    0, 0,
+                    format!(
+                        "la callback de `.find()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+        "no encontrado".into(),
+    )))))
+}
+
+fn list_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("len", &args, 0)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let n = items.borrow().len() as i64;
+    Ok(Value::Int(n))
+}
+
+// ---- Map ----
+
+fn map_get(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("get", &args, 1)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let key = &args[0];
+    for (k, v) in pairs.borrow().iter() {
+        if k == key {
+            return Ok(Value::Result(ResultVariant::Ok(Box::new(v.clone()))));
+        }
+    }
+    Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+        format!("clave no encontrada: {}", key),
+    )))))
+}
+
+fn map_has(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("has", &args, 1)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let key = &args[0];
+    let found = pairs.borrow().iter().any(|(k, _)| k == key);
+    Ok(Value::Bool(found))
+}
+
+fn map_keys(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("keys", &args, 0)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let ks: Vec<Value> = pairs.borrow().iter().map(|(k, _)| k.clone()).collect();
+    Ok(Value::new_list(ks))
+}
+
+fn map_values(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("values", &args, 0)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let vs: Vec<Value> = pairs.borrow().iter().map(|(_, v)| v.clone()).collect();
+    Ok(Value::new_list(vs))
+}
+
+fn map_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("len", &args, 0)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let n = pairs.borrow().len() as i64;
+    Ok(Value::Int(n))
+}
+
+// ---- Str ----
+
+fn str_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("len", &args, 0)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    // Coincide con `len(s)` global: cuenta chars, no bytes.
+    Ok(Value::Int(s.chars().count() as i64))
+}
+
+fn str_upper(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("upper", &args, 0)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    Ok(Value::Str(s.to_uppercase()))
+}
+
+fn str_lower(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+    expect_arity("lower", &args, 0)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    Ok(Value::Str(s.to_lowercase()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1002,14 +1388,15 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
                 )));
             }
             let i_usize = i as usize;
-            items.get(i_usize).cloned().ok_or_else(|| {
+            let borrowed = items.borrow();
+            borrowed.get(i_usize).cloned().ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     0, 0,
                     format!(
                         "índice fuera de rango: {} en lista de tamaño {}",
                         i,
-                        items.len()
+                        borrowed.len()
                     ),
                 ))
             })
@@ -1017,7 +1404,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
         Value::Map(pairs) => {
             // Búsqueda lineal por igualdad. Esto va a ser O(n) hasta que
             // promovamos Map a una estructura indexada de verdad.
-            for (k, v) in pairs {
+            for (k, v) in pairs.borrow().iter() {
                 if k == idx {
                     return Ok(v.clone());
                 }
@@ -1116,8 +1503,8 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
         ));
     }
     let n: i64 = match &args[0] {
-        Value::List(items) => items.len() as i64,
-        Value::Map(pairs) => pairs.len() as i64,
+        Value::List(items) => items.borrow().len() as i64,
+        Value::Map(pairs) => pairs.borrow().len() as i64,
         Value::Str(s) => s.chars().count() as i64,
         Value::Range { start, end } => (end - start).max(0),
         other => {
@@ -1566,8 +1953,7 @@ mod tests {
     #[test]
     fn assign_define_variable_nueva_en_scope_local() {
         let env = Environment::new();
-        let stmt = Stmt::Assign {
-            name: "x".into(),
+        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(42),
         };
@@ -1581,8 +1967,7 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(1));
 
-        let stmt = Stmt::Assign {
-            name: "x".into(),
+        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(99),
         };
@@ -1597,8 +1982,7 @@ mod tests {
         global.borrow_mut().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
-        let stmt = Stmt::Assign {
-            name: "x".into(),
+        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(42),
         };
@@ -1613,8 +1997,7 @@ mod tests {
         let global = Environment::new();
         let child = Environment::new_child(global.clone());
 
-        let stmt = Stmt::Assign {
-            name: "nueva".into(),
+        let stmt = Stmt::Assign { target: AssignTarget::Ident("nueva".into()),
             type_: None,
             value: Expr::Int(7),
         };
@@ -1630,8 +2013,7 @@ mod tests {
         // type_: Some("Int") con value String — no falla (tipado gradual,
         // sin checks en runtime todavía).
         let env = Environment::new();
-        let stmt = Stmt::Assign {
-            name: "x".into(),
+        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: Some("Int".into()),
             value: Expr::Str("soy un string".into()),
         };
@@ -1648,23 +2030,25 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let call = Expr::Call {
-            name: "print".into(),
-            args: vec![Expr::Str("test".into())],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Str("test".into())],
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Null);
     }
 
     #[test]
     fn call_a_funcion_no_definida_es_error() {
+        // Como `Expr::Call` ahora evalúa el callee como expresión, un
+        // ident sin definir falla con `UndefinedVariable` (no
+        // `UndefinedFunction` como antes). Es coherente: el parser no
+        // distingue "esto es un nombre de función" sintácticamente.
         let env = Environment::new();
         let call = Expr::Call {
-            name: "noexiste".into(),
+            callee: Box::new(Expr::Ident("noexiste".into())),
             args: vec![],
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::UndefinedFunction(_), .. })
+            EvalSignal::Error(FitzError { kind: ErrorKind::UndefinedVariable(_), .. })
         ));
     }
 
@@ -1673,9 +2057,7 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(5));
 
-        let call = Expr::Call {
-            name: "x".into(),
-            args: vec![],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("x".into())), args: vec![],
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -1691,9 +2073,7 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let call = Expr::Call {
-            name: "print".into(),
-            args: vec![Expr::BinOp {
+        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::BinOp {
                 op: BinOpKind::Add,
                 left: Box::new(Expr::Int(1)),
                 right: Box::new(Expr::Int(2)),
@@ -1778,7 +2158,7 @@ mod tests {
         let env = Environment::new();
         eval_stmt(&fn_def("f", vec![], vec![]), env.clone()).unwrap();
 
-        let call = Expr::Call { name: "f".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Null);
     }
 
@@ -1791,7 +2171,7 @@ mod tests {
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call { name: "f".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(42));
     }
 
@@ -1807,9 +2187,7 @@ mod tests {
         })];
         eval_stmt(&fn_def("double", vec!["n"], body), env.clone()).unwrap();
 
-        let call = Expr::Call {
-            name: "double".into(),
-            args: vec![Expr::Int(7)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Int(7)],
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(14));
     }
@@ -1825,9 +2203,7 @@ mod tests {
         })];
         eval_stmt(&fn_def("add", vec!["a", "b"], body), env.clone()).unwrap();
 
-        let call = Expr::Call {
-            name: "add".into(),
-            args: vec![Expr::Int(3), Expr::Int(4)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("add".into())), args: vec![Expr::Int(3), Expr::Int(4)],
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(7));
     }
@@ -1845,7 +2221,7 @@ mod tests {
         let body = vec![Stmt::Return(Expr::Ident("x".into()))];
         eval_stmt(&fn_def("get_x", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { name: "get_x".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("get_x".into())), args: vec![] };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(10));
     }
 
@@ -1858,9 +2234,7 @@ mod tests {
         let body = vec![Stmt::Return(Expr::Ident("x".into()))];
         eval_stmt(&fn_def("f", vec!["x"], body), env.clone()).unwrap();
 
-        let call = Expr::Call {
-            name: "f".into(),
-            args: vec![Expr::Int(7)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(7)],
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(7));
     }
@@ -1874,9 +2248,7 @@ mod tests {
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call {
-            name: "f".into(),
-            args: vec![Expr::Int(1)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(1)],
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -1894,9 +2266,7 @@ mod tests {
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call {
-            name: "f".into(),
-            args: vec![Expr::Int(1), Expr::Int(2)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(1), Expr::Int(2)],
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -1925,8 +2295,7 @@ mod tests {
         // f(5) → 11
         let env = Environment::new();
         let body = vec![
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -1942,9 +2311,7 @@ mod tests {
         ];
         eval_stmt(&fn_def("f", vec!["n"], body), env.clone()).unwrap();
 
-        let call = Expr::Call {
-            name: "f".into(),
-            args: vec![Expr::Int(5)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(5)],
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(11));
     }
@@ -1962,7 +2329,7 @@ mod tests {
         ];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { name: "f".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(1));
     }
 
@@ -2032,8 +2399,7 @@ mod tests {
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Int(1)),
             },
-            vec![Stmt::Assign {
-                name: "y".into(),
+            vec![Stmt::Assign { target: AssignTarget::Ident("y".into()),
                 type_: None,
                 value: Expr::Int(99),
             }],
@@ -2066,8 +2432,7 @@ mod tests {
     fn if_como_expresion_en_assign() {
         // let r = if true { 42 } else { 0 }
         let env = Environment::new();
-        let stmt = Stmt::Assign {
-            name: "r".into(),
+        let stmt = Stmt::Assign { target: AssignTarget::Ident("r".into()),
             type_: None,
             value: if_expr(
                 Expr::Bool(true),
@@ -2104,9 +2469,7 @@ mod tests {
             Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("n".into())),
-                right: Box::new(Expr::Call {
-                    name: "factorial".into(),
-                    args: vec![Expr::BinOp {
+                right: Box::new(Expr::Call { callee: Box::new(Expr::Ident("factorial".into())), args: vec![Expr::BinOp {
                         op: BinOpKind::Sub,
                         left: Box::new(Expr::Ident("n".into())),
                         right: Box::new(Expr::Int(1)),
@@ -2117,9 +2480,7 @@ mod tests {
 
         eval_stmt(&fn_def("factorial", vec!["n"], body), env.clone()).unwrap();
 
-        let call = Expr::Call {
-            name: "factorial".into(),
-            args: vec![Expr::Int(5)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("factorial".into())), args: vec![Expr::Int(5)],
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(120));
     }
@@ -2381,8 +2742,7 @@ mod tests {
                 right: Box::new(Expr::Int(5)),
             },
             body: vec![
-                Stmt::Assign {
-                    name: "total".into(),
+                Stmt::Assign { target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -2390,8 +2750,7 @@ mod tests {
                         right: Box::new(Expr::Ident("i".into())),
                     },
                 },
-                Stmt::Assign {
-                    name: "i".into(),
+                Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -2412,8 +2771,7 @@ mod tests {
 
         let stmt = Stmt::While {
             condition: Expr::Bool(false),
-            body: vec![Stmt::Assign {
-                name: "counter".into(),
+            body: vec![Stmt::Assign { target: AssignTarget::Ident("counter".into()),
                 type_: None,
                 value: Expr::Int(99),
             }],
@@ -2431,8 +2789,7 @@ mod tests {
         let stmt = Stmt::While {
             condition: Expr::Bool(true),
             body: vec![
-                Stmt::Assign {
-                    name: "i".into(),
+                Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -2474,8 +2831,7 @@ mod tests {
                 right: Box::new(Expr::Int(5)),
             },
             body: vec![
-                Stmt::Assign {
-                    name: "i".into(),
+                Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -2492,8 +2848,7 @@ mod tests {
                     then: vec![Stmt::Continue],
                     else_: None,
                 }),
-                Stmt::Assign {
-                    name: "total".into(),
+                Stmt::Assign { target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -2531,8 +2886,7 @@ mod tests {
         // }
         let stmt = Stmt::Loop {
             body: vec![
-                Stmt::Assign {
-                    name: "count".into(),
+                Stmt::Assign { target: AssignTarget::Ident("count".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
@@ -2568,7 +2922,7 @@ mod tests {
         }];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { name: "f".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(42));
     }
 
@@ -2648,9 +3002,7 @@ mod tests {
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call {
-            name: "User".into(),
-            args: vec![Expr::Int(1)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("User".into())), args: vec![Expr::Int(1)],
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -2673,13 +3025,11 @@ mod tests {
         //   Hola Fitz, x es 15
         //   30
         let program = vec![
-            Stmt::Assign {
-                name: "name".into(),
+            Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into()),
             },
-            Stmt::Assign {
-                name: "x".into(),
+            Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
@@ -2687,9 +3037,7 @@ mod tests {
                     right: Box::new(Expr::Int(5)),
                 },
             },
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::StrInterp(vec![
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola ".into()),
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit(", x es ".into()),
@@ -2705,11 +3053,7 @@ mod tests {
                     right: Box::new(Expr::Int(2)),
                 })],
             ),
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::Call {
-                    name: "double".into(),
-                    args: vec![Expr::Ident("x".into())],
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Ident("x".into())],
                 }],
             }),
         ];
@@ -2761,14 +3105,11 @@ print(factorial(5))
         // Verifica que el camino Assign → StrInterp → Call (builtin) funciona
         // end-to-end. La salida real se ve con `cargo run -- run examples/hello.fitz`.
         let program = vec![
-            Stmt::Assign {
-                name: "name".into(),
+            Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Patagonia".into()),
             },
-            Stmt::Expr(Expr::Call {
-                name: "print".into(),
-                args: vec![Expr::StrInterp(vec![
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit("!".into()),
@@ -2809,7 +3150,7 @@ print(factorial(5))
     #[test]
     fn evalua_list_vacia() {
         let v = eval_expr_test(Expr::List(vec![])).unwrap();
-        assert_eq!(v, Value::List(vec![]));
+        assert_eq!(v, Value::new_list(vec![]));
     }
 
     #[test]
@@ -2819,7 +3160,7 @@ print(factorial(5))
             Expr::Int(2),
             Expr::Int(3),
         ])).unwrap();
-        assert_eq!(v, Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        assert_eq!(v, Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
     }
 
     #[test]
@@ -2837,7 +3178,7 @@ print(factorial(5))
                 right: Box::new(Expr::Int(2)),
             },
         ])).unwrap();
-        assert_eq!(v, Value::List(vec![Value::Int(2), Value::Int(4)]));
+        assert_eq!(v, Value::new_list(vec![Value::Int(2), Value::Int(4)]));
     }
 
     // ---- Map literal ----
@@ -2845,7 +3186,7 @@ print(factorial(5))
     #[test]
     fn evalua_map_vacio() {
         let v = eval_expr_test(Expr::Map(vec![])).unwrap();
-        assert_eq!(v, Value::Map(vec![]));
+        assert_eq!(v, Value::new_map(vec![]));
     }
 
     #[test]
@@ -2856,7 +3197,7 @@ print(factorial(5))
         ])).unwrap();
         assert_eq!(
             v,
-            Value::Map(vec![
+            Value::new_map(vec![
                 (Value::Str("a".into()), Value::Int(1)),
                 (Value::Str("b".into()), Value::Int(2)),
             ]),
@@ -3301,6 +3642,7 @@ let r = match n {
         match u {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
+                let fields = fields.borrow();
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0], ("id".into(), Value::Int(1)));
                 assert_eq!(fields[1], ("name".into(), Value::Str("Fitz".into())));
@@ -3322,6 +3664,7 @@ let r = match n {
         let u = env.borrow().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
                 assert_eq!(fields[0].0, "id");
                 assert_eq!(fields[1].0, "name");
             }
@@ -3340,6 +3683,7 @@ let r = match n {
         let c = env.borrow().get("c").unwrap();
         match c {
             Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
                 assert_eq!(fields[0], ("host".into(), Value::Str("localhost".into())));
                 assert_eq!(fields[1], ("port".into(), Value::Int(3000)));
             }
@@ -3362,6 +3706,7 @@ let r = match n {
         let c = env.borrow().get("c").unwrap();
         match c {
             Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
                 assert_eq!(fields[0], ("port".into(), Value::Int(4001)));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -3379,6 +3724,7 @@ let r = match n {
         let u = env.borrow().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
                 assert_eq!(fields[1], ("email".into(), Value::Null));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -3396,6 +3742,7 @@ let r = match n {
         let u = env.borrow().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
                 assert_eq!(fields[1], ("email".into(), Value::Null));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -3482,8 +3829,10 @@ let r = match n {
 
     #[test]
     fn field_access_sobre_no_instance_es_type_error() {
-        // Field access sobre un Int debe explotar — no hay métodos
-        // sobre primitivos todavía (eso es paso 4 de Fase 3).
+        // Field access "pelado" sobre un Int explota: no hay propiedades
+        // sobre primitivos. Los métodos sí (`x.upper()` para Str, etc.),
+        // pero ese camino va por `Expr::Call` con callee `Field`, no por
+        // este branch.
         let src = "\
             let x = 42\n\
             let n = x.foo\n\
@@ -3615,7 +3964,7 @@ let r = match n {
         )))))];
         eval_stmt(&fn_def("pass", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { name: "pass".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("pass".into())), args: vec![] };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(5));
     }
 
@@ -3625,8 +3974,7 @@ let r = match n {
         // boom() devuelve Value::Result(Err("nope")) sin ejecutar el return.
         let env = Environment::new();
         let body = vec![
-            Stmt::Assign {
-                name: "_".into(),
+            Stmt::Assign { target: AssignTarget::Ident("_".into()),
                 type_: None,
                 value: Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("nope".into()))))),
             },
@@ -3634,7 +3982,7 @@ let r = match n {
         ];
         eval_stmt(&fn_def("boom", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { name: "boom".into(), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("boom".into())), args: vec![] };
         assert_eq!(
             eval_expr(&call, env).unwrap(),
             err_value(Value::Str("nope".into())),
@@ -3713,5 +4061,424 @@ let r = match n {
             Err(EvalSignal::Return(_)) => {} // ok — el global lo traduciría.
             other => panic!("se esperaba EvalSignal::Return, se obtuvo {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Fase 3, paso 4 (fn anónimas, method calls, mutación de campos)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn fn_expr_evalua_a_function() {
+        // `fn(x) => x * 2` — evaluada sola, da un `Value::Function`.
+        let fnexpr = Expr::FnExpr {
+            params: vec![crate::ast::Param { name: "x".into(), type_: None }],
+            body: vec![Stmt::Return(Expr::BinOp {
+                op: BinOpKind::Mul,
+                left: Box::new(Expr::Ident("x".into())),
+                right: Box::new(Expr::Int(2)),
+            })],
+        };
+        let env = Environment::new();
+        let v = eval_expr(&fnexpr, env).unwrap();
+        assert!(matches!(v, Value::Function { .. }));
+    }
+
+    #[test]
+    fn fn_expr_invocada_al_vuelo() {
+        // `(fn(x) => x + 1)(2)` → 3
+        let src = "let y = (fn(x) => x + 1)(2)\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("y"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn fn_expr_captura_el_env_actual() {
+        // El cuerpo de la anónima ve `n` definido afuera (closure).
+        let src = "\
+            let n = 10\n\
+            let f = fn(x) => x + n\n\
+            let r = f(5)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Int(15)));
+    }
+
+    #[test]
+    fn fn_expr_se_pasa_como_argumento() {
+        // Pasar fn anónima como callback a una función de orden superior
+        // declarada por el usuario.
+        let src = "\
+            fn apply(f, x) => f(x)\n\
+            let r = apply(fn(n) => n * n, 6)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Int(36)));
+    }
+
+    #[test]
+    fn field_assign_muta_la_instancia() {
+        // `user.name = "Otro"` cambia el campo, visible a través de
+        // cualquier alias.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1, name: \"Fitz\" }\n\
+            u.name = \"Otro\"\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let u = env.borrow().get("u").unwrap();
+        match u {
+            Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
+                assert_eq!(fields[1], ("name".into(), Value::Str("Otro".into())));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn field_assign_visible_a_traves_de_alias() {
+        // Dos variables apuntan a la misma instancia (vía `Rc`); mutar
+        // por una se ve por la otra.
+        let src = "\
+            type Box { value: Int }\n\
+            let a = Box { value: 1 }\n\
+            let b = a\n\
+            a.value = 42\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let b = env.borrow().get("b").unwrap();
+        match b {
+            Value::Instance { fields, .. } => {
+                let fields = fields.borrow();
+                assert_eq!(fields[0], ("value".into(), Value::Int(42)));
+            }
+            other => panic!("se esperaba Instance, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn field_assign_a_no_instance_es_error() {
+        // `x.field = ...` sobre algo que no es Instance corta con type error.
+        let src = "\
+            let x = 10\n\
+            x.field = 1\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn field_assign_a_campo_inexistente_es_error() {
+        let src = "\
+            type User { id: Int }\n\
+            let u = User { id: 1 }\n\
+            u.nope = 2\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(err.message.contains("nope"));
+    }
+
+    #[test]
+    fn method_call_sobre_tipo_sin_metodo_emite_error_explicito() {
+        // `xs.foo()` no existe — el dispatch corta con
+        // "no tiene un método llamado foo".
+        let src = "\
+            let xs = [1, 2, 3]\n\
+            xs.foo()\n\
+        ";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(err.message.contains("método"), "mensaje: {}", err.message);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — built-ins de List
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_push_muta_in_place() {
+        let src = "\
+            let xs = [1, 2]\n\
+            xs.push(3)\n\
+            xs.push(4)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let xs = env.borrow().get("xs").unwrap();
+        assert_eq!(
+            xs,
+            Value::new_list(vec![
+                Value::Int(1),
+                Value::Int(2),
+                Value::Int(3),
+                Value::Int(4),
+            ]),
+        );
+    }
+
+    #[test]
+    fn list_push_visible_a_traves_de_alias() {
+        // Dos variables al mismo Rc; mutar por una se ve por la otra.
+        let src = "\
+            let a = [1]\n\
+            let b = a\n\
+            a.push(2)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        let b = env.borrow().get("b").unwrap();
+        assert_eq!(b, Value::new_list(vec![Value::Int(1), Value::Int(2)]));
+    }
+
+    #[test]
+    fn list_pop_devuelve_el_ultimo_y_acorta() {
+        let src = "\
+            let xs = [1, 2, 3]\n\
+            let last = xs.pop()\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("last"), Some(Value::Int(3)));
+        assert_eq!(
+            env.borrow().get("xs"),
+            Some(Value::new_list(vec![Value::Int(1), Value::Int(2)])),
+        );
+    }
+
+    #[test]
+    fn list_pop_sobre_vacia_es_error() {
+        let src = "let xs = []\nlet _ = xs.pop()\n";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(err.message.contains("vacía"), "mensaje: {}", err.message);
+    }
+
+    #[test]
+    fn list_map_aplica_fn_a_cada_elemento() {
+        let src = "let r = [1, 2, 3].map(fn(n) => n * 10)\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("r"),
+            Some(Value::new_list(vec![
+                Value::Int(10),
+                Value::Int(20),
+                Value::Int(30),
+            ])),
+        );
+    }
+
+    #[test]
+    fn list_filter_solo_mantiene_los_true() {
+        let src = "let r = [1, 2, 3, 4].filter(fn(n) => n == 2 or n == 4)\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("r"),
+            Some(Value::new_list(vec![Value::Int(2), Value::Int(4)])),
+        );
+    }
+
+    #[test]
+    fn list_filter_callback_no_bool_es_error() {
+        let src = "let r = [1, 2].filter(fn(n) => n)\n";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn list_find_devuelve_ok_cuando_matchea() {
+        let src = "let r = [1, 2, 3].find(fn(n) => n == 2)\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("r"),
+            Some(ok_value(Value::Int(2))),
+        );
+    }
+
+    #[test]
+    fn list_find_devuelve_err_cuando_no_hay_match() {
+        let src = "let r = [1, 2, 3].find(fn(n) => n == 99)\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("r"),
+            Some(err_value(Value::Str("no encontrado".into()))),
+        );
+    }
+
+    #[test]
+    fn list_metodo_len() {
+        let src = "let n = [1, 2, 3, 4].len()\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(4)));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — built-ins de Map
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn map_get_devuelve_ok_si_hay_clave() {
+        let src = "let r = {\"a\": 1}.get(\"a\")\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(ok_value(Value::Int(1))));
+    }
+
+    #[test]
+    fn map_get_devuelve_err_si_no_hay_clave() {
+        let src = "let r = {\"a\": 1}.get(\"nope\")\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        // El mensaje del Err lleva la clave.
+        let r = env.borrow().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(inner)) => match *inner {
+                Value::Str(s) => assert!(s.contains("nope")),
+                other => panic!("se esperaba Str dentro de Err, se obtuvo {:?}", other),
+            },
+            other => panic!("se esperaba Err, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn map_has_devuelve_true_o_false() {
+        let src = "\
+            let m = {\"a\": 1}\n\
+            let yes = m.has(\"a\")\n\
+            let no = m.has(\"x\")\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("yes"), Some(Value::Bool(true)));
+        assert_eq!(env.borrow().get("no"), Some(Value::Bool(false)));
+    }
+
+    #[test]
+    fn map_keys_y_values_preservan_orden_de_insercion() {
+        let src = "\
+            let m = {\"b\": 2, \"a\": 1}\n\
+            let ks = m.keys()\n\
+            let vs = m.values()\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("ks"),
+            Some(Value::new_list(vec![
+                Value::Str("b".into()),
+                Value::Str("a".into()),
+            ])),
+        );
+        assert_eq!(
+            env.borrow().get("vs"),
+            Some(Value::new_list(vec![Value::Int(2), Value::Int(1)])),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — built-ins de Str
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn str_metodo_len_cuenta_chars() {
+        let src = "let n = \"hola\".len()\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(4)));
+    }
+
+    #[test]
+    fn str_upper_y_lower() {
+        let src = "\
+            let a = \"hola\".upper()\n\
+            let b = \"MUNDO\".lower()\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("a"), Some(Value::Str("HOLA".into())));
+        assert_eq!(env.borrow().get("b"), Some(Value::Str("mundo".into())));
+    }
+
+    #[test]
+    fn metodo_con_aridad_incorrecta_es_error() {
+        let src = "let r = \"x\".upper(1)\n";
+        let err = parse_and_eval(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::WrongArgCount { .. }));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — encadenamiento y composición
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn metodos_se_encadenan() {
+        // `.map(...).filter(...)` se encadena vía postfix. El parser corta
+        // sentencias en el newline; el encadenamiento multi-línea con `.`
+        // al inicio de la línea siguiente todavía no se soporta (deuda
+        // explícita). Se mantiene la cadena en una sola línea.
+        let src = "let r = [1, 2, 3, 4].map(fn(n) => n * n).filter(fn(n) => n > 5)\n";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(
+            env.borrow().get("r"),
+            Some(Value::new_list(vec![Value::Int(9), Value::Int(16)])),
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Test E2E — criterio de éxito de Fase 3
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn programa_e2e_criterio_de_exito_fase_3() {
+        // `users.find(fn(u) => u.id == id)` — usa method call, fn anónima,
+        // Result, struct literal y field access. `find` ya devuelve
+        // `Result<User>` así que `find_user` lo retorna directo. (Usar
+        // `return` adentro de un `match` como expresión es deuda; el
+        // caso de uso natural acá no lo necesita.)
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            \n\
+            fn find_user(users, id) {\n\
+            \treturn users.find(fn(u) => u.id == id)\n\
+            }\n\
+            \n\
+            let users = [\n\
+            \tUser { id: 1, name: \"Fitz\" },\n\
+            \tUser { id: 2, name: \"Roy\" },\n\
+            ]\n\
+            \n\
+            let hit = find_user(users, 1)\n\
+            let miss = find_user(users, 99)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+
+        // hit es Ok(User { id: 1, name: "Fitz" })
+        let hit = env.borrow().get("hit").unwrap();
+        match hit {
+            Value::Result(ResultVariant::Ok(inner)) => match *inner {
+                Value::Instance { ref type_name, ref fields } => {
+                    assert_eq!(type_name, "User");
+                    let f = fields.borrow();
+                    assert_eq!(f[0], ("id".into(), Value::Int(1)));
+                    assert_eq!(f[1], ("name".into(), Value::Str("Fitz".into())));
+                }
+                other => panic!("se esperaba Instance adentro del Ok, se obtuvo {:?}", other),
+            },
+            other => panic!("se esperaba Ok, se obtuvo {:?}", other),
+        }
+
+        // miss es Err("no encontrado") — el mensaje viene de list_find.
+        let miss = env.borrow().get("miss").unwrap();
+        assert_eq!(miss, err_value(Value::Str("no encontrado".into())));
     }
 }

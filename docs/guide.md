@@ -1,7 +1,7 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 3 — paso 3: Result + Ok/Err + `?`, 441 tests pasando).
+> Última actualización: 2026-05-11 (Fase 3 — paso 4: funciones anónimas + method calls + mutación, 472 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -34,13 +34,14 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 **Parte 4 — Abstracción**
 11. [Funciones](#11-funciones)
 12. [Tipos con `type`](#12-tipos-con-type)
+13. [Métodos y mutación](#13-métodos-y-mutación)
 
 **Parte 5 — Errores**
-13. [Result y manejo de errores](#13-result-y-manejo-de-errores)
-14. [Errores y mensajes](#14-errores-y-mensajes)
+14. [Result y manejo de errores](#14-result-y-manejo-de-errores)
+15. [Errores y mensajes](#15-errores-y-mensajes)
 
 **Parte 6 — Cerrando**
-15. [Qué sigue](#15-qué-sigue)
+16. [Qué sigue](#16-qué-sigue)
 
 ---
 
@@ -80,12 +81,16 @@ Solo lo que el intérprete ejecuta hoy:
 - Indexing con `xs[i]` / `m["k"]`.
 - `for x in xs` y `for i in 0..n`.
 - `match` con patrones literales, binding por identificador, `_` y rangos `0..10`.
-- Funciones (`fn` en bloque y `=>` en flecha), closures, recursión.
-- Declaración de tipos con `type`, instanciación (`User { id: 1, name: "x" }`)
-  y acceso a campos (`user.name`), con defaults y nullables.
+- Funciones (`fn` en bloque y `=>` en flecha), funciones anónimas
+  (`fn(x) => x*2`), closures, recursión.
+- Declaración de tipos con `type`, instanciación (`User { id: 1, name: "x" }`),
+  acceso a campos (`user.name`), mutación de campos (`user.name = "Otro"`),
+  defaults y nullables.
+- Method calls sobre listas, mapas, strings e instancias:
+  `xs.map(fn(n) => n*2)`, `xs.push(v)`, `m.get("k")`, `s.upper()`.
 - Manejo de errores con `Result`, `Ok(x)`, `Err(e)`, `match` sobre las
   variantes y operador `?` para propagar.
-- Builtins: `print`, `len`.
+- Builtins globales: `print`, `len`.
 
 ### Qué todavía no anda
 
@@ -94,9 +99,9 @@ pero el intérprete aún no las ejecuta. Si las tipeás vas a ver un
 error explícito:
 
 - Tuplas (`(1, "a", true)`).
-- Mutación de listas (`push`, `pop`, etc.) — espera method calls.
-- Mutación de campos de una instancia (`user.name = "x"`).
-- Métodos sobre instancias (`user.greet()`).
+- Asignación a índice (`xs[0] = v`).
+- Métodos custom declarados por el usuario sobre `type`
+  (`type User { ... fn greet() => ... }`).
 - `async` / `await`.
 - Decoradores HTTP (`@get`, `@post`, …).
 - `import` / `from ... import`.
@@ -121,7 +126,7 @@ Cada ejemplo de la guía vive como archivo en `examples/guide/` y se
 ejecuta así:
 
 ```bash
-cargo run -- run examples/guide/01-hola.fitz
+cargo run -- run examples/guide/02-hola.fitz
 ```
 
 Si copiás y pegás a un archivo propio, también funciona — los ejemplos
@@ -225,7 +230,7 @@ un flag `--debug`; por ahora convivimos con ella.
 
 ### Tu primer archivo
 
-Vamos a escribir un programa propio. Creá [examples/guide/01-hola.fitz](../examples/guide/01-hola.fitz)
+Vamos a escribir un programa propio. Creá [examples/guide/02-hola.fitz](../examples/guide/02-hola.fitz)
 con este contenido (o copialo del repo):
 
 ```fitz
@@ -241,7 +246,7 @@ print("Hola, {name}!")
 Lo corrés igual que cualquier otro:
 
 ```bash
-cargo run -- run examples/guide/01-hola.fitz
+cargo run -- run examples/guide/02-hola.fitz
 ```
 
 Y vas a ver, al final:
@@ -292,7 +297,7 @@ capítulo de strings.
 Si el comando no encuentra el archivo:
 
 ```
-Error leyendo examples/guide/01-hola.fitz: ...
+Error leyendo examples/guide/02-hola.fitz: ...
 ```
 
 Revisá la ruta. Cargo corre con la raíz del proyecto como working
@@ -300,7 +305,7 @@ directory, así que las rutas son relativas a la carpeta `fitz/`.
 
 Si el archivo está pero hay un error de sintaxis, el intérprete corta
 con línea y columna del problema. Vamos a aprender a leer esos
-mensajes en el capítulo 13.
+mensajes en el capítulo 15.
 
 ---
 
@@ -433,7 +438,7 @@ problemas reales, lo reconsideramos.
 
 ### Ejemplo completo
 
-[examples/guide/02-variables.fitz](../examples/guide/02-variables.fitz):
+[examples/guide/03-variables.fitz](../examples/guide/03-variables.fitz):
 
 ```fitz
 // 02-variables.fitz — Variables y tipos primitivos.
@@ -650,7 +655,7 @@ Estos están planeados pero el lexer no los tokeniza todavía.
 
 ### Ejemplo completo
 
-[examples/guide/03-operadores.fitz](../examples/guide/03-operadores.fitz):
+[examples/guide/04-operadores.fitz](../examples/guide/04-operadores.fitz):
 
 ```fitz
 print(2 + 3)
@@ -854,7 +859,7 @@ entre `{` y `}` como una expresión a interpolar.
 
 ### Ejemplo completo
 
-[examples/guide/04-strings.fitz](../examples/guide/04-strings.fitz):
+[examples/guide/05-strings.fitz](../examples/guide/05-strings.fitz):
 
 ```fitz
 name = "Fitz"
@@ -1044,7 +1049,7 @@ código.
 
 ### Ejemplo completo
 
-[examples/guide/05-logica.fitz](../examples/guide/05-logica.fitz):
+[examples/guide/06-logica.fitz](../examples/guide/06-logica.fitz):
 
 ```fitz
 print(true and true)
@@ -1222,7 +1227,7 @@ mucho el lenguaje.
 
 ### Ejemplo completo
 
-[examples/guide/06-if.fitz](../examples/guide/06-if.fitz):
+[examples/guide/07-if.fitz](../examples/guide/07-if.fitz):
 
 ```fitz
 age = 20
@@ -1428,7 +1433,7 @@ while fila < 5 and done == false {
 
 ### Ejemplo completo
 
-[examples/guide/07-loops.fitz](../examples/guide/07-loops.fitz):
+[examples/guide/08-loops.fitz](../examples/guide/08-loops.fitz):
 
 ```fitz
 i = 0
@@ -1693,16 +1698,17 @@ print(usuarios[0]["name"])   // → Ana
 
 ### Lo que todavía no anda
 
-- **Mutación**: `xs.push(4)`, `m["k"] = v`, `xs[0] = nuevo`. Vienen
-  con method calls, que es el paso 4 de Fase 3.
-- **Métodos de lista**: `.map`, `.filter`, `.find`, `.contains`,
-  `.first`, `.last`. Mismo paso 4. Por ahora `for` cubre los casos
-  básicos.
+- **Métodos sobre listas y mapas** — `xs.push(...)`, `xs.map(...)`,
+  `m.get(...)`, etc. ya están vivos desde el paso 4 de Fase 3.
+  Los ves en el [capítulo 13](#13-métodos-y-mutación).
+- **Asignación a índice** (`xs[0] = nuevo`, `m["k"] = v`) — sigue
+  siendo deuda. Por ahora la mutación posicional en listas hay que
+  hacerla con `pop`/`push` o reconstruyendo.
 - **`for` sobre mapas**: necesita el tipo `Pair`/`entry`. Si lo
   intentás, el intérprete corta:
 
   ```
-  Error — `for` sobre Map aún no soportado — esperá al tipo Pair (paso 4 de Fase 3)
+  Error — `for` sobre Map aún no soportado — necesita el tipo Pair
   ```
 
 - **Índices negativos** (`xs[-1]`) al estilo Python.
@@ -1711,7 +1717,7 @@ print(usuarios[0]["name"])   // → Ana
 
 ### Ejemplo completo
 
-[examples/guide/08-listas-mapas.fitz](../examples/guide/08-listas-mapas.fitz):
+[examples/guide/09-listas-mapas.fitz](../examples/guide/09-listas-mapas.fitz):
 
 ```fitz
 nums = [1, 2, 3, 4, 5]
@@ -1988,7 +1994,7 @@ Lo cubrimos en detalle en [el próximo capítulo](#13-result-y-manejo-de-errores
 
 ### Ejemplo completo
 
-[examples/guide/09-match.fitz](../examples/guide/09-match.fitz):
+[examples/guide/10-match.fitz](../examples/guide/10-match.fitz):
 
 ```fitz
 status = "active"
@@ -2222,25 +2228,62 @@ fn square(n) => n * n
 print(apply(square, 7))  // 49
 ```
 
-Esto te abre la puerta a estilos de orden superior — el día que
-existan listas, podrás usar `map`, `filter`, etc. Por ahora alcanza
-para callbacks.
+### Funciones anónimas inline
+
+Cuando una función es lo bastante chica como para no merecer un
+nombre — típicamente una callback que pasás a otra función —
+podés definirla "al vuelo" con la misma palabra clave `fn`, pero
+sin nombre:
+
+```fitz
+let cuadrado = fn(n) => n * n
+print(cuadrado(7))                       // 49
+```
+
+La forma de flecha es la típica, pero la forma de bloque también
+existe:
+
+```fitz
+let abs = fn(n) {
+    if (n < 0) {
+        return -n
+    }
+    return n
+}
+print(abs(-5))                           // 5
+```
+
+La utilidad real aparece cuando pasás la anónima como argumento:
+
+```fitz
+fn apply(f, x) => f(x)
+print(apply(fn(n) => n * 10, 7))          // 70
+```
+
+Y se vuelven ergonómicas con los métodos sobre listas y mapas (cap.
+13): `xs.map(fn(n) => n * 2)`, `users.find(fn(u) => u.id == 1)`.
+
+Una anónima es una función como cualquier otra, así que también
+captura el scope donde se definió — lo mismo que con las nombradas.
+
+```fitz
+let factor = 3
+let triplicar = fn(n) => n * factor
+print(triplicar(5))                       // 15
+```
 
 ### Lo que todavía no anda
 
-- **Funciones anónimas inline** (`fn(x) => x * 2` como expresión
-  directa, sin ponerle nombre). Hoy el parser no las admite. Si
-  necesitás una función "anónima", definila con `fn` y pasala por su
-  nombre.
 - **Parámetros con default** (`fn greet(name = "amigo") { ... }`).
 - **Varargs** (`fn sum(...xs)`).
 - **Argumentos nombrados al llamar** (`greet(name: "Fitz")`).
-- **Method calls** (`obj.method(args)`). Cuando lleguen los tipos
-  custom instanciados en Fase 3.
+- **Métodos custom sobre `type`** (`type User { ... fn greet() => "Hola" }`)
+  — los built-in sobre listas, mapas, strings ya andan (cap. 13),
+  pero declarar métodos propios sobre tus tipos sigue siendo deuda.
 
 ### Ejemplo completo
 
-[examples/guide/10-funciones.fitz](../examples/guide/10-funciones.fitz):
+[examples/guide/11-funciones.fitz](../examples/guide/11-funciones.fitz):
 
 ```fitz
 fn greet(name) {
@@ -2279,6 +2322,15 @@ print(add5(3))
 fn apply(f, x) => f(x)
 fn square(n) => n * n
 print(apply(square, 7))
+
+print(apply(fn(n) => n * 10, 7))
+let abs = fn(n) {
+    if (n < 0) {
+        return -n
+    }
+    return n
+}
+print(abs(-5))
 ```
 
 Salida:
@@ -2291,14 +2343,15 @@ null
 120
 8
 49
+70
+5
 ```
 
 ---
 
 Con funciones ya tenés todo lo necesario para escribir programas
-completos. En el próximo capítulo entramos a la última parte de la
-guía: una mirada a `type`, que hoy declarás pero todavía no podés
-instanciar — y por qué.
+completos. En el próximo capítulo entramos a `type`: cómo declarar
+tus propios tipos, instanciarlos y acceder a sus campos.
 
 ---
 
@@ -2539,11 +2592,10 @@ print("Hola, {u.name}!")    // Hola, Fitz!
 
 ### Lo que todavía no anda
 
-- **Mutación de campos** (`u.name = "otro"`) — espera al paso 4 de
-  Fase 3 (asignación a destinos no-identificador).
-- **Métodos sobre instancias** (`u.greet()`) — también paso 4 de
-  Fase 3. Hoy todo se hace con funciones que reciben la instancia
-  como parámetro.
+- **Métodos custom sobre `type`** (`type User { ... fn greet() => ... }`)
+  — hoy todo método propio se hace con funciones aparte que reciben
+  la instancia como parámetro. Los métodos built-in (sobre `List`,
+  `Map`, `Str`) ya están vivos: ver el [próximo capítulo](#13-métodos-y-mutación).
 - **Chequeo de tipos en runtime** — las anotaciones se guardan pero
   no se validan. Podés pasarle un Str a un campo declarado `Int` y
   el evaluador lo acepta. El chequeo estático llega con el
@@ -2554,7 +2606,7 @@ print("Hola, {u.name}!")    // Hola, Fitz!
 
 ### Ejemplo completo
 
-[examples/guide/11-type.fitz](../examples/guide/11-type.fitz):
+[examples/guide/12-type.fitz](../examples/guide/12-type.fitz):
 
 ```fitz
 type User {
@@ -2597,13 +2649,335 @@ Config { host: "localhost", port: 3000, debug: false }
 
 ---
 
-En el próximo capítulo vemos cómo Fitz maneja errores del programa
-sin excepciones: el tipo `Result`, los constructores `Ok` y `Err`, y
-el operador `?` para propagar.
+En el próximo capítulo entramos en métodos: la sintaxis `receptor.metodo(args)`
+sobre listas, mapas, strings e instancias, y cómo funciona la
+mutación en Fitz.
 
 ---
 
-## 13. Result y manejo de errores
+## 13. Métodos y mutación
+
+Hasta acá las listas, los mapas y las strings los manejabas con
+operaciones globales: `len(xs)`, `for n in xs`, indexing con `[]`.
+Funciona, pero a veces lo natural es escribirlo en orden "objeto
+primero": `xs.len()`, `xs.map(...)`. Eso son **métodos**: funciones
+que se llaman sobre un valor con la sintaxis `receptor.metodo(args)`.
+
+### Por qué método y no función suelta
+
+Misma operación, dos formas de escribirla:
+
+```fitz
+let xs = [1, 2, 3, 4]
+
+// Función global.
+print(len(xs))                     // 4
+
+// Método sobre la lista.
+print(xs.len())                    // 4
+```
+
+Ambas formas valen y, en este caso, hacen lo mismo. La forma de
+método brilla en cadenas: `xs.map(...).filter(...)` se lee de
+izquierda a derecha, paso a paso, sin paréntesis anidados.
+
+En Fitz, los métodos se resuelven por **el tipo del receptor**: hay
+una tabla interna que sabe qué métodos tiene `List`, qué métodos
+tiene `Map`, qué métodos tiene `Str`, etc. Si llamás un método que
+no existe para ese tipo, el intérprete te corta con un mensaje
+claro:
+
+```fitz
+[1, 2].volar()
+// Error — el tipo `List` no tiene un método llamado `volar`
+```
+
+### Métodos de `List`
+
+| Método             | Qué hace                                            |
+|--------------------|-----------------------------------------------------|
+| `push(v)`          | Agrega `v` al final. **Muta** la lista.             |
+| `pop()`            | Saca y devuelve el último. **Muta** la lista.       |
+| `map(fn)`          | Aplica `fn` a cada elemento y devuelve una lista nueva. |
+| `filter(fn)`       | Devuelve una lista nueva con los elementos para los que `fn` da `true`. |
+| `find(fn)`         | Devuelve `Ok(elemento)` para el primero que matchea, o `Err("no encontrado")`. |
+| `len()`            | Cantidad de elementos.                              |
+
+`fn` es cualquier función unaria. La forma más cómoda es la fn
+anónima inline (cap. 11):
+
+```fitz
+let xs = [1, 2, 3, 4]
+
+let doblados = xs.map(fn(n) => n * 2)
+print(doblados)                    // [2, 4, 6, 8]
+
+let pares = xs.filter(fn(n) => n == 2 or n == 4)
+print(pares)                       // [2, 4]
+
+let tres = xs.find(fn(n) => n == 3)
+print(tres)                        // Ok(3)
+
+let veinte = xs.find(fn(n) => n == 20)
+print(veinte)                      // Err("no encontrado")
+```
+
+`push` y `pop` **mutan** la lista; los demás devuelven datos nuevos
+y dejan el receptor intacto.
+
+```fitz
+let xs = [1, 2]
+xs.push(3)
+xs.push(4)
+print(xs)                          // [1, 2, 3, 4]
+let last = xs.pop()
+print(last)                        // 4
+print(xs)                          // [1, 2, 3]
+```
+
+### Métodos de `Map`
+
+| Método      | Qué hace                                                |
+|-------------|---------------------------------------------------------|
+| `get(k)`    | Devuelve `Ok(valor)` si la clave existe, o `Err(...)`.  |
+| `has(k)`    | `true` si la clave existe, `false` si no.               |
+| `keys()`    | Lista con las claves, en orden de inserción.            |
+| `values()`  | Lista con los valores, en orden de inserción.           |
+| `len()`     | Cantidad de pares.                                      |
+
+```fitz
+let m = {"a": 1, "b": 2}
+
+print(m.has("a"))                  // true
+print(m.has("x"))                  // false
+print(m.get("a"))                  // Ok(1)
+print(m.get("x"))                  // Err("clave no encontrada: x")
+print(m.keys())                    // ["a", "b"]
+print(m.values())                  // [1, 2]
+```
+
+La diferencia entre `m["a"]` y `m.get("a")` está en cómo modelan la
+falta: `m["a"]` corta con error si no hay clave, `m.get("a")` te
+devuelve un `Result` y vos decidís qué hacer. Si querés evitar el
+corte, usá `get` (y matcheá el `Result`, cap. 14).
+
+### Métodos de `Str`
+
+| Método      | Qué hace                                |
+|-------------|-----------------------------------------|
+| `len()`     | Cantidad de caracteres (no bytes).      |
+| `upper()`   | Devuelve una copia en mayúsculas.       |
+| `lower()`   | Devuelve una copia en minúsculas.       |
+
+```fitz
+print("hola".len())                // 4
+print("hola".upper())              // HOLA
+print("HOLA".lower())              // hola
+```
+
+Las strings son inmutables: `upper`/`lower` devuelven una nueva,
+sin tocar la original.
+
+### Encadenar métodos
+
+Como cada método devuelve un valor, podés enganchar el próximo
+sobre el resultado. Esto es donde el estilo "objeto primero" se
+empieza a sentir natural:
+
+```fitz
+let pares_al_cuadrado = [1, 2, 3, 4, 5]
+    .filter(fn(n) => n == 2 or n == 4)
+    .map(fn(n) => n * n)
+print(pares_al_cuadrado)           // [4, 16]
+```
+
+> Limitación de hoy: el parser corta en el newline, así que el
+> ejemplo de arriba **no** anda partido en líneas múltiples
+> empezando con `.`. Hay que mantener la cadena en una sola línea
+> (o asignar a variables intermedias). Es deuda chica.
+
+### Mutación de campos
+
+Hasta ahora `user.name` era solo lectura. En este capítulo se
+desbloquea la escritura: `user.name = "Otro"` reemplaza el valor
+del campo en la instancia.
+
+```fitz
+type User { id: Int, name: Str }
+
+let u = User { id: 1, name: "Fitz" }
+print(u)                            // User { id: 1, name: "Fitz" }
+
+u.name = "Roy"
+print(u)                            // User { id: 1, name: "Roy" }
+```
+
+El compilador (estático) eventualmente va a permitir marcar campos
+como `let`/inmutables y forzar el chequeo. Por ahora cualquier
+campo es escribible.
+
+Si intentás asignar a un campo que no existe, error claro:
+
+```fitz
+u.nope = 99
+// Error — el tipo `User` no tiene un campo llamado `nope`
+```
+
+### Alias y referencias compartidas
+
+Acá entra una decisión de diseño que te va a parecer familiar si
+venís de Python o JavaScript: las listas, mapas e instancias se
+pasan **por referencia compartida**. Eso quiere decir que cuando
+dos variables apuntan a la misma lista, mutar por una se ve por la
+otra.
+
+```fitz
+let a = [1, 2]
+let b = a                          // `b` mira la misma lista que `a`.
+a.push(3)
+print(b)                           // [1, 2, 3]   ← se ve la mutación.
+```
+
+Lo mismo pasa con instancias:
+
+```fitz
+let original = User { id: 1, name: "Fitz" }
+let alias = original
+alias.name = "Otro"
+print(original.name)               // Otro
+```
+
+Esto es el mismo modelo que objetos en Python/JS: las primitivas
+(Int, Float, Bool, Str, Null) se copian por valor; las
+**colecciones e instancias** se aliasean. Si querés una copia
+genuina, hoy hay que reconstruir a mano (`xs.map(fn(x) => x)` para
+listas, por ejemplo). El día que necesitemos un `clone()` formal lo
+sumamos.
+
+### Funciones anónimas como callback
+
+Los métodos `map`/`filter`/`find` reciben una función. Podés pasar
+una fn con nombre, pero lo típico es definir la callback al vuelo
+con `fn(x) => ...` (cap. 11):
+
+```fitz
+let usuarios = [
+    User { id: 1, name: "Fitz" },
+    User { id: 2, name: "Roy" },
+]
+
+// `find` en una lista de instancias.
+let resultado = usuarios.find(fn(u) => u.id == 2)
+print(resultado)                   // Ok(User { id: 2, name: "Roy" })
+```
+
+Como una anónima es un closure, también ve las variables del scope
+donde fue definida:
+
+```fitz
+let umbral = 10
+let grandes = [1, 5, 12, 20].filter(fn(n) => n > umbral)
+print(grandes)                     // [12, 20]
+```
+
+### Lo que todavía no anda
+
+- **Asignación a índice** (`xs[0] = nuevo`, `m["k"] = v`). Mientras
+  tanto, usá `push`/`pop` para listas o reconstruí el mapa con un
+  literal nuevo.
+- **Métodos custom sobre `type`** (`type User { ... fn greet() => "Hola, {name}" }`).
+  Hoy escribís funciones globales que reciben la instancia como
+  primer argumento.
+- **Encadenamiento multi-línea** — `.map(...).filter(...)` partido
+  en líneas separadas con `.` al inicio de la siguiente. Hay que
+  mantenerlo en una sola línea o usar variables intermedias.
+- **`return` adentro de un brazo de `match` como expresión** —
+  como cada brazo es una expresión, no podés cortar la función
+  desde adentro con `return`. Se puede pulir cuando moleste.
+- **Más métodos**: `contains`, `trim`, `split`, `starts_with`,
+  `concat`, etc. Se irán sumando con la práctica; sin sorpresas
+  semánticas.
+
+### Ejemplo completo
+
+[examples/guide/13-metodos.fitz](../examples/guide/13-metodos.fitz):
+
+```fitz
+type User { id: Int, name: Str }
+
+let usuarios = [
+    User { id: 1, name: "Fitz" },
+    User { id: 2, name: "Roy" },
+]
+
+usuarios.push(User { id: 3, name: "Cerro" })
+print(usuarios.len())
+
+let nombres = usuarios.map(fn(u) => u.name)
+print(nombres)
+
+let con_o = usuarios.filter(fn(u) => u.name.lower() == "roy")
+print(con_o)
+
+let buscado = usuarios.find(fn(u) => u.id == 1)
+print(buscado)
+
+let no_encontrado = usuarios.find(fn(u) => u.id == 99)
+print(no_encontrado)
+
+let primero = usuarios.find(fn(u) => u.id == 1)
+match primero {
+    Ok(u)  => print("hola, {u.name}!")
+    Err(e) => print("no debería pasar: {e}")
+}
+
+let primer = usuarios[0]
+primer.name = "Patagonia"
+print(usuarios)
+
+let m = {"a": 1, "b": 2, "c": 3}
+print(m.has("a"))
+print(m.get("z"))
+print(m.keys())
+print(m.values())
+print(m.len())
+
+print("Hola".upper())
+print("MUNDO".lower())
+print("hola".len())
+```
+
+Salida:
+
+```
+3
+["Fitz", "Roy", "Cerro"]
+[User { id: 2, name: "Roy" }]
+Ok(User { id: 1, name: "Fitz" })
+Err("no encontrado")
+hola, Fitz!
+[User { id: 1, name: "Patagonia" }, User { id: 2, name: "Roy" }, User { id: 3, name: "Cerro" }]
+true
+Err("clave no encontrada: z")
+["a", "b", "c"]
+[1, 2, 3]
+3
+HOLA
+mundo
+4
+```
+
+---
+
+Con métodos y mutación ya tenés todo lo que hace falta para escribir
+programas que cambian de estado y usan datos en colecciones de
+manera ergonómica. En el próximo capítulo entra Fitz a manejar
+errores **del programa** sin excepciones: el tipo `Result`, los
+constructores `Ok` y `Err`, y el operador `?` para propagar.
+
+---
+
+## 14. Result y manejo de errores
 
 Fitz no tiene excepciones. Cuando una operación puede fallar, su
 resultado se modela explícitamente con el tipo built-in `Result`,
@@ -2736,7 +3110,7 @@ también, y `Ok(1) == Err(1)` da `false`.
 
 ### Ejemplo completo
 
-[examples/guide/12-result.fitz](../examples/guide/12-result.fitz):
+[examples/guide/14-result.fitz](../examples/guide/14-result.fitz):
 
 ```fitz
 type User { id: Int, name: Str }
@@ -2801,14 +3175,14 @@ escrito.
 
 ---
 
-## 14. Errores y mensajes
+## 15. Errores y mensajes
 
 Tarde o temprano vas a tipear algo mal y el intérprete te va a cortar.
 Este capítulo es un mapa de los errores **del intérprete**: los que
 aparecen cuando tu programa Fitz está mal escrito o intenta algo
 inválido en runtime. No los confundas con los errores **del
 programa** — los `Err(...)` que devuelve una función — que cubrimos
-en el [cap. 13](#13-result-y-manejo-de-errores).
+en el [cap. 14](#14-result-y-manejo-de-errores).
 
 ### Formato general
 
@@ -2904,8 +3278,8 @@ Estos son los que más vas a ver mientras escribís lógica:
 | `falta el campo 'Y' al instanciar 'X' (no tiene default y no es nullable)` | Omitiste un campo obligatorio en un struct literal. Cap. 12. |
 | `tipo 'X' no definido` | Instanciaste un tipo que no fue declarado con `type` (o lo escribiste mal). Cap. 12. |
 | `acceso a campo '.X' sobre un valor de tipo 'Y'` | Hiciste `obj.campo` sobre algo que no es una instancia (Int, Str, List, etc.). Cap. 12. |
-| `'Ok' espera exactamente 1 argumento, recibió N` | Constructor `Ok` / `Err` con aridad incorrecta (cap. 13). |
-| `` el operador `?` requiere un valor `Result`, recibió 'X' `` | Usaste `?` sobre algo que no es un `Result` (cap. 13). |
+| `'Ok' espera exactamente 1 argumento, recibió N` | Constructor `Ok` / `Err` con aridad incorrecta (cap. 14). |
+| `` el operador `?` requiere un valor `Result`, recibió 'X' `` | Usaste `?` sobre algo que no es un `Result` (cap. 14). |
 
 Ejemplo (el archivo de este capítulo):
 
@@ -2955,7 +3329,7 @@ no tengamos posiciones finas.
 
 ### Ejemplo completo
 
-[examples/guide/13-errores.fitz](../examples/guide/13-errores.fitz):
+[examples/guide/15-errores.fitz](../examples/guide/15-errores.fitz):
 
 ```fitz
 fn add(a, b) => a + b
@@ -2978,14 +3352,14 @@ contribuir.
 
 ---
 
-## 15. Qué sigue
+## 16. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 14 podés:
+Con los capítulos 1 a 15 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -2997,8 +3371,13 @@ Con los capítulos 1 a 14 podés:
 - Definir **funciones** con su forma de bloque y su forma flecha,
   hacer **recursión** y crear **closures** con captura léxica.
 - Declarar **tipos custom** con `type`, **instanciarlos**
-  (`User { id: 1, name: "x" }`) y acceder a sus campos
-  (`user.name`), con defaults y campos nullables.
+  (`User { id: 1, name: "x" }`), acceder a sus campos
+  (`user.name`), **mutarlos** (`user.name = "Otro"`), con defaults
+  y campos nullables.
+- Llamar **métodos** sobre listas (`xs.push`, `xs.map`,
+  `xs.filter`, `xs.find`), mapas (`m.get`, `m.has`, `m.keys`,
+  `m.values`), y strings (`s.upper`, `s.lower`, `s.len`), usando
+  **funciones anónimas inline** (`fn(n) => n * 2`) como callbacks.
 - Manejar errores con **`Result`**, **`Ok`**, **`Err`** y el
   operador **`?`** para propagar, sin excepciones.
 - Leer un mensaje de error del intérprete y ubicar de qué fase vino.
@@ -3007,12 +3386,10 @@ Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
 
 ### Lo que viene — el resto de Fase 3
 
-Fase 3 ya cerró tres pasos (1: listas/mapas/rangos/`for`; 2: tipos
-custom instanciables; 3: `Result` + `Ok`/`Err` + `?`). Lo que falta:
+Fase 3 ya cerró cuatro pasos (1: listas/mapas/rangos/`for`; 2: tipos
+custom instanciables; 3: `Result` + `Ok`/`Err` + `?`; 4: funciones
+anónimas, method calls y mutación). Lo que falta:
 
-- **Funciones de orden superior y method calls** — `xs.map(fn(x) => ...)`,
-  `xs.filter(...)`, `xs.find(...)`. También desbloquea mutación de
-  listas (`xs.push(...)`) y de campos (`user.name = "x"`).
 - **Módulos e `import`s** — separar tu código en archivos.
 - **Tipado gradual con validación** — las anotaciones que hoy se
   ignoran van a empezar a chequearse (probablemente Fase 5).
@@ -3045,9 +3422,6 @@ una sub-fase del roadmap), la guía gana un capítulo o varios. Lo
 próximo que probablemente se sume, a medida que avancen los pasos
 de Fase 3:
 
-- Capítulo de **funciones de orden superior** — `xs.map(...)`,
-  `xs.filter(...)`, funciones anónimas, method calls. También trae
-  mutación de listas y de campos de instancias.
 - Capítulo de **módulos** una vez que tengamos `import`.
 
 ### Recursos

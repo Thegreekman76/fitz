@@ -234,7 +234,7 @@ nuevos repartidos entre ast, parser, value y evaluator).
 
 Guía: capítulo 9 "Listas, mapas y rangos" sumado, capítulo de Match
 extendido con patrones de rango, capítulo de Loops limpiado de la
-deuda de `for`. Ejemplo nuevo: `examples/guide/08-listas-mapas.fitz`.
+deuda de `for`. Ejemplo nuevo: `examples/guide/09-listas-mapas.fitz`.
 
 **Deuda explícita — retomar después:**
 - **Mutación de listas** (`push`/`pop`/asignación a `xs[i]`) — espera
@@ -274,7 +274,7 @@ instanciar y consultar.
   access e instanciación en runtime).
 - Capítulo 12 de la guía sale del estado "preview" y pasa a documentar
   el feature real; se sumó al ejemplo
-  `examples/guide/11-type.fitz` la parte de instanciación y acceso a
+  `examples/guide/12-type.fitz` la parte de instanciación y acceso a
   campos.
 
 Tests del proyecto al cerrar 3.2: 405 (366 al cerrar 3.1 + 39 nuevos
@@ -341,13 +341,98 @@ renombró a `13-errores.fitz`.
 - **Chequeo de tipo del retorno cuando se usa `?`** — descartado por
   diseño hasta el type checker estático (Fase 5). Tipado gradual.
 
-#### 3.4 Funciones anónimas + higher-order + method calls
-**Pendiente** — el paso más grande.
+#### 3.4 Funciones anónimas + higher-order + method calls ✓
+**Completado** — el paso más grande de Fase 3. Mutación del AST para
+método calls, fn anónimas como expresión, dispatch por tipo del
+receptor, primera tanda de built-ins, y representación compartida
+(`Rc<RefCell<>>`) para listas, mapas y campos de instancia.
 
-- Mutación de `Expr::Call` a `callee: Box<Expr>` para habilitar
-  method calls (`xs.map(...)`). Cierra deuda de 2.3.
-- Anonymous `fn(x) => ...` como expresión.
-- Métodos built-in sobre List, Map, Str.
+- AST mutado:
+  - `Expr::Call` → `{ callee: Box<Expr>, args }`. Cierra deuda de 2.3.
+  - Nueva `Expr::FnExpr { params, body }` — `fn(x) => x*2` y
+    `fn(x) { return x*2 }` como expresión (sin nombre).
+  - `Stmt::Assign` → `{ target: AssignTarget, type_, value }` con
+    `AssignTarget::Ident(String)` y
+    `AssignTarget::Field { object, field }`. Cierra deuda de 2.3 y 3.2.
+- Parser:
+  - `Token::Fn` seguido de `(` en posición de expresión → `FnExpr`.
+    `fn name(...)` sigue siendo `Stmt::FnDef`.
+  - `postfix` sin restricción sobre el callee: `xs.map(f)`,
+    `(fn(x)=>x+1)(2)`, `find(id)?.name`, todo encadenable.
+  - `parse_expr_or_assign_stmt`: parsea el LHS como expresión y
+    decide después si era `Ident = ...`, `Ident : Tipo = ...`,
+    `expr.campo = ...` o expr-stmt.
+- Value:
+  - `Value::List(Shared<Vec<Value>>)`,
+    `Value::Map(Shared<Vec<(Value, Value)>>)`,
+    `Value::Instance { fields: Shared<Vec<(String, Value)>>, ... }`,
+    donde `Shared<T> = Rc<RefCell<T>>`. Constructores
+    `Value::new_list`, `new_map`, `new_instance`.
+  - Alias por referencia (estilo Python/JS): pasar una lista a una
+    función o guardarla en un campo no clona. `.push(...)` y
+    `user.name = "x"` se ven a través de todos los aliases.
+  - Display, igualdad estructural y coerción `Int↔Float` mantienen
+    su comportamiento observable.
+- Evaluator:
+  - `Expr::Call`: si el callee es `Expr::Field`, hace **method
+    dispatch** por `(tipo del receptor, nombre del método)`. Si no,
+    evalúa el callee como cualquier expresión e invoca el `Value`
+    resultante (`Function` o `Builtin`).
+  - `Expr::FnExpr`: crea `Value::Function` con closure sobre el env
+    actual. Sin nombre y sin binding en el env — pura expresión.
+  - `Stmt::Assign` con `AssignTarget::Field`: evalúa el objeto,
+    valida `Value::Instance`, muta el campo. Errores explícitos si
+    no es instancia o el campo no existe.
+- Built-ins (primera tanda):
+  - `List`: `push(v)` muta, `pop()` muta, `map(fn)`, `filter(fn)`,
+    `find(fn) -> Result`, `len()`.
+  - `Map`: `get(k) -> Result`, `has(k) -> Bool`, `keys() -> List`,
+    `values() -> List`, `len()`.
+  - `Str`: `len() -> Int`, `upper() -> Str`, `lower() -> Str`.
+- Tests del proyecto al cerrar 3.4: 472 (441 al cerrar 3.3 + 31
+  nuevos: 3 en ast, 1 ajuste en parser, y 27 en evaluator entre
+  fn anónimas, mutación de campos, método dispatch, built-ins y
+  el E2E del criterio de éxito de Fase 3).
+
+Guía: capítulo 13 nuevo "Métodos y mutación" entre Tipos y Result.
+Renumeración 13→14, 14→15, 15→16. Cap 9 (Listas/mapas) y cap 12
+(Tipos) limpiados de deuda. Cap 11 (Funciones) suma sección
+"Funciones anónimas inline". Ejemplo nuevo
+`examples/guide/13-metodos.fitz`; `12-result.fitz` renombró a
+`14-result.fitz` y `13-errores.fitz` a `15-errores.fitz`.
+
+**Deuda que se cierra:**
+- 2.3 "method calls (`expr.method()`)" — el parser ya construye
+  `Expr::Call { callee: Expr::Field {...}, args }`.
+- 2.3 "asignación a campos (`user.name = ...`)" — `Stmt::Assign.target`
+  admite `AssignTarget::Field`.
+- 3.1 "mutación de listas (`push`/`pop`)" — métodos vivos, con alias
+  compartido. `xs[i] = v` queda como deuda explícita (abajo).
+- 3.2 "mutación de campos" — vivo, visible vía alias.
+- 3.2 "métodos sobre instancias" (la infraestructura): el dispatch
+  está; métodos custom declarados por el usuario sobre `type`
+  siguen siendo deuda (queda como Fase 5+).
+
+**Deuda explícita — retomar después:**
+- **Asignación a índice (`xs[0] = v`)** — `AssignTarget` admite
+  `Ident` y `Field` pero no `Index`. Habilitarlo es agregar la
+  variante al AST, una rama en el parser y otra en el evaluator
+  (con el mismo patrón de `Field`). Fácil; se suma cuando importe.
+- **Métodos custom sobre `type`** — `type User { ... fn greet() => ... }`
+  no se parsea. El dispatch del evaluador ya prevé sumar otra
+  fuente de lookup sin retoques.
+- **`return` adentro de un brazo de `match` como expresión** — hoy
+  el cuerpo de cada brazo es expresión, no statement, así que
+  `Ok(u) => return Ok(u)` rompe en el parser. Salvable con
+  `match`-statement (variante con bloque por brazo) o con
+  expression-with-return. Decisión pendiente.
+- **Encadenamiento multi-línea** — `xs.map(...)\n.filter(...)` corta
+  en el newline porque el parser termina la sentencia. Lo arreglamos
+  cuando moleste (newline-soft-after-postfix-token).
+- **`Pattern::OkWildcard` / `ErrWildcard`** — sigue deuda de 3.3.
+- **Mensaje propio para `?` huérfano** — sigue deuda de 3.3.
+- **Anotaciones compuestas (`List<T>`, `Result<T>`, `Map<K,V>`)** —
+  sigue deuda de 2.3.
 
 #### 3.5 Módulos / `import`
 **Pendiente** — infraestructural.

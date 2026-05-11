@@ -1,4 +1,4 @@
-// 07-loops.fitz — Repetición con while, loop, break y continue.
+// 08-loops.fitz — Repetición con while, loop, break y continue.
 
 // while: repite mientras la condición sea true.
 i = 0

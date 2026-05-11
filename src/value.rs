@@ -18,9 +18,29 @@
 //    Rust la acepta porque `Rc<RefCell<>>` es una indirección: el tamaño
 //    de `Value` no depende del tamaño de `Environment`.
 
+use std::cell::RefCell;
+use std::rc::Rc;
+
 use crate::ast::{Field, Param, Stmt};
 use crate::env::EnvRef;
 use crate::error::FitzResult;
+
+/// Alias para colecciones compartidas por referencia. Las listas, los
+/// mapas y los campos de una instancia viven detrás de `Rc<RefCell<>>`:
+/// `Rc` permite alias (la misma colección visible desde múltiples
+/// variables/campos/argumentos), `RefCell` permite mutar a través del
+/// alias. Es la misma semántica que objetos en Python y JS.
+///
+/// `Value::clone()` clona el `Rc` (barato), no el contenido — todas las
+/// copias miran el mismo dato. Eso es lo que destraba `xs.push(...)`,
+/// `user.name = "x"` y demás formas de mutación.
+pub type Shared<T> = Rc<RefCell<T>>;
+
+/// Constructor del wrapper compartido. Usar siempre `shared(x)` en lugar
+/// de `Rc::new(RefCell::new(x))` directo, para que el patrón quede uniforme.
+pub fn shared<T>(value: T) -> Shared<T> {
+    Rc::new(RefCell::new(value))
+}
 
 /// Un valor en runtime.
 #[derive(Debug, Clone)]
@@ -57,17 +77,20 @@ pub enum Value {
         fields: Vec<Field>,
     },
 
-    /// Lista en runtime. `Vec<Value>` ordenada y mutable internamente,
-    /// pero por ahora los programas Fitz solo la construyen y consumen
-    /// (mutación por method calls llega en el paso 4 de Fase 3).
-    List(Vec<Value>),
+    /// Lista en runtime. Compartida por referencia (`Rc<RefCell<>>`)
+    /// para que `xs.push(...)`, pasar la lista a una función, o
+    /// guardarla en un campo de instancia hablen del mismo dato.
+    /// Construir con `Value::new_list(vec)`.
+    List(Shared<Vec<Value>>),
 
     /// Mapa en runtime. `Vec<(K, V)>` en vez de `HashMap` por dos razones:
     ///  - preserva el orden de inserción (importa para `print` y para
     ///    iteración futura).
     ///  - acepta claves no-hash sin complicar `Value`. Acceso es O(n);
     ///    optimizable más adelante cuando importe.
-    Map(Vec<(Value, Value)>),
+    ///
+    /// Compartido por referencia, mismo criterio que `List`.
+    Map(Shared<Vec<(Value, Value)>>),
 
     /// Rango exclusivo de Int. Iterable. Por ahora solo Int (Float
     /// no tiene una semántica discreta clara para iteración).
@@ -82,9 +105,13 @@ pub enum Value {
     /// de campos del `Value::Type`, no la del literal. Eso garantiza
     /// que dos instancias del mismo tipo se imprimen igual aunque el
     /// usuario haya tipeado los campos en otro orden.
+    ///
+    /// `fields` va compartido (`Rc<RefCell<>>`) para destrabar
+    /// `user.name = "x"`: la mutación se ve a través de cualquier
+    /// alias a esta instancia. Construir con `Value::new_instance(...)`.
     Instance {
         type_name: String,
-        fields: Vec<(String, Value)>,
+        fields: Shared<Vec<(String, Value)>>,
     },
 
     /// Sum type built-in `Result`: representa el desenlace de una
@@ -108,6 +135,28 @@ pub enum ResultVariant {
 }
 
 impl Value {
+    /// Crea un `Value::List` a partir de un `Vec<Value>`. Envolvé siempre
+    /// con este constructor para mantener el wrapping `Rc<RefCell<>>`
+    /// uniforme y no esparcir `Rc::new(RefCell::new(...))` por todos lados.
+    pub fn new_list(items: Vec<Value>) -> Value {
+        Value::List(shared(items))
+    }
+
+    /// Crea un `Value::Map` a partir de un `Vec<(Value, Value)>`.
+    pub fn new_map(pairs: Vec<(Value, Value)>) -> Value {
+        Value::Map(shared(pairs))
+    }
+
+    /// Crea un `Value::Instance` a partir del nombre del tipo y los
+    /// pares `(campo, valor)`. El orden importa: el evaluador lo arma
+    /// siguiendo la declaración del `type`.
+    pub fn new_instance(type_name: String, fields: Vec<(String, Value)>) -> Value {
+        Value::Instance {
+            type_name,
+            fields: shared(fields),
+        }
+    }
+
     /// Nombre del tipo, para mensajes de error.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -153,6 +202,7 @@ impl std::fmt::Display for Value {
                 // Ej: `[1, "hola", 2]`. Distinto del Display de `Str`
                 // suelto, que va sin comillas porque ese caso es para
                 // salida final.
+                let items = items.borrow();
                 write!(f, "[")?;
                 for (i, v) in items.iter().enumerate() {
                     if i > 0 {
@@ -163,6 +213,7 @@ impl std::fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Map(pairs) => {
+                let pairs = pairs.borrow();
                 write!(f, "{{")?;
                 for (i, (k, v)) in pairs.iter().enumerate() {
                     if i > 0 {
@@ -179,6 +230,7 @@ impl std::fmt::Display for Value {
                 // Formato: `User { id: 1, name: "x" }`. Strings con
                 // comillas adentro (mismo criterio que List/Map), para
                 // distinguir `42` de `"42"` a simple vista.
+                let fields = fields.borrow();
                 write!(f, "{} {{", type_name)?;
                 for (i, (k, v)) in fields.iter().enumerate() {
                     if i > 0 {
@@ -231,9 +283,15 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             // List y Map se comparan estructuralmente, elemento a elemento.
             // La igualdad recursiva delega en esta misma impl, así que Int↔Float
-            // coerciona también adentro de listas y mapas.
-            (Value::List(a), Value::List(b)) => a == b,
-            (Value::Map(a), Value::Map(b)) => a == b,
+            // coerciona también adentro de listas y mapas. Si los dos `Rc`
+            // apuntan al mismo dato (alias del mismo origen), `Rc::ptr_eq`
+            // es shortcut barato; si no, comparamos el contenido borroweando.
+            (Value::List(a), Value::List(b)) => {
+                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
+            }
+            (Value::Map(a), Value::Map(b)) => {
+                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
+            }
             (
                 Value::Range { start: s1, end: e1 },
                 Value::Range { start: s2, end: e2 },
@@ -245,7 +303,9 @@ impl PartialEq for Value {
             (
                 Value::Instance { type_name: t1, fields: f1 },
                 Value::Instance { type_name: t2, fields: f2 },
-            ) => t1 == t2 && f1 == f2,
+            ) => {
+                t1 == t2 && (Rc::ptr_eq(f1, f2) || *f1.borrow() == *f2.borrow())
+            }
             // Result se compara variante por variante, recursivamente.
             // Misma coerción Int↔Float adentro vía esta misma impl.
             (Value::Result(a), Value::Result(b)) => match (a, b) {
@@ -341,12 +401,12 @@ mod tests {
 
     #[test]
     fn display_list_vacia() {
-        assert_eq!(Value::List(vec![]).to_string(), "[]");
+        assert_eq!(Value::new_list(vec![]).to_string(), "[]");
     }
 
     #[test]
     fn display_list_con_ints() {
-        let v = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let v = Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
         assert_eq!(v.to_string(), "[1, 2, 3]");
     }
 
@@ -354,7 +414,7 @@ mod tests {
     fn display_list_strings_van_con_comillas_dentro() {
         // Strings sueltos van sin comillas (print), pero adentro de
         // una lista llevan comillas para que se distinga `1` de `"1"`.
-        let v = Value::List(vec![
+        let v = Value::new_list(vec![
             Value::Int(1),
             Value::Str("hola".into()),
             Value::Bool(true),
@@ -364,19 +424,19 @@ mod tests {
 
     #[test]
     fn display_list_anidada() {
-        let inner = Value::List(vec![Value::Int(1), Value::Int(2)]);
-        let outer = Value::List(vec![inner.clone(), inner]);
+        let inner = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
+        let outer = Value::new_list(vec![inner.clone(), inner]);
         assert_eq!(outer.to_string(), "[[1, 2], [1, 2]]");
     }
 
     #[test]
     fn display_map_vacio() {
-        assert_eq!(Value::Map(vec![]).to_string(), "{}");
+        assert_eq!(Value::new_map(vec![]).to_string(), "{}");
     }
 
     #[test]
     fn display_map_preserva_orden_y_comillas_en_strings() {
-        let m = Value::Map(vec![
+        let m = Value::new_map(vec![
             (Value::Str("a".into()), Value::Int(1)),
             (Value::Str("b".into()), Value::Int(2)),
         ]);
@@ -395,16 +455,16 @@ mod tests {
 
     #[test]
     fn type_name_de_list_map_range() {
-        assert_eq!(Value::List(vec![]).type_name(), "List");
-        assert_eq!(Value::Map(vec![]).type_name(), "Map");
+        assert_eq!(Value::new_list(vec![]).type_name(), "List");
+        assert_eq!(Value::new_map(vec![]).type_name(), "Map");
         assert_eq!(Value::Range { start: 0, end: 1 }.type_name(), "Range");
     }
 
     #[test]
     fn igualdad_list_estructural() {
-        let a = Value::List(vec![Value::Int(1), Value::Int(2)]);
-        let b = Value::List(vec![Value::Int(1), Value::Int(2)]);
-        let c = Value::List(vec![Value::Int(1), Value::Int(3)]);
+        let a = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
+        let b = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
+        let c = Value::new_list(vec![Value::Int(1), Value::Int(3)]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -412,16 +472,16 @@ mod tests {
     #[test]
     fn igualdad_list_coerciona_int_float_adentro() {
         // [1, 2] == [1.0, 2.0] — la coerción Int↔Float vale adentro de listas.
-        let a = Value::List(vec![Value::Int(1), Value::Int(2)]);
-        let b = Value::List(vec![Value::Float(1.0), Value::Float(2.0)]);
+        let a = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
+        let b = Value::new_list(vec![Value::Float(1.0), Value::Float(2.0)]);
         assert_eq!(a, b);
     }
 
     #[test]
     fn igualdad_map_estructural() {
-        let a = Value::Map(vec![(Value::Str("k".into()), Value::Int(1))]);
-        let b = Value::Map(vec![(Value::Str("k".into()), Value::Int(1))]);
-        let c = Value::Map(vec![(Value::Str("k".into()), Value::Int(2))]);
+        let a = Value::new_map(vec![(Value::Str("k".into()), Value::Int(1))]);
+        let b = Value::new_map(vec![(Value::Str("k".into()), Value::Int(1))]);
+        let c = Value::new_map(vec![(Value::Str("k".into()), Value::Int(2))]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -430,11 +490,11 @@ mod tests {
     fn igualdad_map_sensible_al_orden() {
         // Como usamos Vec<(K,V)>, orden importa para igualdad. Esto es
         // consistente con cómo lo imprimimos (preservando orden).
-        let a = Value::Map(vec![
+        let a = Value::new_map(vec![
             (Value::Str("a".into()), Value::Int(1)),
             (Value::Str("b".into()), Value::Int(2)),
         ]);
-        let b = Value::Map(vec![
+        let b = Value::new_map(vec![
             (Value::Str("b".into()), Value::Int(2)),
             (Value::Str("a".into()), Value::Int(1)),
         ]);
@@ -456,9 +516,9 @@ mod tests {
     #[test]
     fn igualdad_entre_tipos_distintos_es_false_para_nuevos() {
         // Sanity: list != map, list != range, etc.
-        assert_ne!(Value::List(vec![]), Value::Map(vec![]));
+        assert_ne!(Value::new_list(vec![]), Value::new_map(vec![]));
         assert_ne!(
-            Value::List(vec![Value::Int(0), Value::Int(1)]),
+            Value::new_list(vec![Value::Int(0), Value::Int(1)]),
             Value::Range { start: 0, end: 2 },
         );
     }
@@ -469,49 +529,31 @@ mod tests {
 
     #[test]
     fn type_name_de_instance() {
-        let i = Value::Instance {
-            type_name: "User".into(),
-            fields: vec![],
-        };
+        let i = Value::new_instance("User".into(), vec![]);
         assert_eq!(i.type_name(), "Instance");
     }
 
     #[test]
     fn display_instance_vacia_muestra_llaves_juntas() {
-        let i = Value::Instance {
-            type_name: "Empty".into(),
-            fields: vec![],
-        };
+        let i = Value::new_instance("Empty".into(), vec![]);
         assert_eq!(i.to_string(), "Empty {}");
     }
 
     #[test]
     fn display_instance_con_campos() {
-        let i = Value::Instance {
-            type_name: "User".into(),
-            fields: vec![
+        let i = Value::new_instance("User".into(), vec![
                 ("id".into(), Value::Int(1)),
                 ("name".into(), Value::Str("Fitz".into())),
-            ],
-        };
+            ]);
         // Strings llevan comillas adentro, igual que en List/Map.
         assert_eq!(i.to_string(), "User { id: 1, name: \"Fitz\" }");
     }
 
     #[test]
     fn igualdad_instance_estructural() {
-        let a = Value::Instance {
-            type_name: "Point".into(),
-            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
-        };
-        let b = Value::Instance {
-            type_name: "Point".into(),
-            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
-        };
-        let c = Value::Instance {
-            type_name: "Point".into(),
-            fields: vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(3))],
-        };
+        let a = Value::new_instance("Point".into(), vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))]);
+        let b = Value::new_instance("Point".into(), vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))]);
+        let c = Value::new_instance("Point".into(), vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(3))]);
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -519,14 +561,8 @@ mod tests {
     #[test]
     fn igualdad_instance_distinto_type_name_es_false() {
         // Misma forma de campos, distinto tipo → no son iguales.
-        let a = Value::Instance {
-            type_name: "User".into(),
-            fields: vec![("id".into(), Value::Int(1))],
-        };
-        let b = Value::Instance {
-            type_name: "Admin".into(),
-            fields: vec![("id".into(), Value::Int(1))],
-        };
+        let a = Value::new_instance("User".into(), vec![("id".into(), Value::Int(1))]);
+        let b = Value::new_instance("Admin".into(), vec![("id".into(), Value::Int(1))]);
         assert_ne!(a, b);
     }
 
