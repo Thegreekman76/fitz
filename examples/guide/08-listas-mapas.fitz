@@ -1,0 +1,55 @@
+// Listas, mapas y rangos — capítulo 9 de la guía.
+
+// --- Listas ---
+nums = [1, 2, 3, 4, 5]
+print(nums)
+print("primer: {nums[0]}")
+print("último: {nums[4]}")
+print("cantidad: {len(nums)}")
+
+mezcla = [1, "dos", true, null, 3.14]
+print(mezcla)
+
+vacia = []
+print("vacía: {vacia}, len: {len(vacia)}")
+
+// --- Mapas ---
+user = {"name": "Martín", "age": 43}
+print(user)
+print("nombre: {user[\"name\"]}")
+
+// Orden preservado:
+items = {"primero": 1, "segundo": 2, "tercero": 3}
+print(items)
+
+// --- Rangos ---
+r = 0..5
+print(r)
+print("cantidad: {len(r)}")
+
+// --- for sobre lista ---
+total = 0
+for n in nums {
+    total = total + n
+}
+print("suma de nums: {total}")
+
+// --- for sobre rango ---
+print("contando:")
+for i in 0..5 {
+    print("  {i}")
+}
+
+// --- match con patrón de rango ---
+fn clasificar(n) {
+    return match n {
+        0..10  => "chico"
+        10..100 => "mediano"
+        100..1000 => "grande"
+        _ => "fuera"
+    }
+}
+print(clasificar(3))
+print(clasificar(42))
+print(clasificar(500))
+print(clasificar(99999))

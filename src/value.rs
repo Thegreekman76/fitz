@@ -56,6 +56,22 @@ pub enum Value {
         name: String,
         fields: Vec<Field>,
     },
+
+    /// Lista en runtime. `Vec<Value>` ordenada y mutable internamente,
+    /// pero por ahora los programas Fitz solo la construyen y consumen
+    /// (mutación por method calls llega en el paso 4 de Fase 3).
+    List(Vec<Value>),
+
+    /// Mapa en runtime. `Vec<(K, V)>` en vez de `HashMap` por dos razones:
+    ///  - preserva el orden de inserción (importa para `print` y para
+    ///    iteración futura).
+    ///  - acepta claves no-hash sin complicar `Value`. Acceso es O(n);
+    ///    optimizable más adelante cuando importe.
+    Map(Vec<(Value, Value)>),
+
+    /// Rango exclusivo de Int. Iterable. Por ahora solo Int (Float
+    /// no tiene una semántica discreta clara para iteración).
+    Range { start: i64, end: i64 },
 }
 
 impl Value {
@@ -70,6 +86,9 @@ impl Value {
             Value::Builtin { .. } => "Function",
             Value::Function { .. } => "Function",
             Value::Type { .. } => "Type",
+            Value::List(_) => "List",
+            Value::Map(_) => "Map",
+            Value::Range { .. } => "Range",
         }
     }
 }
@@ -93,7 +112,46 @@ impl std::fmt::Display for Value {
             Value::Builtin { name, .. } => write!(f, "<builtin {}>", name),
             Value::Function { .. } => write!(f, "<function>"),
             Value::Type { name, .. } => write!(f, "<type {}>", name),
+            Value::List(items) => {
+                // Para strings, mostramos comillas adentro de la lista
+                // (es la representación, no salida directa de `print`).
+                // Ej: `[1, "hola", 2]`. Distinto del Display de `Str`
+                // suelto, que va sin comillas porque ese caso es para
+                // salida final.
+                write!(f, "[")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write_inline_value(f, v)?;
+                }
+                write!(f, "]")
+            }
+            Value::Map(pairs) => {
+                write!(f, "{{")?;
+                for (i, (k, v)) in pairs.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write_inline_value(f, k)?;
+                    write!(f, ": ")?;
+                    write_inline_value(f, v)?;
+                }
+                write!(f, "}}")
+            }
+            Value::Range { start, end } => write!(f, "{}..{}", start, end),
         }
+    }
+}
+
+/// Representación "inline" de un Value cuando aparece adentro de otro
+/// (lista, mapa). Los strings llevan comillas para distinguir
+/// `[1, "2"]` de `[1, 2]` — es lectura, no impresión final. El resto
+/// delega en `Display` normal.
+fn write_inline_value(f: &mut std::fmt::Formatter, v: &Value) -> std::fmt::Result {
+    match v {
+        Value::Str(s) => write!(f, "\"{}\"", s),
+        other => write!(f, "{}", other),
     }
 }
 
@@ -109,6 +167,15 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
+            // List y Map se comparan estructuralmente, elemento a elemento.
+            // La igualdad recursiva delega en esta misma impl, así que Int↔Float
+            // coerciona también adentro de listas y mapas.
+            (Value::List(a), Value::List(b)) => a == b,
+            (Value::Map(a), Value::Map(b)) => a == b,
+            (
+                Value::Range { start: s1, end: e1 },
+                Value::Range { start: s2, end: e2 },
+            ) => s1 == s2 && e1 == e2,
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }
@@ -189,5 +256,133 @@ mod tests {
     fn igualdad_strings() {
         assert_eq!(Value::Str("hola".into()), Value::Str("hola".into()));
         assert_ne!(Value::Str("hola".into()), Value::Str("chau".into()));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — List, Map, Range (Fase 3, paso 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn display_list_vacia() {
+        assert_eq!(Value::List(vec![]).to_string(), "[]");
+    }
+
+    #[test]
+    fn display_list_con_ints() {
+        let v = Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        assert_eq!(v.to_string(), "[1, 2, 3]");
+    }
+
+    #[test]
+    fn display_list_strings_van_con_comillas_dentro() {
+        // Strings sueltos van sin comillas (print), pero adentro de
+        // una lista llevan comillas para que se distinga `1` de `"1"`.
+        let v = Value::List(vec![
+            Value::Int(1),
+            Value::Str("hola".into()),
+            Value::Bool(true),
+        ]);
+        assert_eq!(v.to_string(), "[1, \"hola\", true]");
+    }
+
+    #[test]
+    fn display_list_anidada() {
+        let inner = Value::List(vec![Value::Int(1), Value::Int(2)]);
+        let outer = Value::List(vec![inner.clone(), inner]);
+        assert_eq!(outer.to_string(), "[[1, 2], [1, 2]]");
+    }
+
+    #[test]
+    fn display_map_vacio() {
+        assert_eq!(Value::Map(vec![]).to_string(), "{}");
+    }
+
+    #[test]
+    fn display_map_preserva_orden_y_comillas_en_strings() {
+        let m = Value::Map(vec![
+            (Value::Str("a".into()), Value::Int(1)),
+            (Value::Str("b".into()), Value::Int(2)),
+        ]);
+        assert_eq!(m.to_string(), "{\"a\": 1, \"b\": 2}");
+    }
+
+    #[test]
+    fn display_range_simple() {
+        assert_eq!(Value::Range { start: 0, end: 10 }.to_string(), "0..10");
+    }
+
+    #[test]
+    fn display_range_negativo() {
+        assert_eq!(Value::Range { start: -5, end: 5 }.to_string(), "-5..5");
+    }
+
+    #[test]
+    fn type_name_de_list_map_range() {
+        assert_eq!(Value::List(vec![]).type_name(), "List");
+        assert_eq!(Value::Map(vec![]).type_name(), "Map");
+        assert_eq!(Value::Range { start: 0, end: 1 }.type_name(), "Range");
+    }
+
+    #[test]
+    fn igualdad_list_estructural() {
+        let a = Value::List(vec![Value::Int(1), Value::Int(2)]);
+        let b = Value::List(vec![Value::Int(1), Value::Int(2)]);
+        let c = Value::List(vec![Value::Int(1), Value::Int(3)]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn igualdad_list_coerciona_int_float_adentro() {
+        // [1, 2] == [1.0, 2.0] — la coerción Int↔Float vale adentro de listas.
+        let a = Value::List(vec![Value::Int(1), Value::Int(2)]);
+        let b = Value::List(vec![Value::Float(1.0), Value::Float(2.0)]);
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn igualdad_map_estructural() {
+        let a = Value::Map(vec![(Value::Str("k".into()), Value::Int(1))]);
+        let b = Value::Map(vec![(Value::Str("k".into()), Value::Int(1))]);
+        let c = Value::Map(vec![(Value::Str("k".into()), Value::Int(2))]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn igualdad_map_sensible_al_orden() {
+        // Como usamos Vec<(K,V)>, orden importa para igualdad. Esto es
+        // consistente con cómo lo imprimimos (preservando orden).
+        let a = Value::Map(vec![
+            (Value::Str("a".into()), Value::Int(1)),
+            (Value::Str("b".into()), Value::Int(2)),
+        ]);
+        let b = Value::Map(vec![
+            (Value::Str("b".into()), Value::Int(2)),
+            (Value::Str("a".into()), Value::Int(1)),
+        ]);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn igualdad_range() {
+        assert_eq!(
+            Value::Range { start: 0, end: 10 },
+            Value::Range { start: 0, end: 10 },
+        );
+        assert_ne!(
+            Value::Range { start: 0, end: 10 },
+            Value::Range { start: 0, end: 11 },
+        );
+    }
+
+    #[test]
+    fn igualdad_entre_tipos_distintos_es_false_para_nuevos() {
+        // Sanity: list != map, list != range, etc.
+        assert_ne!(Value::List(vec![]), Value::Map(vec![]));
+        assert_ne!(
+            Value::List(vec![Value::Int(0), Value::Int(1)]),
+            Value::Range { start: 0, end: 2 },
+        );
     }
 }

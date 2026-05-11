@@ -173,6 +173,49 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         Stmt::Break => Err(EvalSignal::Break),
         Stmt::Continue => Err(EvalSignal::Continue),
 
+        // `for var in iter { body }` — evalúa `iter` una sola vez al
+        // entrar, después itera. `var` se redefine en el env actual en
+        // cada iteración (no creamos scope nuevo, consistente con la
+        // política de bloques de Fitz: las variables del cuerpo persisten).
+        //
+        // Iterables soportados:
+        //  - List: itera los elementos en orden.
+        //  - Range: itera los Int de start a end-1.
+        //  - Map: aún no (necesita el tipo `Pair`/`entry`; paso 4 de Fase 3).
+        //  - Otros: type error explícito.
+        Stmt::For { var, iter, body } => {
+            let iter_v = eval_expr(iter, env.clone())?;
+            let items_iter: Box<dyn Iterator<Item = Value>> = match iter_v {
+                Value::List(items) => Box::new(items.into_iter()),
+                Value::Range { start, end } => Box::new((start..end).map(Value::Int)),
+                Value::Map(_) => return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "`for` sobre Map aún no soportado — esperá al tipo Pair (paso 4 de Fase 3)",
+                ))),
+                other => return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "List o Range".into(),
+                        found: other.type_name().into(),
+                    },
+                    0, 0,
+                    format!(
+                        "no se puede iterar sobre un valor de tipo `{}`",
+                        other.type_name()
+                    ),
+                ))),
+            };
+            for item in items_iter {
+                env.borrow_mut().define(var.clone(), item);
+                match run_loop_body(body, env.clone()) {
+                    LoopControl::Continue => continue,
+                    LoopControl::Break => break,
+                    LoopControl::Propagate(signal) => return Err(signal),
+                }
+            }
+            Ok(Value::Null)
+        }
+
         // `while cond { body }`. La cond se evalúa antes de cada iteración.
         // Tiene que ser Bool; otros tipos → type error.
         //
@@ -311,6 +354,45 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             "Field access requiere tipos custom instanciados (Fase 3)",
         ))),
 
+        // `[e1, e2, ...]` — evaluamos los elementos en orden.
+        Expr::List(items) => {
+            let mut values = Vec::with_capacity(items.len());
+            for item in items {
+                values.push(eval_expr(item, env.clone())?);
+            }
+            Ok(Value::List(values))
+        }
+
+        // `{k1: v1, ...}` — evaluamos cada par en orden (clave, valor).
+        // El orden de inserción se preserva en el Vec resultante.
+        Expr::Map(pairs) => {
+            let mut entries = Vec::with_capacity(pairs.len());
+            for (k_expr, v_expr) in pairs {
+                let k = eval_expr(k_expr, env.clone())?;
+                let v = eval_expr(v_expr, env.clone())?;
+                entries.push((k, v));
+            }
+            Ok(Value::Map(entries))
+        }
+
+        // `start..end` — ambos extremos tienen que ser Int (no hay rangos
+        // de Float). El rango se materializa como `Value::Range`; la
+        // iteración real (cuando se usa en `for`) ocurre en Stmt::For.
+        Expr::Range { start, end } => {
+            let s_v = eval_expr(start, env.clone())?;
+            let e_v = eval_expr(end, env)?;
+            let s = expect_int_for_range(&s_v, "inicio")?;
+            let e = expect_int_for_range(&e_v, "fin")?;
+            Ok(Value::Range { start: s, end: e })
+        }
+
+        // `obj[idx]` — indexing. Dispatch por tipo del objeto.
+        Expr::Index { object, index } => {
+            let obj = eval_expr(object, env.clone())?;
+            let idx = eval_expr(index, env)?;
+            eval_index(&obj, &idx)
+        }
+
         // `if cond { then } else { else_ }`. Funciona como expresión: su
         // valor es el del último stmt del bloque ejecutado. Sin else y cond
         // falsa → Null.
@@ -372,6 +454,8 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     (Pattern::Wildcard, _) => true,
                     // Ident matchea todo, pero con efecto secundario.
                     (Pattern::Ident(_), _) => true,
+                    // Patrón de rango: solo aplica a Int. start <= v < end.
+                    (Pattern::Range { start, end }, Value::Int(vv)) => start <= vv && vv < end,
                     // Ok/Err sin tipo Result — error explícito.
                     (Pattern::OkBinding(_) | Pattern::ErrBinding(_), _) => {
                         return Err(EvalSignal::Error(FitzError::new(
@@ -684,6 +768,105 @@ fn div_by_zero<T>() -> EvalResult<T> {
 }
 
 // ---------------------------------------------------------------------------
+// Listas, mapas, rangos: helpers de runtime
+// ---------------------------------------------------------------------------
+
+/// Extrae el Int de un Value, o emite un TypeMismatch claro indicando si
+/// fue el "inicio" o el "fin" del rango. Float NO coerciona — los rangos
+/// son discretos.
+fn expect_int_for_range(v: &Value, side: &str) -> EvalResult<i64> {
+    match v {
+        Value::Int(n) => Ok(*n),
+        other => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!(
+                "el {} de un rango debe ser Int, no `{}`",
+                side, other.type_name()
+            ),
+        ))),
+    }
+}
+
+/// `obj[idx]`. Dispatch por tipo del receptor:
+///  - List + Int: bounds-check, devuelve el elemento.
+///  - Map + cualquier valor: búsqueda lineal por igualdad (la misma
+///    igualdad que usa `==`, así que claves Int↔Float matchean).
+///  - Range: no indexable por ahora (semántica no obvia: ¿`(0..10)[3]` = 3?
+///    Probablemente sí, pero lo dejamos para más adelante).
+///  - Str: no indexable hasta que decidamos si la unidad es char o byte.
+///  - Otros: type error.
+fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
+    match obj {
+        Value::List(items) => {
+            let i = match idx {
+                Value::Int(n) => *n,
+                other => return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Int".into(),
+                        found: other.type_name().into(),
+                    },
+                    0, 0,
+                    format!(
+                        "el índice de una lista debe ser Int, no `{}`",
+                        other.type_name()
+                    ),
+                ))),
+            };
+            // Sin índices negativos por ahora (sin Python-style xs[-1]).
+            // Si después lo agregamos, vivirá acá.
+            if i < 0 {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0, 0,
+                    format!("índice negativo en lista: {}", i),
+                )));
+            }
+            let i_usize = i as usize;
+            items.get(i_usize).cloned().ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0, 0,
+                    format!(
+                        "índice fuera de rango: {} en lista de tamaño {}",
+                        i,
+                        items.len()
+                    ),
+                ))
+            })
+        }
+        Value::Map(pairs) => {
+            // Búsqueda lineal por igualdad. Esto va a ser O(n) hasta que
+            // promovamos Map a una estructura indexada de verdad.
+            for (k, v) in pairs {
+                if k == idx {
+                    return Ok(v.clone());
+                }
+            }
+            Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0, 0,
+                format!("clave no encontrada en mapa: {}", idx),
+            )))
+        }
+        other => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "List o Map".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!(
+                "el tipo `{}` no soporta indexing con `[]`",
+                other.type_name()
+            ),
+        ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Operación unaria
 // ---------------------------------------------------------------------------
 //
@@ -722,6 +905,13 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_print,
         },
     );
+    env.borrow_mut().define(
+        "len",
+        Value::Builtin {
+            name: "len",
+            func: builtin_len,
+        },
+    );
 }
 
 /// `print(arg1, arg2, ...)` — imprime los args convertidos a string,
@@ -730,6 +920,45 @@ fn builtin_print(args: &[Value]) -> FitzResult<Value> {
     let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
     println!("{}", parts.join(" "));
     Ok(Value::Null)
+}
+
+/// `len(x)` — longitud de listas, mapas, strings y rangos.
+///  - List: cantidad de elementos.
+///  - Map: cantidad de pares.
+///  - Str: cantidad de chars (no bytes — UTF-8 aware).
+///  - Range: `end - start`, clampeado a 0 si el rango va al revés.
+///  - Otros: type error.
+fn builtin_len(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0, 0,
+            format!("`len` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    let n: i64 = match &args[0] {
+        Value::List(items) => items.len() as i64,
+        Value::Map(pairs) => pairs.len() as i64,
+        Value::Str(s) => s.chars().count() as i64,
+        Value::Range { start, end } => (end - start).max(0),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List, Map, Str o Range".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!(
+                    "`len` no aplica a un valor de tipo `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    Ok(Value::Int(n))
 }
 
 // ---------------------------------------------------------------------------
@@ -2352,5 +2581,508 @@ print(factorial(5))
             }),
         ];
         assert!(eval(program).is_ok());
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — listas, mapas, rangos, indexing, for (Fase 3, paso 1)
+    // -----------------------------------------------------------------------
+
+    /// Helper: parsea y evalúa programa entero. Devuelve el env final.
+    fn parse_and_eval(src: &str) -> FitzResult<()> {
+        let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
+        let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
+        eval(program)
+    }
+
+    /// Como `parse_and_eval`, pero conserva el env para inspeccionarlo.
+    /// Útil cuando querés assertear valores específicos al final.
+    fn parse_eval_into_env(src: &str) -> (EnvRef, FitzResult<()>) {
+        let tokens = crate::lexer::tokenize(src).expect("la fuente debe tokenizar");
+        let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
+        let env = Environment::new();
+        register_builtins(&env);
+        for stmt in &program {
+            if let Err(signal) = eval_stmt(stmt, env.clone()) {
+                return (env, Err(signal_to_error(signal)));
+            }
+        }
+        (env, Ok(()))
+    }
+
+    // ---- List literal ----
+
+    #[test]
+    fn evalua_list_vacia() {
+        let v = eval_expr_test(Expr::List(vec![])).unwrap();
+        assert_eq!(v, Value::List(vec![]));
+    }
+
+    #[test]
+    fn evalua_list_con_literales() {
+        let v = eval_expr_test(Expr::List(vec![
+            Expr::Int(1),
+            Expr::Int(2),
+            Expr::Int(3),
+        ])).unwrap();
+        assert_eq!(v, Value::List(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+    }
+
+    #[test]
+    fn evalua_list_con_expresiones() {
+        // [1 + 1, 2 * 2]
+        let v = eval_expr_test(Expr::List(vec![
+            Expr::BinOp {
+                op: BinOpKind::Add,
+                left: Box::new(Expr::Int(1)),
+                right: Box::new(Expr::Int(1)),
+            },
+            Expr::BinOp {
+                op: BinOpKind::Mul,
+                left: Box::new(Expr::Int(2)),
+                right: Box::new(Expr::Int(2)),
+            },
+        ])).unwrap();
+        assert_eq!(v, Value::List(vec![Value::Int(2), Value::Int(4)]));
+    }
+
+    // ---- Map literal ----
+
+    #[test]
+    fn evalua_map_vacio() {
+        let v = eval_expr_test(Expr::Map(vec![])).unwrap();
+        assert_eq!(v, Value::Map(vec![]));
+    }
+
+    #[test]
+    fn evalua_map_con_pares() {
+        let v = eval_expr_test(Expr::Map(vec![
+            (Expr::Str("a".into()), Expr::Int(1)),
+            (Expr::Str("b".into()), Expr::Int(2)),
+        ])).unwrap();
+        assert_eq!(
+            v,
+            Value::Map(vec![
+                (Value::Str("a".into()), Value::Int(1)),
+                (Value::Str("b".into()), Value::Int(2)),
+            ]),
+        );
+    }
+
+    // ---- Range literal ----
+
+    #[test]
+    fn evalua_range_simple() {
+        let v = eval_expr_test(Expr::Range {
+            start: Box::new(Expr::Int(0)),
+            end: Box::new(Expr::Int(10)),
+        }).unwrap();
+        assert_eq!(v, Value::Range { start: 0, end: 10 });
+    }
+
+    #[test]
+    fn evalua_range_con_float_es_error() {
+        // 0..1.5 — float no es Int.
+        let res = eval_expr_test(Expr::Range {
+            start: Box::new(Expr::Int(0)),
+            end: Box::new(Expr::Float(1.5)),
+        });
+        let err = res.unwrap_err();
+        match err {
+            EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
+            _ => panic!("se esperaba Error"),
+        }
+    }
+
+    // ---- Indexing ----
+
+    #[test]
+    fn index_list_con_int_valido() {
+        // [10, 20, 30][1] → 20
+        let v = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::List(vec![Expr::Int(10), Expr::Int(20), Expr::Int(30)])),
+            index: Box::new(Expr::Int(1)),
+        }).unwrap();
+        assert_eq!(v, Value::Int(20));
+    }
+
+    #[test]
+    fn index_list_fuera_de_rango_es_error() {
+        // [1, 2][5]
+        let res = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::List(vec![Expr::Int(1), Expr::Int(2)])),
+            index: Box::new(Expr::Int(5)),
+        });
+        let err = res.unwrap_err();
+        match err {
+            EvalSignal::Error(e) => {
+                assert!(e.message.contains("fuera de rango"));
+            }
+            _ => panic!("se esperaba Error"),
+        }
+    }
+
+    #[test]
+    fn index_list_negativo_es_error() {
+        // [1, 2][-1] — sin Python-style por ahora
+        let res = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::List(vec![Expr::Int(1), Expr::Int(2)])),
+            index: Box::new(Expr::UnaryOp {
+                op: UnaryOpKind::Neg,
+                operand: Box::new(Expr::Int(1)),
+            }),
+        });
+        let err = res.unwrap_err();
+        match err {
+            EvalSignal::Error(e) => assert!(e.message.contains("negativo")),
+            _ => panic!("se esperaba Error"),
+        }
+    }
+
+    #[test]
+    fn index_list_con_string_es_type_error() {
+        let res = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::List(vec![Expr::Int(1)])),
+            index: Box::new(Expr::Str("a".into())),
+        });
+        let err = res.unwrap_err();
+        match err {
+            EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
+            _ => panic!("se esperaba Error"),
+        }
+    }
+
+    #[test]
+    fn index_map_clave_existente() {
+        // {"a": 1, "b": 2}["b"] → 2
+        let v = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::Map(vec![
+                (Expr::Str("a".into()), Expr::Int(1)),
+                (Expr::Str("b".into()), Expr::Int(2)),
+            ])),
+            index: Box::new(Expr::Str("b".into())),
+        }).unwrap();
+        assert_eq!(v, Value::Int(2));
+    }
+
+    #[test]
+    fn index_map_clave_inexistente_es_error() {
+        let res = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::Map(vec![
+                (Expr::Str("a".into()), Expr::Int(1)),
+            ])),
+            index: Box::new(Expr::Str("z".into())),
+        });
+        let err = res.unwrap_err();
+        match err {
+            EvalSignal::Error(e) => assert!(e.message.contains("clave no encontrada")),
+            _ => panic!("se esperaba Error"),
+        }
+    }
+
+    #[test]
+    fn index_sobre_int_es_type_error() {
+        // 42[0] — Int no se indexa
+        let res = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::Int(42)),
+            index: Box::new(Expr::Int(0)),
+        });
+        let err = res.unwrap_err();
+        match err {
+            EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
+            _ => panic!("se esperaba Error"),
+        }
+    }
+
+    #[test]
+    fn index_encadenado_funciona() {
+        // [[1, 2], [3, 4]][0][1] → 2
+        let v = eval_expr_test(Expr::Index {
+            object: Box::new(Expr::Index {
+                object: Box::new(Expr::List(vec![
+                    Expr::List(vec![Expr::Int(1), Expr::Int(2)]),
+                    Expr::List(vec![Expr::Int(3), Expr::Int(4)]),
+                ])),
+                index: Box::new(Expr::Int(0)),
+            }),
+            index: Box::new(Expr::Int(1)),
+        }).unwrap();
+        assert_eq!(v, Value::Int(2));
+    }
+
+    // ---- for ----
+
+    #[test]
+    fn for_sobre_lista_itera_los_elementos() {
+        // total = 1 + 2 + 3 + 4 = 10
+        let src = r#"
+total = 0
+for x in [1, 2, 3, 4] {
+    total = total + x
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("total"), Some(Value::Int(10)));
+    }
+
+    #[test]
+    fn for_sobre_range_itera_inclusivo_exclusivo() {
+        // 0..3 → 0 + 1 + 2 = 3 (la cota superior es exclusiva)
+        let src = r#"
+total = 0
+for i in 0..3 {
+    total = total + i
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("total"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn for_sobre_lista_vacia_no_itera() {
+        let src = r#"
+ran = false
+for x in [] {
+    ran = true
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("ran"), Some(Value::Bool(false)));
+    }
+
+    #[test]
+    fn for_con_break_corta_iteracion() {
+        // Corta cuando i == 3 → last queda en 2.
+        let src = r#"
+last = 0
+for i in 0..10 {
+    if i == 3 {
+        break
+    }
+    last = i
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("last"), Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn for_con_continue_salta_iteracion() {
+        // 0..5, saltea i == 2 → 0 + 1 + 3 + 4 = 8.
+        let src = r#"
+total = 0
+for i in 0..5 {
+    if i == 2 {
+        continue
+    }
+    total = total + i
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("total"), Some(Value::Int(8)));
+    }
+
+    #[test]
+    fn for_sobre_map_es_error_explicito() {
+        let src = r#"
+for x in {"a": 1} {
+    print(x)
+}
+"#;
+        let res = parse_and_eval(src);
+        let err = res.unwrap_err();
+        assert!(err.message.contains("Map"));
+    }
+
+    #[test]
+    fn for_sobre_int_es_type_error() {
+        let src = r#"
+for x in 42 {
+    print(x)
+}
+"#;
+        let res = parse_and_eval(src);
+        let err = res.unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn for_loop_var_persiste_despues_del_loop() {
+        // Consistente con la política de bloques de Fitz: las variables
+        // del body (incluida la variable de iteración) persisten en el
+        // scope contenedor. Tras 0..3, i = 2 e last = 2.
+        let src = r#"
+for i in 0..3 {
+    last = i
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("i"), Some(Value::Int(2)));
+        assert_eq!(env.borrow().get("last"), Some(Value::Int(2)));
+    }
+
+    #[test]
+    fn for_anidado_funciona() {
+        // 3 * 3 = 9 iteraciones totales.
+        let src = r#"
+total = 0
+for i in 0..3 {
+    for j in 0..3 {
+        total = total + 1
+    }
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("total"), Some(Value::Int(9)));
+    }
+
+    // ---- Pattern::Range ----
+
+    #[test]
+    fn pattern_range_matchea_valor_dentro() {
+        let src = r#"
+let n = 5
+let r = match n {
+    0..10 => "in"
+    _     => "out"
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Str("in".into())));
+    }
+
+    #[test]
+    fn pattern_range_no_matchea_valor_fuera() {
+        let src = r#"
+let n = 15
+let r = match n {
+    0..10 => "in"
+    _     => "out"
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Str("out".into())));
+    }
+
+    #[test]
+    fn pattern_range_es_exclusivo_en_el_fin() {
+        // n = 10 con patrón 0..10 NO matchea (exclusivo). El segundo arm sí.
+        let src = r#"
+let n = 10
+let r = match n {
+    0..10 => "menor"
+    10..20 => "diez_o_mas"
+    _ => "otro"
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Str("diez_o_mas".into())));
+    }
+
+    #[test]
+    fn pattern_range_con_negativos() {
+        let src = r#"
+let n = -3
+let r = match n {
+    -10..0 => "negativo"
+    0..10 => "chico"
+    _ => "otro"
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Str("negativo".into())));
+    }
+
+    #[test]
+    fn pattern_range_no_matchea_no_int() {
+        // 3.14 contra patrón 0..10 → no matchea, cae a wildcard.
+        let src = r#"
+let n = 3.14
+let r = match n {
+    0..10 => "int_chico"
+    _ => "no_int"
+}
+"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("r"), Some(Value::Str("no_int".into())));
+    }
+
+    // ---- builtin len ----
+
+    #[test]
+    fn len_de_lista_devuelve_cantidad_de_elementos() {
+        let src = "n = len([1, 2, 3, 4, 5])";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(5)));
+    }
+
+    #[test]
+    fn len_de_lista_vacia_es_cero() {
+        let src = "n = len([])";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(0)));
+    }
+
+    #[test]
+    fn len_de_mapa_devuelve_cantidad_de_pares() {
+        let src = r#"n = len({"a": 1, "b": 2, "c": 3})"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(3)));
+    }
+
+    #[test]
+    fn len_de_string_cuenta_chars_no_bytes() {
+        // "ñandú" tiene 5 chars y más de 5 bytes en UTF-8.
+        let src = r#"n = len("ñandú")"#;
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(5)));
+    }
+
+    #[test]
+    fn len_de_range_devuelve_cantidad_de_elementos() {
+        let src = "n = len(0..10)";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(10)));
+    }
+
+    #[test]
+    fn len_de_range_al_reves_es_cero() {
+        // 10..0 — el evaluador trata rangos invertidos como vacíos.
+        let src = "n = len(10..0)";
+        let (env, res) = parse_eval_into_env(src);
+        res.unwrap();
+        assert_eq!(env.borrow().get("n"), Some(Value::Int(0)));
+    }
+
+    #[test]
+    fn len_de_int_es_type_error() {
+        let src = "n = len(42)";
+        let res = parse_and_eval(src);
+        let err = res.unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    #[test]
+    fn len_con_cantidad_de_args_incorrecta_es_error() {
+        let src = "n = len([1], [2])";
+        let res = parse_and_eval(src);
+        let err = res.unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::WrongArgCount { .. }));
     }
 }

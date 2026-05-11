@@ -139,19 +139,23 @@ impl Parser {
     // ---------- expresiones: escalera de precedencia ----------
     //
     // De menor a mayor precedencia:
-    //   expression  → equality
+    //   expression  → logic_or
+    //   logic_or    → logic_and ( "or" logic_and )*
+    //   logic_and   → equality  ( "and" equality )*
     //   equality    → comparison ( ("==" | "!=") comparison )*
-    //   comparison  → term       ( ("<" | ">" | "<=" | ">=") term )*
+    //   comparison  → range      ( ("<" | ">" | "<=" | ">=") range )*
+    //   range       → term       ( ".." term )?     (no chainable)
     //   term        → factor     ( ("+" | "-") factor )*
     //   factor      → unary      ( ("*" | "/") unary )*
     //   unary       → "-" unary  |  postfix
-    //   postfix     → primary    ( "." Ident  |  "(" args ")" )*
-    //   primary     → literal | Ident | "(" expression ")"
+    //   postfix     → primary    ( "." Ident  |  "(" args ")"  |  "[" expr "]" )*
+    //   primary     → literal | Ident | "(" expression ")" | list | map
     //
-    // Todos los binarios son izquierda-asociativos: el `while` itera
-    // y va anidando al `left` cada vez. `expression` es el punto de
-    // entrada desde cualquier regla externa que quiera parsear una
-    // expresión completa.
+    // Los binarios chainables son izquierda-asociativos: el `while` itera
+    // y va anidando al `left` cada vez. `range` NO es chainable — `1..2..3`
+    // es error (lo agarra el caller si peek_at sigue siendo `..`). `expression`
+    // es el punto de entrada desde cualquier regla externa que quiera parsear
+    // una expresión completa.
 
     fn expression(&mut self) -> FitzResult<Expr> {
         self.logic_or()
@@ -213,9 +217,9 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> FitzResult<Expr> {
-        let mut left = self.term()?;
+        let mut left = self.range_expr()?;
         while let Some(op) = self.match_comparison_op() {
-            let right = self.term()?;
+            let right = self.range_expr()?;
             left = Expr::BinOp {
                 op,
                 left: Box::new(left),
@@ -223,6 +227,29 @@ impl Parser {
             };
         }
         Ok(left)
+    }
+
+    /// `start..end` — rango exclusivo. NO es chainable: `1..2..3` da error.
+    /// Precedencia: más baja que aritmética (`1..1+5` = `1..(1+5)`), más alta
+    /// que comparación (`0..n < 10` = `(0..n) < 10`). Si después del primer
+    /// `..` viene otro `..` antes de cerrar la expresión, error.
+    fn range_expr(&mut self) -> FitzResult<Expr> {
+        let start = self.term()?;
+        if !matches!(self.peek(), Token::DotDot) {
+            return Ok(start);
+        }
+        self.advance(); // consume '..'
+        let end = self.term()?;
+        if matches!(self.peek(), Token::DotDot) {
+            return Err(self.error(
+                ErrorKind::InvalidSyntax,
+                "los rangos no se encadenan — usá paréntesis si querés un rango de rangos",
+            ));
+        }
+        Ok(Expr::Range {
+            start: Box::new(start),
+            end: Box::new(end),
+        })
     }
 
     fn match_comparison_op(&mut self) -> Option<BinOpKind> {
@@ -298,10 +325,9 @@ impl Parser {
         }
     }
 
-    /// Operadores postfix: acceso a campo (`.field`) y llamada (`(args)`).
-    /// Iteran en loop porque se pueden encadenar: `user.profile.email`,
-    /// `f(x).y` (esto último: ¡error! `f(x)` no es Ident, así que
-    /// `.y` chocaría con el chequeo de método).
+    /// Operadores postfix: acceso a campo (`.field`), llamada (`(args)`)
+    /// e indexing (`[expr]`). Iteran en loop porque se pueden encadenar:
+    /// `user.profile.email`, `xs[0][1]`, `m["clave"]`.
     ///
     /// Restricción documentada en roadmap 2.3: `Expr::Call` solo admite
     /// `name: String`. Por eso solo permitimos llamadas cuando el
@@ -336,6 +362,18 @@ impl Parser {
                     self.advance(); // consume '('
                     let args = self.parse_call_args()?;
                     expr = Expr::Call { name, args };
+                }
+                Token::LBracket => {
+                    self.advance(); // consume '['
+                    let index = self.expression()?;
+                    self.expect(
+                        &Token::RBracket,
+                        "se esperaba ']' para cerrar el indexing",
+                    )?;
+                    expr = Expr::Index {
+                        object: Box::new(expr),
+                        index: Box::new(index),
+                    };
                 }
                 _ => break,
             }
@@ -407,10 +445,7 @@ impl Parser {
             }
             Token::While => self.parse_while(),
             Token::Loop => self.parse_loop(),
-            Token::For => Err(self.error(
-                ErrorKind::InvalidSyntax,
-                "`for` requiere rangos o listas para iterar, que llegan en Fase 3",
-            )),
+            Token::For => self.parse_for(),
             Token::Ident(_) => {
                 // Lookahead: `x =` o `x :` arrancan asignación.
                 // OJO: `x ==` es comparación (EqEq, no Eq), va por
@@ -613,6 +648,20 @@ impl Parser {
         Ok(Stmt::Loop { body })
     }
 
+    /// `for var in iter { body }`. Iteración sobre listas y rangos
+    /// (mapas todavía no, hasta que tengamos el tipo `Pair`).
+    /// `var` se define en cada iteración en el scope del body.
+    fn parse_for(&mut self) -> FitzResult<Stmt> {
+        self.expect(&Token::For, "se esperaba 'for'")?;
+        let var = self.expect_ident(
+            "se esperaba nombre de variable después de 'for'",
+        )?;
+        self.expect(&Token::In, "se esperaba 'in' después de la variable de 'for'")?;
+        let iter = self.expression()?;
+        let body = self.parse_block()?;
+        Ok(Stmt::For { var, iter, body })
+    }
+
     // ---------- if / match / type ----------
 
     /// `if cond { ... }` o `if cond { ... } else { ... }` o
@@ -704,15 +753,17 @@ impl Parser {
     ///   "texto"     → Str
     ///   true/false  → Bool
     ///   null        → Null
+    ///   0..10       → Range (solo Int; extremos pueden ser negativos)
     ///   Ok(name)    → OkBinding(name)      (bloqueado runtime hasta Fase 3)
     ///   Err(name)   → ErrBinding(name)     (bloqueado runtime hasta Fase 3)
     fn parse_pattern(&mut self) -> FitzResult<Pattern> {
         // Literales. Clonamos el peek antes de avanzar para no chocar con
-        // el borrow checker.
+        // el borrow checker. Los Int caen en `try_int_or_range` para
+        // chequear si después viene `..` y promovemos a Range.
         match self.peek().clone() {
             Token::Int(n) => {
                 self.advance();
-                return Ok(Pattern::Int(n));
+                return self.try_int_or_range(n);
             }
             Token::Float(x) => {
                 self.advance();
@@ -742,7 +793,7 @@ impl Parser {
                 match self.peek().clone() {
                     Token::Int(n) => {
                         self.advance();
-                        return Ok(Pattern::Int(-n));
+                        return self.try_int_or_range(-n);
                     }
                     Token::Float(x) => {
                         self.advance();
@@ -789,6 +840,45 @@ impl Parser {
         } else {
             Ok(Pattern::Ident(name))
         }
+    }
+
+    /// Después de consumir un Int (posiblemente negativo), peek `..`:
+    /// si está, parsea el segundo extremo y devuelve `Pattern::Range`;
+    /// si no, devuelve `Pattern::Int(start)` sin más.
+    /// El extremo derecho admite `-Int` también.
+    fn try_int_or_range(&mut self, start: i64) -> FitzResult<Pattern> {
+        if !matches!(self.peek(), Token::DotDot) {
+            return Ok(Pattern::Int(start));
+        }
+        self.advance(); // consume '..'
+        let end = match self.peek().clone() {
+            Token::Int(n) => {
+                self.advance();
+                n
+            }
+            Token::Minus => {
+                self.advance();
+                match self.peek().clone() {
+                    Token::Int(n) => {
+                        self.advance();
+                        -n
+                    }
+                    _ => {
+                        return Err(self.error(
+                            ErrorKind::InvalidSyntax,
+                            "se esperaba Int después de '-' en patrón de rango",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(self.error(
+                    ErrorKind::InvalidSyntax,
+                    "patrón de rango requiere Int en ambos extremos (Float y otros tipos no soportados)",
+                ));
+            }
+        };
+        Ok(Pattern::Range { start, end })
     }
 
     /// `type Name { field: Type [?] [= default], ... }`.
@@ -957,14 +1047,23 @@ impl Parser {
         Ok(args)
     }
 
-    /// Expresión "hoja": literal, identificador, paréntesis, `if`
-    /// o `match`. Acá termina la recursión hacia abajo en la escalera.
+    /// Expresión "hoja": literal, identificador, paréntesis, `if`,
+    /// `match`, list literal `[...]` o map literal `{...}`. Acá
+    /// termina la recursión hacia abajo en la escalera.
+    ///
+    /// Nota sobre `{`: en posición de expresión SIEMPRE arranca un
+    /// map literal. Los bloques (`fn ... { body }`, `if cond { ... }`,
+    /// etc.) consumen su `{` desde `parse_block`/`parse_match_expr`,
+    /// no desde acá — el flujo nunca cae en este caso para esos
+    /// constructos.
     fn primary(&mut self) -> FitzResult<Expr> {
         // `if` y `match` son expresiones — las manejamos antes de
         // consumir el token para que sus parsers lo hagan.
         match self.peek() {
             Token::If => return self.parse_if_expr(),
             Token::Match => return self.parse_match_expr(),
+            Token::LBracket => return self.parse_list_literal(),
+            Token::LBrace => return self.parse_map_literal(),
             _ => {}
         }
         let tok = self.advance();
@@ -995,6 +1094,82 @@ impl Parser {
                 format!("Se esperaba una expresión, se encontró '{:?}'", other),
             )),
         }
+    }
+
+    /// `[expr, expr, ...]` — lista literal. Acepta vacía `[]`,
+    /// trailing comma y newlines entre elementos (útil para listas
+    /// multilínea).
+    fn parse_list_literal(&mut self) -> FitzResult<Expr> {
+        self.expect(&Token::LBracket, "se esperaba '['")?;
+        let mut items: Vec<Expr> = Vec::new();
+        self.skip_newlines();
+        if matches!(self.peek(), Token::RBracket) {
+            self.advance();
+            return Ok(Expr::List(items));
+        }
+        loop {
+            self.skip_newlines();
+            items.push(self.expression()?);
+            self.skip_newlines();
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+                self.skip_newlines();
+                if matches!(self.peek(), Token::RBracket) {
+                    self.advance();
+                    return Ok(Expr::List(items));
+                }
+            } else {
+                break;
+            }
+        }
+        self.expect(
+            &Token::RBracket,
+            "se esperaba ']' para cerrar la lista",
+        )?;
+        Ok(Expr::List(items))
+    }
+
+    /// `{"k": v, ...}` — mapa literal. Acepta vacío `{}`, trailing
+    /// comma y newlines entre pares. La clave es una expresión, no un
+    /// identificador suelto: para usar el valor de una variable como
+    /// clave, los strings literales son lo natural (`{"name": x}`),
+    /// pero `{key_expr: value}` es válido si `key_expr` evalúa a algo
+    /// hasheable en runtime.
+    fn parse_map_literal(&mut self) -> FitzResult<Expr> {
+        self.expect(&Token::LBrace, "se esperaba '{'")?;
+        let mut pairs: Vec<(Expr, Expr)> = Vec::new();
+        self.skip_newlines();
+        if matches!(self.peek(), Token::RBrace) {
+            self.advance();
+            return Ok(Expr::Map(pairs));
+        }
+        loop {
+            self.skip_newlines();
+            let key = self.expression()?;
+            self.expect(
+                &Token::Colon,
+                "se esperaba ':' entre clave y valor en mapa",
+            )?;
+            self.skip_newlines();
+            let value = self.expression()?;
+            pairs.push((key, value));
+            self.skip_newlines();
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+                self.skip_newlines();
+                if matches!(self.peek(), Token::RBrace) {
+                    self.advance();
+                    return Ok(Expr::Map(pairs));
+                }
+            } else {
+                break;
+            }
+        }
+        self.expect(
+            &Token::RBrace,
+            "se esperaba '}' para cerrar el mapa",
+        )?;
+        Ok(Expr::Map(pairs))
     }
 }
 
@@ -1922,16 +2097,6 @@ mod tests {
     }
 
     #[test]
-    fn for_emite_error_explicito_de_deuda() {
-        // `for` no está implementado aún (espera Fase 3).
-        let src = "for x in lista { print(x) }";
-        let tokens = crate::lexer::tokenize(src).unwrap();
-        let err = parse(tokens).unwrap_err();
-        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
-        assert!(err.message.contains("Fase 3"));
-    }
-
-    #[test]
     fn equality_in_expr_stmt_is_not_assignment() {
         // `x == y` debe ser expr-stmt con BinOp(Eq), NO Assign.
         // Esto valida que el lookahead distingue Eq de EqEq.
@@ -2705,5 +2870,473 @@ mod tests {
                 }],
             }),
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Listas, mapas, rangos, indexing (Fase 3, paso 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn list_literal_empty() {
+        assert_eq!(parse_expr("[]").unwrap(), Expr::List(vec![]));
+    }
+
+    #[test]
+    fn list_literal_single_element() {
+        assert_eq!(parse_expr("[42]").unwrap(), Expr::List(vec![Expr::Int(42)]));
+    }
+
+    #[test]
+    fn list_literal_multiple_elements() {
+        assert_eq!(
+            parse_expr("[1, 2, 3]").unwrap(),
+            Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]),
+        );
+    }
+
+    #[test]
+    fn list_literal_trailing_comma() {
+        assert_eq!(
+            parse_expr("[1, 2,]").unwrap(),
+            Expr::List(vec![Expr::Int(1), Expr::Int(2)]),
+        );
+    }
+
+    #[test]
+    fn list_literal_with_newlines_inside() {
+        // Listas multilínea — los newlines entre elementos se ignoran.
+        let src = "[\n  1,\n  2,\n  3,\n]";
+        assert_eq!(
+            parse_expr(src).unwrap(),
+            Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]),
+        );
+    }
+
+    #[test]
+    fn list_literal_with_expressions() {
+        // [a, b + 1, "hola"]
+        assert_eq!(
+            parse_expr(r#"[a, b + 1, "hola"]"#).unwrap(),
+            Expr::List(vec![
+                Expr::Ident("a".into()),
+                Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Ident("b".into())),
+                    right: Box::new(Expr::Int(1)),
+                },
+                Expr::Str("hola".into()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn list_literal_nested() {
+        // [[1, 2], [3, 4]]
+        assert_eq!(
+            parse_expr("[[1, 2], [3, 4]]").unwrap(),
+            Expr::List(vec![
+                Expr::List(vec![Expr::Int(1), Expr::Int(2)]),
+                Expr::List(vec![Expr::Int(3), Expr::Int(4)]),
+            ]),
+        );
+    }
+
+    #[test]
+    fn list_unclosed_errors() {
+        let err = parse_expr("[1, 2").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn map_literal_empty() {
+        assert_eq!(parse_expr("{}").unwrap(), Expr::Map(vec![]));
+    }
+
+    #[test]
+    fn map_literal_single_pair() {
+        assert_eq!(
+            parse_expr(r#"{"a": 1}"#).unwrap(),
+            Expr::Map(vec![(Expr::Str("a".into()), Expr::Int(1))]),
+        );
+    }
+
+    #[test]
+    fn map_literal_multiple_pairs_preserves_order() {
+        assert_eq!(
+            parse_expr(r#"{"a": 1, "b": 2}"#).unwrap(),
+            Expr::Map(vec![
+                (Expr::Str("a".into()), Expr::Int(1)),
+                (Expr::Str("b".into()), Expr::Int(2)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn map_literal_trailing_comma() {
+        assert_eq!(
+            parse_expr(r#"{"a": 1,}"#).unwrap(),
+            Expr::Map(vec![(Expr::Str("a".into()), Expr::Int(1))]),
+        );
+    }
+
+    #[test]
+    fn map_literal_with_newlines() {
+        let src = "{\n  \"a\": 1,\n  \"b\": 2,\n}";
+        assert_eq!(
+            parse_expr(src).unwrap(),
+            Expr::Map(vec![
+                (Expr::Str("a".into()), Expr::Int(1)),
+                (Expr::Str("b".into()), Expr::Int(2)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn map_literal_missing_colon_errors() {
+        let err = parse_expr(r#"{"a", "b"}"#).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+        assert!(err.message.contains(":"));
+    }
+
+    #[test]
+    fn map_literal_nested_in_list() {
+        // [{"k": 1}, {"k": 2}]
+        assert_eq!(
+            parse_expr(r#"[{"k": 1}, {"k": 2}]"#).unwrap(),
+            Expr::List(vec![
+                Expr::Map(vec![(Expr::Str("k".into()), Expr::Int(1))]),
+                Expr::Map(vec![(Expr::Str("k".into()), Expr::Int(2))]),
+            ]),
+        );
+    }
+
+    #[test]
+    fn range_simple_int_literals() {
+        // 0..10
+        assert_eq!(
+            parse_expr("0..10").unwrap(),
+            Expr::Range {
+                start: Box::new(Expr::Int(0)),
+                end: Box::new(Expr::Int(10)),
+            },
+        );
+    }
+
+    #[test]
+    fn range_with_expressions_as_ends() {
+        // a..b+1 → a..(b+1) (range tiene menor precedencia que '+')
+        assert_eq!(
+            parse_expr("a..b+1").unwrap(),
+            Expr::Range {
+                start: Box::new(Expr::Ident("a".into())),
+                end: Box::new(Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Ident("b".into())),
+                    right: Box::new(Expr::Int(1)),
+                }),
+            },
+        );
+    }
+
+    #[test]
+    fn range_precedence_below_comparison() {
+        // 0..n < 10 → (0..n) < 10
+        // (range tiene mayor precedencia que '<')
+        assert_eq!(
+            parse_expr("0..n < 10").unwrap(),
+            Expr::BinOp {
+                op: BinOpKind::Lt,
+                left: Box::new(Expr::Range {
+                    start: Box::new(Expr::Int(0)),
+                    end: Box::new(Expr::Ident("n".into())),
+                }),
+                right: Box::new(Expr::Int(10)),
+            },
+        );
+    }
+
+    #[test]
+    fn range_precedence_above_arithmetic() {
+        // 1+2..3+4 → (1+2)..(3+4)
+        assert_eq!(
+            parse_expr("1+2..3+4").unwrap(),
+            Expr::Range {
+                start: Box::new(Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Int(1)),
+                    right: Box::new(Expr::Int(2)),
+                }),
+                end: Box::new(Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Int(3)),
+                    right: Box::new(Expr::Int(4)),
+                }),
+            },
+        );
+    }
+
+    #[test]
+    fn range_chain_errors() {
+        // 1..2..3 — no chaineable
+        let err = parse_expr("1..2..3").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+    }
+
+    #[test]
+    fn range_with_negative_int() {
+        // -3..3 — unary minus se aplica al primer extremo
+        assert_eq!(
+            parse_expr("-3..3").unwrap(),
+            Expr::Range {
+                start: Box::new(Expr::UnaryOp {
+                    op: UnaryOpKind::Neg,
+                    operand: Box::new(Expr::Int(3)),
+                }),
+                end: Box::new(Expr::Int(3)),
+            },
+        );
+    }
+
+    #[test]
+    fn index_simple() {
+        // xs[0]
+        assert_eq!(
+            parse_expr("xs[0]").unwrap(),
+            Expr::Index {
+                object: Box::new(Expr::Ident("xs".into())),
+                index: Box::new(Expr::Int(0)),
+            },
+        );
+    }
+
+    #[test]
+    fn index_chained() {
+        // m["a"][1]
+        assert_eq!(
+            parse_expr(r#"m["a"][1]"#).unwrap(),
+            Expr::Index {
+                object: Box::new(Expr::Index {
+                    object: Box::new(Expr::Ident("m".into())),
+                    index: Box::new(Expr::Str("a".into())),
+                }),
+                index: Box::new(Expr::Int(1)),
+            },
+        );
+    }
+
+    #[test]
+    fn index_on_list_literal() {
+        // [1, 2, 3][1] — indexing directo sobre literal
+        assert_eq!(
+            parse_expr("[1, 2, 3][1]").unwrap(),
+            Expr::Index {
+                object: Box::new(Expr::List(vec![
+                    Expr::Int(1), Expr::Int(2), Expr::Int(3),
+                ])),
+                index: Box::new(Expr::Int(1)),
+            },
+        );
+    }
+
+    #[test]
+    fn index_with_expression_as_index() {
+        // xs[i + 1]
+        assert_eq!(
+            parse_expr("xs[i + 1]").unwrap(),
+            Expr::Index {
+                object: Box::new(Expr::Ident("xs".into())),
+                index: Box::new(Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Ident("i".into())),
+                    right: Box::new(Expr::Int(1)),
+                }),
+            },
+        );
+    }
+
+    #[test]
+    fn index_unclosed_errors() {
+        let err = parse_expr("xs[0").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn list_assignment_works() {
+        // let xs = [1, 2, 3]
+        let stmt = parse_one_stmt("let xs = [1, 2, 3]");
+        assert_eq!(
+            stmt,
+            Stmt::Assign {
+                name: "xs".into(),
+                type_: None,
+                value: Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]),
+            },
+        );
+    }
+
+    #[test]
+    fn map_assignment_works() {
+        // let m = {"a": 1, "b": 2}
+        let stmt = parse_one_stmt(r#"let m = {"a": 1, "b": 2}"#);
+        assert_eq!(
+            stmt,
+            Stmt::Assign {
+                name: "m".into(),
+                type_: None,
+                value: Expr::Map(vec![
+                    (Expr::Str("a".into()), Expr::Int(1)),
+                    (Expr::Str("b".into()), Expr::Int(2)),
+                ]),
+            },
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — for loop (Fase 3, paso 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn for_loop_over_list() {
+        // for x in xs { print(x) }
+        let stmt = parse_one_stmt("for x in xs { print(x) }");
+        assert_eq!(
+            stmt,
+            Stmt::For {
+                var: "x".into(),
+                iter: Expr::Ident("xs".into()),
+                body: vec![Stmt::Expr(Expr::Call {
+                    name: "print".into(),
+                    args: vec![Expr::Ident("x".into())],
+                })],
+            },
+        );
+    }
+
+    #[test]
+    fn for_loop_over_range() {
+        // for i in 0..10 { print(i) }
+        let stmt = parse_one_stmt("for i in 0..10 { print(i) }");
+        match stmt {
+            Stmt::For { var, iter, body } => {
+                assert_eq!(var, "i");
+                assert_eq!(
+                    iter,
+                    Expr::Range {
+                        start: Box::new(Expr::Int(0)),
+                        end: Box::new(Expr::Int(10)),
+                    },
+                );
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("se esperaba For, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_loop_over_list_literal() {
+        // for x in [1, 2, 3] { print(x) }
+        let stmt = parse_one_stmt("for x in [1, 2, 3] { print(x) }");
+        match stmt {
+            Stmt::For { iter, .. } => {
+                assert_eq!(iter, Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]));
+            }
+            other => panic!("se esperaba For, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_loop_with_break_and_continue() {
+        let src = "for i in 0..10 { if i == 5 { break } else { continue } }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::For { body, .. } => {
+                // El body tiene una sola sentencia: un if/else con break/continue.
+                assert_eq!(body.len(), 1);
+            }
+            other => panic!("se esperaba For, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_loop_missing_in_errors() {
+        // for x 0..10 { ... } — falta `in`
+        let err = parse_program_str("for x 0..10 {}").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+        assert!(err.message.contains("in"));
+    }
+
+    #[test]
+    fn for_loop_missing_var_errors() {
+        // for in xs { ... } — falta variable
+        let err = parse_program_str("for in xs {}").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — patrones de rango en match (Fase 3, paso 1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pattern_range_simple() {
+        // match n { 0..10 => "chico", _ => "grande" }
+        let src = "match n { 0..10 => \"chico\", _ => \"grande\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }) => {
+                assert_eq!(arms.len(), 2);
+                assert_eq!(arms[0].pattern, Pattern::Range { start: 0, end: 10 });
+                assert_eq!(arms[1].pattern, Pattern::Wildcard);
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pattern_range_with_negatives() {
+        // match n { -10..0 => "negativo", 0..10 => "chico", _ => "grande" }
+        let src = "match n { -10..0 => \"negativo\", 0..10 => \"chico\", _ => \"grande\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }) => {
+                assert_eq!(arms.len(), 3);
+                assert_eq!(arms[0].pattern, Pattern::Range { start: -10, end: 0 });
+                assert_eq!(arms[1].pattern, Pattern::Range { start: 0, end: 10 });
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pattern_range_both_negative() {
+        // match n { -5..-1 => "neg" }
+        let src = "match n { -5..-1 => \"neg\", _ => \"otro\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }) => {
+                assert_eq!(arms[0].pattern, Pattern::Range { start: -5, end: -1 });
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pattern_int_sin_dotdot_sigue_siendo_int() {
+        // Sanity check: que el cambio para Pattern::Range no rompa Pattern::Int.
+        let src = "match n { 42 => \"sí\", _ => \"no\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }) => {
+                assert_eq!(arms[0].pattern, Pattern::Int(42));
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn pattern_range_con_float_es_error() {
+        // 0..1.5 — el float como extremo no se soporta en patrones
+        let src = "match n { 0..1.5 => \"x\", _ => \"y\" }";
+        let err = parse_program_str(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
     }
 }

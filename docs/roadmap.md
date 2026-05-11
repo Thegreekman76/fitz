@@ -207,19 +207,79 @@ print(double(x))
 ---
 
 ## Fase 3 — El lenguaje crece 🌱
-**Estado: PENDIENTE**
+**Estado: EN CURSO**
 
-Agregar las features que hacen a Fitz expresivo.
+Agregar las features que hacen a Fitz expresivo. La fase está dividida
+en cinco pasos; cada uno cierra una pieza independiente y suma su
+capítulo a la guía.
 
-### Features
-- [ ] Tipos custom (`type User { ... }`)
-- [ ] Listas y mapas con operaciones básicas
-- [ ] Match expressions
-- [ ] Result / manejo de errores
-- [ ] Funciones de orden superior
-- [ ] String interpolation
-- [ ] Módulos e imports básicos
-- [ ] Tipado gradual — anotaciones opcionales
+### Pasos
+
+#### 3.1 Listas, mapas, rangos ✓
+**Completado** — el lenguaje ya tiene colecciones básicas y `for`.
+
+- AST nuevo: `Expr::List`, `Expr::Map`, `Expr::Range`, `Expr::Index`,
+  `Stmt::For`, `Pattern::Range`.
+- Parser: literales `[...]` y `{...}`, rangos `start..end` con
+  precedencia entre comparación y suma, indexing postfix `xs[i]`,
+  `for var in iter { ... }`, patrón de rango `0..10` en match.
+- Evaluator: `Value::List`, `Value::Map`, `Value::Range`; iteración
+  para `for` sobre listas y rangos; matching de rango contra Int;
+  errores explícitos para índices fuera de rango, claves no
+  encontradas, tipos no indexables.
+- Builtin: `len` para List/Map/Str/Range.
+
+Tests del proyecto: 366 (270 al cerrar Fase 2 + 96 nuevos repartidos
+entre ast, parser, value y evaluator).
+
+Guía: capítulo 9 "Listas, mapas y rangos" sumado, capítulo de Match
+extendido con patrones de rango, capítulo de Loops limpiado de la
+deuda de `for`. Ejemplo nuevo: `examples/guide/08-listas-mapas.fitz`.
+
+**Deuda explícita — retomar después:**
+- **Mutación de listas** (`push`/`pop`/asignación a `xs[i]`) — espera
+  3.4 (method calls). Por ahora las listas son inmutables desde el
+  código fuente.
+- **`for` sobre mapas** — necesita el tipo `Pair`/`entry`. El
+  evaluador emite error explícito por ahora.
+- **Índices negativos** (`xs[-1]` estilo Python) — sin soporte; el
+  evaluador corta con "índice negativo".
+- **`Range` indexable** (`(0..10)[3]`) — no soportado, sin uso claro
+  hasta no tener method calls.
+- **`Str` indexable** — pendiente decisión sobre la unidad (char vs
+  byte vs grafema).
+- **Rango inclusivo `..=`** — sin soporte, se suma si aparece la
+  necesidad.
+
+#### 3.2 Tipos custom instanciables
+**Pendiente** — siguiente paso.
+
+- Struct literal: `User { id: 1, name: "Fitz" }` como expresión.
+- `Value::Struct` con campos accesibles vía `obj.campo` en runtime.
+- Cierra deuda de 2.3 (struct literals no parseaban) y 2.4 (field
+  access en runtime).
+- Capítulo 12 ("Tipos con `type` (preview)") pasa de preview a real.
+
+#### 3.3 Result + Ok/Err + `?`
+**Pendiente** — manejo de errores estilo Rust.
+
+- Sum type built-in para Result.
+- Pattern matching de `Ok(x)` / `Err(e)` (los patrones ya parsean,
+  el evaluador hoy corta con error explícito).
+- Operador `?` postfix para propagación.
+
+#### 3.4 Funciones anónimas + higher-order + method calls
+**Pendiente** — el paso más grande.
+
+- Mutación de `Expr::Call` a `callee: Box<Expr>` para habilitar
+  method calls (`xs.map(...)`). Cierra deuda de 2.3.
+- Anonymous `fn(x) => ...` como expresión.
+- Métodos built-in sobre List, Map, Str.
+
+#### 3.5 Módulos / `import`
+**Pendiente** — infraestructural.
+
+- File loading, name resolution, namespaces.
 
 ### Criterio de completitud
 ```fitz

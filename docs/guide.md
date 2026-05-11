@@ -1,7 +1,7 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 2 cerrada, 270 tests pasando).
+> Última actualización: 2026-05-11 (Fase 3 — paso 1: listas, mapas, rangos y `for`, 366 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -24,19 +24,20 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 4. [Operadores](#4-operadores)
 5. [Strings](#5-strings)
 
-**Parte 3 — Control de flujo**
+**Parte 3 — Control de flujo y colecciones**
 6. [Booleanos y lógica](#6-booleanos-y-lógica)
 7. [if / else](#7-if--else)
 8. [Loops](#8-loops)
-9. [Match](#9-match)
+9. [Listas, mapas y rangos](#9-listas-mapas-y-rangos)
+10. [Match](#10-match)
 
 **Parte 4 — Abstracción**
-10. [Funciones](#10-funciones)
+11. [Funciones](#11-funciones)
 
 **Parte 5 — Lo que está por venir**
-11. [Tipos con `type` (preview)](#11-tipos-con-type-preview)
-12. [Errores y mensajes](#12-errores-y-mensajes)
-13. [Qué sigue](#13-qué-sigue)
+12. [Tipos con `type` (preview)](#12-tipos-con-type-preview)
+13. [Errores y mensajes](#13-errores-y-mensajes)
+14. [Qué sigue](#14-qué-sigue)
 
 ---
 
@@ -72,10 +73,13 @@ Solo lo que el intérprete ejecuta hoy:
 - Booleanos con `and` / `or` y short-circuit.
 - `if` / `else` / `else if`, tanto sentencia como expresión.
 - `while`, `loop`, `break`, `continue`.
-- `match` con patrones literales, binding por identificador y `_`.
+- Listas (`[1, 2, 3]`), mapas (`{"k": v}`), rangos (`0..10`).
+- Indexing con `xs[i]` / `m["k"]`.
+- `for x in xs` y `for i in 0..n`.
+- `match` con patrones literales, binding por identificador, `_` y rangos `0..10`.
 - Funciones (`fn` en bloque y `=>` en flecha), closures, recursión.
 - Declaración de tipos con `type` (declarar sí, instanciar todavía no).
-- El builtin `print`.
+- Builtins: `print`, `len`.
 
 ### Qué todavía no anda
 
@@ -83,8 +87,8 @@ Estas cosas aparecen en la [especificación de sintaxis](syntax-spec.md)
 pero el intérprete aún no las ejecuta. Si las tipeás vas a ver un
 error explícito:
 
-- `for` y rangos (`0..10`).
-- Listas (`[1, 2, 3]`), mapas (`{"a": 1}`), tuplas.
+- Tuplas (`(1, "a", true)`).
+- Mutación de listas (`push`, `pop`, etc.) — espera method calls.
 - Instanciación de tipos custom (`User { id: 1, name: "x" }`).
 - Acceso a campos y métodos (`user.name`, `users.push(...)`).
 - `Result`, `Ok(x)`, `Err(e)`, propagación con `?`.
@@ -101,7 +105,7 @@ La guía está dividida en cinco partes que se leen en orden:
 
 1. **Empezando** — qué es Fitz y cómo correr tu primer programa.
 2. **Datos y expresiones** — los tipos básicos y cómo se combinan.
-3. **Control de flujo** — decidir y repetir.
+3. **Control de flujo y colecciones** — decidir, repetir, agrupar datos.
 4. **Abstracción** — funciones, closures, recursión.
 5. **Lo que está por venir** — `type` como anticipo de la Fase 3,
    cómo leer errores, y a dónde mirar para seguir.
@@ -143,7 +147,10 @@ Antes de escribir código, asegurate de poder ejecutarlo.
 Fitz hoy es un intérprete escrito en Rust. Para correrlo necesitás:
 
 - **Rust toolchain** (cargo + rustc). Si todavía no la tenés,
-  instalá con [rustup](https://rustup.rs).
+  instalá con [rustup](https://rustup.rs). El repo pinea la versión
+  exacta de Rust en `rust-toolchain.toml`, así que rustup la baja sola
+  la primera vez que corras `cargo` adentro del proyecto — no hace
+  falta que coincida con la versión global de tu sistema.
 - **Git**, para clonar el repo.
 
 No hace falta nada más. No hay package manager de Fitz todavía (eso es
@@ -288,7 +295,7 @@ directory, así que las rutas son relativas a la carpeta `fitz/`.
 
 Si el archivo está pero hay un error de sintaxis, el intérprete corta
 con línea y columna del problema. Vamos a aprender a leer esos
-mensajes en el capítulo 12.
+mensajes en el capítulo 13.
 
 ---
 
@@ -414,7 +421,7 @@ Una variable existe en el bloque donde se define y en los anidados,
 hasta donde se cierra ese bloque. Por ahora **los bloques de `if`,
 `match` y `while` no crean su propio scope**: una variable definida
 adentro persiste afuera. Es un comportamiento estilo Python, no estilo
-Rust. Las funciones sí crean su propio scope (cap. 10).
+Rust. Las funciones sí crean su propio scope (cap. 11).
 
 Esto puede sorprender — lo dejamos marcado y, si en algún momento trae
 problemas reales, lo reconsideramos.
@@ -1268,9 +1275,10 @@ Con `if` ya podés decidir. En el próximo capítulo le sumamos repetir:
 
 ## 8. Loops
 
-Para repetir código en Fitz hoy tenés dos construcciones: `while` y
-`loop`. El clásico `for ... in` está reservado en la sintaxis pero
-todavía no se puede usar — vamos a ver por qué al final del capítulo.
+Para repetir código en Fitz hay tres construcciones: `while`, `loop` y
+`for ... in`. Este capítulo cubre las dos primeras; `for` necesita
+listas y rangos, así que vive en el [capítulo 9](#9-listas-mapas-y-rangos)
+junto con las colecciones sobre las que itera.
 
 ### `while`
 
@@ -1407,38 +1415,11 @@ while fila < 5 and done == false {
 
 ### Lo que todavía no anda
 
-- **`for ... in`** está reservado pero no implementado. Si lo
-  escribís, el parser corta:
-
-  ```
-  Error — `for` requiere rangos o listas para iterar, que llegan en Fase 3
-  ```
-
-  La razón es que `for` necesita algo sobre lo que iterar — rangos
-  (`0..10`), listas, etc. — y todavía no hay listas ni rangos como
-  valores de runtime. Llegan en Fase 3 junto con `List<T>`.
-
 - **`loop` como expresión** — en Rust podés escribir
   `let x = loop { break valor }`. Acá `loop` es solo una sentencia;
   `break` no lleva valor.
 
 - **Labels para `break` / `continue`** — para romper más de un nivel.
-
-### Mientras tanto, contadores
-
-Mientras `for` no esté disponible, el patrón usual para iterar entre
-dos números es:
-
-```fitz
-i = 0
-while i < 10 {
-    print(i)
-    i = i + 1
-}
-```
-
-Es feo y propenso a olvidar el incremento, pero hace lo que tiene que
-hacer.
 
 ### Ejemplo completo
 
@@ -1504,13 +1485,287 @@ j = 5
 
 ---
 
-En el próximo capítulo vamos a `match`: patrones literales, binding
-por identificador y `_`. Y por qué `match` sobre un valor cubre
-muchos casos donde uno haría una cadena de `else if`.
+En el próximo capítulo vamos a las **colecciones** — listas, mapas y
+rangos — y al `for ... in` que itera sobre ellas. Después de eso, el
+capítulo de `match` cierra la parte de control de flujo.
 
 ---
 
-## 9. Match
+## 9. Listas, mapas y rangos
+
+Hasta acá manejamos valores sueltos. En este capítulo entran las tres
+estructuras que te dejan agrupar muchos valores y recorrerlos:
+**listas**, **mapas** y **rangos**. Y con ellas llega `for ... in`,
+la forma natural de iterar.
+
+### Listas
+
+Una lista es una secuencia ordenada de valores. Se escribe entre
+corchetes, separados por coma:
+
+```fitz
+nums = [1, 2, 3, 4, 5]
+print(nums)
+// → [1, 2, 3, 4, 5]
+```
+
+Los elementos pueden ser de cualquier tipo, incluso mezclados:
+
+```fitz
+mezcla = [1, "dos", true, null, 3.14]
+print(mezcla)
+// → [1, "dos", true, null, 3.14]
+```
+
+La lista vacía es `[]`:
+
+```fitz
+vacia = []
+print(len(vacia))  // → 0
+```
+
+### Acceso por índice
+
+`xs[i]` devuelve el elemento en la posición `i`, base 0:
+
+```fitz
+nums = [10, 20, 30]
+print(nums[0])  // → 10
+print(nums[2])  // → 30
+```
+
+Si te pasás del tamaño, el intérprete corta:
+
+```
+Error en línea 0:0 — índice fuera de rango: 5 en lista de tamaño 3
+```
+
+Los índices negativos al estilo Python (`xs[-1]` para el último)
+**no** están soportados todavía — dan error explícito. Si necesitás
+el último elemento, hacé `xs[len(xs) - 1]`.
+
+### Mapas
+
+Un mapa asocia claves con valores. Se escribe entre llaves, separando
+clave y valor con `:`:
+
+```fitz
+user = {"name": "Martín", "age": 43}
+print(user)
+// → {"name": "Martín", "age": 43}
+```
+
+Las claves típicamente son strings, pero podés usar cualquier valor
+comparable como clave (`Int`, `Bool`, etc.). El orden de inserción se
+preserva: si insertaste `"a"` antes que `"b"`, así se imprime.
+
+Para leer un valor, usá la misma sintaxis de indexing:
+
+```fitz
+print(user["name"])  // → Martín
+```
+
+Si la clave no existe, el intérprete corta:
+
+```
+Error en línea 0:0 — clave no encontrada en mapa: ausente
+```
+
+El mapa vacío es `{}`:
+
+```fitz
+m = {}
+print(len(m))  // → 0
+```
+
+### Rangos
+
+Un rango representa una secuencia de enteros entre dos extremos. Se
+escribe con dos puntos:
+
+```fitz
+r = 0..5
+print(r)        // → 0..5
+print(len(r))   // → 5
+```
+
+El **extremo derecho es exclusivo**: `0..5` representa `0, 1, 2, 3, 4`
+(cinco valores). Es la misma convención que Rust o que `range(n)` de
+Python. Si el rango va al revés (`10..0`), tiene longitud cero —
+nunca itera.
+
+Los rangos son valores como cualquier otro: podés asignarlos, pasarlos
+a funciones, y compararlos por igualdad. Pero su uso natural es
+iterar, que viene ahora.
+
+### `for ... in`
+
+`for var in iterable { body }` recorre los elementos de la lista o
+los enteros del rango, una iteración por valor. La variable `var` se
+redefine en cada vuelta:
+
+```fitz
+for x in [10, 20, 30] {
+    print(x)
+}
+// → 10
+// → 20
+// → 30
+
+for i in 0..3 {
+    print(i)
+}
+// → 0
+// → 1
+// → 2
+```
+
+`break` y `continue` funcionan igual que en `while`:
+
+```fitz
+total = 0
+for i in 0..10 {
+    if i == 5 {
+        break
+    }
+    total = total + i
+}
+print(total)   // → 0 + 1 + 2 + 3 + 4 = 10
+```
+
+La variable de iteración persiste después del loop (misma política
+que el resto de los bloques de Fitz — las variables no crean scope
+nuevo):
+
+```fitz
+for i in 0..3 {}
+print(i)   // → 2 (el último valor antes de que el rango se acabe)
+```
+
+Si querés iterar varias dimensiones, anidás:
+
+```fitz
+total = 0
+for i in 0..3 {
+    for j in 0..3 {
+        total = total + 1
+    }
+}
+print(total)   // → 9
+```
+
+### Patrón de rango en `match` (adelanto)
+
+Los rangos también se pueden usar como **patrones** en `match`, para
+clasificar un `Int` en bandas:
+
+```fitz
+fn clasificar(n) {
+    return match n {
+        0..10   => "chico"
+        10..100 => "mediano"
+        _       => "grande"
+    }
+}
+```
+
+Esto se ve en detalle en el [próximo capítulo](#10-match).
+
+### Anidación
+
+Listas, mapas y rangos se combinan libremente:
+
+```fitz
+matriz = [[1, 2, 3], [4, 5, 6], [7, 8, 9]]
+print(matriz[1][2])   // → 6
+
+usuarios = [
+    {"name": "Ana", "age": 30},
+    {"name": "Beto", "age": 25},
+]
+print(usuarios[0]["name"])   // → Ana
+```
+
+### Lo que todavía no anda
+
+- **Mutación**: `xs.push(4)`, `m["k"] = v`, `xs[0] = nuevo`. Vienen
+  con method calls, que es el paso 4 de Fase 3.
+- **Métodos de lista**: `.map`, `.filter`, `.find`, `.contains`,
+  `.first`, `.last`. Mismo paso 4. Por ahora `for` cubre los casos
+  básicos.
+- **`for` sobre mapas**: necesita el tipo `Pair`/`entry`. Si lo
+  intentás, el intérprete corta:
+
+  ```
+  Error — `for` sobre Map aún no soportado — esperá al tipo Pair (paso 4 de Fase 3)
+  ```
+
+- **Índices negativos** (`xs[-1]`) al estilo Python.
+- **Rangos inclusivos** (`0..=10`).
+- **Comprehensions** (`[x * 2 for x in xs]`).
+
+### Ejemplo completo
+
+[examples/guide/08-listas-mapas.fitz](../examples/guide/08-listas-mapas.fitz):
+
+```fitz
+nums = [1, 2, 3, 4, 5]
+print(nums)
+print("primer: {nums[0]}")
+print("último: {nums[4]}")
+print("cantidad: {len(nums)}")
+
+mezcla = [1, "dos", true, null, 3.14]
+print(mezcla)
+
+vacia = []
+print("vacía: {vacia}, len: {len(vacia)}")
+
+user = {"name": "Martín", "age": 43}
+print(user)
+print("nombre: {user[\"name\"]}")
+
+items = {"primero": 1, "segundo": 2, "tercero": 3}
+print(items)
+
+r = 0..5
+print(r)
+print("cantidad: {len(r)}")
+
+total = 0
+for n in nums {
+    total = total + n
+}
+print("suma de nums: {total}")
+
+print("contando:")
+for i in 0..5 {
+    print("  {i}")
+}
+
+fn clasificar(n) {
+    return match n {
+        0..10  => "chico"
+        10..100 => "mediano"
+        100..1000 => "grande"
+        _ => "fuera"
+    }
+}
+print(clasificar(3))
+print(clasificar(42))
+print(clasificar(500))
+print(clasificar(99999))
+```
+
+---
+
+En el próximo capítulo cerramos control de flujo con `match`:
+patrones literales, binding por identificador, `_`, y los **patrones
+de rango** que recién vimos en acción.
+
+---
+
+## 10. Match
 
 `match` compara un valor contra una serie de **patrones** y ejecuta el
 primero que coincide. Es la herramienta natural cuando estás haciendo
@@ -1669,11 +1924,42 @@ match status {
 }
 ```
 
+### Patrones de rango
+
+Para los `Int`, podés usar un rango como patrón. Matchea si el valor
+es `Int` y cae adentro del rango (con la cota derecha **exclusiva**,
+igual que el operador `..`):
+
+```fitz
+fn clasificar(n) {
+    return match n {
+        0..10   => "chico"
+        10..100 => "mediano"
+        _       => "grande"
+    }
+}
+
+print(clasificar(5))    // → chico
+print(clasificar(10))   // → mediano  (10 no entra en 0..10)
+print(clasificar(500))  // → grande
+```
+
+Los extremos negativos también son válidos:
+
+```fitz
+match temperatura {
+    -50..0 => print("bajo cero")
+    0..10  => print("frío")
+    10..25 => print("templado")
+    _      => print("calor")
+}
+```
+
+Si el valor no es `Int` (por ejemplo, un `Float`), el patrón de
+rango simplemente no matchea, y se evalúa el siguiente brazo.
+
 ### Lo que todavía no anda
 
-- **Rangos como patrón** (`0..12`, `13..17`, `18..`) — no parsean
-  todavía. La especificación los menciona, llegan junto con rangos
-  como valor en Fase 3.
 - **`Ok(x)` / `Err(e)`** — los patrones parsean, pero el evaluador
   corta con:
 
@@ -1691,7 +1977,7 @@ match status {
 
 ### Ejemplo completo
 
-[examples/guide/08-match.fitz](../examples/guide/08-match.fitz):
+[examples/guide/09-match.fitz](../examples/guide/09-match.fitz):
 
 ```fitz
 status = "active"
@@ -1759,7 +2045,7 @@ parámetros, recursión, y closures con captura léxica.
 
 ---
 
-## 10. Funciones
+## 11. Funciones
 
 Una función agrupa una serie de pasos bajo un nombre, recibe entradas
 (parámetros) y devuelve un valor. En Fitz hay dos formas de
@@ -1943,7 +2229,7 @@ para callbacks.
 
 ### Ejemplo completo
 
-[examples/guide/09-funciones.fitz](../examples/guide/09-funciones.fitz):
+[examples/guide/10-funciones.fitz](../examples/guide/10-funciones.fitz):
 
 ```fitz
 fn greet(name) {
@@ -2005,7 +2291,7 @@ instanciar — y por qué.
 
 ---
 
-## 11. Tipos con `type` (preview)
+## 12. Tipos con `type` (preview)
 
 Este capítulo es un anticipo. La declaración de tipos custom ya está
 en el lenguaje: el lexer, el parser y el evaluador la aceptan. Lo
@@ -2124,7 +2410,7 @@ para otra guía.
 
 ### Ejemplo completo
 
-[examples/guide/10-type.fitz](../examples/guide/10-type.fitz):
+[examples/guide/11-type.fitz](../examples/guide/11-type.fitz):
 
 ```fitz
 type User {
@@ -2159,7 +2445,7 @@ limitaciones de precisión que todavía tiene.
 
 ---
 
-## 12. Errores y mensajes
+## 13. Errores y mensajes
 
 Tarde o temprano vas a tipear algo mal y el intérprete te va a cortar.
 Este capítulo es un mapa de los errores que vas a ver: de dónde
@@ -2221,9 +2507,11 @@ Error en línea 1:5 — String sin cerrar — salto de línea antes de la comill
 |---------|----------|
 | `Se esperaba una expresión, se encontró 'X'` | Faltó la expresión donde el parser la esperaba (después de `+`, después de `=`, dentro de paréntesis). |
 | `se esperaba ')' para cerrar la llamada` | Una llamada quedó sin cerrar paréntesis. |
-| `se esperaba '=>' después del patrón` | Brazo de `match` mal formado, típicamente por un patrón no soportado (cap. 9). |
-| `se esperaba salto de línea o fin de bloque entre sentencias` | Aparece, entre otras cosas, al intentar instanciar un `type` (cap. 11). |
-| `` `for` requiere rangos o listas para iterar, que llegan en Fase 3 `` | El parser ataja `for` con un mensaje explícito (cap. 8). |
+| `se esperaba '=>' después del patrón` | Brazo de `match` mal formado, típicamente por un patrón no soportado (cap. 10). |
+| `se esperaba salto de línea o fin de bloque entre sentencias` | Aparece, entre otras cosas, al intentar instanciar un `type` (cap. 12). |
+| `índice fuera de rango: N en lista de tamaño M` | `xs[i]` con `i` por fuera de la lista (cap. 9). |
+| `clave no encontrada en mapa: k` | `m[k]` con clave que no existe (cap. 9). |
+| `el tipo 'X' no soporta indexing con '[]'` | Intentaste `[i]` sobre algo que no es lista ni mapa (cap. 9). |
 
 Ejemplo:
 
@@ -2246,11 +2534,12 @@ Estos son los que más vas a ver mientras escribís lógica:
 | `división por cero` | Dividiste por `0` (Int) o `0.0` (Float). Cap. 4. |
 | `la condición de 'if' debe ser Bool, no 'Int'` | Pasaste un valor no-Bool a la condición. Lo mismo aplica a `while`. Cap. 6. |
 | `operando izquierdo de 'and' debe ser Bool, no 'X'` | Igual, en `and` / `or`. Cap. 6. |
-| `'add' espera 2 argumento(s), recibió 1` | Aridad incorrecta al llamar (cap. 10). |
+| `'add' espera 2 argumento(s), recibió 1` | Aridad incorrecta al llamar (cap. 11). |
 | `'n' no es invocable (es Int)` | Intentaste llamar como función algo que no lo es. |
 | `'break' solo puede usarse adentro de un loop` | `break` / `continue` fuera de un loop. Cap. 8. |
-| `'return' solo puede usarse adentro de una función` | `return` en el nivel global. Cap. 10. |
-| `el 'match' no matcheó ningún brazo` | El `match` no tenía wildcard y ningún patrón coincidió. Cap. 9. |
+| `'return' solo puede usarse adentro de una función` | `return` en el nivel global. Cap. 11. |
+| `el 'match' no matcheó ningún brazo` | El `match` no tenía wildcard y ningún patrón coincidió. Cap. 10. |
+| `no se puede iterar sobre un valor de tipo 'X'` | `for x in v` con `v` que no es List ni Range (cap. 9). |
 | `Field access requiere tipos custom instanciados (Fase 3)` | Tocás `obj.campo` sobre algo que no es una instancia de tipo. Cap. 11. |
 | `patrones 'Ok(...)' / 'Err(...)' requieren el tipo Result (Fase 3)` | Pattern `Ok`/`Err` en `match`. Cap. 9. |
 
@@ -2302,7 +2591,7 @@ no tengamos posiciones finas.
 
 ### Ejemplo completo
 
-[examples/guide/11-errores.fitz](../examples/guide/11-errores.fitz):
+[examples/guide/12-errores.fitz](../examples/guide/12-errores.fitz):
 
 ```fitz
 fn add(a, b) => a + b
@@ -2325,20 +2614,22 @@ contribuir.
 
 ---
 
-## 13. Qué sigue
+## 14. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es la primera versión de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 12 podés:
+Con los capítulos 1 a 13 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
-- Controlar el flujo con **`if` / `else if` / `else`**, **`while`** y
-  **`loop`**, y elegir entre alternativas con **`match`** sobre
-  literales.
+- Controlar el flujo con **`if` / `else if` / `else`**, **`while`**,
+  **`loop`** y **`for ... in`**, y elegir entre alternativas con
+  **`match`** sobre literales y rangos.
+- Agrupar datos en **listas**, **mapas** y **rangos**, accederlos por
+  índice o clave, recorrerlos e iterarlos.
 - Definir **funciones** con su forma de bloque y su forma flecha,
   hacer **recursión** y crear **closures** con captura léxica.
 - Declarar **tipos custom** con `type` (todavía sin instanciar).
@@ -2346,25 +2637,22 @@ Con los capítulos 1 a 12 podés:
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
 
-### Lo que viene — Fase 3
+### Lo que viene — el resto de Fase 3
 
-La próxima fase del lenguaje arranca con esto. Ver
-[docs/roadmap.md](roadmap.md) para el detalle.
+Fase 3 ya arrancó (paso 1: listas, mapas, rangos y `for`). Lo que falta:
 
 - **Tipos custom instanciables** — `User { id: 1, name: "Fitz" }` va
   a ser una expresión válida; vas a poder acceder a `user.name`.
-- **Listas y mapas** — `[1, 2, 3]`, `{"a": 1}` y operaciones básicas.
-- **`for ... in`** — ya con rangos (`0..10`) y listas como fuentes de
-  iteración.
-- **Match más completo** — patrones de rango (`0..12`), de tuplas, de
-  listas.
 - **`Result` y manejo de errores** — `Ok(x)`, `Err(e)`, operador `?`
   para propagar errores. Sin excepciones, como en Rust.
-- **Funciones de orden superior** — `map`, `filter`, `reduce` sobre
-  listas.
+- **Funciones de orden superior y method calls** — `xs.map(fn(x) => ...)`,
+  `xs.filter(...)`, `xs.find(...)`. También desbloquea mutación de
+  listas (`xs.push(...)`).
 - **Módulos e `import`s** — separar tu código en archivos.
 - **Tipado gradual con validación** — las anotaciones que hoy se
-  ignoran van a empezar a chequearse.
+  ignoran van a empezar a chequearse (probablemente Fase 5).
+
+Ver [docs/roadmap.md](roadmap.md) para el detalle completo.
 
 A medida que estas piezas se van cerrando, esta guía suma capítulos
 nuevos.
@@ -2388,14 +2676,17 @@ medias, no entra todavía. Mejor decir "no se puede" que prometer algo
 que va a romper a quien lo lea.
 
 Cada vez que se cierre un grupo de features (típicamente al cerrar
-una sub-fase del roadmap), la guía gana un capítulo o varios. Ejemplo
-de lo que probablemente venga primero, una vez que arranque Fase 3:
+una sub-fase del roadmap), la guía gana un capítulo o varios. Lo
+próximo que probablemente se sume, a medida que avancen los pasos
+de Fase 3:
 
-- Capítulo de **listas**, con `for ... in`.
-- Capítulo de **tipos custom**, reescribiendo el preview de hoy con
-  ejemplos reales.
+- Capítulo de **tipos custom** instanciables, reescribiendo el
+  preview de hoy con ejemplos reales (`User { id: 1 }`, `user.name`).
 - Capítulo de **errores con `Result`**, que va a reemplazar (o
   complementar) el actual de errores del intérprete.
+- Capítulo de **funciones de orden superior** — `xs.map(...)`,
+  `xs.filter(...)`, funciones anónimas, method calls.
+- Capítulo de **módulos** una vez que tengamos `import`.
 
 ### Recursos
 

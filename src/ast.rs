@@ -59,6 +59,30 @@ pub enum Expr {
         field: String,
     },
 
+    /// Indexing postfix: `objeto[indice]`. Aplica a listas (`xs[0]`),
+    /// mapas (`m["clave"]`), y strings (lectura por índice si lo
+    /// agregamos). El receptor y el índice son expresiones cualquiera.
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
+    },
+
+    /// Lista literal: `[1, 2, 3]`, `[]`, `[x, y + 1]`. Anidable.
+    List(Vec<Expr>),
+
+    /// Mapa literal: `{"k": v, "otra": 42}`, `{}`. Preserva orden de
+    /// inserción (por eso `Vec<(Expr, Expr)>` y no `HashMap`). Las
+    /// claves son expresiones (típicamente strings, pero permitido
+    /// cualquier expresión por simetría con valores).
+    Map(Vec<(Expr, Expr)>),
+
+    /// Rango exclusivo: `start..end`. Itera `start, start+1, ..., end-1`.
+    /// Por ahora solo exclusivo; `..=` inclusive llega si hace falta.
+    Range {
+        start: Box<Expr>,
+        end: Box<Expr>,
+    },
+
     /// `if condition { then } else { else_ }`. Puede usarse en posición de
     /// expresión: `let x = if cond { 1 } else { 2 }`.
     If {
@@ -146,6 +170,16 @@ pub enum Stmt {
     Loop {
         body: Vec<Stmt>,
     },
+
+    /// `for var in iter { body }`. `iter` se evalúa una vez al entrar
+    /// y debe ser iterable (List o Range; Map iterable cuando exista
+    /// el tipo `Pair`). `var` se define en el scope del body en cada
+    /// iteración. `break`/`continue` funcionan igual que en `while`.
+    For {
+        var: String,
+        iter: Expr,
+        body: Vec<Stmt>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -202,6 +236,9 @@ pub enum Pattern {
     OkBinding(String),
     /// `Err(e)` — bloqueado hasta tener tipo Result (Fase 3).
     ErrBinding(String),
+    /// `start..end` — matchea si el valor es Int y `start <= v < end`.
+    /// Solo Int por ahora (Float complica la representación discreta).
+    Range { start: i64, end: i64 },
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -316,6 +353,107 @@ mod tests {
         let stmts: Vec<Stmt> = vec![Stmt::Break, Stmt::Continue];
         assert_eq!(stmts[0], Stmt::Break);
         assert_eq!(stmts[1], Stmt::Continue);
+    }
+
+    #[test]
+    fn list_literal_holds_arbitrary_exprs() {
+        // `[1, x, 2 + 3]`
+        let list = Expr::List(vec![
+            Expr::Int(1),
+            Expr::Ident("x".into()),
+            Expr::BinOp {
+                op: BinOpKind::Add,
+                left: Box::new(Expr::Int(2)),
+                right: Box::new(Expr::Int(3)),
+            },
+        ]);
+        match list {
+            Expr::List(items) => assert_eq!(items.len(), 3),
+            _ => panic!("se esperaba List"),
+        }
+    }
+
+    #[test]
+    fn map_literal_preserva_orden_de_pares() {
+        // `{"a": 1, "b": 2}`
+        let map = Expr::Map(vec![
+            (Expr::Str("a".into()), Expr::Int(1)),
+            (Expr::Str("b".into()), Expr::Int(2)),
+        ]);
+        match map {
+            Expr::Map(pairs) => {
+                assert_eq!(pairs.len(), 2);
+                assert_eq!(pairs[0].0, Expr::Str("a".into()));
+                assert_eq!(pairs[1].1, Expr::Int(2));
+            }
+            _ => panic!("se esperaba Map"),
+        }
+    }
+
+    #[test]
+    fn range_expr_envuelve_extremos() {
+        // `0..10`
+        let r = Expr::Range {
+            start: Box::new(Expr::Int(0)),
+            end: Box::new(Expr::Int(10)),
+        };
+        match r {
+            Expr::Range { start, end } => {
+                assert_eq!(*start, Expr::Int(0));
+                assert_eq!(*end, Expr::Int(10));
+            }
+            _ => panic!("se esperaba Range"),
+        }
+    }
+
+    #[test]
+    fn index_expr_envuelve_objeto_e_indice() {
+        // `xs[0]`
+        let ix = Expr::Index {
+            object: Box::new(Expr::Ident("xs".into())),
+            index: Box::new(Expr::Int(0)),
+        };
+        match ix {
+            Expr::Index { object, index } => {
+                assert_eq!(*object, Expr::Ident("xs".into()));
+                assert_eq!(*index, Expr::Int(0));
+            }
+            _ => panic!("se esperaba Index"),
+        }
+    }
+
+    #[test]
+    fn for_stmt_envuelve_var_iter_y_body() {
+        // `for x in xs { print(x) }`
+        let f = Stmt::For {
+            var: "x".into(),
+            iter: Expr::Ident("xs".into()),
+            body: vec![Stmt::Expr(Expr::Call {
+                name: "print".into(),
+                args: vec![Expr::Ident("x".into())],
+            })],
+        };
+        match f {
+            Stmt::For { var, iter, body } => {
+                assert_eq!(var, "x");
+                assert_eq!(iter, Expr::Ident("xs".into()));
+                assert_eq!(body.len(), 1);
+            }
+            _ => panic!("se esperaba For"),
+        }
+    }
+
+    #[test]
+    fn pattern_range_guarda_extremos_como_int() {
+        // `match n { 0..10 => "chico", _ => "grande" }` — solo el patrón.
+        let p = Pattern::Range { start: 0, end: 10 };
+        match p {
+            Pattern::Range { start, end } => {
+                assert_eq!(start, 0);
+                assert_eq!(end, 10);
+            }
+            _ => panic!("se esperaba Range"),
+        }
     }
 
     #[test]
