@@ -2,3 +2,7 @@
 Cargo.lock
 *.fitz.compiled
 .DS_Store
+
+# Windows
+Thumbs.db
+desktop.ini
