@@ -322,12 +322,14 @@ fn register_http_route(
             )));
         }
         // Resolver el tipo declarado, si lo hay y es un `type` custom
-        // del programa. Si la anotación es un primitivo (`Int`, `Str`,
-        // etc.), un tipo que el env no conoce, o no hay anotación,
-        // `declared_type` queda en `None` y el runtime deserializa
-        // como `Value` libre (Map/List/primitivos).
-        let declared_type = p.type_.as_ref().and_then(|name| {
-            match env.borrow().get(name) {
+        // del programa. Para tipos compuestos (`UserInput?`, `List<X>`,
+        // etc.) la resolución usa la cabeza del `TypeExpr`. Si la
+        // anotación es un primitivo (`Int`, `Str`, ...), un tipo que el
+        // env no conoce, o no hay anotación, `declared_type` queda en
+        // `None` y el runtime deserializa como `Value` libre
+        // (Map/List/primitivos).
+        let declared_type = p.type_.as_ref().and_then(|t| {
+            match env.borrow().get(t.head_name()) {
                 Some(v @ Value::Type { .. }) => Some(v),
                 _ => None,
             }
@@ -335,16 +337,23 @@ fn register_http_route(
         body_param = Some(BodyParam {
             name: p.name.clone(),
             declared_type,
-            declared_type_name: p.type_.clone(),
+            declared_type_name: p.type_.as_ref().map(|t| t.display_name()),
         });
     }
 
     // Empacar tipos de parámetros en el orden declarado del handler.
     // Esto le sirve al runtime para coercionar path params crudos al
-    // tipo Fitz correcto antes de invocar al handler.
+    // tipo Fitz correcto antes de invocar al handler. Pasamos el nombre
+    // cabeza del tipo (sin genéricos ni `?`) porque `coerce_path_param`
+    // solo soporta primitivos.
     let param_types: Vec<(String, Option<String>)> = params
         .iter()
-        .map(|p| (p.name.clone(), p.type_.clone()))
+        .map(|p| {
+            (
+                p.name.clone(),
+                p.type_.as_ref().map(|t| t.head_name().to_string()),
+            )
+        })
         .collect();
 
     push_route(RouteSpec {
@@ -1144,7 +1153,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     eval_expr(expr, env.clone())?
                 } else if let Some(default_expr) = &f.default {
                     eval_expr(default_expr, env.clone())?
-                } else if f.nullable {
+                } else if f.type_.is_nullable() {
                     Value::Null
                 } else {
                     return Err(EvalSignal::Error(FitzError::new(
@@ -2153,6 +2162,7 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ast::TypeExpr;
 
     // ---- helpers ----
 
@@ -2636,7 +2646,7 @@ mod tests {
         // sin checks en runtime todavía).
         let env = Environment::new();
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
-            type_: Some("Int".into()),
+            type_: Some(TypeExpr::named("Int")),
             value: Expr::Str("soy un string".into()),
         };
         assert!(eval_stmt(&stmt, env.clone()).is_ok());
@@ -3554,10 +3564,15 @@ mod tests {
     use crate::ast::Field;
 
     fn make_field(name: &str, type_: &str, nullable: bool) -> Field {
+        let base = TypeExpr::named(type_);
+        let t = if nullable {
+            TypeExpr::Nullable(Box::new(base))
+        } else {
+            base
+        };
         Field {
             name: name.into(),
-            type_: type_.into(),
-            nullable,
+            type_: t,
             default: None,
         }
     }

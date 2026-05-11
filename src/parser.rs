@@ -11,7 +11,7 @@
 
 use crate::ast::{
     AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, Param, Pattern, Program, Stmt,
-    StrPart, UnaryOpKind,
+    StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::lexer::{tokenize, Token, TokenWithPos};
@@ -767,14 +767,12 @@ impl Parser {
                 }
             };
             self.advance(); // consume ':'
-            let type_name = self.expect_ident(
-                "se esperaba nombre de tipo después de ':'",
-            )?;
+            let type_ = self.parse_type_expr()?;
             self.expect(&Token::Eq, "se esperaba '=' en la asignación")?;
             let value = self.expression()?;
             return Ok(Stmt::Assign {
                 target: AssignTarget::Ident(name),
-                type_: Some(type_name),
+                type_: Some(type_),
                 value,
             });
         }
@@ -800,19 +798,75 @@ impl Parser {
         Ok(Stmt::Expr(lhs))
     }
 
-    /// Anotación de tipo opcional: `: Ident`. Devuelve `Some(nombre)`
-    /// si la había. Por ahora solo soporta nombres simples (no
-    /// `List<Int>` ni `Str?`). Esto está implícito en que
-    /// `Stmt::Assign.type_` es `Option<String>`.
-    fn parse_optional_type_annotation(&mut self) -> FitzResult<Option<String>> {
+    /// Anotación de tipo opcional: `: TypeExpr`. Devuelve `Some(t)` si
+    /// la había. Acepta `Int`, `Str`, `List<Int>`, `Map<Str, User>`,
+    /// `Result<List<User>>`, `User?`, `Map<Str, Int>?`, etc.
+    fn parse_optional_type_annotation(&mut self) -> FitzResult<Option<TypeExpr>> {
         if self.eat(&Token::Colon) {
-            let type_name = self.expect_ident(
-                "se esperaba nombre de tipo después de ':'",
-            )?;
-            Ok(Some(type_name))
+            Ok(Some(self.parse_type_expr()?))
         } else {
             Ok(None)
         }
+    }
+
+    /// Parsea una `TypeExpr` (obligatoria) en posición de anotación.
+    ///
+    /// Gramática:
+    ///
+    /// ```text
+    /// type_expr := atom ( '?' )?
+    /// atom      := Ident generic_args?
+    /// generic_args := '<' type_expr ( ',' type_expr )* '>'
+    /// ```
+    ///
+    /// Sufijo `?` se asocia al átomo entero: `List<Int>?` → `Nullable(List<Int>)`.
+    /// Aceptamos `?` una sola vez por ahora; `T??` se podría modelar más
+    /// adelante (`Nullable(Nullable(T))`), pero hoy `eat` solo consume uno
+    /// y un segundo `?` se quedaría sin consumir, sin error explícito.
+    /// El checker estático puede normalizarlo cuando llegue.
+    ///
+    /// Nota sobre lexing: el lexer emite `>` siempre como `Token::Gt`
+    /// (no hay `>>` como un solo token), así que `Result<List<Int>>` se
+    /// cierra consumiendo dos `Token::Gt` separados — uno por nivel de
+    /// genérico.
+    fn parse_type_expr(&mut self) -> FitzResult<TypeExpr> {
+        let name = self.expect_ident("se esperaba un nombre de tipo")?;
+        let mut t = if matches!(self.peek(), Token::Lt) {
+            self.advance(); // consume '<'
+            self.skip_newlines();
+            if matches!(self.peek(), Token::Gt) {
+                return Err(self.error(
+                    ErrorKind::UnexpectedToken,
+                    format!(
+                        "genérico `{}<>` vacío: se esperaba al menos un argumento de tipo",
+                        name
+                    ),
+                ));
+            }
+            let mut args = Vec::new();
+            loop {
+                self.skip_newlines();
+                args.push(self.parse_type_expr()?);
+                self.skip_newlines();
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+            self.skip_newlines();
+            self.expect(
+                &Token::Gt,
+                format!("se esperaba '>' para cerrar `{}<...>`", name),
+            )?;
+            TypeExpr::Generic { name, args }
+        } else {
+            TypeExpr::Named(name)
+        };
+        if self.eat(&Token::Question) {
+            t = TypeExpr::Nullable(Box::new(t));
+        }
+        Ok(t)
     }
 
     fn parse_return(&mut self) -> FitzResult<Stmt> {
@@ -947,14 +1001,11 @@ impl Parser {
         Ok(params)
     }
 
-    /// `-> Type` opcional. Solo soporta nombres de tipo simples por
-    /// ahora (mismo límite que `parse_optional_type_annotation`).
-    fn parse_optional_return_type(&mut self) -> FitzResult<Option<String>> {
+    /// `-> TypeExpr` opcional. Comparte la gramática de tipos con
+    /// `parse_optional_type_annotation` — acepta genéricos y nullables.
+    fn parse_optional_return_type(&mut self) -> FitzResult<Option<TypeExpr>> {
         if self.eat(&Token::Arrow) {
-            let type_name = self.expect_ident(
-                "se esperaba nombre de tipo de retorno después de '->'",
-            )?;
-            Ok(Some(type_name))
+            Ok(Some(self.parse_type_expr()?))
         } else {
             Ok(None)
         }
@@ -1242,10 +1293,12 @@ impl Parser {
         Ok(Pattern::Range { start, end })
     }
 
-    /// `type Name { field: Type [?] [= default], ... }`.
+    /// `type Name { field: TypeExpr [= default], ... }`.
     /// Separador entre campos: coma o newline (ambos aceptados).
-    /// El tipo del campo es un nombre simple (mismo límite que en
-    /// `Stmt::Assign.type_`).
+    /// El tipo del campo usa la misma gramática que el resto de las
+    /// anotaciones (`parse_type_expr`): admite genéricos y el sufijo
+    /// `?` para nullable. La nullabilidad queda dentro de `TypeExpr`
+    /// como `TypeExpr::Nullable(...)`.
     fn parse_typedef(&mut self) -> FitzResult<Stmt> {
         self.expect(&Token::Type, "se esperaba 'type'")?;
         let name = self.expect_ident("se esperaba nombre del tipo")?;
@@ -1271,8 +1324,7 @@ impl Parser {
                 &Token::Colon,
                 "se esperaba ':' después del nombre del campo",
             )?;
-            let type_name = self.expect_ident("se esperaba tipo del campo")?;
-            let nullable = self.eat(&Token::Question);
+            let type_ = self.parse_type_expr()?;
             let default = if self.eat(&Token::Eq) {
                 Some(self.expression()?)
             } else {
@@ -1280,8 +1332,7 @@ impl Parser {
             };
             fields.push(Field {
                 name: field_name,
-                type_: type_name,
-                nullable,
+                type_,
                 default,
             });
             // Separador opcional: coma. Newline se consume en la
@@ -2272,7 +2323,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("let x: Int = 42"),
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
-                type_: Some("Int".into()),
+                type_: Some(TypeExpr::named("Int")),
                 value: Expr::Int(42),
             }
         );
@@ -2294,7 +2345,7 @@ mod tests {
         assert_eq!(
             parse_one_stmt("name: Str = \"Fitz\""),
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
-                type_: Some("Str".into()),
+                type_: Some(TypeExpr::named("Str")),
                 value: Expr::Str("Fitz".into()),
             }
         );
@@ -2572,9 +2623,9 @@ mod tests {
                 name: "double".into(),
                 params: vec![Param {
                     name: "n".into(),
-                    type_: Some("Int".into()),
+                    type_: Some(TypeExpr::named("Int")),
                 }],
-                return_type: Some("Int".into()),
+                return_type: Some(TypeExpr::named("Int")),
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into())),
@@ -2638,10 +2689,10 @@ mod tests {
                 assert_eq!(name, "add");
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "a");
-                assert_eq!(params[0].type_.as_deref(), Some("Int"));
+                assert_eq!(params[0].type_, Some(TypeExpr::named("Int")));
                 assert_eq!(params[1].name, "b");
-                assert_eq!(params[1].type_.as_deref(), Some("Int"));
-                assert_eq!(return_type.as_deref(), Some("Int"));
+                assert_eq!(params[1].type_, Some(TypeExpr::named("Int")));
+                assert_eq!(return_type, Some(TypeExpr::named("Int")));
                 assert_eq!(body.len(), 1);
                 assert!(!is_async);
                 assert!(decorators.is_empty());
@@ -2676,7 +2727,7 @@ mod tests {
             Stmt::FnDef { name, is_async, return_type, .. } => {
                 assert_eq!(name, "fetch");
                 assert!(is_async);
-                assert_eq!(return_type.as_deref(), Some("User"));
+                assert_eq!(return_type, Some(TypeExpr::named("User")));
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
@@ -3039,8 +3090,8 @@ mod tests {
                 assert_eq!(name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].name, "id");
-                assert_eq!(fields[0].type_, "Int");
-                assert!(!fields[0].nullable);
+                assert_eq!(fields[0].type_, TypeExpr::named("Int"));
+                assert!(!fields[0].type_.is_nullable());
                 assert!(fields[0].default.is_none());
             }
             other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
@@ -3057,11 +3108,11 @@ mod tests {
                 assert_eq!(fields.len(), 3);
                 // email es nullable con default null
                 assert_eq!(fields[1].name, "email");
-                assert!(fields[1].nullable);
+                assert!(fields[1].type_.is_nullable());
                 assert_eq!(fields[1].default, Some(Expr::Null));
                 // active no es nullable pero tiene default true
                 assert_eq!(fields[2].name, "active");
-                assert!(!fields[2].nullable);
+                assert!(!fields[2].type_.is_nullable());
                 assert_eq!(fields[2].default, Some(Expr::Bool(true)));
             }
             other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
@@ -3108,7 +3159,7 @@ mod tests {
             Stmt::FnDef { name, is_async, return_type, params, decorators, .. } => {
                 assert_eq!(name, "create_user");
                 assert!(is_async);
-                assert_eq!(return_type.as_deref(), Some("User"));
+                assert_eq!(return_type, Some(TypeExpr::named("User")));
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "body");
                 assert_eq!(decorators.len(), 1);
@@ -4245,5 +4296,195 @@ mod tests {
         // `from utils import` — al menos un nombre obligatorio.
         let err = parse_program_str("from utils import").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — TypeExpr en anotaciones (Fase 5, paso 5.1)
+    //
+    // Cubrimos los tres lugares donde el parser pide un tipo:
+    //   - `let x: T = ...` (Stmt::Assign.type_)
+    //   - `fn f(p: T) -> T` (Param.type_ y FnDef.return_type)
+    //   - `type X { f: T }` (Field.type_)
+    //
+    // El alcance del paso 5.1 es estructura sintáctica: el parser
+    // construye la TypeExpr correcta. Validación semántica (que el
+    // nombre exista, que la aridad del genérico sea correcta, etc.)
+    // queda para 5.2 — el type checker.
+    // -----------------------------------------------------------------------
+
+    /// Helper: extrae la `TypeExpr` de un `let x: T = 0` simple.
+    fn parse_assign_type(src: &str) -> TypeExpr {
+        match parse_one_stmt(src) {
+            Stmt::Assign { type_: Some(t), .. } => t,
+            other => panic!("se esperaba Stmt::Assign con tipo, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_expr_simple_se_parsea_como_named() {
+        let t = parse_assign_type("let x: Int = 0");
+        assert_eq!(t, TypeExpr::named("Int"));
+    }
+
+    #[test]
+    fn type_expr_generico_un_argumento() {
+        // List<Int>
+        let t = parse_assign_type("let xs: List<Int> = []");
+        assert_eq!(
+            t,
+            TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![TypeExpr::named("Int")],
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_generico_dos_argumentos() {
+        // Map<Str, User>
+        let t = parse_assign_type("let m: Map<Str, User> = {}");
+        assert_eq!(
+            t,
+            TypeExpr::Generic {
+                name: "Map".into(),
+                args: vec![TypeExpr::named("Str"), TypeExpr::named("User")],
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_generico_anidado() {
+        // Result<List<User>>  — dos `>` consecutivos al cerrar.
+        let t = parse_assign_type("let r: Result<List<User>> = Ok([])");
+        assert_eq!(
+            t,
+            TypeExpr::Generic {
+                name: "Result".into(),
+                args: vec![TypeExpr::Generic {
+                    name: "List".into(),
+                    args: vec![TypeExpr::named("User")],
+                }],
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_nullable_sobre_named() {
+        // User?
+        let t = parse_assign_type("let u: User? = null");
+        assert_eq!(
+            t,
+            TypeExpr::Nullable(Box::new(TypeExpr::named("User"))),
+        );
+    }
+
+    #[test]
+    fn type_expr_nullable_sobre_generico() {
+        // List<Int>?  — el `?` aplica al átomo entero, no al último arg.
+        let t = parse_assign_type("let xs: List<Int>? = null");
+        assert_eq!(
+            t,
+            TypeExpr::Nullable(Box::new(TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![TypeExpr::named("Int")],
+            })),
+        );
+    }
+
+    #[test]
+    fn type_expr_nullable_adentro_de_generico() {
+        // List<Int?>  — el `?` está adentro, no afuera.
+        let t = parse_assign_type("let xs: List<Int?> = []");
+        assert_eq!(
+            t,
+            TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![TypeExpr::Nullable(Box::new(TypeExpr::named("Int")))],
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_en_param_y_return_de_fndef() {
+        // fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }
+        let stmt = parse_one_stmt(
+            "fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }",
+        );
+        match stmt {
+            Stmt::FnDef { params, return_type, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(
+                    params[0].type_,
+                    Some(TypeExpr::Generic {
+                        name: "List".into(),
+                        args: vec![TypeExpr::named("Int")],
+                    }),
+                );
+                assert_eq!(
+                    return_type,
+                    Some(TypeExpr::Generic {
+                        name: "Result".into(),
+                        args: vec![TypeExpr::named("Int")],
+                    }),
+                );
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_expr_en_field_de_typedef_con_nullable() {
+        // type User { id: Int, tags: List<Str>?, email: Str? }
+        let stmt = parse_one_stmt(
+            "type User { id: Int, tags: List<Str>?, email: Str? }",
+        );
+        match stmt {
+            Stmt::TypeDef { fields, .. } => {
+                assert_eq!(fields.len(), 3);
+                assert_eq!(fields[0].type_, TypeExpr::named("Int"));
+                assert_eq!(
+                    fields[1].type_,
+                    TypeExpr::Nullable(Box::new(TypeExpr::Generic {
+                        name: "List".into(),
+                        args: vec![TypeExpr::named("Str")],
+                    })),
+                );
+                assert!(fields[1].type_.is_nullable());
+                assert_eq!(
+                    fields[2].type_,
+                    TypeExpr::Nullable(Box::new(TypeExpr::named("Str"))),
+                );
+            }
+            other => panic!("se esperaba TypeDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_expr_generico_vacio_es_error() {
+        // `List<>` no debería parsear: se exige al menos un argumento.
+        let err = parse_program_str("let xs: List<> = []").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn type_expr_generico_sin_cerrar_es_error() {
+        // Falta el `>` final.
+        let err = parse_program_str("let xs: List<Int = []").unwrap_err();
+        // El parser falla cuando intenta consumir `>` y se encuentra con `=`.
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn type_expr_anotacion_sin_nombre_es_error() {
+        // `:` sin tipo después.
+        let err = parse_program_str("let x: = 1").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn type_expr_display_round_trip_sobre_un_caso_complejo() {
+        // El display debe reproducir la forma escrita en el fuente.
+        let t = parse_assign_type("let m: Map<Str, Result<List<User>?>> = {}");
+        assert_eq!(t.display_name(), "Map<Str, Result<List<User>?>>");
     }
 }

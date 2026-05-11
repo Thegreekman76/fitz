@@ -650,7 +650,7 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
                     ));
                 }
             }
-        } else if field.nullable {
+        } else if field.type_.is_nullable() {
             out.push((field.name.clone(), Value::Null));
         } else {
             return Err(format!(
@@ -1645,17 +1645,26 @@ mod tests {
     // ---- json_to_instance (validación contra Value::Type) ----
 
     /// Helper: arma un `Value::Type` con los campos dados. Cada
-    /// campo es `(nombre, tipo, nullable, default)`.
+    /// campo es `(nombre, tipo, nullable, default)`. El flag `nullable`
+    /// se traduce a `TypeExpr::Nullable(Named(t))`.
     fn type_value(name: &str, fields: Vec<(&str, &str, bool, Option<Expr>)>) -> Value {
+        use crate::ast::TypeExpr;
         Value::Type {
             name: name.into(),
             fields: fields
                 .into_iter()
-                .map(|(n, t, nullable, default)| crate::ast::Field {
-                    name: n.into(),
-                    type_: t.into(),
-                    nullable,
-                    default,
+                .map(|(n, t, nullable, default)| {
+                    let base = TypeExpr::named(t);
+                    let type_ = if nullable {
+                        TypeExpr::Nullable(Box::new(base))
+                    } else {
+                        base
+                    };
+                    crate::ast::Field {
+                        name: n.into(),
+                        type_,
+                        default,
+                    }
                 })
                 .collect(),
         }

@@ -806,21 +806,84 @@ fitz run api.fitz
 ---
 
 ## Fase 5 — Compilador ⚡
-**Estado: FUTURO**
+**Estado: EN CURSO**
 
-Binario nativo. El salto de intérprete a compilador.
+Plan aprobado: dos mitades cerrables.
+- **5a — Type checker estático** (sobre el intérprete actual)
+- **5b — Codegen a binario nativo** — backend a decidir. Recomendación
+  inicial: Cranelift (pure-Rust, sin LLVM en Windows). Alternativa
+  seria: transpile-a-Rust por reuso de tokio/axum/serde_json.
+  Decisión real al arrancar 5b, después de fijar el IR tipado.
 
-### Opciones
-- **LLVM via inkwell** — máxima performance, alta complejidad
-- **Cranelift** — más simple que LLVM, usado por Wasmtime
-- **Compilar a C** — transpilación, menos purista pero efectivo
+### Pasos
 
-### Features
-- [ ] Type checker completo
+#### 5.1 — TypeExpr en AST y parser ✓
+**Completado** — refactor preparatorio del checker. El AST y el
+parser ahora modelan tipos compuestos; el evaluator y el runtime
+HTTP los consumen sin cambiar comportamiento observable.
+
+- AST nuevo: `TypeExpr` con tres variantes:
+  - `Named(String)` — `Int`, `Str`, `User`.
+  - `Generic { name, args }` — `List<Int>`, `Map<Str, User>`,
+    `Result<List<User>>`, anidable.
+  - `Nullable(Box<TypeExpr>)` — sufijo `?` (`User?`, `List<Int>?`).
+  - Helpers: `display_name()` (reproduce la forma del fuente),
+    `head_name()` (cabeza ignorando genéricos y nullables, para que
+    el runtime HTTP resuelva tipos custom), `is_nullable()`.
+- AST refactor: `Param.type_`, `Stmt::Assign.type_` y
+  `Stmt::FnDef.return_type` pasan de `Option<String>` a
+  `Option<TypeExpr>`. `Field.type_` pasa de `String` a `TypeExpr`,
+  y el flag `Field.nullable: bool` se elimina — la nullabilidad
+  vive adentro como `TypeExpr::Nullable(...)`.
+- Parser: nueva regla `parse_type_expr` (gramática
+  `atom '?'?`, `atom = Ident generic_args?`). Reemplaza los tres
+  call sites (`parse_optional_type_annotation`,
+  `parse_optional_return_type`, field type adentro de
+  `parse_typedef`). El lexer ya emitía `>` como `Token::Gt` único
+  (no hay `>>` como un solo token), así que `Result<List<Int>>`
+  se cierra consumiendo dos `Gt` separados sin trabajo extra.
+- Evaluator: migrado para usar `head_name()` al resolver el
+  `Value::Type` declarado del body param de un handler HTTP, y al
+  empaquetar tipos de path params (que siguen siendo primitivos
+  para `coerce_path_param`). Sin cambios de semántica en runtime
+  — las anotaciones se siguen ignorando, exactamente como antes.
+- http.rs: misma migración + `field.nullable` reemplazado por
+  `field.type_.is_nullable()`.
+
+Cierra deuda 2.3 "tipos compuestos en anotaciones
+(`List<T>`, `Map<K,V>`, `Str?`)" a nivel sintáctico.
+
+Tests al cerrar 5.1: 614 (595 al cerrar 4.5 + 19 nuevos: 6 en
+ast.rs cubriendo `display_name`/`head_name`/`is_nullable` y
+formas anidadas; 13 en parser.rs cubriendo `let x: T = ...`,
+params/return, fields, nullable de generic vs adentro del
+generic, errores `List<>` / generic sin cerrar / `:` sin tipo,
+y round-trip de display sobre `Map<Str, Result<List<User>?>>`).
+
+**Deuda explícita — retomar después:**
+- **Función como tipo** (`fn(Int) -> Int` como `TypeExpr`) — no
+  se modela todavía. Se suma cuando el checker (5.3) lo necesite
+  para callbacks tipados.
+- **Validación semántica** (nombre no resoluble, aridad incorrecta
+  del genérico, coerción Int↔Float consistente) — es 5.2.
+- **`T??` repetido** — el parser solo consume un `?`. Un segundo
+  `?` queda sin consumir y rompe en la siguiente etapa con un
+  mensaje desafortunado. Definir si lo permitimos (semánticamente
+  `Nullable(Nullable(T)) == Nullable(T)`) o si erroramos explícito.
+- **Guía**: sin capítulo nuevo. Tipos compuestos en anotaciones
+  se aceptan en sintaxis pero el evaluator los sigue ignorando
+  igual que antes; el capítulo entra cuando 5.2 los chequea.
+
+#### 5.2 — Resolución de tipos y type checker base
+**Pendiente** — el primer chequeo estático real. Detalle al arrancar.
+
+### Features de la fase entera
+- [x] TypeExpr en AST y parser (5.1)
+- [ ] Type checker completo (5.2 + 5.3 + 5.4)
 - [ ] Inferencia de tipos
-- [ ] Optimizaciones básicas
-- [ ] Binario nativo standalone
-- [ ] Cross-compilation
+- [ ] Optimizaciones básicas (5b)
+- [ ] Binario nativo standalone (5b)
+- [ ] Cross-compilation (5b)
 
 ---
 

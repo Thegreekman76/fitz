@@ -186,7 +186,7 @@ pub enum Stmt {
     /// reanotar el tipo); el parser lo enforcea.
     Assign {
         target: AssignTarget,
-        type_: Option<String>,
+        type_: Option<TypeExpr>,
         value: Expr,
     },
 
@@ -208,7 +208,7 @@ pub enum Stmt {
     FnDef {
         name: String,
         params: Vec<Param>,
-        return_type: Option<String>,
+        return_type: Option<TypeExpr>,
         body: Vec<Stmt>,
         is_async: bool,
         decorators: Vec<Decorator>,
@@ -288,16 +288,82 @@ pub enum UnaryOpKind {
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
-    pub type_: Option<String>,
+    pub type_: Option<TypeExpr>,
 }
 
 /// Campo de un `type`. El tipo es obligatorio dentro de un struct.
+/// La nullabilidad (`T?`) se modela adentro del `TypeExpr` como
+/// `TypeExpr::Nullable(...)`, no como un flag aparte.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Field {
     pub name: String,
-    pub type_: String,
-    pub nullable: bool,
+    pub type_: TypeExpr,
     pub default: Option<Expr>,
+}
+
+/// Una expresión de tipo en una anotación. Es el AST que produce el
+/// parser cuando ve algo como `Int`, `List<Int>`, `Map<Str, User>`,
+/// `Result<List<User>>`, `User?`. No tiene resolución todavía: el
+/// `Named(...)` puede referirse a un built-in (`Int`, `Str`, ...),
+/// a un tipo declarado por el usuario, o a uno importado. El checker
+/// (Fase 5.2) es quien valida que cada nombre exista y que la aridad
+/// de los genéricos sea correcta.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeExpr {
+    /// Nombre simple: `Int`, `Str`, `User`.
+    Named(String),
+    /// Genérico aplicado: `List<Int>`, `Map<Str, User>`, `Result<T>`.
+    /// `args` siempre tiene al menos un elemento (`Foo<>` es error de
+    /// parser).
+    Generic { name: String, args: Vec<TypeExpr> },
+    /// Sufijo `?`: el valor puede ser ese tipo o `Null`. `User?` →
+    /// `Nullable(Box(Named("User")))`. `List<Int>?` →
+    /// `Nullable(Box(Generic { name: "List", args: [Named("Int")] }))`.
+    Nullable(Box<TypeExpr>),
+}
+
+impl TypeExpr {
+    /// Atajo para los call sites más comunes (tests, builtins).
+    pub fn named(s: impl Into<String>) -> Self {
+        TypeExpr::Named(s.into())
+    }
+
+    /// Reproduce la forma escrita en el fuente. Usado en errores y en
+    /// el runtime HTTP para mostrar el tipo declarado.
+    pub fn display_name(&self) -> String {
+        match self {
+            TypeExpr::Named(name) => name.clone(),
+            TypeExpr::Generic { name, args } => {
+                let inner: Vec<String> = args.iter().map(|a| a.display_name()).collect();
+                format!("{}<{}>", name, inner.join(", "))
+            }
+            TypeExpr::Nullable(inner) => format!("{}?", inner.display_name()),
+        }
+    }
+
+    /// Nombre "cabeza" del tipo, ignorando nullables y argumentos
+    /// genéricos. Útil para el runtime HTTP cuando necesita resolver
+    /// un nombre de tipo declarado en el env del importer.
+    /// `User?` → `"User"`, `List<Int>` → `"List"`,
+    /// `Result<List<User>>` → `"Result"`.
+    pub fn head_name(&self) -> &str {
+        match self {
+            TypeExpr::Named(name) => name,
+            TypeExpr::Generic { name, .. } => name,
+            TypeExpr::Nullable(inner) => inner.head_name(),
+        }
+    }
+
+    /// `true` si el tipo es `T?` (admite `Null` además del tipo base).
+    pub fn is_nullable(&self) -> bool {
+        matches!(self, TypeExpr::Nullable(_))
+    }
+}
+
+impl std::fmt::Display for TypeExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.display_name())
+    }
 }
 
 /// Brazo de un `match`: patrón → expresión.
@@ -816,5 +882,81 @@ mod tests {
         } else {
             panic!("se esperaba Assign con target Field");
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — TypeExpr (Fase 5, paso 5.1)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn type_expr_named_display_es_el_nombre() {
+        assert_eq!(TypeExpr::named("Int").display_name(), "Int");
+        assert_eq!(TypeExpr::named("User").display_name(), "User");
+    }
+
+    #[test]
+    fn type_expr_generic_display_con_args() {
+        let t = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::named("Int")],
+        };
+        assert_eq!(t.display_name(), "List<Int>");
+
+        let m = TypeExpr::Generic {
+            name: "Map".into(),
+            args: vec![TypeExpr::named("Str"), TypeExpr::named("User")],
+        };
+        assert_eq!(m.display_name(), "Map<Str, User>");
+    }
+
+    #[test]
+    fn type_expr_nullable_display_con_signo_de_pregunta() {
+        let t = TypeExpr::Nullable(Box::new(TypeExpr::named("Str")));
+        assert_eq!(t.display_name(), "Str?");
+    }
+
+    #[test]
+    fn type_expr_display_anidado_preserva_estructura() {
+        // Result<List<User>?>
+        let t = TypeExpr::Generic {
+            name: "Result".into(),
+            args: vec![TypeExpr::Nullable(Box::new(TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![TypeExpr::named("User")],
+            }))],
+        };
+        assert_eq!(t.display_name(), "Result<List<User>?>");
+    }
+
+    #[test]
+    fn type_expr_head_name_ignora_genericos_y_nullables() {
+        assert_eq!(TypeExpr::named("User").head_name(), "User");
+
+        let g = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::named("Int")],
+        };
+        assert_eq!(g.head_name(), "List");
+
+        let n = TypeExpr::Nullable(Box::new(g));
+        assert_eq!(n.head_name(), "List");
+
+        // Nullable de Nullable cae al fondo.
+        let nn = TypeExpr::Nullable(Box::new(TypeExpr::Nullable(Box::new(
+            TypeExpr::named("Int"),
+        ))));
+        assert_eq!(nn.head_name(), "Int");
+    }
+
+    #[test]
+    fn type_expr_is_nullable_solo_a_nivel_top() {
+        assert!(!TypeExpr::named("Int").is_nullable());
+        assert!(TypeExpr::Nullable(Box::new(TypeExpr::named("Int"))).is_nullable());
+        // `List<Int?>` no es nullable en sí; el campo interno sí.
+        let outer = TypeExpr::Generic {
+            name: "List".into(),
+            args: vec![TypeExpr::Nullable(Box::new(TypeExpr::named("Int")))],
+        };
+        assert!(!outer.is_nullable());
     }
 }
