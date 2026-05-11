@@ -253,8 +253,20 @@ impl Lexer {
                         Some('r') => s.push('\r'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
-                        Some('{') => s.push('{'),
-                        Some('}') => s.push('}'),
+                        // '\{' y '\}' se PRESERVAN literalmente en el
+                        // contenido del Token::Str (con la barra).
+                        // El parser, al construir la expresión de
+                        // string, distingue `{` (inicio de
+                        // interpolación) de `\{` (literal). Si los
+                        // resolviéramos acá, se perdería la distinción.
+                        Some('{') => {
+                            s.push('\\');
+                            s.push('{');
+                        }
+                        Some('}') => {
+                            s.push('\\');
+                            s.push('}');
+                        }
                         Some(other) => {
                             return Err(FitzError::new(
                                 ErrorKind::UnexpectedChar(other),
@@ -610,6 +622,18 @@ mod tests {
         assert_eq!(
             toks(r#""Hola, {name}!""#),
             vec![Token::Str("Hola, {name}!".into()), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn escaped_braces_are_preserved_literally() {
+        // '\{' y '\}' deben llegar al parser con la barra intacta,
+        // así el parser distingue '{name}' (interpolación) de '\{name\}'
+        // (literal). Si el lexer los desescapara acá, se perdería esa
+        // distinción.
+        assert_eq!(
+            toks(r#""hola \{name\}""#),
+            vec![Token::Str(r"hola \{name\}".into()), Token::EOF]
         );
     }
 

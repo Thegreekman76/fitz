@@ -74,13 +74,42 @@ enum Stmt {
 }
 ```
 
-#### 2.3 Parser — PENDIENTE
-Convierte tokens en AST.
+#### 2.3 Parser — EN PROGRESO
+Convierte tokens en AST mediante recursive descent.
 
 ```
 [Let, Ident("x"), Eq, Int(42), Plus, Int(1)]
 → Let { name: "x", value: BinOp { op: Add, left: Int(42), right: Int(1) } }
 ```
+
+**Alcance de 2.3 (lo que SÍ se implementa):**
+- Expresiones: literales, identificadores, paréntesis, operadores aritméticos
+  (`+`, `-`, `*`, `/`), comparación (`<`, `>`, `<=`, `>=`), igualdad
+  (`==`, `!=`), unario `-`.
+- Postfix: field access (`user.name`), llamadas a función (`f(args)`) con
+  nombre simple.
+- `StrInterp`: parsing del contenido de `Token::Str` para detectar `{...}`.
+- Sentencias: `let`/asignación, `return`, expr-statement, `fn` (forma de
+  bloque y de flecha), `type`, `if`/`else` (como sentencia o expresión),
+  `match`, `break`, `continue`.
+- Decoradores HTTP: `@get`/`@post`/`@put`/`@delete` envolviendo una `FnDef`.
+
+**Fuera de alcance — deuda explícita, retomar después:**
+- **Operadores lógicos `and` / `or`** — el lexer aún no emite tokens
+  correspondientes; `BinOpKind::And` y `Or` quedan definidos pero sin uso.
+  Retomar antes del evaluador si los necesitamos, o en Fase 3.
+- **`while`, `for`, `loop`** — el AST aún no tiene estas variantes como
+  `Stmt`. Retomar en Fase 3.
+- **Method calls (`expr.method(args)`)** — `Expr::Call` solo admite
+  `name: String`. Cuando mute a `callee: Box<Expr>` se desbloquea. Por
+  ahora, el parser tira error explícito.
+- **Asignación a campos (`user.name = ...`)** — `Stmt::Assign` solo admite
+  identificador como destino. Retomar cuando definamos mutabilidad.
+- **Posición de errores en subexpresiones de interpolación** — se reporta
+  la posición del string entero, no la posición interna del `{...}`
+  ofensor. Aceptable para v0.1.
+- **Error recovery** — el primer error mata el parseo. Sin paniqueo y
+  resincronización todavía.
 
 #### 2.4 Evaluador — PENDIENTE
 Recorre el AST y ejecuta el programa.

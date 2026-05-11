@@ -71,11 +71,26 @@ fn run_file(path: &PathBuf) {
     println!("   (intérprete en construcción — Fase 2)\n");
 
     // Fase 2.1: lexer
-    match lexer::tokenize(&source) {
+    let tokens = match lexer::tokenize(&source) {
         Ok(tokens) => {
             println!("--- Tokens ---");
             for tok in &tokens {
                 println!("  {:>4}:{:<3}  {:?}", tok.line, tok.column, tok.token);
+            }
+            tokens
+        }
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Fase 2.3: parser
+    match parser::parse(tokens) {
+        Ok(program) => {
+            println!("\n--- AST ---");
+            for (i, stmt) in program.iter().enumerate() {
+                println!("  [{}] {:#?}", i, stmt);
             }
         }
         Err(e) => {
@@ -84,7 +99,6 @@ fn run_file(path: &PathBuf) {
         }
     }
 
-    // TODO Fase 2.2–2.4:
-    // let ast = parser::parse(tokens);
-    // evaluator::eval(ast);
+    // TODO Fase 2.4:
+    // evaluator::eval(program);
 }

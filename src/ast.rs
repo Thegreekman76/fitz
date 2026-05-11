@@ -36,6 +36,14 @@ pub enum Expr {
         right: Box<Expr>,
     },
 
+    /// Operación unaria prefijo: `<op> operand`. Por ahora solo
+    /// negación numérica (`-x`). Cuando el lexer emita `!` como
+    /// operador lógico, sumaremos `UnaryOpKind::Not`.
+    UnaryOp {
+        op: UnaryOpKind,
+        operand: Box<Expr>,
+    },
+
     /// Llamada a función: `name(arg1, arg2, ...)`.
     /// Por ahora solo soporta llamadas con nombre simple (no expresiones que
     /// resulten en función). Cuando agreguemos closures como valores de
@@ -133,6 +141,12 @@ pub enum BinOpKind {
     Add, Sub, Mul, Div,
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
     And, Or,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum UnaryOpKind {
+    /// Negación numérica: `-x`.
+    Neg,
 }
 
 /// Parámetro formal de una función. El tipo es opcional (tipado gradual).
@@ -279,5 +293,21 @@ mod tests {
         let stmts: Vec<Stmt> = vec![Stmt::Break, Stmt::Continue];
         assert_eq!(stmts[0], Stmt::Break);
         assert_eq!(stmts[1], Stmt::Continue);
+    }
+
+    #[test]
+    fn unary_op_negation_wraps_operand() {
+        // -x → UnaryOp { op: Neg, operand: Ident("x") }
+        let expr = Expr::UnaryOp {
+            op: UnaryOpKind::Neg,
+            operand: Box::new(Expr::Ident("x".into())),
+        };
+        match expr {
+            Expr::UnaryOp { op, operand } => {
+                assert_eq!(op, UnaryOpKind::Neg);
+                assert_eq!(*operand, Expr::Ident("x".into()));
+            }
+            _ => panic!("se esperaba UnaryOp"),
+        }
     }
 }
