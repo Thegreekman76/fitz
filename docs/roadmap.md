@@ -525,16 +525,109 @@ fn find_user(users: List<User>, id: Int) -> Result<User> {
 ---
 
 ## Fase 4 — HTTP nativo 🌐
-**Estado: PENDIENTE**
+**Estado: EN CURSO — paso 4.1 cerrado.**
 
 La feature que diferencia a Fitz. HTTP como ciudadano de primera clase.
+Cinco pasos cerrables; cada uno suma su tanda de tests y, al final, su
+capítulo a la guía.
 
-### Implementación
-- Integrar **Axum** o **Hyper** por debajo como runtime HTTP
-- El evaluador detecta decoradores `@get`, `@post`, etc.
-- Genera los handlers automáticamente
-- Serialización/deserialización JSON automática por tipo de retorno
-- Servidor arranca automáticamente si hay rutas definidas
+### Decisiones de diseño (tomadas antes de arrancar)
+
+- **Runtime HTTP**: Axum + tokio (multi-thread). Bypasseamos los
+  extractors tipados (nuestros handlers son `Value::Function`, no `fn`
+  de Rust) — `Router::route` + closure que recibe `Request<Body>` y
+  devuelve `Response`.
+- **Decoradores en AST**: `decorators: Vec<Decorator>` adentro de
+  `FnDef`. Genérico, no atado a HTTP. El evaluator despacha por nombre
+  (`@get`/`@post`/`@put`/`@delete` → registran ruta; `@server` →
+  configura; cualquier otro → error explícito). Por ahora args son
+  solo positionals (named args queda como deuda — destrabaría
+  `@server(port: 8080)`).
+- **Arranque del servidor**: automático al final de eval si hay rutas
+  registradas. `@server(...)` configura host/port, no dispara nada.
+  Coincide con el syntax-spec.
+- **Bridge sync/async**: Fitz sigue siendo intérprete síncrono;
+  `is_async` se sigue ignorando. Cada request lee el body async
+  (axum/tokio) y corre el handler Fitz vía `spawn_blocking` para no
+  bloquear el reactor. Para evitar `Rc`-cross-thread, vamos por un
+  thread dedicado al intérprete + canal de tareas. Async real adentro
+  del lenguaje es deuda explícita (Fase 4.x o 5).
+- **Serialización JSON**: automática desde `Value`. Primitivos
+  obvios; `List` → array; `Map` → object (claves Str obligatorias);
+  `Instance` → object con campos en orden; `Result::Ok(v)` → 200
+  con `v`; `Result::Err(e)` → 500 con `{"error": e}`; tipos no
+  serializables → error explícito.
+- **Deserialización del body**: el handler declara `body: TipoCustom`;
+  el runtime valida el JSON contra el `type` (mismas reglas que
+  `StructLit`) y construye `Value::Instance`. Errores → 400.
+- **Path params**: convertidos según el tipo del parámetro
+  (`id: Int` → parsear como int; fallo → 400). Sin anotación
+  default a `Str`. Query params quedan como deuda.
+
+### Pasos
+
+#### 4.1 — Decoradores genéricos sobre FnDef ✓
+**Completado** — refactor preparatorio. El AST y el parser hablan
+decoradores apilables; el cableado real con el runtime HTTP llega
+en 4.2.
+
+- AST: nueva `Decorator { name: String, args: Vec<Expr> }`;
+  `Stmt::FnDef` gana `decorators: Vec<Decorator>`. Eliminados
+  `Stmt::HttpEndpoint` y `HttpMethod` (cumplido el TODO de Fase 4
+  que tenía el AST desde Fase 2).
+- Parser: `parse_decorated_fndef` apila uno o más
+  `@nombre(args...)` antes de `[async] fn ...`. Args usan
+  `parse_call_args` — son expresiones cualquiera. Cada decorator
+  exige paréntesis (incluso vacíos: `@server()`), mantiene la
+  sintaxis predecible.
+- Evaluator: `Stmt::FnDef` con `decorators` no vacío corta con
+  error explícito mencionando los nombres concretos
+  (`@get`/`@server`/etc.) y "requieren Fase 4.2 — runtime HTTP".
+  Es un puente intencional: AST y parser ya soportan la sintaxis,
+  la semántica espera el runtime.
+
+Tests al cerrar 4.1: 511 (503 al cerrar 3.5 + 8 nuevos: 3 en ast,
+5 netos en parser, 2 en evaluator).
+
+**Observación de diseño cerrada**: el path en `@get("/users/{id}")`
+llega al evaluator como `Expr::StrInterp` (porque `{id}` es sintaxis
+de interpolación de Fitz). En 4.2 los `StrPart::Expr(Ident(...))`
+del path se reconocerán como path params sin necesidad de un mini
+parser dedicado dentro del decorator. Es una buena noticia, no un
+bug — reusa la maquinaria existente.
+
+#### 4.2 — Runtime HTTP mínimo (GET, sin body, sin Result handling)
+**Pendiente.** Integrar axum + tokio. `HttpRegistry` durante eval.
+Thread dedicado al intérprete + canal. Serialización `Value`→JSON
+básica. Path params tipados. Ejemplo `@get("/") => "hola"` corriendo
+end-to-end.
+
+#### 4.3 — Body, deserialización, Result auto-handling
+**Pendiente.** `@post`/`@put`/`@delete`. Body validado contra el
+`type` declarado. `Ok(v)`→200, `Err(e)`→500 con `{"error": e}`.
+Errores de deserialización → 400 con mensaje.
+
+#### 4.4 — `@server(...)` configuración
+**Pendiente.** Parsear args (positionals: port, host?). Default
+3000/127.0.0.1. Log de arranque con la URL final.
+
+#### 4.5 — Guía + ejemplos + cierre de fase
+**Pendiente.** Capítulo 17 "HTTP nativo" entre Módulos y Qué sigue
+(17 → 18). Ejemplo `examples/guide/17-http.fitz`. Validar que
+`examples/server.fitz` corra end-to-end (test de aceptación de la
+fase).
+
+### Deuda explícita ya identificada para Fase 4
+
+- **Named args en decorators** (`@server(port: 8080, host: "0.0.0.0")`)
+  — hoy sólo positionals (`@server(8080, "0.0.0.0")`).
+- **Async real en el lenguaje** — `await`, futures, async fn que de
+  verdad sea async. Probablemente Fase 4.x o 5.
+- **Response builder rico** — `return 401 { ... }` del syntax-spec,
+  status code custom, headers, content-type. Sigue siendo deuda.
+- **Query params** — `?page=1&size=10`. Sin soporte en 4.x.
+- **Middleware** — auth, logging, CORS via decoradores apilables.
+- **Hot reload** del server al cambiar el `.fitz`.
 
 ### Criterio de completitud
 ```fitz
