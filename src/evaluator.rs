@@ -23,9 +23,14 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::ast::{AssignTarget, BinOpKind, Expr, Pattern, Program, Stmt, StrPart, UnaryOpKind};
+use crate::ast::{
+    AssignTarget, BinOpKind, Decorator, Expr, Param, Pattern, Program, Stmt, StrPart, UnaryOpKind,
+};
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
+use crate::http::{
+    has_active_registry, parse_path_template, push_route, HttpMethod, RouteSpec,
+};
 use crate::lexer::tokenize;
 use crate::parser::parse;
 use crate::value::{ResultVariant, Value};
@@ -104,6 +109,137 @@ pub fn eval_with_base(program: Program, base_dir: PathBuf) -> FitzResult<()> {
             return Err(signal_to_error(signal));
         }
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Decorators — pre-procesamiento de `@nombre(args)` sobre `Stmt::FnDef`.
+//
+// El parser solo acumula decorators; acá decidimos qué hace cada uno.
+// Política:
+//
+//   - `@get` / `@post` / `@put` / `@delete`: validan args (1 path) y
+//     registran una `RouteSpec` en el `HttpRegistry` activo. Si no hay
+//     registry activo (eval embebido, REPL, test sin server), error
+//     explícito con sugerencia de qué hacer.
+//   - Cualquier otro nombre: error explícito. `@server` entra en 4.4;
+//     decoradores custom no están planeados hasta Fase 5+.
+//
+// El handler se pasa ya construido como `Value::Function` para que el
+// registry lo guarde sin tener que reconstruirlo (clones de `Rc` son
+// baratos; el `closure: EnvRef` mantiene viva el env del módulo).
+// ---------------------------------------------------------------------------
+
+fn process_decorator(
+    deco: &Decorator,
+    fn_name: &str,
+    params: &[Param],
+    handler: &Value,
+) -> Result<(), EvalSignal> {
+    // ¿Es un decorator HTTP conocido?
+    if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
+        return register_http_route(method, deco, fn_name, params, handler);
+    }
+
+    // Mensaje claro para los que no son HTTP. Cuando 4.4 implemente
+    // `@server`, lo separamos en su propia rama.
+    Err(EvalSignal::Error(FitzError::new(
+        ErrorKind::InvalidSyntax,
+        0,
+        0,
+        format!(
+            "decorator '@{}' no implementado (sobre fn '{}'). \
+             Decorators soportados hoy: @get, @post, @put, @delete.",
+            deco.name, fn_name,
+        ),
+    )))
+}
+
+fn register_http_route(
+    method: HttpMethod,
+    deco: &Decorator,
+    fn_name: &str,
+    params: &[Param],
+    handler: &Value,
+) -> Result<(), EvalSignal> {
+    // Validación 1: el decorator HTTP necesita un único arg con el path.
+    if deco.args.len() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "@{}(...) sobre fn '{}' espera un único argumento (la ruta), \
+                 recibió {}",
+                deco.name,
+                fn_name,
+                deco.args.len(),
+            ),
+        )));
+    }
+
+    // Validación 2: el path se puede traducir a template de axum.
+    let template = parse_path_template(&deco.args[0]).map_err(|e| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!("@{} sobre fn '{}': {}", deco.name, fn_name, e.message()),
+        ))
+    })?;
+
+    // Validación 3: cada path param tiene que estar declarado como
+    // parámetro del handler. Eso garantiza que el handler reciba un
+    // valor por cada `{x}` y simplifica el dispatch.
+    for param_name in &template.params {
+        if !params.iter().any(|p| &p.name == param_name) {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0,
+                0,
+                format!(
+                    "@{} sobre fn '{}': el path declara '{{{}}}' pero el handler \
+                     no tiene un parámetro con ese nombre",
+                    deco.name, fn_name, param_name,
+                ),
+            )));
+        }
+    }
+
+    // Validación 4: hay un registry activo. Sin él, el evaluator está
+    // corriendo afuera de `fitz run` (REPL, test, eval embebido) y los
+    // decorators HTTP no tienen dónde registrarse.
+    if !has_active_registry() {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0,
+            0,
+            format!(
+                "@{} sobre fn '{}': no hay servidor HTTP activo en este contexto. \
+                 Los decoradores HTTP solo funcionan ejecutando el archivo con \
+                 `fitz run`.",
+                deco.name, fn_name,
+            ),
+        )));
+    }
+
+    // Empacar tipos de parámetros en el orden declarado del handler.
+    // Esto le sirve al runtime para coercionar path params crudos al
+    // tipo Fitz correcto antes de invocar al handler.
+    let param_types: Vec<(String, Option<String>)> = params
+        .iter()
+        .map(|p| (p.name.clone(), p.type_.clone()))
+        .collect();
+
+    push_route(RouteSpec {
+        method,
+        path: template.path,
+        path_params: template.params,
+        handler: handler.clone(),
+        handler_name: fn_name.to_string(),
+        param_types,
+    });
+
     Ok(())
 }
 
@@ -345,6 +481,19 @@ fn display_module_path(p: &Path) -> String {
     s.strip_prefix(r"\\?\").map(|x| x.to_string()).unwrap_or(s)
 }
 
+/// Invoca un handler HTTP. Wrapper público sobre `invoke_value` que el
+/// runtime HTTP usa por cada request: recibe el `Value::Function`
+/// registrado y los args ya construidos (path params coercionados al
+/// tipo declarado del handler), devuelve el `Value` que retornó el
+/// handler o un `FitzError` con contexto.
+///
+/// La traducción de ese `Value` a status + body JSON la hace el
+/// módulo `http` (`value_to_outcome`), no este wrapper. Acá solo
+/// ejecutamos el handler.
+pub fn call_handler(handler: Value, args: Vec<Value>, handler_name: &str) -> FitzResult<Value> {
+    invoke_value(handler, args, handler_name).map_err(signal_to_error)
+}
+
 /// Convierte un signal sin contexto en un `FitzError` legible.
 fn signal_to_error(signal: EvalSignal) -> FitzError {
     match signal {
@@ -466,35 +615,26 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // `return_type` y `is_async` se ignoran en runtime (deuda explícita
         // para type-checker estático en Fase 5 y async real en Fase 4.x).
         //
-        // `decorators`: en 4.1 los aceptamos sintácticamente pero el
-        // evaluador todavía no sabe qué hacer con ellos. Cualquier
-        // decorator dispara error explícito acá — el cableado real con
-        // el runtime HTTP llega en 4.2. Esto es un puente intencional:
-        // mantiene el parser y el AST listos sin habilitar semántica
-        // a medias.
+        // `decorators`: si los hay, los procesamos antes de definir la
+        // función. Los decoradores HTTP (`@get`/`@post`/`@put`/`@delete`)
+        // requieren un `HttpRegistry` activo en el thread_local (instalado
+        // por `main.rs` antes de evaluar). Sin registry, error explícito
+        // — los tests y el REPL evalúan sin HTTP. Cualquier decorator no
+        // HTTP también es error: `@server` (4.4) y otros entran cuando
+        // los implementemos.
         Stmt::FnDef { name, params, return_type: _, body, is_async: _, decorators } => {
-            if !decorators.is_empty() {
-                let names: Vec<String> = decorators
-                    .iter()
-                    .map(|d| format!("@{}", d.name))
-                    .collect();
-                return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::InvalidSyntax,
-                    0,
-                    0,
-                    format!(
-                        "decorators {} sobre fn '{}' todavía no implementados \
-                         (requieren Fase 4.2 — runtime HTTP)",
-                        names.join(", "),
-                        name,
-                    ),
-                )));
-            }
             let func = Value::Function {
                 params: params.clone(),
                 body: body.clone(),
                 closure: env.clone(),
             };
+
+            // Procesar decorators ANTES de definir la fn en el env. Si
+            // alguno falla, no queremos un binding mitad-registrado.
+            for deco in decorators {
+                process_decorator(deco, name, params, &func)?;
+            }
+
             env.borrow_mut().define(name.clone(), func);
             Ok(Value::Null)
         }
@@ -5145,36 +5285,127 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
-    // Tests — decoradores (Fase 4, paso 4.1)
+    // Tests — decoradores (Fase 4, pasos 4.1 / 4.2)
     // -----------------------------------------------------------------------
     //
-    // En 4.1 el evaluador todavía no sabe ejecutar decorators: corta
-    // con error explícito apenas evalúa la FnDef. Es un puente
-    // intencional hasta que llegue el runtime HTTP en 4.2.
+    // El evaluador procesa decorators al ver `Stmt::FnDef`. Los HTTP
+    // (`@get`/`@post`/`@put`/`@delete`) requieren `HttpRegistry`
+    // activo en el thread_local; sin él, error explícito. Cualquier
+    // otro decorator también es error (`@server` entra en 4.4).
 
     #[test]
-    fn fndef_con_decorator_corta_con_error_explicito() {
+    fn fndef_con_decorator_http_sin_registry_da_error_claro() {
+        // `parse_and_eval` no instala HttpRegistry, así que un
+        // `@get(...)` corta con sugerencia de usar `fitz run`.
         let src = "@get(\"/\")\nfn index() => \"hola\"";
         let err = parse_and_eval(src).unwrap_err();
         assert!(
-            err.message.contains("@get") && err.message.contains("Fase 4.2"),
+            err.message.contains("@get")
+                && err.message.contains("servidor HTTP activo")
+                && err.message.contains("fitz run"),
             "mensaje inesperado: {}",
             err.message,
         );
     }
 
     #[test]
-    fn fndef_con_decorator_desconocido_corta_igual() {
-        // El parser acepta cualquier `@nombre(args)`; el evaluator
-        // todavía rechaza todos por igual hasta 4.2. Lo importante es
-        // que el error mencione el nombre del decorator para que el
-        // usuario sepa qué quitar.
+    fn fndef_con_decorator_desconocido_da_error_de_decorator() {
         let src = "@patch(\"/x\")\nfn h() => 0";
         let err = parse_and_eval(src).unwrap_err();
         assert!(
-            err.message.contains("@patch"),
-            "mensaje no menciona '@patch': {}",
+            err.message.contains("@patch")
+                && err.message.contains("no implementado"),
+            "mensaje inesperado: {}",
             err.message,
         );
+    }
+
+    #[test]
+    fn fndef_con_decorator_http_con_registry_activo_registra_la_ruta() {
+        // Con registry activo, el decorator @get registra ruta sin
+        // error y define la fn en el env.
+        use crate::http::with_active_registry;
+
+        let src = "@get(\"/users/{id}\")\nfn get_user(id: Int) => \"hola\"";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        assert_eq!(reg.routes.len(), 1);
+        let r = &reg.routes[0];
+        assert_eq!(r.method, crate::http::HttpMethod::Get);
+        assert_eq!(r.path, "/users/{id}");
+        assert_eq!(r.path_params, vec!["id".to_string()]);
+        assert_eq!(r.handler_name, "get_user");
+        assert_eq!(r.param_types, vec![("id".to_string(), Some("Int".into()))]);
+    }
+
+    #[test]
+    fn fndef_con_path_param_sin_param_de_handler_es_error() {
+        // `@get("/{id}")` pero el handler no tiene un param `id`.
+        use crate::http::with_active_registry;
+        let src = "@get(\"/{id}\")\nfn h() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("'{id}'") && err.message.contains("parámetro"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn fndef_con_decorator_http_sin_args_es_error() {
+        // `@get()` sin path.
+        use crate::http::with_active_registry;
+        let src = "@get()\nfn h() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@get") && err.message.contains("argumento"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn fndef_decorator_http_path_no_string_es_error() {
+        // `@get(42)` — path no es string.
+        use crate::http::with_active_registry;
+        let src = "@get(42)\nfn h() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("string literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn fndef_decorator_http_path_sin_slash_es_error() {
+        use crate::http::with_active_registry;
+        let src = "@get(\"users\")\nfn h() => 0";
+        let (res, _reg) = with_active_registry(|| parse_and_eval(src));
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("'/'"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn fndef_post_put_delete_se_registran_con_su_method() {
+        use crate::http::with_active_registry;
+        let src = "\
+            @post(\"/users\")\nfn create(name) => name\n\
+            @put(\"/users/{id}\")\nfn update(id: Int, name) => name\n\
+            @delete(\"/users/{id}\")\nfn del(id: Int) => 0\n\
+        ";
+        let (res, reg) = with_active_registry(|| parse_and_eval(src));
+        res.unwrap();
+        assert_eq!(reg.routes.len(), 3);
+        assert_eq!(reg.routes[0].method, crate::http::HttpMethod::Post);
+        assert_eq!(reg.routes[1].method, crate::http::HttpMethod::Put);
+        assert_eq!(reg.routes[2].method, crate::http::HttpMethod::Delete);
     }
 }

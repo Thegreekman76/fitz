@@ -10,6 +10,7 @@ mod value;      // Fase 2.4 — valores en runtime
 mod env;        // Fase 2.4 — entornos / scopes
 mod evaluator;  // Fase 2.4 — ejecución
 mod error;      // manejo de errores del compilador
+mod http;       // Fase 4 — HTTP nativo (registry + runtime)
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -68,19 +69,9 @@ fn run_file(path: &PathBuf) {
         std::process::exit(1);
     });
 
-    println!("🏔️  Fitz v0.1.0");
-    println!("   Ejecutando: {}", path.display());
-    println!("   (intérprete en construcción — Fase 2)\n");
-
     // Fase 2.1: lexer
     let tokens = match lexer::tokenize(&source) {
-        Ok(tokens) => {
-            println!("--- Tokens ---");
-            for tok in &tokens {
-                println!("  {:>4}:{:<3}  {:?}", tok.line, tok.column, tok.token);
-            }
-            tokens
-        }
+        Ok(tokens) => tokens,
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
@@ -89,20 +80,13 @@ fn run_file(path: &PathBuf) {
 
     // Fase 2.3: parser
     let program = match parser::parse(tokens) {
-        Ok(program) => {
-            println!("\n--- AST ---");
-            for (i, stmt) in program.iter().enumerate() {
-                println!("  [{}] {:#?}", i, stmt);
-            }
-            program
-        }
+        Ok(program) => program,
         Err(e) => {
             eprintln!("{}", e);
             std::process::exit(1);
         }
     };
 
-    // Fase 2.4: evaluador
     // Base dir para resolver `import`s: el directorio del archivo que
     // se está ejecutando. Si por algún motivo no podemos derivarlo
     // (path sin parent), caemos al cwd.
@@ -112,9 +96,27 @@ fn run_file(path: &PathBuf) {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    println!("\n--- Ejecución ---");
-    if let Err(e) = evaluator::eval_with_base(program, base_dir) {
+    // Fase 2.4 + Fase 4: evaluamos el programa dentro de un
+    // `HttpRegistry` activo. Los decoradores HTTP registran rutas
+    // ahí mientras corre el eval. Si después de eval el registry
+    // tiene rutas, arrancamos el servidor; si no, terminamos como un
+    // programa CLI normal.
+    let (eval_result, registry) = http::with_active_registry(|| {
+        evaluator::eval_with_base(program, base_dir)
+    });
+
+    if let Err(e) = eval_result {
         eprintln!("{}", e);
         std::process::exit(1);
+    }
+
+    if !registry.is_empty() {
+        // Default: 127.0.0.1:3000. `@server(...)` configurable llega
+        // en 4.4.
+        let addr: std::net::SocketAddr = "127.0.0.1:3000".parse().unwrap();
+        if let Err(e) = http::serve(registry, addr) {
+            eprintln!("Error del servidor HTTP: {}", e);
+            std::process::exit(1);
+        }
     }
 }

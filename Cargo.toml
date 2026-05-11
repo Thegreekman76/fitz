@@ -22,15 +22,35 @@ miette = { version = "5", features = ["fancy"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# HTTP (Fase 4 — comentado hasta entonces)
-# axum = "0.7"
-# tokio = { version = "1", features = ["full"] }
+# HTTP (Fase 4 — paso 4.2 en adelante)
+#
+# axum: framework HTTP sobre tokio/hyper. Bypasseamos los extractors
+# tipados (nuestros handlers son `Value::Function` de Fitz, no fns
+# de Rust) y usamos `Router::route` + closures que reciben
+# `Request<Body>` y devuelven `Response`.
+#
+# tokio "full": runtime multi-thread, canales, oneshot, signal.
+# Para puentear el intérprete síncrono con el reactor async usamos
+# `mpsc::UnboundedSender` + `oneshot` por request, evitando bloquear
+# el reactor. El intérprete vive en un thread std propio porque
+# `Value` usa `Rc<RefCell<>>` (no es `Send`).
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
 
 [dev-dependencies]
-# Para tests
 # Directorios temporales para tests del loader de módulos (3.5):
 # permite armar fixtures en disco y limpiarlos automáticamente.
 tempfile = "3"
+
+# tower: para tests E2E del runtime HTTP via `Router::oneshot(req)`,
+# evitando abrir un socket TCP real. Más determinista, sin port
+# allocation.
+tower = { version = "0.5", features = ["util"] }
+
+# http-body-util: helpers para construir bodies en tests (Full, Empty,
+# collect, etc.) sin armar streams a mano. Viene como dep transitiva
+# de axum, pero la pinneamos por claridad.
+http-body-util = "0.1"
 
 [profile.release]
 opt-level = 3

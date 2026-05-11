@@ -596,11 +596,56 @@ del path se reconocerán como path params sin necesidad de un mini
 parser dedicado dentro del decorator. Es una buena noticia, no un
 bug — reusa la maquinaria existente.
 
-#### 4.2 — Runtime HTTP mínimo (GET, sin body, sin Result handling)
-**Pendiente.** Integrar axum + tokio. `HttpRegistry` durante eval.
-Thread dedicado al intérprete + canal. Serialización `Value`→JSON
-básica. Path params tipados. Ejemplo `@get("/") => "hola"` corriendo
-end-to-end.
+#### 4.2 — Runtime HTTP mínimo (GET + Result handling) ✓
+**Completado** — server axum + tokio + bridge sync/async funcionando.
+GET con path params tipados, serialización JSON automática, Result
+auto-handling. `cargo run -- run server.fitz` levanta el server.
+
+- Nuevo módulo `src/http.rs` con:
+  - `HttpRegistry` + `RouteSpec` + `RouteMeta` + `HttpMethod`.
+  - `with_active_registry(...)` para que el evaluator vea un registry
+    durante eval vía thread_local.
+  - `parse_path_template`: traduce `Expr::Str` o `Expr::StrInterp` del
+    decorator a path axum (`/users/{id}`) + lista de param names.
+  - `value_to_json` + `value_to_outcome`: serialización total con
+    Result auto-handling (`Ok(v)`→200, `Err(e)`→500 con `{"error":e}`),
+    tipos opacos (Function/Module/Type/Range) → 500 explícito.
+  - `coerce_path_param`: convierte string crudo a Int/Float/Str/Bool
+    según el tipo declarado del parámetro del handler. Falla → 400.
+  - `build_router` + `serve(registry, addr)`: arranca axum en un
+    std::thread spawneado; el thread main entra al
+    `run_interpreter_loop`. Bridge vía
+    `mpsc::UnboundedSender<InterpTask>` + `oneshot::Sender<HandlerOutcome>`
+    por request. Graceful shutdown con Ctrl-C.
+- Evaluator: cuando ve `Stmt::FnDef` con decorator `@get`/`@post`/
+  `@put`/`@delete` y hay registry activo, valida (1 arg path, path
+  starts with `/`, cada `{x}` tiene su parámetro en el handler) y
+  registra una `RouteSpec`. Sin registry → error explícito con
+  sugerencia "ejecutá con `fitz run`". Decoradores no implementados
+  (`@server`, `@patch`, etc.) → error con el nombre.
+- `main.rs`: envuelve `eval_with_base` en `with_active_registry`. Si
+  después de eval el registry tiene rutas, llama a `http::serve` en
+  127.0.0.1:3000 (`@server(...)` configurable llega en 4.4).
+- Axum 0.8 (no 0.7): la sintaxis `{id}` del syntax-spec mapea directa
+  al matcher de axum. Bumpeo deliberado.
+
+Tests al cerrar 4.2: 558 (511 al cerrar 4.1 + 47 nuevos repartidos
+en `src/http.rs` — 28 unit tests del módulo + 7 E2E con `Router::oneshot`
+sobre `LocalSet` — y 8 nuevos en `evaluator::tests` para el flujo de
+registro). Validado manualmente: server real con `curl` responde 200,
+400, 500 según corresponde.
+
+**Decisión de threading documentada en código**: el intérprete vive
+en el thread main (donde corrieron los `Rc<RefCell<>>` del eval), no
+en un thread spawneado — `Value` no es `Send`. Tokio corre en un
+std::thread propio. Lo que cruza el canal son strings y números.
+
+**Limitaciones de 4.2 (deuda explícita, no nueva):**
+- Solo GET/POST/PUT/DELETE sin body — el body llega en 4.3.
+- Sin query params, sin headers, sin status codes custom.
+- `@server(...)` parsea pero no hace nada (4.4).
+- `async fn` se acepta sintácticamente pero no aporta nada en
+  runtime (deuda vieja: async real adentro del lenguaje).
 
 #### 4.3 — Body, deserialización, Result auto-handling
 **Pendiente.** `@post`/`@put`/`@delete`. Body validado contra el
