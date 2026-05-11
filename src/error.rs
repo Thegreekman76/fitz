@@ -36,6 +36,9 @@ pub enum ErrorKind {
     BreakOutsideLoop,
     ContinueOutsideLoop,
     WrongArgCount { expected: usize, found: usize },
+
+    // Errores del checker estático (Fase 5)
+    TypeError,
 }
 
 impl FitzError {
@@ -57,7 +60,15 @@ impl FitzError {
 
 impl std::fmt::Display for FitzError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        write!(f, "Error en línea {}:{} — {}", self.line, self.column, self.message)?;
+        // line == 0 && column == 0 indica "sin posición" — algunos
+        // errores del evaluator y todos los del checker estático
+        // todavía no llevan línea/columna (el AST no las propaga).
+        // En ese caso, omitimos el prefijo para no mentir.
+        if self.line == 0 && self.column == 0 {
+            write!(f, "Error — {}", self.message)?;
+        } else {
+            write!(f, "Error en línea {}:{} — {}", self.line, self.column, self.message)?;
+        }
         if let Some(hint) = &self.hint {
             write!(f, "\n  Sugerencia: {}", hint)?;
         }

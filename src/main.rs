@@ -11,6 +11,7 @@ mod env;        // Fase 2.4 — entornos / scopes
 mod evaluator;  // Fase 2.4 — ejecución
 mod error;      // manejo de errores del compilador
 mod http;       // Fase 4 — HTTP nativo (registry + runtime)
+mod types;      // Fase 5.2 — sistema de tipos resuelto + checker base
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -57,9 +58,46 @@ fn main() {
             println!("   Por ahora usá: fitz run {}", file.display());
         }
         Commands::Check { file } => {
-            println!("🚧 Type checker en construcción");
-            println!("   Archivo: {}", file.display());
+            check_file(&file);
         }
+    }
+}
+
+/// `fitz check <archivo>` — corre lexer + parser + checker estático
+/// y reporta errores. Exit code 0 si está limpio, 1 si hay errores
+/// de cualquier tipo.
+fn check_file(path: &PathBuf) {
+    let source = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error leyendo {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+    let tokens = match lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let (_env, errors) = types::resolve_program(&program);
+    if errors.is_empty() {
+        println!("✓ {} — sin errores de tipo", path.display());
+    } else {
+        eprintln!(
+            "✗ {} — {} error(es) de tipo:",
+            path.display(),
+            errors.len()
+        );
+        for e in &errors {
+            eprintln!("  {}", e);
+        }
+        std::process::exit(1);
     }
 }
 
@@ -86,6 +124,23 @@ fn run_file(path: &PathBuf) {
             std::process::exit(1);
         }
     };
+
+    // Fase 5.2: checker estático en modo warning. Durante 5.x los
+    // errores de tipo NO abortan la ejecución — se reportan y el
+    // programa sigue corriendo en el intérprete. El default flipea
+    // a "strict aborta" al cerrar 5a (después de 5.4), una vez que
+    // el checker cubre cuerpos de funciones y HTTP.
+    let (_type_env, type_errors) = types::resolve_program(&program);
+    if !type_errors.is_empty() {
+        eprintln!(
+            "⚠ {} warning(s) del checker de tipos:",
+            type_errors.len()
+        );
+        for e in &type_errors {
+            eprintln!("  {}", e);
+        }
+        eprintln!("   (Fase 5.x — no abortan la ejecución; usá `fitz check` para validar).");
+    }
 
     // Base dir para resolver `import`s: el directorio del archivo que
     // se está ejecutando. Si por algún motivo no podemos derivarlo

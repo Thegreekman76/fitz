@@ -874,12 +874,98 @@ y round-trip de display sobre `Map<Str, Result<List<User>?>>`).
   se aceptan en sintaxis pero el evaluator los sigue ignorando
   igual que antes; el capítulo entra cuando 5.2 los chequea.
 
-#### 5.2 — Resolución de tipos y type checker base
-**Pendiente** — el primer chequeo estático real. Detalle al arrancar.
+#### 5.2 — Resolución de tipos y type checker base ✓
+**Completado** — primer chequeo estático real. Nuevo módulo
+`src/types.rs` con representación interna `Type`, tabla `TypeEnv`,
+resolución de `TypeExpr → Type` con validación de aridad y
+existencia, y pasada de chequeo sobre las anotaciones del programa.
+
+- `Type` con primitivos como singletons (`Int`, `Float`, `Str`,
+  `Bool`, `Null`, `Range`), genéricos built-in con aridad fija
+  (`List<T>`, `Map<K, V>`, `Result<T>`), `Nominal(TypeId)` para
+  tipos declarados, `Nullable(Box<Type>)` para `T?`. Identidad
+  nominal por `TypeId` — dos `type User` en módulos distintos
+  serían tipos distintos.
+- `TypeEnv` con declare_nominal/set_fields/lookup, soporta forward
+  refs cross-tipo (`type A { b: B }; type B { a: A }`).
+- `resolve_type_expr`: traduce `TypeExpr` a `Type` validando
+  primitivo + 0 args, genéricos con aridad exacta, nominal sin
+  args. Errores claros: "tipo desconocido `Foo`", "el tipo `List`
+  espera 1 argumento(s) de tipo, recibió 2".
+- `resolve_program` en tres vueltas: nombres → fields → resto de
+  anotaciones (params, return type, lets — incluso adentro de
+  bodies de funciones). Acumula todos los errores en lugar de
+  cortar al primero.
+- `check_field_default` valida defaults literales contra el tipo
+  declarado del campo (`Int = "x"` → error; `Float = 1` → OK por
+  coerción; `Str? = null` → OK). Defaults no-literales se
+  postergan a 5.3.
+- CLI: `fitz check <file>` corre lexer + parser + resolución,
+  reporta errores con contexto, exit code 1 si hay alguno.
+  `fitz run` lo corre **en modo warning**: imprime los errores
+  pero no aborta — los programas existentes siguen ejecutándose
+  igual durante 5.x. El default flipea a "strict aborta" al
+  cerrar 5a (después de 5.4).
+- `FitzError` Display ahora omite el prefijo `en línea 0:0` cuando
+  no hay posición. Beneficia al checker (sin posiciones todavía)
+  y a varios errores del evaluator que ya estaban así.
+
+Cierra parcialmente deuda 2.4 "anotaciones de tipo se ignoran"
+— las anotaciones ahora se resuelven y validan; el chequeo de
+valores contra los tipos resueltos entra en 5.3.
+
+Tests al cerrar 5.2: 651 (614 al cerrar 5.1 + 37 nuevos en
+`types.rs`: resolución por primitivo, genérico con aridad
+correcta e incorrecta, nullable de primitivo y de generic,
+nominal declarado y desconocido, generic con arg inválido que
+propaga, programa vacío, type con primitivos, type con
+generic+nullable, type que referencia otro type, forward refs
+mutuas, type con field de tipo inexistente, type redeclarado,
+defaults literales compatibles/incompatibles, default null sobre
+nullable/no-nullable, default Int sobre Float, default
+no-literal aceptado, fndef con anotaciones válidas, fndef con
+param/return/generic inválido, assign con tipo inválido, lets
+adentro de body validados, múltiples errores acumulados, AST
+construido a mano).
+
+Validado a mano: los 17 ejemplos de la guía y `examples/server.fitz`
+pasan `fitz check` sin errores. Un archivo de prueba con 4 errores
+distintos (tipo desconocido en campo, default incompatible, otro
+tipo desconocido, aridad incorrecta de generic) se reporta
+completo y con contexto en `fitz check` (exit 1) y como warnings
+en `fitz run` (exit 0, programa ejecuta).
+
+**Deuda explícita — retomar después:**
+- **Posiciones de error** — `TypeExpr` no carga línea/columna, así
+  que los errores del checker salen sin posición. Mismo issue que
+  varios `FitzError` del evaluator. Pelarlo es un refactor amplio
+  del parser; cuando se cierre, el Display vuelve a mostrar
+  línea/columna en todos los casos.
+- **Chequeo de expresiones contra el tipo declarado** — `let x:
+  Int = "hola"` hoy no falla (el valor es un literal Str, el tipo
+  declarado es Int, pero el checker no compara). Es el corazón
+  de 5.3.
+- **Sugerencias "¿quisiste decir...?"** — sin similaridad de
+  nombres todavía. Nice-to-have post-5.4.
+- **Imports cross-módulo en el checker** — el evaluator carga
+  módulos lazy/eager, pero `resolve_program` chequea cada archivo
+  por separado. Cuando 5.3 valide expresiones, los tipos
+  importados van a tener que aparecer en el `TypeEnv` del archivo
+  que los usa. Por ahora, los handlers que usan tipos importados
+  (caso típico: `examples/server.fitz` sin imports) siguen
+  funcionando porque cada archivo se resuelve solo y sus `type`s
+  locales están en su env.
+
+#### 5.3 — Type checker de expresiones y funciones
+**Pendiente** — validar que cada `Expr` tenga el tipo esperado.
+Aritmética con coerción, llamadas con aridad y tipos correctos,
+`?` exige `Result<T>` con firma compatible, `match` exhaustivo
+sobre `Result`, modelo de tipo de función para `xs.map(f)`.
 
 ### Features de la fase entera
 - [x] TypeExpr en AST y parser (5.1)
-- [ ] Type checker completo (5.2 + 5.3 + 5.4)
+- [x] Resolución de tipos y checker base (5.2)
+- [ ] Type checker completo (5.3 + 5.4)
 - [ ] Inferencia de tipos
 - [ ] Optimizaciones básicas (5b)
 - [ ] Binario nativo standalone (5b)
