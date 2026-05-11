@@ -85,7 +85,7 @@ fn check_file(path: &PathBuf) {
             std::process::exit(1);
         }
     };
-    let (_env, errors) = types::resolve_program(&program);
+    let (_env, errors) = types::check_program(&program);
     if errors.is_empty() {
         println!("✓ {} — sin errores de tipo", path.display());
     } else {
@@ -130,7 +130,7 @@ fn run_file(path: &PathBuf) {
     // programa sigue corriendo en el intérprete. El default flipea
     // a "strict aborta" al cerrar 5a (después de 5.4), una vez que
     // el checker cubre cuerpos de funciones y HTTP.
-    let (_type_env, type_errors) = types::resolve_program(&program);
+    let (_type_env, type_errors) = types::check_program(&program);
     if !type_errors.is_empty() {
         eprintln!(
             "⚠ {} warning(s) del checker de tipos:",

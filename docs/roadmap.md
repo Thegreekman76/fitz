@@ -957,15 +957,94 @@ en `fitz run` (exit 0, programa ejecuta).
   locales están en su env.
 
 #### 5.3 — Type checker de expresiones y funciones
-**Pendiente** — validar que cada `Expr` tenga el tipo esperado.
-Aritmética con coerción, llamadas con aridad y tipos correctos,
-`?` exige `Result<T>` con firma compatible, `match` exhaustivo
-sobre `Result`, modelo de tipo de función para `xs.map(f)`.
+**En curso** — se divide en cinco sub-pasos cerrables.
+
+##### 5.3.1 — Synthesis básico ✓
+**Completado** — primera pasada del checker que mira EXPRESIONES.
+Sintetiza tipos para literales, idents, BinOp aritmético/comparación/
+lógico, UnaryOp Neg, StrInterp, `if`, list/map literales, struct
+lit, field access sobre Nominal, Range. Asignaciones con anotación
+validan compatibilidad. Scopes locales para FnDef/FnExpr/while/for/
+loop. Match bindea las variables de los patrones (Ident, OkBinding,
+ErrBinding). Imports registran nombres como vars (`import foo`,
+`from foo import X`) y los nombres de `FromImport` se registran
+también como nominales en el TypeEnv para que `User { ... }` no
+falle.
+
+- Nuevas variantes de `Type`: `Function { params, ret }` (modelado
+  pero ret todavía es Any en 5.3.1) y `Any` (escape gradual para
+  expresiones que el checker aún no modela y para anotaciones que
+  faltan).
+- `CheckCtx`: stack de scopes para variables, errores acumulados,
+  builtins (`print`, `len`) pre-registrados como Any.
+- `infer_expr`: synth bottom-up. Cubre los Expr listados arriba;
+  Call/FnExpr/Index/Match/Ok/Err/Try devuelven Any o info parcial
+  hasta que las sub-fases siguientes los refinen.
+- `check_stmt` + `check_block`: walker de Stmt con scopes. Stmt::
+  Assign con anotación compara RHS contra el tipo declarado;
+  para FnDef abre scope y bindea params con tipo declarado o Any.
+- `is_compatible`: Any compatible con todo, Null compatible con
+  `T?`, `T` compatible con `T?`, Int compatible con Float
+  (coerción), resto = igualdad estructural.
+- Pre-registro de firmas: las `FnDef` top-level se registran como
+  `Type::Function` en el scope global antes de walkear los bodies,
+  habilitando referencias hacia adelante y recursión mutua.
+- Entry point público nuevo: `check_program` (corre
+  `resolve_program` + pasada de expresiones). `resolve_program`
+  queda como API privada del módulo para tests granulares.
+  `fitz check` y `fitz run` ahora llaman a `check_program`.
+
+Tests al cerrar 5.3.1: 700 (651 al cerrar 5.2 + 49 nuevos
+cubriendo ident desconocido/conocido/nominal-como-value,
+builtins, BinOps aritmético/comparación/lógico con tipos OK y
+errores, UnaryOp Neg, Range, lists vacías/homogéneas/anotadas
+mal, maps vacíos, StructLit con tipo conocido/desconocido/campo
+mal tipado/campo extra, field access OK e incompatible, Assigns
+con varias formas de compatibilidad, if/while con cond mala,
+for sobre Range/List/no-iterable, FnDef y FnExpr bindeando
+params, match con Ident/OkBinding/ErrBinding bindings, imports
+y from-imports, acumulación de múltiples errores).
+
+Validado a mano: los 17 ejemplos de la guía y
+`examples/server.fitz` pasan `fitz check` limpios; `fitz run`
+produce el mismo output que antes; un archivo de prueba con 7
+errores variados (assign con tipo mal, BinOp con Str/Int, var
+desconocida, if con cond Int, for sobre Int, StructLit con
+campo mal tipado, StructLit con tipo desconocido) se reportan
+con mensajes específicos y contexto.
+
+**Limitaciones conocidas de 5.3.1 (todas pendientes en sub-pasos siguientes):**
+- Llamadas no validan aridad ni tipos de args — Call devuelve
+  el ret del Function si lo conoce, Any si no. Es 5.3.2.
+- `Stmt::Return` no se compara contra return_type — es 5.3.2.
+- `?` sobre no-Result no falla, y no exige que la fn contenedora
+  devuelva Result. Es 5.3.3.
+- Match sobre Result no exige ambas ramas (exhaustividad). Es 5.3.3.
+- Métodos built-in (`xs.map`, `m.get`, etc.) no se chequean: el
+  Field dentro de un Call devuelve Any. Es 5.3.4.
+- `FnExpr.ret` queda en Any. 5.3.5 sintetizará a partir del body.
+
+##### 5.3.2 — Llamadas, return contra return_type
+**Pendiente** — registrar firmas, validar aridad y tipos de args,
+chequear `Stmt::Return` contra el return type declarado.
+
+##### 5.3.3 — Result, `?`, match exhaustivo
+**Pendiente** — `?` exige Result en operando y firma de fn
+contenedora compatible; match sobre Result exige ambas ramas.
+
+##### 5.3.4 — Métodos built-in con templates paramétricos
+**Pendiente** — `xs.map(f)`, `m.get(k)`, `s.upper()`, etc. Cada
+método con su signature template (`List<T>.map(fn(T) -> U) -> List<U>`).
+
+##### 5.3.5 — FnExpr ret inferido + cierre de 5.3
+**Pendiente** — refinar `Expr::FnExpr` para sintetizar `ret`
+desde el body. Cierre formal de 5.3.
 
 ### Features de la fase entera
 - [x] TypeExpr en AST y parser (5.1)
 - [x] Resolución de tipos y checker base (5.2)
-- [ ] Type checker completo (5.3 + 5.4)
+- [x] Checker de expresiones — synthesis básico (5.3.1)
+- [ ] Checker completo (5.3.2 → 5.3.5 + 5.4)
 - [ ] Inferencia de tipos
 - [ ] Optimizaciones básicas (5b)
 - [ ] Binario nativo standalone (5b)
