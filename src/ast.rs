@@ -68,7 +68,7 @@ pub enum Expr {
 
     /// Función anónima en posición de expresión: `fn(x) => x * 2` o
     /// `fn(x) { return x * 2 }`. La forma flecha la convierte el parser a
-    /// `body: vec![Stmt::Return(expr)]` — mismo truco que `Stmt::FnDef`.
+    /// `body: vec![Stmt::Return(expr, Span::ZERO)]` — mismo truco que `Stmt::FnDef`.
     /// No tiene nombre; se evalúa a un `Value::Function` con closure
     /// capturando el env del lugar de definición.
     FnExpr {
@@ -179,6 +179,56 @@ pub enum AssignTarget {
     },
 }
 
+/// Posición de un nodo del AST en el archivo fuente. La acompaña a
+/// cada `Stmt` desde B.1 — sirve para enriquecer los mensajes de
+/// error del checker/evaluador con línea y columna reales (antes
+/// quedaban siempre en `0:0`).
+///
+/// Para nodos sintéticos (construidos por el parser sin un token
+/// concreto, p.ej. el cuerpo flecha de `fn f(x) => x * 2` que se
+/// convierte a `Return`), o para nodos de tests, usamos
+/// `Span::default()` (= `Span::ZERO`, ambos campos a 0). El sitio
+/// que reporta error chequea `is_known()` antes de citar posición.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Span {
+    pub line: usize,
+    pub column: usize,
+}
+
+impl Span {
+    pub const ZERO: Span = Span { line: 0, column: 0 };
+
+    pub fn new(line: usize, column: usize) -> Self {
+        Span { line, column }
+    }
+
+    /// `true` si el span apunta a una posición real (no fue
+    /// completado con `default()`). Lo usan los formatters de error
+    /// para decidir si citan línea/columna o solo el mensaje.
+    /// Mantenido como API pública para uso futuro en
+    /// `FitzError::Display`.
+    #[allow(dead_code)]
+    pub fn is_known(&self) -> bool {
+        self.line != 0 || self.column != 0
+    }
+}
+
+/// `Span` se compara como **siempre igual** a sí mismo. Razón: los
+/// tests del AST/parser/evaluator usan `assert_eq!` sobre `Stmt` y
+/// `Expr` construyendo nodos literales con `Span::ZERO`, contra
+/// nodos producidos por el parser con spans reales. Si la comparación
+/// fuera estructural sobre `line`/`column`, ~30 tests deberían
+/// duplicar la lógica del parser para predecir las posiciones — sin
+/// valor real (los tests miran estructura, no posición). Cuando hace
+/// falta validar la posición, se compara explícitamente `span.line`
+/// y `span.column` (ver tests dedicados de span en parser y checker).
+impl PartialEq for Span {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+impl Eq for Span {}
+
 /// Una sentencia: ejecuta un efecto, opcionalmente produce un valor.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
@@ -191,17 +241,18 @@ pub enum Stmt {
         target: AssignTarget,
         type_: Option<TypeExpr>,
         value: Expr,
+        span: Span,
     },
 
     /// `return expr`.
-    Return(Expr),
+    Return(Expr, Span),
 
     /// Una expresión usada como sentencia (típicamente una llamada).
-    Expr(Expr),
+    Expr(Expr, Span),
 
     /// Definición de función. Soporta forma de bloque y forma de flecha
     /// (`fn f(n) => n * 2`) — esta última la convierte el parser a
-    /// `body: vec![Stmt::Return(Expr)]`.
+    /// `body: vec![Stmt::Return(Expr, Span::ZERO)]`.
     ///
     /// `decorators` lista los `@deco(args...)` que envuelven la función,
     /// en el orden en que aparecen en el código fuente. El parser solo
@@ -215,30 +266,34 @@ pub enum Stmt {
         body: Vec<Stmt>,
         is_async: bool,
         decorators: Vec<Decorator>,
+        span: Span,
     },
 
     /// Definición de tipo custom: `type User { id: Int, name: Str }`.
     TypeDef {
         name: String,
         fields: Vec<Field>,
+        span: Span,
     },
 
     /// `break` dentro de loop/while/for.
-    Break,
+    Break(Span),
 
     /// `continue` dentro de loop/while/for.
-    Continue,
+    Continue(Span),
 
     /// `while cond { body }`. Itera mientras `cond` evalúe a `Bool(true)`.
     /// `break` corta el loop; `continue` salta a la próxima iteración.
     While {
         condition: Expr,
         body: Vec<Stmt>,
+        span: Span,
     },
 
     /// `loop { body }` — loop infinito. Solo se sale con `break` (o `return`).
     Loop {
         body: Vec<Stmt>,
+        span: Span,
     },
 
     /// `for var in iter { body }`. `iter` se evalúa una vez al entrar
@@ -249,6 +304,7 @@ pub enum Stmt {
         var: String,
         iter: Expr,
         body: Vec<Stmt>,
+        span: Span,
     },
 
     /// `import foo` o `import foo.bar.baz` — carga un módulo desde
@@ -261,6 +317,7 @@ pub enum Stmt {
     Import {
         /// Segmentos del path en orden. Siempre tiene al menos un elemento.
         path: Vec<String>,
+        span: Span,
     },
 
     /// `from foo import a, b, c` o `from foo.bar import x` — carga el
@@ -271,7 +328,31 @@ pub enum Stmt {
     FromImport {
         path: Vec<String>,
         names: Vec<String>,
+        span: Span,
     },
+}
+
+impl Stmt {
+    /// Devuelve el span de cualquier variante. Helper para los sitios
+    /// que reportan errores sobre un stmt sin matchear por variante.
+    /// Mantenido como API pública para tests y uso futuro.
+    #[allow(dead_code)]
+    pub fn span(&self) -> Span {
+        match self {
+            Stmt::Assign { span, .. } => *span,
+            Stmt::Return(_, span) => *span,
+            Stmt::Expr(_, span) => *span,
+            Stmt::FnDef { span, .. } => *span,
+            Stmt::TypeDef { span, .. } => *span,
+            Stmt::Break(span) => *span,
+            Stmt::Continue(span) => *span,
+            Stmt::While { span, .. } => *span,
+            Stmt::Loop { span, .. } => *span,
+            Stmt::For { span, .. } => *span,
+            Stmt::Import { span, .. } => *span,
+            Stmt::FromImport { span, .. } => *span,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -454,7 +535,7 @@ mod tests {
                 target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into()),
-            },
+             span: Span::ZERO },
             // x = 10 + 5
             Stmt::Assign {
                 target: AssignTarget::Ident("x".into()),
@@ -464,7 +545,7 @@ mod tests {
                     left: Box::new(Expr::Int(10)),
                     right: Box::new(Expr::Int(5)),
                 },
-            },
+             span: Span::ZERO },
             // print("Hola, {name}!")
             Stmt::Expr(Expr::Call {
                 callee: Box::new(Expr::Ident("print".into())),
@@ -473,7 +554,7 @@ mod tests {
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit("!".into()),
                 ])],
-            }),
+            }, Span::ZERO),
             // fn double(n) => n * 2
             Stmt::FnDef {
                 name: "double".into(),
@@ -483,10 +564,10 @@ mod tests {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(2)),
-                })],
+                }, Span::ZERO)],
                 is_async: false,
                 decorators: vec![],
-            },
+             span: Span::ZERO },
             // print(double(x))
             Stmt::Expr(Expr::Call {
                 callee: Box::new(Expr::Ident("print".into())),
@@ -494,7 +575,7 @@ mod tests {
                     callee: Box::new(Expr::Ident("double".into())),
                     args: vec![Expr::Ident("x".into())],
                 }],
-            }),
+            }, Span::ZERO),
         ];
 
         assert_eq!(program.len(), 5);
@@ -524,9 +605,9 @@ mod tests {
     #[test]
     fn ast_supports_break_and_continue_inside_loops() {
         // Stmt::Break y Stmt::Continue son sentencias por sí mismas.
-        let stmts: Vec<Stmt> = vec![Stmt::Break, Stmt::Continue];
-        assert_eq!(stmts[0], Stmt::Break);
-        assert_eq!(stmts[1], Stmt::Continue);
+        let stmts: Vec<Stmt> = vec![Stmt::Break(Span::ZERO), Stmt::Continue(Span::ZERO)];
+        assert_eq!(stmts[0], Stmt::Break(Span::ZERO));
+        assert_eq!(stmts[1], Stmt::Continue(Span::ZERO));
     }
 
     #[test]
@@ -605,10 +686,10 @@ mod tests {
             body: vec![Stmt::Expr(Expr::Call {
                 callee: Box::new(Expr::Ident("print".into())),
                 args: vec![Expr::Ident("x".into())],
-            })],
-        };
+            }, Span::ZERO)],
+         span: Span::ZERO };
         match f {
-            Stmt::For { var, iter, body } => {
+            Stmt::For { var, iter, body, .. } => {
                 assert_eq!(var, "x");
                 assert_eq!(iter, Expr::Ident("xs".into()));
                 assert_eq!(body.len(), 1);
@@ -749,14 +830,14 @@ mod tests {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Int(2)),
-            })],
+            }, Span::ZERO)],
         };
         match fnexpr {
             Expr::FnExpr { params, body } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "x");
                 assert_eq!(body.len(), 1);
-                assert!(matches!(body[0], Stmt::Return(_)));
+                assert!(matches!(body[0], Stmt::Return(_, _)));
             }
             _ => panic!("se esperaba FnExpr"),
         }
@@ -768,10 +849,10 @@ mod tests {
 
     #[test]
     fn import_simple_guarda_path_de_un_segmento() {
-        // `import utils` → Stmt::Import { path: ["utils"] }
-        let s = Stmt::Import { path: vec!["utils".into()] };
+        // `import utils` → Stmt::Import { path: ["utils"] , span: Span::ZERO }
+        let s = Stmt::Import { path: vec!["utils".into()] , span: Span::ZERO };
         match s {
-            Stmt::Import { path } => {
+            Stmt::Import { path, .. } => {
                 assert_eq!(path, vec!["utils".to_string()]);
             }
             _ => panic!("se esperaba Import"),
@@ -780,10 +861,10 @@ mod tests {
 
     #[test]
     fn import_punteado_guarda_segmentos_en_orden() {
-        // `import sub.foo` → Stmt::Import { path: ["sub", "foo"] }
-        let s = Stmt::Import { path: vec!["sub".into(), "foo".into()] };
+        // `import sub.foo` → Stmt::Import { path: ["sub", "foo"] , span: Span::ZERO }
+        let s = Stmt::Import { path: vec!["sub".into(), "foo".into()] , span: Span::ZERO };
         match s {
-            Stmt::Import { path } => {
+            Stmt::Import { path, .. } => {
                 assert_eq!(path.len(), 2);
                 assert_eq!(path[0], "sub");
                 assert_eq!(path[1], "foo");
@@ -798,9 +879,9 @@ mod tests {
         let s = Stmt::FromImport {
             path: vec!["utils".into()],
             names: vec!["slugify".into(), "parse".into()],
-        };
+         span: Span::ZERO };
         match s {
-            Stmt::FromImport { path, names } => {
+            Stmt::FromImport { path, names, .. } => {
                 assert_eq!(path, vec!["utils".to_string()]);
                 assert_eq!(names, vec!["slugify".to_string(), "parse".to_string()]);
             }
@@ -834,7 +915,7 @@ mod tests {
             body: vec![],
             is_async: false,
             decorators: vec![],
-        };
+         span: Span::ZERO };
         if let Stmt::FnDef { decorators, .. } = f {
             assert!(decorators.is_empty());
         } else {
@@ -855,7 +936,7 @@ mod tests {
                 Decorator { name: "get".into(), args: vec![Expr::Str("/x".into())] },
                 Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into())] },
             ],
-        };
+         span: Span::ZERO };
         if let Stmt::FnDef { decorators, .. } = f {
             assert_eq!(decorators.len(), 2);
             assert_eq!(decorators[0].name, "get");
@@ -872,7 +953,7 @@ mod tests {
             target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(1),
-        };
+         span: Span::ZERO };
         if let Stmt::Assign { target, .. } = s1 {
             assert_eq!(target, AssignTarget::Ident("x".into()));
         } else {
@@ -887,7 +968,7 @@ mod tests {
             },
             type_: None,
             value: Expr::Str("x".into()),
-        };
+         span: Span::ZERO };
         if let Stmt::Assign { target: AssignTarget::Field { object, field }, .. } = s2 {
             assert_eq!(*object, Expr::Ident("user".into()));
             assert_eq!(field, "name");

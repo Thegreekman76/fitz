@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, Program, Stmt, TypeExpr};
+use crate::ast::{Expr, Program, Span, Stmt, TypeExpr};
 use crate::error::{ErrorKind, FitzError};
 
 /// Identidad única para los tipos nominales (los declarados con
@@ -350,7 +350,7 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
 
     // Vuelta 2: resolver los fields de cada `type`.
     for stmt in program {
-        if let Stmt::TypeDef { name, fields } = stmt {
+        if let Stmt::TypeDef { name, fields, .. } = stmt {
             // Si la declaración falló (duplicado), no hay id que actualizar.
             let id = match env.lookup(name) {
                 Some(id) => id,
@@ -434,7 +434,7 @@ fn resolve_stmt_annotations(stmt: &Stmt, env: &TypeEnv, errors: &mut Vec<FitzErr
                 resolve_stmt_annotations(s, env, errors);
             }
         }
-        Stmt::While { body, .. } | Stmt::Loop { body } | Stmt::For { body, .. } => {
+        Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
             for s in body {
                 resolve_stmt_annotations(s, env, errors);
             }
@@ -642,6 +642,22 @@ impl<'a> CheckCtx<'a> {
     fn error(&mut self, msg: impl Into<String>) {
         self.errors
             .push(FitzError::new(ErrorKind::TypeError, 0, 0, msg.into()));
+    }
+
+    /// Variante de `error` que cita la posición real del nodo (línea
+    /// y columna del primer token del `Stmt`). Lo usan los sitios de
+    /// reporte stmt-level — ver `check_stmt`. Cuando el span es
+    /// `Span::ZERO` (nodos sintéticos del parser o tests),
+    /// `FitzError::Display` omite el prefijo "en línea N:M" por la
+    /// regla `is_known()` de Span — el comportamiento queda idéntico
+    /// a `error` para esos casos.
+    fn error_at(&mut self, span: Span, msg: impl Into<String>) {
+        self.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            msg.into(),
+        ));
     }
 }
 
@@ -1690,14 +1706,14 @@ fn check_block(ctx: &mut CheckCtx, body: &[Stmt]) {
 /// declara variables.
 fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
     match stmt {
-        Stmt::Assign { target, type_, value } => {
+        Stmt::Assign { target, type_, value, span } => {
             let value_ty = infer_expr(ctx, value);
             if let AssignTarget::Ident(name) = target {
                 match type_ {
                     Some(ann) => {
                         let declared = resolve_type_expr(ann, ctx.types).unwrap_or(Type::Any);
                         if !is_compatible(&value_ty, &declared) {
-                            ctx.error(format!(
+                            ctx.error_at(*span, format!(
                                 "`{}` declarado como `{}` recibió un valor `{}`",
                                 name,
                                 declared.display(ctx.types),
@@ -1718,7 +1734,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             Some(existing) if existing.annotated => {
                                 let existing_ty = existing.ty.clone();
                                 if !is_compatible(&value_ty, &existing_ty) {
-                                    ctx.error(format!(
+                                    ctx.error_at(*span, format!(
                                         "`{}` declarado como `{}` recibió un valor `{}`",
                                         name,
                                         existing_ty.display(ctx.types),
@@ -1741,7 +1757,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // Nominal con field y compararlo — bajo el radar de 5.3.1).
         }
 
-        Stmt::Return(e) => {
+        Stmt::Return(e, span) => {
             // Inferimos siempre para que los errores adentro afloren.
             let ret_ty = infer_expr(ctx, e);
             // Si estamos adentro de una función con return_type
@@ -1750,7 +1766,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // ya emite error en runtime si `return` está huérfano.
             if let Some(expected) = ctx.return_stack.last().cloned() {
                 if !is_compatible(&ret_ty, &expected) {
-                    ctx.error(format!(
+                    ctx.error_at(*span, format!(
                         "`return` devuelve `{}` pero la función declara `{}`",
                         ret_ty.display(ctx.types),
                         expected.display(ctx.types)
@@ -1765,7 +1781,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             }
         }
 
-        Stmt::Expr(e) => {
+        Stmt::Expr(e, _) => {
             let _ = infer_expr(ctx, e);
         }
 
@@ -1804,10 +1820,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // Ya validada por resolve_program.
         }
 
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body, span } => {
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
-                ctx.error(format!(
+                ctx.error_at(*span, format!(
                     "la condición de `while` debe ser Bool, recibió `{}`",
                     cond_ty.display(ctx.types)
                 ));
@@ -1817,20 +1833,20 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.pop_scope();
         }
 
-        Stmt::Loop { body } => {
+        Stmt::Loop { body, .. } => {
             ctx.push_scope();
             check_block(ctx, body);
             ctx.pop_scope();
         }
 
-        Stmt::For { var, iter, body } => {
+        Stmt::For { var, iter, body, span } => {
             let iter_ty = infer_expr(ctx, iter);
             let elem_ty = match &iter_ty {
                 Type::List(t) => (**t).clone(),
                 Type::Range => Type::Int,
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error(format!(
+                    ctx.error_at(*span, format!(
                         "el iterable de `for` debe ser List o Range, recibió `{}`",
                         other.display(ctx.types)
                     ));
@@ -1843,9 +1859,9 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.pop_scope();
         }
 
-        Stmt::Break | Stmt::Continue => {}
+        Stmt::Break(_) | Stmt::Continue(_) => {}
 
-        Stmt::Import { path } => {
+        Stmt::Import { path, .. } => {
             // `import a.b.c` bindea `c` como Module (Any en el checker).
             if let Some(last) = path.last() {
                 ctx.declare_var(last.clone(), Type::Any);
@@ -1931,6 +1947,37 @@ mod tests {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
         resolve_program(&program)
+    }
+
+    fn errors_of(src: &str) -> Vec<FitzError> {
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (_env, errors) = check_program(&program);
+        errors
+    }
+
+    #[test]
+    fn error_de_asignacion_con_tipo_incompatible_cita_linea_real() {
+        // B.1: el error apunta al `let` del stmt (línea/col reales),
+        // no al genérico `0:0` que se usaba antes.
+        let errors = errors_of("\n\nlet x: Int = \"texto\"");
+        assert_eq!(errors.len(), 1, "esperaba 1 error, fue {:?}", errors);
+        let e = &errors[0];
+        assert_eq!(e.line, 3, "esperaba línea 3, fue {}", e.line);
+        assert_eq!(e.column, 1, "esperaba col 1, fue {}", e.column);
+    }
+
+    #[test]
+    fn error_de_while_no_bool_cita_linea_real() {
+        let errors = errors_of("\nwhile (42) { let _ = 0 }");
+        assert!(!errors.is_empty(), "esperaba error de tipo");
+        let e = &errors[0];
+        assert_eq!(e.line, 2, "esperaba línea 2, fue {}", e.line);
+        assert!(
+            e.message.contains("while"),
+            "esperaba mensaje sobre while, fue: {}",
+            e.message
+        );
     }
 
     // ---- resolve_type_expr ----
@@ -2339,7 +2386,7 @@ mod tests {
                     type_: TE::named("Int"),
                     default: None,
                 }],
-            },
+             span: Span::ZERO },
             Stmt::FnDef {
                 name: "noop".into(),
                 params: vec![Param {
@@ -2350,12 +2397,12 @@ mod tests {
                 body: vec![],
                 is_async: false,
                 decorators: Vec::<Decorator>::new(),
-            },
+             span: Span::ZERO },
             Stmt::Assign {
                 target: AssignTarget::Ident("v".into()),
                 type_: Some(TE::Nullable(Box::new(TE::named("X")))),
                 value: Expr::Null,
-            },
+             span: Span::ZERO },
         ];
         let (env, errors) = resolve_program(&program);
         assert!(errors.is_empty(), "errores: {:?}", errors);
@@ -2935,7 +2982,7 @@ mod tests {
 
     #[test]
     fn return_arrow_implicito_chequea_contra_return_type() {
-        // `fn f() -> Int => "x"` se desugarea a `body: [Stmt::Return("x")]`.
+        // `fn f() -> Int => "x"` se desugarea a `body: [Stmt::Return("x", Span::ZERO)]`.
         assert_error_with(
             "fn id(x: Int) -> Int => \"no soy int\"",
             &["return", "Int", "Str"],

@@ -4,6 +4,12 @@
 > Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
 > **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
 
+> **Estado de ejecución**: ruta A (quick wins) cerrada — clippy limpio,
+> helpers, validaciones; B.1 (span en Stmt) cerrada — los errores
+> stmt-level del checker ya citan línea/columna reales en lugar de
+> `0:0`. Ver matriz para ítems pendientes (B.2 Expr-level, C deudas
+> funcionales).
+
 ## Resumen ejecutivo
 
 Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.
@@ -79,7 +85,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| S1 | AST + propagación | **Span en AST**: capturar línea/columna en `Expr`/`Stmt`, propagar a errores. Hoy todo `0:0`. Mencionado en codegen, checker, parser, evaluator. | Alta | Alta |
+| S1 | AST + propagación | **Span en AST**: capturar línea/columna en `Expr`/`Stmt`, propagar a errores. **Stmt-level cerrado en B.1** — los errores del checker `let x: Int = "foo"`, `while (42)`, `for x in 1`, return type mismatch citan posición real. **Expr-level (S1.2, ex-B.2) pendiente** — errores sobre BinOp/Call/etc. heredan el span del Stmt contenedor (línea precisa, columna degradada). | Media (Expr-level) | Alta |
 | U1 | `evaluator.rs` | Mensajes de error inconsistentes en estilo: "no tiene método X" vs "el tipo X no soporta" vs "espera Y arg(s)". Falta helper unificado. | Media | Baja |
 | U2 | `types.rs` ~20 sitios | Mismo patrón `ctx.error(format!("...{}...{}...", ...))` repetido. Helper `type_mismatch_error(label, expected, actual)` reduce repetición. | Baja | Baja |
 | U3 | `http.rs:481` | El handler-mapping `Ok→200/Err→500` no incluye stack trace del Err en log (solo en response). Útil para debug. | Baja | Baja |

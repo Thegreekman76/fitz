@@ -26,6 +26,11 @@ use std::path::{Path, PathBuf};
 use crate::ast::{
     AssignTarget, BinOpKind, Decorator, Expr, Param, Pattern, Program, Stmt, StrPart, UnaryOpKind,
 };
+// `Span` se usa solo en tests (construcción literal de Stmts con
+// `Span::ZERO`); el evaluator de producción accede a spans via
+// `_, span: _` patterns que no requieren el tipo en scope.
+#[cfg(test)]
+use crate::ast::Span;
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::http::{
@@ -650,7 +655,7 @@ fn signal_to_error(signal: EvalSignal) -> FitzError {
 
 fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
     match stmt {
-        Stmt::Expr(expr) => eval_expr(expr, env),
+        Stmt::Expr(expr, _) => eval_expr(expr, env),
 
         // `x = value`, `x: Tipo = value`, o `obj.campo = value`. La anotación
         // de tipo se ignora en runtime — tipado gradual, los checks de tipos
@@ -662,7 +667,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - `Field`: evaluamos el objeto receptor (tiene que ser
         //    `Value::Instance`), validamos que el campo exista, y mutamos
         //    la celda compartida `Rc<RefCell<...>>` de `fields`.
-        Stmt::Assign { target, type_: _, value } => {
+        Stmt::Assign { target, type_: _, value, span: _ } => {
             let v = eval_expr(value, env.clone())?;
             match target {
                 AssignTarget::Ident(name) => {
@@ -726,7 +731,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // `return expr` — evalúa el valor y lo emite como signal. El handler
         // de Call lo intercepta y lo convierte en valor de retorno. Si nadie
         // lo intercepta, llega al top level y se reporta como error.
-        Stmt::Return(expr) => {
+        Stmt::Return(expr, _) => {
             let v = eval_expr(expr, env)?;
             Err(EvalSignal::Return(v))
         }
@@ -748,7 +753,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // — los tests y el REPL evalúan sin HTTP. Cualquier decorator no
         // HTTP también es error: `@server` (4.4) y otros entran cuando
         // los implementemos.
-        Stmt::FnDef { name, params, return_type: _, body, is_async: _, decorators } => {
+        Stmt::FnDef { name, params, return_type: _, body, is_async: _, decorators, span: _ } => {
             let func = Value::Function {
                 params: params.clone(),
                 body: body.clone(),
@@ -771,7 +776,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // `type Name { campo1: T1, ... }`. Por ahora solo registramos el
         // tipo en el env como un valor inerte. La instanciación (`User { id: 1 }`)
         // y el field access requieren extensiones del AST (Fase 3).
-        Stmt::TypeDef { name, fields } => {
+        Stmt::TypeDef { name, fields, span: _ } => {
             let t = Value::Type {
                 name: name.clone(),
                 fields: fields.clone(),
@@ -779,8 +784,8 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             env.borrow_mut().define(name.clone(), t);
             Ok(Value::Null)
         }
-        Stmt::Break => Err(EvalSignal::Break),
-        Stmt::Continue => Err(EvalSignal::Continue),
+        Stmt::Break(_) => Err(EvalSignal::Break),
+        Stmt::Continue(_) => Err(EvalSignal::Continue),
 
         // `for var in iter { body }` — evalúa `iter` una sola vez al
         // entrar, después itera. `var` se redefine en el env actual en
@@ -792,7 +797,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - Range: itera los Int de start a end-1.
         //  - Map: aún no (necesita el tipo `Pair`/`entry`; deuda abierta).
         //  - Otros: type error explícito.
-        Stmt::For { var, iter, body } => {
+        Stmt::For { var, iter, body, span: _ } => {
             let iter_v = eval_expr(iter, env.clone())?;
             let items_iter: Box<dyn Iterator<Item = Value>> = match iter_v {
                 // La lista va por referencia compartida (`Rc<RefCell<>>`).
@@ -841,7 +846,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // loop, `Continue` salta a la siguiente iteración. Errors y
         // `Return` se propagan al caller (un return dentro de un while
         // dentro de una función rompe ambos hasta la función).
-        Stmt::While { condition, body } => {
+        Stmt::While { condition, body, span: _ } => {
             loop {
                 let cond_v = eval_expr(condition, env.clone())?;
                 let cond_bool = match cond_v {
@@ -872,7 +877,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
 
         // `loop { body }` — itera para siempre. Solo `break` o `return`
         // pueden sacarte.
-        Stmt::Loop { body } => {
+        Stmt::Loop { body, span: _ } => {
             loop {
                 match run_loop_body(body, env.clone()) {
                     LoopControl::Continue => continue,
@@ -887,7 +892,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // bajo el ÚLTIMO segmento del path (`sub.foo` → binding `foo`).
         // Para field access (`foo.bar`) ver `eval_expr` sobre `Expr::Field`;
         // para method calls (`foo.bar()`) ver `dispatch_method`.
-        Stmt::Import { path } => {
+        Stmt::Import { path, span: _ } => {
             let module = load_module(path)?;
             let binding_name = path
                 .last()
@@ -901,7 +906,7 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // nombre directo al scope actual. Si el módulo no expone
         // alguno de los nombres pedidos, error explícito citando cuál
         // falta y desde qué módulo.
-        Stmt::FromImport { path, names } => {
+        Stmt::FromImport { path, names, span: _ } => {
             let module = load_module(path)?;
             let module_env = match &module {
                 Value::Module { env, .. } => env.clone(),
@@ -2254,7 +2259,7 @@ mod tests {
     #[test]
     fn stmt_expr_evalua_la_expresion_interna() {
         let env = Environment::new();
-        let stmt = Stmt::Expr(Expr::Int(7));
+        let stmt = Stmt::Expr(Expr::Int(7), Span::ZERO);
         let result = eval_stmt(&stmt, env).unwrap();
         assert_eq!(result, Value::Int(7));
     }
@@ -2291,7 +2296,7 @@ mod tests {
 
     #[test]
     fn break_fuera_de_loop_es_error() {
-        let result = eval(vec![Stmt::Break]);
+        let result = eval(vec![Stmt::Break(Span::ZERO)]);
         assert!(matches!(
             result.unwrap_err().kind,
             ErrorKind::BreakOutsideLoop
@@ -2300,7 +2305,7 @@ mod tests {
 
     #[test]
     fn continue_fuera_de_loop_es_error() {
-        let result = eval(vec![Stmt::Continue]);
+        let result = eval(vec![Stmt::Continue(Span::ZERO)]);
         assert!(matches!(
             result.unwrap_err().kind,
             ErrorKind::ContinueOutsideLoop
@@ -2593,7 +2598,7 @@ mod tests {
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(42),
-        };
+         span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
 
         assert_eq!(env.borrow().get("x"), Some(Value::Int(42)));
@@ -2607,7 +2612,7 @@ mod tests {
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(99),
-        };
+         span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
 
         assert_eq!(env.borrow().get("x"), Some(Value::Int(99)));
@@ -2622,7 +2627,7 @@ mod tests {
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(42),
-        };
+         span: Span::ZERO };
         eval_stmt(&stmt, child).unwrap();
 
         // El cambio se ve en el global.
@@ -2637,7 +2642,7 @@ mod tests {
         let stmt = Stmt::Assign { target: AssignTarget::Ident("nueva".into()),
             type_: None,
             value: Expr::Int(7),
-        };
+         span: Span::ZERO };
         eval_stmt(&stmt, child.clone()).unwrap();
 
         // Solo existe en child, no se propagó al padre.
@@ -2653,7 +2658,7 @@ mod tests {
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: Some(TypeExpr::named("Int")),
             value: Expr::Str("soy un string".into()),
-        };
+         span: Span::ZERO };
         assert!(eval_stmt(&stmt, env.clone()).is_ok());
         assert_eq!(env.borrow().get("x"), Some(Value::Str("soy un string".into())));
     }
@@ -2787,7 +2792,7 @@ mod tests {
             body,
             is_async: false,
             decorators: vec![],
-        }
+         span: Span::ZERO }
     }
 
     #[test]
@@ -2805,7 +2810,7 @@ mod tests {
         // fn f() { return 42 } ; f()
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(42))]),
+            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(42), Span::ZERO)]),
             env.clone(),
         ).unwrap();
 
@@ -2822,7 +2827,7 @@ mod tests {
             op: BinOpKind::Mul,
             left: Box::new(Expr::Ident("n".into())),
             right: Box::new(Expr::Int(2)),
-        })];
+        }, Span::ZERO)];
         eval_stmt(&fn_def("double", vec!["n"], body), env.clone()).unwrap();
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Int(7)],
@@ -2838,7 +2843,7 @@ mod tests {
             op: BinOpKind::Add,
             left: Box::new(Expr::Ident("a".into())),
             right: Box::new(Expr::Ident("b".into())),
-        })];
+        }, Span::ZERO)];
         eval_stmt(&fn_def("add", vec!["a", "b"], body), env.clone()).unwrap();
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("add".into())), args: vec![Expr::Int(3), Expr::Int(4)],
@@ -2856,7 +2861,7 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(10));
 
-        let body = vec![Stmt::Return(Expr::Ident("x".into()))];
+        let body = vec![Stmt::Return(Expr::Ident("x".into()), Span::ZERO)];
         eval_stmt(&fn_def("get_x", vec![], body), env.clone()).unwrap();
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("get_x".into())), args: vec![] };
@@ -2869,7 +2874,7 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(100));
 
-        let body = vec![Stmt::Return(Expr::Ident("x".into()))];
+        let body = vec![Stmt::Return(Expr::Ident("x".into()), Span::ZERO)];
         eval_stmt(&fn_def("f", vec!["x"], body), env.clone()).unwrap();
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(7)],
@@ -2882,7 +2887,7 @@ mod tests {
         // fn f(a, b) ... ; f(1)
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec!["a", "b"], vec![Stmt::Return(Expr::Int(0))]),
+            &fn_def("f", vec!["a", "b"], vec![Stmt::Return(Expr::Int(0), Span::ZERO)]),
             env.clone(),
         ).unwrap();
 
@@ -2900,7 +2905,7 @@ mod tests {
     fn fn_con_muchos_args_es_error() {
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(0))]),
+            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(0), Span::ZERO)]),
             env.clone(),
         ).unwrap();
 
@@ -2917,7 +2922,7 @@ mod tests {
     #[test]
     fn return_fuera_de_fn_es_error() {
         // En el top level, `return 5` no tiene caller que lo intercepte.
-        let result = eval(vec![Stmt::Return(Expr::Int(5))]);
+        let result = eval(vec![Stmt::Return(Expr::Int(5), Span::ZERO)]);
         assert!(matches!(
             result.unwrap_err().kind,
             ErrorKind::ReturnOutsideFunction
@@ -2940,12 +2945,12 @@ mod tests {
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(2)),
                 },
-            },
+             span: Span::ZERO },
             Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Add,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Int(1)),
-            }),
+            }, Span::ZERO),
         ];
         eval_stmt(&fn_def("f", vec!["n"], body), env.clone()).unwrap();
 
@@ -2962,8 +2967,8 @@ mod tests {
         // }
         let env = Environment::new();
         let body = vec![
-            Stmt::Return(Expr::Int(1)),
-            Stmt::Return(Expr::Int(2)),
+            Stmt::Return(Expr::Int(1), Span::ZERO),
+            Stmt::Return(Expr::Int(2), Span::ZERO),
         ];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).unwrap();
 
@@ -2981,21 +2986,21 @@ mod tests {
     #[test]
     fn if_true_sin_else_devuelve_valor_del_then() {
         // if true { 7 } → 7
-        let e = if_expr(Expr::Bool(true), vec![Stmt::Expr(Expr::Int(7))], None);
+        let e = if_expr(Expr::Bool(true), vec![Stmt::Expr(Expr::Int(7), Span::ZERO)], None);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(7));
     }
 
     #[test]
     fn if_false_sin_else_devuelve_null() {
-        let e = if_expr(Expr::Bool(false), vec![Stmt::Expr(Expr::Int(7))], None);
+        let e = if_expr(Expr::Bool(false), vec![Stmt::Expr(Expr::Int(7), Span::ZERO)], None);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Null);
     }
 
     #[test]
     fn if_else_toma_la_rama_correcta() {
         // if true { 1 } else { 2 } → 1
-        let then = vec![Stmt::Expr(Expr::Int(1))];
-        let else_ = vec![Stmt::Expr(Expr::Int(2))];
+        let then = vec![Stmt::Expr(Expr::Int(1), Span::ZERO)];
+        let else_ = vec![Stmt::Expr(Expr::Int(2), Span::ZERO)];
         let e = if_expr(Expr::Bool(true), then.clone(), Some(else_.clone()));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(1));
 
@@ -3017,8 +3022,8 @@ mod tests {
     fn if_evalua_solo_la_rama_correspondiente() {
         // El then es un Ident no definido. Si se evaluara, daría error.
         // Como cond es false, no se toca → resultado del else.
-        let then = vec![Stmt::Expr(Expr::Ident("no_existe".into()))];
-        let else_ = vec![Stmt::Expr(Expr::Int(99))];
+        let then = vec![Stmt::Expr(Expr::Ident("no_existe".into()), Span::ZERO)];
+        let else_ = vec![Stmt::Expr(Expr::Int(99), Span::ZERO)];
         let e = if_expr(Expr::Bool(false), then, Some(else_));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(99));
     }
@@ -3040,9 +3045,9 @@ mod tests {
             vec![Stmt::Assign { target: AssignTarget::Ident("y".into()),
                 type_: None,
                 value: Expr::Int(99),
-            }],
+             span: Span::ZERO }],
             None,
-        ));
+        ), Span::ZERO);
         eval_stmt(&if_stmt, env.clone()).unwrap();
 
         assert_eq!(env.borrow().get("y"), Some(Value::Int(99)));
@@ -3052,16 +3057,16 @@ mod tests {
     fn else_if_anidado_funciona() {
         // if false { 1 } else if true { 2 } else { 3 } → 2
         //
-        // El parser modela `else if` como `else_: vec![Stmt::Expr(Expr::If)]`.
+        // El parser modela `else if` como `else_: vec![Stmt::Expr(Expr::If, Span::ZERO)]`.
         let inner = if_expr(
             Expr::Bool(true),
-            vec![Stmt::Expr(Expr::Int(2))],
-            Some(vec![Stmt::Expr(Expr::Int(3))]),
+            vec![Stmt::Expr(Expr::Int(2), Span::ZERO)],
+            Some(vec![Stmt::Expr(Expr::Int(3), Span::ZERO)]),
         );
         let outer = if_expr(
             Expr::Bool(false),
-            vec![Stmt::Expr(Expr::Int(1))],
-            Some(vec![Stmt::Expr(inner)]),
+            vec![Stmt::Expr(Expr::Int(1), Span::ZERO)],
+            Some(vec![Stmt::Expr(inner, Span::ZERO)]),
         );
         assert_eq!(eval_expr_test(outer).unwrap(), Value::Int(2));
     }
@@ -3074,10 +3079,10 @@ mod tests {
             type_: None,
             value: if_expr(
                 Expr::Bool(true),
-                vec![Stmt::Expr(Expr::Int(42))],
-                Some(vec![Stmt::Expr(Expr::Int(0))]),
+                vec![Stmt::Expr(Expr::Int(42), Span::ZERO)],
+                Some(vec![Stmt::Expr(Expr::Int(0), Span::ZERO)]),
             ),
-        };
+         span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
         assert_eq!(env.borrow().get("r"), Some(Value::Int(42)));
     }
@@ -3101,9 +3106,9 @@ mod tests {
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(0)),
                 },
-                vec![Stmt::Return(Expr::Int(1))],
+                vec![Stmt::Return(Expr::Int(1), Span::ZERO)],
                 None,
-            )),
+            ), Span::ZERO),
             Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("n".into())),
@@ -3113,7 +3118,7 @@ mod tests {
                         right: Box::new(Expr::Int(1)),
                     }],
                 }),
-            }),
+            }, Span::ZERO),
         ];
 
         eval_stmt(&fn_def("factorial", vec!["n"], body), env.clone()).unwrap();
@@ -3445,7 +3450,7 @@ print(_)\n";
                         left: Box::new(Expr::Ident("total".into())),
                         right: Box::new(Expr::Ident("i".into())),
                     },
-                },
+                 span: Span::ZERO },
                 Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
@@ -3453,9 +3458,9 @@ print(_)\n";
                         left: Box::new(Expr::Ident("i".into())),
                         right: Box::new(Expr::Int(1)),
                     },
-                },
+                 span: Span::ZERO },
             ],
-        };
+          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
         assert_eq!(env.borrow().get("total"), Some(Value::Int(10)));
     }
@@ -3470,8 +3475,8 @@ print(_)\n";
             body: vec![Stmt::Assign { target: AssignTarget::Ident("counter".into()),
                 type_: None,
                 value: Expr::Int(99),
-            }],
-        };
+             span: Span::ZERO }],
+          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
         assert_eq!(env.borrow().get("counter"), Some(Value::Int(0)));
     }
@@ -3492,18 +3497,18 @@ print(_)\n";
                         left: Box::new(Expr::Ident("i".into())),
                         right: Box::new(Expr::Int(1)),
                     },
-                },
+                 span: Span::ZERO },
                 Stmt::Expr(Expr::If {
                     condition: Box::new(Expr::BinOp {
                         op: BinOpKind::Eq,
                         left: Box::new(Expr::Ident("i".into())),
                         right: Box::new(Expr::Int(3)),
                     }),
-                    then: vec![Stmt::Break],
+                    then: vec![Stmt::Break(Span::ZERO)],
                     else_: None,
-                }),
+                }, Span::ZERO),
             ],
-        };
+          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
         assert_eq!(env.borrow().get("i"), Some(Value::Int(3)));
     }
@@ -3534,16 +3539,16 @@ print(_)\n";
                         left: Box::new(Expr::Ident("i".into())),
                         right: Box::new(Expr::Int(1)),
                     },
-                },
+                 span: Span::ZERO },
                 Stmt::Expr(Expr::If {
                     condition: Box::new(Expr::BinOp {
                         op: BinOpKind::Eq,
                         left: Box::new(Expr::Ident("i".into())),
                         right: Box::new(Expr::Int(3)),
                     }),
-                    then: vec![Stmt::Continue],
+                    then: vec![Stmt::Continue(Span::ZERO)],
                     else_: None,
-                }),
+                }, Span::ZERO),
                 Stmt::Assign { target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
@@ -3551,9 +3556,9 @@ print(_)\n";
                         left: Box::new(Expr::Ident("total".into())),
                         right: Box::new(Expr::Ident("i".into())),
                     },
-                },
+                 span: Span::ZERO },
             ],
-        };
+          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
         assert_eq!(env.borrow().get("total"), Some(Value::Int(12)));
     }
@@ -3564,7 +3569,7 @@ print(_)\n";
         let stmt = Stmt::While {
             condition: Expr::Int(1),
             body: vec![],
-        };
+         span: Span::ZERO };
         assert!(matches!(
             eval_stmt(&stmt, env).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
@@ -3589,18 +3594,18 @@ print(_)\n";
                         left: Box::new(Expr::Ident("count".into())),
                         right: Box::new(Expr::Int(1)),
                     },
-                },
+                 span: Span::ZERO },
                 Stmt::Expr(Expr::If {
                     condition: Box::new(Expr::BinOp {
                         op: BinOpKind::Eq,
                         left: Box::new(Expr::Ident("count".into())),
                         right: Box::new(Expr::Int(5)),
                     }),
-                    then: vec![Stmt::Break],
+                    then: vec![Stmt::Break(Span::ZERO)],
                     else_: None,
-                }),
+                }, Span::ZERO),
             ],
-        };
+          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
         assert_eq!(env.borrow().get("count"), Some(Value::Int(5)));
     }
@@ -3614,8 +3619,8 @@ print(_)\n";
         let env = Environment::new();
         let body = vec![Stmt::While {
             condition: Expr::Bool(true),
-            body: vec![Stmt::Return(Expr::Int(42))],
-        }];
+            body: vec![Stmt::Return(Expr::Int(42), Span::ZERO)],
+         span: Span::ZERO }];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).unwrap();
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
@@ -3650,7 +3655,7 @@ print(_)\n";
                 make_field("id", "Int", false),
                 make_field("name", "Str", false),
             ],
-        };
+         span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
 
         let v = env.borrow().get("User").expect("User no quedó en el env");
@@ -3682,7 +3687,7 @@ print(_)\n";
             &Stmt::TypeDef {
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
-            },
+             span: Span::ZERO },
             env.clone(),
         ).unwrap();
 
@@ -3699,7 +3704,7 @@ print(_)\n";
             &Stmt::TypeDef {
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
-            },
+             span: Span::ZERO },
             env.clone(),
         ).unwrap();
 
@@ -3729,7 +3734,7 @@ print(_)\n";
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into()),
-            },
+             span: Span::ZERO },
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
@@ -3737,14 +3742,14 @@ print(_)\n";
                     left: Box::new(Expr::Int(10)),
                     right: Box::new(Expr::Int(5)),
                 },
-            },
+             span: Span::ZERO },
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola ".into()),
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit(", x es ".into()),
                     StrPart::Expr(Expr::Ident("x".into())),
                 ])],
-            }),
+            }, Span::ZERO),
             fn_def(
                 "double",
                 vec!["n"],
@@ -3752,11 +3757,11 @@ print(_)\n";
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(2)),
-                })],
+                }, Span::ZERO)],
             ),
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Ident("x".into())],
                 }],
-            }),
+            }, Span::ZERO),
         ];
         assert!(eval(program).is_ok());
     }
@@ -3809,13 +3814,13 @@ print(factorial(5))
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Patagonia".into()),
-            },
+             span: Span::ZERO },
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit("!".into()),
                 ])],
-            }),
+            }, Span::ZERO),
         ];
         assert!(eval(program).is_ok());
     }
@@ -4662,7 +4667,7 @@ let r = match n {
         let env = Environment::new();
         let body = vec![Stmt::Return(Expr::Try(Box::new(Expr::Ok(Box::new(
             Expr::Int(5),
-        )))))];
+        )))), Span::ZERO)];
         eval_stmt(&fn_def("pass", vec![], body), env.clone()).unwrap();
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("pass".into())), args: vec![] };
@@ -4678,8 +4683,8 @@ let r = match n {
             Stmt::Assign { target: AssignTarget::Ident("_".into()),
                 type_: None,
                 value: Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("nope".into()))))),
-            },
-            Stmt::Return(Expr::Ok(Box::new(Expr::Str("nunca llega".into())))),
+             span: Span::ZERO },
+            Stmt::Return(Expr::Ok(Box::new(Expr::Str("nunca llega".into()))), Span::ZERO),
         ];
         eval_stmt(&fn_def("boom", vec![], body), env.clone()).unwrap();
 
@@ -4757,7 +4762,7 @@ let r = match n {
         // En top-level, `Err(...)?` emite Return; el evaluador global lo
         // convierte en "return solo puede usarse adentro de una función".
         let env = Environment::new();
-        let stmt = Stmt::Expr(Expr::Try(Box::new(Expr::Err(Box::new(Expr::Int(1))))));
+        let stmt = Stmt::Expr(Expr::Try(Box::new(Expr::Err(Box::new(Expr::Int(1))))), Span::ZERO);
         match eval_stmt(&stmt, env.clone()) {
             Err(EvalSignal::Return(_)) => {} // ok — el global lo traduciría.
             other => panic!("se esperaba EvalSignal::Return, se obtuvo {:?}", other),
@@ -4777,7 +4782,7 @@ let r = match n {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Int(2)),
-            })],
+            }, Span::ZERO)],
         };
         let env = Environment::new();
         let v = eval_expr(&fnexpr, env).unwrap();

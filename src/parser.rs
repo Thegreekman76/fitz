@@ -10,8 +10,8 @@
 // y deuda explícita.
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, Param, Pattern, Program, Stmt,
-    StrPart, TypeExpr, UnaryOpKind,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, Param, Pattern, Program, Span,
+    Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::lexer::{tokenize, Token, TokenWithPos};
@@ -646,43 +646,47 @@ impl Parser {
     }
 
     /// Parsea UNA sentencia. El caller maneja terminadores y loops.
+    /// Captura el span del primer token y lo pasa a cada sub-parser
+    /// vía sus constructores de `Stmt`.
     fn parse_stmt(&mut self) -> FitzResult<Stmt> {
+        let (line, column) = self.current_pos();
+        let span = Span::new(line, column);
         match self.peek() {
-            Token::Let => self.parse_assign_with_let(),
-            Token::Return => self.parse_return(),
-            Token::Fn | Token::Async => self.parse_fndef(),
-            Token::Type => self.parse_typedef(),
-            Token::At => self.parse_decorated_fndef(),
+            Token::Let => self.parse_assign_with_let(span),
+            Token::Return => self.parse_return(span),
+            Token::Fn | Token::Async => self.parse_fndef(span),
+            Token::Type => self.parse_typedef(span),
+            Token::At => self.parse_decorated_fndef(span),
             Token::Break => {
                 self.advance();
-                Ok(Stmt::Break)
+                Ok(Stmt::Break(span))
             }
             Token::Continue => {
                 self.advance();
-                Ok(Stmt::Continue)
+                Ok(Stmt::Continue(span))
             }
-            Token::While => self.parse_while(),
-            Token::Loop => self.parse_loop(),
-            Token::For => self.parse_for(),
-            Token::Import => self.parse_import(),
-            Token::From => self.parse_from_import(),
-            _ => self.parse_expr_or_assign_stmt(),
+            Token::While => self.parse_while(span),
+            Token::Loop => self.parse_loop(span),
+            Token::For => self.parse_for(span),
+            Token::Import => self.parse_import(span),
+            Token::From => self.parse_from_import(span),
+            _ => self.parse_expr_or_assign_stmt(span),
         }
     }
 
     /// `import foo` o `import foo.bar.baz`. El path se acumula como
     /// `Ident ( '.' Ident )*`. No admite `as` (sin aliases en esta
     /// iteración). No anida — corta en el siguiente terminador.
-    fn parse_import(&mut self) -> FitzResult<Stmt> {
+    fn parse_import(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Import, "se esperaba 'import'")?;
         let path = self.parse_module_path()?;
-        Ok(Stmt::Import { path })
+        Ok(Stmt::Import { path, span })
     }
 
     /// `from foo import a, b, c` — el path puede tener puntos (`from
     /// sub.foo import bar`). La lista de nombres tiene que tener al
     /// menos uno. Acepta trailing comma.
-    fn parse_from_import(&mut self) -> FitzResult<Stmt> {
+    fn parse_from_import(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::From, "se esperaba 'from'")?;
         let path = self.parse_module_path()?;
         self.expect(
@@ -703,7 +707,7 @@ impl Parser {
                 "se esperaba identificador después de ',' en 'from ... import'",
             )?);
         }
-        Ok(Stmt::FromImport { path, names })
+        Ok(Stmt::FromImport { path, names, span })
     }
 
     /// Path de módulo: `Ident ( '.' Ident )*`. Devuelve los segmentos.
@@ -724,7 +728,7 @@ impl Parser {
         Ok(segments)
     }
 
-    fn parse_assign_with_let(&mut self) -> FitzResult<Stmt> {
+    fn parse_assign_with_let(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Let, "se esperaba 'let'")?;
         let name = self.expect_ident(
             "se esperaba nombre de variable después de 'let'",
@@ -736,6 +740,7 @@ impl Parser {
             target: AssignTarget::Ident(name),
             type_,
             value,
+            span,
         })
     }
 
@@ -751,7 +756,7 @@ impl Parser {
     /// recién después decidimos si era asignación, según el token que
     /// haya quedado. Eso resuelve naturalmente `user.name = "x"` y
     /// elimina el lookahead duro que antes solo miraba `peek_at(1)`.
-    fn parse_expr_or_assign_stmt(&mut self) -> FitzResult<Stmt> {
+    fn parse_expr_or_assign_stmt(&mut self, span: Span) -> FitzResult<Stmt> {
         let lhs = self.expression()?;
 
         // Caso 2: `Ident : Tipo = expr`. La anotación solo se acepta
@@ -774,6 +779,7 @@ impl Parser {
                 target: AssignTarget::Ident(name),
                 type_: Some(type_),
                 value,
+                span,
             });
         }
 
@@ -791,11 +797,11 @@ impl Parser {
                     ));
                 }
             };
-            return Ok(Stmt::Assign { target, type_: None, value });
+            return Ok(Stmt::Assign { target, type_: None, value, span });
         }
 
         // Caso 1: sentencia-expresión.
-        Ok(Stmt::Expr(lhs))
+        Ok(Stmt::Expr(lhs, span))
     }
 
     /// Anotación de tipo opcional: `: TypeExpr`. Devuelve `Some(t)` si
@@ -869,7 +875,7 @@ impl Parser {
         Ok(t)
     }
 
-    fn parse_return(&mut self) -> FitzResult<Stmt> {
+    fn parse_return(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Return, "se esperaba 'return'")?;
         // `return` sin valor devuelve null implícito. Detectamos los
         // terminadores válidos para una sentencia: fin de línea, cierre
@@ -878,7 +884,7 @@ impl Parser {
             Token::Newline | Token::RBrace | Token::EOF => Expr::Null,
             _ => self.expression()?,
         };
-        Ok(Stmt::Return(value))
+        Ok(Stmt::Return(value, span))
     }
 
     // ---------- definición de función ----------
@@ -889,10 +895,10 @@ impl Parser {
     //   fn name(params) => expr
     //   fn name(params) -> Type => expr
     //
-    // La forma de flecha se desugar a `body: vec![Stmt::Return(expr)]`
+    // La forma de flecha se desugar a `body: vec![Stmt::Return(expr, Span::ZERO)]`
     // (decisión documentada en ast.rs).
 
-    fn parse_fndef(&mut self) -> FitzResult<Stmt> {
+    fn parse_fndef(&mut self, span: Span) -> FitzResult<Stmt> {
         let is_async = self.eat(&Token::Async);
         self.expect(&Token::Fn, "se esperaba 'fn'")?;
         let name = self.expect_ident(
@@ -909,8 +915,9 @@ impl Parser {
         let body = match self.peek() {
             Token::FatArrow => {
                 self.advance();
+                let (arrow_line, arrow_col) = self.current_pos();
                 let expr = self.expression()?;
-                vec![Stmt::Return(expr)]
+                vec![Stmt::Return(expr, Span::new(arrow_line, arrow_col))]
             }
             Token::LBrace => self.parse_block()?,
             _ => {
@@ -931,6 +938,7 @@ impl Parser {
             // entra por `parse_decorated_fndef`, ese path reconstruye el
             // FnDef pegándole los decorators acumulados.
             decorators: vec![],
+            span,
         })
     }
 
@@ -952,8 +960,9 @@ impl Parser {
         let body = match self.peek() {
             Token::FatArrow => {
                 self.advance();
+                let (arrow_line, arrow_col) = self.current_pos();
                 let expr = self.expression()?;
-                vec![Stmt::Return(expr)]
+                vec![Stmt::Return(expr, Span::new(arrow_line, arrow_col))]
             }
             Token::LBrace => self.parse_block()?,
             _ => {
@@ -1037,26 +1046,26 @@ impl Parser {
 
     /// `while cond { body }`. Iteración condicional. La condición se evalúa
     /// antes de cada iteración; si es `false`, termina el loop.
-    fn parse_while(&mut self) -> FitzResult<Stmt> {
+    fn parse_while(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::While, "se esperaba 'while'")?;
         // La condición no permite struct literal a primer nivel — el `{`
         // siguiente arranca el cuerpo del while. Adentro de paréntesis sí.
         let condition = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
-        Ok(Stmt::While { condition, body })
+        Ok(Stmt::While { condition, body, span })
     }
 
     /// `loop { body }` — loop infinito. Solo se sale con `break` o `return`.
-    fn parse_loop(&mut self) -> FitzResult<Stmt> {
+    fn parse_loop(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Loop, "se esperaba 'loop'")?;
         let body = self.parse_block()?;
-        Ok(Stmt::Loop { body })
+        Ok(Stmt::Loop { body, span })
     }
 
     /// `for var in iter { body }`. Iteración sobre listas y rangos
     /// (mapas todavía no, hasta que tengamos el tipo `Pair`).
     /// `var` se define en cada iteración en el scope del body.
-    fn parse_for(&mut self) -> FitzResult<Stmt> {
+    fn parse_for(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::For, "se esperaba 'for'")?;
         let var = self.expect_ident(
             "se esperaba nombre de variable después de 'for'",
@@ -1067,7 +1076,7 @@ impl Parser {
         // listas sí: `for u in [User { id: 1 }]`.
         let iter = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
-        Ok(Stmt::For { var, iter, body })
+        Ok(Stmt::For { var, iter, body, span })
     }
 
     // ---------- if / match / type ----------
@@ -1086,8 +1095,9 @@ impl Parser {
             if matches!(self.peek(), Token::If) {
                 // `else if` — anidamos el siguiente if como un bloque
                 // de una sola sentencia-expresión.
+                let (nested_line, nested_col) = self.current_pos();
                 let nested = self.parse_if_expr()?;
-                Some(vec![Stmt::Expr(nested)])
+                Some(vec![Stmt::Expr(nested, Span::new(nested_line, nested_col))])
             } else {
                 Some(self.parse_block()?)
             }
@@ -1302,7 +1312,7 @@ impl Parser {
     /// anotaciones (`parse_type_expr`): admite genéricos y el sufijo
     /// `?` para nullable. La nullabilidad queda dentro de `TypeExpr`
     /// como `TypeExpr::Nullable(...)`.
-    fn parse_typedef(&mut self) -> FitzResult<Stmt> {
+    fn parse_typedef(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Type, "se esperaba 'type'")?;
         let name = self.expect_ident("se esperaba nombre del tipo")?;
         self.expect(
@@ -1314,7 +1324,7 @@ impl Parser {
             self.skip_newlines();
             if matches!(self.peek(), Token::RBrace) {
                 self.advance();
-                return Ok(Stmt::TypeDef { name, fields });
+                return Ok(Stmt::TypeDef { name, fields, span });
             }
             if self.is_at_end() {
                 return Err(self.error(
@@ -1364,7 +1374,7 @@ impl Parser {
     // decorators no vacíos; 4.2 cablea `@get`/`@post`/`@put`/`@delete`
     // contra el runtime HTTP.
 
-    fn parse_decorated_fndef(&mut self) -> FitzResult<Stmt> {
+    fn parse_decorated_fndef(&mut self, span: Span) -> FitzResult<Stmt> {
         let mut decorators: Vec<Decorator> = Vec::new();
         // Al menos uno: el llamador entró acá viendo `@`.
         loop {
@@ -1384,7 +1394,7 @@ impl Parser {
                 "después de un decorador debe venir una definición de función",
             ));
         }
-        let fndef = self.parse_fndef()?;
+        let fndef = self.parse_fndef(span)?;
         // `parse_fndef` siempre devuelve un `Stmt::FnDef`; le pegamos los
         // decoradores acumulados.
         match fndef {
@@ -1395,6 +1405,7 @@ impl Parser {
                 body,
                 is_async,
                 decorators: _,
+                span,
             } => Ok(Stmt::FnDef {
                 name,
                 params,
@@ -1402,6 +1413,7 @@ impl Parser {
                 body,
                 is_async,
                 decorators,
+                span,
             }),
             // Inalcanzable: parse_fndef es total.
             other => Ok(other),
@@ -2318,7 +2330,7 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(42),
-            }
+             span: Span::ZERO }
         );
     }
 
@@ -2329,7 +2341,7 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: Some(TypeExpr::named("Int")),
                 value: Expr::Int(42),
-            }
+             span: Span::ZERO }
         );
     }
 
@@ -2340,7 +2352,7 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(42),
-            }
+             span: Span::ZERO }
         );
     }
 
@@ -2351,7 +2363,7 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: Some(TypeExpr::named("Str")),
                 value: Expr::Str("Fitz".into()),
-            }
+             span: Span::ZERO }
         );
     }
 
@@ -2367,7 +2379,7 @@ mod tests {
                     left: Box::new(Expr::Int(10)),
                     right: Box::new(Expr::Int(5)),
                 },
-            }
+             span: Span::ZERO }
         );
     }
 
@@ -2375,7 +2387,7 @@ mod tests {
     fn return_with_expression() {
         assert_eq!(
             parse_one_stmt("return 42"),
-            Stmt::Return(Expr::Int(42)),
+            Stmt::Return(Expr::Int(42), Span::ZERO),
         );
     }
 
@@ -2387,15 +2399,15 @@ mod tests {
                 op: BinOpKind::Add,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Int(1)),
-            }),
+            }, Span::ZERO),
         );
     }
 
     #[test]
     fn return_sin_expresion_devuelve_null() {
         // `return` solo (con newline al final). El parser lo modela como
-        // `Stmt::Return(Expr::Null)`.
-        assert_eq!(parse_one_stmt("return"), Stmt::Return(Expr::Null));
+        // `Stmt::Return(Expr::Null, Span::ZERO)`.
+        assert_eq!(parse_one_stmt("return"), Stmt::Return(Expr::Null, Span::ZERO));
     }
 
     #[test]
@@ -2406,7 +2418,7 @@ mod tests {
         let program = parse(tokens).unwrap();
         match &program[0] {
             Stmt::FnDef { body, .. } => {
-                assert_eq!(body, &vec![Stmt::Return(Expr::Null)]);
+                assert_eq!(body, &vec![Stmt::Return(Expr::Null, Span::ZERO)]);
             }
             _ => panic!("se esperaba FnDef"),
         }
@@ -2417,25 +2429,72 @@ mod tests {
         assert_eq!(
             parse_one_stmt("print(x)"),
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("x".into())],
-            }),
+            }, Span::ZERO),
         );
     }
 
+    // ---- B.1: Span propagation -----------------------------------
+
+    #[test]
+    fn stmt_lleva_span_de_la_primera_linea() {
+        // Stmt simple en línea 1, col 1 → span debería ser (1, 1).
+        let stmt = parse_one_stmt("let x = 42");
+        let span = stmt.span();
+        assert_eq!(span.line, 1, "esperaba línea 1, fue {}", span.line);
+        assert_eq!(span.column, 1, "esperaba col 1, fue {}", span.column);
+    }
+
+    #[test]
+    fn stmt_lleva_span_de_linea_posterior() {
+        // Stmts en líneas 2 y 3 — cada uno con su span.
+        let src = "\n  let x = 1\nreturn x";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        assert_eq!(program.len(), 2);
+        let s0 = program[0].span();
+        let s1 = program[1].span();
+        assert_eq!((s0.line, s0.column), (2, 3),
+            "esperaba (2,3) para `let`, fue ({},{})", s0.line, s0.column);
+        assert_eq!((s1.line, s1.column), (3, 1),
+            "esperaba (3,1) para `return`, fue ({},{})", s1.line, s1.column);
+    }
+
+    #[test]
+    fn span_de_fn_def_apunta_al_fn() {
+        let src = "  fn foo() => 1";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let span = program[0].span();
+        assert_eq!((span.line, span.column), (1, 3));
+    }
+
+    #[test]
+    fn span_de_fn_decorada_apunta_al_decorator() {
+        // El span de `Stmt::FnDef` decorada apunta al `@`, no al `fn`.
+        let src = "@get(\"/\") fn handler() => 0";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let span = program[0].span();
+        assert_eq!(span.column, 1);
+    }
+
+    // ---- fin tests B.1 span ---------------------------------------
+
     #[test]
     fn break_statement() {
-        assert_eq!(parse_one_stmt("break"), Stmt::Break);
+        assert!(matches!(parse_one_stmt("break"), Stmt::Break(_)));
     }
 
     #[test]
     fn continue_statement() {
-        assert_eq!(parse_one_stmt("continue"), Stmt::Continue);
+        assert!(matches!(parse_one_stmt("continue"), Stmt::Continue(_)));
     }
 
     #[test]
     fn while_basic_parses() {
         let stmt = parse_one_stmt("while x < 10 { x = x + 1 }");
         match stmt {
-            Stmt::While { condition, body } => {
+            Stmt::While { condition, body, .. } => {
                 assert!(matches!(condition, Expr::BinOp { op: BinOpKind::Lt, .. }));
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Assign { .. }));
@@ -2449,7 +2508,7 @@ mod tests {
         let stmt = parse_one_stmt("while true { break }");
         match stmt {
             Stmt::While { body, .. } => {
-                assert_eq!(body, vec![Stmt::Break]);
+                assert!(matches!(body[..], [Stmt::Break(_)]));
             }
             _ => panic!("se esperaba while"),
         }
@@ -2459,7 +2518,7 @@ mod tests {
     fn loop_basic_parses() {
         let stmt = parse_one_stmt("loop { x = 1 }");
         match stmt {
-            Stmt::Loop { body } => {
+            Stmt::Loop { body, .. } => {
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Assign { .. }));
             }
@@ -2475,7 +2534,7 @@ mod tests {
                 op: BinOpKind::And,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Ident("y".into())),
-            }),
+            }, Span::ZERO),
         );
     }
 
@@ -2487,7 +2546,7 @@ mod tests {
                 op: BinOpKind::Or,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Ident("y".into())),
-            }),
+            }, Span::ZERO),
         );
     }
 
@@ -2503,7 +2562,7 @@ mod tests {
                 right: Box::new(Expr::Ident("b".into())),
             }),
             right: Box::new(Expr::Ident("c".into())),
-        });
+        }, Span::ZERO);
         assert_eq!(stmt, expected);
     }
 
@@ -2523,7 +2582,7 @@ mod tests {
                 left: Box::new(Expr::Ident("a".into())),
                 right: Box::new(Expr::Int(10)),
             }),
-        });
+        }, Span::ZERO);
         assert_eq!(stmt, expected);
     }
 
@@ -2537,7 +2596,7 @@ mod tests {
                 op: BinOpKind::Eq,
                 left: Box::new(Expr::Ident("x".into())),
                 right: Box::new(Expr::Ident("y".into())),
-            }),
+            }, Span::ZERO),
         );
     }
 
@@ -2551,12 +2610,12 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(1),
-            }
+             span: Span::ZERO }
         );
         assert_eq!(
             program[2],
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("x".into())],
-            })
+            }, Span::ZERO)
         );
     }
 
@@ -2611,10 +2670,10 @@ mod tests {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(2)),
-                })],
+                }, Span::ZERO)],
                 is_async: false,
                 decorators: vec![],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -2634,10 +2693,10 @@ mod tests {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(2)),
-                })],
+                }, Span::ZERO)],
                 is_async: false,
                 decorators: vec![],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -2651,10 +2710,10 @@ mod tests {
                 params: vec![Param { name: "name".into(), type_: None }],
                 return_type: None,
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("name".into())],
-                })],
+                }, Span::ZERO)],
                 is_async: false,
                 decorators: vec![],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -2675,11 +2734,12 @@ mod tests {
                             left: Box::new(Expr::Ident("n".into())),
                             right: Box::new(Expr::Int(2)),
                         },
-                    },
-                    Stmt::Return(Expr::Ident("x".into())),
+                     span: Span::ZERO },
+                    Stmt::Return(Expr::Ident("x".into()), Span::ZERO),
                 ],
                 is_async: false,
                 decorators: vec![],
+                span: Span::ZERO,
             },
         );
     }
@@ -2689,7 +2749,7 @@ mod tests {
         // fn add(a: Int, b: Int) -> Int { return a + b }
         let stmt = parse_one_stmt("fn add(a: Int, b: Int) -> Int { return a + b }");
         match stmt {
-            Stmt::FnDef { name, params, return_type, body, is_async, decorators } => {
+            Stmt::FnDef { name, params, return_type, body, is_async, decorators, .. } => {
                 assert_eq!(name, "add");
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "a");
@@ -2958,7 +3018,7 @@ mod tests {
         // if x < 5 { print(x) }
         let stmt = parse_one_stmt("if x < 5 { print(x) }");
         match stmt {
-            Stmt::Expr(Expr::If { condition, then, else_ }) => {
+            Stmt::Expr(Expr::If { condition, then, else_ }, _) => {
                 assert_eq!(
                     *condition,
                     Expr::BinOp {
@@ -2970,7 +3030,7 @@ mod tests {
                 assert_eq!(then.len(), 1);
                 assert!(else_.is_none());
             }
-            other => panic!("se esperaba Stmt::Expr(If), se obtuvo {:?}", other),
+            other => panic!("se esperaba Stmt::Expr(If, Span::ZERO), se obtuvo {:?}", other),
         }
     }
 
@@ -2978,7 +3038,7 @@ mod tests {
     fn if_with_else() {
         let stmt = parse_one_stmt("if x { 1 } else { 2 }");
         match stmt {
-            Stmt::Expr(Expr::If { else_: Some(e), .. }) => {
+            Stmt::Expr(Expr::If { else_: Some(e), .. }, _) => {
                 assert_eq!(e.len(), 1);
             }
             other => panic!("se esperaba If con else, se obtuvo {:?}", other),
@@ -2991,11 +3051,11 @@ mod tests {
         // → If(a, [1], else: [Expr(If(b, [2], else: [3]))])
         let stmt = parse_one_stmt("if a { 1 } else if b { 2 } else { 3 }");
         match stmt {
-            Stmt::Expr(Expr::If { else_: Some(outer_else), .. }) => {
+            Stmt::Expr(Expr::If { else_: Some(outer_else), .. }, _) => {
                 // El else exterior contiene una sola stmt: un Expr::If anidado.
                 assert_eq!(outer_else.len(), 1);
                 match &outer_else[0] {
-                    Stmt::Expr(Expr::If { else_: Some(inner_else), .. }) => {
+                    Stmt::Expr(Expr::If { else_: Some(inner_else), .. }, _) => {
                         assert_eq!(inner_else.len(), 1);
                     }
                     other => panic!("se esperaba if anidado, se obtuvo {:?}", other),
@@ -3022,7 +3082,7 @@ mod tests {
         let src = "if x {\n  let y = 1\n  print(y)\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::If { then, .. }) => {
+            Stmt::Expr(Expr::If { then, .. }, _) => {
                 assert_eq!(then.len(), 2);
             }
             other => panic!("se esperaba If, se obtuvo {:?}", other),
@@ -3034,7 +3094,7 @@ mod tests {
         // match x { foo => 1, _ => 0 }
         let stmt = parse_one_stmt("match x { foo => 1, _ => 0 }");
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
                 assert_eq!(arms[0].pattern, Pattern::Ident("foo".into()));
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
@@ -3048,7 +3108,7 @@ mod tests {
         // match result { Ok(u) => u, Err(e) => 0 }
         let stmt = parse_one_stmt("match result { Ok(u) => u, Err(e) => 0 }");
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
                 assert_eq!(arms[0].pattern, Pattern::OkBinding("u".into()));
                 assert_eq!(arms[1].pattern, Pattern::ErrBinding("e".into()));
@@ -3063,7 +3123,7 @@ mod tests {
         // ensuciar el scope con una var llamada `_`.
         let stmt = parse_one_stmt("match result { Ok(_) => 1, Err(_) => 0 }");
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
                 assert_eq!(arms[0].pattern, Pattern::OkWildcard);
                 assert_eq!(arms[1].pattern, Pattern::ErrWildcard);
@@ -3077,7 +3137,7 @@ mod tests {
         let src = "match x {\n  foo => 1\n  bar => 2\n  _ => 0\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => assert_eq!(arms.len(), 3),
+            Stmt::Expr(Expr::Match { arms, .. }, _) => assert_eq!(arms.len(), 3),
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }
     }
@@ -3092,7 +3152,7 @@ mod tests {
     fn typedef_empty() {
         let stmt = parse_one_stmt("type Empty { }");
         match stmt {
-            Stmt::TypeDef { name, fields } => {
+            Stmt::TypeDef { name, fields, .. } => {
                 assert_eq!(name, "Empty");
                 assert!(fields.is_empty());
             }
@@ -3105,7 +3165,7 @@ mod tests {
         let src = "type User {\n  id: Int\n  name: Str\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::TypeDef { name, fields } => {
+            Stmt::TypeDef { name, fields, .. } => {
                 assert_eq!(name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].name, "id");
@@ -3325,7 +3385,7 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into()),
-            }
+             span: Span::ZERO }
         );
 
         // 2. x = 10 + 5
@@ -3338,7 +3398,7 @@ mod tests {
                     left: Box::new(Expr::Int(10)),
                     right: Box::new(Expr::Int(5)),
                 },
-            }
+             span: Span::ZERO }
         );
 
         // 3. print("Hola, {name}!")
@@ -3349,7 +3409,7 @@ mod tests {
                     StrPart::Expr(Expr::Ident("name".into())),
                     StrPart::Lit("!".into()),
                 ])],
-            })
+            }, Span::ZERO)
         );
 
         // 4. fn double(n) => n * 2
@@ -3363,10 +3423,10 @@ mod tests {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into())),
                     right: Box::new(Expr::Int(2)),
-                })],
+                }, Span::ZERO)],
                 is_async: false,
                 decorators: vec![],
-            }
+             span: Span::ZERO }
         );
 
         // 5. print(double(x))
@@ -3374,7 +3434,7 @@ mod tests {
             program[4],
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Ident("x".into())],
                 }],
-            }),
+            }, Span::ZERO),
         );
     }
 
@@ -3675,7 +3735,7 @@ mod tests {
             Stmt::Assign { target: AssignTarget::Ident("xs".into()),
                 type_: None,
                 value: Expr::List(vec![Expr::Int(1), Expr::Int(2), Expr::Int(3)]),
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -3691,7 +3751,7 @@ mod tests {
                     (Expr::Str("a".into()), Expr::Int(1)),
                     (Expr::Str("b".into()), Expr::Int(2)),
                 ]),
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -3709,8 +3769,8 @@ mod tests {
                 var: "x".into(),
                 iter: Expr::Ident("xs".into()),
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Ident("x".into())],
-                })],
-            },
+                }, Span::ZERO)],
+             span: Span::ZERO },
         );
     }
 
@@ -3719,7 +3779,7 @@ mod tests {
         // for i in 0..10 { print(i) }
         let stmt = parse_one_stmt("for i in 0..10 { print(i) }");
         match stmt {
-            Stmt::For { var, iter, body } => {
+            Stmt::For { var, iter, body, .. } => {
                 assert_eq!(var, "i");
                 assert_eq!(
                     iter,
@@ -3784,7 +3844,7 @@ mod tests {
         let src = "match n { 0..10 => \"chico\", _ => \"grande\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
                 assert_eq!(arms[0].pattern, Pattern::Range { start: 0, end: 10 });
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
@@ -3799,7 +3859,7 @@ mod tests {
         let src = "match n { -10..0 => \"negativo\", 0..10 => \"chico\", _ => \"grande\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 3);
                 assert_eq!(arms[0].pattern, Pattern::Range { start: -10, end: 0 });
                 assert_eq!(arms[1].pattern, Pattern::Range { start: 0, end: 10 });
@@ -3814,7 +3874,7 @@ mod tests {
         let src = "match n { -5..-1 => \"neg\", _ => \"otro\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms[0].pattern, Pattern::Range { start: -5, end: -1 });
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -3827,7 +3887,7 @@ mod tests {
         let src = "match n { 42 => \"sí\", _ => \"no\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::Match { arms, .. }) => {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms[0].pattern, Pattern::Int(42));
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -3950,7 +4010,7 @@ mod tests {
         let src = "print(User { id: 1, name: \"x\" })";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Expr(Expr::Call { args, .. }) => {
+            Stmt::Expr(Expr::Call { args, .. }, _) => {
                 assert_eq!(args.len(), 1);
                 assert!(matches!(args[0], Expr::StructLit { .. }));
             }
@@ -3980,7 +4040,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::FnDef { body, .. } => match &body[0] {
-                Stmt::Return(Expr::StructLit { .. }) => {}
+                Stmt::Return(Expr::StructLit { .. }, _) => {}
                 other => panic!("se esperaba Return(StructLit), se obtuvo {:?}", other),
             },
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
@@ -4058,7 +4118,7 @@ mod tests {
         let stmts = parse_program_str(src).expect("debería parsear con paréntesis");
         assert_eq!(stmts.len(), 1);
         match &stmts[0] {
-            Stmt::Expr(Expr::If { condition, .. }) => match condition.as_ref() {
+            Stmt::Expr(Expr::If { condition, .. }, _) => match condition.as_ref() {
                 Expr::BinOp { left, .. } => {
                     assert!(matches!(**left, Expr::StructLit { .. }));
                 }
@@ -4076,7 +4136,7 @@ mod tests {
         let src = "while x { print(x) }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::While { condition, body } => {
+            Stmt::While { condition, body, .. } => {
                 assert_eq!(condition, Expr::Ident("x".into()));
                 assert_eq!(body.len(), 1);
             }
@@ -4091,7 +4151,7 @@ mod tests {
         let src = "for u in [User { id: 1, name: \"a\" }] { print(u) }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::For { var, iter, body } => {
+            Stmt::For { var, iter, body, .. } => {
                 assert_eq!(var, "u");
                 assert!(matches!(iter, Expr::List(_)));
                 assert_eq!(body.len(), 1);
@@ -4208,7 +4268,7 @@ mod tests {
              \tErr(e) => -1\n\
              }",
         );
-        if let Stmt::Expr(Expr::Match { value, arms }) = stmt {
+        if let Stmt::Expr(Expr::Match { value, arms }, _) = stmt {
             assert_eq!(*value, Expr::Ok(Box::new(Expr::Int(1))));
             assert_eq!(arms.len(), 2);
             assert_eq!(arms[0].pattern, Pattern::OkBinding("v".into()));
@@ -4224,21 +4284,21 @@ mod tests {
 
     #[test]
     fn import_simple_se_parsea() {
-        // `import utils` → Stmt::Import { path: ["utils"] }
+        // `import utils` → Stmt::Import { path: ["utils"] , span: Span::ZERO }
         assert_eq!(
             parse_one_stmt("import utils"),
-            Stmt::Import { path: vec!["utils".into()] },
+            Stmt::Import { path: vec!["utils".into()] , span: Span::ZERO },
         );
     }
 
     #[test]
     fn import_punteado_acumula_segmentos() {
-        // `import sub.foo.bar` → Stmt::Import { path: ["sub", "foo", "bar"] }
+        // `import sub.foo.bar` → Stmt::Import { path: ["sub", "foo", "bar"] , span: Span::ZERO }
         assert_eq!(
             parse_one_stmt("import sub.foo.bar"),
             Stmt::Import {
                 path: vec!["sub".into(), "foo".into(), "bar".into()],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -4263,7 +4323,7 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["utils".into()],
                 names: vec!["slugify".into()],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -4275,7 +4335,7 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["utils".into()],
                 names: vec!["a".into(), "b".into(), "c".into()],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -4287,7 +4347,7 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["sub".into(), "foo".into()],
                 names: vec!["bar".into()],
-            },
+             span: Span::ZERO },
         );
     }
 
@@ -4299,7 +4359,7 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["utils".into()],
                 names: vec!["a".into(), "b".into()],
-            },
+             span: Span::ZERO },
         );
     }
 

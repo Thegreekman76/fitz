@@ -290,7 +290,7 @@ impl ModuleLoader {
     fn collect_imports(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
             match stmt {
-                Stmt::Import { path } => {
+                Stmt::Import { path, .. } => {
                     let idx = self.load_module(path)?;
                     let binding_name = path.last().cloned().unwrap_or_default();
                     self.bindings.insert(
@@ -298,7 +298,7 @@ impl ModuleLoader {
                         ResolvedBinding::Namespace { module_index: idx },
                     );
                 }
-                Stmt::FromImport { path, names } => {
+                Stmt::FromImport { path, names, .. } => {
                     let idx = self.load_module(path)?;
                     for name in names {
                         let kind = self.classify_named(idx, name)?;
@@ -595,13 +595,13 @@ fn generate_module_rs(program: &Program, env: &TypeEnv) -> Result<String, FitzEr
 fn stmt_kind(s: &Stmt) -> &'static str {
     match s {
         Stmt::Assign { .. } => "asignación",
-        Stmt::Expr(_) => "expresión suelta",
-        Stmt::Return(_) => "return",
+        Stmt::Expr(..) => "expresión suelta",
+        Stmt::Return(..) => "return",
         Stmt::While { .. } => "while",
         Stmt::Loop { .. } => "loop",
         Stmt::For { .. } => "for",
-        Stmt::Break => "break",
-        Stmt::Continue => "continue",
+        Stmt::Break(_) => "break",
+        Stmt::Continue(_) => "continue",
         Stmt::FnDef { .. } => "fn",
         Stmt::TypeDef { .. } => "type",
         Stmt::Import { .. } | Stmt::FromImport { .. } => "import",
@@ -628,7 +628,7 @@ fn collect_module_sigs(
 
     for stmt in program {
         match stmt {
-            Stmt::TypeDef { name, fields } => {
+            Stmt::TypeDef { name, fields, .. } => {
                 let id = match env.lookup(name) {
                     Some(id) => id,
                     None => continue,
@@ -693,7 +693,7 @@ fn collect_module_sigs(
                 };
                 fn_sigs.insert(name.clone(), FnSig { params: ps, ret });
             }
-            Stmt::Assign { target, type_, value } => {
+            Stmt::Assign { target, type_, value, .. } => {
                 // Solo bindings simples a un Ident con RHS literal.
                 let AssignTarget::Ident(name) = target else {
                     return Err(loader_err(
@@ -1300,7 +1300,7 @@ impl<'a> CodegenCtx<'a> {
     /// resuelven.
     fn pre_register_types(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
-            let Stmt::TypeDef { name, fields: ast_fields } = stmt else { continue };
+            let Stmt::TypeDef { name, fields: ast_fields, .. } = stmt else { continue };
             let id = self.env.lookup(name).ok_or_else(|| {
                 self.err(format!("tipo `{}` no registrado en el TypeEnv (¿checker no corrió?)", name))
             })?;
@@ -1410,7 +1410,7 @@ impl<'a> CodegenCtx<'a> {
     /// referenciarlos. Solo aplica en modo `Module`.
     fn pre_register_top_lets(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
-            let Stmt::Assign { target, type_, value } = stmt else { continue };
+            let Stmt::Assign { target, type_, value, .. } = stmt else { continue };
             let AssignTarget::Ident(name) = target else { continue };
             let ty = match type_ {
                 Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
@@ -1645,23 +1645,23 @@ impl<'a> CodegenCtx<'a> {
 
     fn gen_stmt_in_fn(&mut self, stmt: &Stmt, ret_expected: &Type) -> Result<(), FitzError> {
         match stmt {
-            Stmt::Assign { target, type_, value } => self.gen_assign(target, type_.as_ref(), value),
-            Stmt::Return(e) => self.gen_return(e, ret_expected),
-            Stmt::Expr(e) => {
+            Stmt::Assign { target, type_, value, .. } => self.gen_assign(target, type_.as_ref(), value),
+            Stmt::Return(e, _) => self.gen_return(e, ret_expected),
+            Stmt::Expr(e, _) => {
                 self.emit_indent();
                 self.gen_expr_for_stmt(e)?;
                 self.emit(";\n");
                 Ok(())
             }
-            Stmt::While { condition, body } => self.gen_while(condition, body, ret_expected),
-            Stmt::Loop { body } => self.gen_loop(body, ret_expected),
-            Stmt::For { var, iter, body } => self.gen_for(var, iter, body, ret_expected),
-            Stmt::Break => {
+            Stmt::While { condition, body, .. } => self.gen_while(condition, body, ret_expected),
+            Stmt::Loop { body, .. } => self.gen_loop(body, ret_expected),
+            Stmt::For { var, iter, body, .. } => self.gen_for(var, iter, body, ret_expected),
+            Stmt::Break(_) => {
                 self.emit_indent();
                 self.emit("break;\n");
                 Ok(())
             }
-            Stmt::Continue => {
+            Stmt::Continue(_) => {
                 self.emit_indent();
                 self.emit("continue;\n");
                 Ok(())
@@ -1739,7 +1739,7 @@ impl<'a> CodegenCtx<'a> {
     /// `collect_module_sigs` antes; acá asumimos que el value es
     /// una de las variantes literales.
     fn gen_module_top_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
-        let Stmt::Assign { target, type_, value } = stmt else {
+        let Stmt::Assign { target, type_, value, .. } = stmt else {
             unreachable!("gen_module_top_let solo se llama sobre Stmt::Assign");
         };
         let AssignTarget::Ident(name) = target else {
@@ -2069,7 +2069,7 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    /// Para statements `Stmt::Expr(e)`: si `e` es una llamada a
+    /// Para statements `Stmt::Expr(e, Span::ZERO)`: si `e` es una llamada a
     /// `print(...)`, generamos `println!(...)` (que devuelve `()`).
     /// El resto cae al `gen_expr` normal.
     fn gen_expr_for_stmt(&mut self, e: &Expr) -> Result<(), FitzError> {
@@ -2737,7 +2737,7 @@ impl<'a> CodegenCtx<'a> {
 
     /// Dry-run para sintetizar el tipo de retorno de un callback. Pushea
     /// el scope del param, recorre el body buscando el primer
-    /// `Stmt::Return(e)` (o el último `Stmt::Expr(e)` no-print), llama
+    /// `Stmt::Return(e, Span::ZERO)` (o el último `Stmt::Expr(e, Span::ZERO)` no-print), llama
     /// a `gen_expr` con `self.output` redirigido a un buffer descartable
     /// (no contamina la salida real).
     fn infer_callback_ret_silently(
@@ -2748,10 +2748,10 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<Type, FitzError> {
         let target: Option<&Expr> = body
             .iter()
-            .find_map(|s| if let Stmt::Return(e) = s { Some(e) } else { None })
+            .find_map(|s| if let Stmt::Return(e, _) = s { Some(e) } else { None })
             .or_else(|| {
                 body.last().and_then(|s| match s {
-                    Stmt::Expr(e) if !is_print_call(e) => Some(e),
+                    Stmt::Expr(e, _) if !is_print_call(e) => Some(e),
                     _ => None,
                 })
             });
@@ -3356,7 +3356,7 @@ impl<'a> CodegenCtx<'a> {
                 self.push_scope();
                 let mut full = self.gen_block_to_string(&then_stmts)?;
                 if let Some(e) = then_tail {
-                    full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(e.clone()))?);
+                    full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(e.clone(), crate::ast::Span::ZERO))?);
                 }
                 self.pop_scope();
                 full
@@ -3367,7 +3367,7 @@ impl<'a> CodegenCtx<'a> {
                     self.push_scope();
                     let mut full = self.gen_block_to_string(&else_stmts)?;
                     if let Some(e) = else_tail {
-                        full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(e.clone()))?);
+                        full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(e.clone(), crate::ast::Span::ZERO))?);
                     }
                     self.pop_scope();
                     full
@@ -4052,12 +4052,12 @@ fn __json_shape(json: &serde_json::Value) -> &'static str {
 
 "#;
 
-/// Si el último stmt del bloque es un `Stmt::Expr(e)` que se puede
+/// Si el último stmt del bloque es un `Stmt::Expr(e, Span::ZERO)` que se puede
 /// usar como valor (no es un `print(...)`, que solo es stmt), lo
 /// devolvemos separado del resto. Caso contrario, el tail va `None`
 /// y el bloque queda completo.
 fn split_tail_expr(body: &[Stmt]) -> (Vec<&Stmt>, Option<&Expr>) {
-    if let Some(Stmt::Expr(e)) = body.last() {
+    if let Some(Stmt::Expr(e, _)) = body.last() {
         if !is_print_call(e) {
             let stmts: Vec<&Stmt> = body[..body.len() - 1].iter().collect();
             return (stmts, Some(e));
