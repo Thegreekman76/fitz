@@ -1,8 +1,8 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.3: checker de
-> `?` y match exhaustivo sobre `Result`, 742 tests pasando).
+> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.4: checker de
+> métodos built-in con signatures paramétricas, 767 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -2715,6 +2715,12 @@ claro:
 [1, 2].volar()
 // Error — el tipo `List` no tiene un método llamado `volar`
 ```
+
+Desde la Fase 5.3.4, **`fitz check` también valida los métodos
+built-in estáticamente**: tipos de argumentos, aridad, tipo del
+receptor del callback en `map`/`filter`/`find`, y typos sobre
+métodos inexistentes (`xs.lenght()`) los detectás sin tener que
+ejecutar el programa.
 
 ### Métodos de `List`
 

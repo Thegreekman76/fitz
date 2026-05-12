@@ -1172,9 +1172,88 @@ Ok+wildcard, ident catch-all, match sobre Int / Any
 - **`?` adentro de `Result<X>?`** — no exigido, decisión de
   diseño. Revisitable si aparece el caso.
 
-##### 5.3.4 — Métodos built-in con templates paramétricos
-**Pendiente** — `xs.map(f)`, `m.get(k)`, `s.upper()`, etc. Cada
-método con su signature template (`List<T>.map(fn(T) -> U) -> List<U>`).
+##### 5.3.4 — Métodos built-in con templates paramétricos ✓
+**Completado** — `Expr::Call` con `callee: Expr::Field` ahora
+despacha por `(tipo del receptor, nombre del método)` a una tabla
+built-in en lugar de caer en el camino general (que no podía
+modelar signatures paramétricas).
+
+- Nuevo helper `infer_method_call(ctx, receiver_ty, method,
+  args_ty) -> Option<Type>` con sub-dispatchers
+  `infer_list_method`, `infer_map_method`, `infer_str_method`.
+  Cada uno hace match sobre el nombre del método, valida aridad
+  + tipos vs la signature concreta del receptor, y devuelve el
+  ret instanciado.
+- Tabla de signatures cubierta (14 métodos):
+  - `List<T>`: `push(T) -> Null`, `pop() -> T`, `len() -> Int`,
+    `map(fn(T) -> U) -> List<U>`,
+    `filter(fn(T) -> Bool) -> List<T>`,
+    `find(fn(T) -> Bool) -> Result<T>`.
+  - `Map<K, V>`: `get(K) -> Result<V>`, `has(K) -> Bool`,
+    `keys() -> List<K>`, `values() -> List<V>`, `len() -> Int`.
+  - `Str`: `len() -> Int`, `upper() -> Str`, `lower() -> Str`.
+- Helpers compartidos:
+  - `check_method_arity(name, args_ty, expected) -> bool` —
+    aridad fija, devuelve `false` cuando no coincide (caller
+    puede saltarse validaciones extra).
+  - `check_unary_callback(cb, elem_ty, method, expected_ret)
+    -> Type` — exige `Function` con aridad 1, valida que el
+    param sea compatible con T, y opcionalmente que el ret sea
+    compatible con un tipo esperado (caso `filter`/`find`
+    exigen `Bool`). Callback `Any` pasa sin chequear (gradual).
+- Política sobre método desconocido:
+  - Receptor built-in concreto (`List`/`Map`/`Str`) → error con
+    el nombre del receptor y del método. Captura typos
+    (`xs.lenght()`).
+  - Receptor `Nominal(id)` → `None`; la llamada cae a gradual
+    (Any) sin chequear. Los métodos custom sobre `type` siguen
+    siendo deuda de 3.2; no rompemos código que los use.
+  - Receptor `Any` → `None`, gradual.
+  - Otro tipo concreto (Int, Bool, Range, Result, etc.) →
+    error "no tiene el método X". El evaluator también lo
+    rechazaba en runtime; ahora se atrapa estáticamente.
+- Impacto sobre 5.3.3: `xs.find(...)` y `m.get(k)` antes eran
+  `Any` y ahora son `Result<T>` / `Result<V>` concretos. Eso
+  hace que:
+  - `users.find(...)?` opere sobre `Result<User>` concreto en
+    vez de gradual. La regla "fn contenedora retorna Result"
+    sigue chequeando — si la fn no declara return_type
+    (`return_stack.last() == Any`), no dispara. Los ejemplos
+    existentes (server.fitz `update_user`) no declaran return
+    type así que siguen pasando.
+  - `match users.find(...) { Ok(u) ... Err(_) ... }` ahora pasa
+    por el chequeo de exhaustividad de 5.3.3 (antes el
+    scrutinee Any no exigía exhaustividad). Los matches
+    existentes son todos `Ok + Err`, completos.
+- E2E: los 17 ejemplos + `examples/server.fitz` pasan
+  `fitz check` sin regresiones — la mayor parte del código
+  built-in en los ejemplos era invisible al checker hasta acá,
+  y ahora se valida sin warnings nuevos.
+
+Tests al cerrar 5.3.4: 767 (742 al cerrar 5.3.3 + 25 nuevos en
+`types.rs`: List push/pop/len/map/filter/find con tipos
+compatibles, incompatibles, aridad incorrecta, callback sin
+anotaciones (gradual), callback param incompatible; Map
+get/has/keys/values/len con tipos compatibles e incompatibles;
+Str upper/lower/len; método desconocido sobre cada built-in
+(typos), método sobre Int (error), método sobre Nominal sin
+chequeo (gradual), encadenado `xs.map(...).filter(...)` en una
+sola línea).
+
+**Deuda explícita — retomar después:**
+- **FnExpr.ret inferido del body** — los callbacks inline
+  (`fn(x) => x * 2`) hoy tienen `ret = Any`. Eso significa que
+  `.filter(fn(x: Int) -> Int { ... })` con ret no-Bool no se
+  detecta si el callback es FnExpr inline (sí se detecta si
+  viene como Function declarada con ret concreto). Lo cubre
+  5.3.5.
+- **`Expr::Index`** (`xs[i]`, `m[k]`) sigue devolviendo `Any`.
+  Es un paso análogo a métodos built-in pero independiente;
+  candidato a 5.3.5 o sub-paso separado.
+- **Encadenamiento multi-línea** (`xs.map(...)\n.filter(...)`)
+  sigue siendo deuda explícita del parser (3.4). El test usa
+  forma de una sola línea.
+- **Métodos custom sobre `type`** — sigue deuda de 3.2.
 
 ##### 5.3.5 — FnExpr ret inferido + cierre de 5.3
 **Pendiente** — refinar `Expr::FnExpr` para sintetizar `ret`
@@ -1186,7 +1265,8 @@ desde el body. Cierre formal de 5.3.
 - [x] Checker de expresiones — synthesis básico (5.3.1)
 - [x] Llamadas y return contra return_type (5.3.2)
 - [x] Result, `?`, match exhaustivo (5.3.3)
-- [ ] Checker completo (5.3.4 → 5.3.5 + 5.4)
+- [x] Métodos built-in con templates paramétricos (5.3.4)
+- [ ] Checker completo (5.3.5 + 5.4)
 - [ ] Inferencia de tipos
 - [ ] Optimizaciones básicas (5b)
 - [ ] Binario nativo standalone (5b)

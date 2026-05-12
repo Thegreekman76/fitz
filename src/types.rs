@@ -865,6 +865,24 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::Call { callee, args } => {
+            // Camino de método: `obj.method(args)` ↔ callee
+            // sintáctico es `Expr::Field`. Despachamos por
+            // `(tipo del receptor, nombre del método)` contra la
+            // tabla de built-ins (5.3.4) en lugar de pasar por la
+            // ruta general — la ruta general no puede modelar
+            // signatures paramétricas como `List<T>.map`.
+            if let Expr::Field { object, field } = callee.as_ref() {
+                let obj_ty = infer_expr(ctx, object);
+                let args_ty: Vec<Type> =
+                    args.iter().map(|a| infer_expr(ctx, a)).collect();
+                return match infer_method_call(ctx, &obj_ty, field, &args_ty) {
+                    Some(ret) => ret,
+                    // Receptor que no entendemos (Nominal sin métodos
+                    // custom, Module via import, Any): seguimos en
+                    // modo gradual sin chequear nada de la llamada.
+                    None => Type::Any,
+                };
+            }
             // Sintetizamos siempre callee y args para que afloren
             // errores adentro. Después validamos aridad y tipos según
             // lo que sea el callee.
@@ -1015,6 +1033,280 @@ fn describe_callee(callee: &Expr) -> String {
         Expr::Ident(name) => format!("la función `{}`", name),
         Expr::Field { field, .. } => format!("el método `{}`", field),
         _ => "esta llamada".into(),
+    }
+}
+
+/// Despacho del checker para método built-in. Recibe el tipo del
+/// receptor (`xs` en `xs.map(f)`), el nombre del método, y los
+/// tipos ya inferidos de los argumentos. Devuelve `Some(ret)` con
+/// el tipo del resultado, o `None` cuando el receptor no entra en
+/// el dispatch built-in (Nominal sin métodos custom todavía,
+/// Module via import — ambos modelados como `Any` o `Nominal`).
+///
+/// Para los casos `None`, el caller continúa en modo gradual
+/// (devuelve `Any` sin chequear aridad/tipos). Para los casos
+/// soportados, las violaciones se reportan vía `ctx.error(...)`
+/// pero el dispatch siempre devuelve `Some(...)` con el ret
+/// inferido (los errores no propagan, se acumulan).
+///
+/// Convención: `T` siempre proviene del receptor concreto en este
+/// call site. `List<Int>.map(f)` y `List<Str>.map(f)` instancian
+/// distinto.
+fn infer_method_call(
+    ctx: &mut CheckCtx,
+    receiver_ty: &Type,
+    method: &str,
+    args_ty: &[Type],
+) -> Option<Type> {
+    // Pelamos un Nullable: `xs?.map(...)` cae cuando el `?` ya
+    // desempacó, así que acá raramente vemos Nullable. Por las
+    // dudas, lo dejamos transparente.
+    let recv = receiver_ty.base();
+    match recv {
+        Type::List(t) => {
+            let t = (**t).clone();
+            Some(infer_list_method(ctx, &t, method, args_ty))
+        }
+        Type::Map(k, v) => {
+            let k = (**k).clone();
+            let v = (**v).clone();
+            Some(infer_map_method(ctx, &k, &v, method, args_ty))
+        }
+        Type::Str => Some(infer_str_method(ctx, method, args_ty)),
+        // Gradual: no aplicamos chequeo sobre Any (no sabemos
+        // nada) ni sobre Nominal (los métodos custom sobre `type`
+        // no existen todavía — deuda de 3.2). Quien llame retorna
+        // `Any`.
+        Type::Any | Type::Nominal(_) => None,
+        other => {
+            // Tipos sin métodos built-in: `42.foo()` y similares.
+            // El evaluator también corta, acá nos adelantamos con
+            // mensaje específico.
+            ctx.error(format!(
+                "el tipo `{}` no tiene el método `{}`",
+                other.display(ctx.types),
+                method
+            ));
+            Some(Type::Any)
+        }
+    }
+}
+
+/// Valida aridad de un método built-in. Devuelve `true` si la
+/// aridad coincide (para que el caller pueda saltarse validaciones
+/// extra sobre argumentos que no existen). Si falla, acumula error
+/// y devuelve `false`.
+fn check_method_arity(
+    ctx: &mut CheckCtx,
+    method: &str,
+    args_ty: &[Type],
+    expected: usize,
+) -> bool {
+    if args_ty.len() != expected {
+        ctx.error(format!(
+            "el método `{}` espera {} argumento(s), recibió {}",
+            method,
+            expected,
+            args_ty.len()
+        ));
+        false
+    } else {
+        true
+    }
+}
+
+/// Valida un callback unario (`fn(T) -> U`). Devuelve el `U`
+/// inferido del callback, o `Any` si el callback es Any o no
+/// validable. Si `expected_ret` es `Some(B)`, además exige que U
+/// sea compatible con B (caso típico: `.filter()` exige `Bool`).
+fn check_unary_callback(
+    ctx: &mut CheckCtx,
+    cb: &Type,
+    elem_ty: &Type,
+    method: &str,
+    expected_ret: Option<&Type>,
+) -> Type {
+    match cb {
+        Type::Any => Type::Any,
+        Type::Function { params, ret } => {
+            if params.len() != 1 {
+                ctx.error(format!(
+                    "la callback de `.{}()` debe tomar 1 argumento, recibió {}",
+                    method,
+                    params.len()
+                ));
+                return (**ret).clone();
+            }
+            // El param del callback tiene que poder recibir un T
+            // (el tipo de los elementos). Si el callback declaró un
+            // tipo concreto incompatible, error.
+            if !is_compatible(elem_ty, &params[0]) {
+                ctx.error(format!(
+                    "la callback de `.{}()` recibe elementos `{}` pero su parámetro es `{}`",
+                    method,
+                    elem_ty.display(ctx.types),
+                    params[0].display(ctx.types)
+                ));
+            }
+            if let Some(expected) = expected_ret {
+                if !is_compatible(ret, expected) {
+                    ctx.error(format!(
+                        "la callback de `.{}()` debe devolver `{}`, devuelve `{}`",
+                        method,
+                        expected.display(ctx.types),
+                        ret.display(ctx.types)
+                    ));
+                }
+            }
+            (**ret).clone()
+        }
+        other => {
+            ctx.error(format!(
+                "la callback de `.{}()` debe ser una función, recibió `{}`",
+                method,
+                other.display(ctx.types)
+            ));
+            Type::Any
+        }
+    }
+}
+
+fn infer_list_method(
+    ctx: &mut CheckCtx,
+    t: &Type,
+    method: &str,
+    args_ty: &[Type],
+) -> Type {
+    match method {
+        "push" => {
+            check_method_arity(ctx, "push", args_ty, 1);
+            if let Some(arg) = args_ty.first() {
+                if !is_compatible(arg, t) {
+                    ctx.error(format!(
+                        "`push` sobre `List<{}>` recibió `{}`",
+                        t.display(ctx.types),
+                        arg.display(ctx.types)
+                    ));
+                }
+            }
+            Type::Null
+        }
+        "pop" => {
+            check_method_arity(ctx, "pop", args_ty, 0);
+            t.clone()
+        }
+        "len" => {
+            check_method_arity(ctx, "len", args_ty, 0);
+            Type::Int
+        }
+        "map" => {
+            if !check_method_arity(ctx, "map", args_ty, 1) {
+                return Type::List(Box::new(Type::Any));
+            }
+            let u = check_unary_callback(ctx, &args_ty[0], t, "map", None);
+            Type::List(Box::new(u))
+        }
+        "filter" => {
+            if !check_method_arity(ctx, "filter", args_ty, 1) {
+                return Type::List(Box::new(t.clone()));
+            }
+            check_unary_callback(ctx, &args_ty[0], t, "filter", Some(&Type::Bool));
+            Type::List(Box::new(t.clone()))
+        }
+        "find" => {
+            if !check_method_arity(ctx, "find", args_ty, 1) {
+                return Type::Result(Box::new(t.clone()));
+            }
+            check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool));
+            Type::Result(Box::new(t.clone()))
+        }
+        _ => {
+            ctx.error(format!(
+                "`List<{}>` no tiene el método `{}`",
+                t.display(ctx.types),
+                method
+            ));
+            Type::Any
+        }
+    }
+}
+
+fn infer_map_method(
+    ctx: &mut CheckCtx,
+    k: &Type,
+    v: &Type,
+    method: &str,
+    args_ty: &[Type],
+) -> Type {
+    match method {
+        "get" => {
+            check_method_arity(ctx, "get", args_ty, 1);
+            if let Some(arg) = args_ty.first() {
+                if !is_compatible(arg, k) {
+                    ctx.error(format!(
+                        "`get` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
+                        k.display(ctx.types),
+                        v.display(ctx.types),
+                        k.display(ctx.types),
+                        arg.display(ctx.types)
+                    ));
+                }
+            }
+            Type::Result(Box::new(v.clone()))
+        }
+        "has" => {
+            check_method_arity(ctx, "has", args_ty, 1);
+            if let Some(arg) = args_ty.first() {
+                if !is_compatible(arg, k) {
+                    ctx.error(format!(
+                        "`has` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
+                        k.display(ctx.types),
+                        v.display(ctx.types),
+                        k.display(ctx.types),
+                        arg.display(ctx.types)
+                    ));
+                }
+            }
+            Type::Bool
+        }
+        "keys" => {
+            check_method_arity(ctx, "keys", args_ty, 0);
+            Type::List(Box::new(k.clone()))
+        }
+        "values" => {
+            check_method_arity(ctx, "values", args_ty, 0);
+            Type::List(Box::new(v.clone()))
+        }
+        "len" => {
+            check_method_arity(ctx, "len", args_ty, 0);
+            Type::Int
+        }
+        _ => {
+            ctx.error(format!(
+                "`Map<{}, {}>` no tiene el método `{}`",
+                k.display(ctx.types),
+                v.display(ctx.types),
+                method
+            ));
+            Type::Any
+        }
+    }
+}
+
+fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type]) -> Type {
+    match method {
+        "len" => {
+            check_method_arity(ctx, "len", args_ty, 0);
+            Type::Int
+        }
+        "upper" | "lower" => {
+            check_method_arity(ctx, method, args_ty, 0);
+            Type::Str
+        }
+        _ => {
+            ctx.error(format!("`Str` no tiene el método `{}`", method));
+            Type::Any
+        }
     }
 }
 
@@ -2726,6 +3018,265 @@ mod tests {
              let s = match pick() {\n\
                  Ok(v) => \"ok\"\n\
              }",
+        );
+    }
+
+    // ---- 5.3.4: métodos built-in con templates paramétricos ----
+
+    // List<T>: push
+
+    #[test]
+    fn list_push_con_tipo_compatible_pasa() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2]\n\
+             xs.push(3)",
+        );
+    }
+
+    #[test]
+    fn list_push_con_tipo_incompatible_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\n\
+             xs.push(\"x\")",
+            &["push", "List<Int>", "Str"],
+        );
+    }
+
+    #[test]
+    fn list_push_aridad_incorrecta_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\n\
+             xs.push(1, 2)",
+            &["push", "1 argumento", "recibió 2"],
+        );
+    }
+
+    // List<T>: pop, len
+
+    #[test]
+    fn list_pop_devuelve_t() {
+        // Si pop sobre List<Int> devuelve Int, asignarlo a Int es OK.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let last: Int = xs.pop()",
+        );
+    }
+
+    #[test]
+    fn list_len_devuelve_int() {
+        assert_ok(
+            "let xs = [1, 2, 3]\n\
+             let n: Int = xs.len()",
+        );
+    }
+
+    // List<T>: map
+
+    #[test]
+    fn list_map_devuelve_list_del_ret_del_callback() {
+        // map sobre List<Int> con callback fn(Int) -> Str → List<Str>.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let strs: List<Str> = xs.map(fn(x: Int) -> Str { return \"x\" })",
+        );
+    }
+
+    #[test]
+    fn list_map_con_callback_param_incompatible_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.map(fn(x: Str) -> Str { return x })",
+            &["map", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn list_map_con_callback_sin_anotaciones_es_any() {
+        // Callback sin anotaciones → params = [Any], ret = Any.
+        // El map devuelve List<Any>; asignarlo a List<Int> pasa por
+        // is_compatible recursivo + Any.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.map(fn(x) => x * 2)",
+        );
+    }
+
+    // List<T>: filter
+
+    #[test]
+    fn list_filter_devuelve_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let evens: List<Int> = xs.filter(fn(x: Int) -> Bool { return true })",
+        );
+    }
+
+    #[test]
+    fn list_filter_callback_aridad_incorrecta_es_error() {
+        // El FnExpr siempre tiene `ret = Any` hasta 5.3.5, así que
+        // no podemos detectar "ret no es Bool" sobre un FnExpr inline.
+        // Lo que sí captamos es aridad del callback: filter espera
+        // fn(T) -> Bool con un solo param.
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.filter(fn(x, y) => true)",
+            &["filter", "1 argumento", "recibió 2"],
+        );
+    }
+
+    // List<T>: find
+
+    #[test]
+    fn list_find_devuelve_result_t() {
+        // find sobre List<User> devuelve Result<User>.
+        assert_ok(
+            "type User { id: Int }\n\
+             let xs: List<User> = [User { id: 1 }]\n\
+             let r: Result<User> = xs.find(fn(u: User) -> Bool { return true })",
+        );
+    }
+
+    #[test]
+    fn list_find_con_try_destrabba_t() {
+        // xs.find(...)? adentro de una fn -> Result<User> debería
+        // desempacar a User.
+        assert_ok(
+            "type User { id: Int }\n\
+             fn first(xs: List<User>) -> Result<User> {\n\
+                 let u: User = xs.find(fn(u: User) -> Bool { return true })?\n\
+                 return Ok(u)\n\
+             }",
+        );
+    }
+
+    // List<T>: método desconocido
+
+    #[test]
+    fn list_metodo_desconocido_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\n\
+             xs.lenght()",
+            &["List<Int>", "lenght"],
+        );
+    }
+
+    // Map<K, V>: get, has
+
+    #[test]
+    fn map_get_devuelve_result_v() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let r: Result<Int> = m.get(\"a\")",
+        );
+    }
+
+    #[test]
+    fn map_get_con_clave_incompatible_es_error() {
+        assert_error_with(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let r = m.get(42)",
+            &["get", "Map<Str, Int>", "Int"],
+        );
+    }
+
+    #[test]
+    fn map_has_devuelve_bool() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let b: Bool = m.has(\"a\")",
+        );
+    }
+
+    #[test]
+    fn map_keys_y_values_devuelven_listas() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let ks: List<Str> = m.keys()\n\
+             let vs: List<Int> = m.values()",
+        );
+    }
+
+    #[test]
+    fn map_len_devuelve_int() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let n: Int = m.len()",
+        );
+    }
+
+    #[test]
+    fn map_metodo_desconocido_es_error() {
+        assert_error_with(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             m.foo()",
+            &["Map<Str, Int>", "foo"],
+        );
+    }
+
+    // Str
+
+    #[test]
+    fn str_upper_lower_devuelven_str() {
+        assert_ok(
+            "let s = \"hola\"\n\
+             let u: Str = s.upper()\n\
+             let l: Str = s.lower()",
+        );
+    }
+
+    #[test]
+    fn str_len_devuelve_int() {
+        assert_ok(
+            "let n: Int = \"hola\".len()",
+        );
+    }
+
+    #[test]
+    fn str_metodo_desconocido_es_error() {
+        assert_error_with(
+            "let s = \"hola\"\n\
+             s.upcase()",
+            &["Str", "upcase"],
+        );
+    }
+
+    // Encadenado
+
+    #[test]
+    fn metodo_encadenado_map_filter() {
+        // map(...).filter(...) en una sola línea — el ret de map
+        // (List<Any> por FnExpr.ret=Any hasta 5.3.5) alimenta al
+        // filter. Encadenamiento multi-línea sigue siendo deuda
+        // explícita del parser (3.4).
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.map(fn(x) => x * 2).filter(fn(y) => true)",
+        );
+    }
+
+    // Receptores que no tienen métodos built-in
+
+    #[test]
+    fn metodo_sobre_int_es_error() {
+        assert_error_with(
+            "let n = 1\n\
+             n.foo()",
+            &["Int", "foo"],
+        );
+    }
+
+    // Nominal: gradual, no chequea ni rechaza
+
+    #[test]
+    fn metodo_sobre_nominal_no_chequea() {
+        // type sin métodos custom: user.greet() pasa sin warning
+        // (el evaluator lo emite en runtime). Es la regla gradual
+        // de 5.3.4 — los métodos custom sobre `type` no existen
+        // todavía, no rompemos código que use ese patrón.
+        assert_ok(
+            "type User { id: Int }\n\
+             let u = User { id: 1 }\n\
+             u.greet()",
         );
     }
 }
