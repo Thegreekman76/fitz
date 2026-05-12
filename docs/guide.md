@@ -4097,15 +4097,23 @@ mover el handler a un pool y no vas a tener que cambiar nada.
   bridge es síncrono. Cuando se sume async real, los handlers de
   hoy van a seguir funcionando.
 - **Compilar HTTP con `fitz build`** — desde 5b.6 el compilador
-  produce servidores HTTP nativos (axum + tokio). Funciona para
-  handlers sin **state compartido**: cada handler procesa sus
-  args y devuelve directo, sin leer/escribir vars top-level del
-  programa. El ejemplo de este capítulo y `examples/server.fitz`
-  usan `let users = [...]` que TODOS los handlers leen — eso es
-  state compartido, y NO compila con `fitz build` todavía
-  (deuda residual). Sí compila y corre con `fitz run`. Resolver
-  el caso compilado requiere `Arc<Mutex<...>>` + `State` extractor
-  en el Rust generado — sub-paso futuro.
+  produce servidores HTTP nativos (axum + tokio). Desde F11 (post-5b)
+  también soporta **state compartido**: cualquier `let users = [...]`
+  top-level que un handler referencia se materializa como un
+  `thread_local!` en el Rust generado, y cada handler agarra una
+  copia del Rc al inicio del body via `.with(|s| s.clone())`. El
+  ejemplo de este capítulo y `examples/server.fitz` compilan
+  end-to-end con `fitz build` y producen los mismos resultados
+  que `fitz run` (validados con curl bit-a-bit). El trade-off del
+  approach: el binario producido es **single-threaded** —
+  `#[tokio::main(flavor = "current_thread")]` para que el
+  thread_local actúe como global. Para los workloads HTTP de Fitz
+  hoy (handlers sync, sin async externo) es irrelevante. Cuando
+  Fitz sume async/await real adentro del lenguaje, este approach se
+  reemplaza por `Arc<Mutex<...>>` + `State` extractor (sub-paso
+  futuro). Una restricción visible: las fns HTTP necesitan
+  anotación de return type — la inferencia desde el body en
+  codegen es deuda 5b.1 separada.
 - **Status codes custom** — `return 401 { ... }` está en el
   syntax-spec pero el intérprete aún no lo entiende. Hoy: Result
   destila a 200/500 automático, o tipos no serializables → 500
@@ -4145,13 +4153,13 @@ let users = [
 ]
 
 @get("/")
-fn index() => "Fitz HTTP corriendo"
+fn index() -> Str => "Fitz HTTP corriendo"
 
 @get("/users")
-fn list_users() => users
+fn list_users() -> List<User> => users
 
 @get("/users/{id}")
-fn get_user(id: Int) {
+fn get_user(id: Int) -> Result<User> {
     let found = users.find(fn(u) => u.id == id)
     return match found {
         Ok(u)  => Ok(u)
@@ -4160,7 +4168,7 @@ fn get_user(id: Int) {
 }
 
 @post("/users")
-fn create_user(body: UserInput) {
+fn create_user(body: UserInput) -> User {
     let new_id = users.len() + 1
     let u = User { id: new_id, name: body.name, email: body.email }
     users.push(u)
@@ -4168,10 +4176,22 @@ fn create_user(body: UserInput) {
 }
 ```
 
-Levantalo con:
+Las anotaciones de return (`-> Str`, `-> Result<User>`, etc.) son
+necesarias si vas a compilar el programa con `fitz build`. El
+intérprete las infiere igual y funciona sin ellas; el codegen es
+más estricto (deuda 5b.1).
+
+Levantalo con `fitz run` (sin compilar):
 
 ```bash
 cargo run -- run examples/guide/17-http.fitz
+```
+
+O compilalo a binario nativo:
+
+```bash
+cargo run -- build examples/guide/17-http.fitz
+./examples/guide/17-http
 ```
 
 Y probalo:
@@ -4220,7 +4240,7 @@ binario nativo standalone** con `fitz build`.
 Hasta acá usamos siempre `fitz run`: el intérprete lee el archivo,
 lo lexea, parsea, chequea y ejecuta en proceso. Es rápido para
 iterar y conserva toda la riqueza del lenguaje (lista heterogénea,
-state HTTP compartido, mutación implícita).
+inferencia completa sin anotaciones, mutación implícita).
 
 `fitz build` toma el mismo `.fitz` y produce un **binario nativo
 standalone** que corre sin Fitz instalado. Es el modo "deployar":
@@ -4310,11 +4330,17 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
   tiene un tipo "Value" genérico tagged en runtime sin un
   refactor. Workaround: armar dos colecciones, o usar `fitz run`.
-- **State compartido entre handlers HTTP** — un `let users = [...]`
-  top-level usado por todos los handlers. El intérprete lo
-  resuelve porque cada handler captura el env del módulo; en
-  Rust las fns top-level no acceden al scope de `main`.
-  Workaround: pasar el state como argumento, o `fitz run`.
+- **Server HTTP multi-threaded** — el binario compilado corre
+  como `#[tokio::main(flavor = "current_thread")]` (single-thread),
+  porque el state compartido entre handlers vive en un
+  `thread_local!` y multi-thread haría que cada worker tuviera su
+  propia copia. Para los workloads HTTP de Fitz hoy (handlers
+  sync, sin async externo) es invisible — solo aparece si querés
+  paralelismo verdadero entre requests. Cuando aterrice async/await
+  real en el lenguaje, esto se pivota a `Arc<Mutex<...>>` + `State`
+  extractor. (State compartido **sí** compila desde F11 — el
+  intérprete y el binario producen el mismo resultado para
+  `examples/server.fitz` y `examples/guide/17-http.fitz`.)
 - **`let X = <expr>` no literal a nivel top de un módulo** — las
   constantes top-level de un módulo deben tener una RHS literal
   (`"texto"`, `42`, `3.14`, `true`, `null`). `let X = compute()`
@@ -4359,9 +4385,9 @@ Hola, Fitz, x es 15
 ### Ejemplo: server HTTP compilado
 
 [examples/guide/18-build.fitz](../examples/guide/18-build.fitz)
-es un server HTTP **sin state compartido** que sí compila. Tiene
-endpoints estáticos, path params, Result con Err → 500, y un
-POST con body deserializado a un `type` custom:
+es un server HTTP simple que cubre endpoints estáticos, path params,
+Result con Err → 500, y un POST con body deserializado a un `type`
+custom:
 
 ```fitz
 @server(3000)
@@ -4419,8 +4445,9 @@ nativo standalone.
 - **Iterando**: `fitz run`. Cambios en el `.fitz` se reflejan
   inmediato; sin paso de compilación.
 - **Explorando features experimentales**: `fitz run`. Listas
-  heterogéneas, state HTTP compartido — todo lo que está en "qué
-  todavía no anda" sigue funcionando en el intérprete.
+  heterogéneas, error de runtime puro como división por cero — todo
+  lo que está en "qué todavía no anda" sigue funcionando en el
+  intérprete sin restricciones.
 - **Producción / deploy**: `fitz build`. Un binario que se
   copia a un servidor y arranca, sin runtime de Fitz alrededor.
 - **Distribuir un script CLI**: `fitz build`. El binario chico
@@ -4508,21 +4535,22 @@ Lo que sigue post-5:
   formatter, linter, plugin de editores.
 - **Deuda residual de Fase 5b** que entra como sub-pasos
   futuros si aparece presión:
-  - **State compartido HTTP** — la limitación más visible de
-    `fitz build` hoy (el cap 17 / `server.fitz` no compila por
-    esto). Resolverla pide `Arc<Mutex<...>>` + `axum::extract::
-    State`, lo cual es un refactor profundo de la representación
-    de `List`/`Map`.
   - **`async` / `await` reales en el lenguaje** — destrabar
-    handlers HTTP concurrentes sin bloquear el reactor.
-  - **Higher-order completo** — closures escapadas, funciones
-    como param / retorno (más allá del callback inline de
-    `.map`/`.filter`).
-  - **Inferencia de tipos de params** en fns sin anotar — hoy
-    `fn greet(name)` corre en el intérprete pero `fitz build`
-    exige anotación.
+    handlers HTTP concurrentes sin bloquear el reactor. Cuando
+    aterrice, también obliga a revisitar F11: el server compilado
+    es hoy single-threaded (tokio current_thread) para que el
+    `thread_local!` del state compartido actúe como global; un
+    handler con `await` cambia el modelo y pide `Arc<Mutex<...>>`
+    + `State` extractor.
+  - **Inferencia de tipos de params y returns** en fns sin
+    anotar — hoy `fn greet(name)` corre en el intérprete pero
+    `fitz build` exige anotación. Mismo caso para handlers HTTP
+    sin return type explícito.
   - **Status codes custom**, query params, headers, middleware,
     TLS — todo HTTP "más allá del 80%".
+  - **Listas/mapas heterogéneos** compilados (`[1, "dos"]`) — el
+    intérprete los acepta, el compilador necesita un `FitzValue`
+    tagged en runtime.
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
 deuda explícita acumulada por fase.

@@ -35,14 +35,17 @@ let users = [
     User { id: 2, name: "luis", email: null },
 ]
 
+// Las anotaciones de return son necesarias para `fitz build` (deuda
+// 5b.1 — inferencia en codegen). `fitz run` infiere igual.
+
 @get("/")
-fn index() => "Fitz HTTP corriendo"
+fn index() -> Str => "Fitz HTTP corriendo"
 
 @get("/users")
-fn list_users() => users
+fn list_users() -> List<User> => users
 
 @get("/users/{id}")
-fn get_user(id: Int) {
+fn get_user(id: Int) -> Result<User> {
     let found = users.find(fn(u) => u.id == id)
     return match found {
         Ok(u)  => Ok(u)
@@ -51,7 +54,7 @@ fn get_user(id: Int) {
 }
 
 @post("/users")
-fn create_user(body: UserInput) {
+fn create_user(body: UserInput) -> User {
     let new_id = users.len() + 1
     let u = User { id: new_id, name: body.name, email: body.email }
     users.push(u)

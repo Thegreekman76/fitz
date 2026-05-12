@@ -11,7 +11,11 @@
 > ahora valida tipos en `obj.field = value`. F12 (higher-order
 > completo) cerrada — closures escapadas, fn como valor/param/retorno
 > compilan con `fitz build`; cap 11 anotado y validado bit-a-bit.
-> Ver matriz para ítems pendientes (S1.2 expr-level, F11 state HTTP).
+> F11 (state HTTP compartido) cerrada — `thread_local!` por var
+> top-level referenciada en handlers + tokio current_thread runtime;
+> `examples/server.fitz` y `examples/guide/17-http.fitz` compilan
+> end-to-end. Ver matriz para ítems pendientes (S1.2 expr-level, T1
+> tests frágiles).
 
 ## Resumen ejecutivo
 
@@ -141,7 +145,7 @@ completa abajo.
 | F8 | `lexer.rs:319` | Identificadores ASCII-only (`is_alphabetic()` pero después corta con `is_ascii_digit()`). Sin `π`, `función` como nombres. | Baja | Baja |
 | F9 | `lexer.rs:252-279` | Escapes en strings limitados: faltan `\u{...}`, `\x..`, `\0`, `\b`. | Baja | Media |
 | F10 | `parser.rs` | Encadenamiento multi-línea en method chains (`xs.map(f)\n.filter(g)`). Deuda explícita 3.4 del parser. | Media | Media |
-| F11 | `codegen.rs` (state HTTP) | State compartido entre handlers HTTP — la deuda más visible de 5b.6. Bloquea `examples/server.fitz`. | Alta | Alta |
+| F11 | ~~`codegen.rs` (state HTTP)~~ **CERRADO** vía `thread_local! { static __FITZ_STATE_X: Rc<RefCell<T>> = ...; }` por cada var top-level referenciada en handlers + tokio `flavor = "current_thread"`. Cada fn que toca state materializa al inicio del body (`let X = __FITZ_STATE_X.with(|s| s.clone());`). Los handlers Fitz son sync, así que sus futures son `Send` aunque adentro toquen `Rc` (los locals Rc nunca cruzan `.await`). `examples/server.fitz` (CRUD completo) y `examples/guide/17-http.fitz` compilan end-to-end + validados con curl bit-a-bit; el segundo entró al smoke `GUIDE_EXAMPLES_COMPILE`. 5 tests nuevos (1 unit + 4 E2E con build + spawn + secuencia de requests). **Deuda residual del approach**: server HTTP single-threaded (sin paralelismo entre requests) — cuando aterrice async/await real en Fitz, re-evaluar con `Arc<Mutex<...>>` + `State` extractor. | — | — |
 | F12 | ~~`codegen.rs` (higher-order)~~ **CERRADO** — closures escapadas, fn nombrada como valor, FnExpr asignado a var, fn como param y como tipo de retorno compilan con `fitz build`. `TypeExpr::Function` nueva variante; codegen emite `Rc<dyn Fn(...) -> R>` uniforme. Cap 11 anotado y compilable bit-a-bit con el intérprete. Smoke `GUIDE_EXAMPLES_COMPILE` incluye `11-funciones.fitz`. 24 tests nuevos. | — | — |
 | F13 | `codegen.rs` | Listas/mapas heterogéneos: `[1, "dos"]` corre en intérprete, no compila. Requiere `FitzValue` tagged runtime. | Baja | Alta |
 | F14 | `codegen.rs` | `let X = <expr>` no-literal a nivel mod top-level. | Baja | Media |
@@ -205,6 +209,9 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
 - **F2** (field assignment chequeo) ✅ — cerrada en C-F2.
 - **F12** (higher-order completo) ✅ — cerrada con `TypeExpr::Function`
   + codegen a `Rc<dyn Fn(...) -> R>`. Cap 11 ahora compila.
-- **F11** (state HTTP compartido) — pendiente, sigue siendo la
-  deuda más visible (bloquea `examples/server.fitz` y
-  `examples/guide/17-http.fitz`).
+- **F11** (state HTTP compartido) ✅ — cerrada vía `thread_local!`
+  + tokio current_thread. `examples/server.fitz` y
+  `examples/guide/17-http.fitz` compilan + corren end-to-end.
+  Trade-off documentado: server single-threaded hasta que aterrice
+  async/await real (entonces se pivota a Arc/Mutex + `State`
+  extractor).

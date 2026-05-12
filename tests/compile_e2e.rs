@@ -582,17 +582,17 @@ fn lista_heterogenea_aborta_build() {
 
 #[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
-    // 5b.6 abre @get/@post/etc. La feature bloqueada que apuntamos acá
-    // pasa a ser **state compartido HTTP** (`let X = ...` top-level
-    // junto a decoradores HTTP) — el codegen aborta con mensaje claro
-    // citando 5b.6 como deuda residual.
+    // 5b.6 abrió @get/@post/etc., F11 abrió state HTTP compartido.
+    // La feature que apuntamos acá pasa a ser **decorator HTTP custom
+    // sobre `fn main`** — el codegen lo rechaza con mensaje claro
+    // (regla R1 que pide handlers con nombre distinto a `main`).
     let stderr = build_expect_fail(
-        "unsupported-http-state",
-        "let users = [1, 2]\n@get(\"/users\") fn list() -> Str => \"x\"\n",
+        "unsupported-http-main-decorator",
+        "@get(\"/\") fn main() => 0\n",
     );
     assert!(
-        stderr.contains("state compartido") || stderr.contains("5b.6"),
-        "esperaba mensaje sobre state compartido / 5b.6, fue: {}",
+        stderr.contains("`fn main` solo admite `@server"),
+        "esperaba mensaje sobre fn main + decorator HTTP, fue: {}",
         stderr
     );
 }
@@ -1252,6 +1252,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13-metodos.fitz",
     "14-result.fitz",
     "16-modulos.fitz",
+    "17-http.fitz",
     "18-build.fitz",
 ];
 
@@ -1308,16 +1309,275 @@ fn smoke_ejemplos_guia_compilables_compilan() {
     );
 }
 
-#[test]
-fn http_state_compartido_aborta_build() {
-    let stderr = build_expect_fail(
-        "http-state-aborts",
-        "let users = [1, 2]\n@get(\"/users\") fn list() -> Str => \"x\"\n",
-    );
+// ---------------------------------------------------------------------------
+// F11 — state HTTP compartido (thread_local + tokio current_thread)
+// ---------------------------------------------------------------------------
+
+/// Helper F11: build + spawn + **secuencia** de requests sobre el mismo
+/// binario corriendo. Valida que el state compartido persiste entre
+/// llamadas. La secuencia es `(method, path, body) -> (status, body)`.
+fn build_spawn_requests(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    sequence: &[(&str, &str, Option<&str>)],
+) -> Vec<(u16, String)> {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
     assert!(
-        stderr.contains("state compartido"),
-        "esperaba mensaje sobre state compartido, fue: {}",
-        stderr
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto {} en 3s", port);
+    }
+
+    use std::io::{Read, Write};
+    let mut results: Vec<(u16, String)> = Vec::with_capacity(sequence.len());
+    for (method, path, body) in sequence {
+        let request = match body {
+            Some(b) => format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                method,
+                path,
+                addr,
+                b.len(),
+                b
+            ),
+            None => format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+                method, path, addr
+            ),
+        };
+        let mut stream =
+            std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream.write_all(request.as_bytes()).expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw
+            .find("\r\n\r\n")
+            .map(|i| i + 4)
+            .unwrap_or(raw.len());
+        let body = raw[body_start..].to_string();
+        results.push((status, body));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    results
+}
+
+#[test]
+fn http_state_get_lista_compartida() {
+    // F11: una `let users = [...]` top-level referenciada por un
+    // handler GET. El binario debe servir la lista y los items que
+    // contiene preservan el formato JSON del intérprete.
+    let src = "@server(43320)\nfn main() => 0\n\
+               type User { id: Int, name: Str }\n\
+               let users = [User { id: 1, name: \"ana\" }, User { id: 2, name: \"luis\" }]\n\
+               @get(\"/users\") fn list_users() -> List<User> => users\n";
+    let results = build_spawn_requests(
+        "http-state-get-list",
+        src,
+        43320,
+        &[("GET", "/users", None)],
+    );
+    let (status, body) = &results[0];
+    assert_eq!(*status, 200);
+    assert!(
+        body.contains("\"id\":1") && body.contains("\"name\":\"ana\"")
+            && body.contains("\"id\":2") && body.contains("\"name\":\"luis\""),
+        "esperaba lista con ambos users, body fue: {}",
+        body
+    );
+}
+
+#[test]
+fn http_state_post_persiste_entre_requests() {
+    // F11: POST agrega a la lista. Un GET posterior **al mismo binario**
+    // debe ver el nuevo item — confirmación clave de que el state
+    // compartido funciona via `thread_local!` + tokio current_thread.
+    let src = "@server(43321)\nfn main() => 0\n\
+               type User { id: Int, name: Str }\n\
+               type UserInput { name: Str }\n\
+               let users = [User { id: 1, name: \"ana\" }]\n\
+               @get(\"/users\") fn list_users() -> List<User> => users\n\
+               @post(\"/users\") fn create_user(body: UserInput) -> User {\n\
+                   let u = User { id: users.len() + 1, name: body.name }\n\
+                   users.push(u)\n\
+                   return u\n\
+               }\n";
+    let results = build_spawn_requests(
+        "http-state-post-persist",
+        src,
+        43321,
+        &[
+            ("GET", "/users", None),
+            ("POST", "/users", Some(r#"{"name":"sofi"}"#)),
+            ("GET", "/users", None),
+        ],
+    );
+    assert_eq!(results[0].0, 200);
+    assert!(
+        !results[0].1.contains("sofi"),
+        "primer GET no debería tener `sofi`, body: {}",
+        results[0].1
+    );
+    assert_eq!(results[1].0, 200);
+    assert!(
+        results[1].1.contains("\"name\":\"sofi\""),
+        "POST debería devolver el nuevo user, body: {}",
+        results[1].1
+    );
+    assert_eq!(results[2].0, 200);
+    assert!(
+        results[2].1.contains("\"name\":\"sofi\"") && results[2].1.contains("\"name\":\"ana\""),
+        "GET final debería ver ambos users (state persiste), body: {}",
+        results[2].1
+    );
+}
+
+#[test]
+fn http_state_put_mutacion_de_campos() {
+    // F11: PUT muta campos de un user existente. El siguiente GET
+    // debe ver la mutación. Mismo binary, locks consecutivos sobre el
+    // thread_local.
+    let src = "@server(43322)\nfn main() => 0\n\
+               type User { id: Int, name: Str }\n\
+               type UserInput { name: Str }\n\
+               let users = [User { id: 1, name: \"ana\" }]\n\
+               @get(\"/users/{id}\") fn get_user(id: Int) -> Result<User> {\n\
+                   return users.find(fn(u) => u.id == id)\n\
+               }\n\
+               @put(\"/users/{id}\") fn update_user(id: Int, body: UserInput) -> Result<User> {\n\
+                   let u = users.find(fn(u) => u.id == id)?\n\
+                   u.name = body.name\n\
+                   return Ok(u)\n\
+               }\n";
+    let results = build_spawn_requests(
+        "http-state-put-mutate",
+        src,
+        43322,
+        &[
+            ("PUT", "/users/1", Some(r#"{"name":"ana actualizada"}"#)),
+            ("GET", "/users/1", None),
+        ],
+    );
+    assert_eq!(results[0].0, 200);
+    assert!(
+        results[0].1.contains("\"name\":\"ana actualizada\""),
+        "PUT debería devolver el user mutado, body: {}",
+        results[0].1
+    );
+    assert_eq!(results[1].0, 200);
+    assert!(
+        results[1].1.contains("\"name\":\"ana actualizada\""),
+        "GET posterior debería ver la mutación, body: {}",
+        results[1].1
+    );
+}
+
+#[test]
+fn http_state_delete_reconstruccion_lista() {
+    // F11: DELETE que reconstruye la lista (filter + while pop + for
+    // push) — patrón canónico para "borrar de una lista compartida sin
+    // perder la referencia". El siguiente GET ve la lista achicada.
+    let src = "@server(43323)\nfn main() => 0\n\
+               type User { id: Int, name: Str }\n\
+               let users = [User { id: 1, name: \"ana\" }, User { id: 2, name: \"luis\" }]\n\
+               @get(\"/users\") fn list_users() -> List<User> => users\n\
+               @delete(\"/users/{id}\") fn delete_user(id: Int) -> Result<Str> {\n\
+                   let kept = users.filter(fn(u) => u.id != id)\n\
+                   while (users.len() > 0) { users.pop() }\n\
+                   for u in kept { users.push(u) }\n\
+                   return Ok(\"borrado\")\n\
+               }\n";
+    let results = build_spawn_requests(
+        "http-state-delete-rebuild",
+        src,
+        43323,
+        &[
+            ("DELETE", "/users/2", None),
+            ("GET", "/users", None),
+        ],
+    );
+    assert_eq!(results[0].0, 200);
+    assert_eq!(results[1].0, 200);
+    assert!(
+        results[1].1.contains("\"name\":\"ana\"")
+            && !results[1].1.contains("\"name\":\"luis\""),
+        "GET post-delete debería tener solo ana, body: {}",
+        results[1].1
+    );
+}
+
+#[test]
+fn http_state_var_no_referenciada_no_se_promueve() {
+    // F11: una var top-level que NO es referenciada por ningún handler
+    // no debe afectar el codegen — debe ejecutarse como expresión normal
+    // dentro de `fn main()` y el server arranca igual.
+    let src = "@server(43324)\nfn main() => 0\n\
+               let saludo = \"ignorada\"\n\
+               @get(\"/\") fn index() -> Str => \"ok\"\n";
+    let results = build_spawn_requests(
+        "http-state-unused",
+        src,
+        43324,
+        &[("GET", "/", None)],
+    );
+    assert_eq!(results[0].0, 200);
+    assert!(
+        results[0].1.contains("ok"),
+        "GET / debería devolver `ok`, body: {}",
+        results[0].1
     );
 }
 

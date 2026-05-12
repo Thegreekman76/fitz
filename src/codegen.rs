@@ -145,6 +145,239 @@ fn has_http_routes(program: &Program) -> bool {
     })
 }
 
+/// F11 — detección de state HTTP compartido.
+///
+/// Identifica qué vars top-level (`Stmt::Assign`) son **referenciadas
+/// por al menos una fn** del programa cuando el programa tiene HTTP.
+/// La detección es directa (no transitiva): si una fn cualquiera
+/// (handler o helper) referencia `users` en su body, marcamos a `users`
+/// como state. Las fns que tocan state se materializan al inicio del
+/// body con `let users = __FITZ_STATE_USERS.with(|s| s.clone());`, así
+/// que cada una toma su Rc del thread_local independientemente — no
+/// hace falta propagar dependencias por la cadena de llamadas.
+///
+/// Devuelve:
+///   - Vec con los nombres de los state vars, en orden de aparición
+///     en el programa (determinista para el output del codegen).
+///   - HashMap fn_name → Vec<state_var_names> referenciados (alfabético).
+///
+/// La función NO valida que la RHS sea compatible — eso lo hace el
+/// codegen al emitir cada `Stmt::Assign` top-level dentro del init del
+/// thread_local.
+fn detect_shared_state(program: &Program) -> (Vec<String>, HashMap<String, Vec<String>>) {
+    // Paso 1 — recolectar candidatos (top-level `Stmt::Assign` con
+    // target Ident). Solo el Ident; field-assign top-level no aplica.
+    let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut order: Vec<String> = Vec::new();
+    for s in program {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            ..
+        } = s
+        {
+            if candidates.insert(name.clone()) {
+                order.push(name.clone());
+            }
+        }
+    }
+
+    // Paso 2 — para cada fn (top-level cualquiera), recolectar idents
+    // referenciados que coincidan con un candidato. Excluimos params
+    // de la propia fn y locals declarados en su body. Para detectar
+    // locals usamos un mini-visitor con scopes.
+    let mut fn_deps: HashMap<String, Vec<String>> = HashMap::new();
+    let mut used_globally: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in program {
+        if let Stmt::FnDef { name, params, body, .. } = s {
+            let mut locals: std::collections::HashSet<String> = params
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            let mut refs: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for stmt in body {
+                walk_stmt_for_state_refs(stmt, &candidates, &mut locals, &mut refs);
+            }
+            if !refs.is_empty() {
+                let mut sorted: Vec<String> = refs.into_iter().collect();
+                sorted.sort();
+                for r in &sorted {
+                    used_globally.insert(r.clone());
+                }
+                fn_deps.insert(name.clone(), sorted);
+            }
+        }
+    }
+
+    // Paso 3 — filtrar el orden de aparición por las vars realmente
+    // referenciadas (las no referenciadas no son "state" — se quedan
+    // como main_stmts top-level y se ejecutan/descartan en `fn main`).
+    let final_state: Vec<String> = order
+        .into_iter()
+        .filter(|n| used_globally.contains(n))
+        .collect();
+    (final_state, fn_deps)
+}
+
+/// Walker recursivo que detecta refs a `candidates` en un stmt,
+/// respetando bindings locales nuevos. `locals` se extiende a medida
+/// que entran asignaciones / for / params de FnExpr.
+fn walk_stmt_for_state_refs(
+    stmt: &Stmt,
+    candidates: &std::collections::HashSet<String>,
+    locals: &mut std::collections::HashSet<String>,
+    refs: &mut std::collections::HashSet<String>,
+) {
+    match stmt {
+        Stmt::Assign { target, value, .. } => {
+            walk_expr_for_state_refs(value, candidates, locals, refs);
+            match target {
+                AssignTarget::Ident(name) => {
+                    locals.insert(name.clone());
+                }
+                AssignTarget::Field { object, .. } => {
+                    walk_expr_for_state_refs(object, candidates, locals, refs);
+                }
+            }
+        }
+        Stmt::Return(e, _) | Stmt::Expr(e, _) => {
+            walk_expr_for_state_refs(e, candidates, locals, refs);
+        }
+        Stmt::While { condition, body, .. } => {
+            walk_expr_for_state_refs(condition, candidates, locals, refs);
+            for s in body {
+                walk_stmt_for_state_refs(s, candidates, locals, refs);
+            }
+        }
+        Stmt::Loop { body, .. } => {
+            for s in body {
+                walk_stmt_for_state_refs(s, candidates, locals, refs);
+            }
+        }
+        Stmt::For { var, iter, body, .. } => {
+            walk_expr_for_state_refs(iter, candidates, locals, refs);
+            let was_local = locals.insert(var.clone());
+            for s in body {
+                walk_stmt_for_state_refs(s, candidates, locals, refs);
+            }
+            if !was_local {
+                // El binding ya estaba — no removemos. Si era nuevo,
+                // lo dejamos para mantener la conservadurez del
+                // approach (mejor sobre-detectar que sub-detectar).
+            }
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
+    }
+}
+
+fn walk_expr_for_state_refs(
+    e: &Expr,
+    candidates: &std::collections::HashSet<String>,
+    locals: &mut std::collections::HashSet<String>,
+    refs: &mut std::collections::HashSet<String>,
+) {
+    match e {
+        Expr::Ident(name) => {
+            if candidates.contains(name) && !locals.contains(name) {
+                refs.insert(name.clone());
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
+        Expr::StrInterp(parts) => {
+            for p in parts {
+                if let StrPart::Expr(inner) = p {
+                    walk_expr_for_state_refs(inner, candidates, locals, refs);
+                }
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            walk_expr_for_state_refs(left, candidates, locals, refs);
+            walk_expr_for_state_refs(right, candidates, locals, refs);
+        }
+        Expr::UnaryOp { operand, .. } => {
+            walk_expr_for_state_refs(operand, candidates, locals, refs);
+        }
+        Expr::Call { callee, args } => {
+            walk_expr_for_state_refs(callee, candidates, locals, refs);
+            for a in args {
+                walk_expr_for_state_refs(a, candidates, locals, refs);
+            }
+        }
+        Expr::If { condition, then, else_ } => {
+            walk_expr_for_state_refs(condition, candidates, locals, refs);
+            for s in then {
+                walk_stmt_for_state_refs(s, candidates, locals, refs);
+            }
+            if let Some(else_b) = else_ {
+                for s in else_b {
+                    walk_stmt_for_state_refs(s, candidates, locals, refs);
+                }
+            }
+        }
+        Expr::Range { start, end } => {
+            walk_expr_for_state_refs(start, candidates, locals, refs);
+            walk_expr_for_state_refs(end, candidates, locals, refs);
+        }
+        Expr::List(items) => {
+            for it in items {
+                walk_expr_for_state_refs(it, candidates, locals, refs);
+            }
+        }
+        Expr::Map(pairs) => {
+            for (k, v) in pairs {
+                walk_expr_for_state_refs(k, candidates, locals, refs);
+                walk_expr_for_state_refs(v, candidates, locals, refs);
+            }
+        }
+        Expr::Index { object, index } => {
+            walk_expr_for_state_refs(object, candidates, locals, refs);
+            walk_expr_for_state_refs(index, candidates, locals, refs);
+        }
+        Expr::Field { object, .. } => {
+            walk_expr_for_state_refs(object, candidates, locals, refs);
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, v) in fields {
+                walk_expr_for_state_refs(v, candidates, locals, refs);
+            }
+        }
+        Expr::Ok(inner) | Expr::Err(inner) | Expr::Try(inner) => {
+            walk_expr_for_state_refs(inner, candidates, locals, refs);
+        }
+        Expr::Match { value, arms } => {
+            walk_expr_for_state_refs(value, candidates, locals, refs);
+            for arm in arms {
+                // Patterns que introducen bindings extienden locals.
+                // Aproximación conservadora: no detallamos cada
+                // variante; los Ok(x)/Err(x) bindings no van a chocar
+                // con state vars en la práctica (nombres distintos).
+                walk_expr_for_state_refs(&arm.body, candidates, locals, refs);
+            }
+        }
+        Expr::FnExpr { params, body } => {
+            // Los params del FnExpr son locales adentro del body. El
+            // shadowing puede ocultar un state var, pero como no
+            // removemos al salir, esto es conservador. En la práctica
+            // los params de callbacks (`fn(u) => ...`) no comparten
+            // nombre con state vars del scope contenedor.
+            for p in params {
+                locals.insert(p.name.clone());
+            }
+            for s in body {
+                walk_stmt_for_state_refs(s, candidates, locals, refs);
+            }
+        }
+    }
+}
+
+/// F11 — nombre canónico del thread_local que respalda un state var.
+/// `users` → `__FITZ_STATE_USERS`. Toda la convención respeta el alfa-
+/// numérico ASCII; si el lexer del futuro permite identifiers no-ASCII
+/// como nombres de vars, este helper tiene que adaptarse (deuda residual).
+fn state_var_static_name(var_name: &str) -> String {
+    format!("__FITZ_STATE_{}", var_name.to_ascii_uppercase())
+}
+
 /// Normaliza un stem de archivo `.fitz` a un identificador válido
 /// para `[package].name` y `[[bin]].name` en Cargo. Reglas:
 ///   - Caracteres permitidos: ASCII alfanuméricos, `-`, `_`.
@@ -872,30 +1105,66 @@ fn generate_main_rs(
         }
     }
 
-    // 5b.6: state compartido entre handlers no soportado todavía. Si
-    // hay HTTP y los main_stmts incluyen un `Stmt::Assign` (`let X =
-    // ...` top-level), abortamos con mensaje claro. Esto evita que el
-    // codegen de los http_fns falle con "variable desconocida" cuando
-    // el body referencia un binding top-level.
-    if has_http {
-        for s in &main_stmts {
-            if let Stmt::Assign { target, .. } = s {
-                let name = match target {
-                    AssignTarget::Ident(n) => n.clone(),
-                    AssignTarget::Field { .. } => "<campo>".to_string(),
+    // F11 (post-5b): state HTTP compartido vía `thread_local!`.
+    // Detectamos las vars top-level `let X = ...` referenciadas por las
+    // fns del programa. Cada una se materializa como un `thread_local!`
+    // estático y las fns que las usan emiten al inicio del body
+    // `let X = __FITZ_STATE_X.with(|s| s.clone());` — un Rc clone que
+    // preserva aliasing. El tokio runtime se configura como
+    // `flavor = "current_thread"` para que el thread_local actúe como
+    // global (caso contrario, cada worker thread tendría su propia
+    // copia y los handlers no compartirían state).
+    //
+    // Trade-off: el server HTTP queda single-threaded. Para el subset
+    // de Fitz HTTP de hoy (handlers sync, sin async externo, sin
+    // workloads CPU-bound) es irrelevante. Cuando Fitz sume async/await
+    // reales, este approach se reemplaza por `Arc<Mutex<...>>` con
+    // `State` extractor (deuda residual documentada).
+    let (shared_state_order, fn_deps) = if has_http {
+        detect_shared_state(program)
+    } else {
+        (Vec::new(), HashMap::new())
+    };
+    ctx.fn_state_deps = fn_deps;
+    // Los tipos resueltos de cada state var los inferimos al re-visitar
+    // los `Stmt::Assign` correspondientes (necesitamos el `Type` para
+    // emitir el alias del thread_local con tipo concreto). Lo hacemos
+    // acá porque el ctx ya tiene los tipos custom pre-registrados.
+    for s in &main_stmts {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            type_,
+            value,
+            ..
+        } = s
+        {
+            if shared_state_order.contains(name) {
+                let resolved = match type_ {
+                    Some(te) => resolve_type_expr(te, env).map_err(|e| {
+                        FitzError::new(
+                            ErrorKind::TypeError,
+                            0,
+                            0,
+                            format!(
+                                "state HTTP `{}`: anotación no resuelve: {}",
+                                name, e.message
+                            ),
+                        )
+                    })?,
+                    None => {
+                        // Sin anotación, inferimos del valor inicial.
+                        // Hacemos un pre-pass: el ctx aún no tiene los
+                        // bodies emitidos, pero `gen_expr` no muta nada
+                        // que no podamos descartar (output va a un
+                        // buffer temporal). Como atajo, usamos
+                        // `with_temp_output` para una emisión "fantasma"
+                        // que solo nos da el tipo.
+                        let (_out, result) = ctx.with_temp_output(|c| c.gen_expr(value));
+                        let (_code, ty) = result?;
+                        ty
+                    }
                 };
-                return Err(FitzError::new(
-                    ErrorKind::TypeError,
-                    0,
-                    0,
-                    format!(
-                        "state compartido entre handlers HTTP (var top-level `{}`) no soportado \
-                         en 5b.6: las fns Rust no acceden al scope de `main`. Deuda residual — \
-                         workaround: pasar el state como argumento a cada handler, o usar `fitz \
-                         run` para mantener la semántica completa del intérprete.",
-                        name
-                    ),
-                ));
+                ctx.state_var_types.insert(name.clone(), resolved);
             }
         }
     }
@@ -1085,6 +1354,22 @@ struct CodegenCtx<'a> {
     /// claros del codegen, lo replicamos. Vacío fuera de toda fn
     /// (top-level del archivo, donde `?` no aplica).
     ret_stack: Vec<Type>,
+    /// F11: nombres de vars top-level que el codegen detectó como
+    /// **state HTTP compartido** (referenciadas desde al menos una fn
+    /// con decorator HTTP). Indexado por nombre → tipo resuelto.
+    /// Vacío para programas no-HTTP o HTTP sin state compartido.
+    /// Las vars se emiten como `thread_local!` con la representación
+    /// usual `Rc<RefCell<...>>` (no cambia la repr de tipos) y se
+    /// materializan al inicio de cada fn que las referencia.
+    /// El tokio runtime queda `flavor = "current_thread"` para que el
+    /// thread_local actúe como global de verdad.
+    state_var_types: HashMap<String, Type>,
+    /// F11: para cada fn (top-level, helper, o handler), los nombres
+    /// de los state vars que su body referencia directo. Lo usamos al
+    /// inicio del body para emitir `let <name> = __FITZ_STATE_<NAME>
+    /// .with(|s| s.clone());` (Rc clone — preserva aliasing). El orden
+    /// es alfabético para que el output sea determinista.
+    fn_state_deps: HashMap<String, Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -1128,6 +1413,8 @@ impl<'a> CodegenCtx<'a> {
             module_bindings: HashMap::new(),
             loaded_modules: Vec::new(),
             ret_stack: Vec::new(),
+            state_var_types: HashMap::new(),
+            fn_state_deps: HashMap::new(),
         }
     }
 
@@ -1619,6 +1906,36 @@ impl<'a> CodegenCtx<'a> {
         self.push_scope();
         for (param, pty) in params.iter().zip(sig.params.iter()) {
             self.declare_var(param.name.clone(), pty.clone());
+        }
+        // F11: si esta fn referencia algún state HTTP shared, lo
+        // materializamos como var local al inicio del body. El `clone()`
+        // sobre el contenido del thread_local es Rc clone (barato) y
+        // preserva aliasing — mutaciones via `users.push(...)` se ven en
+        // todas las llamadas posteriores porque el thread_local guarda
+        // el Rc, no el contenido.
+        if let Some(deps) = self.fn_state_deps.get(name).cloned() {
+            for dep_name in &deps {
+                let ty = self
+                    .state_var_types
+                    .get(dep_name)
+                    .cloned()
+                    .ok_or_else(|| {
+                        self.err(format!(
+                            "fn `{}` referencia state `{}` pero el tipo no se resolvió",
+                            name, dep_name
+                        ))
+                    })?;
+                let static_name = state_var_static_name(dep_name);
+                let rust_ty = rust_type_for(&ty, self.env)?;
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "let mut {}: {} = {}.with(|__s| __s.clone());",
+                    dep_name, rust_ty, static_name
+                )
+                .unwrap();
+                self.declare_var(dep_name.clone(), ty);
+            }
         }
         // Frame de "return esperado" para coerciones y para que `?`
         // (Try) pueda validar que está adentro de una fn Result.
@@ -3929,49 +4246,88 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
-    /// Genera el `#[tokio::main] async fn main()` que construye el
-    /// `Router` axum con cada handler registrado, parsea la addr de
-    /// `@server(...)` (o usa defaults), e invoca `axum::serve`.
+    /// Genera el `#[tokio::main(flavor = "current_thread")] async fn main()`
+    /// que construye el `Router` axum con cada handler registrado,
+    /// parsea la addr de `@server(...)` (o usa defaults), e invoca
+    /// `axum::serve`.
     ///
-    /// `main_stmts` se ignoran en modo HTTP (los `let x = ...` top-level
-    /// no se pueden ejecutar antes del server sin diseñar un init phase
-    /// distinto; los ejemplos canónicos no los usan).
+    /// F11: si el programa tiene `Stmt::Assign` top-level (state
+    /// compartido), emitimos un `thread_local!` por cada uno antes del
+    /// `fn main()`. Cada handler (y cada fn helper) materializa el
+    /// state al inicio de su body via `state.with(|s| s.clone())` — un
+    /// Rc clone que preserva aliasing. El tokio runtime queda en
+    /// `flavor = "current_thread"` para que el thread_local funcione
+    /// como global (sin él, cada worker thread tendría su propia copia).
+    ///
+    /// El resto de los `main_stmts` (que no sean `Stmt::Assign`
+    /// top-level usados como state) se emiten dentro del `fn main()`
+    /// antes del Router — útil para `print(...)` de inicio o setup
+    /// auxiliar.
     fn gen_http_main(
         &mut self,
         http_fns: &[&Stmt],
         server_config: &Option<ServerConfigArgs>,
         main_stmts: &[&Stmt],
     ) -> Result<(), FitzError> {
-        // 5b.6: state compartido entre handlers no soportado. En el
-        // intérprete, las fns top-level capturan el env del módulo y
-        // un `let users = [...]` queda visible para todos. En Rust,
-        // los handlers son `fn` libres y no acceden al scope de `main`.
-        // Modelarlo bien requiere `Arc<Mutex<...>>` con extractores
-        // `axum::extract::State`, lo cual es un refactor grande de la
-        // representación de tipos (List/Map dejaría de ser
-        // `Rc<RefCell<>>` cuando es shared HTTP state). Lo cerramos
-        // como deuda visible: si el programa HTTP tiene
-        // `Stmt::Assign` top-level, abortamos con mensaje claro.
-        for s in main_stmts {
-            if let Stmt::Assign { target, .. } = s {
-                let name = match target {
-                    AssignTarget::Ident(n) => n.clone(),
-                    AssignTarget::Field { .. } => "<campo>".to_string(),
-                };
-                return Err(self.err(format!(
-                    "state compartido entre handlers HTTP (var top-level `{}`) no soportado \
-                     en 5b.6: las fns Rust no acceden al scope de `main`. Deuda residual — \
-                     workaround: pasar el state como argumento a cada handler, o usar `fitz \
-                     run` para mantener la semántica completa del intérprete.",
-                    name
-                )));
+        // F11: emitir un `thread_local!` por cada state var detectado.
+        // El init es la expresión RHS original del `Stmt::Assign`. El
+        // `Rc::new(RefCell::new(...))` está embebido en gen_expr para
+        // List/Map/Nominal — la representación matchea exactamente la
+        // del intérprete y la del CLI compilado, por eso el Rc clone
+        // del `.with(|s| s.clone())` preserva aliasing across handler
+        // calls. Orden determinista por orden de aparición.
+        if !self.state_var_types.is_empty() {
+            // Reconstruimos el orden caminando main_stmts (que vienen
+            // en orden de aparición). Solo emitimos para los que están
+            // en state_var_types (los referenciados por al menos una
+            // fn). Los `Stmt::Assign` sin referencia se ignoran — se
+            // re-emiten como locales en `fn main()` (caso raro).
+            for s in main_stmts {
+                if let Stmt::Assign {
+                    target: AssignTarget::Ident(name),
+                    value,
+                    ..
+                } = s
+                {
+                    if let Some(ty) = self.state_var_types.get(name).cloned() {
+                        let static_name = state_var_static_name(name);
+                        let rust_ty = rust_type_for(&ty, self.env)?;
+                        let (init_code, init_ty) = self.gen_expr(value)?;
+                        let coerced = coerce(&init_code, &init_ty, &ty);
+                        self.emit("thread_local! {\n");
+                        writeln!(
+                            &mut self.output,
+                            "    static {}: {} = {};",
+                            static_name, rust_ty, coerced
+                        )
+                        .unwrap();
+                        self.emit("}\n\n");
+                    }
+                }
             }
         }
 
-        self.emit("#[tokio::main]\nasync fn main() {\n");
+        // F11: tokio current_thread. Justificación arriba en el doc-
+        // comment. Los `tokio::spawn` que axum hace internamente siguen
+        // pidiendo `Send` sobre los futures, pero los wrappers
+        // `__handler_<name>` que generamos son sync (sus locals Rc no
+        // cruzan ningún `.await`), así que cumplen el bound.
+        self.emit("#[tokio::main(flavor = \"current_thread\")]\nasync fn main() {\n");
         self.indent += 1;
         self.push_scope();
+        // Emitimos los main_stmts que NO son state (no están en
+        // state_var_types). Los que sí son state ya viven en
+        // thread_local — re-emitirlos como locales acá sería redundante.
         for s in main_stmts {
+            if let Stmt::Assign {
+                target: AssignTarget::Ident(name),
+                ..
+            } = s
+            {
+                if self.state_var_types.contains_key(name) {
+                    continue;
+                }
+            }
             self.gen_stmt(s)?;
         }
 
@@ -6033,11 +6389,20 @@ mod tests {
 
     #[test]
     fn http_main_emite_tokio_main_async() {
+        // F11: tokio runtime queda en `flavor = "current_thread"` para
+        // que el `thread_local!` del state compartido funcione como
+        // global. Los handlers Fitz son sync (sus locals Rc no cruzan
+        // ningún `.await`), así que cumplen el bound `Send` que axum
+        // exige sobre los futures.
         let src = "@server(3000) fn main() => 0\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         assert_http_contains(
             src,
-            &["#[tokio::main]", "async fn main()", "axum::Router::new()"],
+            &[
+                "#[tokio::main(flavor = \"current_thread\")]",
+                "async fn main()",
+                "axum::Router::new()",
+            ],
         );
     }
 
@@ -6137,19 +6502,47 @@ mod tests {
     }
 
     #[test]
-    fn http_state_compartido_es_error_claro() {
+    fn http_state_compartido_emite_thread_local() {
+        // F11 — antes (5b.6) este caso abortaba con "state compartido
+        // no soportado". Ahora el codegen emite un `thread_local!` por
+        // cada state var detectado, y cada fn que la referencia
+        // materializa la Rc al inicio del body via `.with(|s| s.clone())`.
         let src = "let users = [1, 2, 3]\n\
-                   @get(\"/users\") fn list_users() -> Str => \"x\"";
-        let err = gen(src).expect_err("esperaba error de codegen");
+                   @get(\"/users\") fn list_users() -> List<Int> => users";
+        let code = gen(src).unwrap();
         assert!(
-            err.message.contains("state compartido"),
-            "esperaba mensaje sobre state compartido, fue: {}",
-            err.message
+            code.contains("thread_local!"),
+            "esperaba bloque `thread_local!`, got:\n{}",
+            code
         );
         assert!(
-            err.message.contains("users"),
-            "esperaba que el mensaje cite la var `users`, fue: {}",
-            err.message
+            code.contains("__FITZ_STATE_USERS"),
+            "esperaba el static __FITZ_STATE_USERS, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__FITZ_STATE_USERS.with(|__s| __s.clone())"),
+            "esperaba la materialización con `.with(|__s| __s.clone())`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn http_state_no_referenciado_no_se_promueve_a_thread_local() {
+        // Si una var top-level NO es referenciada por ninguna fn HTTP,
+        // no es state compartido — se queda como var local en `fn main()`.
+        let src = "let ignorada = 42\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap();
+        assert!(
+            !code.contains("thread_local!"),
+            "no esperaba thread_local para una var sin refs, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("__FITZ_STATE_IGNORADA"),
+            "no esperaba el static, got:\n{}",
+            code
         );
     }
 

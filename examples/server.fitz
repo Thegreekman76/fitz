@@ -47,14 +47,18 @@ let users = [
     User { id: 2, name: "luis", email: null },
 ]
 
+// Las anotaciones de return son requeridas por `fitz build` (deuda 5b.1
+// — inferencia de tipos en codegen pendiente). En `fitz run` el
+// intérprete las infiere igual; el subset compilable está más estricto.
+
 @get("/")
-fn index() => "Fitz API corriendo 🏔️"
+fn index() -> Str => "Fitz API corriendo 🏔️"
 
 @get("/users")
-fn list_users() => users
+fn list_users() -> List<User> => users
 
 @get("/users/{id}")
-fn get_user(id: Int) {
+fn get_user(id: Int) -> Result<User> {
     let found = users.find(fn(u) => u.id == id)
     return match found {
         Ok(u)  => Ok(u)
@@ -63,7 +67,7 @@ fn get_user(id: Int) {
 }
 
 @post("/users")
-fn create_user(body: UserInput) {
+fn create_user(body: UserInput) -> User {
     let new_id = users.len() + 1
     let u = User { id: new_id, name: body.name, email: body.email }
     users.push(u)
@@ -74,7 +78,7 @@ fn create_user(body: UserInput) {
 // Si no, Err → 500. Usamos `?` para destrabar el Ok y dejar que el
 // Err se propague hasta el caller (handler → runtime → 500).
 @put("/users/{id}")
-fn update_user(id: Int, body: UserInput) {
+fn update_user(id: Int, body: UserInput) -> Result<User> {
     let u = users.find(fn(u) => u.id == id)?
     u.name = body.name
     u.email = body.email
@@ -84,7 +88,7 @@ fn update_user(id: Int, body: UserInput) {
 // Delete: filtramos y reconstruimos la lista para preservar la
 // referencia compartida que ven los otros handlers.
 @delete("/users/{id}")
-fn delete_user(id: Int) {
+fn delete_user(id: Int) -> Result<Str> {
     let exists = users.find(fn(u) => u.id == id)
     return match exists {
         Err(_) => Err("usuario {id} no encontrado")
@@ -92,7 +96,7 @@ fn delete_user(id: Int) {
     }
 }
 
-fn do_delete(id: Int) {
+fn do_delete(id: Int) -> Result<Str> {
     let kept = users.filter(fn(u) => u.id != id)
     while (users.len() > 0) {
         users.pop()
