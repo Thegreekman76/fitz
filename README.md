@@ -4,12 +4,19 @@
 > Nacido en la Patagonia. Construido con Rust.
 
 ```fitz
+// Ejemplo aspiracional (sintaxis del syntax-spec). Lo de
+// async/.await y status codes custom llega en Fases 4.x/5.x.
 @get("/users/{id}")
 async fn get_user(id: Int) -> User {
     let user = db.find(id).await
     return user
 }
 ```
+
+Para ver un ejemplo **que corre hoy end-to-end**, mirá
+[`examples/server.fitz`](examples/server.fitz) — un CRUD completo
+con `Result + ?`, body JSON y `@server(...)`, ejecutable con
+`fitz run`.
 
 ## Por qué Fitz
 
@@ -22,16 +29,35 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 **Fitz toma lo mejor de cada uno:**
 
-| Feature          | Python | TypeScript | Go  | Fitz |
-| ---------------- | ------ | ---------- | --- | ---- |
-| Sintaxis limpia  | ✅     | ⚠️         | ❌  | ✅   |
-| Tipado gradual   | ❌     | ✅         | ❌  | ✅   |
-| Compilado nativo | ❌     | ❌         | ✅  | ✅   |
-| HTTP en el core  | ❌     | ❌         | ❌  | ✅   |
-| Async nativo     | ⚠️     | ✅         | ✅  | ✅   |
-| Interop Python   | ✅     | ❌         | ❌  | ✅   |
+| Feature              | Python | TypeScript | Go  | Fitz |
+| -------------------- | ------ | ---------- | --- | ---- |
+| Sintaxis limpia      | ✅     | ⚠️         | ❌  | ✅   |
+| Tipado gradual       | ❌     | ✅         | ❌  | ✅ * |
+| Compilado nativo     | ❌     | ❌         | ✅  | 🚧 † |
+| HTTP en el core      | ❌     | ❌         | ❌  | ✅   |
+| Async nativo         | ⚠️     | ✅         | ✅  | 🚧 ‡ |
+| Interop Python       | ✅     | ❌         | ❌  | 🚧 § |
 
-## Ejemplo rápido
+\* **Tipado gradual con chequeo estático** — Fase 5a completada.
+`fitz check` y `fitz run` validan anotaciones en compile time;
+sin anotación, se infiere o se trata como `Any`.
+
+† **Compilado nativo** — objetivo de Fase 5b. Hoy Fitz corre con
+un intérprete escrito en Rust. El IR tipado y el codegen
+(Cranelift o transpile-a-Rust) son el próximo bloque.
+
+‡ **Async nativo** — la sintaxis `async fn` se parsea, pero el
+runtime sigue siendo síncrono. Los handlers HTTP corren en un
+thread del intérprete con bridge a tokio. El `await` real
+llega en Fase 4.x/5.x.
+
+§ **Interop Python via PyO3** — planificado, todavía no
+implementado.
+
+## Ejemplo aspiracional
+
+Esto es lo que Fitz va a ser. Lo que **corre hoy** está abajo en
+"Qué funciona hoy" y en [`examples/`](examples/).
 
 ```fitz
 // main.fitz — un servicio completo, un archivo, cero dependencias
@@ -58,22 +84,75 @@ async fn get_user(id: Int) -> User {
 ```
 
 ```bash
-fitz build && ./main
+fitz build && ./main          # ← objetivo, Fase 5b
+```
+
+Hoy mismo, lo equivalente (sin `async`, sin status codes custom,
+con el intérprete) sí corre:
+
+```bash
+fitz run examples/server.fitz
 # Servidor en http://localhost:3000
 ```
 
-Un binario. Sin dependencias en producción.
-
 ## Estado del proyecto
 
-🏔️ **Fase 3 completada — el lenguaje creció.** Los cinco pasos
-cerraron: listas/mapas/rangos con `for ... in`, tipos custom
-instanciables con field access y mutación, `Result` + `Ok`/`Err` + `?`,
-funciones anónimas + method calls + mutación, y módulos / `import`.
-El intérprete ejecuta programas multi-archivo end-to-end (503 tests
-pasando). Próximo: Fase 4 — HTTP nativo.
+🏔️ **Fase 5a completada — type checker estático funcionando.**
 
-Ver [roadmap](docs/roadmap.md) para el estado detallado.
+Las fases cerradas:
+
+- **Fase 2 — Intérprete base**: lexer, parser, AST, evaluador con
+  funciones, closures, control de flujo, manejo unificado de errores.
+- **Fase 3 — El lenguaje crece**: listas/mapas/rangos con `for ... in`,
+  tipos custom (`type`) instanciables con field access y mutación,
+  `Result` + `Ok`/`Err` + `?`, funciones anónimas + method calls,
+  módulos / `import` / `from import`.
+- **Fase 4 — HTTP nativo**: `@get`/`@post`/`@put`/`@delete` en el
+  lenguaje, path params tipados, body JSON deserializado contra
+  `type`, `@server(port, host)` configurable, serialización JSON
+  automática (incluyendo `Result` auto-handling: `Ok(v)`→200,
+  `Err(e)`→500).
+- **Fase 5a — Type checker estático**: `fitz check` valida
+  anotaciones, llamadas (aridad + tipos), returns vs return_type,
+  operador `?`, exhaustividad de `match` sobre `Result`, métodos
+  built-in paramétricos (`List<T>.map`, etc.), índices (`xs[i]`),
+  FnExpr.ret inferido del body. `fitz run` aborta en modo strict
+  por default; `--no-typecheck` lo salta.
+
+**784 tests pasando.** Próximo: **Fase 5b — codegen a binario
+nativo** (backend a decidir: Cranelift o transpile-a-Rust).
+
+Ver [roadmap](docs/roadmap.md) para el estado detallado y la
+deuda explícita.
+
+## Qué funciona hoy
+
+- **Sintaxis completa** (Fases 2-3): variables, aritmética con
+  coerción Int↔Float, strings con interpolación, control de flujo
+  (`if`/`while`/`for`/`loop`/`match`), funciones (bloque y flecha),
+  closures, listas/mapas/rangos, tipos custom con defaults y
+  campos nullables, `Result` + `?`, módulos.
+- **HTTP nativo** (Fase 4): handlers con decoradores
+  `@get`/`@post`/`@put`/`@delete`, path params tipados, body JSON
+  con validación contra `type`, `@server(port, host)`.
+- **Type checker estático** (Fase 5a): `fitz check` valida
+  anotaciones de tipo. Reporta typos en variables, mismatches
+  en asignación y argumentos, return contra return_type,
+  exhaustividad de `match` sobre `Result`, métodos inexistentes
+  sobre built-ins, índices con tipo de clave incompatible, y más.
+
+### CLI
+
+```bash
+# Ejecutar un programa
+fitz run programa.fitz
+
+# Validar tipos sin ejecutar (exit 1 si hay errores)
+fitz check programa.fitz
+
+# Ejecutar saltando el chequeo estático (warnings, no aborta)
+fitz run --no-typecheck programa.fitz
+```
 
 ## Estabilidad
 
