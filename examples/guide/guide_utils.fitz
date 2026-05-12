@@ -9,7 +9,7 @@
 
 let PREFIX = "saludos, "
 
-fn greet(name) => "{PREFIX}{name}"
+fn greet(name: Str) -> Str => "{PREFIX}{name}"
 
 type User {
     id: Int

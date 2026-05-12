@@ -105,14 +105,18 @@ fn check_file(path: &PathBuf) {
     }
 }
 
-/// `fitz build <archivo>` — Fase 5b.1. Compila el .fitz a binario
-/// nativo via `rustc`. Flujo: lex → parse → checker (strict) →
-/// codegen a Rust → `rustc` → copia el binario adyacente al
-/// archivo fuente.
+/// `fitz build <archivo>` — Fase 5b. Compila el .fitz a binario nativo.
+/// Flujo: lex → parse → checker (strict) → codegen a Cargo project →
+/// `cargo build --release` → copia el binario adyacente al archivo
+/// fuente.
 ///
-/// El Rust generado queda en `target/fitz-build/<nombre>/main.rs`
-/// para inspección manual. Si rustc falla, el output crudo se
-/// imprime tal cual.
+/// Desde 5b.5 generamos un Cargo project en lugar de invocar rustc
+/// directamente. Razones: (a) los imports cross-archivo necesitan
+/// múltiples `.rs` con `mod`, lo que se hace nativo con cargo; (b) cuando
+/// llegue 5b.6 con HTTP, sumamos `axum`/`tokio`/`serde_json` al
+/// `Cargo.toml` generado sin reescribir pipeline; (c) cargo cachea
+/// incremental, lo que abarata segunda compilación. Trade-off: la
+/// primera compilación cuesta ~1-2s más que `rustc` directo.
 fn build_file(path: &PathBuf) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
@@ -149,74 +153,109 @@ fn build_file(path: &PathBuf) {
         std::process::exit(1);
     }
 
-    // Codegen.
-    let rust_code = match codegen::generate_rust(&program, &env) {
-        Ok(s) => s,
+    // Codegen a Cargo project.
+    let project = match codegen::generate_project(path, &program, &env) {
+        Ok(p) => p,
         Err(e) => {
             eprintln!("✗ codegen: {}", e);
-            eprintln!("   (Fase 5b.1 soporta un subset; el resto llega en 5b.2+.)");
+            eprintln!("   (Fase 5b soporta un subset progresivo; los mensajes citan el sub-paso correspondiente.)");
             std::process::exit(1);
         }
     };
 
-    // Directorios.
-    let stem = path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("fitz_build");
+    // Layout del Cargo project: target/fitz-build/<stem>/{Cargo.toml, src/...}.
     let build_dir = PathBuf::from("target")
         .join("fitz-build")
-        .join(stem);
-    if let Err(e) = fs::create_dir_all(&build_dir) {
-        eprintln!("Error creando {}: {}", build_dir.display(), e);
-        std::process::exit(1);
-    }
-    let rust_src = build_dir.join("main.rs");
-    if let Err(e) = fs::write(&rust_src, &rust_code) {
-        eprintln!("Error escribiendo {}: {}", rust_src.display(), e);
+        .join(&project.bin_name);
+    let src_dir = build_dir.join("src");
+    if let Err(e) = fs::create_dir_all(&src_dir) {
+        eprintln!("Error creando {}: {}", src_dir.display(), e);
         std::process::exit(1);
     }
 
-    // Output binario adyacente al .fitz: `hello.fitz` → `hello`
-    // (Linux/macOS) o `hello.exe` (Windows).
-    let bin_name = if cfg!(windows) {
-        format!("{}.exe", stem)
-    } else {
-        stem.to_string()
-    };
-    let bin_out = path
-        .parent()
-        .map(|p| p.join(&bin_name))
-        .unwrap_or_else(|| PathBuf::from(&bin_name));
+    // Escribir Cargo.toml.
+    let cargo_toml_path = build_dir.join("Cargo.toml");
+    if let Err(e) = fs::write(&cargo_toml_path, &project.cargo_toml) {
+        eprintln!("Error escribiendo {}: {}", cargo_toml_path.display(), e);
+        std::process::exit(1);
+    }
 
-    // Invocamos rustc directamente. Para 5b.1 no necesitamos
-    // dependencias externas; cuando lleguen (axum/tokio en 5b.6),
-    // pasamos a generar Cargo.toml + src/main.rs y llamamos cargo.
-    let output = std::process::Command::new("rustc")
-        .args([
-            "--edition",
-            "2021",
-            "-O",
-        ])
-        .arg(&rust_src)
-        .arg("-o")
-        .arg(&bin_out)
+    // Escribir src/main.rs.
+    let main_rs_path = src_dir.join("main.rs");
+    if let Err(e) = fs::write(&main_rs_path, &project.main_rs) {
+        eprintln!("Error escribiendo {}: {}", main_rs_path.display(), e);
+        std::process::exit(1);
+    }
+
+    // Escribir cada mod file (5b.5+).
+    for mod_file in &project.mod_files {
+        let dest = src_dir.join(&mod_file.rel_path);
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Error creando {}: {}", parent.display(), e);
+                std::process::exit(1);
+            }
+        }
+        if let Err(e) = fs::write(&dest, &mod_file.content) {
+            eprintln!("Error escribiendo {}: {}", dest.display(), e);
+            std::process::exit(1);
+        }
+    }
+
+    // Invocar cargo build --release. Trabajamos contra el manifiesto
+    // del project generado; el target dir se hereda (cargo decide).
+    let output = std::process::Command::new("cargo")
+        .args(["build", "--release", "--manifest-path"])
+        .arg(&cargo_toml_path)
         .output();
 
     let output = match output {
         Ok(o) => o,
         Err(e) => {
-            eprintln!("Error invocando rustc: {}", e);
-            eprintln!("   ¿Tenés rustc en el PATH? (`rustup` lo provee.)");
+            eprintln!("Error invocando cargo: {}", e);
+            eprintln!("   ¿Tenés cargo en el PATH? (`rustup` lo provee.)");
             std::process::exit(1);
         }
     };
 
     if !output.status.success() {
-        eprintln!("✗ rustc falló al compilar el código generado:");
-        eprintln!("   (revisá {} para ver qué se intentó compilar.)", rust_src.display());
-        eprintln!("--- stderr de rustc ---");
+        eprintln!("✗ cargo build falló al compilar el código generado:");
+        eprintln!("   (revisá {} para ver qué se intentó compilar.)", src_dir.display());
+        eprintln!("--- stderr de cargo ---");
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    // Binario en target/release/<bin_name>; copiar adyacente al .fitz
+    // con el `output_basename` (= stem original del .fitz, sin
+    // sanitizar). Si el usuario buildea `02-hola.fitz`, el archivo
+    // final es `02-hola.exe` aunque el crate dentro de Cargo se llame
+    // `fitz_02-hola`.
+    let release_bin_filename = if cfg!(windows) {
+        format!("{}.exe", project.bin_name)
+    } else {
+        project.bin_name.clone()
+    };
+    let output_filename = if cfg!(windows) {
+        format!("{}.exe", project.output_basename)
+    } else {
+        project.output_basename.clone()
+    };
+    let release_bin_path = build_dir
+        .join("target")
+        .join("release")
+        .join(&release_bin_filename);
+    let bin_out = path
+        .parent()
+        .map(|p| p.join(&output_filename))
+        .unwrap_or_else(|| PathBuf::from(&output_filename));
+    if let Err(e) = fs::copy(&release_bin_path, &bin_out) {
+        eprintln!(
+            "Error copiando {} a {}: {}",
+            release_bin_path.display(),
+            bin_out.display(),
+            e
+        );
         std::process::exit(1);
     }
 

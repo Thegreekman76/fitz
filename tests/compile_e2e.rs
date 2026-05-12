@@ -583,15 +583,16 @@ fn lista_heterogenea_aborta_build() {
 
 #[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
-    // 5b.4 abre Result/match. La feature bloqueada que apuntamos acá
-    // pasa a ser `import` (5b.5) — el codegen aborta con mensaje claro.
+    // 5b.5 abre imports/módulos. La feature bloqueada que apuntamos
+    // acá pasa a ser `@get` (decoradores HTTP) — el codegen aborta con
+    // mensaje claro mencionando 5b.6.
     let stderr = build_expect_fail(
-        "unsupported-import",
-        "from foo import bar\nprint(bar)\n",
+        "unsupported-http",
+        "@get(\"/\") fn index() => 0\n",
     );
     assert!(
-        stderr.contains("5b.5") || stderr.contains("import"),
-        "esperaba mensaje sobre import / 5b.5, fue: {}",
+        stderr.contains("5b.6") || stderr.contains("decorador"),
+        "esperaba mensaje sobre decorador HTTP / 5b.6, fue: {}",
         stderr
     );
 }
@@ -730,6 +731,189 @@ print(boom())
     let (stdout, exit) = build_and_run("print-result", src);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["Ok(42)", "Err(\"explotó\")"]);
+}
+
+// ---------------------------------------------------------------------------
+// Fase 5b.5 — módulos / import
+// ---------------------------------------------------------------------------
+//
+// Los tests de 5b.5 necesitan MÚLTIPLES archivos en el tempdir (no solo
+// `prog.fitz`). Helper específico para escribir varios archivos antes
+// del build.
+
+fn build_and_run_multi(
+    test_name: &str,
+    main_src: &str,
+    extra_files: &[(&str, &str)],
+) -> (String, i32) {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, main_src).expect("escribir .fitz");
+    for (name, content) in extra_files {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).expect("crear subdir");
+        }
+        std::fs::write(&p, content).expect("escribir extra .fitz");
+    }
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+    let run = Command::new(&bin).output().expect("invocar binario");
+    (
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+        run.status.code().unwrap_or(-1),
+    )
+}
+
+fn build_expect_fail_multi(
+    test_name: &str,
+    main_src: &str,
+    extra_files: &[(&str, &str)],
+) -> String {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, main_src).expect("escribir .fitz");
+    for (name, content) in extra_files {
+        let p = dir.join(name);
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).expect("crear subdir");
+        }
+        std::fs::write(&p, content).expect("escribir extra .fitz");
+    }
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        !output.status.success(),
+        "esperaba que fitz build fallara, pero salió OK:\nstdout: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+#[test]
+fn from_import_type_y_fn_compilado() {
+    // Reproduce el patrón de `examples/guide/16-modulos.fitz`:
+    // - `import utils` expone `utils.greet(...)` como namespace.
+    // - `from utils import User` trae el tipo al scope para
+    //   construir con `User { ... }`.
+    let main = "\
+import utils
+from utils import User
+let u = User { id: 7, name: \"Fitz\" }
+print(utils.greet(u.name))
+print(u)
+";
+    let utils = "\
+let PREFIX = \"saludos, \"
+fn greet(name: Str) -> Str => \"{PREFIX}{name}\"
+type User { id: Int, name: Str }
+";
+    let (stdout, exit) = build_and_run_multi(
+        "module-basic",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &["saludos, Fitz", "User { id: 7, name: \"Fitz\" }"],
+    );
+}
+
+#[test]
+fn from_import_const_str_compilado() {
+    // `from utils import PREFIX` trae una constante de Str al scope.
+    let main = "\
+from utils import PREFIX
+print(PREFIX)
+";
+    let utils = "let PREFIX = \"prefijo\"";
+    let (stdout, exit) = build_and_run_multi(
+        "module-import-const",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["prefijo"]);
+}
+
+#[test]
+fn import_namespace_con_fn_solo_compilado() {
+    // `import utils` y luego `utils.greet(...)` sin importar nada
+    // específico. El namespace queda disponible vía path Rust.
+    let main = "\
+import utils
+print(utils.greet(\"Patagonia\"))
+";
+    let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"";
+    let (stdout, exit) = build_and_run_multi(
+        "module-namespace-only",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hola, Patagonia"]);
+}
+
+#[test]
+fn modulo_inexistente_aborta_build() {
+    let stderr = build_expect_fail_multi(
+        "module-not-found",
+        "import inexistente\nprint(0)\n",
+        &[],
+    );
+    assert!(
+        stderr.contains("no se encontró el módulo")
+            || stderr.contains("inexistente"),
+        "esperaba mensaje de módulo no encontrado, fue: {}",
+        stderr
+    );
+}
+
+#[test]
+fn modulo_con_import_propio_es_error_transitivo() {
+    // 5b.5: los imports transitivos no se soportan todavía.
+    // Si el módulo cargado tiene su propio `import`, el loader aborta.
+    let main = "\
+import primero
+print(primero.x())
+";
+    let primero = "\
+import segundo
+fn x() -> Int => 1
+";
+    let segundo = "fn y() -> Int => 2";
+    let stderr = build_expect_fail_multi(
+        "module-transitivo",
+        main,
+        &[("primero.fitz", primero), ("segundo.fitz", segundo)],
+    );
+    assert!(
+        stderr.contains("transitivos") || stderr.contains("5b.5"),
+        "esperaba mensaje sobre imports transitivos / 5b.5, fue: {}",
+        stderr
+    );
 }
 
 #[test]

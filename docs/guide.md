@@ -3482,7 +3482,7 @@ Pongamos dos archivos lado a lado:
 ```fitz
 let PREFIX = "saludos, "
 
-fn greet(name) {
+fn greet(name: Str) -> Str {
     return "{PREFIX}{name}"
 }
 ```
@@ -3719,6 +3719,19 @@ convención de underscore validada por el compilador estático.
   de usuario.
 - **Multi-línea en `from import (...)` con paréntesis** — sin
   soporte. Una línea sola.
+- **Compilar (`fitz build`)** — desde 5b.5 el compilador
+  soporta módulos. Con dos restricciones que no afectan al
+  intérprete:
+  - Las funciones del módulo **deben anotar tipos** de parámetros
+    y retorno (limitación de codegen 5b.1; la inferencia de
+    tipos de params es deuda residual).
+  - Los `let X = ...` top-level del módulo deben tener una
+    **RHS literal** (`"texto"`, `42`, `3.14`, `true`, `null`).
+    Expresiones más complejas (`let X = compute()`) compilan
+    en el intérprete pero no en `fitz build`.
+  - **Imports transitivos no se soportan**: un módulo cargado
+    por el main no puede tener su propio `import`. Workaround
+    hasta que se cierre: aplaná los imports al archivo principal.
 
 ### Ejemplo completo
 
@@ -3738,7 +3751,7 @@ print(u)
 ```fitz
 let PREFIX = "saludos, "
 
-fn greet(name) => "{PREFIX}{name}"
+fn greet(name: Str) -> Str => "{PREFIX}{name}"
 
 type User {
     id: Int

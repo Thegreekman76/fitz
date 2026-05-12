@@ -40,29 +40,724 @@
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
+use std::path::{Path, PathBuf};
 
 use crate::ast::{
     AssignTarget, BinOpKind, Expr, Field, Param, Program, Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError};
-use crate::types::{resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
+use crate::types::{check_program, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
+
+// ---------------------------------------------------------------------------
+// API pública del codegen
+// ---------------------------------------------------------------------------
+
+/// Artefactos para escribir un Cargo project entero. Lo produce
+/// `generate_project`; el subcomando `build` de `main.rs` los serializa
+/// a disco y dispara `cargo build`.
+pub struct ProjectArtifacts {
+    /// Nombre del crate y del binario producido por Cargo. Sanitizado
+    /// para cumplir las reglas de Cargo (alfanumérico/`-`/`_`, sin
+    /// empezar con dígito). Lo usa `main.rs` para encontrar el binario
+    /// resultante en `target/release/<bin_name>`.
+    pub bin_name: String,
+    /// Nombre del binario adyacente al `.fitz` original, sin sanitizar
+    /// (matchea el stem del archivo fuente). Ej: `02-hola.fitz` →
+    /// `02-hola`. `main.rs` copia `bin_name` a este nombre al final
+    /// del build para preservar la convención del usuario.
+    pub output_basename: String,
+    pub cargo_toml: String,
+    pub main_rs: String,
+    /// Cero o más mod files. Cada uno apunta a una ruta relativa a `src/`
+    /// (p.ej. `guide_utils.rs` o `sub/foo.rs`).
+    pub mod_files: Vec<ModFile>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ModFile {
+    pub rel_path: PathBuf,
+    pub content: String,
+}
+
+/// Pipeline completo para un `fitz build`: arma el Cargo project con
+/// `main.rs`, opcionales `mod` files, y `Cargo.toml`. El `src_path` es
+/// el archivo `.fitz` que se está compilando — su `parent()` es el
+/// `base_dir` para resolver `import`s, y su `file_stem()` es el nombre
+/// del crate/binario.
+///
+/// 5b.5: si el programa tiene `Stmt::Import` / `Stmt::FromImport`,
+/// los módulos referenciados se cargan recursivamente (parser + checker
+/// + codegen) y producen entries en `mod_files`.
+pub fn generate_project(
+    src_path: &Path,
+    program: &Program,
+    env: &TypeEnv,
+) -> Result<ProjectArtifacts, FitzError> {
+    let raw_stem = src_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("fitz_build")
+        .to_string();
+    // Cargo exige que el `[package].name` sea un identificador válido:
+    // alfanuméricos, guiones, y guiones bajos, sin empezar por dígito.
+    // El stem del archivo `.fitz` puede ser cualquier cosa (ej:
+    // `02-hola.fitz`). Sanitizamos: reemplazamos no-alfanuméricos por
+    // `_` y prefijamos `fitz_` si empieza con dígito.
+    let stem = sanitize_crate_name(&raw_stem);
+    let base_dir = src_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+
+    // PASS 1 — Cargar recursivamente todos los módulos importados desde
+    // el main, generar su código Rust y registrarlos.
+    let mut loader = ModuleLoader::new(base_dir.clone());
+    loader.collect_imports(program)?;
+
+    // PASS 2 — Generar el main.rs. El loader expone los bindings de
+    // módulos (`import foo` / `from foo import X`) para que el codegen
+    // del main resuelva `foo.x` como path `foo::x` y los tipos
+    // importados con sus fields completos.
+    let main_rs = generate_main_rs(program, env, &loader)?;
+
+    Ok(ProjectArtifacts {
+        bin_name: stem.clone(),
+        output_basename: raw_stem,
+        cargo_toml: cargo_toml_for(&stem),
+        main_rs,
+        mod_files: loader.into_mod_files(),
+    })
+}
+
+/// Normaliza un stem de archivo `.fitz` a un identificador válido
+/// para `[package].name` y `[[bin]].name` en Cargo. Reglas:
+///   - Caracteres permitidos: ASCII alfanuméricos, `-`, `_`.
+///   - No puede empezar con dígito.
+///
+/// Ejemplos: `02-hola` → `fitz_02-hola`, `mi.app` → `mi_app`,
+/// `simple` → `simple`.
+fn sanitize_crate_name(raw: &str) -> String {
+    let mut s: String = raw
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '_'
+            }
+        })
+        .collect();
+    if s.chars().next().map_or(true, |c| c.is_ascii_digit() || c == '-') {
+        s = format!("fitz_{}", s);
+    }
+    s
+}
+
+/// Cargo.toml minimalista para un binario sin dependencias. Cuando
+/// llegue 5b.6 sumamos `axum`/`tokio`/`serde_json` acá.
+fn cargo_toml_for(stem: &str) -> String {
+    format!(
+        "[package]\n\
+         name = \"{stem}\"\n\
+         version = \"0.1.0\"\n\
+         edition = \"2021\"\n\
+         \n\
+         [[bin]]\n\
+         name = \"{stem}\"\n\
+         path = \"src/main.rs\"\n",
+    )
+}
+
+// ---------------------------------------------------------------------------
+// ModuleLoader — carga recursiva de módulos para el codegen
+// ---------------------------------------------------------------------------
+//
+// El intérprete carga módulos en runtime con un loader instalado en un
+// thread_local (ver `evaluator::load_module`). El codegen necesita lo
+// mismo pero AOT: leer el archivo, parsearlo, chequearlo, generarlo
+// como un `mod` Rust, y guardar metadatos suficientes para resolver
+// llamadas y struct literals cross-module.
+//
+// Alcance 5b.5: single-level imports — el main puede importar módulos,
+// pero los módulos NO pueden importar otros módulos. Si llegan
+// imports anidados, el loader emite un error explícito y los deja
+// como deuda residual.
+
+/// Resultado de cargar un módulo: lo que el main necesita para emitir
+/// `mod foo;`, `use foo::{...};`, y resolver `foo.x` o llamadas a
+/// items importados.
+#[derive(Debug, Clone)]
+struct LoadedModule {
+    /// Nombre Rust del módulo (= último segmento del path Fitz =
+    /// nombre visible en el binding). Ej: `import sub.utils` → `utils`.
+    mod_name: String,
+    /// Ruta del archivo Rust generado, relativa a `src/` del crate.
+    /// Ej: `utils.rs` para `import utils`; `sub/utils.rs` para
+    /// `import sub.utils` (junto con `sub/mod.rs`).
+    rel_path: PathBuf,
+    /// Código Rust completo del módulo (preludio + items con `pub`).
+    rust_content: String,
+    /// Firmas de tipos exportados, indexadas por nombre.
+    type_sigs: HashMap<String, TypeSig>,
+    /// Firmas de fns exportadas.
+    fn_sigs: HashMap<String, FnSig>,
+    /// Constantes / statics top-level: nombre → tipo Fitz resuelto.
+    const_sigs: HashMap<String, Type>,
+}
+
+/// Binding visible en el archivo importer. Producido por el loader
+/// y consumido por el `CodegenCtx` para resolver expresiones que
+/// referencian items cross-module.
+#[derive(Debug, Clone)]
+enum ResolvedBinding {
+    /// `import foo` — `foo` queda como namespace. Las expresiones
+    /// `foo.greet(...)` y `foo.PREFIX` se traducen a paths Rust
+    /// (`foo::greet(...)`, `foo::PREFIX`) consultando esta sig.
+    Namespace { module_index: usize },
+    /// `from foo import X` — `X` queda como item directo en el scope.
+    /// `kind` decide si emitimos `use foo::X;` (fn/const) o
+    /// `use foo::{X, XData};` (type).
+    Named {
+        module_index: usize,
+        item: String,
+        kind: NamedKind,
+    },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NamedKind {
+    Type,
+    Fn,
+    Const,
+}
+
+struct ModuleLoader {
+    base_dir: PathBuf,
+    /// Módulos cargados en orden de descubrimiento. Cada `mod foo;`
+    /// del main.rs se emite en este orden.
+    modules: Vec<LoadedModule>,
+    /// Map de path canonicalizado a índice en `modules` — para cache
+    /// (el mismo archivo importado dos veces produce una sola entry).
+    by_path: HashMap<PathBuf, usize>,
+    /// Bindings nombrados (visibles en el scope del importer).
+    /// Mapean cada `import foo` / `from foo import X` al módulo
+    /// resuelto y al kind de uso.
+    bindings: HashMap<String, ResolvedBinding>,
+}
+
+impl ModuleLoader {
+    fn new(base_dir: PathBuf) -> Self {
+        Self {
+            base_dir,
+            modules: Vec::new(),
+            by_path: HashMap::new(),
+            bindings: HashMap::new(),
+        }
+    }
+
+    /// Recorre el AST del programa principal y carga cada módulo
+    /// referenciado por `Stmt::Import` / `Stmt::FromImport`.
+    fn collect_imports(&mut self, program: &Program) -> Result<(), FitzError> {
+        for stmt in program {
+            match stmt {
+                Stmt::Import { path } => {
+                    let idx = self.load_module(path)?;
+                    let binding_name = path.last().cloned().unwrap_or_default();
+                    self.bindings.insert(
+                        binding_name,
+                        ResolvedBinding::Namespace { module_index: idx },
+                    );
+                }
+                Stmt::FromImport { path, names } => {
+                    let idx = self.load_module(path)?;
+                    for name in names {
+                        let kind = self.classify_named(idx, name)?;
+                        self.bindings.insert(
+                            name.clone(),
+                            ResolvedBinding::Named {
+                                module_index: idx,
+                                item: name.clone(),
+                                kind,
+                            },
+                        );
+                    }
+                }
+                _ => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Resuelve los segmentos a un path absoluto. `["foo"]` →
+    /// `<base>/foo.fitz`; `["sub", "foo"]` → `<base>/sub/foo.fitz`.
+    fn resolve_path(&self, segments: &[String]) -> PathBuf {
+        let mut path = self.base_dir.clone();
+        let n = segments.len();
+        for (i, seg) in segments.iter().enumerate() {
+            if i + 1 == n {
+                path.push(format!("{}.fitz", seg));
+            } else {
+                path.push(seg);
+            }
+        }
+        path
+    }
+
+    /// Carga un módulo: si ya está cacheado por path, devuelve el
+    /// índice existente. Si no, lee + parse + check + codegen del
+    /// módulo, lo agrega a `modules` y devuelve el nuevo índice.
+    fn load_module(&mut self, segments: &[String]) -> Result<usize, FitzError> {
+        if segments.is_empty() {
+            return Err(loader_err("`import` con path vacío".to_string()));
+        }
+        let path = self.resolve_path(segments);
+        let canonical = std::fs::canonicalize(&path).map_err(|_| {
+            loader_err(format!(
+                "no se encontró el módulo `{}` (buscado en `{}`)",
+                segments.join("."),
+                path.display()
+            ))
+        })?;
+
+        if let Some(&idx) = self.by_path.get(&canonical) {
+            return Ok(idx);
+        }
+
+        let source = std::fs::read_to_string(&canonical).map_err(|e| {
+            loader_err(format!(
+                "error leyendo el módulo `{}`: {}",
+                canonical.display(),
+                e
+            ))
+        })?;
+        let tokens =
+            crate::lexer::tokenize(&source).map_err(|e| loader_err(e.message.clone()))?;
+        let module_program =
+            crate::parser::parse(tokens).map_err(|e| loader_err(e.message.clone()))?;
+        let (module_env, type_errors) = check_program(&module_program);
+        if !type_errors.is_empty() {
+            return Err(loader_err(format!(
+                "el módulo `{}` tiene errores de tipo: {}",
+                segments.join("."),
+                type_errors[0].message
+            )));
+        }
+
+        // Restricción 5b.5: imports transitivos no soportados todavía.
+        for stmt in &module_program {
+            if matches!(stmt, Stmt::Import { .. } | Stmt::FromImport { .. }) {
+                return Err(loader_err(format!(
+                    "el módulo `{}` usa `import` propio: imports transitivos no soportados \
+                     en 5b.5 (deuda residual). Workaround: aplaná los imports al main.",
+                    segments.join(".")
+                )));
+            }
+        }
+
+        // Generar el código Rust del módulo (modo Module).
+        let rust_content = generate_module_rs(&module_program, &module_env)?;
+
+        let mod_name = segments.last().cloned().unwrap_or_default();
+        let rel_path = mod_rel_path_from_segments(segments);
+
+        // Extraer firmas para uso del importer.
+        let (type_sigs, fn_sigs, const_sigs) =
+            collect_module_sigs(&module_program, &module_env)?;
+
+        let idx = self.modules.len();
+        self.modules.push(LoadedModule {
+            mod_name,
+            rel_path,
+            rust_content,
+            type_sigs,
+            fn_sigs,
+            const_sigs,
+        });
+        self.by_path.insert(canonical, idx);
+        Ok(idx)
+    }
+
+    /// Decide si un nombre importado vía `from foo import X` es un
+    /// type, una fn o una const, inspeccionando las sigs del módulo
+    /// cargado en `module_index`. Si el nombre no existe en el
+    /// módulo, error.
+    fn classify_named(&self, module_index: usize, name: &str) -> Result<NamedKind, FitzError> {
+        let m = &self.modules[module_index];
+        if m.type_sigs.contains_key(name) {
+            Ok(NamedKind::Type)
+        } else if m.fn_sigs.contains_key(name) {
+            Ok(NamedKind::Fn)
+        } else if m.const_sigs.contains_key(name) {
+            Ok(NamedKind::Const)
+        } else {
+            Err(loader_err(format!(
+                "el módulo `{}` no exporta `{}`",
+                m.mod_name, name
+            )))
+        }
+    }
+
+    fn emit_mod_decls(&self, output: &mut String) {
+        for m in &self.modules {
+            // Para imports con subdirectorios, agregamos también un
+            // `mod.rs` con `pub mod <last>;` en `into_mod_files`.
+            // Acá solo declaramos el segmento root en `main.rs`.
+            output.push_str(&format!("mod {};\n", root_segment_of(&m.rel_path)));
+        }
+        if !self.modules.is_empty() {
+            output.push('\n');
+        }
+    }
+
+    fn emit_use_decls(&self, output: &mut String) {
+        // Ordenamos las entries por nombre para que el output sea
+        // determinista (HashMap no garantiza orden).
+        let mut entries: Vec<(&String, &ResolvedBinding)> = self.bindings.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (_, binding) in entries {
+            if let ResolvedBinding::Named {
+                module_index,
+                item,
+                kind,
+            } = binding
+            {
+                let mod_name = &self.modules[*module_index].mod_name;
+                match kind {
+                    NamedKind::Type => {
+                        output.push_str(&format!(
+                            "use {mod}::{{{item}, {item}Data}};\n",
+                            mod = mod_name,
+                            item = item,
+                        ));
+                    }
+                    NamedKind::Fn | NamedKind::Const => {
+                        output.push_str(&format!(
+                            "use {}::{};\n",
+                            mod_name, item
+                        ));
+                    }
+                }
+            }
+        }
+        if self.bindings.values().any(|b| matches!(b, ResolvedBinding::Named { .. })) {
+            output.push('\n');
+        }
+    }
+
+    /// Convierte los módulos cargados a `ModFile`s para que el caller
+    /// los escriba a disco. Para imports con subdirectorios, suma un
+    /// `mod.rs` en cada parent que faltaba.
+    fn into_mod_files(self) -> Vec<ModFile> {
+        let mut files: Vec<ModFile> = Vec::new();
+        let mut declared_in_parent: HashMap<PathBuf, Vec<String>> = HashMap::new();
+        for m in self.modules {
+            // Si el rel_path tiene un parent (subdirectorio), anotamos
+            // que el parent necesita declarar `pub mod <last>;` en su
+            // `mod.rs`.
+            if let Some(parent) = m.rel_path.parent() {
+                if !parent.as_os_str().is_empty() {
+                    let leaf = m
+                        .rel_path
+                        .file_stem()
+                        .and_then(|s| s.to_str())
+                        .unwrap_or("")
+                        .to_string();
+                    declared_in_parent
+                        .entry(parent.to_path_buf())
+                        .or_default()
+                        .push(leaf);
+                }
+            }
+            files.push(ModFile {
+                rel_path: m.rel_path,
+                content: m.rust_content,
+            });
+        }
+        // Materializar los `mod.rs` por cada parent agregado.
+        for (parent, leaves) in declared_in_parent {
+            let mut content = String::new();
+            for leaf in leaves {
+                content.push_str(&format!("pub mod {};\n", leaf));
+            }
+            files.push(ModFile {
+                rel_path: parent.join("mod.rs"),
+                content,
+            });
+        }
+        files
+    }
+}
+
+fn loader_err(msg: String) -> FitzError {
+    FitzError::new(ErrorKind::TypeError, 0, 0, msg)
+}
+
+/// `["foo"]` → `foo.rs`; `["sub", "foo"]` → `sub/foo.rs`.
+fn mod_rel_path_from_segments(segments: &[String]) -> PathBuf {
+    let mut p = PathBuf::new();
+    let n = segments.len();
+    for (i, seg) in segments.iter().enumerate() {
+        if i + 1 == n {
+            p.push(format!("{}.rs", seg));
+        } else {
+            p.push(seg);
+        }
+    }
+    p
+}
+
+/// Para `mod foo;` en main.rs, queremos `foo` (sin path); para
+/// `sub/foo.rs` queremos `sub` (el root segment, que se declara como
+/// `mod sub;` y trae el `sub/mod.rs` con `pub mod foo;` adentro).
+fn root_segment_of(rel_path: &Path) -> String {
+    rel_path
+        .components()
+        .next()
+        .and_then(|c| c.as_os_str().to_str())
+        .map(|s| s.trim_end_matches(".rs").to_string())
+        .unwrap_or_default()
+}
+
+/// Genera `src/<mod>.rs` para un módulo importado. Modo: `Module`
+/// (todo `pub`, sin `fn main()`, top-level `let X = literal` →
+/// `pub const`/`pub static`).
+fn generate_module_rs(program: &Program, env: &TypeEnv) -> Result<String, FitzError> {
+    let mut ctx = CodegenCtx::new_for_module(env);
+    ctx.pre_register_types(program)?;
+    ctx.pre_register_fns(program)?;
+    ctx.pre_register_top_lets(program)?;
+
+    ctx.emit_prelude();
+
+    // Particionar stmts top-level. Para módulos: type / fn / let
+    // (con RHS literal). Cualquier otra cosa → error de codegen.
+    let mut type_defs: Vec<&Stmt> = Vec::new();
+    let mut top_fns: Vec<&Stmt> = Vec::new();
+    let mut top_lets: Vec<&Stmt> = Vec::new();
+    for s in program {
+        match s {
+            Stmt::TypeDef { .. } => type_defs.push(s),
+            Stmt::FnDef { .. } => top_fns.push(s),
+            Stmt::Assign { .. } => top_lets.push(s),
+            other => {
+                return Err(loader_err(format!(
+                    "el módulo no soporta `{}` a nivel top: hoy permitimos solo `type`, \
+                     `fn` y `let X = <literal>` (5b.5).",
+                    stmt_kind(other)
+                )));
+            }
+        }
+    }
+
+    for stmt in &type_defs {
+        ctx.gen_type_def(stmt)?;
+    }
+    for stmt in top_fns {
+        ctx.gen_top_fn(stmt)?;
+    }
+    for stmt in top_lets {
+        ctx.gen_module_top_let(stmt)?;
+    }
+
+    Ok(ctx.output)
+}
+
+fn stmt_kind(s: &Stmt) -> &'static str {
+    match s {
+        Stmt::Assign { .. } => "asignación",
+        Stmt::Expr(_) => "expresión suelta",
+        Stmt::Return(_) => "return",
+        Stmt::While { .. } => "while",
+        Stmt::Loop { .. } => "loop",
+        Stmt::For { .. } => "for",
+        Stmt::Break => "break",
+        Stmt::Continue => "continue",
+        Stmt::FnDef { .. } => "fn",
+        Stmt::TypeDef { .. } => "type",
+        Stmt::Import { .. } | Stmt::FromImport { .. } => "import",
+    }
+}
+
+/// Recolecta las firmas exportadas de un módulo: tipos, fns y consts.
+/// El loader las usa para resolver llamadas / accesos cross-module.
+fn collect_module_sigs(
+    program: &Program,
+    env: &TypeEnv,
+) -> Result<
+    (
+        HashMap<String, TypeSig>,
+        HashMap<String, FnSig>,
+        HashMap<String, Type>,
+    ),
+    FitzError,
+> {
+    let mut type_sigs: HashMap<String, TypeSig> = HashMap::new();
+    let mut fn_sigs: HashMap<String, FnSig> = HashMap::new();
+    let mut const_sigs: HashMap<String, Type> = HashMap::new();
+
+    for stmt in program {
+        match stmt {
+            Stmt::TypeDef { name, fields } => {
+                let id = match env.lookup(name) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let resolved = match &env.info(id).fields {
+                    Some(fs) => fs.clone(),
+                    None => continue,
+                };
+                let mut combined = Vec::with_capacity(resolved.len());
+                for r in resolved {
+                    let default = fields
+                        .iter()
+                        .find(|f| f.name == r.name)
+                        .and_then(|f| f.default.clone());
+                    combined.push(TypeSigField {
+                        name: r.name,
+                        type_: r.type_,
+                        default,
+                    });
+                }
+                type_sigs.insert(
+                    name.clone(),
+                    TypeSig {
+                        id,
+                        fields: combined,
+                    },
+                );
+            }
+            Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                ..
+            } => {
+                let mut ps: Vec<Type> = Vec::with_capacity(params.len());
+                for p in params {
+                    let t = match &p.type_ {
+                        Some(te) => resolve_type_expr(te, env).map_err(|e| {
+                            loader_err(format!(
+                                "fn `{}` del módulo: parámetro `{}`: {}",
+                                name, p.name, e.message
+                            ))
+                        })?,
+                        None => {
+                            return Err(loader_err(format!(
+                                "fn `{}` del módulo: parámetro `{}` necesita anotación \
+                                 de tipo (deuda 5b.1).",
+                                name, p.name
+                            )));
+                        }
+                    };
+                    ps.push(t);
+                }
+                let ret = match return_type {
+                    Some(te) => resolve_type_expr(te, env).map_err(|e| {
+                        loader_err(format!(
+                            "fn `{}` del módulo: return type: {}",
+                            name, e.message
+                        ))
+                    })?,
+                    None => Type::Null,
+                };
+                fn_sigs.insert(name.clone(), FnSig { params: ps, ret });
+            }
+            Stmt::Assign { target, type_, value } => {
+                // Solo bindings simples a un Ident con RHS literal.
+                let AssignTarget::Ident(name) = target else {
+                    return Err(loader_err(
+                        "el módulo no soporta asignación a campo a nivel top \
+                         (solo `let X = <literal>`)"
+                            .to_string(),
+                    ));
+                };
+                let resolved_ty = match type_ {
+                    Some(te) => resolve_type_expr(te, env).map_err(|e| {
+                        loader_err(format!(
+                            "let `{}` del módulo: anotación: {}",
+                            name, e.message
+                        ))
+                    })?,
+                    None => infer_literal_type(value).ok_or_else(|| {
+                        loader_err(format!(
+                            "let `{}` del módulo: la RHS debe ser un literal \
+                             (Int/Float/Str/Bool/Null) o tenés que anotar el tipo (5b.5).",
+                            name
+                        ))
+                    })?,
+                };
+                if !is_literal_expr(value) {
+                    return Err(loader_err(format!(
+                        "let `{}` del módulo: la RHS debe ser un literal — \
+                         (Int/Float/Str/Bool/Null). Expresiones más complejas \
+                         no se soportan a nivel top todavía (5b.5).",
+                        name
+                    )));
+                }
+                const_sigs.insert(name.clone(), resolved_ty);
+            }
+            _ => {}
+        }
+    }
+
+    Ok((type_sigs, fn_sigs, const_sigs))
+}
+
+/// True si la expresión es un literal puro (Int/Float/Str/Bool/Null
+/// sin sub-expresiones). El módulo solo permite estos en
+/// `let X = ...` top-level.
+fn is_literal_expr(e: &Expr) -> bool {
+    matches!(
+        e,
+        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Null | Expr::Str(_)
+    )
+}
+
+fn infer_literal_type(e: &Expr) -> Option<Type> {
+    match e {
+        Expr::Int(_) => Some(Type::Int),
+        Expr::Float(_) => Some(Type::Float),
+        Expr::Str(_) => Some(Type::Str),
+        Expr::Bool(_) => Some(Type::Bool),
+        Expr::Null => Some(Type::Null),
+        _ => None,
+    }
+}
 
 /// Genera código Rust válido a partir de un programa Fitz tipado.
 /// El programa debe haber pasado por `check_program` antes (las
 /// anotaciones de tipo deben estar resueltas y consistentes).
 ///
-/// Errores acá son de **codegen**: features fuera de scope para
-/// 5b.1 (tipos compuestos, FnExpr, fns sin return type que
-/// retornan, etc.). No revalidamos lo que el checker ya hizo.
+/// Hoy es el path que usan los unit tests del codegen (single-file,
+/// sin imports). El subcomando `build` pasa por `generate_project`
+/// que es el wrapper multi-archivo.
+///
+/// Errores acá son de **codegen**: features fuera de scope (FnExpr
+/// suelto, top-level no soportado, etc.). No revalidamos lo que el
+/// checker ya hizo.
+#[allow(dead_code)]
 pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzError> {
+    let loader = ModuleLoader::new(PathBuf::from("."));
+    generate_main_rs(program, env, &loader)
+}
+
+/// Genera el `src/main.rs` del Cargo project. Si hay módulos cargados,
+/// emite los `mod foo;` y `use foo::{...};` correspondientes al inicio.
+fn generate_main_rs(
+    program: &Program,
+    env: &TypeEnv,
+    loader: &ModuleLoader,
+) -> Result<String, FitzError> {
     let mut ctx = CodegenCtx::new(env);
+    ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
 
     // Tres categorías de stmts top-level:
-    //   * `type Foo { ... }` → structs + alias + impl Display, afuera de `fn main()`.
-    //   * `fn ...`            → fns top-level, afuera de `fn main()`.
-    //   * el resto            → cuerpo de `fn main()`.
+    //   * `type Foo { ... }`     → structs + alias + impl Display, afuera de `fn main()`.
+    //   * `fn ...`               → fns top-level, afuera de `fn main()`.
+    //   * `Stmt::Import` / `Stmt::FromImport` → se traducen a `mod`/`use` en el preludio.
+    //   * el resto               → cuerpo de `fn main()`.
     let mut type_defs: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut main_stmts: Vec<&Stmt> = Vec::new();
@@ -70,11 +765,18 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
         match s {
             Stmt::TypeDef { .. } => type_defs.push(s),
             Stmt::FnDef { .. } => top_fns.push(s),
+            Stmt::Import { .. } | Stmt::FromImport { .. } => {
+                // Manejados via `loader.emit_mod_decls` y
+                // `loader.emit_use_decls`; no entran al cuerpo
+                // de main.
+            }
             _ => main_stmts.push(s),
         }
     }
 
     ctx.emit_prelude();
+    loader.emit_mod_decls(&mut ctx.output);
+    loader.emit_use_decls(&mut ctx.output);
     for stmt in &type_defs {
         ctx.gen_type_def(stmt)?;
     }
@@ -90,10 +792,32 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
 // CodegenCtx
 // ---------------------------------------------------------------------------
 
+/// Modo del codegen: cambia los detalles de emisión sin duplicar
+/// código. `Main` produce `src/main.rs` (con `fn main()` y los
+/// items sin `pub`); `Module` produce `src/<nombre>.rs` (con `pub`
+/// en todo lo top-level, sin `fn main()`, y `let X = literal` a
+/// nivel mod traducido a `pub const`/`pub static`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GenMode {
+    Main,
+    Module,
+}
+
+/// Copia portable de las firmas exportadas de un módulo. Se llena en
+/// `install_loader_bindings` y vive adentro del CodegenCtx.
+#[derive(Debug, Clone)]
+struct LoadedModuleSigs {
+    mod_name: String,
+    type_sigs: HashMap<String, TypeSig>,
+    fn_sigs: HashMap<String, FnSig>,
+    const_sigs: HashMap<String, Type>,
+}
+
 struct CodegenCtx<'a> {
     env: &'a TypeEnv,
     output: String,
     indent: usize,
+    mode: GenMode,
     /// Stack de scopes de variables locales: nombre → tipo Fitz.
     /// El codegen usa esto para inferir tipos en expresiones y
     /// para decidir entre `let mut` (primera asignación) y `=`
@@ -109,6 +833,28 @@ struct CodegenCtx<'a> {
     /// instancias y los field accesses puedan resolver tipos de
     /// campo sin volver a iterar el AST.
     type_sigs: HashMap<String, TypeSig>,
+    /// Fields resueltos por TypeId. Lo usa `gen_field_access` y
+    /// `gen_field_assign` para encontrar los campos de un tipo
+    /// importado (su TypeEnv del checker tiene el id pero sin
+    /// fields — el codegen los enriquece desde el módulo cargado).
+    fields_by_id: HashMap<TypeId, Vec<ResolvedField>>,
+    /// Consts/statics top-level del propio módulo (5b.5): nombre →
+    /// tipo Fitz. Sirven para que el body de una fn del módulo pueda
+    /// referenciarlas. En main mode, queda vacío (los `let` top-level
+    /// son vars locales adentro de `fn main()`).
+    own_consts: HashMap<String, Type>,
+    /// Bindings de módulos importados: nombre visible (último segmento
+    /// del path para `import foo`, o el identificador en `from foo
+    /// import X`) → `ResolvedBinding` con el índice del módulo cargado.
+    /// Sirve para resolver `foo.greet(...)` → `foo::greet(...)` Rust,
+    /// `foo.PREFIX` → `foo::PREFIX`, y para conocer los fields de
+    /// `User` cuando `from foo import User` se usa en `User { ... }`.
+    module_bindings: HashMap<String, ResolvedBinding>,
+    /// Firmas de módulos cargados, indexadas por `module_index` que
+    /// guarda `ResolvedBinding`. El ctx se queda con una copia para no
+    /// necesitar una referencia al loader (que viviría con un lifetime
+    /// distinto al `&'a TypeEnv` de arriba).
+    loaded_modules: Vec<LoadedModuleSigs>,
     /// Stack con el return type esperado de cada fn en curso. Se
     /// pushea al entrar a una fn top-level o a un callback inline
     /// (FnExpr); se consulta desde `gen_expr` para validar que el
@@ -152,11 +898,85 @@ impl<'a> CodegenCtx<'a> {
             env,
             output: String::new(),
             indent: 0,
+            mode: GenMode::Main,
             scopes: vec![HashMap::new()],
             fn_sigs: HashMap::new(),
             type_sigs: HashMap::new(),
+            fields_by_id: HashMap::new(),
+            own_consts: HashMap::new(),
+            module_bindings: HashMap::new(),
+            loaded_modules: Vec::new(),
             ret_stack: Vec::new(),
         }
+    }
+
+    fn new_for_module(env: &'a TypeEnv) -> Self {
+        let mut ctx = Self::new(env);
+        ctx.mode = GenMode::Module;
+        ctx
+    }
+
+    fn pub_prefix(&self) -> &'static str {
+        match self.mode {
+            GenMode::Main => "",
+            GenMode::Module => "pub ",
+        }
+    }
+
+    /// Lee los bindings y las firmas de módulos del loader, dejando al
+    /// ctx autocontenido (sin necesidad de mantener viva una referencia
+    /// al loader). Las firmas se copian — son pocos KBs por módulo, y
+    /// el TypeEnv del importer las usa para resolver tipos / consts /
+    /// fns cross-module.
+    fn install_loader_bindings(&mut self, loader: &ModuleLoader) {
+        for m in &loader.modules {
+            self.loaded_modules.push(LoadedModuleSigs {
+                mod_name: m.mod_name.clone(),
+                type_sigs: m.type_sigs.clone(),
+                fn_sigs: m.fn_sigs.clone(),
+                const_sigs: m.const_sigs.clone(),
+            });
+        }
+        for (name, binding) in &loader.bindings {
+            self.module_bindings.insert(name.clone(), binding.clone());
+        }
+    }
+
+    /// Resuelve `<ns>.<field>` (namespace access) cuando `ns` es un
+    /// módulo importado via `import foo`. Devuelve `(código Rust,
+    /// tipo Fitz)`. Si el módulo no exporta `field`, `None`.
+    fn resolve_namespace_field(&self, ns: &str, field: &str) -> Option<(String, Type)> {
+        let idx = match self.module_bindings.get(ns)? {
+            ResolvedBinding::Namespace { module_index } => *module_index,
+            _ => return None,
+        };
+        let m = self.loaded_modules.get(idx)?;
+        if let Some(sig) = m.fn_sigs.get(field) {
+            Some((
+                format!("{}::{}", m.mod_name, field),
+                Type::Function {
+                    params: sig.params.clone(),
+                    ret: Box::new(sig.ret.clone()),
+                },
+            ))
+        } else if let Some(ty) = m.const_sigs.get(field) {
+            Some((format!("{}::{}", m.mod_name, field), ty.clone()))
+        } else {
+            None
+        }
+    }
+
+    /// Para `<ns>.<fn_name>(args)`: devuelve `(path Rust, firma)` si
+    /// existe. Si `ns` es módulo pero no tiene esa fn, `None`.
+    fn resolve_namespace_call(&self, ns: &str, fn_name: &str) -> Option<(String, FnSig)> {
+        let idx = match self.module_bindings.get(ns)? {
+            ResolvedBinding::Namespace { module_index } => *module_index,
+            _ => return None,
+        };
+        let m = self.loaded_modules.get(idx)?;
+        m.fn_sigs
+            .get(fn_name)
+            .map(|sig| (format!("{}::{}", m.mod_name, fn_name), sig.clone()))
     }
 
     // --- emit helpers -----------------------------------------------------
@@ -208,7 +1028,19 @@ impl<'a> CodegenCtx<'a> {
 
     fn emit_prelude(&mut self) {
         self.emit("// Código generado por Fitz 5b — no editar a mano.\n");
-        self.emit("#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n");
+        // El `#![allow(...)]` es atributo de crate, solo en main.rs.
+        if matches!(self.mode, GenMode::Main) {
+            self.emit(
+                "#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n",
+            );
+        } else {
+            // En un módulo emitimos los allows como atributos del
+            // archivo (`#![...]` también funciona en mods; el efecto
+            // se acota al mod).
+            self.emit(
+                "#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n",
+            );
+        }
         // Rc<RefCell<>> es la representación de las instancias de
         // tipos custom — coincide con el modelo del intérprete (las
         // mutaciones se ven a través de cualquier alias).
@@ -216,6 +1048,9 @@ impl<'a> CodegenCtx<'a> {
         self.emit("use std::cell::RefCell;\n\n");
         // Helper de formato para Float: alinea con `Display` del
         // intérprete (`3.0` se imprime como `\"3.0\"`, no `\"3\"`).
+        // Cada archivo (main.rs o mod) trae su propio `__fitz_fmt_float`;
+        // no compartimos — es solo unas pocas líneas y nos ahorra una
+        // dependencia cross-module.
         self.emit(
             "fn __fitz_fmt_float(v: f64) -> String {\n    \
              if v.is_finite() && v.fract() == 0.0 { format!(\"{:.1}\", v) } else { format!(\"{}\", v) }\n}\n\n",
@@ -261,23 +1096,114 @@ impl<'a> CodegenCtx<'a> {
             // el checker mantiene en orden de declaración). Para cada
             // uno, buscamos el AST por nombre para sacar el default.
             let mut combined = Vec::with_capacity(resolved.len());
-            for r in resolved {
+            for r in &resolved {
                 let default = ast_fields
                     .iter()
                     .find(|f: &&Field| f.name == r.name)
                     .and_then(|f| f.default.clone());
                 combined.push(TypeSigField {
-                    name: r.name,
-                    type_: r.type_,
+                    name: r.name.clone(),
+                    type_: r.type_.clone(),
                     default,
                 });
             }
+            self.fields_by_id.insert(id, resolved);
             self.type_sigs.insert(name.clone(), TypeSig { id, fields: combined });
+        }
+
+        // 5b.5: enriquecer con tipos importados via `from foo import User`.
+        // El checker del importer ya registró `User` como nominal en el
+        // TypeEnv (sin fields). Acá copiamos los fields desde el módulo
+        // cargado, asignándolos al `id` del importer — así el TypeId
+        // que aparece en `Type::Nominal(id)` sigue siendo coherente
+        // entre código del main y los lookups por id.
+        let bindings: Vec<(String, ResolvedBinding)> = self
+            .module_bindings
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect();
+        for (name, binding) in bindings {
+            let ResolvedBinding::Named {
+                module_index,
+                item,
+                kind,
+            } = binding
+            else {
+                continue;
+            };
+            if !matches!(kind, NamedKind::Type) {
+                continue;
+            }
+            let importer_id = self.env.lookup(&name).ok_or_else(|| {
+                self.err(format!(
+                    "tipo importado `{}` no registrado en TypeEnv del importer (¿checker no corrió?)",
+                    name
+                ))
+            })?;
+            let module_sig = {
+                let m = self.loaded_modules.get(module_index).ok_or_else(|| {
+                    self.err(format!("módulo no cargado al registrar `{}`", item))
+                })?;
+                m.type_sigs.get(&item).cloned().ok_or_else(|| {
+                    self.err(format!("el módulo no expone el tipo `{}`", item))
+                })?
+            };
+            let resolved: Vec<ResolvedField> = module_sig
+                .fields
+                .iter()
+                .map(|f| ResolvedField {
+                    name: f.name.clone(),
+                    type_: f.type_.clone(),
+                })
+                .collect();
+            // Reasignamos el id del módulo al del importer al copiar.
+            let combined = module_sig.fields.clone();
+            self.fields_by_id.insert(importer_id, resolved);
+            self.type_sigs.insert(
+                name.clone(),
+                TypeSig {
+                    id: importer_id,
+                    fields: combined,
+                },
+            );
         }
         Ok(())
     }
 
+    /// Devuelve los fields de un tipo nominal por TypeId. Mira primero
+    /// la tabla interna (`fields_by_id`, llenada con tipos locales e
+    /// importados) y, como fallback histórico, el TypeEnv. Esto deja
+    /// que un tipo importado via `from foo import User` siga andando
+    /// aunque el checker no haya resuelto sus fields.
+    fn fields_for_id(&self, id: TypeId) -> Option<Vec<ResolvedField>> {
+        if let Some(fs) = self.fields_by_id.get(&id) {
+            return Some(fs.clone());
+        }
+        self.env.info(id).fields.clone()
+    }
+
     // --- pre-registro de fns top-level ------------------------------------
+
+    /// Pre-registra los `Stmt::Assign` top-level del módulo como consts
+    /// con su tipo, para que el body de las fns del módulo pueda
+    /// referenciarlos. Solo aplica en modo `Module`.
+    fn pre_register_top_lets(&mut self, program: &Program) -> Result<(), FitzError> {
+        for stmt in program {
+            let Stmt::Assign { target, type_, value } = stmt else { continue };
+            let AssignTarget::Ident(name) = target else { continue };
+            let ty = match type_ {
+                Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
+                    self.err(format!(
+                        "let `{}` del módulo: anotación: {}",
+                        name, e.message
+                    ))
+                })?,
+                None => infer_literal_type(value).unwrap_or(Type::Any),
+            };
+            self.own_consts.insert(name.clone(), ty);
+        }
+        Ok(())
+    }
 
     fn pre_register_fns(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
@@ -358,16 +1284,19 @@ impl<'a> CodegenCtx<'a> {
         // `Rc<T>` compara por **contenido** (no identidad), y
         // `RefCell<T>` compara borroweando — matchea exacto la
         // semántica estructural del intérprete.
+        let pub_kw = self.pub_prefix();
+        let field_pub = pub_kw;
         write!(
             &mut self.output,
-            "#[derive(Clone, PartialEq)]\nstruct {} {{\n",
-            data_name
+            "#[derive(Clone, PartialEq)]\n{}struct {} {{\n",
+            pub_kw, data_name
         )
         .unwrap();
         for f in &sig.fields {
             write!(
                 &mut self.output,
-                "    {}: {},\n",
+                "    {}{}: {},\n",
+                field_pub,
                 f.name,
                 rust_type_for(&f.type_, self.env)?
             )
@@ -378,8 +1307,8 @@ impl<'a> CodegenCtx<'a> {
         // type Foo = Rc<RefCell<FooData>>;
         write!(
             &mut self.output,
-            "type {} = Rc<RefCell<{}>>;\n\n",
-            name, data_name
+            "{}type {} = Rc<RefCell<{}>>;\n\n",
+            pub_kw, name, data_name
         )
         .unwrap();
 
@@ -442,6 +1371,8 @@ impl<'a> CodegenCtx<'a> {
             .ok_or_else(|| self.err(format!("fn `{}` no estaba pre-registrada", name)))?;
 
         // Header: fn <name>(p1: T1, p2: T2, ...) -> Ret {
+        let pub_kw = self.pub_prefix();
+        self.emit(pub_kw);
         self.emit("fn ");
         self.emit(name);
         self.emit("(");
@@ -580,6 +1511,75 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
+    /// Emite un `let X = <literal>` top-level de un módulo como
+    /// `pub const X: T = ...;` (primitivos) o `pub static X: &str =
+    /// "...";` (Str). La validación de "es un literal" ya la hizo
+    /// `collect_module_sigs` antes; acá asumimos que el value es
+    /// una de las variantes literales.
+    fn gen_module_top_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let Stmt::Assign { target, type_, value } = stmt else {
+            unreachable!("gen_module_top_let solo se llama sobre Stmt::Assign");
+        };
+        let AssignTarget::Ident(name) = target else {
+            return Err(self.err(
+                "asignación a campo a nivel top de módulo: no soportada (solo `let X = <literal>`)",
+            ));
+        };
+
+        let declared_ty = match type_ {
+            Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
+                self.err(format!(
+                    "let `{}`: anotación: {}",
+                    name, e.message
+                ))
+            })?,
+            None => infer_literal_type(value).ok_or_else(|| {
+                self.err(format!(
+                    "let `{}` top-level de módulo: la RHS debe ser literal o tenés que anotar el tipo",
+                    name
+                ))
+            })?,
+        };
+
+        // Str → `pub static X: &str = "...";`. Los otros → `pub const`.
+        match (&declared_ty, value) {
+            (Type::Str, Expr::Str(s)) => {
+                writeln!(
+                    &mut self.output,
+                    "pub static {}: &str = {};\n",
+                    name,
+                    rust_str_literal(s)
+                )
+                .unwrap();
+            }
+            (Type::Int, Expr::Int(n)) => {
+                writeln!(&mut self.output, "pub const {}: i64 = {}i64;\n", name, n).unwrap();
+            }
+            (Type::Float, Expr::Float(f)) => {
+                writeln!(&mut self.output, "pub const {}: f64 = {}f64;\n", name, f).unwrap();
+            }
+            (Type::Float, Expr::Int(n)) => {
+                // Coerción explícita Int → Float, como en el resto del codegen.
+                writeln!(
+                    &mut self.output,
+                    "pub const {}: f64 = {}f64;\n",
+                    name, *n as f64
+                )
+                .unwrap();
+            }
+            (Type::Bool, Expr::Bool(b)) => {
+                writeln!(&mut self.output, "pub const {}: bool = {};\n", name, b).unwrap();
+            }
+            _ => {
+                return Err(self.err(format!(
+                    "let `{}`: combinación de tipo/valor no soportada como constante de módulo",
+                    name
+                )));
+            }
+        }
+        Ok(())
+    }
+
     fn gen_field_assign(
         &mut self,
         object: &Expr,
@@ -594,17 +1594,17 @@ impl<'a> CodegenCtx<'a> {
                 type_name(&obj_ty)
             )));
         };
-        let info = self.env.info(*id);
-        let declared = info.fields.clone().ok_or_else(|| {
+        let info_name = self.env.info(*id).name.clone();
+        let declared = self.fields_for_id(*id).ok_or_else(|| {
             self.err(format!(
                 "tipo `{}` con campos sin resolver — no se puede generar asignación",
-                info.name
+                info_name
             ))
         })?;
         let Some(f) = declared.iter().find(|f| f.name == field) else {
             return Err(self.err(format!(
                 "el tipo `{}` no tiene un campo llamado `{}`",
-                info.name, field
+                info_name, field
             )));
         };
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
@@ -759,6 +1759,39 @@ impl<'a> CodegenCtx<'a> {
             Expr::Null => Ok(("()".to_string(), Type::Null)),
 
             Expr::Ident(name) => {
+                // 5b.5: si el nombre está en `module_bindings` como
+                // `Named` y es Const, devolvemos el path directo. El
+                // `use foo::PREFIX;` ya lo trajo al scope Rust;
+                // `PREFIX` con tipo Str → para concat/format hay que
+                // pasarlo con `.to_string()` o `&str` — depende del
+                // contexto. Simplificamos: si es Str, emitimos
+                // `String::from(PREFIX)` para que encaje con el resto
+                // del codegen (`String` consistente).
+                if let Some(binding) = self.module_bindings.get(name).cloned() {
+                    if let ResolvedBinding::Named { module_index, item, kind } = binding {
+                        if matches!(kind, NamedKind::Const) {
+                            if let Some(m) = self.loaded_modules.get(module_index) {
+                                if let Some(ty) = m.const_sigs.get(&item).cloned() {
+                                    let code = match &ty {
+                                        Type::Str => format!("String::from({})", item),
+                                        _ => item.clone(),
+                                    };
+                                    return Ok((code, ty));
+                                }
+                            }
+                        }
+                    }
+                }
+                // 5b.5: const top-level del propio módulo (emitida como
+                // `pub static`/`pub const`). El fn body la referencia
+                // por nombre — Rust resuelve.
+                if let Some(ty) = self.own_consts.get(name).cloned() {
+                    let code = match &ty {
+                        Type::Str => format!("String::from({})", name),
+                        _ => name.clone(),
+                    };
+                    return Ok((code, ty));
+                }
                 let ty = self
                     .lookup_var(name)
                     .cloned()
@@ -1040,7 +2073,24 @@ impl<'a> CodegenCtx<'a> {
         // como hace el evaluator. Hoy solo cubrimos métodos built-in
         // sobre Str; List/Map y métodos custom sobre `type` quedan
         // como deuda (llegan en 5b.3 y post-3.2 respectivamente).
+        //
+        // 5b.5: caso especial — si el object es `Ident(ns)` con `ns`
+        // siendo namespace de módulo, traducimos `foo.greet(args)` →
+        // `foo::greet(args)` Rust con la firma del módulo.
         if let Expr::Field { object, field } = callee {
+            if let Expr::Ident(ns) = object.as_ref() {
+                if let Some(binding) = self.module_bindings.get(ns).cloned() {
+                    if let ResolvedBinding::Namespace { .. } = binding {
+                        if let Some((path, sig)) = self.resolve_namespace_call(ns, field) {
+                            return self.gen_call_with_sig(&path, &sig, args);
+                        }
+                        return Err(self.err(format!(
+                            "el módulo `{}` no exporta una función llamada `{}`",
+                            ns, field
+                        )));
+                    }
+                }
+            }
             return self.gen_method_call(object, field, args);
         }
         let Expr::Ident(name) = callee else {
@@ -1075,15 +2125,44 @@ impl<'a> CodegenCtx<'a> {
                 ))),
             };
         }
+        // 5b.5: si el nombre está en `module_bindings` como `Named`
+        // (`from foo import greet`), la firma viene del módulo, no
+        // de `fn_sigs`. El `use foo::greet;` ya lo agregó al scope
+        // Rust, así que el call se emite con el name directo.
+        if let Some(binding) = self.module_bindings.get(name).cloned() {
+            if let ResolvedBinding::Named { module_index, item, kind } = binding {
+                if matches!(kind, NamedKind::Fn) {
+                    if let Some(m) = self.loaded_modules.get(module_index) {
+                        if let Some(sig) = m.fn_sigs.get(&item).cloned() {
+                            return self.gen_call_with_sig(name, &sig, args);
+                        }
+                    }
+                }
+            }
+        }
+
         let sig = self
             .fn_sigs
             .get(name)
             .cloned()
             .ok_or_else(|| self.err(format!("función `{}` desconocida en codegen", name)))?;
+        self.gen_call_with_sig(name, &sig, args)
+    }
+
+    /// Emite una llamada con una firma conocida: `<callee>(arg1, arg2, ...)`
+    /// con coerciones por parámetro. El `callee_expr` puede ser un
+    /// identificador (`greet`) o un path Rust (`foo::greet`); ambos
+    /// son válidos como prefijo de `(...)`.
+    fn gen_call_with_sig(
+        &mut self,
+        callee_expr: &str,
+        sig: &FnSig,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
         if args.len() != sig.params.len() {
             return Err(self.err(format!(
                 "`{}` espera {} argumento(s), recibió {}",
-                name,
+                callee_expr,
                 sig.params.len(),
                 args.len()
             )));
@@ -1093,7 +2172,10 @@ impl<'a> CodegenCtx<'a> {
             let (code, ty) = self.gen_expr(a)?;
             arg_codes.push(coerce(&code, &ty, expected));
         }
-        Ok((format!("{}({})", name, arg_codes.join(", ")), sig.ret.clone()))
+        Ok((
+            format!("{}({})", callee_expr, arg_codes.join(", ")),
+            sig.ret.clone(),
+        ))
     }
 
     fn gen_method_call(
@@ -1933,6 +3015,25 @@ impl<'a> CodegenCtx<'a> {
         object: &Expr,
         field: &str,
     ) -> Result<(String, Type), FitzError> {
+        // 5b.5: si el objeto es `Ident(ns)` con `ns` siendo un namespace
+        // de módulo importado (`import foo`), traducimos `foo.bar` a
+        // path Rust `foo::bar`. Lo hacemos ANTES de evaluar el objeto,
+        // porque `Ident("foo")` no está en `scopes` (los imports no
+        // declaran var en el codegen), pero sí en `module_bindings`.
+        if let Expr::Ident(ns) = object {
+            if let Some(binding) = self.module_bindings.get(ns).cloned() {
+                if let ResolvedBinding::Namespace { .. } = binding {
+                    if let Some((code, ty)) = self.resolve_namespace_field(ns, field) {
+                        return Ok((code, ty));
+                    }
+                    return Err(self.err(format!(
+                        "el módulo `{}` no exporta `{}` (ni fn ni constante)",
+                        ns, field
+                    )));
+                }
+            }
+        }
+
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         let Type::Nominal(id) = &obj_ty else {
             return Err(self.err(format!(
@@ -1941,17 +3042,17 @@ impl<'a> CodegenCtx<'a> {
                 type_name(&obj_ty)
             )));
         };
-        let info = self.env.info(*id);
-        let declared = info.fields.clone().ok_or_else(|| {
+        let info_name = self.env.info(*id).name.clone();
+        let declared = self.fields_for_id(*id).ok_or_else(|| {
             self.err(format!(
                 "tipo `{}` con campos sin resolver — no se puede generar acceso",
-                info.name
+                info_name
             ))
         })?;
         let Some(f) = declared.iter().find(|f| f.name == field) else {
             return Err(self.err(format!(
                 "el tipo `{}` no tiene un campo llamado `{}`",
-                info.name, field
+                info_name, field
             )));
         };
         // `code.borrow().field` es válido cuando el accesor consume
@@ -3487,13 +4588,10 @@ mod tests {
     // (El test viejo `match_no_soportado` se reemplazó por los tests
     // de match en 5b.4 más abajo.)
 
-    #[test]
-    fn imports_no_soportados() {
-        assert_err_contains(
-            "from foo import bar\nprint(bar)",
-            &["import", "5b.5"],
-        );
-    }
+    // (El test viejo `imports_no_soportados` se reemplazó en 5b.5;
+    // los imports ahora se soportan. Para feature no soportada en
+    // codegen single-file, ver `http_decoradores_no_soportados` que
+    // sigue apuntando a 5b.6.)
 
     #[test]
     fn http_decoradores_no_soportados() {
@@ -3701,6 +4799,106 @@ mod tests {
         assert!(
             code.contains("})?"),
             "esperaba que el bloque del find termine con `}})?` (operador ? sobre Result), got:\n{}",
+            code
+        );
+    }
+
+    // ---- 5b.5: módulos / import ----------------------------------------
+
+    /// Genera el código de un programa "main" tratándolo como un módulo
+    /// importado (sin loader externo). Útil para validar el codegen
+    /// de un módulo independientemente del orquestador.
+    fn gen_module(src: &str) -> Result<String, FitzError> {
+        let tokens = crate::lexer::tokenize(src).expect("lex OK");
+        let program = crate::parser::parse(tokens).expect("parse OK");
+        let (env, errors) = crate::types::check_program(&program);
+        if !errors.is_empty() {
+            panic!("checker errors: {:?}", errors);
+        }
+        generate_module_rs(&program, &env)
+    }
+
+    #[test]
+    fn modulo_emite_pub_en_struct_y_alias() {
+        // Un módulo expone tipos custom con `pub` en struct + alias.
+        let code = gen_module("type User { id: Int, name: Str }").unwrap();
+        assert!(
+            code.contains("pub struct UserData"),
+            "esperaba `pub struct UserData`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("pub type User = "),
+            "esperaba `pub type User = ...`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn modulo_emite_pub_en_fn() {
+        let code = gen_module("fn add(a: Int, b: Int) -> Int => a + b").unwrap();
+        assert!(
+            code.contains("pub fn add("),
+            "esperaba `pub fn add(`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn modulo_let_str_top_level_se_emite_como_pub_static() {
+        let code = gen_module("let MSG = \"hola\"").unwrap();
+        assert!(
+            code.contains("pub static MSG: &str = \"hola\""),
+            "esperaba `pub static MSG: &str = \"hola\"`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn modulo_let_int_top_level_se_emite_como_pub_const() {
+        let code = gen_module("let MAX_RETRIES: Int = 5").unwrap();
+        assert!(
+            code.contains("pub const MAX_RETRIES: i64 = 5i64"),
+            "esperaba `pub const MAX_RETRIES: i64 = 5i64`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn modulo_top_level_no_acepta_expr_compleja() {
+        // Una RHS no literal a nivel top de módulo se rechaza con
+        // mensaje que cita 5b.5 (deuda residual).
+        let r = gen_module("let X = 1 + 1");
+        let err = r.expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("literal") || err.message.contains("RHS"),
+            "esperaba mensaje sobre literal/RHS, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn fn_body_de_modulo_puede_referenciar_const_local() {
+        // PREFIX como `pub static`, greet la usa adentro de su body.
+        // Comprobamos que el codegen del módulo no se queja de
+        // "variable desconocida".
+        let code = gen_module(
+            "let PREFIX = \"hola, \"\nfn greet(name: Str) -> Str => \"{PREFIX}{name}\"",
+        )
+        .unwrap();
+        assert!(
+            code.contains("pub static PREFIX: &str = \"hola, \""),
+            "esperaba `pub static PREFIX`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("pub fn greet(mut name: String) -> String"),
+            "esperaba `pub fn greet(mut name: String) -> String`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("String::from(PREFIX)"),
+            "esperaba que el body use `String::from(PREFIX)`, got:\n{}",
             code
         );
     }

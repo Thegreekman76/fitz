@@ -1856,11 +1856,104 @@ con clave faltante, print Result, match-range). Reapunté el E2E
 - **Posiciones de error precisas en codegen**: deuda
   pospuesta de 5a.
 
-##### 5b.5 — Módulos / `import`
-**Pendiente** — `import foo` → `mod foo;` en el Cargo project
-generado. Probablemente acá pasamos de `rustc` directo a
-`cargo build` (un módulo por archivo, plus `Cargo.toml`
-generado).
+##### 5b.5 — Módulos / `import` ✓
+**Cerrado.** Quinto paso de Fase 5b. Cierra la brecha más visible
+entre `fitz run` y `fitz build`: los programas con `import foo` /
+`from foo import X` ya compilan a binario nativo. Habilita el cap
+16 de la guía end-to-end con `fitz build`.
+
+**Decisión clave de pipeline**: pasamos de `rustc` directo a
+**siempre generar un Cargo project**. Trade-off aceptado: la
+primera compilación cuesta ~1-2s más. Justificación:
+- Los imports cross-archivo necesitan múltiples `.rs` con `mod`,
+  que es la abstracción nativa de Cargo.
+- Cuando llegue 5b.6 con axum/tokio, las deps se suman al
+  `Cargo.toml` generado sin reescribir pipeline.
+- Cargo cachea incremental — segunda compilación rápida.
+
+**Estructura del project generado**:
+```
+target/fitz-build/<stem>/
+├── Cargo.toml         # [package] / [bin] / sin deps por ahora
+└── src/
+    ├── main.rs        # mod foo; use foo::{...}; + fn main()
+    ├── foo.rs         # pub fn / pub struct / pub type / pub const
+    └── ...
+```
+El binario final se copia adyacente al `.fitz` original. Sanitización
+del nombre del crate: `02-hola.fitz` → crate `fitz_02-hola`, binario
+adyacente `02-hola.exe` (el stem original se preserva).
+
+**Implementación del codegen**:
+- Nuevo `ModuleLoader` con cache por path canonicalizado y
+  stack de loading para detección de ciclos. Para cada import,
+  lee + lexea + parsea + chequea el módulo y lo genera como
+  Rust en modo `Module` (todo `pub`, sin `fn main()`).
+- Nuevo `GenMode { Main, Module }` en el `CodegenCtx`: `Module`
+  marca todas las defs top-level como `pub` y soporta
+  `let X = <literal>` → `pub const`/`pub static`.
+- **Bindings cross-module**:
+  - `import foo` → `mod foo;` + binding namespace. `foo.greet(x)`
+    se traduce a `foo::greet(x)` Rust.
+  - `from foo import User` → `mod foo;` + `use foo::{User,
+    UserData};`. Permite usar `User { ... }` en el importer
+    porque el codegen importa el data struct también.
+  - `from foo import greet` (fn) → `use foo::greet;` con la firma
+    del módulo para resolver la llamada.
+  - `from foo import PREFIX` (const Str) → `use foo::PREFIX;`,
+    consumido como `String::from(PREFIX)`.
+- **Enriquecimiento de TypeEnv del importer**: el checker
+  registra los tipos importados sin fields (no carga el módulo).
+  El codegen copia los fields del módulo cargado al
+  `fields_by_id` del importer, manteniendo el `TypeId` del
+  importer — así `User { id: 1 }` y `u.id` resuelven correcto.
+- **Top-level del módulo**:
+  - `type X { ... }` → `pub struct XData` + `pub type X = ...`
+    + `impl Display`.
+  - `fn f(p: T) -> U` → `pub fn` (anotaciones requeridas —
+    deuda 5b.1).
+  - `let X = <literal>` → `pub const X: T` (primitivos) o
+    `pub static X: &str` (Str). El módulo pre-registra las
+    consts antes de emitir bodies, así una fn del módulo puede
+    referenciar la const en su cuerpo.
+  - RHS no literal o stmts no `type`/`fn`/`let` → error de
+    codegen citando "5b.5" como deuda.
+
+**Limitaciones aceptadas en 5b.5**:
+- **Imports transitivos no soportados**: un módulo cargado por
+  el main no puede tener su propio `import`. Loader aborta con
+  mensaje claro citando 5b.5 como deuda residual. Workaround:
+  aplanar imports al main.
+- **`fitz build` con cap 14 / cap 16**: ambos requieren
+  anotaciones de tipo en fns. El cap 16 (`guide_utils.fitz`) se
+  actualizó: `fn greet(name: Str) -> Str => ...`. El intérprete
+  sigue infiriendo.
+
+**Tests**: 6 unit nuevos en `src/codegen.rs` (modo Module emite
+`pub` en struct/alias/fn, `let` top-level → static/const, RHS no
+literal aborta, fn body referencia const local) + 5 E2E nuevos
+en `tests/compile_e2e.rs` (`from import` type+fn, `from import`
+const Str, `import` namespace con fn, módulo inexistente aborta,
+módulo con `import` propio aborta por transitividad). Reapunté
+el E2E "feature no soportada en codegen" desde `import` a `@get`
+(5b.6).
+
+**Validación bit-a-bit**: `examples/guide/16-modulos.fitz` +
+`guide_utils.fitz` (con `greet` anotado) compilan con `fitz
+build` y producen output idéntico a `fitz run`.
+
+**Deuda explícita que sigue post-5b.5**:
+- **Imports transitivos**: un módulo importado puede tener
+  imports propios. Quitar la restricción requiere recursar el
+  loader sin perder el binding cross-archivo. Sub-paso futuro
+  si aparece presión.
+- **`import foo as f`** (aliases) y **`from foo import X as Y`**:
+  no soportado.
+- **`foo.User { ... }`** (struct literal con path): el parser
+  no acepta `Path { ... }`. Workaround: `from foo import User`.
+- **`let X = <expr>`** no literal a nivel mod: deuda 5b.5.
+- **Inferencia de tipos de params** en fns sin anotar: deuda
+  vieja de 5b.1, sigue.
 
 ##### 5b.6 — HTTP / `@server` / handlers
 **Pendiente** — los decoradores `@get`/`@post`/etc. se traducen
@@ -1892,7 +1985,7 @@ compilado a binario standalone"), cierre formal de Fase 5.
 - [x] Tipos custom + field access (5b.2)
 - [x] Listas, mapas, indexing, métodos built-in (5b.3)
 - [x] Result, `?`, match (5b.4)
-- [ ] Módulos / `import` (5b.5)
+- [x] Módulos / `import` (5b.5)
 - [ ] HTTP / `@server` / handlers (5b.6)
 - [ ] Optimizaciones básicas (post-5b — strings sin `.clone()`,
   pre-declaración de vars que cruzan bloques)
