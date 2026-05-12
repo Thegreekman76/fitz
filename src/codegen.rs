@@ -1532,6 +1532,21 @@ impl<'a> CodegenCtx<'a> {
         FitzError::new(ErrorKind::TypeError, 0, 0, msg.into())
     }
 
+    /// Variante de `err` que cita la posición real del nodo. Lo usan
+    /// los sitios del codegen que tienen un `Expr` a mano y quieren
+    /// que el mensaje apunte al token problemático (no al inicio del
+    /// programa). Span `ZERO` cae en el mismo formato sin posición
+    /// que produce `err`.
+    ///
+    /// Disponible para migración incremental — los call sites de
+    /// codegen siguen mayoritariamente con `err()` (los errores son
+    /// "feature no soportada", menos impactantes en UX que los del
+    /// evaluator). Se migran sitios uno a uno cuando duele.
+    #[allow(dead_code)]
+    fn err_at(&self, span: crate::ast::Span, msg: impl Into<String>) -> FitzError {
+        FitzError::new(ErrorKind::TypeError, span.line, span.column, msg.into())
+    }
+
     // --- prelude + main shell ---------------------------------------------
 
     fn emit_prelude(&mut self) {

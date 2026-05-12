@@ -24,13 +24,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Decorator, Expr, Param, Pattern, Program, Stmt, StrPart, UnaryOpKind,
+    AssignTarget, BinOpKind, Decorator, Expr, Param, Pattern, Program, Span, Stmt, StrPart,
+    UnaryOpKind,
 };
-// `Span` se usa solo en tests (construcción literal de Stmts con
-// `Span::ZERO`); el evaluator de producción accede a spans via
-// `_, span: _` patterns que no requieren el tipo en scope.
-#[cfg(test)]
-use crate::ast::Span;
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::http::{
@@ -622,7 +618,10 @@ fn display_module_path(p: &Path) -> String {
 /// módulo `http` (`value_to_outcome`), no este wrapper. Acá solo
 /// ejecutamos el handler.
 pub fn call_handler(handler: Value, args: Vec<Value>, handler_name: &str) -> FitzResult<Value> {
-    invoke_value(handler, args, handler_name).map_err(signal_to_error)
+    // El handler HTTP no tiene posición sintáctica directa — viene del
+    // server runtime, no de una llamada en el source. Span::ZERO está
+    // bien acá; el FitzError::Display omite la posición.
+    invoke_value(handler, args, handler_name, Span::ZERO).map_err(signal_to_error)
 }
 
 /// Convierte un signal sin contexto en un `FitzError` legible.
@@ -962,6 +961,7 @@ fn run_loop_body(body: &[Stmt], env: EnvRef) -> LoopControl {
 // ---------------------------------------------------------------------------
 
 fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
+    let span = expr.span();
     match expr {
         // Literales — el valor está embebido en el AST.
         Expr::Int(n, _) => Ok(Value::Int(*n)),
@@ -974,25 +974,25 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         Expr::Ident(name, _) => env.borrow().get(name).ok_or_else(|| {
             EvalSignal::Error(FitzError::new(
                 ErrorKind::UndefinedVariable(name.clone()),
-                0, 0,
+                span.line, span.column,
                 format!("variable `{}` no definida", name),
             ))
         }),
 
         // And/Or hacen short-circuit: no evaluamos `right` salvo que haga
         // falta. El resto de BinOps evalúan ambos lados antes de combinar.
-        Expr::BinOp { op, left, right, .. } if matches!(op, BinOpKind::And | BinOpKind::Or) => {
-            eval_logical(op, left, right, env)
+        Expr::BinOp { op, left, right, span } if matches!(op, BinOpKind::And | BinOpKind::Or) => {
+            eval_logical(op, left, right, env, *span)
         }
-        Expr::BinOp { op, left, right, .. } => {
+        Expr::BinOp { op, left, right, span } => {
             let lv = eval_expr(left, env.clone())?;
             let rv = eval_expr(right, env)?;
-            eval_binop(op, lv, rv)
+            eval_binop(op, lv, rv, *span)
         }
 
-        Expr::UnaryOp { op, operand, .. } => {
+        Expr::UnaryOp { op, operand, span } => {
             let v = eval_expr(operand, env)?;
-            eval_unary(op, v)
+            eval_unary(op, v, *span)
         }
 
         // String con interpolación: cada `StrPart::Expr` se evalúa y se
@@ -1019,7 +1019,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         //    al field access normal y eso emite error de "no es invocable".
         //  - cualquier otra cosa → llamada normal. Evaluamos el callee y
         //    esperamos `Value::Function` o `Value::Builtin`.
-        Expr::Call { callee, args, .. } => eval_call(callee, args, env),
+        Expr::Call { callee, args, span } => eval_call(callee, args, env, *span),
 
         // `fn(x) => x * 2` o `fn(x) { return x * 2 }` — función anónima.
         // Se evalúa a `Value::Function` con el env actual como closure,
@@ -1048,7 +1048,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         .ok_or_else(|| {
                             EvalSignal::Error(FitzError::new(
                                 ErrorKind::InvalidSyntax,
-                                0, 0,
+                                span.line, span.column,
                                 format!(
                                     "el tipo `{}` no tiene un campo llamado `{}`",
                                     type_name, field
@@ -1060,7 +1060,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     module_env.borrow().get(field).ok_or_else(|| {
                         EvalSignal::Error(FitzError::new(
                             ErrorKind::UndefinedVariable(field.clone()),
-                            0, 0,
+                            span.line, span.column,
                             format!(
                                 "el módulo `{}` no exporta `{}`",
                                 name, field,
@@ -1073,7 +1073,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         expected: "Instance o Module".into(),
                         found: other.type_name().into(),
                     },
-                    0, 0,
+                    span.line, span.column,
                     format!(
                         "acceso a campo `.{}` sobre un valor de tipo `{}` — \
                          solo se permite sobre instancias de tipos custom o módulos",
@@ -1110,7 +1110,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             let ty = env.borrow().get(type_name).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(type_name.clone()),
-                    0, 0,
+                    span.line, span.column,
                     format!("tipo `{}` no definido", type_name),
                 ))
             })?;
@@ -1122,7 +1122,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                             expected: "Type".into(),
                             found: other.type_name().into(),
                         },
-                        0, 0,
+                        span.line, span.column,
                         format!(
                             "`{}` no es un tipo — no se puede instanciar (es `{}`)",
                             type_name,
@@ -1134,11 +1134,14 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
             // Detectar campos extra: cada nombre del literal tiene que
             // estar entre los declarados.
-            for (provided_name, _) in fields {
+            for (provided_name, value_expr) in fields {
                 if !declared.iter().any(|f| f.name == *provided_name) {
+                    // Apuntamos al valor del campo extra — más útil que
+                    // el inicio del struct literal.
+                    let fs = value_expr.span();
                     return Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::InvalidSyntax,
-                        0, 0,
+                        fs.line, fs.column,
                         format!(
                             "el tipo `{}` no tiene un campo llamado `{}`",
                             type_name, provided_name
@@ -1163,7 +1166,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 } else {
                     return Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::InvalidSyntax,
-                        0, 0,
+                        span.line, span.column,
                         format!(
                             "falta el campo `{}` al instanciar `{}` \
                              (no tiene default y no es nullable)",
@@ -1203,16 +1206,16 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         Expr::Range { start, end, .. } => {
             let s_v = eval_expr(start, env.clone())?;
             let e_v = eval_expr(end, env)?;
-            let s = expect_int_for_range(&s_v, "inicio")?;
-            let e = expect_int_for_range(&e_v, "fin")?;
+            let s = expect_int_for_range(&s_v, "inicio", start.span())?;
+            let e = expect_int_for_range(&e_v, "fin", end.span())?;
             Ok(Value::Range { start: s, end: e })
         }
 
         // `obj[idx]` — indexing. Dispatch por tipo del objeto.
-        Expr::Index { object, index, .. } => {
+        Expr::Index { object, index, span } => {
             let obj = eval_expr(object, env.clone())?;
             let idx = eval_expr(index, env)?;
-            eval_index(&obj, &idx)
+            eval_index(&obj, &idx, *span)
         }
 
         // `if cond { then } else { else_ }`. Funciona como expresión: su
@@ -1226,17 +1229,20 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             let cond_v = eval_expr(condition, env.clone())?;
             let cond_bool = match cond_v {
                 Value::Bool(b) => b,
-                other => return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::TypeMismatch {
-                        expected: "Bool".into(),
-                        found: other.type_name().into(),
-                    },
-                    0, 0,
-                    format!(
-                        "la condición de `if` debe ser Bool, no `{}`",
-                        other.type_name()
-                    ),
-                ))),
+                other => {
+                    let cs = condition.span();
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Bool".into(),
+                            found: other.type_name().into(),
+                        },
+                        cs.line, cs.column,
+                        format!(
+                            "la condición de `if` debe ser Bool, no `{}`",
+                            other.type_name()
+                        ),
+                    )));
+                }
             };
 
             if cond_bool {
@@ -1312,7 +1318,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             // ocurre típicamente con Ok/Err mal cubiertos.
             Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                0, 0,
+                span.line, span.column,
                 "el `match` no matcheó ningún brazo",
             )))
         }
@@ -1343,7 +1349,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // burbujea hasta `eval` y se reporta como "`return` solo puede
         // usarse adentro de una función". Mensaje genérico (deuda
         // explícita; mejora pendiente con un signal dedicado).
-        Expr::Try(inner, _) => {
+        Expr::Try(inner, try_span) => {
             let v = eval_expr(inner, env)?;
             match v {
                 Value::Result(ResultVariant::Ok(x)) => Ok(*x),
@@ -1355,7 +1361,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         expected: "Result".into(),
                         found: other.type_name().into(),
                     },
-                    0, 0,
+                    try_span.line, try_span.column,
                     format!(
                         "el operador `?` requiere un valor `Result`, recibió `{}`",
                         other.type_name()
@@ -1391,7 +1397,7 @@ fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
 ///
 /// El identificador para mensajes de error se deriva de la forma del
 /// callee: `Expr::Ident(n, _)` → `"n"`, otro → `"<expr>"`.
-fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
+fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> EvalResult<Value> {
     // Method call.
     if let Expr::Field { object, field, .. } = callee {
         let receiver = eval_expr(object, env.clone())?;
@@ -1399,7 +1405,7 @@ fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
         for arg in args {
             arg_values.push(eval_expr(arg, env.clone())?);
         }
-        return dispatch_method(receiver, field, arg_values);
+        return dispatch_method(receiver, field, arg_values, span);
     }
 
     // Llamada normal.
@@ -1409,7 +1415,7 @@ fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
         arg_values.push(eval_expr(arg, env.clone())?);
     }
     let display_name = callee_display_name(callee);
-    invoke_value(callee_value, arg_values, &display_name)
+    invoke_value(callee_value, arg_values, &display_name, span)
 }
 
 /// Devuelve un nombre legible para usar en mensajes de error de una
@@ -1424,7 +1430,9 @@ fn callee_display_name(callee: &Expr) -> String {
 
 /// Invoca un valor que ya sabemos que tiene que ser una función. Maneja
 /// builtins, user-defined functions y errores de "no es invocable".
-fn invoke_value(value: Value, arg_values: Vec<Value>, display_name: &str) -> EvalResult<Value> {
+fn invoke_value(
+    value: Value, arg_values: Vec<Value>, display_name: &str, span: Span,
+) -> EvalResult<Value> {
     match value {
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
 
@@ -1435,7 +1443,7 @@ fn invoke_value(value: Value, arg_values: Vec<Value>, display_name: &str) -> Eva
                         expected: params.len(),
                         found: arg_values.len(),
                     },
-                    0, 0,
+                    span.line, span.column,
                     format!(
                         "`{}` espera {} argumento(s), recibió {}",
                         display_name,
@@ -1466,7 +1474,7 @@ fn invoke_value(value: Value, arg_values: Vec<Value>, display_name: &str) -> Eva
                 expected: "función".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
+            span.line, span.column,
             format!("`{}` no es invocable (es {})", display_name, other.type_name()),
         ))),
     }
@@ -1485,25 +1493,26 @@ fn dispatch_method(
     receiver: Value,
     method: &str,
     args: Vec<Value>,
+    span: Span,
 ) -> EvalResult<Value> {
     match (&receiver, method) {
         // List
-        (Value::List(_), "push") => list_push(receiver, args),
-        (Value::List(_), "pop") => list_pop(receiver, args),
-        (Value::List(_), "map") => list_map(receiver, args),
-        (Value::List(_), "filter") => list_filter(receiver, args),
-        (Value::List(_), "find") => list_find(receiver, args),
-        (Value::List(_), "len") => list_len(receiver, args),
+        (Value::List(_), "push") => list_push(receiver, args, span),
+        (Value::List(_), "pop") => list_pop(receiver, args, span),
+        (Value::List(_), "map") => list_map(receiver, args, span),
+        (Value::List(_), "filter") => list_filter(receiver, args, span),
+        (Value::List(_), "find") => list_find(receiver, args, span),
+        (Value::List(_), "len") => list_len(receiver, args, span),
         // Map
-        (Value::Map(_), "get") => map_get(receiver, args),
-        (Value::Map(_), "has") => map_has(receiver, args),
-        (Value::Map(_), "keys") => map_keys(receiver, args),
-        (Value::Map(_), "values") => map_values(receiver, args),
-        (Value::Map(_), "len") => map_len(receiver, args),
+        (Value::Map(_), "get") => map_get(receiver, args, span),
+        (Value::Map(_), "has") => map_has(receiver, args, span),
+        (Value::Map(_), "keys") => map_keys(receiver, args, span),
+        (Value::Map(_), "values") => map_values(receiver, args, span),
+        (Value::Map(_), "len") => map_len(receiver, args, span),
         // Str
-        (Value::Str(_), "len") => str_len(receiver, args),
-        (Value::Str(_), "upper") => str_upper(receiver, args),
-        (Value::Str(_), "lower") => str_lower(receiver, args),
+        (Value::Str(_), "len") => str_len(receiver, args, span),
+        (Value::Str(_), "upper") => str_upper(receiver, args, span),
+        (Value::Str(_), "lower") => str_lower(receiver, args, span),
         // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
         // módulo y llamándola como cualquier función. No es method
         // dispatch real — el módulo no es "el receptor", solo el lugar
@@ -1512,15 +1521,15 @@ fn dispatch_method(
             let value = module_env.borrow().get(method).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(method.into()),
-                    0, 0,
+                    span.line, span.column,
                     format!("el módulo `{}` no exporta `{}`", name, method),
                 ))
             })?;
-            invoke_value(value, args, method)
+            invoke_value(value, args, method, span)
         }
         _ => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            0, 0,
+            span.line, span.column,
             format!(
                 "el tipo `{}` no tiene un método llamado `{}`",
                 receiver.type_name(),
@@ -1548,14 +1557,14 @@ fn dispatch_method(
 
 /// Helper: chequea que `args.len() == expected`; si no, devuelve error
 /// de aridad citando el método.
-fn expect_arity(method: &str, args: &[Value], expected: usize) -> EvalResult<()> {
+fn expect_arity(method: &str, args: &[Value], expected: usize, span: Span) -> EvalResult<()> {
     if args.len() != expected {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::WrongArgCount {
                 expected,
                 found: args.len(),
             },
-            0, 0,
+            span.line, span.column,
             format!(
                 "`.{}()` espera {} argumento(s), recibió {}",
                 method, expected, args.len(),
@@ -1568,14 +1577,14 @@ fn expect_arity(method: &str, args: &[Value], expected: usize) -> EvalResult<()>
 /// Helper: invoca un `Value` que tiene que ser callable, con UN solo
 /// argumento. Para `map`/`filter`/`find`, donde la callback es siempre
 /// unaria.
-fn invoke_callback(callback: &Value, arg: Value, method: &str) -> EvalResult<Value> {
-    invoke_value(callback.clone(), vec![arg], &format!("callback de .{}()", method))
+fn invoke_callback(callback: &Value, arg: Value, method: &str, span: Span) -> EvalResult<Value> {
+    invoke_value(callback.clone(), vec![arg], &format!("callback de .{}()", method), span)
 }
 
 // ---- List ----
 
-fn list_push(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("push", &args, 1)?;
+fn list_push(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("push", &args, 1, span)?;
     let items = match receiver {
         Value::List(items) => items,
         _ => unreachable!(),
@@ -1586,8 +1595,8 @@ fn list_push(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::Null)
 }
 
-fn list_pop(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("pop", &args, 0)?;
+fn list_pop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("pop", &args, 0, span)?;
     let items = match receiver {
         Value::List(items) => items,
         _ => unreachable!(),
@@ -1597,14 +1606,14 @@ fn list_pop(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
         Some(v) => Ok(v),
         None => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            0, 0,
+            span.line, span.column,
             "`.pop()` sobre lista vacía".to_string(),
         ))),
     }
 }
 
-fn list_map(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("map", &args, 1)?;
+fn list_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("map", &args, 1, span)?;
     let items = match receiver {
         Value::List(items) => items,
         _ => unreachable!(),
@@ -1615,13 +1624,13 @@ fn list_map(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     let snapshot: Vec<Value> = items.borrow().clone();
     let mut out = Vec::with_capacity(snapshot.len());
     for item in snapshot {
-        out.push(invoke_callback(callback, item, "map")?);
+        out.push(invoke_callback(callback, item, "map", span)?);
     }
     Ok(Value::new_list(out))
 }
 
-fn list_filter(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("filter", &args, 1)?;
+fn list_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("filter", &args, 1, span)?;
     let items = match receiver {
         Value::List(items) => items,
         _ => unreachable!(),
@@ -1630,7 +1639,7 @@ fn list_filter(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     let snapshot: Vec<Value> = items.borrow().clone();
     let mut out = Vec::new();
     for item in snapshot {
-        let keep = invoke_callback(callback, item.clone(), "filter")?;
+        let keep = invoke_callback(callback, item.clone(), "filter", span)?;
         match keep {
             Value::Bool(true) => out.push(item),
             Value::Bool(false) => {}
@@ -1640,7 +1649,7 @@ fn list_filter(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    0, 0,
+                    span.line, span.column,
                     format!(
                         "la callback de `.filter()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -1652,8 +1661,8 @@ fn list_filter(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::new_list(out))
 }
 
-fn list_find(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("find", &args, 1)?;
+fn list_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("find", &args, 1, span)?;
     let items = match receiver {
         Value::List(items) => items,
         _ => unreachable!(),
@@ -1661,7 +1670,7 @@ fn list_find(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     let callback = &args[0];
     let snapshot: Vec<Value> = items.borrow().clone();
     for item in snapshot {
-        let keep = invoke_callback(callback, item.clone(), "find")?;
+        let keep = invoke_callback(callback, item.clone(), "find", span)?;
         match keep {
             Value::Bool(true) => {
                 return Ok(Value::Result(ResultVariant::Ok(Box::new(item))));
@@ -1673,7 +1682,7 @@ fn list_find(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    0, 0,
+                    span.line, span.column,
                     format!(
                         "la callback de `.find()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -1687,8 +1696,8 @@ fn list_find(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     )))))
 }
 
-fn list_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("len", &args, 0)?;
+fn list_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("len", &args, 0, span)?;
     let items = match receiver {
         Value::List(items) => items,
         _ => unreachable!(),
@@ -1699,8 +1708,8 @@ fn list_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
 
 // ---- Map ----
 
-fn map_get(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("get", &args, 1)?;
+fn map_get(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("get", &args, 1, span)?;
     let pairs = match receiver {
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
@@ -1716,8 +1725,8 @@ fn map_get(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     )))))
 }
 
-fn map_has(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("has", &args, 1)?;
+fn map_has(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("has", &args, 1, span)?;
     let pairs = match receiver {
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
@@ -1727,8 +1736,8 @@ fn map_has(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::Bool(found))
 }
 
-fn map_keys(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("keys", &args, 0)?;
+fn map_keys(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("keys", &args, 0, span)?;
     let pairs = match receiver {
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
@@ -1737,8 +1746,8 @@ fn map_keys(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::new_list(ks))
 }
 
-fn map_values(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("values", &args, 0)?;
+fn map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("values", &args, 0, span)?;
     let pairs = match receiver {
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
@@ -1747,8 +1756,8 @@ fn map_values(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::new_list(vs))
 }
 
-fn map_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("len", &args, 0)?;
+fn map_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("len", &args, 0, span)?;
     let pairs = match receiver {
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
@@ -1759,8 +1768,8 @@ fn map_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
 
 // ---- Str ----
 
-fn str_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("len", &args, 0)?;
+fn str_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("len", &args, 0, span)?;
     let s = match receiver {
         Value::Str(s) => s,
         _ => unreachable!(),
@@ -1769,8 +1778,8 @@ fn str_len(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::Int(s.chars().count() as i64))
 }
 
-fn str_upper(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("upper", &args, 0)?;
+fn str_upper(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("upper", &args, 0, span)?;
     let s = match receiver {
         Value::Str(s) => s,
         _ => unreachable!(),
@@ -1778,8 +1787,8 @@ fn str_upper(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
     Ok(Value::Str(s.to_uppercase()))
 }
 
-fn str_lower(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
-    expect_arity("lower", &args, 0)?;
+fn str_lower(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("lower", &args, 0, span)?;
     let s = match receiver {
         Value::Str(s) => s,
         _ => unreachable!(),
@@ -1809,37 +1818,37 @@ fn str_lower(receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
 // Igualdad (Eq, NotEq): delega en `PartialEq` de `Value`, que ya hace
 // coerción Int↔Float. Tipos incompatibles dan `false` sin error.
 
-fn eval_binop(op: &BinOpKind, l: Value, r: Value) -> EvalResult<Value> {
+fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
     use BinOpKind::*;
     match op {
-        Add => eval_add(l, r),
-        Sub => arith(l, r, "-", |a, b| a - b, |a, b| a - b),
-        Mul => arith(l, r, "*", |a, b| a * b, |a, b| a * b),
-        Div => eval_div(l, r),
+        Add => eval_add(l, r, span),
+        Sub => arith(l, r, "-", |a, b| a - b, |a, b| a - b, span),
+        Mul => arith(l, r, "*", |a, b| a * b, |a, b| a * b, span),
+        Div => eval_div(l, r, span),
         Eq => Ok(Value::Bool(l == r)),
         NotEq => Ok(Value::Bool(l != r)),
-        Lt | LtEq | Gt | GtEq => compare(op, l, r),
+        Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
         And | Or => unreachable!("And/Or se manejan en eval_logical antes de llegar acá"),
     }
 }
 
 /// Add tiene un caso especial: `Str + Str` concatena. El resto delega en
 /// `arith` con el mismo patrón de promoción Int↔Float.
-fn eval_add(l: Value, r: Value) -> EvalResult<Value> {
+fn eval_add(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     if let (Value::Str(a), Value::Str(b)) = (&l, &r) {
         return Ok(Value::Str(format!("{}{}", a, b)));
     }
-    arith(l, r, "+", |a, b| a + b, |a, b| a + b)
+    arith(l, r, "+", |a, b| a + b, |a, b| a + b, span)
 }
 
 /// Div chequea 0 antes de delegar — error explícito en vez de Infinity/NaN.
-fn eval_div(l: Value, r: Value) -> EvalResult<Value> {
+fn eval_div(l: Value, r: Value, span: Span) -> EvalResult<Value> {
     match &r {
-        Value::Int(0) => return div_by_zero(),
-        Value::Float(b) if *b == 0.0 => return div_by_zero(),
+        Value::Int(0) => return div_by_zero(span),
+        Value::Float(b) if *b == 0.0 => return div_by_zero(span),
         _ => {}
     }
-    arith(l, r, "/", |a, b| a / b, |a, b| a / b)
+    arith(l, r, "/", |a, b| a / b, |a, b| a / b, span)
 }
 
 /// Helper genérico para Add/Sub/Mul/Div: aplica `int_op` si ambos son Int,
@@ -1848,7 +1857,9 @@ fn eval_div(l: Value, r: Value) -> EvalResult<Value> {
 /// `Fn(i64, i64) -> i64` es una _trait bound_ que acepta cualquier closure
 /// que no consume su entorno. Los closures `|a, b| a + b` que pasamos no
 /// capturan nada, así que cumplen. Esto evita repetir el match cuatro veces.
-fn arith<I, F>(l: Value, r: Value, op_name: &str, int_op: I, float_op: F) -> EvalResult<Value>
+fn arith<I, F>(
+    l: Value, r: Value, op_name: &str, int_op: I, float_op: F, span: Span,
+) -> EvalResult<Value>
 where
     I: Fn(i64, i64) -> i64,
     F: Fn(f64, f64) -> f64,
@@ -1858,11 +1869,11 @@ where
         (Value::Int(a), Value::Float(b)) => Ok(Value::Float(float_op(a as f64, b))),
         (Value::Float(a), Value::Int(b)) => Ok(Value::Float(float_op(a, b as f64))),
         (Value::Float(a), Value::Float(b)) => Ok(Value::Float(float_op(a, b))),
-        (l, r) => type_error(op_name, &l, &r),
+        (l, r) => type_error(op_name, &l, &r, span),
     }
 }
 
-fn compare(op: &BinOpKind, l: Value, r: Value) -> EvalResult<Value> {
+fn compare(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
     use BinOpKind::*;
 
     // Numérico (con promoción Int→f64). NaN propaga como false en cualquiera
@@ -1888,7 +1899,7 @@ fn compare(op: &BinOpKind, l: Value, r: Value) -> EvalResult<Value> {
         }));
     }
 
-    type_error(op_name(op), &l, &r)
+    type_error(op_name(op), &l, &r, span)
 }
 
 /// Convierte un Value numérico a f64. Devuelve None si no es numérico —
@@ -1904,9 +1915,11 @@ fn as_f64(v: &Value) -> Option<f64> {
 /// And/Or con short-circuit y type-check de Bool. Vive aparte de `eval_binop`
 /// porque necesita acceso a las expresiones SIN evaluar (para no evaluar el
 /// lado derecho cuando el izquierdo ya determina el resultado).
-fn eval_logical(op: &BinOpKind, left: &Expr, right: &Expr, env: EnvRef) -> EvalResult<Value> {
+fn eval_logical(
+    op: &BinOpKind, left: &Expr, right: &Expr, env: EnvRef, span: Span,
+) -> EvalResult<Value> {
     let lv = eval_expr(left, env.clone())?;
-    let lb = expect_bool(&lv, op_name(op), "izquierdo")?;
+    let lb = expect_bool(&lv, op_name(op), "izquierdo", left.span())?;
 
     // Short-circuit: `false and ...` → false, `true or ...` → true.
     match op {
@@ -1916,13 +1929,14 @@ fn eval_logical(op: &BinOpKind, left: &Expr, right: &Expr, env: EnvRef) -> EvalR
     }
 
     let rv = eval_expr(right, env)?;
-    let rb = expect_bool(&rv, op_name(op), "derecho")?;
+    let rb = expect_bool(&rv, op_name(op), "derecho", right.span())?;
+    let _ = span; // mantenido por consistencia de firma con eval_binop
     Ok(Value::Bool(rb))
 }
 
 /// Helper para chequear que un Value sea Bool. Devuelve el bool o un
 /// TypeMismatch contextualizado al operador y lado.
-fn expect_bool(v: &Value, op: &str, side: &str) -> EvalResult<bool> {
+fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> {
     match v {
         Value::Bool(b) => Ok(*b),
         _ => Err(EvalSignal::Error(FitzError::new(
@@ -1930,7 +1944,7 @@ fn expect_bool(v: &Value, op: &str, side: &str) -> EvalResult<bool> {
                 expected: "Bool".into(),
                 found: v.type_name().into(),
             },
-            0, 0,
+            span.line, span.column,
             format!("operando {} de `{}` debe ser Bool, no `{}`", side, op, v.type_name()),
         ))),
     }
@@ -1947,13 +1961,13 @@ fn op_name(op: &BinOpKind) -> &'static str {
     }
 }
 
-fn type_error<T>(op: &str, l: &Value, r: &Value) -> EvalResult<T> {
+fn type_error<T>(op: &str, l: &Value, r: &Value, span: Span) -> EvalResult<T> {
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::TypeMismatch {
             expected: "operandos compatibles".into(),
             found: format!("{} {} {}", l.type_name(), op, r.type_name()),
         },
-        0, 0,
+        span.line, span.column,
         format!(
             "operación `{}` no soportada entre `{}` y `{}`",
             op, l.type_name(), r.type_name()
@@ -1961,10 +1975,10 @@ fn type_error<T>(op: &str, l: &Value, r: &Value) -> EvalResult<T> {
     )))
 }
 
-fn div_by_zero<T>() -> EvalResult<T> {
+fn div_by_zero<T>(span: Span) -> EvalResult<T> {
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::DivisionByZero,
-        0, 0,
+        span.line, span.column,
         "división por cero",
     )))
 }
@@ -1976,7 +1990,7 @@ fn div_by_zero<T>() -> EvalResult<T> {
 /// Extrae el Int de un Value, o emite un TypeMismatch claro indicando si
 /// fue el "inicio" o el "fin" del rango. Float NO coerciona — los rangos
 /// son discretos.
-fn expect_int_for_range(v: &Value, side: &str) -> EvalResult<i64> {
+fn expect_int_for_range(v: &Value, side: &str, span: Span) -> EvalResult<i64> {
     match v {
         Value::Int(n) => Ok(*n),
         other => Err(EvalSignal::Error(FitzError::new(
@@ -1984,7 +1998,7 @@ fn expect_int_for_range(v: &Value, side: &str) -> EvalResult<i64> {
                 expected: "Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
+            span.line, span.column,
             format!(
                 "el {} de un rango debe ser Int, no `{}`",
                 side, other.type_name()
@@ -2001,7 +2015,7 @@ fn expect_int_for_range(v: &Value, side: &str) -> EvalResult<i64> {
 ///    Probablemente sí, pero lo dejamos para más adelante).
 ///  - Str: no indexable hasta que decidamos si la unidad es char o byte.
 ///  - Otros: type error.
-fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
+fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
     match obj {
         Value::List(items) => {
             let i = match idx {
@@ -2011,7 +2025,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
                         expected: "Int".into(),
                         found: other.type_name().into(),
                     },
-                    0, 0,
+                    span.line, span.column,
                     format!(
                         "el índice de una lista debe ser Int, no `{}`",
                         other.type_name()
@@ -2023,7 +2037,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
             if i < 0 {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    0, 0,
+                    span.line, span.column,
                     format!("índice negativo en lista: {}", i),
                 )));
             }
@@ -2032,7 +2046,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
             borrowed.get(i_usize).cloned().ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    0, 0,
+                    span.line, span.column,
                     format!(
                         "índice fuera de rango: {} en lista de tamaño {}",
                         i,
@@ -2051,7 +2065,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
             }
             Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                0, 0,
+                span.line, span.column,
                 format!("clave no encontrada en mapa: {}", idx),
             )))
         }
@@ -2060,7 +2074,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
                 expected: "List o Map".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
+            span.line, span.column,
             format!(
                 "el tipo `{}` no soporta indexing con `[]`",
                 other.type_name()
@@ -2076,7 +2090,7 @@ fn eval_index(obj: &Value, idx: &Value) -> EvalResult<Value> {
 // Por ahora solo `Neg`: negación numérica (`-x`). Cuando el lexer emita `!`
 // como operador lógico, sumaremos `Not` acá.
 
-fn eval_unary(op: &UnaryOpKind, v: Value) -> EvalResult<Value> {
+fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
     match op {
         UnaryOpKind::Neg => match v {
             Value::Int(n) => Ok(Value::Int(-n)),
@@ -2086,7 +2100,7 @@ fn eval_unary(op: &UnaryOpKind, v: Value) -> EvalResult<Value> {
                     expected: "Int o Float".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                span.line, span.column,
                 format!("no se puede negar un valor de tipo `{}`", other.type_name()),
             ))),
         },
@@ -5793,5 +5807,70 @@ let r = match n {
         assert_eq!(reg.routes[0].method, crate::http::HttpMethod::Post);
         assert_eq!(reg.routes[1].method, crate::http::HttpMethod::Put);
         assert_eq!(reg.routes[2].method, crate::http::HttpMethod::Delete);
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Span en errores de runtime (S1.2 sub-paso 3)
+    //
+    // Antes de S1.2 los errores de runtime sobre expresiones heredaban
+    // posición `0:0` (sin ubicación reportada). Tras este sub-paso, cada
+    // error de tipo / aridad / división por cero / indexing sobre Expr
+    // cita la columna del nodo problemático.
+    // -----------------------------------------------------------------------
+
+    fn first_runtime_error(src: &str) -> FitzError {
+        let err = parse_and_eval(src).expect_err("esperado un error de runtime");
+        err
+    }
+
+    #[test]
+    fn span_runtime_div_zero_apunta_al_operador() {
+        // `print(10 / 0)` — el `/` está en columna 10.
+        let e = first_runtime_error("print(10 / 0)");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 10);
+        assert!(e.message.contains("división por cero"));
+    }
+
+    #[test]
+    fn span_runtime_type_mismatch_binop_apunta_al_operador() {
+        // `print(1 + true)` — el `+` está en columna 9. El checker
+        // estático también lo capta; el error de runtime ahora cita
+        // la misma posición.
+        let e = first_runtime_error("fn f() => 1 + true\nprint(f())");
+        // El error ocurre adentro de `f`, columna del `+`.
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 13);
+    }
+
+    #[test]
+    fn span_runtime_ident_desconocido_apunta_al_ident() {
+        // `print(unknown_var)` — `unknown_var` arranca en columna 7.
+        let e = first_runtime_error("print(unknown_var)");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 7);
+        assert!(e.message.contains("no definida"));
+    }
+
+    #[test]
+    fn span_runtime_index_oob_apunta_al_corchete() {
+        // `let xs = [1, 2]\nprint(xs[10])` — el `[` está en col 9 de
+        // línea 2.
+        let src = "let xs = [1, 2]\nprint(xs[10])";
+        let e = first_runtime_error(src);
+        assert_eq!(e.line, 2);
+        assert_eq!(e.column, 9);
+        assert!(e.message.contains("fuera de rango"));
+    }
+
+    #[test]
+    fn span_runtime_arity_mismatch_apunta_al_paren() {
+        // `fn f(x: Int) => x\nprint(f(1, 2))` — el `(` del call está
+        // en col 8 de línea 2.
+        let src = "fn f(x: Int) -> Int => x\nlet _ = f(1, 2)";
+        let e = first_runtime_error(src);
+        assert_eq!(e.line, 2);
+        assert_eq!(e.column, 10);
+        assert!(e.message.contains("espera 1"));
     }
 }

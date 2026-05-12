@@ -16,8 +16,13 @@
 > `examples/server.fitz` y `examples/guide/17-http.fitz` compilan
 > end-to-end. T1 (tests frágiles del codegen) — primer batch cerrado:
 > infra AST-based con `syn` + `quote`, 37/113 unit tests del codegen
-> migrados de string-match a inspección de AST. Ver matriz para ítems
-> pendientes (S1.2 expr-level, T1 sucesivos batches).
+> migrados de string-match a inspección de AST. S1.2 (span en Expr)
+> — los 3 sub-pasos cerrados: variantes de `Expr` cargan `Span`,
+> parser propaga spans en cada regla, checker (`infer_expr` +
+> helpers) y evaluator (`eval_expr` + helpers + 14 métodos
+> built-in) citan posición del nodo en errores. 1010 tests
+> pasando. Ver matriz para ítems pendientes (codegen call sites,
+> Pattern/TypeExpr, T1 sucesivos batches).
 
 ## Resumen ejecutivo
 
@@ -94,7 +99,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| S1 | AST + propagación | **Span en AST**: capturar línea/columna en `Expr`/`Stmt`, propagar a errores. **Stmt-level cerrado en B.1** — los errores del checker `let x: Int = "foo"`, `while (42)`, `for x in 1`, return type mismatch citan posición real. **Expr-level (S1.2, ex-B.2) pendiente** — errores sobre BinOp/Call/etc. heredan el span del Stmt contenedor (línea precisa, columna degradada). | Media (Expr-level) | Alta |
+| S1 | AST + propagación | **Span en AST** — Stmt-level cerrado en B.1; **Expr-level cerrado en S1.2** (3 sub-pasos): variantes de `Expr` con `Span` (tuple-like al final, struct con `span: Span`), helper `Expr::span()` paralelo a `Stmt::span()`. Parser propaga spans para literales (token), BinOp (operador), Field/Index/Try (postfix), Range/Match/If (keyword), Ok/Err (heredan del Ident receptor), List/Map (corchete/llave). Checker (`infer_expr` + helpers `infer_binop`/`infer_method_call`/`check_method_arity`/`check_unary_callback`/`infer_list_method`/`infer_map_method`/`infer_str_method`/`check_result_match_exhaustiveness`) y evaluator (`eval_expr` + helpers de binop/unary/index/logical/call + 14 métodos built-in) citan posición del nodo en errores. 5 tests de span en parser, 9 en checker, 5 en evaluator. **Pendiente residual menor**: codegen call sites (17 sitios) con `err()` → helper `err_at` disponible para migración incremental; `Pattern` y `TypeExpr` sin span (deuda explícita). | Baja (residual) | Baja |
 | U1 | `evaluator.rs` | Mensajes de error inconsistentes en estilo: "no tiene método X" vs "el tipo X no soporta" vs "espera Y arg(s)". Falta helper unificado. | Media | Baja |
 | U2 | `types.rs` ~20 sitios | Mismo patrón `ctx.error(format!("...{}...{}...", ...))` repetido. Helper `type_mismatch_error(label, expected, actual)` reduce repetición. | Baja | Baja |
 | U3 | `http.rs:481` | El handler-mapping `Ok→200/Err→500` no incluye stack trace del Err en log (solo en response). Útil para debug. | Baja | Baja |
@@ -200,10 +205,16 @@ prio Alta/Media con complejidad Baja): ~2-3 horas de trabajo, deja
 `cargo clippy` limpio, mejora la mantenibilidad puntual, y
 sincroniza la guía con el estado actual.
 
-Una sesión más ambiciosa suma **T1 + S1** (refactor de tests
-frágiles + spans en AST): trabajo grande pero destraba mucho de lo
-otro (mejores mensajes de error → mejor UX; tests menos frágiles →
-refactors futuros más baratos).
+**S1 (span en AST)** ya está sustancialmente cerrado tras S1.2
+(3 sub-pasos): cada `Expr` carga su span; checker y evaluator
+citan posición del nodo en errores; mensajes pasan de `0:0` a
+línea+columna precisas. Lo que queda son call sites del codegen
+con `err()` (helper `err_at` ya disponible, migración incremental
+cuando duela), y `Pattern`/`TypeExpr` sin span (deuda explícita,
+menor impacto). El próximo trabajo grande paralelo es **T1
+batches sucesivos**: ~76 unit tests del codegen todavía
+matchean strings literales del Rust generado; cada uno migrado
+a AST-based con `syn` resiste cambios cosméticos del codegen.
 
 Las **deudas funcionales** son sub-pasos formales que mejor se
 abren como mini-fases dedicadas, cada una con plan corto + tests
@@ -217,6 +228,13 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
   Trade-off documentado: server single-threaded hasta que aterrice
   async/await real (entonces se pivota a Arc/Mutex + `State`
   extractor).
+- **S1.2** (span en Expr + checker + evaluator) ✅ — los 3
+  sub-pasos cerrados. Errores expr-level del checker y de
+  runtime citan posición exacta del nodo problemático (operador,
+  paréntesis, corchete, argumento concreto, valor del campo,
+  etc.). 19 tests dedicados de span entre parser/checker/
+  evaluator. Deuda residual menor: codegen call sites siguen con
+  `err()` (helper `err_at` listo en `CodegenCtx`).
 - **T1** (tests frágiles del codegen) — **primer batch cerrado**.
   Infra `ast_test` (módulo adentro de `mod tests`) parsea el Rust
   generado con `syn::parse_file` y expone helpers para buscar
