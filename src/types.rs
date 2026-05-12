@@ -537,6 +537,12 @@ struct CheckCtx<'a> {
     /// (FnDef o FnExpr) anidada que se está chequeando. Vacío en
     /// el scope top-level. `Stmt::Return` lo consulta para validar.
     return_stack: Vec<Type>,
+    /// Stack paralelo a `return_stack`: cada frame recolecta los
+    /// tipos sintetizados de los `Stmt::Return` adentro de esa
+    /// función. `Expr::FnExpr` lo consume al salir para inferir su
+    /// `ret`. Para `Stmt::FnDef` se acumula también pero se
+    /// descarta (ya tenemos `return_type` declarado).
+    inferred_returns: Vec<Vec<Type>>,
     errors: Vec<FitzError>,
 }
 
@@ -546,6 +552,7 @@ impl<'a> CheckCtx<'a> {
             types,
             scopes: vec![std::collections::HashMap::new()],
             return_stack: Vec::new(),
+            inferred_returns: Vec::new(),
             errors: Vec::new(),
         };
         ctx.register_builtins();
@@ -928,13 +935,16 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
         Expr::FnExpr { params, body } => {
             // Walkeamos el body con un scope nuevo y los params
-            // bindeados (con su tipo declarado o `Any` si la anotación
-            // faltó). El tipo del FnExpr es `Function`; 5.3.5 refina
-            // el `ret` inferido del body. Como no tenemos return_type
-            // declarado, empujamos `Any` al return_stack — los `return`
-            // adentro del FnExpr no se chequean en 5.3.2.
+            // bindeados (con su tipo declarado o `Any` si la
+            // anotación faltó). El tipo del FnExpr es `Function`;
+            // 5.3.5 infiere el `ret` recolectando los tipos de los
+            // `Stmt::Return` del body y unificándolos con `lub`.
+            // Empujamos `Any` al return_stack porque sin anotación
+            // no podemos validar contra qué — los returns se
+            // recolectan, no se chequean.
             ctx.push_scope();
             ctx.return_stack.push(Type::Any);
+            ctx.inferred_returns.push(Vec::new());
             let param_types: Vec<Type> = params
                 .iter()
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
@@ -943,17 +953,59 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ctx.declare_var(p.name.clone(), t.clone());
             }
             check_block(ctx, body);
+            let returns = ctx.inferred_returns.pop().unwrap_or_default();
             ctx.return_stack.pop();
             ctx.pop_scope();
+            let ret = unify_returns(&returns);
             Type::Function {
                 params: param_types,
-                ret: Box::new(Type::Any),
+                ret: Box::new(ret),
             }
         }
         Expr::Index { object, index } => {
-            let _ = infer_expr(ctx, object);
-            let _ = infer_expr(ctx, index);
-            Type::Any // 5.3.4
+            let obj_ty = infer_expr(ctx, object);
+            let idx_ty = infer_expr(ctx, index);
+            match obj_ty.base() {
+                Type::List(t) => {
+                    if !is_compatible(&idx_ty, &Type::Int) {
+                        ctx.error(format!(
+                            "el índice de una `List` debe ser Int, recibió `{}`",
+                            idx_ty.display(ctx.types)
+                        ));
+                    }
+                    (**t).clone()
+                }
+                Type::Map(k, v) => {
+                    if !is_compatible(&idx_ty, k) {
+                        ctx.error(format!(
+                            "el índice de un `Map<{}, {}>` debe ser `{}`, recibió `{}`",
+                            k.display(ctx.types),
+                            v.display(ctx.types),
+                            k.display(ctx.types),
+                            idx_ty.display(ctx.types)
+                        ));
+                    }
+                    (**v).clone()
+                }
+                Type::Str => {
+                    // Str indexable es deuda explícita de 3.1 (la
+                    // unidad — char vs byte vs grafema — sin
+                    // decidir). El evaluator también corta.
+                    ctx.error("`Str` no soporta indexing con `[]` todavía".to_string());
+                    Type::Any
+                }
+                // Gradual: Any y Nominal no chequean. Nominal con
+                // operador `[]` es deuda (custom indexers no existen);
+                // Any es el escape habitual.
+                Type::Any | Type::Nominal(_) => Type::Any,
+                other => {
+                    ctx.error(format!(
+                        "el tipo `{}` no soporta indexing con `[]`",
+                        other.display(ctx.types)
+                    ));
+                    Type::Any
+                }
+            }
         }
         Expr::Match { value, arms } => {
             let scrutinee = infer_expr(ctx, value);
@@ -1034,6 +1086,83 @@ fn describe_callee(callee: &Expr) -> String {
         Expr::Field { field, .. } => format!("el método `{}`", field),
         _ => "esta llamada".into(),
     }
+}
+
+/// "Least upper bound" pragmático para sintetizar el tipo de
+/// retorno de una función cuyo body tiene varios `return` con
+/// tipos diferentes. No es un lattice formal: prioriza preservar
+/// información útil (Result<X> + Result<Any> = Result<X>) sobre
+/// la pureza teórica.
+///
+/// Reglas:
+///   - `a == b` → `a`.
+///   - Cualquiera Any → el otro (Any cede al concreto).
+///   - Int + Float → Float (coerción).
+///   - Null + T → `T?` (rama opcional).
+///   - T + T? → `T?`.
+///   - Generics (List/Map/Result/Nullable) → recursión.
+///   - Mix arbitrario → Any.
+fn lub(a: &Type, b: &Type) -> Type {
+    if a == b {
+        return a.clone();
+    }
+    if matches!(a, Type::Any) {
+        return b.clone();
+    }
+    if matches!(b, Type::Any) {
+        return a.clone();
+    }
+    // Coerción Int↔Float.
+    if (matches!(a, Type::Int) && matches!(b, Type::Float))
+        || (matches!(a, Type::Float) && matches!(b, Type::Int))
+    {
+        return Type::Float;
+    }
+    // Null + T → T? (y simétrico).
+    if matches!(a, Type::Null) {
+        return Type::Nullable(Box::new(b.clone()));
+    }
+    if matches!(b, Type::Null) {
+        return Type::Nullable(Box::new(a.clone()));
+    }
+    // T + T? → T? (y simétrico): si el inner del nullable es igual
+    // al otro, ya es lo mejor que tenemos.
+    if let Type::Nullable(inner) = a {
+        if **inner == *b {
+            return a.clone();
+        }
+    }
+    if let Type::Nullable(inner) = b {
+        if **inner == *a {
+            return b.clone();
+        }
+    }
+    // Generics recursivos.
+    match (a, b) {
+        (Type::List(ai), Type::List(bi)) => Type::List(Box::new(lub(ai, bi))),
+        (Type::Map(ak, av), Type::Map(bk, bv)) => {
+            Type::Map(Box::new(lub(ak, bk)), Box::new(lub(av, bv)))
+        }
+        (Type::Result(ai), Type::Result(bi)) => Type::Result(Box::new(lub(ai, bi))),
+        (Type::Nullable(ai), Type::Nullable(bi)) => Type::Nullable(Box::new(lub(ai, bi))),
+        _ => Type::Any,
+    }
+}
+
+/// Unifica los tipos de los `return` recolectados durante el
+/// walkeo del body de una función. Si la lista está vacía, la
+/// función no retorna explícitamente y devolvemos `Null` (matchea
+/// la semántica del evaluator: una fn que termina sin `return`
+/// produce `Value::Null`).
+fn unify_returns(types: &[Type]) -> Type {
+    if types.is_empty() {
+        return Type::Null;
+    }
+    let mut result = types[0].clone();
+    for t in &types[1..] {
+        result = lub(&result, t);
+    }
+    result
 }
 
 /// Despacho del checker para método built-in. Recibe el tipo del
@@ -1568,6 +1697,12 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     ));
                 }
             }
+            // Alimentamos el frame inferido de la fn contenedora.
+            // Para FnDef se descarta al pop; para FnExpr lo usa para
+            // sintetizar `ret`.
+            if let Some(frame) = ctx.inferred_returns.last_mut() {
+                frame.push(ret_ty);
+            }
         }
 
         Stmt::Expr(e) => {
@@ -1584,17 +1719,23 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // bindean con su tipo declarado (o Any). Empujamos el
             // return type esperado al stack para que los `return`
             // adentro lo vean. Sin anotación → `Any` (no chequea).
+            // También pusheamos un frame en `inferred_returns` para
+            // mantener consistencia con FnExpr (los frames van en
+            // paralelo); el contenido se descarta acá porque FnDef
+            // ya tiene `return_type` declarado.
             let ret = match return_type {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
             ctx.push_scope();
             ctx.return_stack.push(ret);
+            ctx.inferred_returns.push(Vec::new());
             for p in params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
                 ctx.declare_var(p.name.clone(), pty);
             }
             check_block(ctx, body);
+            ctx.inferred_returns.pop();
             ctx.return_stack.pop();
             ctx.pop_scope();
         }
@@ -3278,5 +3419,190 @@ mod tests {
              let u = User { id: 1 }\n\
              u.greet()",
         );
+    }
+
+    // ---- 5.3.5: FnExpr.ret inferido + Expr::Index ----
+
+    // FnExpr ret inferido — formas básicas
+
+    #[test]
+    fn fn_expr_arrow_devuelve_tipo_del_expr() {
+        // `fn(x: Int) => x * 2` se desugarea a body=[Return(x*2)];
+        // ret inferido = Int. Filter exige Bool, así que esto debe
+        // disparar el chequeo de ret.
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.filter(fn(x: Int) => x * 2)",
+            &["filter", "Bool", "Int"],
+        );
+    }
+
+    #[test]
+    fn fn_expr_arrow_bool_pasa_filter() {
+        // Mismo escenario pero con ret Bool — filter acepta.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.filter(fn(x: Int) => x > 0)",
+        );
+    }
+
+    #[test]
+    fn fn_expr_block_un_solo_return_infiere_ese_tipo() {
+        // Forma bloque con un return — ret = tipo del return.
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.find(fn(x: Int) { return x * 2 })",
+            &["find", "Bool", "Int"],
+        );
+    }
+
+    #[test]
+    fn fn_expr_sin_return_es_null() {
+        // Una fn que no retorna explícitamente — ret = Null. Para
+        // un map, los elementos quedan como List<Null>.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Null> = xs.map(fn(x: Int) { print(x) })",
+        );
+    }
+
+    // FnExpr ret inferido — unificación (lub) sobre varios returns
+
+    #[test]
+    fn fn_expr_lub_int_float_es_float() {
+        // Dos returns: Int y Float → Float (coerción).
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Float> = xs.map(fn(x: Int) {\n\
+                 if (x > 0) { return 1.5 }\n\
+                 return 0\n\
+             })",
+        );
+    }
+
+    #[test]
+    fn fn_expr_lub_null_y_t_es_nullable() {
+        // Una rama devuelve null, otra Int → ret = Int?.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int?> = xs.map(fn(x: Int) {\n\
+                 if (x > 0) { return x }\n\
+                 return null\n\
+             })",
+        );
+    }
+
+    #[test]
+    fn fn_expr_lub_result_ok_y_err_es_result_concreto() {
+        // Ok(User) + Err("...") → lub(Result<User>, Result<Any>)
+        // = Result<User>. Detecta que el FnExpr puede usarse donde
+        // se espera Result<User>.
+        assert_ok(
+            "type User { id: Int }\n\
+             let xs: List<User> = [User { id: 1 }]\n\
+             let r: List<Result<User>> = xs.map(fn(u: User) {\n\
+                 if (u.id > 0) { return Ok(u) }\n\
+                 return Err(\"boom\")\n\
+             })",
+        );
+    }
+
+    // Expr::Index
+
+    #[test]
+    fn index_list_devuelve_t() {
+        assert_ok(
+            "let xs: List<Int> = [10, 20, 30]\n\
+             let n: Int = xs[0]",
+        );
+    }
+
+    #[test]
+    fn index_list_con_indice_no_int_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [10, 20]\n\
+             let n = xs[\"x\"]",
+            &["List", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn index_map_devuelve_v() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let n: Int = m[\"a\"]",
+        );
+    }
+
+    #[test]
+    fn index_map_con_clave_incompatible_es_error() {
+        assert_error_with(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let n = m[42]",
+            &["Map<Str, Int>", "Str", "Int"],
+        );
+    }
+
+    #[test]
+    fn index_sobre_int_es_error() {
+        assert_error_with(
+            "let n = 1\n\
+             let x = n[0]",
+            &["Int", "indexing"],
+        );
+    }
+
+    #[test]
+    fn index_sobre_str_es_error_hasta_que_se_implemente() {
+        // Indexing de Str sigue siendo deuda de 3.1 — el checker
+        // se adelanta al evaluator con un mensaje claro.
+        assert_error_with(
+            "let s = \"hola\"\n\
+             let c = s[0]",
+            &["Str", "indexing", "todavía"],
+        );
+    }
+
+    #[test]
+    fn index_sobre_any_no_chequea() {
+        // Receptor Any (var traída por import) → gradual.
+        assert_ok(
+            "from foo import xs\n\
+             let n = xs[0]",
+        );
+    }
+
+    // lub directo
+
+    #[test]
+    fn lub_funciones_basicas() {
+        assert_eq!(lub(&Type::Int, &Type::Int), Type::Int);
+        assert_eq!(lub(&Type::Int, &Type::Any), Type::Int);
+        assert_eq!(lub(&Type::Any, &Type::Str), Type::Str);
+        assert_eq!(lub(&Type::Int, &Type::Float), Type::Float);
+        assert_eq!(lub(&Type::Float, &Type::Int), Type::Float);
+        // Null + Int → Int?.
+        assert_eq!(
+            lub(&Type::Null, &Type::Int),
+            Type::Nullable(Box::new(Type::Int))
+        );
+        // Int + Str → Any (mix arbitrario).
+        assert_eq!(lub(&Type::Int, &Type::Str), Type::Any);
+    }
+
+    #[test]
+    fn lub_recursivo_en_result() {
+        // lub(Result<User>, Result<Any>) → Result<User>.
+        let env = env_with(&["User"]);
+        let user = Type::Nominal(env.lookup("User").unwrap());
+        let a = Type::Result(Box::new(user.clone()));
+        let b = Type::Result(Box::new(Type::Any));
+        assert_eq!(lub(&a, &b), a);
+    }
+
+    #[test]
+    fn unify_returns_vacio_es_null() {
+        // Sin returns explícitos → Null (matchea el evaluator).
+        assert_eq!(unify_returns(&[]), Type::Null);
     }
 }

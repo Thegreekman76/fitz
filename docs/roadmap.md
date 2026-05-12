@@ -956,8 +956,11 @@ en `fitz run` (exit 0, programa ejecuta).
   funcionando porque cada archivo se resuelve solo y sus `type`s
   locales están en su env.
 
-#### 5.3 — Type checker de expresiones y funciones
-**En curso** — se divide en cinco sub-pasos cerrables.
+#### 5.3 — Type checker de expresiones y funciones ✓
+**Completado** — los cinco sub-pasos cerrados. Cubre la
+sintaxis completa del lenguaje observable hoy. El cierre formal
+con la lista de pendientes naturales (que no bloquean 5.4) está
+al final de 5.3.5.
 
 ##### 5.3.1 — Synthesis básico ✓
 **Completado** — primera pasada del checker que mira EXPRESIONES.
@@ -1255,9 +1258,97 @@ sola línea).
   forma de una sola línea.
 - **Métodos custom sobre `type`** — sigue deuda de 3.2.
 
-##### 5.3.5 — FnExpr ret inferido + cierre de 5.3
-**Pendiente** — refinar `Expr::FnExpr` para sintetizar `ret`
-desde el body. Cierre formal de 5.3.
+##### 5.3.5 — FnExpr.ret inferido + Expr::Index + cierre de 5.3 ✓
+**Completado** — último paso del checker de expresiones. Cierra
+la sub-fase 5.3 entera.
+
+- `CheckCtx` gana `inferred_returns: Vec<Vec<Type>>` paralelo a
+  `return_stack`. Cada frame recolecta los tipos sintetizados
+  de los `Stmt::Return` del body de su función. `Expr::FnExpr`
+  lo consume al salir para sintetizar `ret` vía `unify_returns`
+  + `lub`. `Stmt::FnDef` también pushea un frame por
+  consistencia pero descarta el contenido (ya tiene
+  `return_type` declarado; la unificación queda disponible para
+  un eventual check futuro "declarado vs inferido"). `Stmt::Return`
+  pushea su tipo al frame de la fn contenedora.
+- `lub(a, b)`: "least upper bound" pragmático para unificar
+  tipos de ramas distintas de un `return`. Reglas:
+  - `a == b` → `a`.
+  - Cualquiera Any → el otro (Any cede al concreto).
+  - Int + Float → Float (coerción).
+  - Null + T → `T?` (caso típico de "una rama devuelve null").
+  - T + T? → `T?`.
+  - Generics built-in (`List`/`Map`/`Result`/`Nullable`)
+    recursivos.
+  - Mix arbitrario → Any.
+  No es un lattice formal — prioriza preservar información
+  útil (`lub(Result<User>, Result<Any>) = Result<User>`).
+- `unify_returns(types)`: fold con `lub`. Lista vacía → `Null`
+  (matchea la semántica del evaluator: una fn que termina sin
+  `return` explícito devuelve `Value::Null`).
+- Caso clave destrabado: `xs.filter(fn(x: Int) => x * 2)`
+  ahora detecta que el ret inferido del callback (`Int`) no es
+  el `Bool` que filter exige. El test correspondiente que
+  abandonamos en 5.3.4 volvió.
+- **`Expr::Index`** (`xs[i]`, `m[k]`): deja de devolver `Any`
+  silenciosamente.
+  - `List<T>[Int]` → `T`. Índice no-Int → error.
+  - `Map<K, V>[K]` → `V`. Índice incompatible con K → error.
+  - `Str[?]` → error "no soporta indexing todavía" (deuda 3.1
+    sobre unidad char/byte/grafema).
+  - `Any` o `Nominal` → `Any` (gradual; los indexers custom
+    sobre `type` no existen todavía).
+  - Otro tipo concreto → error "no soporta indexing".
+
+Tests al cerrar 5.3.5: 784 (767 al cerrar 5.3.4 + 17 nuevos en
+`types.rs`: FnExpr ret inferido para arrow/block/sin-return,
+lub con Int+Float, Null+T, Result+Result; Index sobre
+List/Map/Str/Int/Any con tipos compatibles e incompatibles;
+helpers `lub` y `unify_returns` directos).
+
+Verificación end-to-end: los 17 ejemplos + `examples/server.fitz`
+pasan `fitz check` limpios. El cambio más sensible (FnExpr.ret
+real) no rompe nada porque todos los callbacks de filter/find
+en los ejemplos retornan `Bool` (`u.id == id`, `n == 2 or n == 4`,
+etc.); los de map retornan tipos arbitrarios sin chequeo de ret
+forzado.
+
+**Cierre formal de 5.3 — Type checker de expresiones y
+funciones:**
+
+El checker estático cubre hoy el lenguaje observable:
+literales, ident, operadores aritméticos/lógicos/comparación
+con coerción Int↔Float, StrInterp, control de flujo
+(if/while/for/loop), list/map/struct literals, field access,
+match (con exhaustividad sobre Result), Range, Ok/Err, `?`,
+struct lit, llamadas a fn/builtin con aridad y tipos,
+`Stmt::Return` contra `return_type`, métodos built-in
+paramétricos para List/Map/Str (14 métodos), FnExpr con `ret`
+inferido del body, y `Expr::Index` sobre receptores conocidos.
+La regla gradual (`Any` cede a cualquier tipo) preserva el
+modelo del lenguaje sin obligar a anotar.
+
+**Deuda explícita — pendientes naturales que NO bloquean 5.4:**
+- **Métodos custom sobre `type`** — deuda vieja de 3.2. El
+  dispatch del checker está preparado para sumar otra fuente
+  de lookup sin retoques.
+- **`Pattern::OkWildcard` / `ErrWildcard`** — deuda de 3.3.
+  Hoy `Ok(_)` parsea como `OkBinding("_")` y ensucia el scope.
+- **`Result<X>?` como scrutinee de match** — no exigido,
+  decisión de diseño. Revisitable si aparece como caso real.
+- **Patrones imposibles sobre Result** (literal `Int` en match
+  sobre `Result<T>`) — son dead code; el chequeo es independiente.
+- **Encadenamiento multi-línea en method chains** (deuda 3.4
+  del parser) — `xs.map(...)\n.filter(...)` corta en el
+  newline; el checker funciona pero la sintaxis no llega.
+- **Posiciones de error** — `TypeExpr` y muchos `FitzError` del
+  checker todavía salen sin línea/columna. Refactor amplio,
+  pendiente.
+- **FnExpr con tipo de retorno declarado en sintaxis**
+  (`fn(x: Int) -> Int { ... }` como expresión) — el AST y el
+  parser no lo modelan. Hoy el ret se infiere siempre. Cuando
+  aparezca la sintaxis, el checker compara declarado vs
+  inferido sin trabajo extra.
 
 ### Features de la fase entera
 - [x] TypeExpr en AST y parser (5.1)
@@ -1266,8 +1357,11 @@ desde el body. Cierre formal de 5.3.
 - [x] Llamadas y return contra return_type (5.3.2)
 - [x] Result, `?`, match exhaustivo (5.3.3)
 - [x] Métodos built-in con templates paramétricos (5.3.4)
-- [ ] Checker completo (5.3.5 + 5.4)
-- [ ] Inferencia de tipos
+- [x] FnExpr.ret inferido + Expr::Index + cierre formal de 5.3 (5.3.5)
+- [ ] Modo strict y cierre de 5a (5.4)
+- [x] Inferencia de tipos básica (synthesis de expresiones,
+  unión de returns en FnExpr — la inferencia bidireccional más
+  rica queda como deuda)
 - [ ] Optimizaciones básicas (5b)
 - [ ] Binario nativo standalone (5b)
 - [ ] Cross-compilation (5b)

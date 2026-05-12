@@ -1,8 +1,8 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.4: checker de
-> métodos built-in con signatures paramétricas, 767 tests pasando).
+> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.5: cierre del
+> type checker de expresiones, 784 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
