@@ -806,10 +806,15 @@ fitz run api.fitz
 ---
 
 ## Fase 5 — Compilador ⚡
-**Estado: EN CURSO**
+**Estado: 5a COMPLETADA / 5b PENDIENTE**
 
 Plan aprobado: dos mitades cerrables.
-- **5a — Type checker estático** (sobre el intérprete actual)
+- **5a — Type checker estático** (sobre el intérprete actual) ✓
+  Cerrado al cerrar el paso 5.4: el checker recorre lexer → parser →
+  resolución de anotaciones → expresiones (synthesis, llamadas,
+  return, Result/`?`/match exhaustivo, métodos built-in,
+  FnExpr.ret inferido, Index). `fitz run` corre el checker por
+  default y aborta si hay errores; `--no-typecheck` lo salta.
 - **5b — Codegen a binario nativo** — backend a decidir. Recomendación
   inicial: Cranelift (pure-Rust, sin LLVM en Windows). Alternativa
   seria: transpile-a-Rust por reuso de tokio/axum/serde_json.
@@ -1350,6 +1355,82 @@ modelo del lenguaje sin obligar a anotar.
   aparezca la sintaxis, el checker compara declarado vs
   inferido sin trabajo extra.
 
+#### 5.4 — Modo strict en `fitz run` + cierre de 5a ✓
+**Completado** — flip del default de `fitz run`: ahora aborta
+cuando el checker estático encuentra errores, en lugar de
+emitirlos como warnings y seguir. Cierra formalmente la
+sub-fase 5a (Type checker estático sobre el intérprete).
+
+- `src/main.rs`:
+  - Nueva flag `--no-typecheck` en la variante `Run` del enum
+    `Commands` (`#[arg(long)]`). Sin la flag, modo strict; con
+    la flag, los errores se reportan como warnings y el
+    programa se ejecuta igual.
+  - Strict (default): mensaje `✗ <archivo> — N error(es) de
+    tipo:` + lista de errores + sugerencia `Usá \`fitz check\`
+    para revisar, o \`fitz run --no-typecheck <archivo>\` para
+    correr igual.` Exit code 1. El evaluator nunca arranca.
+  - Gradual (`--no-typecheck`): mensaje `⚠ N warning(s) del
+    checker de tipos (modo \`--no-typecheck\`):` + lista. Sigue
+    al evaluator.
+- `examples/guide/15-errores.fitz` reescrito: cambió de
+  aridad-incorrecta (que el checker ahora detectaba desde
+  5.3.2) a división por cero (error de runtime puro que el
+  sistema de tipos no analiza por diseño). Sigue cumpliendo el
+  rol pedagógico del capítulo — mostrar cómo se ve un error de
+  runtime — sin entrar en conflicto con el modo strict del
+  checker.
+- `docs/guide.md` cap 15 reorganizado: documenta cuatro etapas
+  (lexer → parser → **checker** → evaluador) en lugar de tres;
+  suma sección "Modo strict y `--no-typecheck`"; tabla nueva
+  de errores típicos del checker; ejemplo final de runtime
+  puro. Cap 3 actualizado (anotaciones de tipo se chequean en
+  compile time). Cap 18 actualizado: Fase 5a cerrada, 5b
+  (codegen) como próximo bloque. Header bumpeado.
+
+Sin tests automatizados nuevos en 5.4 — el feature es CLI y la
+infraestructura para tests CLI no existe todavía. Verificado a
+mano:
+- Programa con error de tipo → `fitz run` aborta con exit 1.
+- Mismo programa con `--no-typecheck` → ejecuta con warning.
+- `examples/guide/15-errores.fitz` pasa `fitz check` (división
+  por cero no es tipo) y `fitz run` emite `Error — división
+  por cero` desde el evaluator.
+- Los 14 ejemplos no-HTTP de la guía corren limpios con
+  `fitz run`.
+
+Total al cerrar 5.4: 784 tests (sin cambios respecto de 5.3.5).
+
+**Cierre formal de Fase 5a — Type checker estático:**
+
+5a queda completada. El checker cubre la sintaxis completa
+observable del lenguaje hoy: anotaciones en variables,
+parámetros, return types y campos de `type`; expresiones de
+todos los nodos del AST; llamadas con aridad y tipos contra la
+signature declarada; `Stmt::Return` contra return_type
+declarado; operador `?` con la regla de fn contenedora;
+exhaustividad de `match` sobre `Result<T>`; métodos built-in
+paramétricos sobre `List`/`Map`/`Str` (14 métodos); `Expr::Index`
+sobre `List`/`Map`; inferencia básica (synthesis + `lub` para
+FnExpr.ret).
+
+Lo que queda abierto para futuras fases (no bloquea 5b):
+- Métodos custom sobre `type` (deuda 3.2; dispatch del checker
+  preparado).
+- `Pattern::OkWildcard` / `ErrWildcard` (deuda 3.3).
+- Patrones imposibles sobre Result (dead-code check separado).
+- Encadenamiento multi-línea en method chains (deuda 3.4 del
+  parser).
+- Reasignación sin anotación contra tipo previo (`m: Int = 1;
+  m = "x"` no chequea — el binding se relaja al tipo nuevo).
+- Posiciones de error precisas en TypeExpr y errores del
+  checker.
+- FnExpr con return type declarado en sintaxis (AST/parser).
+- Sugerencias "did you mean..." en typos.
+
+5b arranca con un IR tipado encima de lo que produce este
+checker.
+
 ### Features de la fase entera
 - [x] TypeExpr en AST y parser (5.1)
 - [x] Resolución de tipos y checker base (5.2)
@@ -1358,7 +1439,7 @@ modelo del lenguaje sin obligar a anotar.
 - [x] Result, `?`, match exhaustivo (5.3.3)
 - [x] Métodos built-in con templates paramétricos (5.3.4)
 - [x] FnExpr.ret inferido + Expr::Index + cierre formal de 5.3 (5.3.5)
-- [ ] Modo strict y cierre de 5a (5.4)
+- [x] Modo strict y cierre de 5a (5.4)
 - [x] Inferencia de tipos básica (synthesis de expresiones,
   unión de returns en FnExpr — la inferencia bidireccional más
   rica queda como deuda)

@@ -1,8 +1,8 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.5: cierre del
-> type checker de expresiones, 784 tests pasando).
+> Última actualización: 2026-05-12 (Fase 5a cerrada — paso 5.4:
+> modo strict en `fitz run`, 784 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -60,9 +60,10 @@ bagaje histórico del segundo. Algunas ideas centrales:
 
 - **Sintaxis liviana**, inspirada en Python y TypeScript. Punto y coma
   opcional, llaves para los bloques, indentación libre.
-- **Tipado gradual**: las anotaciones de tipo son opcionales. Hoy se
-  parsean y todavía no se chequean — el chequeo estático llega más
-  adelante en el roadmap.
+- **Tipado gradual con chequeo estático**: las anotaciones de tipo
+  son opcionales, pero cuando están, `fitz check` y `fitz run` las
+  validan en compile time (Fase 5a, cerrada). Sin anotación, el
+  tipo se infiere o se trata como `Any` (escape gradual).
 - **HTTP como ciudadano de primera clase** — `@get`, `@post`, etc. son
   parte del lenguaje, no de una librería. El servidor arranca solo
   si tu programa registra rutas. Lo vas a ver en el [capítulo 17](#17-http-nativo).
@@ -404,25 +405,23 @@ city: Str = "El Chaltén"
 let height: Float = 3405.0
 ```
 
-**Aviso importante**: hoy estas anotaciones se parsean pero el
-intérprete no las chequea. Esto compila y corre sin error, aunque el
-valor no coincide con el tipo declarado:
+**Desde la Fase 5, estas anotaciones se chequean en compile time**.
+Si el valor no coincide con el tipo declarado, `fitz check` reporta
+el problema y `fitz run` aborta en modo strict:
 
 ```fitz
-x: Int = "no soy int"   // se acepta sin chequear, x queda como Str
+x: Int = "no soy int"
+// ✗ Error — `x` declarado como `Int` recibió un valor `Str`
 ```
 
-El plan a largo plazo es el [tipado gradual](roadmap.md): las
-anotaciones son opcionales, y cuando estén, el type checker (Fase 5)
-las valida en compile time. Mientras tanto, las podés usar como
-documentación o costumbre, pero no esperes seguridad de tipos. El
-runtime sí va a fallar si más adelante usás un valor de manera
-incompatible (por ejemplo, sumando un `Str` con un `Int`).
+El [tipado gradual](roadmap.md) sigue siendo el modelo: las
+anotaciones son opcionales. Sin anotación, el tipo se infiere
+(`let n = 42` → `n` es `Int`) o se trata como `Any` cuando no se
+puede determinar. Si querés saltarte el chequeo en una corrida
+puntual, agregale `--no-typecheck` al comando.
 
-Limitación adicional: la anotación hoy es solo un **nombre simple**
-(`Int`, `Str`, `MyType`). Formas como `List<Int>`, `Map<Str, Int>` o
-`Str?` aparecen en la especificación pero el parser todavía no las
-soporta como anotación de variable.
+La sintaxis de anotaciones admite tipos compuestos: `List<Int>`,
+`Map<Str, User>`, `Result<User>`, y nullable `Str?`.
 
 ### Reasignación
 
@@ -434,13 +433,19 @@ count = count + 1
 print(count)   // 43
 ```
 
-Y como las anotaciones no se chequean, el tipo del valor también
-puede cambiar (no es algo que recomiende — es solo una consecuencia
-del estado actual del lenguaje):
+Sin anotación, el tipo del valor también puede cambiar entre
+asignaciones (consecuencia del modelo gradual, no algo que
+recomiende):
 
 ```fitz
 n = 42
-n = "ahora soy texto"   // funciona hoy, no funcionará cuando el type checker llegue
+n = "ahora soy texto"   // pasa porque n no tiene tipo declarado
+```
+
+Con anotación, asignar un valor incompatible falla en `fitz check`:
+
+```fitz
+m: Int = "no soy int"   // ✗ error — `m` declarado como `Int` recibió un valor `Str`
 ```
 
 ### Ámbito (scope)
@@ -3232,7 +3237,7 @@ que vas a ver uno por corrida.
 
 ### De qué fase vino el error
 
-Fitz procesa tu programa en tres etapas, y cada una puede tirar
+Fitz procesa tu programa en cuatro etapas, y cada una puede tirar
 errores con distinto sabor:
 
 1. **Lexer** — separa el texto en tokens. Si una comilla no cierra o
@@ -3240,15 +3245,44 @@ errores con distinto sabor:
 2. **Parser** — arma el árbol de sintaxis. Si la gramática no
    coincide (`if` sin `{`, `match` sin `=>`, expresión incompleta),
    falla acá.
-3. **Evaluador** — ejecuta el árbol. Si tu programa parsea pero hace
-   algo inválido en runtime (sumar tipos incompatibles, llamar a una
-   variable, dividir por cero), falla acá.
+3. **Checker estático** (Fase 5) — recorre el árbol validando las
+   anotaciones de tipo y las expresiones. Si declaraste `x: Int` y
+   le asignás `"hola"`, si llamás `add(5)` cuando `add` espera dos
+   argumentos, o si el callback de `.filter(...)` no devuelve `Bool`,
+   falla acá.
+4. **Evaluador** — ejecuta el árbol. Si tu programa pasó las tres
+   etapas anteriores pero hace algo inválido en runtime (dividir por
+   cero, indexar fuera de rango, matchear sin brazo que coincida),
+   falla acá.
 
-Hoy el lexer y el parser dan **posiciones precisas**. El evaluador,
-en cambio, casi siempre reporta `0:0` — es deuda explícita: nos
-faltan ubicaciones para las subexpresiones. La descripción del error
-sí es buena, así que en runtime usamos eso para orientarnos hasta que
-se mejore.
+Hoy el lexer y el parser dan **posiciones precisas**. El checker y
+el evaluador, en cambio, suelen reportar `0:0` — es deuda explícita:
+nos faltan ubicaciones para las subexpresiones. La descripción del
+error sí es buena, así que usamos eso para orientarnos hasta que se
+mejore.
+
+### Modo strict y `--no-typecheck`
+
+Desde la Fase 5.4, `fitz run` aborta cuando el checker estático
+encuentra errores. Eso quiere decir que un programa con errores de
+tipo **no llega a ejecutarse**:
+
+```
+✗ archivo.fitz — 1 error(es) de tipo:
+  Error — `x` declarado como `Int` recibió un valor `Str`
+   Usá `fitz check` para revisar, o `fitz run --no-typecheck archivo.fitz` para correr igual.
+```
+
+Si querés saltarte el chequeo (por ejemplo, para probar una rama
+mientras todavía hay errores en otra parte del programa, o para
+diagnosticar un bug del propio checker), agregá `--no-typecheck`:
+
+```bash
+fitz run --no-typecheck archivo.fitz
+```
+
+En ese modo los errores del checker se reportan como warnings y el
+programa se ejecuta igual.
 
 ### Errores típicos del lexer
 
@@ -3290,9 +3324,37 @@ x = 1 +
 Error en línea 1:8 — Se esperaba una expresión, se encontró 'Newline'
 ```
 
+### Errores típicos del checker estático
+
+Estos los detectás con `fitz check` o aparecen al correr `fitz run`
+(que aborta en modo strict desde Fase 5.4):
+
+| Mensaje | Cuándo aparece |
+|---------|----------------|
+| `variable desconocida \`x\`` | Usaste un nombre que no fue declarado. |
+| `` `x` declarado como `T` recibió un valor `U` `` | Mismatch entre la anotación y el valor. |
+| `la función \`f\` espera N argumento(s), recibió M` | Aridad incorrecta en la llamada. |
+| `` `return` devuelve `T` pero la función declara `U` `` | El cuerpo de la fn devuelve algo distinto a lo declarado. |
+| `el operador \`?\` requiere un \`Result\`, recibió \`X\`` | Usaste `?` sobre algo que no es Result. |
+| `match sobre \`Result\` no es exhaustivo: falta el caso \`X\`` | Match sin cubrir Ok o Err (y sin wildcard). |
+| `el tipo \`X\` no tiene el método \`Y\`` | Typo de método (`xs.lenght()`) o método inexistente. |
+| `el tipo \`X\` no soporta indexing con \`[]\`` | `obj[i]` sobre algo que no es lista/mapa. |
+
+Ejemplo:
+
+```fitz
+let x: Int = "hola"
+```
+
+```
+✗ archivo.fitz — 1 error(es) de tipo:
+  Error — `x` declarado como `Int` recibió un valor `Str`
+```
+
 ### Errores típicos del evaluador
 
-Estos son los que más vas a ver mientras escribís lógica:
+Estos son los que más vas a ver mientras escribís lógica — pasaron
+el checker porque el sistema de tipos no analiza valores:
 
 | Mensaje | Cuándo aparece |
 |---------|----------------|
@@ -3317,12 +3379,13 @@ Estos son los que más vas a ver mientras escribís lógica:
 Ejemplo (el archivo de este capítulo):
 
 ```fitz
-fn add(a, b) => a + b
-print(add(5))
+let x = 10
+let y = 0
+print(x / y)
 ```
 
 ```
-Error en línea 0:0 — `add` espera 2 argumento(s), recibió 1
+Error en línea 0:0 — división por cero
 ```
 
 ### Cuando el mensaje no alcanza
@@ -3365,36 +3428,24 @@ no tengamos posiciones finas.
 [examples/guide/15-errores.fitz](../examples/guide/15-errores.fitz):
 
 ```fitz
-fn add(a, b) => a + b
-
-print(add(5))
+let x = 10
+let y = 0
+print(x / y)
 ```
 
-Desde la Fase 5.3.2, el chequeo estático de llamadas detecta el
-problema **antes** de ejecutar el programa. Si corrés `fitz check`,
-exit code 1:
+`fitz check` lo deja pasar: el sistema de tipos no analiza valores
+(no sabe que `y` siempre vale `0` en este punto). El error aparece
+al correr (`fitz run`):
 
 ```
-✗ examples/guide/15-errores.fitz — 1 error(es) de tipo:
-  Error — la función `add` espera 2 argumento(s), recibió 1
+--- Ejecución ---
+Error en línea 0:0 — división por cero
 ```
 
-Y si corrés `fitz run`, el checker emite primero un warning y
-después el evaluator ejecuta y emite el mismo error en runtime
-(salida recortada — antes vienen los tokens y el AST):
-
-```
-⚠ 1 warning(s) del checker de tipos:
-  Error — la función `add` espera 2 argumento(s), recibió 1
-   (Fase 5.x — no abortan la ejecución; usá `fitz check` para validar).
-...
-Error en línea 0:0 — `add` espera 2 argumento(s), recibió 1
-```
-
-El error de runtime sigue siendo el mismo que antes (`0:0` por la
-deuda de posiciones en el evaluator); lo nuevo es el warning de
-arriba, que ahora te avisa en `fitz check` sin necesidad de
-ejecutar.
+Si querés ver cómo se ven los errores del checker, probá agregar
+`let x: Int = "hola"` en un archivo y correrlo: `fitz run` aborta
+en strict mode antes de ejecutar. Sumando `--no-typecheck` los
+errores pasan a warnings y el programa sigue corriendo.
 
 ---
 
@@ -4152,33 +4203,40 @@ Con los capítulos 1 a 17 podés:
   serialización JSON automática, y `@server(port, host)` para
   configurar.
 - Leer un mensaje de error del intérprete y ubicar de qué fase vino.
+- Validar tipos en compile time con **`fitz check`**, y dejar que
+  `fitz run` aborte en modo strict cuando encuentra errores (Fase
+  5.4 cerró el type checker estático).
 
-Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end.
+Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
+ahora con un chequeo estático que atrapa errores antes de que se
+ejecuten.
 
-### Lo que viene — más allá de Fase 4
+### Lo que viene — más allá de Fase 5a
 
-Fase 4 cerró sus cinco pasos (1: decoradores genéricos sobre `FnDef`;
-2: runtime HTTP mínimo con GET y Result auto-handling; 3: body +
-deserialización JSON; 4: `@server(...)` configurable; 5: guía,
-ejemplos y cierre). Las piezas grandes que siguen:
+Fase 5 está dividida en dos mitades. **5a — type checker estático
+sobre el intérprete actual** acaba de cerrarse: las anotaciones que
+durante Fases 2 a 4 se parseaban pero no se chequeaban, ahora se
+validan en `fitz check` y en `fitz run` por default. La mitad
+restante:
 
-- **Tipado gradual con validación estática** — las anotaciones que
-  hoy se ignoran van a empezar a chequearse en compile time
-  (Fase 5).
-- **Compilador a binario nativo** — el salto de intérprete a binario
-  via LLVM o Cranelift. Type checker estático completo.
+- **Fase 5b — Compilador a binario nativo** — el salto de intérprete
+  a binario. Backend a decidir (Cranelift o transpile-a-Rust); IR
+  tipado aprovechando lo que construyó 5a.
 - **`async` / `await` reales en el lenguaje** — destrabar handlers
-  HTTP concurrentes sin bloquear el reactor (probablemente Fase 4.x).
+  HTTP concurrentes sin bloquear el reactor.
 - **Status codes custom y response builder** (`return 401 { ... }`),
   query params, headers, middleware.
+- **Inferencia bidireccional más rica** — hoy synth básico + lub
+  para FnExpr.ret. Falta inferencia "desde el contexto" (un literal
+  vacío `[]` adentro de un arg que espera `List<Int>` no tipa con
+  `Int` todavía).
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
 deuda explícita acumulada por fase.
 
 ### Más adelante
 
-- **Fase 5 — Compilador**: el salto de intérprete a binario nativo,
-  via LLVM o Cranelift. Type checker estático completo.
+- **Fase 5b — Codegen**: el salto de intérprete a binario nativo.
 - **Fase 6 — Ecosistema**: package manager, registry, LSP, formatter,
   linter, interop con Python.
 

@@ -33,6 +33,10 @@ enum Commands {
     Run {
         /// Archivo a ejecutar
         file: PathBuf,
+        /// Saltar el chequeo estático de tipos. Sin esta flag los
+        /// errores del checker abortan la ejecución (modo strict).
+        #[arg(long)]
+        no_typecheck: bool,
     },
     /// Compilar a binario (Fase 5)
     Build {
@@ -50,8 +54,8 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Run { file } => {
-            run_file(&file);
+        Commands::Run { file, no_typecheck } => {
+            run_file(&file, no_typecheck);
         }
         Commands::Build { file } => {
             println!("🚧 Compilador en construcción — Fase 5");
@@ -101,7 +105,7 @@ fn check_file(path: &PathBuf) {
     }
 }
 
-fn run_file(path: &PathBuf) {
+fn run_file(path: &PathBuf, no_typecheck: bool) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
         std::process::exit(1);
@@ -125,21 +129,36 @@ fn run_file(path: &PathBuf) {
         }
     };
 
-    // Fase 5.2: checker estático en modo warning. Durante 5.x los
-    // errores de tipo NO abortan la ejecución — se reportan y el
-    // programa sigue corriendo en el intérprete. El default flipea
-    // a "strict aborta" al cerrar 5a (después de 5.4), una vez que
-    // el checker cubre cuerpos de funciones y HTTP.
+    // Fase 5.4: checker estático en modo strict por default. Los
+    // errores de tipo abortan la ejecución antes de pasar al
+    // evaluator. La flag `--no-typecheck` cambia el comportamiento
+    // a warning (los reporta pero sigue ejecutando), pensada para
+    // legacy code o para diagnosticar bugs del checker.
     let (_type_env, type_errors) = types::check_program(&program);
     if !type_errors.is_empty() {
-        eprintln!(
-            "⚠ {} warning(s) del checker de tipos:",
-            type_errors.len()
-        );
-        for e in &type_errors {
-            eprintln!("  {}", e);
+        if no_typecheck {
+            eprintln!(
+                "⚠ {} warning(s) del checker de tipos (modo `--no-typecheck`):",
+                type_errors.len()
+            );
+            for e in &type_errors {
+                eprintln!("  {}", e);
+            }
+        } else {
+            eprintln!(
+                "✗ {} — {} error(es) de tipo:",
+                path.display(),
+                type_errors.len()
+            );
+            for e in &type_errors {
+                eprintln!("  {}", e);
+            }
+            eprintln!(
+                "   Usá `fitz check` para revisar, o `fitz run --no-typecheck {}` para correr igual.",
+                path.display()
+            );
+            std::process::exit(1);
         }
-        eprintln!("   (Fase 5.x — no abortan la ejecución; usá `fitz check` para validar).");
     }
 
     // Base dir para resolver `import`s: el directorio del archivo que
