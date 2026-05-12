@@ -42,9 +42,11 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 `fitz check` y `fitz run` validan anotaciones en compile time;
 sin anotación, se infiere o se trata como `Any`.
 
-† **Compilado nativo** — objetivo de Fase 5b. Hoy Fitz corre con
-un intérprete escrito en Rust. El IR tipado y el codegen
-(Cranelift o transpile-a-Rust) son el próximo bloque.
+† **Compilado nativo** — en curso, **Fase 5b.1** cerrado.
+Backend elegido: transpile-a-Rust. `fitz build hello.fitz`
+compila un subset primitivo (Int/Float/Str/Bool, funciones,
+control de flujo, `print`) a binario standalone via `rustc`.
+Tipos compuestos, Result, módulos y HTTP entran en 5b.2-5b.6.
 
 ‡ **Async nativo** — la sintaxis `async fn` se parsea, pero el
 runtime sigue siendo síncrono. Los handlers HTTP corren en un
@@ -84,7 +86,7 @@ async fn get_user(id: Int) -> User {
 ```
 
 ```bash
-fitz build && ./main          # ← objetivo, Fase 5b
+fitz build && ./main          # ← objetivo final; hoy compila el subset primitivo (5b.1)
 ```
 
 Hoy mismo, lo equivalente (sin `async`, sin status codes custom,
@@ -95,9 +97,17 @@ fitz run examples/server.fitz
 # Servidor en http://localhost:3000
 ```
 
+Y un programa CLI primitivo ya se compila a binario nativo:
+
+```bash
+fitz build hello.fitz
+./hello
+```
+
 ## Estado del proyecto
 
-🏔️ **Fase 5a completada — type checker estático funcionando.**
+🏔️ **Fase 5a completada + Fase 5b.1 cerrado — el lenguaje compila
+a binario nativo (subset primitivo).**
 
 Las fases cerradas:
 
@@ -118,9 +128,17 @@ Las fases cerradas:
   built-in paramétricos (`List<T>.map`, etc.), índices (`xs[i]`),
   FnExpr.ret inferido del body. `fitz run` aborta en modo strict
   por default; `--no-typecheck` lo salta.
+- **Fase 5b.1 — Codegen a binario nativo (subset primitivo)**:
+  `fitz build` compila un subset Fitz (Int/Float/Str/Bool/Null,
+  BinOp/UnaryOp/StrInterp, asignación + reasignación,
+  `if`/`while`/`loop`/`for-range`, funciones top-level, `print`) a
+  binario standalone via transpile-a-Rust + `rustc`. Tipos
+  compuestos, Result, módulos y HTTP entran en sub-pasos
+  5b.2 a 5b.6.
 
-**784 tests pasando.** Próximo: **Fase 5b — codegen a binario
-nativo** (backend a decidir: Cranelift o transpile-a-Rust).
+**833 tests pasando** (825 unit + 8 E2E que compilan binarios).
+Próximo: **Fase 5b.2** — tipos custom + field access en el
+compilador.
 
 Ver [roadmap](docs/roadmap.md) para el estado detallado y la
 deuda explícita.
@@ -140,11 +158,15 @@ deuda explícita.
   en asignación y argumentos, return contra return_type,
   exhaustividad de `match` sobre `Result`, métodos inexistentes
   sobre built-ins, índices con tipo de clave incompatible, y más.
+- **Compilación a binario nativo (subset primitivo)** (Fase 5b.1):
+  `fitz build` compila programas CLI con primitivos, control de
+  flujo y funciones a binario standalone. Tipos compuestos,
+  Result, módulos y HTTP entran en 5b.2-5b.6.
 
 ### CLI
 
 ```bash
-# Ejecutar un programa
+# Ejecutar un programa (intérprete + checker strict)
 fitz run programa.fitz
 
 # Validar tipos sin ejecutar (exit 1 si hay errores)
@@ -152,6 +174,10 @@ fitz check programa.fitz
 
 # Ejecutar saltando el chequeo estático (warnings, no aborta)
 fitz run --no-typecheck programa.fitz
+
+# Compilar a binario nativo (subset primitivo — Fase 5b.1)
+fitz build programa.fitz
+./programa
 ```
 
 ## Estabilidad

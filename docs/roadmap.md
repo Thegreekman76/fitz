@@ -806,7 +806,7 @@ fitz run api.fitz
 ---
 
 ## Fase 5 — Compilador ⚡
-**Estado: 5a COMPLETADA / 5b PENDIENTE**
+**Estado: 5a COMPLETADA / 5b EN CURSO (5b.1 cerrado)**
 
 Plan aprobado: dos mitades cerrables.
 - **5a — Type checker estático** (sobre el intérprete actual) ✓
@@ -815,10 +815,15 @@ Plan aprobado: dos mitades cerrables.
   return, Result/`?`/match exhaustivo, métodos built-in,
   FnExpr.ret inferido, Index). `fitz run` corre el checker por
   default y aborta si hay errores; `--no-typecheck` lo salta.
-- **5b — Codegen a binario nativo** — backend a decidir. Recomendación
-  inicial: Cranelift (pure-Rust, sin LLVM en Windows). Alternativa
-  seria: transpile-a-Rust por reuso de tokio/axum/serde_json.
-  Decisión real al arrancar 5b, después de fijar el IR tipado.
+- **5b — Codegen a binario nativo** — backend elegido:
+  **transpile-a-Rust** sobre Cranelift/LLVM. Razones decisivas:
+  reuso de toda la infra del compilador, async real cuando llegue
+  (sin escribir runtime propio), cross-compile a todos los targets
+  de rustc, y la posibilidad de mapear handlers `@get`/`@post` a
+  `async fn` axum sin trabajo extra cuando llegue 5b.6. Trade-off:
+  compile times = rustc. Se divide en siete sub-pasos cerrables
+  (5b.1 → 5b.7) con criterio de "hello world compilado" hoy y
+  CRUD HTTP compilado al cerrar 5b.7.
 
 ### Pasos
 
@@ -1444,6 +1449,204 @@ Lo que queda abierto para futuras fases (no bloquea 5b):
 5b arranca con un IR tipado encima de lo que produce este
 checker.
 
+#### 5b.1 — Codegen a binario nativo (subset primitivo) ✓
+**Completado** — primer paso de Fase 5b. Transpile AST de Fitz →
+código Rust → binario via `rustc`. Cubre programas CLI con
+primitivos, sin tipos compuestos, sin HTTP.
+
+**Backend elegido — transpile-a-Rust** sobre Cranelift/LLVM:
+- Reusamos el compilador de Rust completo. Optimizaciones (LTO,
+  inlining) gratis.
+- Cross-compile a todos los targets de rustc sin trabajo extra.
+- `async fn` Fitz puede mapear a `async fn` Rust cuando llegue
+  5b.6 (HTTP / async real).
+- Type-safety: si el codegen tiene un bug, rustc lo va a cazar.
+- Trade-off explícito: compile times = los de rustc (~2s para
+  programas pequeños). Para servicios web —el público objetivo
+  de Fitz— se hace una vez por deploy, no es interactive.
+
+**Nuevo módulo `src/codegen.rs`**:
+- `pub fn generate_rust(program: &Program, env: &TypeEnv) ->
+  Result<String, FitzError>` — entry point.
+- `CodegenCtx` con stack de scopes (`HashMap<String, Type>`) y
+  tabla `fn_sigs` de firmas pre-registradas. Las firmas top-level
+  se computan **antes** de generar cuerpos, así las llamadas
+  resuelven el return type sin importar el orden de las fns.
+- Visitor sobre AST tipado. No introducimos IR intermedio en
+  5b.1: para un subset chico, un visitor a un buffer `String`
+  alcanza. Cuando 5b.2+ traiga tipos compuestos posiblemente
+  sumemos uno.
+- Helpers: `coerce(code, from, to)` para Int→Float, `numeric_coerce`
+  para BinOp con tipos mixtos, `rust_type_for(t)` para mapear
+  primitivos, `rust_str_literal(s)` para literales escapados,
+  `type_name(t)` para mensajes.
+
+**Mapping AST de Fitz → Rust**:
+
+| Fitz | Rust |
+|------|------|
+| `Int` | `i64` |
+| `Float` | `f64` |
+| `Str` | `String` |
+| `Bool` | `bool` |
+| `Null` | `()` |
+| `let x: Int = 42` | `let mut x: i64 = 42i64;` |
+| `let x = 1` (inferido) | `let mut x: i64 = 1i64;` (usa tipo del checker) |
+| `"hola {x}"` | `format!("hola {}", x)` |
+| `s1 + s2` (Str) | `format!("{}{}", s1, s2)` |
+| `1 + 2.0` | `((1i64 as f64) + 2f64)` |
+| `print(a, b)` | `println!("{} {}", a, b)` |
+| `for i in 0..3` | `for mut i in (0i64 as i64)..(3i64 as i64)` |
+| `fn f(n: Int) -> Int { ... }` | `fn f(mut n: i64) -> i64 { ... }` |
+
+Convenciones:
+- Variables siempre `let mut` para simplificar reasignación.
+  Reasignación detectada mirando si la var ya existe en algún
+  scope visible (no solo el top); si sí, emite `x = ...` en
+  vez de `let mut x = ...`.
+- Strings se concatenan siempre con `format!` para evitar los
+  juegos de ownership de `String + &str`. Ineficiente pero
+  correcto.
+- Strings pasados como args usan `.clone()` (ineficiente pero
+  evita refactor de ownership).
+- Coerción `Int → Float` se inserta como `(x as f64)` en cada
+  punto donde se necesita (BinOp mixto, asignación a Float
+  anotado, paso de Int a param Float).
+- `print()` sin args → `println!()` (newline).
+- `print(a, b, c)` → format string con `{}` separados por
+  espacio, replicando la semántica del intérprete.
+
+**Subset soportado en 5b.1**:
+- Literales Int / Float / Str / Bool / Null.
+- BinOp (aritméticos con coerción, comparación numérica y de
+  Str via `.as_str()`, lógicos `and`/`or`).
+- UnaryOp `Neg`.
+- StrInterp.
+- Asignación con o sin anotación, reasignación.
+- `if`/`else` como sentencia.
+- `while`, `loop`, `break`, `continue`.
+- `for var in start..end` (rangos exclusivos).
+- Funciones top-level con params/return tipados.
+- `print()` builtin.
+- `return` explícito.
+
+**Fuera de scope (refinamos en pasos siguientes con errores
+explícitos)**:
+- Tipos custom, struct lit, field access → 5b.2.
+- Listas, mapas, indexing → 5b.3.
+- `Result`/`?`/`match` → 5b.4.
+- Módulos → 5b.5.
+- HTTP / `@server` / handlers → 5b.6.
+- Funciones anónimas (FnExpr) → 5b.2 o 5b.3.
+- Decoradores → error "5b.6".
+
+**Subcomando `fitz build`** (antes era stub que imprimía "🚧"):
+- Flow: lex → parse → checker en **modo strict siempre** (no hay
+  `--no-typecheck` en build; build exige programa correcto) →
+  `codegen::generate_rust` → escribe `target/fitz-build/<nombre>/main.rs`
+  (visible para debug) → invoca `rustc --edition 2021 -O <main.rs>
+  -o <bin>` → copia el binario adyacente al .fitz fuente.
+- Naming: `hello.fitz` → `hello.exe` (Windows) o `hello`
+  (Linux/macOS).
+- Sin Cargo todavía — 5b.1 no tiene dependencias externas. Cuando
+  llegue 5b.4+ con serde (para Result) o 5b.6 con axum/tokio,
+  pasamos a generar `Cargo.toml + src/main.rs` y llamar
+  `cargo build --release`.
+
+**Tests**:
+- **28 tests unitarios** en `codegen.rs`: cubren cada feature
+  del subset (literales, BinOp con coerciones, StrInterp, print,
+  fns top-level con block y arrow, llamadas, if/while/for/loop,
+  reasignación, UnaryOp, lógicos, comparación Str con
+  `.as_str()`) + cada feature fuera de scope con error
+  específico mencionando el sub-paso futuro.
+- **8 tests E2E** en `tests/compile_e2e.rs` (integration tests):
+  invocan `fitz build` sobre programas reales, ejecutan el
+  binario, comparan stdout y exit code. Cubren: criterio de éxito
+  hello-world, `if`/`else`, `while`+reasignación, `for`-range,
+  coerción Int→Float, recursión, build aborta con error de tipo
+  strict, build aborta sobre feature no soportada (lista). Usan
+  un `Mutex` global para serializar las invocaciones de rustc
+  (múltiples rustc paralelos sobre el mismo target dir producían
+  cross-talk de outputs en Windows).
+
+**Criterio de éxito**:
+```fitz
+let name = "Fitz"
+let x = 10 + 5
+print("Hola, {name}, x es {x}")
+
+fn double(n: Int) -> Int => n * 2
+print(double(x))
+```
+```bash
+fitz build hello.fitz
+./hello
+# Hola, Fitz, x es 15
+# 30
+```
+Validado a mano y vía test E2E.
+
+Tests al cerrar 5b.1: **833** (797 al cerrar deuda residual + 28
+unit codegen + 8 E2E = 833). Los 17 ejemplos + `server.fitz`
+pasan `fitz check` limpios sin cambios.
+
+**Deuda explícita — retomar en pasos siguientes**:
+- **`Type::Any` en variables sin anotación inferible**: el
+  codegen exige conocer el tipo. Si el checker no pudo
+  sintetizar (caso raro en 5b.1), error. En 5b.2+ podemos
+  refinar a `Box<dyn Any>` o pedir anotación al usuario.
+- **Vars declaradas adentro de bloques quedan confinadas en
+  Rust**: en Fitz `while { x = 5 }` deja `x` definida afuera;
+  en el binario generado, no. Discrepancia conocida; cierra
+  con pre-declaración de vars en el outer scope si se pide.
+- **Compile time del binario**: ~2s para programas chicos por
+  `rustc` cold. Aceptable para 5b.1; si molesta en 5b.6+ con
+  axum, pasamos a `cargo build` que cachea.
+- **Strings pasados con `.clone()` siempre**: ineficiente.
+  Optimización post-5b cuando estabilicemos el modelo de
+  ownership en codegen.
+
+##### 5b.2 — Tipos custom + field access + struct literal
+**Pendiente** — `type User { id: Int, name: Str }` →
+`struct User { id: i64, name: String }`. Instanciación
+`User { id: 1, name: "x" }` → `User { id: 1, name: String::from("x") }`.
+Field access `user.name` → `user.name.clone()`. Field assignment
+`user.name = "x"` → `user.name = String::from("x")`. Probablemente
+sume `Box<T>`/`Rc<RefCell<T>>` para matchear la semántica de
+referencia compartida del intérprete (a decidir al arrancar).
+
+##### 5b.3 — Listas, mapas, indexing, method calls
+**Pendiente** — `List<T>` → `Vec<T>` (o `Rc<RefCell<Vec<T>>>` por
+aliasing), `Map<K, V>` → `Vec<(K, V)>` (preserve order del
+intérprete). Métodos built-in con las mismas signatures del
+checker. Probablemente sume infra para evitar `Vec<Vec<X>>`
+embebido fragmentado.
+
+##### 5b.4 — Result, `?`, match
+**Pendiente** — `Result<T>` → enum dedicado, `?` se traduce a
+`return Err(e)` o desempaca, `match` se traduce a `match` Rust.
+Aprovecha la exhaustividad ya validada por el checker.
+
+##### 5b.5 — Módulos / `import`
+**Pendiente** — `import foo` → `mod foo;` en el Cargo project
+generado. Probablemente acá pasamos de `rustc` directo a
+`cargo build` (un módulo por archivo, plus `Cargo.toml`
+generado).
+
+##### 5b.6 — HTTP / `@server` / handlers
+**Pendiente** — los decoradores `@get`/`@post`/etc. se traducen
+a registración en una `Router` axum dentro del `main`. `async
+fn` real cuando llegue. Bridge sync/async puede simplificarse
+porque tokio + axum corren todo async nativamente. Probablemente
+suma `[dependencies] axum = "0.8"` + `tokio` + `serde_json` al
+Cargo.toml generado.
+
+##### 5b.7 — Guía + ejemplos + cierre de Fase 5b
+**Pendiente** — capítulo nuevo de la guía sobre `fitz build`,
+ejemplos compilados, criterio de éxito final ("CRUD HTTP
+compilado a binario standalone"), cierre formal de Fase 5.
+
 ### Features de la fase entera
 - [x] TypeExpr en AST y parser (5.1)
 - [x] Resolución de tipos y checker base (5.2)
@@ -1456,9 +1659,18 @@ checker.
 - [x] Inferencia de tipos básica (synthesis de expresiones,
   unión de returns en FnExpr — la inferencia bidireccional más
   rica queda como deuda)
-- [ ] Optimizaciones básicas (5b)
-- [ ] Binario nativo standalone (5b)
-- [ ] Cross-compilation (5b)
+- [x] Backend de codegen decidido — transpile-a-Rust (5b)
+- [x] Codegen subset primitivo + `fitz build` (5b.1)
+- [ ] Tipos custom + field access (5b.2)
+- [ ] Listas, mapas, indexing, métodos built-in (5b.3)
+- [ ] Result, `?`, match (5b.4)
+- [ ] Módulos / `import` (5b.5)
+- [ ] HTTP / `@server` / handlers (5b.6)
+- [ ] Optimizaciones básicas (post-5b — strings sin `.clone()`,
+  pre-declaración de vars que cruzan bloques)
+- [x] Binario nativo standalone (5b.1 — subset primitivo;
+  features faltantes en 5b.2-5b.6)
+- [x] Cross-compilation (gratis via rustc targets)
 
 ---
 

@@ -12,6 +12,7 @@ mod evaluator;  // Fase 2.4 — ejecución
 mod error;      // manejo de errores del compilador
 mod http;       // Fase 4 — HTTP nativo (registry + runtime)
 mod types;      // Fase 5.2 — sistema de tipos resuelto + checker base
+mod codegen;    // Fase 5b.1 — transpile AST → Rust → binario
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -58,8 +59,7 @@ fn main() {
             run_file(&file, no_typecheck);
         }
         Commands::Build { file } => {
-            println!("🚧 Compilador en construcción — Fase 5");
-            println!("   Por ahora usá: fitz run {}", file.display());
+            build_file(&file);
         }
         Commands::Check { file } => {
             check_file(&file);
@@ -103,6 +103,124 @@ fn check_file(path: &PathBuf) {
         }
         std::process::exit(1);
     }
+}
+
+/// `fitz build <archivo>` — Fase 5b.1. Compila el .fitz a binario
+/// nativo via `rustc`. Flujo: lex → parse → checker (strict) →
+/// codegen a Rust → `rustc` → copia el binario adyacente al
+/// archivo fuente.
+///
+/// El Rust generado queda en `target/fitz-build/<nombre>/main.rs`
+/// para inspección manual. Si rustc falla, el output crudo se
+/// imprime tal cual.
+fn build_file(path: &PathBuf) {
+    let source = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error leyendo {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+
+    let tokens = match lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Checker en modo strict — no hay `--no-typecheck` en build.
+    let (env, type_errors) = types::check_program(&program);
+    if !type_errors.is_empty() {
+        eprintln!(
+            "✗ {} — {} error(es) de tipo:",
+            path.display(),
+            type_errors.len()
+        );
+        for e in &type_errors {
+            eprintln!("  {}", e);
+        }
+        eprintln!("   Usá `fitz check` para revisar antes de buildear.");
+        std::process::exit(1);
+    }
+
+    // Codegen.
+    let rust_code = match codegen::generate_rust(&program, &env) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ codegen: {}", e);
+            eprintln!("   (Fase 5b.1 soporta un subset; el resto llega en 5b.2+.)");
+            std::process::exit(1);
+        }
+    };
+
+    // Directorios.
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("fitz_build");
+    let build_dir = PathBuf::from("target")
+        .join("fitz-build")
+        .join(stem);
+    if let Err(e) = fs::create_dir_all(&build_dir) {
+        eprintln!("Error creando {}: {}", build_dir.display(), e);
+        std::process::exit(1);
+    }
+    let rust_src = build_dir.join("main.rs");
+    if let Err(e) = fs::write(&rust_src, &rust_code) {
+        eprintln!("Error escribiendo {}: {}", rust_src.display(), e);
+        std::process::exit(1);
+    }
+
+    // Output binario adyacente al .fitz: `hello.fitz` → `hello`
+    // (Linux/macOS) o `hello.exe` (Windows).
+    let bin_name = if cfg!(windows) {
+        format!("{}.exe", stem)
+    } else {
+        stem.to_string()
+    };
+    let bin_out = path
+        .parent()
+        .map(|p| p.join(&bin_name))
+        .unwrap_or_else(|| PathBuf::from(&bin_name));
+
+    // Invocamos rustc directamente. Para 5b.1 no necesitamos
+    // dependencias externas; cuando lleguen (axum/tokio en 5b.6),
+    // pasamos a generar Cargo.toml + src/main.rs y llamamos cargo.
+    let output = std::process::Command::new("rustc")
+        .args([
+            "--edition",
+            "2021",
+            "-O",
+        ])
+        .arg(&rust_src)
+        .arg("-o")
+        .arg(&bin_out)
+        .output();
+
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("Error invocando rustc: {}", e);
+            eprintln!("   ¿Tenés rustc en el PATH? (`rustup` lo provee.)");
+            std::process::exit(1);
+        }
+    };
+
+    if !output.status.success() {
+        eprintln!("✗ rustc falló al compilar el código generado:");
+        eprintln!("   (revisá {} para ver qué se intentó compilar.)", rust_src.display());
+        eprintln!("--- stderr de rustc ---");
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    println!("✓ binario: {}", bin_out.display());
 }
 
 fn run_file(path: &PathBuf, no_typecheck: bool) {
