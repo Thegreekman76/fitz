@@ -15,7 +15,7 @@ print(10 / 3.0)
 
 // Unario negativo.
 print(-5)
-x = 10
+let x = 10
 print(-x)
 
 // Comparación.
@@ -26,5 +26,9 @@ print("a" < "b")    // strings se comparan lexicográficamente
 // Igualdad.
 print(1 == 1)
 print(1 == 1.0)     // Int y Float numéricamente iguales
-print(1 == "1")     // false — tipos distintos, sin coerción
 print(null == null)
+// `1 == "1"` también funciona en el intérprete (devuelve false porque
+// los tipos son distintos), pero el compilador (`fitz build`) rechaza
+// la comparación entre Int y Str directamente — Rust exige operandos
+// del mismo tipo para `==`. Si querés probarlo, corré este archivo
+// con `fitz run`.

@@ -1,0 +1,56 @@
+// 18-build.fitz — Ejemplo del capítulo 18 "fitz build" (compilar a
+// binario nativo).
+//
+// Este server **no usa state compartido**: cada handler procesa sus
+// args y devuelve directo, sin leer/escribir vars top-level. Eso lo
+// hace compilable con `fitz build` end-to-end (a diferencia del cap
+// 17, que usa una `List<User>` que todos los handlers comparten).
+//
+// Compilar y correr:
+//   fitz build examples/guide/18-build.fitz
+//   ./examples/guide/18-build         # Linux / macOS
+//   .\examples\guide\18-build.exe     # Windows
+//
+// Probar:
+//   curl http://127.0.0.1:3000/
+//   curl http://127.0.0.1:3000/double/21
+//   curl http://127.0.0.1:3000/divide/10/0      # 500 — Err
+//   curl -X POST http://127.0.0.1:3000/echo \
+//        -H "Content-Type: application/json" \
+//        -d '{"msg":"hola","times":3}'
+
+@server(3000)
+fn main() => 0
+
+// Endpoint estático: solo un mensaje.
+@get("/")
+fn index() -> Str => "Fitz HTTP compilado"
+
+// Path param Int + Result: si n < 0, Err → 500.
+@get("/double/{n}")
+fn double(n: Int) -> Result<Int> {
+    if (n < 0) {
+        return Err("n debe ser >= 0")
+    }
+    return Ok(n * 2)
+}
+
+// Dos path params + Result: división con manejo de error.
+@get("/divide/{a}/{b}")
+fn divide(a: Int, b: Int) -> Result<Int> {
+    if (b == 0) {
+        return Err("división por cero")
+    }
+    return Ok(a / b)
+}
+
+// POST con body deserializado contra un `type`: defaults + nullables
+// aplicados como en `fitz run`.
+type Echo {
+    msg: Str
+    times: Int = 1
+    note: Str?
+}
+
+@post("/echo")
+fn echo(body: Echo) -> Echo => body

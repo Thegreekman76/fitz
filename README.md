@@ -5,7 +5,7 @@
 
 ```fitz
 // Ejemplo aspiracional (sintaxis del syntax-spec). Lo de
-// async/.await y status codes custom llega en Fases 4.x/5.x.
+// async/.await y status codes custom es deuda residual post-5.
 @get("/users/{id}")
 async fn get_user(id: Int) -> User {
     let user = db.find(id).await
@@ -13,10 +13,12 @@ async fn get_user(id: Int) -> User {
 }
 ```
 
-Para ver un ejemplo **que corre hoy end-to-end**, mirá
-[`examples/server.fitz`](examples/server.fitz) — un CRUD completo
-con `Result + ?`, body JSON y `@server(...)`, ejecutable con
-`fitz run`.
+Para ver un ejemplo **que corre hoy end-to-end con `fitz run`**,
+mirá [`examples/server.fitz`](examples/server.fitz) — un CRUD
+completo con `Result + ?`, body JSON y `@server(...)`. Para un
+ejemplo **compilado a binario nativo con `fitz build`**, mirá
+[`examples/guide/18-build.fitz`](examples/guide/18-build.fitz) —
+server HTTP sin state compartido, compilable end-to-end.
 
 ## Por qué Fitz
 
@@ -33,7 +35,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 | -------------------- | ------ | ---------- | --- | ---- |
 | Sintaxis limpia      | ✅     | ⚠️         | ❌  | ✅   |
 | Tipado gradual       | ❌     | ✅         | ❌  | ✅ * |
-| Compilado nativo     | ❌     | ❌         | ✅  | 🚧 † |
+| Compilado nativo     | ❌     | ❌         | ✅  | ✅ † |
 | HTTP en el core      | ❌     | ❌         | ❌  | ✅   |
 | Async nativo         | ⚠️     | ✅         | ✅  | 🚧 ‡ |
 | Interop Python       | ✅     | ❌         | ❌  | 🚧 § |
@@ -42,19 +44,21 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 `fitz check` y `fitz run` validan anotaciones en compile time;
 sin anotación, se infiere o se trata como `Any`.
 
-† **Compilado nativo** — en curso, **Fase 5b.1** cerrado.
-Backend elegido: transpile-a-Rust. `fitz build hello.fitz`
-compila un subset primitivo (Int/Float/Str/Bool, funciones,
-control de flujo, `print`) a binario standalone via `rustc`.
-Tipos compuestos, Result, módulos y HTTP entran en 5b.2-5b.6.
+† **Compilado nativo** — Fase 5b completada. Backend:
+transpile-a-Rust + Cargo. `fitz build` compila primitivos,
+tipos custom, listas/mapas, `Result`/`?`/`match`, módulos y
+HTTP (sin state compartido entre handlers) a binario standalone.
+Ver [cap 18 de la guía](docs/guide.md#18-fitz-build--compilar-a-binario-nativo)
+para el detalle del subset soportado y de la deuda residual.
 
 ‡ **Async nativo** — la sintaxis `async fn` se parsea, pero el
 runtime sigue siendo síncrono. Los handlers HTTP corren en un
-thread del intérprete con bridge a tokio. El `await` real
-llega en Fase 4.x/5.x.
+thread del intérprete con bridge a tokio (en `fitz run`) o como
+fns sync wrapped por axum (en `fitz build`). El `await` real
+llega post-5.
 
-§ **Interop Python via PyO3** — planificado, todavía no
-implementado.
+§ **Interop Python via PyO3** — planificado para Fase 6,
+todavía no implementado.
 
 ## Ejemplo aspiracional
 
@@ -85,29 +89,31 @@ async fn get_user(id: Int) -> User {
 }
 ```
 
-```bash
-fitz build && ./main          # ← objetivo final; hoy compila el subset primitivo (5b.1)
-```
-
-Hoy mismo, lo equivalente (sin `async`, sin status codes custom,
-con el intérprete) sí corre:
+Hoy mismo, casi todo lo de arriba funciona — falta el `async`
+real (la keyword se parsea pero el runtime es sync), los status
+codes custom (`return 404 { ... }`), y el `await` del DB call:
 
 ```bash
 fitz run examples/server.fitz
-# Servidor en http://localhost:3000
+# Servidor en http://127.0.0.1:3000 (CRUD completo)
 ```
 
-Y un programa CLI primitivo ya se compila a binario nativo:
+Un server HTTP **compilado a binario nativo** (sin state
+compartido entre handlers, deuda residual de 5b.6):
 
 ```bash
-fitz build hello.fitz
-./hello
+fitz build examples/guide/18-build.fitz
+./examples/guide/18-build      # Linux/macOS
+# o:
+.\examples\guide\18-build.exe  # Windows
 ```
 
 ## Estado del proyecto
 
-🏔️ **Fase 5a completada + Fase 5b.2 cerrado — el lenguaje compila
-tipos custom + control de flujo + métodos Str a binario nativo.**
+🏔️ **Fase 5 completada — Fitz tiene type checker estático y
+compilador a binario nativo.** El lenguaje pasa de intérprete
+puro a un compilador completo que produce ejecutables standalone
+(CLI o HTTP) via transpile-a-Rust + Cargo.
 
 Las fases cerradas:
 
@@ -123,29 +129,29 @@ Las fases cerradas:
   automática (incluyendo `Result` auto-handling: `Ok(v)`→200,
   `Err(e)`→500).
 - **Fase 5a — Type checker estático**: `fitz check` valida
-  anotaciones, llamadas (aridad + tipos), returns vs return_type,
-  operador `?`, exhaustividad de `match` sobre `Result`, métodos
-  built-in paramétricos (`List<T>.map`, etc.), índices (`xs[i]`),
-  FnExpr.ret inferido del body. `fitz run` aborta en modo strict
-  por default; `--no-typecheck` lo salta.
-- **Fase 5b.1 — Codegen subset primitivo**: `fitz build` compila
-  programas con primitivos, BinOp/UnaryOp/StrInterp, asignación +
-  reasignación, `if`/`while`/`loop`/`for-range` y funciones
-  top-level a binario standalone via transpile-a-Rust + `rustc`.
-- **Fase 5b.2 — Tipos custom compilados**: `type Foo { ... }` se
-  traduce a `Rc<RefCell<FooData>>` (preserva el aliasing y la
-  mutación compartida del intérprete). Struct literal con defaults
-  inline-eados, field access/assign, igualdad estructural,
-  `if`-as-expression, métodos `Str.len/upper/lower`, `StrInterp`
-  con cualquier tipo. Listas/mapas, `Result`/`?` y módulos entran
-  en sub-pasos 5b.3-5b.5; HTTP en 5b.6.
+  anotaciones, llamadas, returns, operador `?`, exhaustividad de
+  `match` sobre `Result`, métodos built-in paramétricos, índices,
+  FnExpr.ret inferido. `fitz run` aborta en modo strict por
+  default; `--no-typecheck` lo salta.
+- **Fase 5b — Codegen a binario nativo**: `fitz build` compila a
+  un Cargo project + invoca `cargo build --release` para producir
+  un ejecutable standalone. Subset: primitivos, control de flujo,
+  tipos custom (con defaults/nullables/igualdad/aliasing), listas
+  y mapas homogéneos, `Result`/`?`/`match` exhaustivo, módulos
+  (`import`/`from import`), y HTTP nativo (`@get`/`@post`/`@put`/
+  `@delete` + `@server` + path params + body JSON contra `type`
+  custom). El binario producido es ~5 MB y no necesita Fitz ni
+  Rust instalados en la máquina destino.
 
-**868 tests pasando** (846 unit + 22 E2E que compilan binarios).
-Próximo: **Fase 5b.3** — listas, mapas, indexing y method calls
-sobre containers en el compilador.
+**949 tests pasando** (901 unit + 48 E2E que compilan binarios
+con `fitz build` y validan output).
 
-Ver [roadmap](docs/roadmap.md) para el estado detallado y la
-deuda explícita.
+Próximo norte: **Fase 6 — Interop Python** (propuesta, no
+comprometida) y **Fase 7 — Ecosistema** (package manager, LSP,
+formatter, linter). Ver el [roadmap](docs/roadmap.md) para
+detalle y la deuda residual de Fase 5b que queda como sub-paso
+opcional (state compartido HTTP, higher-order completo, async
+real, etc.).
 
 ## Qué funciona hoy
 
@@ -162,12 +168,10 @@ deuda explícita.
   en asignación y argumentos, return contra return_type,
   exhaustividad de `match` sobre `Result`, métodos inexistentes
   sobre built-ins, índices con tipo de clave incompatible, y más.
-- **Compilación a binario nativo** (Fases 5b.1 y 5b.2): `fitz build`
-  compila programas con primitivos, control de flujo (incluyendo
-  `if`-as-expression), funciones, tipos custom (con defaults,
-  nullables e igualdad estructural), métodos built-in sobre Str e
-  interpolación con cualquier tipo. Listas/mapas, Result, módulos
-  y HTTP entran en 5b.3-5b.6.
+- **Compilación a binario nativo** (Fase 5b): `fitz build` compila
+  CLI y servidores HTTP a ejecutables standalone. Ver el
+  [cap 18 de la guía](docs/guide.md#18-fitz-build--compilar-a-binario-nativo)
+  para el subset cubierto y las limitaciones residuales.
 
 ### CLI
 
@@ -181,7 +185,7 @@ fitz check programa.fitz
 # Ejecutar saltando el chequeo estático (warnings, no aborta)
 fitz run --no-typecheck programa.fitz
 
-# Compilar a binario nativo (Fase 5b.1+5b.2)
+# Compilar a binario nativo (Fase 5b)
 fitz build programa.fitz
 ./programa
 ```

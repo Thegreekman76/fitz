@@ -2057,10 +2057,69 @@ con `fitz run` como con `fitz build && ./bin`.
   tipo. Para body como `Map` libre necesitamos un FromFitzJson
   para `Rc<RefCell<Vec<(String, T)>>>` con keys auto-converted.
 
-##### 5b.7 — Guía + ejemplos + cierre de Fase 5b
-**Pendiente** — capítulo nuevo de la guía sobre `fitz build`,
-ejemplos compilados, criterio de éxito final ("CRUD HTTP
-compilado a binario standalone"), cierre formal de Fase 5.
+##### 5b.7 — Guía + ejemplos + cierre formal de Fase 5b ✓
+**Cerrado.** Séptimo y último paso de Fase 5b. **Cierra la fase
+entera.** El compilador está completo para todos los aspectos
+centrales del lenguaje; los pendientes restantes son sub-pasos
+opcionales que se abrirán post-fase si aparece presión.
+
+**Cambios**:
+- **Cap 18 nuevo en `docs/guide.md`** — "`fitz build` — compilar
+  a binario nativo". Cubre:
+  - Pipeline lex → parse → check → codegen → Cargo project →
+    `cargo build` → binario adyacente al `.fitz`.
+  - Estructura del project generado en `target/fitz-build/<stem>/`.
+  - Mapping de tipos Fitz → Rust en tabla compacta (Int → i64,
+    `List<T>` → `Rc<RefCell<Vec<T>>>`, `type Foo` → `struct
+    FooData` + alias, etc.).
+  - Tabla "Qué se soporta" — primitivos, control flow, tipos
+    custom, listas/mapas homogéneos, Result, módulos, HTTP.
+  - Sección "Qué todavía no anda con `fitz build`" — fns sin
+    anotar, lista/mapa heterogéneos, higher-order completo,
+    state HTTP compartido, `let X = <expr>` no literal en
+    módulo, imports transitivos, división por cero literal,
+    comparar tipos distintos.
+  - Ejemplos CLI primitivo y HTTP simple (referenciando el
+    nuevo `examples/guide/18-build.fitz`).
+  - Criterio "cuándo usar `fitz run` vs `fitz build`".
+  - Nota sobre cross-compilation gratis via rustc targets.
+- **Re-numeración** del viejo cap 18 ("Qué sigue") a **cap 19**.
+  Contenido actualizado: quita referencias a "5b.1/5b.2
+  cerrados, 5b.3-5b.6 pendientes" (Fase 5 ahora cerrada
+  entera). Apunta a Fase 6 (Interop Python) y Fase 7
+  (Ecosistema) como próximo norte. Lista la deuda residual
+  como sub-pasos futuros opcionales.
+- **`examples/guide/18-build.fitz` nuevo** — server HTTP **sin
+  state compartido** que compila end-to-end. Cubre GET
+  estático, GET con path param + Result Ok/Err, POST con body
+  deserializado a `type` custom con defaults + nullables.
+  Sirve como referencia del cap 18 y como smoke E2E.
+- **Fixes mínimos a ejemplos** para que entren a la lista
+  compilable sin tocar el codegen:
+  - `04-operadores.fitz`: agrega `let x = 10` (antes asignaba
+    sin declarar), comenta `1 == "1"` (el intérprete devuelve
+    `false`, el compilador rechaza Int vs Str).
+  - `06-logica.fitz`: agrega `let age = 20`, anota
+    `fn ruido() -> Bool`.
+- **`examples/guide/{09,11,15,17}-*.fitz` mantenidos
+  intérprete-only**, cada uno con razón explícita documentada
+  en el cap 18 (lista heterogénea, higher-order, error
+  intencional, state HTTP).
+- **Smoke test E2E** (`smoke_ejemplos_guia_compilables_compilan`)
+  en `tests/compile_e2e.rs`: itera la constante
+  `GUIDE_EXAMPLES_COMPILE` con 13 entradas y verifica que cada
+  una compile con `fitz build`. Limpia `.exe`/`.pdb` adyacente
+  después de cada build. ~11s costo total, vale para prevenir
+  regresiones futuras del codegen sobre la guía.
+- **Validación bit-a-bit manual**: 12 ejemplos CLI compilables
+  verificados con md5 del stdout `fitz run` vs `fitz build &&
+  ./bin`. Todos coinciden bit-a-bit. El 13 (18-build) es HTTP
+  y se valida con curl + status codes.
+
+**Tests sumados**: 1 E2E nuevo (smoke). Sin unit nuevos —
+5b.7 es docs + ejemplos + smoke, no toca el codegen.
+
+**Total al cierre de Fase 5b**: 949 tests (901 unit + 48 E2E).
 
 ### Features de la fase entera
 - [x] TypeExpr en AST y parser (5.1)
@@ -2081,11 +2140,64 @@ compilado a binario standalone"), cierre formal de Fase 5.
 - [x] Result, `?`, match (5b.4)
 - [x] Módulos / `import` (5b.5)
 - [x] HTTP / `@server` / handlers (5b.6)
+- [x] Guía + ejemplos + cierre formal de Fase 5b (5b.7)
 - [ ] Optimizaciones básicas (post-5b — strings sin `.clone()`,
   pre-declaración de vars que cruzan bloques)
-- [x] Binario nativo standalone (5b.1 — subset primitivo;
-  features faltantes en 5b.2-5b.6)
+- [x] Binario nativo standalone (5b.1 — subset primitivo; tipos
+  custom 5b.2; listas/mapas 5b.3; Result 5b.4; módulos 5b.5;
+  HTTP 5b.6)
 - [x] Cross-compilation (gratis via rustc targets)
+
+### Criterio de completitud de Fase 5b — Codegen ✓
+
+**Cerrada al cierre de 5b.7.** Resumen de lo que está disponible
+hoy con `fitz build`:
+
+- **Pipeline**: lex → parse → check (strict) → codegen → Cargo
+  project (`target/fitz-build/<stem>/`) → `cargo build --release`
+  → binario adyacente al `.fitz` fuente.
+- **Subset compilable**:
+  - Primitivos (Int/Float/Str/Bool/Null) + operadores + interp.
+  - Control flow: `if`/`else`/`while`/`loop`/`for`/`match` con
+    literales/ranges/Ok-Err/wildcard.
+  - Tipos custom (`type Foo`): instanciación, fields, defaults,
+    nullables, igualdad estructural, mutación con aliasing.
+  - Listas/mapas **homogéneos**, indexing, métodos built-in
+    (push/pop/map/filter/find/len, get/has/keys/values).
+  - `Result<T>` con `?` y match exhaustivo. `Err` pinned a
+    `String` en el código generado.
+  - Módulos: `import foo`, `from foo import X` (tipos, fns,
+    consts).
+  - HTTP nativo: `@get`/`@post`/`@put`/`@delete` + path params
+    + body JSON contra `type` custom + Result → 200/500
+    + `@server(port, host)`.
+  - Serialización JSON automática para tipos custom (objeto con
+    field por field), listas, mapas, Result.
+
+**Deuda residual visible** que queda como sub-paso futuro
+opcional:
+- **State compartido HTTP** — la limitación más visible. Bloquea
+  `examples/server.fitz` y `examples/guide/17-http.fitz`. Requiere
+  `Arc<Mutex<...>>` + `axum::extract::State` y refactor profundo
+  de la representación de `List`/`Map`.
+- **Inferencia de tipos de params** en fns sin anotar (deuda
+  5b.1).
+- **Listas/mapas heterogéneos** — el intérprete los maneja con
+  `Value` tagged; el compilador exige homogéneo.
+- **Higher-order completo** — closures escapadas, fns como
+  param/retorno (más allá del callback inline).
+- **`?` adentro de FnExpr inline**.
+- **`let X = <expr>` no literal a nivel mod** (deuda 5b.5).
+- **Imports transitivos** (deuda 5b.5).
+- **async/await reales** en el lenguaje.
+- **HTTP avanzado**: status codes custom, middleware, query
+  params, headers, TLS, streaming.
+
+Estos NO son bloqueantes para declarar Fase 5b cerrada: el
+80% del lenguaje compila end-to-end (validado con 13 ejemplos
+guía compilados bit-a-bit contra el intérprete + 48 E2E del
+codegen). La deuda restante se abre como sub-paso cuando aparezca
+presión real.
 
 ---
 

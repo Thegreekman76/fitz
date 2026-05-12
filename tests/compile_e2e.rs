@@ -1144,6 +1144,84 @@ fn http_post_body_extra_field_es_400() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Fase 5b.7 — smoke test: todos los ejemplos guía marcados como
+// compilables deben compilar con `fitz build` sin error
+// ---------------------------------------------------------------------------
+
+/// Lista de ejemplos guía que el cap 18 declara compilables con
+/// `fitz build`. Los que NO están acá tienen una razón documentada
+/// (state HTTP compartido, lista heterogénea, higher-order completo,
+/// error intencional, etc.) — están listados en el cap 18 también.
+const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
+    "02-hola.fitz",
+    "03-variables.fitz",
+    "04-operadores.fitz",
+    "05-strings.fitz",
+    "06-logica.fitz",
+    "07-if.fitz",
+    "08-loops.fitz",
+    "10-match.fitz",
+    "12-type.fitz",
+    "13-metodos.fitz",
+    "14-result.fitz",
+    "16-modulos.fitz",
+    "18-build.fitz",
+];
+
+#[test]
+fn smoke_ejemplos_guia_compilables_compilan() {
+    // Smoke test del cap 18: cada ejemplo de la lista compila a binario
+    // con `fitz build`. Costoso (cada ejemplo invoca cargo + rustc),
+    // pero corre serializado por el `SERIAL` mutex y vale para
+    // prevenir regresiones futuras del codegen sobre la guía.
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let project_root = std::env::current_dir().expect("cwd");
+    let guide_dir = project_root.join("examples").join("guide");
+
+    let mut failures: Vec<String> = Vec::new();
+    for name in GUIDE_EXAMPLES_COMPILE {
+        let src_path = guide_dir.join(name);
+        assert!(
+            src_path.exists(),
+            "ejemplo no existe: {}",
+            src_path.display()
+        );
+        let output = Command::new(fitz_bin())
+            .args(["build"])
+            .arg(&src_path)
+            .output()
+            .expect("invocar fitz build");
+        if !output.status.success() {
+            failures.push(format!(
+                "{}\n--- stderr ---\n{}",
+                name,
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+        // Limpiar el binario adyacente para no dejar `.exe` colgados
+        // (memoria del workflow: examples/ no debe contener generados).
+        let stem = std::path::Path::new(name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap();
+        let bin_name = if cfg!(windows) {
+            format!("{}.exe", stem)
+        } else {
+            stem.to_string()
+        };
+        let _ = std::fs::remove_file(guide_dir.join(&bin_name));
+        let _ = std::fs::remove_file(guide_dir.join(format!("{}.pdb", stem)));
+    }
+
+    assert!(
+        failures.is_empty(),
+        "ejemplos que no compilaron ({}):\n{}",
+        failures.len(),
+        failures.join("\n\n"),
+    );
+}
+
 #[test]
 fn http_state_compartido_aborta_build() {
     let stderr = build_expect_fail(

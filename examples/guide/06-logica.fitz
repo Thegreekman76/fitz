@@ -7,14 +7,14 @@ print(false or true)
 print(false or false)
 
 // Combinando con comparación: los usos típicos.
-age = 20
+let age = 20
 print(age >= 18 and age < 65)   // ¿en edad de trabajar?
 print(age < 13 or age >= 65)    // ¿aplica descuento?
 
 // Short-circuit:
 //   - `or`: si el izquierdo ya es true, no evalúa el derecho.
 //   - `and`: si el izquierdo ya es false, no evalúa el derecho.
-fn ruido() {
+fn ruido() -> Bool {
     print("¡me llamaron!")
     return true
 }

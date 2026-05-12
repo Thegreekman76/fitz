@@ -47,8 +47,11 @@ no corre, es un bug de la guía o del intérprete — abrí un issue.
 **Parte 7 — HTTP nativo**
 17. [HTTP nativo](#17-http-nativo)
 
-**Parte 8 — Cerrando**
-18. [Qué sigue](#18-qué-sigue)
+**Parte 8 — Compilar**
+18. [`fitz build` — compilar a binario nativo](#18-fitz-build--compilar-a-binario-nativo)
+
+**Parte 9 — Cerrando**
+19. [Qué sigue](#19-qué-sigue)
 
 ---
 
@@ -4194,19 +4197,256 @@ en disco o en una DB; para prototipos y juguetes, alcanza.
 
 Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
 escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
-errores propagable, configuración del server. Lo que viene en el
+errores propagable, configuración del server. El próximo capítulo
+cubre el otro gran salto de Fase 5: **compilar el programa a un
+binario nativo standalone** con `fitz build`.
+
+---
+
+## 18. `fitz build` — compilar a binario nativo
+
+Hasta acá usamos siempre `fitz run`: el intérprete lee el archivo,
+lo lexea, parsea, chequea y ejecuta en proceso. Es rápido para
+iterar y conserva toda la riqueza del lenguaje (closures
+escapadas, lista heterogénea, state HTTP compartido).
+
+`fitz build` toma el mismo `.fitz` y produce un **binario nativo
+standalone** que corre sin Fitz instalado. Es el modo "deployar":
+más lento de compilar (segundos en vez de milisegundos), pero el
+output es un ejecutable que podés copiar a otro servidor.
+
+### Cómo funciona
+
+```
+fitz build hello.fitz
+```
+
+Hace, en orden:
+
+1. **Lexer + parser**: igual que `fitz run`.
+2. **Type checker estático en modo strict** (sin `--no-typecheck`):
+   los errores de tipo abortan el build acá.
+3. **Codegen**: traduce el AST a un **Cargo project** completo
+   adentro de `target/fitz-build/<nombre>/`. Estructura:
+   ```
+   target/fitz-build/hello/
+   ├── Cargo.toml
+   └── src/
+       ├── main.rs
+       └── (mod_files si hay imports)
+   ```
+4. **`cargo build --release`**: invoca Cargo, que llama a rustc.
+   Si el programa tiene `@get`/`@post`/etc., el `Cargo.toml`
+   incluye `axum`, `tokio`, `serde` y `serde_json` como
+   dependencias. Sin HTTP, queda minimalista.
+5. **Copia el binario** producido (`target/release/hello`)
+   adyacente al `.fitz` original. En Windows es `hello.exe`; en
+   Linux/macOS, `hello`.
+
+Inspeccionar el Rust generado es libre: el `src/main.rs` queda
+ahí mientras no lo borres. Si rustc se queja, ver el código
+generado suele desambiguar.
+
+### Mapping de tipos Fitz → Rust
+
+Acá la traducción base, para que el código generado no te tome
+por sorpresa si lo abrís:
+
+| Fitz                 | Rust                                                          |
+|----------------------|---------------------------------------------------------------|
+| `Int`                | `i64`                                                         |
+| `Float`              | `f64`                                                         |
+| `Str`                | `String`                                                      |
+| `Bool`               | `bool`                                                        |
+| `Null`               | `()`                                                          |
+| `T?`                 | `Option<T>`                                                   |
+| `List<T>`            | `Rc<RefCell<Vec<T>>>` (referencia compartida)                 |
+| `Map<K, V>`          | `Rc<RefCell<Vec<(K, V)>>>` (orden de inserción preservado)    |
+| `Result<T>`          | `Result<T, String>` (Err pinned a String — ver cap 14)        |
+| `type Foo { ... }`   | `struct FooData { ... }` + `type Foo = Rc<RefCell<FooData>>;` |
+
+Las instancias de tipos custom van detrás de `Rc<RefCell<>>` para
+preservar la semántica del intérprete: mutar `u.name = "x"` a
+través de un alias se ve en cualquier otra var que apunte a la
+misma instancia.
+
+### Qué se soporta
+
+| Feature                                            | Soporte |
+|----------------------------------------------------|---------|
+| Primitivos + operadores + interpolación            | ✅      |
+| `if` / `else` / `while` / `loop` / `for ... in`    | ✅      |
+| `match` con literales, ranges, Ok/Err, wildcards   | ✅      |
+| Tipos custom: instanciación, fields, defaults      | ✅      |
+| Listas y mapas (**homogéneos**), indexing, métodos | ✅      |
+| `Result`, `?`, propagación de Err                  | ✅      |
+| Módulos: `import foo` / `from foo import X`        | ✅      |
+| Funciones anónimas como callback inline de `.map`  | ✅      |
+| HTTP: `@get`/`@post`/`@put`/`@delete`, `@server`   | ✅      |
+| Body JSON deserializado contra `type` custom       | ✅      |
+| Serialización JSON automática de respuestas        | ✅      |
+
+### Qué todavía no anda con `fitz build`
+
+Cosas que sí corren con `fitz run` pero todavía no compilan:
+
+- **Funciones sin anotar params** — `fn greet(name)` corre en el
+  intérprete (el tipo se infiere desde el body). El compilador
+  exige `fn greet(name: Str) -> Str`. Workaround: anotar.
+- **Listas/mapas heterogéneos** — `[1, "dos", true]` corre en el
+  intérprete (cada item conserva su tipo). El compilador exige
+  homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
+  tiene un tipo "Value" genérico tagged en runtime sin un
+  refactor. Workaround: armar dos colecciones, o usar `fitz run`.
+- **Higher-order completo** — pasar funciones como param o
+  retornarlas (`make_adder` que devuelve una closure, `apply(f,
+  x)`). Los callbacks inline de `.map`/`.filter`/`.find` sí
+  funcionan; lo que falta es la closure escapando del scope.
+  Workaround: `fitz run`.
+- **State compartido entre handlers HTTP** — un `let users = [...]`
+  top-level usado por todos los handlers. El intérprete lo
+  resuelve porque cada handler captura el env del módulo; en
+  Rust las fns top-level no acceden al scope de `main`.
+  Workaround: pasar el state como argumento, o `fitz run`.
+- **`let X = <expr>` no literal a nivel top de un módulo** — las
+  constantes top-level de un módulo deben tener una RHS literal
+  (`"texto"`, `42`, `3.14`, `true`, `null`). `let X = compute()`
+  no compila.
+- **Imports transitivos** — un módulo cargado por el main no
+  puede tener su propio `import`. Workaround: aplaná los imports.
+- **División por cero literal** — `print(10 / 0)` no compila
+  (rustc rechaza la operación en compile-time). En el intérprete
+  es un error de runtime explícito.
+- **Comparar valores de tipos distintos** — `1 == "1"` corre en
+  el intérprete (devuelve `false` porque los tipos no coinciden);
+  el compilador rechaza la comparación.
+
+Si te tropezás con algo de esta lista, el mensaje del codegen lo
+cita explícitamente. La salida tiene la forma:
+
+```
+✗ codegen: Error — <descripción> ...
+   (Fase 5b soporta un subset progresivo; los mensajes citan el sub-paso correspondiente.)
+```
+
+### Ejemplo: programa CLI primitivo
+
+```fitz
+let name = "Fitz"
+let x = 10 + 5
+print("Hola, {name}, x es {x}")
+
+fn double(n: Int) -> Int => n * 2
+print(double(x))
+```
+
+```
+$ fitz build hello.fitz
+✓ binario: hello.exe
+
+$ ./hello.exe
+Hola, Fitz, x es 15
+30
+```
+
+### Ejemplo: server HTTP compilado
+
+[examples/guide/18-build.fitz](../examples/guide/18-build.fitz)
+es un server HTTP **sin state compartido** que sí compila. Tiene
+endpoints estáticos, path params, Result con Err → 500, y un
+POST con body deserializado a un `type` custom:
+
+```fitz
+@server(3000)
+fn main() => 0
+
+@get("/")
+fn index() -> Str => "Fitz HTTP compilado"
+
+@get("/double/{n}")
+fn double(n: Int) -> Result<Int> {
+    if (n < 0) {
+        return Err("n debe ser >= 0")
+    }
+    return Ok(n * 2)
+}
+
+type Echo {
+    msg: Str
+    times: Int = 1
+    note: Str?
+}
+
+@post("/echo")
+fn echo(body: Echo) -> Echo => body
+```
+
+```
+$ fitz build examples/guide/18-build.fitz
+✓ binario: examples/guide/18-build.exe
+
+$ ./examples/guide/18-build.exe &
+Fitz HTTP escuchando en http://127.0.0.1:3000
+
+$ curl http://127.0.0.1:3000/
+"Fitz HTTP compilado"
+
+$ curl http://127.0.0.1:3000/double/21
+42
+
+$ curl http://127.0.0.1:3000/double/-1
+{"error":"n debe ser >= 0"}
+
+$ curl -X POST http://127.0.0.1:3000/echo \
+       -H "Content-Type: application/json" \
+       -d '{"msg":"hola"}'
+{"msg":"hola","times":1,"note":null}
+```
+
+El binario es ~5 MB y arranca instantáneo. No necesita ni Fitz
+ni Rust instalados en la máquina destino: es un ejecutable
+nativo standalone.
+
+### Cuándo usar `fitz run` y cuándo `fitz build`
+
+- **Iterando**: `fitz run`. Cambios en el `.fitz` se reflejan
+  inmediato; sin paso de compilación.
+- **Explorando features experimentales**: `fitz run`. Closures
+  escapadas, listas heterogéneas, state HTTP compartido — todo
+  lo que está en "qué todavía no anda" sigue funcionando en el
+  intérprete.
+- **Producción / deploy**: `fitz build`. Un binario que se
+  copia a un servidor y arranca, sin runtime de Fitz alrededor.
+- **Distribuir un script CLI**: `fitz build`. El binario chico
+  es más fácil de compartir que pedir a alguien que instale
+  Fitz primero.
+
+### Cross-compilation
+
+Como por debajo está rustc, **cross-compilar es gratis** vía
+`rustup target add <triple>`. El subcomando `fitz build` todavía
+no expone una flag `--target`, pero el flujo está abierto: en el
+project generado podés correr `cargo build --release --target
+x86_64-unknown-linux-musl` (o el target que precises) directo.
+Si esto te interesa, abrí un issue.
+
+---
+
+Con `fitz build` cerramos Fase 5. El lenguaje tiene ahora todas
+las piezas centrales: type checker estático, intérprete maduro,
+y un compilador que genera binarios nativos para CLI y HTTP. El
 último capítulo es el mapa hacia adelante.
 
 ---
 
-## 18. Qué sigue
+## 19. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 17 podés:
+Con los capítulos 1 a 18 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -4236,45 +4476,57 @@ Con los capítulos 1 a 17 podés:
 - Leer un mensaje de error del intérprete y ubicar de qué fase vino.
 - Validar tipos en compile time con **`fitz check`**, y dejar que
   `fitz run` aborte en modo strict cuando encuentra errores (Fase
-  5.4 cerró el type checker estático).
+  5a cerró el type checker estático).
+- **Compilar a binario nativo** con `fitz build`: programa CLI
+  o server HTTP que corre sin Fitz instalado en la máquina
+  destino (Fase 5b — codegen via transpile-a-Rust + Cargo).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
-ahora con un chequeo estático que atrapa errores antes de que se
-ejecuten.
+con un chequeo estático que atrapa errores antes de que se
+ejecuten y un compilador que produce binarios standalone.
 
-### Lo que viene — más allá de Fase 5a
+### Lo que viene — más allá de Fase 5
 
-Fase 5 está dividida en dos mitades. **5a — type checker estático
-sobre el intérprete actual** acaba de cerrarse: las anotaciones que
-durante Fases 2 a 4 se parseaban pero no se chequeaban, ahora se
-validan en `fitz check` y en `fitz run` por default. La mitad
-restante:
+Fase 5 está cerrada: **5a (type checker estático)** validó las
+anotaciones que durante Fases 2 a 4 se parseaban pero no se
+chequeaban, y **5b (codegen a binario nativo)** transpila el AST
+a un Cargo project + invoca rustc para producir binarios.
 
-- **Fase 5b — Compilador a binario nativo** — el salto de intérprete
-  a binario via transpile-a-Rust + `rustc`. Backend decidido por el
-  reuso de infra (rustc + axum/tokio para 5b.6) y cross-compile
-  gratis. **5b.1 y 5b.2 cerrados**: hoy `fitz build` ya genera
-  binarios standalone con primitivos, tipos custom, defaults +
-  nullables, igualdad estructural, `if`-as-expression y métodos
-  Str. Faltan listas/mapas (5b.3), `Result`/`?`/`match` (5b.4),
-  módulos (5b.5) y HTTP (5b.6).
-- **`async` / `await` reales en el lenguaje** — destrabar handlers
-  HTTP concurrentes sin bloquear el reactor.
-- **Status codes custom y response builder** (`return 401 { ... }`),
-  query params, headers, middleware.
-- **Inferencia bidireccional más rica** — hoy synth básico + lub
-  para FnExpr.ret. Falta inferencia "desde el contexto" (un literal
-  vacío `[]` adentro de un arg que espera `List<Int>` no tipa con
-  `Int` todavía).
+Lo que sigue post-5:
+
+- **Fase 6 — Interop Python** (propuesta, no comprometida): poder
+  llamar código Python desde Fitz (y viceversa). El stack inicial
+  de FastAPI/SQLAlchemy del autor vive ahí; abrir el camino sin
+  pedir que se reescriba todo es lo que justifica la fase.
+- **Fase 7 — Ecosistema**: package manager, registry, LSP,
+  formatter, linter, plugin de editores.
+- **Deuda residual de Fase 5b** que entra como sub-pasos
+  futuros si aparece presión:
+  - **State compartido HTTP** — la limitación más visible de
+    `fitz build` hoy (el cap 17 / `server.fitz` no compila por
+    esto). Resolverla pide `Arc<Mutex<...>>` + `axum::extract::
+    State`, lo cual es un refactor profundo de la representación
+    de `List`/`Map`.
+  - **`async` / `await` reales en el lenguaje** — destrabar
+    handlers HTTP concurrentes sin bloquear el reactor.
+  - **Higher-order completo** — closures escapadas, funciones
+    como param / retorno (más allá del callback inline de
+    `.map`/`.filter`).
+  - **Inferencia de tipos de params** en fns sin anotar — hoy
+    `fn greet(name)` corre en el intérprete pero `fitz build`
+    exige anotación.
+  - **Status codes custom**, query params, headers, middleware,
+    TLS — todo HTTP "más allá del 80%".
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
 deuda explícita acumulada por fase.
 
 ### Más adelante
 
-- **Fase 5b — Codegen**: el salto de intérprete a binario nativo.
-- **Fase 6 — Ecosistema**: package manager, registry, LSP, formatter,
-  linter, interop con Python.
+- **Fase 6 — Interop Python**: aprovechar el ecosistema sin
+  reescribir todo.
+- **Fase 7 — Ecosistema**: package manager, LSP, formatter,
+  linter, plugin de editores.
 
 ### Cómo va a crecer esta guía
 
