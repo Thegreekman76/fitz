@@ -806,7 +806,7 @@ fitz run api.fitz
 ---
 
 ## Fase 5 — Compilador ⚡
-**Estado: 5a COMPLETADA / 5b EN CURSO (5b.1 cerrado)**
+**Estado: 5a COMPLETADA / 5b EN CURSO (5b.2 cerrado)**
 
 Plan aprobado: dos mitades cerrables.
 - **5a — Type checker estático** (sobre el intérprete actual) ✓
@@ -1607,14 +1607,60 @@ pasan `fitz check` limpios sin cambios.
   Optimización post-5b cuando estabilicemos el modelo de
   ownership en codegen.
 
-##### 5b.2 — Tipos custom + field access + struct literal
-**Pendiente** — `type User { id: Int, name: Str }` →
-`struct User { id: i64, name: String }`. Instanciación
-`User { id: 1, name: "x" }` → `User { id: 1, name: String::from("x") }`.
-Field access `user.name` → `user.name.clone()`. Field assignment
-`user.name = "x"` → `user.name = String::from("x")`. Probablemente
-sume `Box<T>`/`Rc<RefCell<T>>` para matchear la semántica de
-referencia compartida del intérprete (a decidir al arrancar).
+##### 5b.2 — Tipos custom + field access + struct literal ✓
+**Completado** — segundo paso de Fase 5b. `type Foo { ... }` se
+transpila a `struct FooData { ... }` con type alias
+`type Foo = Rc<RefCell<FooData>>;` para preservar la semántica
+de referencia compartida del intérprete. Trade-off conocido:
+field access caro (`u.borrow().name.clone()`), optimizable
+post-5b.
+
+Cubierto:
+- Struct literal con defaults inline-eados y wrapping
+  `Some(...)`/`None` automático para campos nullables.
+- Field access (`u.name`) con `.clone()` selectivo según
+  `needs_clone` (Str/Nominal/Nullable clonan, primitivos Copy no).
+- Field assignment (`u.name = "x"`).
+- Igualdad estructural entre instancias (`==`/`!=`) via
+  `#[derive(PartialEq)]` — `Rc<RefCell<T>>` compara por
+  contenido, recursando en campos nominales anidados igual que
+  el intérprete.
+- Tipos custom como campo de otro tipo custom
+  (`type Order { user: User? }`).
+- Pasaje a/desde funciones: el `Rc` se clona en cada uso de
+  `Ident` Nominal — el clone es del puntero refcontado, así que
+  preserva aliasing.
+- `Display for FooData` reproduce el formato del intérprete
+  (strings con comillas, Float con `.0`, Nullable como `null`,
+  nominales recursivos).
+
+Bonus que entraron en el mismo bloque (cierran deuda chica de
+5b.1):
+- **`if` como expresión con valor**: cuando ambas ramas terminan
+  en `Stmt::Expr` no-`print`, `gen_if_expr` emite el `if` como
+  expresión Rust con tail sin `;`. LUB simple: `Int+Float→Float`,
+  `T+Null→T?`. Statement-mode preservado para `if cond { print(x) }`.
+  Cierra deuda de 5b.1 sobre `let x = if cond { a } else { b }`.
+- **Métodos built-in sobre Str**: `s.len()`→`chars().count()`,
+  `s.upper()`→`to_uppercase()`, `s.lower()`→`to_lowercase()`.
+  Despacho por callee `Expr::Field { object, field }`.
+- **StrInterp con Null/Float/Nominal/Nullable**: alineado al
+  formato del intérprete. `"x es {null}"` ahora produce `"x es
+  null"` (antes rustc no compilaba por `()` sin Display).
+
+Deuda explícita marcada con error de codegen claro:
+- Métodos custom sobre `type`: depende de cerrar la deuda de 3.2
+  en parser/AST (hoy `Stmt::TypeDef` solo guarda `fields`, sin
+  bloque de métodos).
+- Tipos importados: hasta 5b.5.
+- Listas/mapas (literales, indexing, métodos): hasta 5b.3.
+- `Result`/`?`/`match`: hasta 5b.4.
+
+Tests: 21 unit nuevos en `src/codegen.rs` + 14 E2E nuevos en
+`tests/compile_e2e.rs`. Total acumulado: 868 (846 unit + 22 E2E).
+Validado a mano contra `fitz run`: `examples/types.fitz`,
+`examples/guide/05-strings.fitz`, `examples/guide/07-if.fitz`
+y `examples/guide/12-type.fitz` producen output idéntico.
 
 ##### 5b.3 — Listas, mapas, indexing, method calls
 **Pendiente** — `List<T>` → `Vec<T>` (o `Rc<RefCell<Vec<T>>>` por
@@ -1661,7 +1707,7 @@ compilado a binario standalone"), cierre formal de Fase 5.
   rica queda como deuda)
 - [x] Backend de codegen decidido — transpile-a-Rust (5b)
 - [x] Codegen subset primitivo + `fitz build` (5b.1)
-- [ ] Tipos custom + field access (5b.2)
+- [x] Tipos custom + field access (5b.2)
 - [ ] Listas, mapas, indexing, métodos built-in (5b.3)
 - [ ] Result, `?`, match (5b.4)
 - [ ] Módulos / `import` (5b.5)

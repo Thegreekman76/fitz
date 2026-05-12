@@ -4220,8 +4220,13 @@ validan en `fitz check` y en `fitz run` por default. La mitad
 restante:
 
 - **Fase 5b — Compilador a binario nativo** — el salto de intérprete
-  a binario. Backend a decidir (Cranelift o transpile-a-Rust); IR
-  tipado aprovechando lo que construyó 5a.
+  a binario via transpile-a-Rust + `rustc`. Backend decidido por el
+  reuso de infra (rustc + axum/tokio para 5b.6) y cross-compile
+  gratis. **5b.1 y 5b.2 cerrados**: hoy `fitz build` ya genera
+  binarios standalone con primitivos, tipos custom, defaults +
+  nullables, igualdad estructural, `if`-as-expression y métodos
+  Str. Faltan listas/mapas (5b.3), `Result`/`?`/`match` (5b.4),
+  módulos (5b.5) y HTTP (5b.6).
 - **`async` / `await` reales en el lenguaje** — destrabar handlers
   HTTP concurrentes sin bloquear el reactor.
 - **Status codes custom y response builder** (`return 401 { ... }`),

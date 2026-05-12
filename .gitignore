@@ -3,6 +3,11 @@ Cargo.lock
 *.fitz.compiled
 .DS_Store
 
+# Binarios y símbolos generados por `fitz build` (Fase 5b).
+# Quedan adyacentes al `.fitz` fuente; no se versionan.
+*.exe
+*.pdb
+
 # Windows
 Thumbs.db
 desktop.ini

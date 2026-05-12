@@ -164,7 +164,9 @@ print(r)
 ";
     let (stdout, exit) = build_and_run("coerce-int-float", src);
     assert_eq!(exit, 0);
-    assert_lines(&stdout, &["6"]);
+    // 5b.2 alinea el formato de Float con el intérprete: las
+    // fracciones .0 se imprimen explícitas (`6.0`, no `6`).
+    assert_lines(&stdout, &["6.0"]);
 }
 
 #[test]
@@ -179,6 +181,232 @@ print(fact(5))
     let (stdout, exit) = build_and_run("recursion", src);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["120"]);
+}
+
+// ---------------------------------------------------------------------------
+// Fase 5b.2 — tipos custom
+// ---------------------------------------------------------------------------
+
+#[test]
+fn instancia_basica_round_trip_compilado() {
+    let src = "\
+type User { id: Int, name: Str }
+let u = User { id: 1, name: \"Fitz\" }
+print(u.id)
+print(u.name)
+";
+    let (stdout, exit) = build_and_run("instance-basic", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["1", "Fitz"]);
+}
+
+#[test]
+fn defaults_aplicados_en_binario() {
+    let src = "\
+type Config { host: Str, port: Int = 3000, debug: Bool = false }
+let c = Config { host: \"localhost\" }
+print(c.port)
+print(c.debug)
+";
+    let (stdout, exit) = build_and_run("defaults", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["3000", "false"]);
+}
+
+#[test]
+fn nullable_omitido_imprime_null_en_binario() {
+    let src = "\
+type User { id: Int, email: Str? }
+let u = User { id: 1 }
+print(u.email)
+";
+    let (stdout, exit) = build_and_run("nullable-omitted", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["null"]);
+}
+
+#[test]
+fn field_mutation_visible_via_alias_compilado() {
+    // Semántica de referencia compartida: mutar a través de un
+    // alias se ve en la variable original. Mismo modelo que el
+    // intérprete (Rc<RefCell<>>).
+    let src = "\
+type User { id: Int, name: Str }
+let a = User { id: 1, name: \"uno\" }
+let b = a
+b.name = \"dos\"
+print(a.name)
+print(b.name)
+";
+    let (stdout, exit) = build_and_run("alias-mutation", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["dos", "dos"]);
+}
+
+#[test]
+fn fn_que_muta_param_refleja_afuera_compilado() {
+    let src = "\
+type User { name: Str }
+fn rename(u: User, n: Str) {
+    u.name = n
+}
+let u = User { name: \"uno\" }
+rename(u, \"dos\")
+print(u.name)
+";
+    let (stdout, exit) = build_and_run("fn-mutates-param", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["dos"]);
+}
+
+#[test]
+fn print_instance_formato_canonico_compilado() {
+    // El Display de `UserData` debe reproducir el formato del
+    // intérprete: `User { id: 1, name: "Fitz", email: null }`.
+    let src = "\
+type User { id: Int, name: Str, email: Str? }
+let u = User { id: 1, name: \"Fitz\" }
+print(u)
+";
+    let (stdout, exit) = build_and_run("instance-display", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &["User { id: 1, name: \"Fitz\", email: null }"],
+    );
+}
+
+#[test]
+fn igualdad_estructural_entre_instancias_compilado() {
+    // Dos instancias con los mismos campos comparan true; con
+    // un campo distinto, false. Recursa adentro de campos
+    // nominales anidados gracias al derive(PartialEq) de Rust
+    // (Rc<RefCell<T>> compara por contenido).
+    let src = "\
+type Address { city: Str }
+type User { id: Int, name: Str, addr: Address? }
+
+let a1 = User { id: 1, name: \"x\", addr: Address { city: \"El Chaltén\" } }
+let a2 = User { id: 1, name: \"x\", addr: Address { city: \"El Chaltén\" } }
+let b  = User { id: 2, name: \"x\", addr: Address { city: \"El Chaltén\" } }
+let c  = User { id: 1, name: \"x\", addr: Address { city: \"Otro\" } }
+print(a1 == a2)
+print(a1 == b)
+print(a1 == c)
+print(a1 != c)
+";
+    let (stdout, exit) = build_and_run("instance-eq", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["true", "false", "false", "true"]);
+}
+
+#[test]
+fn tipos_anidados_round_trip_compilado() {
+    let src = "\
+type User { name: Str }
+type Order { id: Int, user: User? }
+let u = User { name: \"Fitz\" }
+let o = Order { id: 7, user: u }
+print(o)
+print(o.user)
+";
+    let (stdout, exit) = build_and_run("nested-types", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "Order { id: 7, user: User { name: \"Fitz\" } }",
+            "User { name: \"Fitz\" }",
+        ],
+    );
+}
+
+// ---------------------------------------------------------------------------
+// 5b.2+: if como expresión con valor
+// ---------------------------------------------------------------------------
+
+#[test]
+fn if_como_expresion_con_else_compilado() {
+    let src = "\
+let active = true
+let status = if (active) { \"on\" } else { \"off\" }
+print(status)
+";
+    let (stdout, exit) = build_and_run("if-expr", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["on"]);
+}
+
+#[test]
+fn if_else_if_chain_como_expresion_compilado() {
+    let src = "\
+let n = -3
+let sign = if (n > 0) { \"positivo\" } else if (n < 0) { \"negativo\" } else { \"cero\" }
+print(sign)
+";
+    let (stdout, exit) = build_and_run("if-elseif-expr", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["negativo"]);
+}
+
+#[test]
+fn if_expresion_bloque_multilinea_compilado() {
+    let src = "\
+let total = if (true) {
+    let a = 10
+    let b = 20
+    a + b
+} else {
+    0
+}
+print(total)
+";
+    let (stdout, exit) = build_and_run("if-multiline-expr", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["30"]);
+}
+
+#[test]
+fn if_expresion_unifica_int_y_float_compilado() {
+    let src = "\
+let n = 5
+let r = if (n > 0) { 1 } else { 2.5 }
+print(r)
+";
+    let (stdout, exit) = build_and_run("if-int-float", src);
+    assert_eq!(exit, 0);
+    // Int en la rama then se coerciona a Float; la salida sigue la
+    // convención del intérprete (`1.0`, no `1`).
+    assert_lines(&stdout, &["1.0"]);
+}
+
+// ---------------------------------------------------------------------------
+// 5b.2+: métodos built-in sobre Str
+// ---------------------------------------------------------------------------
+
+#[test]
+fn str_len_chars_unicode_compilado() {
+    let src = "\
+let s = \"Chaltén\"
+print(s.len())
+";
+    let (stdout, exit) = build_and_run("str-len", src);
+    assert_eq!(exit, 0);
+    // 7 caracteres Unicode, no 8 bytes UTF-8.
+    assert_lines(&stdout, &["7"]);
+}
+
+#[test]
+fn str_upper_lower_round_trip_compilado() {
+    let src = "\
+let s = \"Hola Mundo\"
+print(s.upper())
+print(s.lower())
+print(s.upper().lower())
+";
+    let (stdout, exit) = build_and_run("str-upper-lower", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["HOLA MUNDO", "hola mundo", "hola mundo"]);
 }
 
 // ---------------------------------------------------------------------------
