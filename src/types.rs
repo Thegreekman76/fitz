@@ -191,6 +191,7 @@ impl TypeEnv {
     }
 
     /// Cantidad de nominales registrados. Útil para tests.
+    #[allow(dead_code)]
     pub fn nominal_count(&self) -> usize {
         self.nominals.len()
     }
@@ -850,17 +851,16 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     .collect();
                 for f in &declared {
                     match provided_map.get(f.name.as_str()) {
-                        Some(actual) => {
-                            if !is_compatible(actual, &f.type_) {
-                                ctx.error(format!(
-                                    "el campo `{}.{}` espera `{}`, recibió `{}`",
-                                    type_name,
-                                    f.name,
-                                    f.type_.display(ctx.types),
-                                    actual.display(ctx.types)
-                                ));
-                            }
+                        Some(actual) if !is_compatible(actual, &f.type_) => {
+                            ctx.error(format!(
+                                "el campo `{}.{}` espera `{}`, recibió `{}`",
+                                type_name,
+                                f.name,
+                                f.type_.display(ctx.types),
+                                actual.display(ctx.types)
+                            ));
                         }
+                        Some(_) => {}
                         None => {
                             // Faltante: válido si nullable o si el
                             // evaluator espera default (validado en

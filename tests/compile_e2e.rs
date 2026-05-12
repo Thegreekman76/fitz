@@ -8,7 +8,6 @@
 // Importante: estos tests **invocan rustc** internamente vía `fitz
 // build`. Son más lentos que los unitarios; cada uno toma ~2s.
 
-use std::path::PathBuf;
 use std::process::Command;
 use std::sync::Mutex;
 

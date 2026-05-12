@@ -1762,6 +1762,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
 mod tests {
     use super::*;
     use crate::lexer::tokenize;

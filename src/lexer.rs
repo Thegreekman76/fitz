@@ -14,6 +14,7 @@ use crate::error::{ErrorKind, FitzError, FitzResult};
 
 /// Tipo de token. La info de línea/columna va aparte, en `TokenWithPos`.
 #[derive(Debug, Clone, PartialEq)]
+#[allow(clippy::upper_case_acronyms)] // EOF es el nombre canónico.
 pub enum Token {
     // Literales
     Int(i64),
@@ -198,7 +199,7 @@ impl Lexer {
         }
 
         let is_float = self.peek() == Some('.')
-            && self.peek_next().map_or(false, |c| c.is_ascii_digit());
+            && self.peek_next().is_some_and(|c| c.is_ascii_digit());
 
         if is_float {
             self.advance(); // consumir '.'
@@ -516,6 +517,7 @@ pub fn tokenize(source: &str) -> FitzResult<Vec<TokenWithPos>> {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
 mod tests {
     use super::*;
 

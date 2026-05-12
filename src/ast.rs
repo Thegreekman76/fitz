@@ -12,6 +12,9 @@
 
 /// Una expresión: produce un valor.
 #[derive(Debug, Clone, PartialEq)]
+// `FnExpr` repite el sufijo "Expr" del enum, pero renombrarlo a `Fn`
+// chocaría con la keyword visual del lenguaje. Lo dejamos.
+#[allow(clippy::enum_variant_names)]
 pub enum Expr {
     // ---------- literales ----------
     Int(i64),
@@ -324,6 +327,8 @@ pub enum TypeExpr {
 
 impl TypeExpr {
     /// Atajo para los call sites más comunes (tests, builtins).
+    /// Mantenido como API pública para tests futuros.
+    #[allow(dead_code)]
     pub fn named(s: impl Into<String>) -> Self {
         TypeExpr::Named(s.into())
     }
@@ -508,7 +513,7 @@ mod tests {
 
     #[test]
     fn strpart_distinguishes_literal_from_expression() {
-        let parts = vec![
+        let parts = [
             StrPart::Lit("Edad: ".into()),
             StrPart::Expr(Expr::Ident("age".into())),
         ];

@@ -117,7 +117,9 @@ pub struct BodyParam {
     pub declared_type: Option<Value>,
     /// Cuando `declared_type` es `None`, este campo guarda el nombre
     /// del tipo (si lo hay) para mensajes de error. Si tampoco está
-    /// declarado, `None`.
+    /// declarado, `None`. Lo dejamos como metadata estructural aunque
+    /// el lectura actual sea solo por `Debug`.
+    #[allow(dead_code)]
     pub declared_type_name: Option<String>,
 }
 
@@ -632,14 +634,14 @@ pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<
     for field in &fields {
         if let Some(json_val) = obj.get(&field.name) {
             out.push((field.name.clone(), json_to_value(json_val)));
-        } else if field.default.is_some() {
+        } else if let Some(default_expr) = field.default.as_ref() {
             // Los defaults son `Expr` y se evalúan en el env de
             // instanciación. Acá no tenemos env porque el body se
             // valida lejos del eval. Para 4.3, los defaults sólo
             // funcionan si son literales constantes simples; otros
             // casos requieren más cableado. Lo manejamos en
             // `default_to_value` (helper local).
-            match default_to_value(field.default.as_ref().unwrap()) {
+            match default_to_value(default_expr) {
                 Ok(v) => out.push((field.name.clone(), v)),
                 Err(_) => {
                     return Err(format!(
@@ -866,8 +868,6 @@ fn build_method_router(
     has_path_params: bool,
     expects_body: bool,
 ) -> MethodRouter {
-    use axum::routing::{delete, get, post, put};
-
     match (has_path_params, expects_body) {
         (false, false) => {
             let h = move || {
@@ -1137,8 +1137,7 @@ pub fn serve(registry: HttpRegistry, addr: std::net::SocketAddr) -> std::io::Res
     // Esperar a que el thread tokio termine de bajar limpio.
     match tokio_handle.join() {
         Ok(res) => res,
-        Err(_) => Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        Err(_) => Err(std::io::Error::other(
             "thread del servidor HTTP panickeó",
         )),
     }
@@ -1155,6 +1154,7 @@ async fn shutdown_signal() {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
 mod tests {
     use super::*;
     use crate::ast::StrPart;

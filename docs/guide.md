@@ -1,8 +1,9 @@
 # Guía de Fitz
 
-> Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-12 (Fase 5a cerrada — paso 5.4:
-> modo strict en `fitz run`, 784 tests pasando).
+> Estado: viva — cubre lo que el intérprete ejecuta hoy y lo que el
+> compilador (`fitz build`) produce como binario nativo.
+> Última actualización: 2026-05-12 (Fase 5b cerrada — codegen a
+> binario nativo + HTTP, 949 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -10,7 +11,8 @@ pensada para leerse de arriba a abajo: cada capítulo asume lo del
 anterior.
 
 Lo que ves acá funciona hoy contra el binario del repo. Si un ejemplo
-no corre, es un bug de la guía o del intérprete — abrí un issue.
+no corre, es un bug de la guía, del intérprete o del compilador —
+abrí un issue.
 
 ---
 

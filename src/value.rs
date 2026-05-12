@@ -355,6 +355,7 @@ impl PartialEq for Value {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::approx_constant)] // 3.14 en tests es un Float genérico, no PI.
 mod tests {
     use super::*;
 

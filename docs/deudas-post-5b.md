@@ -1,0 +1,196 @@
+# Auditoría post-Fase 5b — deudas y mejoras
+
+> Documento generado tras cerrar Fase 5b (codegen a binario nativo).
+> Identifica deudas técnicas, gaps de docs, mejoras de calidad/UX.
+> **No ejecuta fixes** — es input para decidir qué atacar y en qué orden.
+
+## Resumen ejecutivo
+
+Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.
+Hallazgos: **~45 únicos** después de consolidar duplicados de las 6
+revisiones paralelas + clippy. El proyecto está **sólido**: cero bugs
+críticos no documentados, cero issues de seguridad, todas las deudas
+mayores ya estaban en el roadmap como pospuestas.
+
+Las áreas con más superficie a mejorar:
+
+1. **Span en AST** — la deuda más mencionada (codegen, checker,
+   evaluator y parser la citan): errores hardcoded a `0:0` sin
+   línea/columna. Bloquea UX seria.
+2. **Tests frágiles del codegen** — ~80% de los unit tests matchean
+   strings literales del Rust generado. Cualquier refactor menor
+   rompe la suite.
+3. **Limpieza de clippy** — 12 "errors" (falsos positivos por `3.14`
+   tomado como aproximación de π) + ~25 warnings (unused imports,
+   `if let` colapsables, etc.) que ensucian el output de `cargo
+   clippy`.
+
+## Top 5 recomendaciones
+
+Por **valor/esfuerzo**, en orden:
+
+1. **L1 — Limpiar clippy** (Baja complejidad, alto valor): 12 errores
+   + 25 warnings. La mayoría son auto-fixables (`cargo clippy --fix`)
+   o triviales (`#[allow(clippy::approx_constant)]` en tests con
+   `3.14`, eliminar imports no usados). **Resultado**: `cargo clippy`
+   queda limpio, los CI futuros pueden bloquear regresiones nuevas.
+2. **L2 — Helper `with_temp_output`** en codegen (Baja): patrón
+   `mem::take(&mut self.output)` repetido 6 veces. Refactor a un
+   helper genérico que toma una closure. Reduce ~40 líneas, hace
+   futuros refactors más seguros.
+3. **R1 — Validar `fn main` con decoradores no-`@server`** (Baja):
+   hoy el codegen ignora silenciosamente `@get` si está sobre
+   `fn main`. Sumar validación explícita: error claro si `fn main`
+   tiene cualquier decorador HTTP que no sea `@server`.
+4. **T1 — Refactor de tests frágiles a snapshot/AST-based** (Media):
+   los unit del codegen usan `code.contains("string literal")`. Es
+   poco realista cambiar los 100+ tests, pero un buen 30-40% se
+   pueden mover a tests que validen *comportamiento* (compile + run)
+   vs *forma textual*. Trabajo de granito incremental.
+5. **S1 — Span en AST** (Alta complejidad, alto valor a largo plazo):
+   agregar `Span { line: usize, col: usize, len: usize }` a `Expr`
+   y `Stmt` (y opcionalmente `TypeExpr`), propagar desde tokens del
+   parser, consumir en mensajes de error de checker/evaluator/codegen.
+   Esto destraba mensajes de error útiles. Es trabajo grande
+   (refactor amplio) pero el roadmap ya lo cita como pospuesto, y es
+   condición habilitante para varias mejoras de UX. Sub-paso natural
+   para post-5b.
+
+Los otros ~40 hallazgos son **incrementales**: cada uno suma poco
+solo, pero entre todos son una mejora de calidad significativa. Lista
+completa abajo.
+
+---
+
+## Matriz completa de hallazgos
+
+### Robustez
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| R1 | `codegen.rs:811-849` | `fn main` con decorators no-`@server` se ignora silenciosamente. Falta validación. | Media | Baja |
+| R2 | `codegen.rs:3444+` | Nombres de variables/campos del usuario se inyectan en strings Rust sin sanitizar. Defensa en profundidad: agregar sanity check. Teórico hoy (parser filtra), pero frágil. | Media | Baja |
+| R3 | `codegen.rs` (múltiples) | `write!`/`writeln!` con `.unwrap()` ~36 sitios. No falla sobre `String` pero acopla a la representación de output. | Media | Media |
+| R4 | `evaluator.rs:1578` y otros | `unwrap()` sobre args ya validados por aridad. Seguro hoy, pero fragiliza ante refactor. | Baja | Baja |
+| R5 | `http.rs:208-228` | `with_active_registry` con `take()`/restore — patrón correcto pero documentación no aclara invariantes de reentrancia. | Baja | Baja |
+| R6 | `evaluator.rs` | Float `1.0/0.0` → `Float(inf)` sin warning, después falla en serialización JSON. Atajable en aritmética. | Baja | Media |
+
+### UX (mensajes / output / CLI)
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| S1 | AST + propagación | **Span en AST**: capturar línea/columna en `Expr`/`Stmt`, propagar a errores. Hoy todo `0:0`. Mencionado en codegen, checker, parser, evaluator. | Alta | Alta |
+| U1 | `evaluator.rs` | Mensajes de error inconsistentes en estilo: "no tiene método X" vs "el tipo X no soporta" vs "espera Y arg(s)". Falta helper unificado. | Media | Baja |
+| U2 | `types.rs` ~20 sitios | Mismo patrón `ctx.error(format!("...{}...{}...", ...))` repetido. Helper `type_mismatch_error(label, expected, actual)` reduce repetición. | Baja | Baja |
+| U3 | `http.rs:481` | El handler-mapping `Ok→200/Err→500` no incluye stack trace del Err en log (solo en response). Útil para debug. | Baja | Baja |
+| U4 | `evaluator.rs:496-510` | Detección de ciclos de import no incluye stack en mensaje. El `LOADER.loading` lo tiene; agregar al error. | Baja | Baja |
+
+### Performance
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| P1 | `evaluator.rs:2040+` | Map es `Vec<(K,V)>` — lookup O(n). Documentado como deuda explícita; bloqueante para maps grandes. | Baja | Alta |
+| P2 | `codegen.rs:1911+` | `.clone()` recursivos de `Type` en hot path (~20 sitios). Cada `gen_expr` puede hacer 2-3 clones. | Media | Media |
+| P3 | `codegen.rs:636+` | Pre-registro de tipos/fns clona estructuras enteras. Alternativa `Rc<TypeSig>` reduciría allocaciones, requiere refactor. | Baja | Alta |
+| P4 | `evaluator.rs:805` | Snapshot pattern (`items.borrow().clone()`) en cada llamada a `.map`/`.filter`. Necesario para evitar re-entrancia pero costoso. | Baja | Alta |
+| P5 | `codegen.rs` field access | `u.field` → `(u).borrow().field.clone()`. Optimizable a borrow sin clone en casos seguros, pero requiere análisis. | Baja | Alta |
+
+### Mantenibilidad
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| L2 | `codegen.rs` 6 sitios | Patrón `mem::take(&mut self.output)` + restore repetido. Helper `with_temp_output(f)` lo abstrae. | Baja | Baja |
+| M1 | `codegen.rs:779-920` | `generate_main_rs` (~140 líneas) mezcla particionado + validaciones + emisión. Partir en `partition_stmts`, `validate_http`, etc. | Media | Media |
+| M2 | `codegen.rs:3529-3688` | `gen_http_handler_wrapper` (~160 líneas) hace todo: resuelve params, categoriza, emite. Extraer sub-fns. | Media | Media |
+| M3 | `types.rs:664-1110` | `infer_expr` 446 líneas con mega-match de 30+ branches. Extraer branches grandes. | Baja | Media |
+| M4 | `types.rs:1691-1866` | `check_stmt` 175 líneas. Repetición `push_scope`/`pop_scope` en 4 branches. Helper `with_scope(f)`. | Baja | Baja |
+| M5 | `parser.rs` 3 sitios | `parse_list_literal`/`parse_call_args`/`parse_struct_lit_fields` parsean listas con coma con código similar pero no factorizado. | Baja | Media |
+
+### Tests
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| T1 | `codegen.rs` tests (~80% de 104) | Tests matchean strings literales del Rust generado (`assert_contains(code, "let mut x: i64")`). Frágiles. | Alta | Media |
+| T2 | `tests/compile_e2e.rs:20` | Mutex `SERIAL` serializa los 48 E2E. Cada uno usa tempdir único — paralelizables con `CARGO_TARGET_DIR` per-test. ~4x speedup. | Media | Media |
+| T3 | `parser.rs` tests | Solo 4 tests de paths de error. Sin tests para: `fn f(a, a)` (params duplicados), decorator fuera de fn, escapes raros. | Media | Media |
+| T4 | E2E ~12/48 | Tests E2E que solo verifican que `build` no falle, sin validar stdout/body/status. | Media | Baja |
+| T5 | `codegen.rs` | Tipos custom compilados sin tests E2E sobre el binario: field access, instancias anidadas, igualdad estructural. (Sí hay en intérprete.) | Media | Media |
+| T6 | Combinatorias | Cero tests para `List<List<Int>>`, `Map<Str, List<Int>>`, `List<Custom?>`. | Media | Alta |
+| T7 | HTTP E2E (7/48) | Cobertura HTTP E2E muy limitada. Sin tests para: múltiples rutas mismo path, headers, Content-Type negociation, body sin tipo declarado. | Media | Alta |
+
+### Deuda funcional (features incompletas o gradual)
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| F1 | `types.rs` ~30 sitios | `Type::Any` como gradual escape — silencia errores intencionalmente. Falta documentar matriz de cobertura: qué casos son legítimos vs cuáles podrían tipar mejor. | Media | Media |
+| F2 | `types.rs:1739-1741` | `Stmt::Assign` con `AssignTarget::Field` no se chequea (deuda explícita 5.3.1+). Hoy el evaluator lo ejecuta sin validar. | Media | Media |
+| F3 | `parser.rs:656-662` | `return`/`break`/`continue` huérfanos aceptados por parser, captados en runtime con mensaje genérico. El checker podría rechazarlos estáticamente. | Media | Media |
+| F4 | `parser.rs` (Field default) | `type User { id: Int = 0 }` con default a nivel `type` field — el AST tiene `Field.default` pero el parser no lo popula en todos los contextos. Verificar. | Media | Media |
+| F5 | `evaluator.rs:751`, `http.rs:27-29` | `is_async` en `FnDef` se ignora silenciosamente (deuda explícita). | Baja | Alta |
+| F6 | `evaluator.rs:2098-2113` | Solo 2 builtins (`print`, `len`). Verificar si el syntax-spec promete más (`range`, `type_of`, `to_string`). | Baja | Baja (audit) |
+| F7 | `lexer.rs:187-234` | Números: sin soporte `1_000` (separador), `3.14e-2` (notación científica). | Baja | Media |
+| F8 | `lexer.rs:319` | Identificadores ASCII-only (`is_alphabetic()` pero después corta con `is_ascii_digit()`). Sin `π`, `función` como nombres. | Baja | Baja |
+| F9 | `lexer.rs:252-279` | Escapes en strings limitados: faltan `\u{...}`, `\x..`, `\0`, `\b`. | Baja | Media |
+| F10 | `parser.rs` | Encadenamiento multi-línea en method chains (`xs.map(f)\n.filter(g)`). Deuda explícita 3.4 del parser. | Media | Media |
+| F11 | `codegen.rs` (state HTTP) | State compartido entre handlers HTTP — la deuda más visible de 5b.6. Bloquea `examples/server.fitz`. | Alta | Alta |
+| F12 | `codegen.rs` (higher-order) | Closures escapadas y fns como param/retorno no compilan. | Media | Alta |
+| F13 | `codegen.rs` | Listas/mapas heterogéneos: `[1, "dos"]` corre en intérprete, no compila. Requiere `FitzValue` tagged runtime. | Baja | Alta |
+| F14 | `codegen.rs` | `let X = <expr>` no-literal a nivel mod top-level. | Baja | Media |
+
+### Docs
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| D1 | `guide.md:4-5` | Header desactualizado: cita Fase 5a / 784 tests. Debe ser Fase 5b cerrada / 949. | Alta | Baja |
+| D2 | `guide.md:881-883` | Cita métodos de Str y reenvía a cap 13, pero cap 13 no los desarrolla. Verificar. | Baja | Baja |
+| D3 | `syntax-spec.md:1-8` | Header dice "BORRADOR v0.1" sin actualizar a Fase 5 cerrada. Falta marcar features ya implementadas. | Media | Media |
+| D4 | Repo root | Sin `CHANGELOG.md`. Con 5 fases cerradas, vale un registro histórico. | Baja | Media |
+| D5 | `guide.md:225-226` y otros | Status codes custom (`return 401 { ... }`) citados como "deuda" pero estado real ambiguo entre guía / README / spec. | Media | Media |
+| D6 | `guide.md:2725-2738` vs `:4305-4310` | Deudas residuales duplicadas en cap 13 y cap 18 (asignación a índice, state HTTP). Centralizar. | Baja | Baja |
+| D7 | `README.md:38` | Tabla async marca `🚧` con nota "se parsea pero runtime sync". Alinea con guía pero la nota podría ser más clara. | Baja | Baja |
+
+### Linter (clippy)
+
+| ID | Ubicación | Descripción | Prio | Comp |
+|----|-----------|-------------|------|------|
+| L1a | `lexer.rs:539`, `parser.rs:1914`, `value.rs:375` + 9 más | 12 errores: `3.14` literal en tests rechazado por clippy como "approximate value of PI". Falso positivo. | Alta | Baja |
+| L1b | varios módulos | Warnings: unused imports (`PathBuf`, `Param`, `delete/get/post/put`), `unused variable: return_type`. | Baja | Baja |
+| L1c | varios | Warnings: `if let` colapsables, `map_or` simplificables, `repeat().take()` más conciso, `vec!` innecesario. ~6 sugerencias auto-aplicables con `cargo clippy --fix`. | Baja | Baja |
+| L1d | `error.rs` | Variantes `UndefinedFunction`, `NullReference` nunca construidas. Fields `expected`/`found` nunca leídos. Limpiar muertos. | Baja | Baja |
+| L1e | `lexer.rs` | `EOF` flaggeado por "name contains capitalized acronym". Cosmético, ignorable con `#[allow]`. | Baja | Baja |
+| L1f | `parser.rs` | `.unwrap()` sobre `field.default` después de chequear `.is_some()` → reemplazar por `if let Some(_)`. | Baja | Baja |
+
+---
+
+## Qué NO entró en la auditoría
+
+- **Fase 6/7** (Interop Python, Ecosistema): decisión de roadmap, no
+  auditoría.
+- **Features del syntax-spec NO implementadas** todavía
+  (status codes custom, async/await real, middleware, query params,
+  headers): documentadas como dirección, no contrato. La auditoría
+  solo señala donde docs/código discrepan sobre el estado actual.
+- **Verificación bit-a-bit profunda** de cada feature: el smoke test
+  E2E ya cubre los ejemplos compilables; no re-verifiqué cada uno.
+- **Benchmarks de performance**: las menciones P1-P5 son
+  observaciones sobre el código, no medidas. Si alguna duele, hace
+  falta benchmark dedicado.
+
+---
+
+## Próximos pasos sugeridos
+
+Una sesión razonable de cleanup ataca **L1 + L2 + R1 + D1** (todos
+prio Alta/Media con complejidad Baja): ~2-3 horas de trabajo, deja
+`cargo clippy` limpio, mejora la mantenibilidad puntual, y
+sincroniza la guía con el estado actual.
+
+Una sesión más ambiciosa suma **T1 + S1** (refactor de tests
+frágiles + spans en AST): trabajo grande pero destraba mucho de lo
+otro (mejores mensajes de error → mejor UX; tests menos frágiles →
+refactors futuros más baratos).
+
+Las **deudas funcionales (F11, F12, F2)** son sub-pasos formales que
+mejor abrir como mini-fases dedicadas (state HTTP compartido,
+higher-order completo, field assignment chequeo) — cada una con
+plan corto + tests + cierre.

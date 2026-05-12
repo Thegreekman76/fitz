@@ -43,7 +43,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Expr, Field, Param, Program, Stmt, StrPart, TypeExpr, UnaryOpKind,
+    AssignTarget, BinOpKind, Expr, Field, Program, Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError};
 use crate::types::{check_program, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
@@ -163,7 +163,7 @@ fn sanitize_crate_name(raw: &str) -> String {
             }
         })
         .collect();
-    if s.chars().next().map_or(true, |c| c.is_ascii_digit() || c == '-') {
+    if s.chars().next().is_none_or(|c| c.is_ascii_digit() || c == '-') {
         s = format!("fitz_{}", s);
     }
     s
@@ -610,6 +610,7 @@ fn stmt_kind(s: &Stmt) -> &'static str {
 
 /// Recolecta las firmas exportadas de un módulo: tipos, fns y consts.
 /// El loader las usa para resolver llamadas / accesos cross-module.
+#[allow(clippy::type_complexity)] // tres maps por categoría es claro
 fn collect_module_sigs(
     program: &Program,
     env: &TypeEnv,
@@ -836,6 +837,25 @@ fn generate_main_rs(
                                 ));
                             }
                         }
+                    }
+                    // 5b.6: `fn main` es especial — el codegen genera
+                    // su propia `fn main` async cuando hay HTTP, y la
+                    // del usuario solo aporta decorators (típico:
+                    // `@server(3000) fn main() => 0` como placeholder).
+                    // Si el usuario pone un decorator HTTP de ruta
+                    // (`@get`/`@post`/...) sobre `fn main`, lo
+                    // ignoraríamos silenciosamente — confuso. Rechazar
+                    // explícito.
+                    if name == "main" && http_decos {
+                        return Err(FitzError::new(
+                            ErrorKind::TypeError,
+                            0,
+                            0,
+                            "`fn main` solo admite `@server(...)` como decorator. \
+                             Para registrar rutas HTTP, definí los handlers en fns \
+                             con nombre distinto a `main` (ej.: `fn index`, `fn get_user`)."
+                                .to_string(),
+                        ));
                     }
                     if http_decos {
                         http_fns.push(s);
@@ -1160,10 +1180,10 @@ impl<'a> CodegenCtx<'a> {
                     ret: Box::new(sig.ret.clone()),
                 },
             ))
-        } else if let Some(ty) = m.const_sigs.get(field) {
-            Some((format!("{}::{}", m.mod_name, field), ty.clone()))
         } else {
-            None
+            m.const_sigs
+                .get(field)
+                .map(|ty| (format!("{}::{}", m.mod_name, field), ty.clone()))
         }
     }
 
@@ -1494,9 +1514,9 @@ impl<'a> CodegenCtx<'a> {
         )
         .unwrap();
         for f in &sig.fields {
-            write!(
+            writeln!(
                 &mut self.output,
-                "    {}{}: {},\n",
+                "    {}{}: {},",
                 field_pub,
                 f.name,
                 rust_type_for(&f.type_, self.env)?
@@ -1525,14 +1545,14 @@ impl<'a> CodegenCtx<'a> {
         .unwrap();
         if sig.fields.is_empty() {
             // `Foo {}` — sin espacios.
-            write!(&mut self.output, "        write!(__f, \"{} {{{{}}}}\")\n    }}\n}}\n\n", name).unwrap();
+            writeln!(&mut self.output, "        write!(__f, \"{} {{{{}}}}\")\n    }}\n}}\n", name).unwrap();
         } else {
-            write!(&mut self.output, "        write!(__f, \"{} {{{{\")?;\n", name).unwrap();
+            writeln!(&mut self.output, "        write!(__f, \"{} {{{{\")?;", name).unwrap();
             for (i, f) in sig.fields.iter().enumerate() {
                 if i > 0 {
                     self.emit("        write!(__f, \",\")?;\n");
                 }
-                write!(&mut self.output, "        write!(__f, \" {}: \")?;\n", f.name).unwrap();
+                writeln!(&mut self.output, "        write!(__f, \" {}: \")?;", f.name).unwrap();
                 let field_expr = format!("self.{}", f.name);
                 let stmt = inline_display_stmt(&field_expr, &f.type_);
                 self.emit(&stmt);
@@ -1549,7 +1569,7 @@ impl<'a> CodegenCtx<'a> {
         let Stmt::FnDef {
             name,
             params,
-            return_type,
+            return_type: _,
             body,
             decorators,
             ..
@@ -1812,9 +1832,9 @@ impl<'a> CodegenCtx<'a> {
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
         let coerced = coerce(&rhs_code, &rhs_ty, &f.type_);
         self.emit_indent();
-        write!(
+        writeln!(
             &mut self.output,
-            "({}).borrow_mut().{} = {};\n",
+            "({}).borrow_mut().{} = {};",
             obj_code, field, coerced
         )
         .unwrap();
@@ -1888,9 +1908,9 @@ impl<'a> CodegenCtx<'a> {
             let (start_code, _) = self.gen_expr(start)?;
             let (end_code, _) = self.gen_expr(end)?;
             self.emit_indent();
-            write!(
+            writeln!(
                 &mut self.output,
-                "for mut {var} in ({start_code} as i64)..({end_code} as i64) {{\n"
+                "for mut {var} in ({start_code} as i64)..({end_code} as i64) {{"
             )
             .unwrap();
             self.indent += 1;
@@ -1925,9 +1945,9 @@ impl<'a> CodegenCtx<'a> {
             )));
         }
         self.emit_indent();
-        write!(
+        writeln!(
             &mut self.output,
-            "for mut {var} in ({iter_code}).borrow().clone().into_iter() {{\n"
+            "for mut {var} in ({iter_code}).borrow().clone().into_iter() {{"
         )
         .unwrap();
         self.indent += 1;
@@ -1969,17 +1989,17 @@ impl<'a> CodegenCtx<'a> {
                 // contexto. Simplificamos: si es Str, emitimos
                 // `String::from(PREFIX)` para que encaje con el resto
                 // del codegen (`String` consistente).
-                if let Some(binding) = self.module_bindings.get(name).cloned() {
-                    if let ResolvedBinding::Named { module_index, item, kind } = binding {
-                        if matches!(kind, NamedKind::Const) {
-                            if let Some(m) = self.loaded_modules.get(module_index) {
-                                if let Some(ty) = m.const_sigs.get(&item).cloned() {
-                                    let code = match &ty {
-                                        Type::Str => format!("String::from({})", item),
-                                        _ => item.clone(),
-                                    };
-                                    return Ok((code, ty));
-                                }
+                if let Some(ResolvedBinding::Named { module_index, item, kind }) =
+                    self.module_bindings.get(name).cloned()
+                {
+                    if matches!(kind, NamedKind::Const) {
+                        if let Some(m) = self.loaded_modules.get(module_index) {
+                            if let Some(ty) = m.const_sigs.get(&item).cloned() {
+                                let code = match &ty {
+                                    Type::Str => format!("String::from({})", item),
+                                    _ => item.clone(),
+                                };
+                                return Ok((code, ty));
                             }
                         }
                     }
@@ -2074,13 +2094,11 @@ impl<'a> CodegenCtx<'a> {
         let Expr::Call { args, .. } = call_expr else {
             return Err(self.err("gen_print_to_string llamada con expr que no es Call"));
         };
-        let saved = std::mem::take(&mut self.output);
         let saved_indent = self.indent;
         self.indent = 0;
-        self.gen_print(args)?;
-        let out = std::mem::take(&mut self.output);
-        self.output = saved;
+        let (out, result) = self.with_temp_output(|ctx| ctx.gen_print(args));
         self.indent = saved_indent;
+        result?;
         Ok(out)
     }
 
@@ -2105,8 +2123,7 @@ impl<'a> CodegenCtx<'a> {
             };
             pieces.push(piece);
         }
-        let format_str: String = std::iter::repeat("{}")
-            .take(args.len())
+        let format_str: String = std::iter::repeat_n("{}", args.len())
             .collect::<Vec<_>>()
             .join(" ");
         self.emit(&format!(
@@ -2281,16 +2298,16 @@ impl<'a> CodegenCtx<'a> {
         // `foo::greet(args)` Rust con la firma del módulo.
         if let Expr::Field { object, field } = callee {
             if let Expr::Ident(ns) = object.as_ref() {
-                if let Some(binding) = self.module_bindings.get(ns).cloned() {
-                    if let ResolvedBinding::Namespace { .. } = binding {
-                        if let Some((path, sig)) = self.resolve_namespace_call(ns, field) {
-                            return self.gen_call_with_sig(&path, &sig, args);
-                        }
-                        return Err(self.err(format!(
-                            "el módulo `{}` no exporta una función llamada `{}`",
-                            ns, field
-                        )));
+                if let Some(ResolvedBinding::Namespace { .. }) =
+                    self.module_bindings.get(ns).cloned()
+                {
+                    if let Some((path, sig)) = self.resolve_namespace_call(ns, field) {
+                        return self.gen_call_with_sig(&path, &sig, args);
                     }
+                    return Err(self.err(format!(
+                        "el módulo `{}` no exporta una función llamada `{}`",
+                        ns, field
+                    )));
                 }
             }
             return self.gen_method_call(object, field, args);
@@ -2331,13 +2348,13 @@ impl<'a> CodegenCtx<'a> {
         // (`from foo import greet`), la firma viene del módulo, no
         // de `fn_sigs`. El `use foo::greet;` ya lo agregó al scope
         // Rust, así que el call se emite con el name directo.
-        if let Some(binding) = self.module_bindings.get(name).cloned() {
-            if let ResolvedBinding::Named { module_index, item, kind } = binding {
-                if matches!(kind, NamedKind::Fn) {
-                    if let Some(m) = self.loaded_modules.get(module_index) {
-                        if let Some(sig) = m.fn_sigs.get(&item).cloned() {
-                            return self.gen_call_with_sig(name, &sig, args);
-                        }
+        if let Some(ResolvedBinding::Named { module_index, item, kind }) =
+            self.module_bindings.get(name).cloned()
+        {
+            if matches!(kind, NamedKind::Fn) {
+                if let Some(m) = self.loaded_modules.get(module_index) {
+                    if let Some(sig) = m.fn_sigs.get(&item).cloned() {
+                        return self.gen_call_with_sig(name, &sig, args);
                     }
                 }
             }
@@ -2742,9 +2759,7 @@ impl<'a> CodegenCtx<'a> {
 
         self.push_scope();
         self.declare_var(param_name.to_string(), param_ty.clone());
-        let saved = std::mem::take(&mut self.output);
-        let result = self.gen_expr(e);
-        self.output = saved;
+        let (_discarded, result) = self.with_temp_output(|ctx| ctx.gen_expr(e));
         self.pop_scope();
         result.map(|(_, t)| t)
     }
@@ -3223,16 +3238,16 @@ impl<'a> CodegenCtx<'a> {
         // porque `Ident("foo")` no está en `scopes` (los imports no
         // declaran var en el codegen), pero sí en `module_bindings`.
         if let Expr::Ident(ns) = object {
-            if let Some(binding) = self.module_bindings.get(ns).cloned() {
-                if let ResolvedBinding::Namespace { .. } = binding {
-                    if let Some((code, ty)) = self.resolve_namespace_field(ns, field) {
-                        return Ok((code, ty));
-                    }
-                    return Err(self.err(format!(
-                        "el módulo `{}` no exporta `{}` (ni fn ni constante)",
-                        ns, field
-                    )));
+            if let Some(ResolvedBinding::Namespace { .. }) =
+                self.module_bindings.get(ns).cloned()
+            {
+                if let Some((code, ty)) = self.resolve_namespace_field(ns, field) {
+                    return Ok((code, ty));
                 }
+                return Err(self.err(format!(
+                    "el módulo `{}` no exporta `{}` (ni fn ni constante)",
+                    ns, field
+                )));
             }
         }
 
@@ -3369,30 +3384,48 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    /// Redirige `self.output` a un buffer temporal mientras corre `f`,
+    /// y devuelve `(output capturado, valor de retorno de f)`. Restaura
+    /// el output original al salir, incluso si `f` retorna `Err`
+    /// (vía drop normal del `mem::replace`). Sirve para emitir
+    /// fragmentos que después se inyectan en otra estructura (p.ej.
+    /// brazos de `match`, bodies de `if`/`else` en modo expresión).
+    ///
+    /// La indentación NO se gestiona acá — el caller decide si la
+    /// modifica adentro de `f` y la restaura.
+    fn with_temp_output<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self) -> R,
+    ) -> (String, R) {
+        let saved = std::mem::take(&mut self.output);
+        let result = f(self);
+        let captured = std::mem::replace(&mut self.output, saved);
+        (captured, result)
+    }
+
     /// Emite los `stmts` redirigiendo `self.output` a un buffer
     /// temporal y devuelve el resultado. Restaura el output original
     /// antes de devolver. La indentación actual se respeta (los
     /// `emit_indent` van con `self.indent + 1` porque entran en un
     /// `if`/`else` body).
     fn gen_block_to_string(&mut self, stmts: &[&Stmt]) -> Result<String, FitzError> {
-        let saved = std::mem::take(&mut self.output);
         self.indent += 1;
-        for s in stmts {
-            self.gen_stmt(s)?;
-        }
+        let (out, result) = self.with_temp_output(|ctx| {
+            for s in stmts {
+                ctx.gen_stmt(s)?;
+            }
+            Ok::<(), FitzError>(())
+        });
         self.indent -= 1;
-        let out = std::mem::take(&mut self.output);
-        self.output = saved;
+        result?;
         Ok(out)
     }
 
     fn gen_stmt_to_string(&mut self, stmt: &Stmt) -> Result<String, FitzError> {
-        let saved = std::mem::take(&mut self.output);
         self.indent += 1;
-        self.gen_stmt(stmt)?;
+        let (out, result) = self.with_temp_output(|ctx| ctx.gen_stmt(stmt));
         self.indent -= 1;
-        let out = std::mem::take(&mut self.output);
-        self.output = saved;
+        result?;
         Ok(out)
     }
 
@@ -5518,6 +5551,20 @@ mod tests {
     fn http_sin_server_decorator_usa_default_3000() {
         let src = "@get(\"/\") fn index() -> Str => \"ok\"";
         assert_http_contains(src, &["\"127.0.0.1:3000\".parse()"]);
+    }
+
+    #[test]
+    fn http_decorator_de_ruta_sobre_fn_main_es_error_claro() {
+        // `@get("/") fn main()` no debe ignorarse silenciosamente:
+        // 5b.6 generaba la `fn main` async desde el codegen, así que el
+        // decorator de ruta sobre `fn main` quedaba mudo. R1 lo ataja.
+        let src = "@get(\"/\") fn main() => 0";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("`fn main` solo admite `@server"),
+            "esperaba mensaje sobre fn main + decorator HTTP, fue: {}",
+            err.message
+        );
     }
 
     #[test]

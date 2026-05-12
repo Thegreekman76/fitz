@@ -14,7 +14,13 @@ pub struct FitzError {
     pub hint: Option<String>,
 }
 
+// Las variantes y sus payloads documentan los tipos de error que el
+// compilador/runtime puede emitir. Los campos no se leen vía accesor
+// (se ven solo por Debug), pero son parte de la API: distinguen
+// `UndefinedVariable("foo")` de `UndefinedFunction("bar")` al
+// inspeccionar errores en tests y al imprimir con `{:?}`.
 #[derive(Debug)]
+#[allow(dead_code)]
 pub enum ErrorKind {
     // Errores de lexer
     UnexpectedChar(char),
