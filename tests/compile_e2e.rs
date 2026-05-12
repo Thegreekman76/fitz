@@ -426,16 +426,172 @@ fn build_aborta_con_errores_de_tipo_strict() {
     );
 }
 
+// ---------------------------------------------------------------------------
+// Fase 5b.3 — listas, mapas, indexing, métodos built-in
+// ---------------------------------------------------------------------------
+
 #[test]
-fn build_aborta_si_codegen_no_soporta_feature() {
-    // Listas no se soportan en 5b.1.
+fn lista_basica_push_len_iteracion_compilado() {
+    let src = "\
+let xs: List<Int> = [1, 2, 3]
+print(xs)
+print(xs.len())
+xs.push(4)
+print(xs)
+print(len(xs))
+for v in xs {
+    print(v)
+}
+";
+    let (stdout, exit) = build_and_run("list-basic", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "[1, 2, 3]",
+            "3",
+            "[1, 2, 3, 4]",
+            "4",
+            "1",
+            "2",
+            "3",
+            "4",
+        ],
+    );
+}
+
+#[test]
+fn lista_indexing_y_pop_compilado() {
+    let src = "\
+let xs: List<Int> = [10, 20, 30]
+print(xs[0])
+print(xs[2])
+let last = xs.pop()
+print(last)
+print(xs)
+";
+    let (stdout, exit) = build_and_run("list-index-pop", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["10", "30", "30", "[10, 20]"]);
+}
+
+#[test]
+fn mapa_basico_has_keys_values_len_compilado() {
+    let src = "\
+let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}
+print(m)
+print(m.len())
+print(m[\"a\"])
+print(m.has(\"a\"))
+print(m.has(\"z\"))
+print(m.keys())
+print(m.values())
+";
+    let (stdout, exit) = build_and_run("map-basic", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "{\"a\": 1, \"b\": 2, \"c\": 3}",
+            "3",
+            "1",
+            "true",
+            "false",
+            "[\"a\", \"b\", \"c\"]",
+            "[1, 2, 3]",
+        ],
+    );
+}
+
+#[test]
+fn lista_de_instancias_con_map_filter_y_alias_compilado() {
+    // Reproduce un fragmento del cap 13 (sin `find`, que llega en 5b.4).
+    // Cubre: lista de Nominal, push, map con FnExpr→Str, filter con
+    // FnExpr→Bool y método encadenado `.lower()`, mutación via alias
+    // `xs[i].name = ...`.
+    let src = "\
+type User { id: Int, name: Str }
+let usuarios: List<User> = [
+    User { id: 1, name: \"Fitz\" },
+    User { id: 2, name: \"Roy\" },
+]
+usuarios.push(User { id: 3, name: \"Cerro\" })
+print(usuarios.len())
+let nombres = usuarios.map(fn(u) => u.name)
+print(nombres)
+let solo_roy = usuarios.filter(fn(u) => u.name.lower() == \"roy\")
+print(solo_roy)
+let primer = usuarios[0]
+primer.name = \"Patagonia\"
+print(usuarios)
+";
+    let (stdout, exit) = build_and_run("list-instances", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "3",
+            "[\"Fitz\", \"Roy\", \"Cerro\"]",
+            "[User { id: 2, name: \"Roy\" }]",
+            "[User { id: 1, name: \"Patagonia\" }, User { id: 2, name: \"Roy\" }, User { id: 3, name: \"Cerro\" }]",
+        ],
+    );
+}
+
+#[test]
+fn chain_de_metodos_funciona_compilado() {
+    // `.map(...).map(...)` y `.filter(...).map(...)` — los métodos de
+    // List devuelven Rc<RefCell<Vec<_>>>, así que se pueden encadenar
+    // como cualquier expresión. Ojo: cada método toma el receptor por
+    // valor (clone del Rc) y devuelve una colección nueva.
+    let src = "\
+let xs: List<Int> = [1, 2, 3, 4]
+let resultado = xs.filter(fn(x) => x > 1).map(fn(x) => x * 10)
+print(resultado)
+";
+    let (stdout, exit) = build_and_run("chain-methods", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["[20, 30, 40]"]);
+}
+
+#[test]
+fn lista_de_floats_con_int_promueve_a_float_compilado() {
+    // El lub de items hace que `[1, 2.5, 3]` sea `List<Float>` y los
+    // Int se inserten como `(N as f64)`.
+    let src = "\
+let xs = [1, 2.5, 3]
+print(xs)
+";
+    let (stdout, exit) = build_and_run("list-promote-float", src);
+    assert_eq!(exit, 0);
+    // Float `1.0`, `2.5`, `3.0` con el formato del intérprete.
+    assert_lines(&stdout, &["[1.0, 2.5, 3.0]"]);
+}
+
+#[test]
+fn lista_heterogenea_aborta_build() {
     let stderr = build_expect_fail(
-        "unsupported-list",
-        "let xs = [1, 2, 3]\nprint(xs)\n",
+        "unsupported-heterogeneous-list",
+        "let xs = [1, \"dos\"]\nprint(xs)\n",
     );
     assert!(
-        stderr.contains("5b.3") || stderr.contains("listas"),
-        "esperaba mensaje sobre listas / 5b.3, fue: {}",
+        stderr.contains("homogénea") || stderr.contains("incompatibles"),
+        "esperaba mensaje sobre lista homogénea, fue: {}",
+        stderr
+    );
+}
+
+#[test]
+fn build_aborta_si_codegen_no_soporta_feature() {
+    // 5b.3 abre listas/mapas, pero `Result`/`Ok`/`Err` / `match` siguen
+    // sin soportarse en el codegen — llegan en 5b.4.
+    let stderr = build_expect_fail(
+        "unsupported-result",
+        "let v = Ok(42)\nprint(v)\n",
+    );
+    assert!(
+        stderr.contains("5b.4") || stderr.contains("Result"),
+        "esperaba mensaje sobre Result / 5b.4, fue: {}",
         stderr
     );
 }

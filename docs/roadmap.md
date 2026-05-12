@@ -1662,12 +1662,92 @@ Validado a mano contra `fitz run`: `examples/types.fitz`,
 `examples/guide/05-strings.fitz`, `examples/guide/07-if.fitz`
 y `examples/guide/12-type.fitz` producen output idéntico.
 
-##### 5b.3 — Listas, mapas, indexing, method calls
-**Pendiente** — `List<T>` → `Vec<T>` (o `Rc<RefCell<Vec<T>>>` por
-aliasing), `Map<K, V>` → `Vec<(K, V)>` (preserve order del
-intérprete). Métodos built-in con las mismas signatures del
-checker. Probablemente sume infra para evitar `Vec<Vec<X>>`
-embebido fragmentado.
+##### 5b.3 — Listas, mapas, indexing, method calls ✓
+**Completado** — tercer paso de Fase 5b. `List<T>` →
+`Rc<RefCell<Vec<T>>>` y `Map<K, V>` → `Rc<RefCell<Vec<(K, V)>>>`:
+mismo modelo de referencia compartida que 5b.2 (Nominal). Orden de
+inserción preservado por Vec. Aliasing por referencia: `xs.push(x)`,
+`xs[i].name = "x"` vía cualquier alias se ve en la colección original.
+Trade-off conocido (paralelo a 5b.2): `xs[i]` → `xs.borrow()[i as
+usize].clone()`. Optimizable post-5b.
+
+Cubierto:
+- **Literales**: `[e1, e2, ...]` con coerción de cada item al tipo
+  común (LUB pragmático: Int↔Float→Float, T↔Null→T?, T?↔T→T?,
+  recursivo en generics built-in). `{k: v, ...}` análogo a `Vec<(K, V)>`.
+  Vacíos sintetizan `List<Any>`/`Map<Any, Any>` y el contexto
+  (anotación destino) los resuelve.
+- **Heterogéneos irrecuperables** (`[1, "dos"]`, `{"a": 1, "b": "x"}`)
+  → error de codegen con mensaje claro. El subset compilado no
+  soporta tagged unions runtime.
+- **Indexing** `xs[i]` (List) y `m[k]` (Map). List: borrow + clone
+  del item (clone del Rc para Nominal/List/Map → preserva
+  aliasing). Map: búsqueda lineal con `panic!` si la clave falta,
+  mensaje idéntico al del intérprete. Para evitar E0716 con `Rc`
+  temporales, el bloque liga primero el Rc a una var local antes
+  del `.borrow()`.
+- **`for v in xs`** sobre `List<T>`: snapshot via `borrow().clone()
+  .into_iter()` para evitar re-entrancia si el body muta la lista.
+  Map como iterable directo NO se soporta (alineado con el
+  intérprete).
+- **Métodos**: `push`, `pop`, `len`, `map`, `filter` sobre List;
+  `has`, `keys`, `values`, `len` sobre Map. `pop` paniquea sobre
+  lista vacía con el mensaje del intérprete. `keys`/`values`
+  devuelven `List<K>`/`List<V>` envuelto en Rc, permitiendo
+  method chaining.
+- **`find` (List) y `get` (Map)** devuelven `Result<T>` y se
+  difirieron a 5b.4 con error de codegen específico mencionando
+  "5b.4". El cap 13 entero (que usa find + match) queda bloqueado
+  hasta 5b.4; la versión reducida sin find/match compila bit-a-bit.
+- **Builtin global `len(x)`**: despacha por tipo del argumento
+  (Str → `chars().count()`, List/Map → `borrow().len()`). Una fn
+  `len` definida por el usuario gana — `fn_sigs` se chequea antes
+  del builtin.
+- **FnExpr inline como callback** de `.map(...)` y `.filter(...)`:
+  emite Rust closure tipado `|p: T| -> U { body }`. Inferencia
+  mini-LUB del ret type sobre el primer `Stmt::Return` del body
+  (o último `Stmt::Expr` no-print). **Higher-order completo**
+  (FnExpr como var, param o retorno) → error explícito con
+  referencia a "sub-paso posterior". El cap 11 (closures,
+  `make_adder`, `apply`) queda como deuda visible.
+- **`print`/interpolación de List/Map**: formato bit-a-bit
+  idéntico al intérprete (`[1, 2, 3]`, `{"a": 1, "b": 2}`,
+  strings entre comillas adentro vía `show_expr_inline`). El
+  bloque inline liga el Rc a `let __list`/`let __map` antes del
+  `.borrow()` (vida del temporal); itera con `.iter().cloned()`
+  para que `__it` venga por valor.
+- **`lub_for_if` renombrado a `lub`** y extendido recursivamente
+  para generics built-in (List/Map/Result/Nullable). Reusado
+  desde if-as-expression (5b.2) y desde unificación de items de
+  literales (5b.3).
+
+Tests: 28 unit nuevos en `src/codegen.rs` (literales, indexing,
+métodos, FnExpr inline, builtin global, print bit-a-bit, errores
+explícitos) + 7 E2E nuevos en `tests/compile_e2e.rs` (push+len+
+for, indexing+pop, mapa has/keys/values/len, lista de instancias +
+alias del cap 13, chain `.filter().map()`, promoción Int→Float,
+lista heterogénea aborta). Total acumulado: **902 tests** (873
+unit + 29 E2E). El test viejo `listas_no_soportadas` se reemplazó
+por `listas_heterogeneas_son_error`; el E2E
+`build_aborta_si_codegen_no_soporta_feature` ahora apunta a
+`Ok(...)` (Result, 5b.4).
+
+Validado a mano contra `fitz run`: `examples/guide/09-listas-mapas.fitz`
+reducido al subset compilable (sin Range como valor, sin mezclas
+heterogéneas, con anotaciones) y `examples/guide/13-metodos.fitz`
+reducido (sin find/match/get) producen output idéntico bit-a-bit.
+
+**Deuda explícita — retomar en pasos siguientes**:
+- **Heterogéneos**: introducir un `FitzValue` runtime tagged si
+  el caso aparece como bloqueante en la práctica. Por ahora se
+  resuelve con `fitz run`.
+- **find/get → Result**: se desbloquean en 5b.4.
+- **Higher-order completo**: closures que escapan, FnExpr como
+  var/param/retorno. Probable sub-paso 5b.4.5 o post-5b.6 con
+  `Box<dyn Fn(...)>` + captura por clone explícita.
+- **Range como valor / `print(range)`**: deuda residual de 5b.1
+  (sigue siendo error de codegen). Cierra cuando lo necesite un
+  ejemplo concreto.
 
 ##### 5b.4 — Result, `?`, match
 **Pendiente** — `Result<T>` → enum dedicado, `?` se traduce a
@@ -1708,7 +1788,7 @@ compilado a binario standalone"), cierre formal de Fase 5.
 - [x] Backend de codegen decidido — transpile-a-Rust (5b)
 - [x] Codegen subset primitivo + `fitz build` (5b.1)
 - [x] Tipos custom + field access (5b.2)
-- [ ] Listas, mapas, indexing, métodos built-in (5b.3)
+- [x] Listas, mapas, indexing, métodos built-in (5b.3)
 - [ ] Result, `?`, match (5b.4)
 - [ ] Módulos / `import` (5b.5)
 - [ ] HTTP / `@server` / handlers (5b.6)

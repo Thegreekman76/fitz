@@ -661,24 +661,63 @@ impl<'a> CodegenCtx<'a> {
         body: &[Stmt],
         ret_expected: &Type,
     ) -> Result<(), FitzError> {
-        // 5b.1: solo `for v in start..end` (Range). El iter tiene
-        // que ser un Expr::Range; otros iterables llegan en 5b.3.
-        let Expr::Range { start, end } = iter else {
-            return Err(self.err(
-                "`for` sobre listas y otros iterables: no soportado en 5b.1 — llega en 5b.3",
-            ));
+        // Dos iterables soportados hoy:
+        //   * `for v in start..end` — rango exclusivo (5b.1).
+        //   * `for v in xs` con xs: List<T> — itera sobre snapshot.
+        //     Snapshot (clone del Vec interno) para evitar re-entrancia
+        //     al RefCell si el body muta la lista original. Mismo patrón
+        //     que list_map en el intérprete.
+        // Map como iterable directo NO se soporta (alineado con el
+        // intérprete, que también lo rechaza).
+        if let Expr::Range { start, end } = iter {
+            let (start_code, _) = self.gen_expr(start)?;
+            let (end_code, _) = self.gen_expr(end)?;
+            self.emit_indent();
+            write!(
+                &mut self.output,
+                "for mut {var} in ({start_code} as i64)..({end_code} as i64) {{\n"
+            )
+            .unwrap();
+            self.indent += 1;
+            self.push_scope();
+            self.declare_var(var.to_string(), Type::Int);
+            for s in body {
+                self.gen_stmt_in_fn(s, ret_expected)?;
+            }
+            self.pop_scope();
+            self.indent -= 1;
+            self.emit_indent();
+            self.emit("}\n");
+            return Ok(());
+        }
+        // Caso general: el iter tiene que evaluar a List<T>.
+        let (iter_code, iter_ty) = self.gen_expr(iter)?;
+        let elem_ty = match &iter_ty {
+            Type::List(inner) => (**inner).clone(),
+            other => {
+                return Err(self.err(format!(
+                    "`for {} in <expr>`: el iterable es `{}`, solo se soportan Range y List<T>",
+                    var,
+                    display_type(other, self.env)
+                )));
+            }
         };
-        let (start_code, _) = self.gen_expr(start)?;
-        let (end_code, _) = self.gen_expr(end)?;
+        if matches!(elem_ty, Type::Any) {
+            return Err(self.err(format!(
+                "`for {} in ...` sobre `List<Any>`: el subset compilado exige tipo homogéneo \
+                 concreto",
+                var
+            )));
+        }
         self.emit_indent();
         write!(
             &mut self.output,
-            "for mut {var} in ({start_code} as i64)..({end_code} as i64) {{\n"
+            "for mut {var} in ({iter_code}).borrow().clone().into_iter() {{\n"
         )
         .unwrap();
         self.indent += 1;
         self.push_scope();
-        self.declare_var(var.to_string(), Type::Int);
+        self.declare_var(var.to_string(), elem_ty);
         for s in body {
             self.gen_stmt_in_fn(s, ret_expected)?;
         }
@@ -736,17 +775,11 @@ impl<'a> CodegenCtx<'a> {
             }
 
             Expr::Range { .. } => Err(self.err(
-                "`Range` solo se acepta como iterable de `for` en 5b.1; otros usos no se generan",
+                "`Range` solo se acepta como iterable de `for`; otros usos no se generan",
             )),
-            Expr::List(_) => Err(self.err(
-                "listas literales `[...]`: no soportadas en 5b.1 — llegan en 5b.3",
-            )),
-            Expr::Map(_) => Err(self.err(
-                "mapas literales `{...}`: no soportados en 5b.1 — llegan en 5b.3",
-            )),
-            Expr::Index { .. } => Err(self.err(
-                "indexing `[]`: requiere listas/mapas — 5b.3",
-            )),
+            Expr::List(items) => self.gen_list_lit(items),
+            Expr::Map(pairs) => self.gen_map_lit(pairs),
+            Expr::Index { object, index } => self.gen_index(object, index),
             Expr::Field { object, field } => self.gen_field_access(object, field),
             Expr::StructLit { type_name, fields } => self.gen_struct_lit(type_name, fields),
             Expr::Ok(_) | Expr::Err(_) | Expr::Try(_) => Err(self.err(
@@ -755,8 +788,17 @@ impl<'a> CodegenCtx<'a> {
             Expr::Match { .. } => Err(self.err(
                 "`match`: requiere Result/tipos custom — 5b.4",
             )),
+            // FnExpr "suelto" — usado como valor, parámetro o retorno —
+            // requiere closures escapados con tipo (Box<dyn Fn(...)>) y
+            // captura por clone explícita. Higher-order completo queda
+            // como sub-paso después de 5b.4 (Result). El único FnExpr
+            // que SÍ se acepta hoy es como callback inline de
+            // `.map`/`.filter` sobre List, y se intercepta en
+            // `gen_method_call` antes de llegar acá.
             Expr::FnExpr { .. } => Err(self.err(
-                "funciones anónimas `fn(...) => ...`: no soportadas en 5b.1",
+                "funciones anónimas `fn(...) => ...` solo se admiten hoy como callback inline de \
+                 `.map(...)` o `.filter(...)` sobre listas. Usarlas como valor, parámetro o \
+                 retorno (higher-order) llega en un sub-paso posterior de 5b.",
             )),
         }
     }
@@ -973,13 +1015,35 @@ impl<'a> CodegenCtx<'a> {
         }
         let Expr::Ident(name) = callee else {
             return Err(self.err(
-                "llamadas con callee complejo (FnExpr inline): no soportadas en 5b",
+                "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
             ));
         };
         if name == "print" {
             return Err(self.err(
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
             ));
+        }
+        // Builtin global `len(x)`: despacha por tipo del argumento a la
+        // misma implementación que el método (`.len()`). Cubre Str, List
+        // y Map. Si el usuario tiene una fn `len` definida (raro pero
+        // válido), su sig prevalece — chequeamos `fn_sigs` antes del
+        // builtin.
+        if name == "len" && !self.fn_sigs.contains_key(name) && args.len() == 1 {
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            return match arg_ty {
+                Type::Str => Ok((
+                    format!("(({}).chars().count() as i64)", arg_code),
+                    Type::Int,
+                )),
+                Type::List(_) | Type::Map(_, _) => Ok((
+                    format!("(({}).borrow().len() as i64)", arg_code),
+                    Type::Int,
+                )),
+                other => Err(self.err(format!(
+                    "`len(...)`: no aplica a `{}` — solo Str, List<T> y Map<K, V>",
+                    display_type(&other, self.env)
+                ))),
+            };
         }
         let sig = self
             .fn_sigs
@@ -1010,6 +1074,7 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<(String, Type), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         match (&obj_ty, method) {
+            // ---- Str ----
             (Type::Str, "len") => {
                 check_method_arity(method, args, 0)?;
                 Ok((format!("(({}).chars().count() as i64)", obj_code), Type::Int))
@@ -1026,18 +1091,457 @@ impl<'a> CodegenCtx<'a> {
                 "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower)",
                 other
             ))),
-            (Type::List(_) | Type::Map(_, _), m) => Err(self.err(format!(
-                "métodos sobre List/Map (`.{}`): llegan en 5b.3",
-                m
+
+            // ---- List ----
+            (Type::List(t), "push") => self.gen_list_push(&obj_code, t, args),
+            (Type::List(t), "pop") => self.gen_list_pop(&obj_code, t, args),
+            (Type::List(_), "len") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("(({}).borrow().len() as i64)", obj_code), Type::Int))
+            }
+            (Type::List(t), "map") => self.gen_list_map(&obj_code, t, args),
+            (Type::List(t), "filter") => self.gen_list_filter(&obj_code, t, args),
+            (Type::List(_), "find") => Err(self.err(
+                "`.find()` sobre List<T> devuelve `Result<T>`; el subset compilado no soporta \
+                 `Result` todavía — llega en 5b.4. Mientras tanto, podés iterar con `for` y \
+                 acumular tu propia condición, o usar `fitz run`.",
+            )),
+            (Type::List(_), other) => Err(self.err(format!(
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter)",
+                other
             ))),
+
+            // ---- Map ----
+            (Type::Map(k, _), "has") => self.gen_map_has(&obj_code, k, args),
+            (Type::Map(k, _), "keys") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "Rc::new(RefCell::new(({}).borrow().iter().map(|(__k, _)| __k.clone()).collect::<Vec<_>>()))",
+                    obj_code
+                );
+                Ok((code, Type::List(Box::new((**k).clone()))))
+            }
+            (Type::Map(_, v), "values") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "Rc::new(RefCell::new(({}).borrow().iter().map(|(_, __v)| __v.clone()).collect::<Vec<_>>()))",
+                    obj_code
+                );
+                Ok((code, Type::List(Box::new((**v).clone()))))
+            }
+            (Type::Map(_, _), "len") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("(({}).borrow().len() as i64)", obj_code), Type::Int))
+            }
+            (Type::Map(_, _), "get") => Err(self.err(
+                "`.get()` sobre Map<K, V> devuelve `Result<V>`; el subset compilado no soporta \
+                 `Result` todavía — llega en 5b.4. Mientras tanto, podés usar `m.has(k)` + `m[k]`, \
+                 o `fitz run`.",
+            )),
+            (Type::Map(_, _), other) => Err(self.err(format!(
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len)",
+                other
+            ))),
+
+            // ---- Tipos custom ----
             (Type::Nominal(_), m) => Err(self.err(format!(
                 "métodos custom sobre `type` (`.{}`): primero hay que cerrar la deuda de 3.2 en el parser",
                 m
             ))),
+
+            // ---- Otros ----
             (other, m) => Err(self.err(format!(
                 "method call `.{}` sobre `{}`: no soportado en codegen",
                 m,
-                type_name(other)
+                display_type(other, self.env)
+            ))),
+        }
+    }
+
+    // --- métodos List ----------------------------------------------------
+
+    /// `xs.push(x)` → `({xs}).borrow_mut().push({coerce x → T})`. Devuelve
+    /// `()` (Null en Fitz). El stmt-mode agrega el `;` final por encima.
+    fn gen_list_push(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("push", args, 1)?;
+        let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+        let coerced = coerce(&arg_code, &arg_ty, elem_ty);
+        let code = format!("({}).borrow_mut().push({})", obj_code, coerced);
+        Ok((code, Type::Null))
+    }
+
+    /// `xs.pop()` → `({xs}).borrow_mut().pop().expect(...)`. El intérprete
+    /// tira error de runtime sobre lista vacía con ese mensaje; el binario
+    /// generado paniquea — comportamiento esencial (abortar con mensaje)
+    /// equivalente.
+    fn gen_list_pop(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("pop", args, 0)?;
+        let code = format!(
+            "({}).borrow_mut().pop().expect(\"`.pop()` sobre lista vacía\")",
+            obj_code
+        );
+        Ok((code, elem_ty.clone()))
+    }
+
+    /// `xs.map(callback)` → snapshot del Vec + map + collect, envuelto en
+    /// `Rc::new(RefCell::new(...))`. El callback debe ser un FnExpr
+    /// inline; no admitimos referencias a fns nombradas hoy (eso necesita
+    /// higher-order, deuda explícita).
+    fn gen_list_map(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("map", args, 1)?;
+        let (callback_code, ret_ty) =
+            self.gen_callback_inline(&args[0], elem_ty, None, "map")?;
+        let code = format!(
+            "{{ \
+                let __items: Vec<_> = ({}).borrow().clone(); \
+                Rc::new(RefCell::new(__items.into_iter().map({}).collect::<Vec<_>>())) \
+            }}",
+            obj_code, callback_code
+        );
+        Ok((code, Type::List(Box::new(ret_ty))))
+    }
+
+    /// `xs.filter(callback)` → snapshot + for-loop manual + push. Evitamos
+    /// `.filter(...).collect()` porque el `filter` de Iterator pasa `&T`
+    /// y el callback de Fitz toma T por valor. El loop manual clona el
+    /// item para pasárselo al callback (para Nominal/List/Map es clone
+    /// del Rc → barato) y mueve el original al output si el predicado
+    /// retorna true.
+    fn gen_list_filter(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("filter", args, 1)?;
+        let (callback_code, _) =
+            self.gen_callback_inline(&args[0], elem_ty, Some(&Type::Bool), "filter")?;
+        let code = format!(
+            "{{ \
+                let __items: Vec<_> = ({}).borrow().clone(); \
+                let __cb = {}; \
+                let mut __out: Vec<_> = Vec::new(); \
+                for __it in __items.into_iter() {{ \
+                    if __cb(__it.clone()) {{ __out.push(__it); }} \
+                }} \
+                Rc::new(RefCell::new(__out)) \
+            }}",
+            obj_code, callback_code
+        );
+        Ok((code, Type::List(Box::new(elem_ty.clone()))))
+    }
+
+    // --- métodos Map -----------------------------------------------------
+
+    /// `m.has(k)` → búsqueda lineal por igualdad → bool.
+    fn gen_map_has(
+        &mut self,
+        obj_code: &str,
+        key_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("has", args, 1)?;
+        let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+        let coerced = coerce(&arg_code, &arg_ty, key_ty);
+        let code = format!(
+            "{{ let __k = {}; ({}).borrow().iter().any(|(__k2, _)| __k2 == &__k) }}",
+            coerced, obj_code
+        );
+        Ok((code, Type::Bool))
+    }
+
+    // --- helpers para callback inline ------------------------------------
+
+    /// Genera el código Rust de un closure inline a partir de un `FnExpr`.
+    /// `param_ty` es el tipo que el receptor (List<T>) impone al param;
+    /// el FnExpr puede traer anotación propia, pero la del receptor
+    /// manda (el checker ya validó compatibilidad).
+    ///
+    /// `expected_ret_ty = Some(t)` fuerza el tipo de retorno (caso
+    /// `filter` que exige `Bool`). `None` infiere desde el primer
+    /// `return` del body, o el último `Stmt::Expr` no-print, o `Null`.
+    /// La heurística cubre arrow form (`fn(x) => e`) y bodies simples
+    /// con un solo return — los casos exóticos (returns adentro de cada
+    /// rama de un `if`) caen a `Null` por simplicidad y requieren
+    /// reescribir el callback en arrow form si el tipo importa.
+    ///
+    /// Devuelve `(código del closure, tipo de retorno inferido/forzado)`.
+    fn gen_callback_inline(
+        &mut self,
+        arg: &Expr,
+        param_ty: &Type,
+        expected_ret_ty: Option<&Type>,
+        method: &str,
+    ) -> Result<(String, Type), FitzError> {
+        let (params, body) = match arg {
+            Expr::FnExpr { params, body } => (params, body),
+            _ => {
+                return Err(self.err(format!(
+                    "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}`. \
+                     Pasar una fn nombrada como callback (higher-order) llega en un sub-paso \
+                     posterior de 5b.",
+                    method
+                )));
+            }
+        };
+        if params.len() != 1 {
+            return Err(self.err(format!(
+                "el callback de `.{}` toma 1 parámetro, recibió {}",
+                method,
+                params.len()
+            )));
+        }
+        let param_name = params[0].name.clone();
+
+        // Inferimos el ret type en dry-run sobre el primer Stmt::Return
+        // del body, o el último Stmt::Expr no-print, o Null.
+        let inferred_ret = self.infer_callback_ret_silently(body, &param_name, param_ty)?;
+        let ret_ty = expected_ret_ty.cloned().unwrap_or_else(|| inferred_ret.clone());
+
+        let param_ty_rs = rust_type_for(param_ty, self.env)?;
+        let ret_ty_rs = rust_type_for(&ret_ty, self.env)?;
+
+        // Emit el body en un buffer aparte, con el param ligado.
+        self.push_scope();
+        self.declare_var(param_name.clone(), param_ty.clone());
+        let saved = std::mem::take(&mut self.output);
+        let saved_indent = self.indent;
+        self.indent = 0;
+        let mut body_str = String::new();
+        for s in body {
+            self.gen_stmt_in_fn(s, &ret_ty)?;
+            body_str.push_str(&std::mem::take(&mut self.output));
+        }
+        self.output = saved;
+        self.indent = saved_indent;
+        self.pop_scope();
+
+        let code = format!(
+            "|{}: {}| -> {} {{ {} }}",
+            param_name, param_ty_rs, ret_ty_rs, body_str
+        );
+        Ok((code, ret_ty))
+    }
+
+    /// Dry-run para sintetizar el tipo de retorno de un callback. Pushea
+    /// el scope del param, recorre el body buscando el primer
+    /// `Stmt::Return(e)` (o el último `Stmt::Expr(e)` no-print), llama
+    /// a `gen_expr` con `self.output` redirigido a un buffer descartable
+    /// (no contamina la salida real).
+    fn infer_callback_ret_silently(
+        &mut self,
+        body: &[Stmt],
+        param_name: &str,
+        param_ty: &Type,
+    ) -> Result<Type, FitzError> {
+        let target: Option<&Expr> = body
+            .iter()
+            .find_map(|s| if let Stmt::Return(e) = s { Some(e) } else { None })
+            .or_else(|| {
+                body.last().and_then(|s| match s {
+                    Stmt::Expr(e) if !is_print_call(e) => Some(e),
+                    _ => None,
+                })
+            });
+        let Some(e) = target else { return Ok(Type::Null) };
+
+        self.push_scope();
+        self.declare_var(param_name.to_string(), param_ty.clone());
+        let saved = std::mem::take(&mut self.output);
+        let result = self.gen_expr(e);
+        self.output = saved;
+        self.pop_scope();
+        result.map(|(_, t)| t)
+    }
+
+    // --- listas, mapas, indexing ------------------------------------------
+
+    /// `[e1, e2, ...]` → `Rc::new(RefCell::new(vec![v1, v2, ...]))` con
+    /// coerción de cada elemento al tipo común. Tipo común sintetizado
+    /// como en el checker (5.3.1): primer elemento define el tipo, los
+    /// demás deben unificar via `lub` (Int↔Float, T↔Null). Mezcla
+    /// irrecuperable o lista vacía sin contexto → error claro.
+    fn gen_list_lit(&mut self, items: &[Expr]) -> Result<(String, Type), FitzError> {
+        if items.is_empty() {
+            // Lista vacía: no podemos sintetizar T. Emitimos un código
+            // genérico `Vec::new()` y devolvemos `List<Any>`. El
+            // contexto (anotación destino, paso a fn tipada) coerciona
+            // a un T concreto; si nadie lo restringe, el rustc generado
+            // fallará con "type annotations needed", reflejando que el
+            // usuario tiene que anotar.
+            return Ok((
+                "Rc::new(RefCell::new(Vec::new()))".to_string(),
+                Type::List(Box::new(Type::Any)),
+            ));
+        }
+        let mut item_codes_tys: Vec<(String, Type)> = Vec::with_capacity(items.len());
+        for it in items {
+            let (c, t) = self.gen_expr(it)?;
+            item_codes_tys.push((c, t));
+        }
+        let mut common_ty = item_codes_tys[0].1.clone();
+        for (_, t) in &item_codes_tys[1..] {
+            common_ty = lub(&common_ty, t).map_err(|_| {
+                self.err(format!(
+                    "lista con elementos de tipos incompatibles (`{}` y `{}`): el subset compilado \
+                     exige una lista homogénea (todos del mismo tipo, con coerciones Int→Float y \
+                     T→T? permitidas)",
+                    display_type(&common_ty, self.env),
+                    display_type(t, self.env),
+                ))
+            })?;
+        }
+        if matches!(common_ty, Type::Any) {
+            return Err(self.err(
+                "lista con elementos cuyo tipo común es `Any`: el subset compilado exige tipo \
+                 homogéneo concreto. Anotá el tipo o usá `fitz run` para interpretarlo sin restricción.",
+            ));
+        }
+        let coerced: Vec<String> = item_codes_tys
+            .iter()
+            .map(|(c, t)| coerce(c, t, &common_ty))
+            .collect();
+        let code = format!(
+            "Rc::new(RefCell::new(vec![{}]))",
+            coerced.join(", ")
+        );
+        Ok((code, Type::List(Box::new(common_ty))))
+    }
+
+    /// `{k1: v1, k2: v2, ...}` → `Rc::new(RefCell::new(vec![(k1, v1), ...]))`.
+    /// Orden de inserción preservado por Vec. K y V deben ser homogéneos
+    /// (mismas reglas que List). Para `m["k"]` (Index) y `m.get(k)` la
+    /// búsqueda es lineal O(n), pero matchea exactamente lo que hace
+    /// el intérprete.
+    fn gen_map_lit(&mut self, pairs: &[(Expr, Expr)]) -> Result<(String, Type), FitzError> {
+        if pairs.is_empty() {
+            return Ok((
+                "Rc::new(RefCell::new(Vec::new()))".to_string(),
+                Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
+            ));
+        }
+        let mut entries: Vec<((String, Type), (String, Type))> = Vec::with_capacity(pairs.len());
+        for (k, v) in pairs {
+            let kt = self.gen_expr(k)?;
+            let vt = self.gen_expr(v)?;
+            entries.push((kt, vt));
+        }
+        let mut common_k = entries[0].0 .1.clone();
+        let mut common_v = entries[0].1 .1.clone();
+        for ((_, kt), (_, vt)) in &entries[1..] {
+            common_k = lub(&common_k, kt).map_err(|_| {
+                self.err(format!(
+                    "mapa con claves de tipos incompatibles (`{}` y `{}`): el subset compilado \
+                     exige claves homogéneas",
+                    display_type(&common_k, self.env),
+                    display_type(kt, self.env),
+                ))
+            })?;
+            common_v = lub(&common_v, vt).map_err(|_| {
+                self.err(format!(
+                    "mapa con valores de tipos incompatibles (`{}` y `{}`): el subset compilado \
+                     exige valores homogéneos",
+                    display_type(&common_v, self.env),
+                    display_type(vt, self.env),
+                ))
+            })?;
+        }
+        if matches!(common_k, Type::Any) || matches!(common_v, Type::Any) {
+            return Err(self.err(
+                "mapa con claves o valores cuyo tipo común es `Any`: el subset compilado exige \
+                 tipos homogéneos concretos. Anotá el tipo o usá `fitz run` para interpretarlo \
+                 sin restricción.",
+            ));
+        }
+        let pieces: Vec<String> = entries
+            .iter()
+            .map(|((kc, kt), (vc, vt))| {
+                format!(
+                    "({}, {})",
+                    coerce(kc, kt, &common_k),
+                    coerce(vc, vt, &common_v)
+                )
+            })
+            .collect();
+        let code = format!(
+            "Rc::new(RefCell::new(vec![{}]))",
+            pieces.join(", ")
+        );
+        Ok((code, Type::Map(Box::new(common_k), Box::new(common_v))))
+    }
+
+    /// `obj[idx]` — dispatch por tipo del receptor.
+    ///
+    ///   - `List<T>[Int]`   → `({xs}.borrow()[idx as usize].clone())`.
+    ///     Index out-of-bounds panicea en Rust (igual que el intérprete
+    ///     que tira error de runtime).
+    ///   - `Map<K, V>[K]`   → búsqueda lineal por igualdad. Si no hay,
+    ///     panic con mensaje al estilo del intérprete.
+    ///
+    /// El clone del item es del Rc para Nominal/List/Map → barato y
+    /// preserva el aliasing con la colección original (mutar via
+    /// `xs[0].name = "x"` se ve en xs).
+    fn gen_index(
+        &mut self,
+        object: &Expr,
+        index: &Expr,
+    ) -> Result<(String, Type), FitzError> {
+        let (obj_code, obj_ty) = self.gen_expr(object)?;
+        let (idx_code, idx_ty) = self.gen_expr(index)?;
+        match &obj_ty {
+            Type::List(inner) => {
+                if !matches!(idx_ty, Type::Int) {
+                    return Err(self.err(format!(
+                        "indexing de lista con `{}`: el índice debe ser Int",
+                        display_type(&idx_ty, self.env)
+                    )));
+                }
+                let code = format!(
+                    "({}).borrow()[({}) as usize].clone()",
+                    obj_code, idx_code
+                );
+                Ok((code, (**inner).clone()))
+            }
+            Type::Map(k_ty, v_ty) => {
+                let coerced_idx = coerce(&idx_code, &idx_ty, k_ty);
+                // Búsqueda lineal por igualdad. `unwrap_or_else(panic)` con
+                // mensaje al estilo del intérprete. Ligamos el Rc a una
+                // var local antes de `.borrow()` para extender la vida
+                // del temporal — `(m.clone()).borrow()` solo cuando la
+                // expresión completa cabe en una stmt simple; acá usamos
+                // un `let __m = ...` y necesitamos el holder.
+                let code = format!(
+                    "{{ \
+                        let __map = {}; \
+                        let __m = __map.borrow(); \
+                        let __k = {}; \
+                        __m.iter() \
+                            .find(|(__k2, _)| __k2 == &__k) \
+                            .map(|(_, __v)| __v.clone()) \
+                            .unwrap_or_else(|| panic!(\"clave no encontrada en mapa: {{:?}}\", __k)) \
+                    }}",
+                    obj_code, coerced_idx
+                );
+                Ok((code, (**v_ty).clone()))
+            }
+            other => Err(self.err(format!(
+                "indexing `[]` sobre `{}`: solo soportado en List<T> y Map<K, V>",
+                display_type(other, self.env)
             ))),
         }
     }
@@ -1178,7 +1682,7 @@ impl<'a> CodegenCtx<'a> {
                 self.pop_scope();
                 (stmts, c, t)
             };
-            let result_ty = lub_for_if(&then_tail_ty, &else_tail_ty).map_err(|_| {
+            let result_ty = lub(&then_tail_ty, &else_tail_ty).map_err(|_| {
                 self.err(format!(
                     "ramas de `if` con tipos incompatibles: `{}` y `{}`",
                     type_name(&then_tail_ty),
@@ -1290,10 +1794,20 @@ fn is_print_call(e: &Expr) -> bool {
         if matches!(callee.as_ref(), Expr::Ident(n) if n == "print"))
 }
 
-/// "Least upper bound" pragmático sobre dos tipos resueltos para
-/// unificar las ramas de un `if`. Mismo criterio que `types.rs`
-/// para FnExpr (5.3.5) pero acotado al subset compilable hoy.
-fn lub_for_if(a: &Type, b: &Type) -> Result<Type, ()> {
+/// "Least upper bound" pragmático sobre dos tipos resueltos. Mismo
+/// criterio que `types.rs` para FnExpr (5.3.5) y para if-as-expression
+/// (5b.2), acotado al subset compilable hoy. Usado además para unificar
+/// elementos de listas/mapas literales (5b.3).
+///
+/// Reglas:
+///   - `a == b`               → `a`
+///   - `Int` ↔ `Float`        → `Float`
+///   - `Null` ↔ `T`           → `T?` (T ≠ Null)
+///   - `T?` ↔ `T`             → `T?`
+///   - mismo `List<a>`/`List<b>` con `lub(a,b)` recursivo → `List<lub>`
+///     (idem `Map`, `Nullable`)
+///   - resto                  → `Err(())`
+fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
     if a == b {
         return Ok(a.clone());
     }
@@ -1306,6 +1820,17 @@ fn lub_for_if(a: &Type, b: &Type) -> Result<Type, ()> {
             if **inner == *other =>
         {
             Ok(Type::Nullable(inner.clone()))
+        }
+        (Type::Nullable(a_in), Type::Nullable(b_in)) => {
+            lub(a_in, b_in).map(|t| Type::Nullable(Box::new(t)))
+        }
+        (Type::List(a_in), Type::List(b_in)) => {
+            lub(a_in, b_in).map(|t| Type::List(Box::new(t)))
+        }
+        (Type::Map(ak, av), Type::Map(bk, bv)) => {
+            let k = lub(ak, bk)?;
+            let v = lub(av, bv)?;
+            Ok(Type::Map(Box::new(k), Box::new(v)))
         }
         _ => Err(()),
     }
@@ -1324,12 +1849,50 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         Type::Null => Ok("()".to_string()),
         Type::Nominal(id) => Ok(env.info(*id).name.clone()),
         Type::Nullable(inner) => Ok(format!("Option<{}>", rust_type_for(inner, env)?)),
+        // List<T> y Map<K, V> se modelan con `Rc<RefCell<>>` para
+        // preservar la semántica de referencia compartida del intérprete
+        // (push/pop/asignación de elementos visibles vía cualquier alias).
+        // T = Any (literal mixto sin contexto) → error explícito; el
+        // subset compilable exige tipo homogéneo concreto.
+        Type::List(inner) => {
+            if matches!(**inner, Type::Any) {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    "listas con elementos de tipos mixtos (`List<Any>`): el subset compilado \
+                     necesita tipo homogéneo concreto. Anotá el tipo o usá `fitz run` para \
+                     interpretarlo sin restricción."
+                        .to_string(),
+                ));
+            }
+            Ok(format!("Rc<RefCell<Vec<{}>>>", rust_type_for(inner, env)?))
+        }
+        Type::Map(k, v) => {
+            if matches!(**k, Type::Any) || matches!(**v, Type::Any) {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    "mapas con claves o valores de tipos mixtos (`Map<Any, ...>` o \
+                     `Map<..., Any>`): el subset compilado necesita tipos homogéneos \
+                     concretos. Anotá el tipo o usá `fitz run` para interpretarlo \
+                     sin restricción."
+                        .to_string(),
+                ));
+            }
+            Ok(format!(
+                "Rc<RefCell<Vec<({}, {})>>>",
+                rust_type_for(k, env)?,
+                rust_type_for(v, env)?
+            ))
+        }
         other => Err(FitzError::new(
             ErrorKind::TypeError,
             0,
             0,
             format!(
-                "codegen 5b no soporta el tipo `{}` (primitivos + tipos custom + nullables)",
+                "codegen 5b no soporta el tipo `{}` (primitivos + tipos custom + nullables + List<T> + Map<K, V>)",
                 type_name(other)
             ),
         )),
@@ -1354,15 +1917,50 @@ fn type_name(t: &Type) -> &'static str {
     }
 }
 
+/// Versión "linda" del tipo para mensajes de error, con T concreto
+/// (recursa en generics, resuelve nominales). `List<User>` en vez de
+/// `List<...>`. Usar `type_name` solo cuando el detalle no importa.
+fn display_type(t: &Type, env: &TypeEnv) -> String {
+    match t {
+        Type::Int => "Int".into(),
+        Type::Float => "Float".into(),
+        Type::Str => "Str".into(),
+        Type::Bool => "Bool".into(),
+        Type::Null => "Null".into(),
+        Type::Range => "Range".into(),
+        Type::Any => "Any".into(),
+        Type::List(inner) => format!("List<{}>", display_type(inner, env)),
+        Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
+        Type::Result(inner) => format!("Result<{}>", display_type(inner, env)),
+        Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
+        Type::Nominal(id) => env.info(*id).name.clone(),
+        Type::Function { params, ret } => {
+            let ps = params
+                .iter()
+                .map(|p| display_type(p, env))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("fn({}) -> {}", ps, display_type(ret, env))
+        }
+    }
+}
+
 /// `true` si el tipo subyacente NO es `Copy` en el Rust generado y por
 /// ende necesita `.clone()` cuando se evalúa un `Ident`/`Field` que se
 /// va a consumir en otro contexto.
+///
+/// Para List/Map el clone es del `Rc` envolvente — barato y, lo más
+/// importante, **preserva el aliasing**: dos vars que se construyeron
+/// a partir de la misma lista comparten contenido y mutaciones vía
+/// `push`/asignación se ven en ambas. Mismo criterio que para Nominal.
 fn needs_clone(t: &Type) -> bool {
     match t {
         Type::Int | Type::Float | Type::Bool | Type::Null => false,
         Type::Str | Type::Nominal(_) => true,
         // `Option<T>` no es Copy salvo casos extremos; clonamos siempre.
         Type::Nullable(_) => true,
+        // `Rc<RefCell<Vec<...>>>` — clone del Rc, barato, alias preservado.
+        Type::List(_) | Type::Map(_, _) => true,
         // Fallback conservador: clonamos.
         _ => true,
     }
@@ -1426,11 +2024,67 @@ fn show_expr(code: &str, ty: &Type) -> String {
                 code, inner_show
             )
         }
-        // Cualquier otro tipo (List, Map, Result, Range, Any, Function)
-        // hoy no llega acá en codegen — quien lo intente recibe el
-        // error general de tipo no soportado. Damos un fallback debug
-        // solo para no romper si el AST cuela algo.
+        // List/Map en print top-level usan el formato "inline" (strings
+        // con comillas adentro de los items, igual que `write_inline_value`
+        // del intérprete). Construimos el string en runtime concatenando
+        // sub-shows item por item. Ligamos primero el `Rc` a una `let`
+        // antes de hacer `.borrow()` para extender la vida del temporal
+        // — `(xs.clone()).borrow()` cae con la expresión.
+        Type::List(inner) => {
+            // Iteramos con `.cloned()` para que `__it` sea por valor
+            // (no `&T`) — uniforma el código de `show_expr_inline` con
+            // el de `show_expr` general (que asume valor). El clone es
+            // barato para `Rc<RefCell<...>>` (Nominal/List/Map) y vivible
+            // para `String` en contexto de print.
+            let item_show = show_expr_inline("__it", inner);
+            format!(
+                "{{ \
+                    let __list = {}; \
+                    let __items = __list.borrow(); \
+                    let mut __s = String::from(\"[\"); \
+                    for (__i, __it) in __items.iter().cloned().enumerate() {{ \
+                        if __i > 0 {{ __s.push_str(\", \"); }} \
+                        __s.push_str(&({})); \
+                    }} \
+                    __s.push(']'); \
+                    __s \
+                }}",
+                code, item_show
+            )
+        }
+        Type::Map(kt, vt) => {
+            let k_show = show_expr_inline("__k", kt);
+            let v_show = show_expr_inline("__v", vt);
+            format!(
+                "{{ \
+                    let __map = {}; \
+                    let __pairs = __map.borrow(); \
+                    let mut __s = String::from(\"{{\"); \
+                    for (__i, (__k, __v)) in __pairs.iter().cloned().enumerate() {{ \
+                        if __i > 0 {{ __s.push_str(\", \"); }} \
+                        __s.push_str(&({})); \
+                        __s.push_str(\": \"); \
+                        __s.push_str(&({})); \
+                    }} \
+                    __s.push('}}'); \
+                    __s \
+                }}",
+                code, k_show, v_show
+            )
+        }
+        // Range, Any, Function, Result — fallback. Si el AST cuela algo
+        // que llega acá, el error principal viene de otro lado.
         _ => format!("format!(\"{{:?}}\", {})", code),
+    }
+}
+
+/// Versión "inline" de `show_expr` para items adentro de colecciones:
+/// strings van **entre comillas** (igual a `write_inline_value` del
+/// intérprete). Llama a `show_expr` para todo lo demás.
+fn show_expr_inline(code: &str, ty: &Type) -> String {
+    match ty {
+        Type::Str => format!("format!(\"\\\"{{}}\\\"\", {})", code),
+        _ => show_expr(code, ty),
     }
 }
 
@@ -2047,9 +2701,384 @@ mod tests {
         );
     }
 
+    // ---- 5b.3: listas, mapas, indexing, métodos built-in ----
+
     #[test]
-    fn listas_no_soportadas() {
-        assert_err_contains("let xs = [1, 2, 3]", &["listas", "5b.3"]);
+    fn list_literal_emite_rc_refcell_vec() {
+        // `[1, 2, 3]` se modela como `Rc<RefCell<Vec<i64>>>`. Los items
+        // se coercen al tipo común (acá Int → i64) y se construye con
+        // el macro vec![].
+        assert_contains(
+            "let xs: List<Int> = [1, 2, 3]",
+            &[
+                "let mut xs: Rc<RefCell<Vec<i64>>>",
+                "Rc::new(RefCell::new(vec![1i64, 2i64, 3i64]))",
+            ],
+        );
+    }
+
+    #[test]
+    fn list_literal_homogeneo_int_float_promueve_a_float() {
+        // Int+Float en la misma lista → `List<Float>` (mismo lub que
+        // if-expression y FnExpr ret).
+        let code = gen("let xs = [1, 2.5, 3]").unwrap();
+        assert!(
+            code.contains("Rc<RefCell<Vec<f64>>>"),
+            "esperaba List<f64>, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("(1i64 as f64)") && code.contains("(3i64 as f64)"),
+            "esperaba coerción Int→Float en los items, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_literal_vacia_es_list_any_a_resolver_por_contexto() {
+        // `[]` sin contexto da `List<Any>`. Con anotación, el contexto
+        // restringe a List<T> y el `Vec::new()` infiere desde el target.
+        let code = gen("let xs: List<Int> = []").unwrap();
+        assert!(
+            code.contains("let mut xs: Rc<RefCell<Vec<i64>>>"),
+            "esperaba `List<Int>` por anotación, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Rc::new(RefCell::new(Vec::new()))"),
+            "esperaba `Rc::new(RefCell::new(Vec::new()))` para lista vacía, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_literal_heterogeneo_es_error_homogeneo_requerido() {
+        // Sin posibilidad de unificar (Int + Str), el codegen aborta
+        // con mensaje claro mencionando la heterogeneidad.
+        assert_err_contains(
+            "let xs = [1, \"dos\"]",
+            &["homogénea"],
+        );
+    }
+
+    #[test]
+    fn map_literal_emite_vec_pares() {
+        assert_contains(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}",
+            &[
+                "let mut m: Rc<RefCell<Vec<(String, i64)>>>",
+                "(String::from(\"a\"), 1i64)",
+                "(String::from(\"b\"), 2i64)",
+            ],
+        );
+    }
+
+    #[test]
+    fn map_literal_vacio_resuelto_por_anotacion() {
+        let code = gen("let m: Map<Str, Int> = {}").unwrap();
+        assert!(
+            code.contains("let mut m: Rc<RefCell<Vec<(String, i64)>>>"),
+            "esperaba `Map<Str, Int>` por anotación, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_literal_valores_heterogeneos_es_error() {
+        assert_err_contains(
+            "let m = {\"a\": 1, \"b\": \"x\"}",
+            &["homogéneos"],
+        );
+    }
+
+    #[test]
+    fn list_indexing_emite_borrow_clone() {
+        // `xs[0]` → `(xs.clone()).borrow()[(0i64) as usize].clone()`.
+        // El `.clone()` final es del Rc para Nominal/List/Map o copy
+        // para primitivos — siempre seguro.
+        let code = gen("let xs: List<Int> = [10, 20]\nlet x = xs[0]").unwrap();
+        assert!(
+            code.contains(".borrow()[(0i64) as usize].clone()"),
+            "esperaba acceso por borrow + index + clone, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let mut x: i64 ="),
+            "esperaba que x quede tipado como i64, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_indexing_emite_busqueda_lineal_con_panic() {
+        // `m["a"]` → bloque que linea la búsqueda y paniquea si falta.
+        let code = gen(
+            "let m: Map<Str, Int> = {\"a\": 1}\nlet n = m[\"a\"]",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".find(|(__k2, _)| __k2 == &__k)"),
+            "esperaba búsqueda lineal en map, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("clave no encontrada en mapa"),
+            "esperaba mensaje de panic con texto del intérprete, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn for_sobre_list_genera_snapshot_iter() {
+        // `for v in xs` → snapshot via `borrow().clone().into_iter()`
+        // (evita re-entrancia si el body muta `xs`).
+        let code = gen(
+            "let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".borrow().clone().into_iter()"),
+            "esperaba snapshot iter, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn for_sobre_list_de_any_es_error() {
+        assert_err_contains(
+            "let xs = []\nfor v in xs { print(v) }",
+            &["List<Any>"],
+        );
+    }
+
+    #[test]
+    fn list_push_emite_borrow_mut_push() {
+        assert_contains(
+            "let xs: List<Int> = []\nxs.push(7)",
+            &["(xs.clone()).borrow_mut().push(7i64);"],
+        );
+    }
+
+    #[test]
+    fn list_pop_emite_borrow_mut_pop_con_expect() {
+        let code = gen("let xs: List<Int> = [1]\nlet x = xs.pop()").unwrap();
+        assert!(
+            code.contains(".borrow_mut().pop().expect(\"`.pop()` sobre lista vacía\")"),
+            "esperaba `.pop().expect(...)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_len_metodo_emite_borrow_len_as_i64() {
+        let code = gen("let xs: List<Int> = []\nlet n = xs.len()").unwrap();
+        assert!(
+            code.contains(".borrow().len() as i64"),
+            "esperaba `.borrow().len() as i64`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn len_builtin_global_sobre_list_resuelve_a_borrow_len() {
+        // `len(xs)` despacha por tipo del argumento — mismo código que
+        // `xs.len()` para List/Map; para Str sigue siendo chars().count.
+        let code = gen("let xs: List<Int> = [1]\nlet n = len(xs)").unwrap();
+        assert!(
+            code.contains(".borrow().len() as i64"),
+            "esperaba `.borrow().len() as i64` desde el builtin global, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn len_builtin_global_sobre_str_usa_chars_count() {
+        let code = gen("let s = \"hola\"\nlet n = len(s)").unwrap();
+        assert!(
+            code.contains(".chars().count() as i64"),
+            "esperaba `.chars().count() as i64`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_map_con_fnexpr_inline_emite_closure() {
+        let code = gen(
+            "let xs: List<Int> = [1, 2, 3]\nlet ys = xs.map(fn(x) => x * 2)",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".into_iter().map(|x: i64| -> i64"),
+            "esperaba closure inline `|x: i64| -> i64`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Rc::new(RefCell::new"),
+            "esperaba envoltorio Rc::new(RefCell::new(...)), got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let mut ys: Rc<RefCell<Vec<i64>>>"),
+            "esperaba que `ys` quede tipado `List<Int>`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_filter_con_fnexpr_inline_emite_for_manual() {
+        // Filter usa un for manual (no .filter()) porque el callback
+        // toma T por valor pero `Iterator::filter` quiere &T.
+        let code = gen(
+            "let xs: List<Int> = [1, 2, 3]\nlet ys = xs.filter(fn(x) => x > 1)",
+        )
+        .unwrap();
+        assert!(
+            code.contains("let __cb = |x: i64| -> bool"),
+            "esperaba binding del callback como `|x: i64| -> bool`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("if __cb(__it.clone())"),
+            "esperaba aplicación del cb con clone, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_method_chaining_funciona() {
+        // `xs.map(f).map(g)` debe poder componerse. El test es de
+        // estructura: el tipo de salida del primer map alimenta al
+        // siguiente sin friction.
+        let code = gen(
+            "let xs: List<Int> = [1, 2]\n\
+             let ys = xs.map(fn(x) => x * 2).map(fn(x) => x + 1)",
+        )
+        .unwrap();
+        assert!(
+            code.matches(".into_iter().map(|x: i64| -> i64").count() >= 2,
+            "esperaba dos map closures encadenados, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_has_emite_iter_any() {
+        let code = gen(
+            "let m: Map<Str, Int> = {\"a\": 1}\nlet b = m.has(\"a\")",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".iter().any(|(__k2, _)| __k2 == &__k)"),
+            "esperaba `.iter().any(...)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_keys_emite_lista_nueva_de_claves() {
+        let code = gen(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\nlet ks = m.keys()",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".iter().map(|(__k, _)| __k.clone()).collect::<Vec<_>>()"),
+            "esperaba pipeline de keys, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let mut ks: Rc<RefCell<Vec<String>>>"),
+            "esperaba que keys retorne List<Str>, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_values_emite_lista_nueva_de_valores() {
+        let code = gen(
+            "let m: Map<Str, Int> = {\"a\": 1}\nlet vs = m.values()",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".iter().map(|(_, __v)| __v.clone()).collect::<Vec<_>>()"),
+            "esperaba pipeline de values, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let mut vs: Rc<RefCell<Vec<i64>>>"),
+            "esperaba que values retorne List<Int>, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn map_len_metodo_emite_borrow_len_as_i64() {
+        let code = gen(
+            "let m: Map<Str, Int> = {\"a\": 1}\nlet n = m.len()",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".borrow().len() as i64"),
+            "esperaba `.borrow().len() as i64`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_find_difere_a_5b4() {
+        // find devuelve Result<T>; Result en codegen llega en 5b.4.
+        assert_err_contains(
+            "let xs: List<Int> = [1, 2]\nlet x = xs.find(fn(n) => n > 0)",
+            &["5b.4"],
+        );
+    }
+
+    #[test]
+    fn map_get_difere_a_5b4() {
+        assert_err_contains(
+            "let m: Map<Str, Int> = {\"a\": 1}\nlet v = m.get(\"a\")",
+            &["5b.4"],
+        );
+    }
+
+    #[test]
+    fn fnexpr_suelta_da_error_claro() {
+        // FnExpr como valor (no como callback inline) no se soporta.
+        assert_err_contains(
+            "let f = fn(x: Int) => x * 2",
+            &["higher-order", "callback inline"],
+        );
+    }
+
+    #[test]
+    fn print_de_lista_emite_iter_inline() {
+        // El print/interp construye el string `[a, b, c]` en runtime
+        // ligando primero el Rc a una var (vida del temporal).
+        let code = gen("let xs: List<Int> = [1, 2]\nprint(xs)").unwrap();
+        assert!(
+            code.contains("let __list = "),
+            "esperaba binding del Rc antes del borrow, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("String::from(\"[\")"),
+            "esperaba header `[` para lista, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn print_de_mapa_emite_iter_inline_con_llaves() {
+        let code = gen("let m: Map<Str, Int> = {\"a\": 1}\nprint(m)").unwrap();
+        assert!(
+            code.contains("let __map = "),
+            "esperaba binding del Rc antes del borrow, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("String::from(\"{\")"),
+            "esperaba header `{{` para mapa, got:\n{}",
+            code
+        );
     }
 
     #[test]
