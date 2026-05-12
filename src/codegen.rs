@@ -277,13 +277,13 @@ fn walk_expr_for_state_refs(
     refs: &mut std::collections::HashSet<String>,
 ) {
     match e {
-        Expr::Ident(name) => {
+        Expr::Ident(name, _) => {
             if candidates.contains(name) && !locals.contains(name) {
                 refs.insert(name.clone());
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
-        Expr::StrInterp(parts) => {
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) => {}
+        Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let StrPart::Expr(inner) = p {
                     walk_expr_for_state_refs(inner, candidates, locals, refs);
@@ -297,13 +297,13 @@ fn walk_expr_for_state_refs(
         Expr::UnaryOp { operand, .. } => {
             walk_expr_for_state_refs(operand, candidates, locals, refs);
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             walk_expr_for_state_refs(callee, candidates, locals, refs);
             for a in args {
                 walk_expr_for_state_refs(a, candidates, locals, refs);
             }
         }
-        Expr::If { condition, then, else_ } => {
+        Expr::If { condition, then, else_, .. } => {
             walk_expr_for_state_refs(condition, candidates, locals, refs);
             for s in then {
                 walk_stmt_for_state_refs(s, candidates, locals, refs);
@@ -314,22 +314,22 @@ fn walk_expr_for_state_refs(
                 }
             }
         }
-        Expr::Range { start, end } => {
+        Expr::Range { start, end, .. } => {
             walk_expr_for_state_refs(start, candidates, locals, refs);
             walk_expr_for_state_refs(end, candidates, locals, refs);
         }
-        Expr::List(items) => {
+        Expr::List(items, _) => {
             for it in items {
                 walk_expr_for_state_refs(it, candidates, locals, refs);
             }
         }
-        Expr::Map(pairs) => {
+        Expr::Map(pairs, _) => {
             for (k, v) in pairs {
                 walk_expr_for_state_refs(k, candidates, locals, refs);
                 walk_expr_for_state_refs(v, candidates, locals, refs);
             }
         }
-        Expr::Index { object, index } => {
+        Expr::Index { object, index, .. } => {
             walk_expr_for_state_refs(object, candidates, locals, refs);
             walk_expr_for_state_refs(index, candidates, locals, refs);
         }
@@ -341,10 +341,10 @@ fn walk_expr_for_state_refs(
                 walk_expr_for_state_refs(v, candidates, locals, refs);
             }
         }
-        Expr::Ok(inner) | Expr::Err(inner) | Expr::Try(inner) => {
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => {
             walk_expr_for_state_refs(inner, candidates, locals, refs);
         }
-        Expr::Match { value, arms } => {
+        Expr::Match { value, arms, .. } => {
             walk_expr_for_state_refs(value, candidates, locals, refs);
             for arm in arms {
                 // Patterns que introducen bindings extienden locals.
@@ -354,7 +354,7 @@ fn walk_expr_for_state_refs(
                 walk_expr_for_state_refs(&arm.body, candidates, locals, refs);
             }
         }
-        Expr::FnExpr { params, body } => {
+        Expr::FnExpr { params, body, .. } => {
             // Los params del FnExpr son locales adentro del body. El
             // shadowing puede ocultar un state var, pero como no
             // removemos al salir, esto es conservador. En la práctica
@@ -973,17 +973,17 @@ fn collect_module_sigs(
 fn is_literal_expr(e: &Expr) -> bool {
     matches!(
         e,
-        Expr::Int(_) | Expr::Float(_) | Expr::Bool(_) | Expr::Null | Expr::Str(_)
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Null(_) | Expr::Str(_, _)
     )
 }
 
 fn infer_literal_type(e: &Expr) -> Option<Type> {
     match e {
-        Expr::Int(_) => Some(Type::Int),
-        Expr::Float(_) => Some(Type::Float),
-        Expr::Str(_) => Some(Type::Str),
-        Expr::Bool(_) => Some(Type::Bool),
-        Expr::Null => Some(Type::Null),
+        Expr::Int(_, _) => Some(Type::Int),
+        Expr::Float(_, _) => Some(Type::Float),
+        Expr::Str(_, _) => Some(Type::Str),
+        Expr::Bool(_, _) => Some(Type::Bool),
+        Expr::Null(_) => Some(Type::Null),
         _ => None,
     }
 }
@@ -1244,7 +1244,7 @@ fn parse_server_decorator(args: &[Expr]) -> Result<ServerConfigArgs, FitzError> 
         ));
     }
     if let Some(port_expr) = args.first() {
-        let Expr::Int(n) = port_expr else {
+        let Expr::Int(n, _) = port_expr else {
             return Err(FitzError::new(
                 ErrorKind::TypeError,
                 0,
@@ -1263,7 +1263,7 @@ fn parse_server_decorator(args: &[Expr]) -> Result<ServerConfigArgs, FitzError> 
         cfg.port = *n as u16;
     }
     if let Some(host_expr) = args.get(1) {
-        let Expr::Str(s) = host_expr else {
+        let Expr::Str(s, _) = host_expr else {
             return Err(FitzError::new(
                 ErrorKind::TypeError,
                 0,
@@ -2082,7 +2082,7 @@ impl<'a> CodegenCtx<'a> {
 
         // Str → `pub static X: &str = "...";`. Los otros → `pub const`.
         match (&declared_ty, value) {
-            (Type::Str, Expr::Str(s)) => {
+            (Type::Str, Expr::Str(s, _)) => {
                 writeln!(
                     &mut self.output,
                     "pub static {}: &str = {};\n",
@@ -2091,13 +2091,13 @@ impl<'a> CodegenCtx<'a> {
                 )
                 .unwrap();
             }
-            (Type::Int, Expr::Int(n)) => {
+            (Type::Int, Expr::Int(n, _)) => {
                 writeln!(&mut self.output, "pub const {}: i64 = {}i64;\n", name, n).unwrap();
             }
-            (Type::Float, Expr::Float(f)) => {
+            (Type::Float, Expr::Float(f, _)) => {
                 writeln!(&mut self.output, "pub const {}: f64 = {}f64;\n", name, f).unwrap();
             }
-            (Type::Float, Expr::Int(n)) => {
+            (Type::Float, Expr::Int(n, _)) => {
                 // Coerción explícita Int → Float, como en el resto del codegen.
                 writeln!(
                     &mut self.output,
@@ -2106,7 +2106,7 @@ impl<'a> CodegenCtx<'a> {
                 )
                 .unwrap();
             }
-            (Type::Bool, Expr::Bool(b)) => {
+            (Type::Bool, Expr::Bool(b, _)) => {
                 writeln!(&mut self.output, "pub const {}: bool = {};\n", name, b).unwrap();
             }
             _ => {
@@ -2221,7 +2221,7 @@ impl<'a> CodegenCtx<'a> {
         //     que list_map en el intérprete.
         // Map como iterable directo NO se soporta (alineado con el
         // intérprete, que también lo rechaza).
-        if let Expr::Range { start, end } = iter {
+        if let Expr::Range { start, end, .. } = iter {
             let (start_code, _) = self.gen_expr(start)?;
             let (end_code, _) = self.gen_expr(end)?;
             self.emit_indent();
@@ -2285,19 +2285,19 @@ impl<'a> CodegenCtx<'a> {
     /// Devuelve `(código Rust de la expresión, tipo Fitz)`.
     fn gen_expr(&mut self, e: &Expr) -> Result<(String, Type), FitzError> {
         match e {
-            Expr::Int(n) => Ok((format!("{}i64", n), Type::Int)),
-            Expr::Float(n) => {
+            Expr::Int(n, _) => Ok((format!("{}i64", n), Type::Int)),
+            Expr::Float(n, _) => {
                 // `1.0` ya es f64 literal en Rust; sufijo opcional
                 // pero claro. Para evitar `inf`/`-inf` corner cases
                 // delegamos al Display de f64 que produce literal
                 // válido.
                 Ok((format!("{}f64", n), Type::Float))
             }
-            Expr::Str(s) => Ok((format!("String::from({})", rust_str_literal(s)), Type::Str)),
-            Expr::Bool(b) => Ok((b.to_string(), Type::Bool)),
-            Expr::Null => Ok(("()".to_string(), Type::Null)),
+            Expr::Str(s, _) => Ok((format!("String::from({})", rust_str_literal(s)), Type::Str)),
+            Expr::Bool(b, _) => Ok((b.to_string(), Type::Bool)),
+            Expr::Null(_) => Ok(("()".to_string(), Type::Null)),
 
-            Expr::Ident(name) => {
+            Expr::Ident(name, _) => {
                 // 5b.5: si el nombre está en `module_bindings` como
                 // `Named` y es Const, devolvemos el path directo. El
                 // `use foo::PREFIX;` ya lo trajo al scope Rust;
@@ -2377,29 +2377,29 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, ty))
             }
 
-            Expr::StrInterp(parts) => self.gen_str_interp(parts),
+            Expr::StrInterp(parts, _) => self.gen_str_interp(parts),
 
-            Expr::BinOp { op, left, right } => self.gen_binop(op, left, right),
-            Expr::UnaryOp { op, operand } => self.gen_unary(op, operand),
+            Expr::BinOp { op, left, right, .. } => self.gen_binop(op, left, right),
+            Expr::UnaryOp { op, operand, .. } => self.gen_unary(op, operand),
 
-            Expr::Call { callee, args } => self.gen_call(callee, args),
+            Expr::Call { callee, args, .. } => self.gen_call(callee, args),
 
-            Expr::If { condition, then, else_ } => {
+            Expr::If { condition, then, else_, .. } => {
                 self.gen_if_expr(condition, then, else_.as_deref())
             }
 
             Expr::Range { .. } => Err(self.err(
                 "`Range` solo se acepta como iterable de `for`; otros usos no se generan",
             )),
-            Expr::List(items) => self.gen_list_lit(items),
-            Expr::Map(pairs) => self.gen_map_lit(pairs),
-            Expr::Index { object, index } => self.gen_index(object, index),
-            Expr::Field { object, field } => self.gen_field_access(object, field),
-            Expr::StructLit { type_name, fields } => self.gen_struct_lit(type_name, fields),
-            Expr::Ok(inner) => self.gen_ok(inner),
-            Expr::Err(inner) => self.gen_err(inner),
-            Expr::Try(inner) => self.gen_try(inner),
-            Expr::Match { value, arms } => self.gen_match(value, arms),
+            Expr::List(items, _) => self.gen_list_lit(items),
+            Expr::Map(pairs, _) => self.gen_map_lit(pairs),
+            Expr::Index { object, index, .. } => self.gen_index(object, index),
+            Expr::Field { object, field, .. } => self.gen_field_access(object, field),
+            Expr::StructLit { type_name, fields, .. } => self.gen_struct_lit(type_name, fields),
+            Expr::Ok(inner, _) => self.gen_ok(inner),
+            Expr::Err(inner, _) => self.gen_err(inner),
+            Expr::Try(inner, _) => self.gen_try(inner),
+            Expr::Match { value, arms, .. } => self.gen_match(value, arms),
             // FnExpr "suelto" — usado como valor, parámetro o retorno
             // (higher-order, F12). Emite `Rc::new(move |p1: T1, ...|
             // -> R { body }) as Rc<dyn Fn(T1, ...) -> R>`. Los
@@ -2409,7 +2409,7 @@ impl<'a> CodegenCtx<'a> {
             // consume directo. Acá llega cualquier FnExpr usado como
             // valor: `let f = fn(n) => ...`, `apply(fn(n) => ..., 7)`,
             // `return fn(y) => x + y`.
-            Expr::FnExpr { params, body } => self.gen_fn_expr_as_value(params, body),
+            Expr::FnExpr { params, body, .. } => self.gen_fn_expr_as_value(params, body),
         }
     }
 
@@ -2417,8 +2417,8 @@ impl<'a> CodegenCtx<'a> {
     /// `print(...)`, generamos `println!(...)` (que devuelve `()`).
     /// El resto cae al `gen_expr` normal.
     fn gen_expr_for_stmt(&mut self, e: &Expr) -> Result<(), FitzError> {
-        if let Expr::Call { callee, args } = e {
-            if let Expr::Ident(name) = callee.as_ref() {
+        if let Expr::Call { callee, args, .. } = e {
+            if let Expr::Ident(name, _) = callee.as_ref() {
                 if name == "print" {
                     return self.gen_print(args);
                 }
@@ -2631,7 +2631,7 @@ impl<'a> CodegenCtx<'a> {
         callee: &Expr,
         args: &[Expr],
     ) -> Result<(String, Type), FitzError> {
-        // Method call: el callee es `Expr::Field { object, field }`.
+        // Method call: el callee es `Expr::Field { object, field, .. }`.
         // Despachamos por `(tipo del receptor, nombre del método)`
         // como hace el evaluator. Hoy solo cubrimos métodos built-in
         // sobre Str; List/Map y métodos custom sobre `type` quedan
@@ -2640,8 +2640,8 @@ impl<'a> CodegenCtx<'a> {
         // 5b.5: caso especial — si el object es `Ident(ns)` con `ns`
         // siendo namespace de módulo, traducimos `foo.greet(args)` →
         // `foo::greet(args)` Rust con la firma del módulo.
-        if let Expr::Field { object, field } = callee {
-            if let Expr::Ident(ns) = object.as_ref() {
+        if let Expr::Field { object, field, .. } = callee {
+            if let Expr::Ident(ns, _) = object.as_ref() {
                 if let Some(ResolvedBinding::Namespace { .. }) =
                     self.module_bindings.get(ns).cloned()
                 {
@@ -2656,7 +2656,7 @@ impl<'a> CodegenCtx<'a> {
             }
             return self.gen_method_call(object, field, args);
         }
-        let Expr::Ident(name) = callee else {
+        let Expr::Ident(name, _) = callee else {
             return Err(self.err(
                 "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
             ));
@@ -3032,7 +3032,7 @@ impl<'a> CodegenCtx<'a> {
         method: &str,
     ) -> Result<(String, Type), FitzError> {
         let (params, body) = match arg {
-            Expr::FnExpr { params, body } => (params, body),
+            Expr::FnExpr { params, body, .. } => (params, body),
             _ => {
                 return Err(self.err(format!(
                     "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}`. \
@@ -3763,7 +3763,7 @@ impl<'a> CodegenCtx<'a> {
         // path Rust `foo::bar`. Lo hacemos ANTES de evaluar el objeto,
         // porque `Ident("foo")` no está en `scopes` (los imports no
         // declaran var en el codegen), pero sí en `module_bindings`.
-        if let Expr::Ident(ns) = object {
+        if let Expr::Ident(ns, _) = object {
             if let Some(ResolvedBinding::Namespace { .. }) =
                 self.module_bindings.get(ns).cloned()
             {
@@ -4390,21 +4390,21 @@ impl<'a> CodegenCtx<'a> {
 }
 
 /// Extrae el path template de un decorator HTTP. Acepta tanto un
-/// literal puro (`Expr::Str("/users/static")`) como una interpolación
+/// literal puro (`Expr::Str("/users/static", Span::ZERO)`) como una interpolación
 /// (`Expr::StrInterp` con partes Lit + Ident: `"/users/{id}"`). En el
 /// segundo caso, reconstruye el path y devuelve los nombres de los
 /// params en orden. Si la interpolación tiene expresiones complejas
 /// (no-Ident), error.
 fn parse_http_path(expr: &Expr) -> Result<String, FitzError> {
     match expr {
-        Expr::Str(s) => Ok(s.clone()),
-        Expr::StrInterp(parts) => {
+        Expr::Str(s, _) => Ok(s.clone()),
+        Expr::StrInterp(parts, _) => {
             use crate::ast::StrPart;
             let mut buf = String::new();
             for part in parts {
                 match part {
                     StrPart::Lit(s) => buf.push_str(s),
-                    StrPart::Expr(Expr::Ident(name)) => {
+                    StrPart::Expr(Expr::Ident(name, _)) => {
                         buf.push('{');
                         buf.push_str(name);
                         buf.push('}');
@@ -4633,7 +4633,7 @@ fn split_tail_expr(body: &[Stmt]) -> (Vec<&Stmt>, Option<&Expr>) {
 
 fn is_print_call(e: &Expr) -> bool {
     matches!(e, Expr::Call { callee, .. }
-        if matches!(callee.as_ref(), Expr::Ident(n) if n == "print"))
+        if matches!(callee.as_ref(), Expr::Ident(n, _) if n == "print"))
 }
 
 /// Recorre el body de un `FnExpr` recolectando capturas: identifiers
@@ -4717,7 +4717,7 @@ fn collect_captures_expr(
     out: &mut Vec<(String, Type)>,
 ) {
     match e {
-        Expr::Ident(name) => {
+        Expr::Ident(name, _) => {
             // Param del propio FnExpr o local declarado dentro:
             // no es captura.
             if params.contains(name) || locals.contains(name) {
@@ -4743,8 +4743,8 @@ fn collect_captures_expr(
                 }
             }
         }
-        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
-        Expr::StrInterp(parts) => {
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) => {}
+        Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let crate::ast::StrPart::Expr(inner) = p {
                     collect_captures_expr(inner, params, locals, ctx, seen, out);
@@ -4758,13 +4758,13 @@ fn collect_captures_expr(
         Expr::UnaryOp { operand, .. } => {
             collect_captures_expr(operand, params, locals, ctx, seen, out);
         }
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             collect_captures_expr(callee, params, locals, ctx, seen, out);
             for a in args {
                 collect_captures_expr(a, params, locals, ctx, seen, out);
             }
         }
-        Expr::FnExpr { params: inner_params, body } => {
+        Expr::FnExpr { params: inner_params, body, .. } => {
             // Closure anidada: sus params introducen un scope nuevo.
             // Para detectar capturas del FnExpr exterior, nos importa
             // todo lo que esa closure interior use desde nuestro
@@ -4784,26 +4784,26 @@ fn collect_captures_expr(
         Expr::Field { object, .. } => {
             collect_captures_expr(object, params, locals, ctx, seen, out);
         }
-        Expr::Index { object, index } => {
+        Expr::Index { object, index, .. } => {
             collect_captures_expr(object, params, locals, ctx, seen, out);
             collect_captures_expr(index, params, locals, ctx, seen, out);
         }
-        Expr::List(items) => {
+        Expr::List(items, _) => {
             for it in items {
                 collect_captures_expr(it, params, locals, ctx, seen, out);
             }
         }
-        Expr::Map(pairs) => {
+        Expr::Map(pairs, _) => {
             for (k, v) in pairs {
                 collect_captures_expr(k, params, locals, ctx, seen, out);
                 collect_captures_expr(v, params, locals, ctx, seen, out);
             }
         }
-        Expr::Range { start, end } => {
+        Expr::Range { start, end, .. } => {
             collect_captures_expr(start, params, locals, ctx, seen, out);
             collect_captures_expr(end, params, locals, ctx, seen, out);
         }
-        Expr::If { condition, then, else_ } => {
+        Expr::If { condition, then, else_, .. } => {
             collect_captures_expr(condition, params, locals, ctx, seen, out);
             for s in then {
                 collect_captures_stmt(s, params, locals, ctx, seen, out);
@@ -4814,7 +4814,7 @@ fn collect_captures_expr(
                 }
             }
         }
-        Expr::Match { value, arms } => {
+        Expr::Match { value, arms, .. } => {
             collect_captures_expr(value, params, locals, ctx, seen, out);
             for arm in arms {
                 collect_captures_expr(&arm.body, params, locals, ctx, seen, out);
@@ -4825,7 +4825,7 @@ fn collect_captures_expr(
                 collect_captures_expr(e, params, locals, ctx, seen, out);
             }
         }
-        Expr::Ok(inner) | Expr::Err(inner) | Expr::Try(inner) => {
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => {
             collect_captures_expr(inner, params, locals, ctx, seen, out);
         }
     }

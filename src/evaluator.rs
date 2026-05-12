@@ -199,7 +199,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 
     if let Some(port_expr) = deco.args.first() {
         match port_expr {
-            Expr::Int(n) => {
+            Expr::Int(n, _) => {
                 if *n < 1 || *n > 65535 {
                     return Err(err(format!(
                         "@server sobre fn '{}': port {} fuera de rango (debe estar entre 1 y 65535)",
@@ -220,7 +220,7 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 
     if let Some(host_expr) = deco.args.get(1) {
         match host_expr {
-            Expr::Str(s) => {
+            Expr::Str(s, _) => {
                 // Validamos en el momento del registro para no
                 // diferirlo a la hora de levantar el server.
                 if s.parse::<std::net::IpAddr>().is_err() {
@@ -964,14 +964,14 @@ fn run_loop_body(body: &[Stmt], env: EnvRef) -> LoopControl {
 fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
     match expr {
         // Literales — el valor está embebido en el AST.
-        Expr::Int(n) => Ok(Value::Int(*n)),
-        Expr::Float(x) => Ok(Value::Float(*x)),
-        Expr::Str(s) => Ok(Value::Str(s.clone())),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Null => Ok(Value::Null),
+        Expr::Int(n, _) => Ok(Value::Int(*n)),
+        Expr::Float(x, _) => Ok(Value::Float(*x)),
+        Expr::Str(s, _) => Ok(Value::Str(s.clone())),
+        Expr::Bool(b, _) => Ok(Value::Bool(*b)),
+        Expr::Null(_) => Ok(Value::Null),
 
         // Identificador — lookup encadenado en la cadena de scopes.
-        Expr::Ident(name) => env.borrow().get(name).ok_or_else(|| {
+        Expr::Ident(name, _) => env.borrow().get(name).ok_or_else(|| {
             EvalSignal::Error(FitzError::new(
                 ErrorKind::UndefinedVariable(name.clone()),
                 0, 0,
@@ -981,23 +981,23 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
         // And/Or hacen short-circuit: no evaluamos `right` salvo que haga
         // falta. El resto de BinOps evalúan ambos lados antes de combinar.
-        Expr::BinOp { op, left, right } if matches!(op, BinOpKind::And | BinOpKind::Or) => {
+        Expr::BinOp { op, left, right, .. } if matches!(op, BinOpKind::And | BinOpKind::Or) => {
             eval_logical(op, left, right, env)
         }
-        Expr::BinOp { op, left, right } => {
+        Expr::BinOp { op, left, right, .. } => {
             let lv = eval_expr(left, env.clone())?;
             let rv = eval_expr(right, env)?;
             eval_binop(op, lv, rv)
         }
 
-        Expr::UnaryOp { op, operand } => {
+        Expr::UnaryOp { op, operand, .. } => {
             let v = eval_expr(operand, env)?;
             eval_unary(op, v)
         }
 
         // String con interpolación: cada `StrPart::Expr` se evalúa y se
         // convierte a string vía `Display`. Los `Lit` van tal cual.
-        Expr::StrInterp(parts) => {
+        Expr::StrInterp(parts, _) => {
             let mut result = String::new();
             for part in parts {
                 match part {
@@ -1013,18 +1013,18 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
         // Llamada a función. Dos caminos según la forma sintáctica del
         // callee:
-        //  - `Expr::Field { object, field }` → method call. Evaluamos el
+        //  - `Expr::Field { object, field, .. }` → method call. Evaluamos el
         //    receptor y consultamos la tabla de métodos built-in del
         //    evaluador para el tipo del receptor. Si no hay método, caemos
         //    al field access normal y eso emite error de "no es invocable".
         //  - cualquier otra cosa → llamada normal. Evaluamos el callee y
         //    esperamos `Value::Function` o `Value::Builtin`.
-        Expr::Call { callee, args } => eval_call(callee, args, env),
+        Expr::Call { callee, args, .. } => eval_call(callee, args, env),
 
         // `fn(x) => x * 2` o `fn(x) { return x * 2 }` — función anónima.
         // Se evalúa a `Value::Function` con el env actual como closure,
         // igual que un `Stmt::FnDef`, pero sin nombre ni binding en el env.
-        Expr::FnExpr { params, body } => Ok(Value::Function {
+        Expr::FnExpr { params, body, .. } => Ok(Value::Function {
             params: params.clone(),
             body: body.clone(),
             closure: env,
@@ -1036,7 +1036,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // method dispatch (`xs.map(...)`), que va por la rama `Expr::Call`
         // con callee `Field`. El field access "pelado" sobre primitivos
         // no tiene semántica útil hoy.
-        Expr::Field { object, field } => {
+        Expr::Field { object, field, .. } => {
             let obj = eval_expr(object, env)?;
             match obj {
                 Value::Instance { type_name, fields } => {
@@ -1106,7 +1106,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // El orden de los campos en la instancia sigue la declaración
         // del `type`, no el del literal — eso garantiza un `Display`
         // estable y comparaciones estructurales consistentes.
-        Expr::StructLit { type_name, fields } => {
+        Expr::StructLit { type_name, fields, .. } => {
             let ty = env.borrow().get(type_name).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(type_name.clone()),
@@ -1177,7 +1177,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         }
 
         // `[e1, e2, ...]` — evaluamos los elementos en orden.
-        Expr::List(items) => {
+        Expr::List(items, _) => {
             let mut values = Vec::with_capacity(items.len());
             for item in items {
                 values.push(eval_expr(item, env.clone())?);
@@ -1187,7 +1187,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
         // `{k1: v1, ...}` — evaluamos cada par en orden (clave, valor).
         // El orden de inserción se preserva en el Vec resultante.
-        Expr::Map(pairs) => {
+        Expr::Map(pairs, _) => {
             let mut entries = Vec::with_capacity(pairs.len());
             for (k_expr, v_expr) in pairs {
                 let k = eval_expr(k_expr, env.clone())?;
@@ -1200,7 +1200,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // `start..end` — ambos extremos tienen que ser Int (no hay rangos
         // de Float). El rango se materializa como `Value::Range`; la
         // iteración real (cuando se usa en `for`) ocurre en Stmt::For.
-        Expr::Range { start, end } => {
+        Expr::Range { start, end, .. } => {
             let s_v = eval_expr(start, env.clone())?;
             let e_v = eval_expr(end, env)?;
             let s = expect_int_for_range(&s_v, "inicio")?;
@@ -1209,7 +1209,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         }
 
         // `obj[idx]` — indexing. Dispatch por tipo del objeto.
-        Expr::Index { object, index } => {
+        Expr::Index { object, index, .. } => {
             let obj = eval_expr(object, env.clone())?;
             let idx = eval_expr(index, env)?;
             eval_index(&obj, &idx)
@@ -1222,7 +1222,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // Los bloques NO crean scope nuevo — variables declaradas adentro
         // persisten en el scope contenedor (estilo Python). Deuda explícita
         // si después esto trae sorpresas.
-        Expr::If { condition, then, else_ } => {
+        Expr::If { condition, then, else_, .. } => {
             let cond_v = eval_expr(condition, env.clone())?;
             let cond_bool = match cond_v {
                 Value::Bool(b) => b,
@@ -1262,7 +1262,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         //
         // Cada arm con binding crea un scope hijo para que la variable no
         // contamine el scope contenedor.
-        Expr::Match { value, arms } => {
+        Expr::Match { value, arms, .. } => {
             let v = eval_expr(value, env.clone())?;
 
             for arm in arms {
@@ -1319,13 +1319,13 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
         // `Ok(inner)` — constructor de la variante exitosa de Result.
         // Evaluamos el inner y lo envolvemos.
-        Expr::Ok(inner) => {
+        Expr::Ok(inner, _) => {
             let v = eval_expr(inner, env)?;
             Ok(Value::Result(ResultVariant::Ok(Box::new(v))))
         }
 
         // `Err(inner)` — constructor de la variante de error.
-        Expr::Err(inner) => {
+        Expr::Err(inner, _) => {
             let v = eval_expr(inner, env)?;
             Ok(Value::Result(ResultVariant::Err(Box::new(v))))
         }
@@ -1343,7 +1343,7 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // burbujea hasta `eval` y se reporta como "`return` solo puede
         // usarse adentro de una función". Mensaje genérico (deuda
         // explícita; mejora pendiente con un signal dedicado).
-        Expr::Try(inner) => {
+        Expr::Try(inner, _) => {
             let v = eval_expr(inner, env)?;
             match v {
                 Value::Result(ResultVariant::Ok(x)) => Ok(*x),
@@ -1381,7 +1381,7 @@ fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
 
 /// Resolver de llamadas. Despacha según la forma sintáctica del callee:
 ///
-///  - `Expr::Field { object, field }` → method call. Evalúa el receptor,
+///  - `Expr::Field { object, field, .. }` → method call. Evalúa el receptor,
 ///    los args, y consulta la tabla de métodos built-in
 ///    (`dispatch_method`). Si el receptor es una instancia y el "método"
 ///    no existe en la tabla, caemos al field access (por si el usuario
@@ -1390,10 +1390,10 @@ fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
 ///    despacha sobre `Value::Builtin` / `Value::Function`.
 ///
 /// El identificador para mensajes de error se deriva de la forma del
-/// callee: `Expr::Ident(n)` → `"n"`, otro → `"<expr>"`.
+/// callee: `Expr::Ident(n, _)` → `"n"`, otro → `"<expr>"`.
 fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
     // Method call.
-    if let Expr::Field { object, field } = callee {
+    if let Expr::Field { object, field, .. } = callee {
         let receiver = eval_expr(object, env.clone())?;
         let mut arg_values = Vec::with_capacity(args.len());
         for arg in args {
@@ -1417,7 +1417,7 @@ fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef) -> EvalResult<Value> {
 /// lo demás usa un placeholder.
 fn callee_display_name(callee: &Expr) -> String {
     match callee {
-        Expr::Ident(n) => n.clone(),
+        Expr::Ident(n, _) => n.clone(),
         _ => "<expr>".to_string(),
     }
 }
@@ -2193,31 +2193,31 @@ mod tests {
 
     #[test]
     fn evalua_int_literal() {
-        assert_eq!(eval_expr_test(Expr::Int(42)).unwrap(), Value::Int(42));
+        assert_eq!(eval_expr_test(Expr::Int(42, Span::ZERO)).unwrap(), Value::Int(42));
     }
 
     #[test]
     fn evalua_float_literal() {
-        assert_eq!(eval_expr_test(Expr::Float(3.14)).unwrap(), Value::Float(3.14));
+        assert_eq!(eval_expr_test(Expr::Float(3.14, Span::ZERO)).unwrap(), Value::Float(3.14));
     }
 
     #[test]
     fn evalua_string_literal() {
         assert_eq!(
-            eval_expr_test(Expr::Str("hola".into())).unwrap(),
+            eval_expr_test(Expr::Str("hola".into(), Span::ZERO)).unwrap(),
             Value::Str("hola".into())
         );
     }
 
     #[test]
     fn evalua_bool_literal() {
-        assert_eq!(eval_expr_test(Expr::Bool(true)).unwrap(), Value::Bool(true));
-        assert_eq!(eval_expr_test(Expr::Bool(false)).unwrap(), Value::Bool(false));
+        assert_eq!(eval_expr_test(Expr::Bool(true, Span::ZERO)).unwrap(), Value::Bool(true));
+        assert_eq!(eval_expr_test(Expr::Bool(false, Span::ZERO)).unwrap(), Value::Bool(false));
     }
 
     #[test]
     fn evalua_null_literal() {
-        assert_eq!(eval_expr_test(Expr::Null).unwrap(), Value::Null);
+        assert_eq!(eval_expr_test(Expr::Null(Span::ZERO)).unwrap(), Value::Null);
     }
 
     // ---- Ident ----
@@ -2227,14 +2227,14 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(99));
 
-        let result = eval_expr(&Expr::Ident("x".into()), env).unwrap();
+        let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), env).unwrap();
         assert_eq!(result, Value::Int(99));
     }
 
     #[test]
     fn ident_no_definido_devuelve_error() {
         let env = Environment::new();
-        let result = eval_expr(&Expr::Ident("nope".into()), env);
+        let result = eval_expr(&Expr::Ident("nope".into(), Span::ZERO), env);
 
         match result {
             Err(EvalSignal::Error(e)) => {
@@ -2250,7 +2250,7 @@ mod tests {
         global.borrow_mut().define("x", Value::Str("from_global".into()));
 
         let child = Environment::new_child(global);
-        let result = eval_expr(&Expr::Ident("x".into()), child).unwrap();
+        let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), child).unwrap();
         assert_eq!(result, Value::Str("from_global".into()));
     }
 
@@ -2259,7 +2259,7 @@ mod tests {
     #[test]
     fn stmt_expr_evalua_la_expresion_interna() {
         let env = Environment::new();
-        let stmt = Stmt::Expr(Expr::Int(7), Span::ZERO);
+        let stmt = Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO);
         let result = eval_stmt(&stmt, env).unwrap();
         assert_eq!(result, Value::Int(7));
     }
@@ -2316,24 +2316,24 @@ mod tests {
 
     /// Helper: construye `BinOp { op, left: l, right: r }` con boxes.
     fn binop(op: BinOpKind, l: Expr, r: Expr) -> Expr {
-        Expr::BinOp { op, left: Box::new(l), right: Box::new(r) }
+        Expr::BinOp { op, left: Box::new(l), right: Box::new(r), span: Span::ZERO }
     }
 
     #[test]
     fn add_int_int_da_int() {
-        let e = binop(BinOpKind::Add, Expr::Int(2), Expr::Int(3));
+        let e = binop(BinOpKind::Add, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(5));
     }
 
     #[test]
     fn add_int_float_promueve_a_float() {
-        let e = binop(BinOpKind::Add, Expr::Int(2), Expr::Float(0.5));
+        let e = binop(BinOpKind::Add, Expr::Int(2, Span::ZERO), Expr::Float(0.5, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Float(2.5));
     }
 
     #[test]
     fn add_float_int_promueve_a_float() {
-        let e = binop(BinOpKind::Add, Expr::Float(1.5), Expr::Int(2));
+        let e = binop(BinOpKind::Add, Expr::Float(1.5, Span::ZERO), Expr::Int(2, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Float(3.5));
     }
 
@@ -2341,15 +2341,15 @@ mod tests {
     fn add_strings_concatena() {
         let e = binop(
             BinOpKind::Add,
-            Expr::Str("hola ".into()),
-            Expr::Str("mundo".into()),
+            Expr::Str("hola ".into(), Span::ZERO),
+            Expr::Str("mundo".into(), Span::ZERO),
         );
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("hola mundo".into()));
     }
 
     #[test]
     fn add_tipos_incompatibles_es_type_error() {
-        let e = binop(BinOpKind::Add, Expr::Str("x".into()), Expr::Int(1));
+        let e = binop(BinOpKind::Add, Expr::Str("x".into(), Span::ZERO), Expr::Int(1, Span::ZERO));
         match eval_expr_test(e) {
             Err(EvalSignal::Error(err)) => {
                 assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
@@ -2360,29 +2360,29 @@ mod tests {
 
     #[test]
     fn sub_mul_funcionan() {
-        let sub = binop(BinOpKind::Sub, Expr::Int(10), Expr::Int(3));
+        let sub = binop(BinOpKind::Sub, Expr::Int(10, Span::ZERO), Expr::Int(3, Span::ZERO));
         assert_eq!(eval_expr_test(sub).unwrap(), Value::Int(7));
 
-        let mul = binop(BinOpKind::Mul, Expr::Int(4), Expr::Int(5));
+        let mul = binop(BinOpKind::Mul, Expr::Int(4, Span::ZERO), Expr::Int(5, Span::ZERO));
         assert_eq!(eval_expr_test(mul).unwrap(), Value::Int(20));
     }
 
     #[test]
     fn div_int_int_trunca() {
         // 10 / 3 = 3 (truncado), no 3.33
-        let e = binop(BinOpKind::Div, Expr::Int(10), Expr::Int(3));
+        let e = binop(BinOpKind::Div, Expr::Int(10, Span::ZERO), Expr::Int(3, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(3));
     }
 
     #[test]
     fn div_int_float_da_float() {
-        let e = binop(BinOpKind::Div, Expr::Int(10), Expr::Float(4.0));
+        let e = binop(BinOpKind::Div, Expr::Int(10, Span::ZERO), Expr::Float(4.0, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Float(2.5));
     }
 
     #[test]
     fn div_por_cero_int_es_error() {
-        let e = binop(BinOpKind::Div, Expr::Int(1), Expr::Int(0));
+        let e = binop(BinOpKind::Div, Expr::Int(1, Span::ZERO), Expr::Int(0, Span::ZERO));
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::DivisionByZero, .. })
@@ -2391,7 +2391,7 @@ mod tests {
 
     #[test]
     fn div_por_cero_float_es_error() {
-        let e = binop(BinOpKind::Div, Expr::Float(1.0), Expr::Float(0.0));
+        let e = binop(BinOpKind::Div, Expr::Float(1.0, Span::ZERO), Expr::Float(0.0, Span::ZERO));
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::DivisionByZero, .. })
@@ -2403,39 +2403,39 @@ mod tests {
     #[test]
     fn eq_con_coercion_int_float() {
         // 1 == 1.0 → true
-        let e = binop(BinOpKind::Eq, Expr::Int(1), Expr::Float(1.0));
+        let e = binop(BinOpKind::Eq, Expr::Int(1, Span::ZERO), Expr::Float(1.0, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn eq_tipos_distintos_da_false_sin_error() {
         // 1 == "1" → false (no error)
-        let e = binop(BinOpKind::Eq, Expr::Int(1), Expr::Str("1".into()));
+        let e = binop(BinOpKind::Eq, Expr::Int(1, Span::ZERO), Expr::Str("1".into(), Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(false));
     }
 
     #[test]
     fn noteq_funciona() {
-        let e = binop(BinOpKind::NotEq, Expr::Int(1), Expr::Int(2));
+        let e = binop(BinOpKind::NotEq, Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn lt_gt_lteq_gteq_numericos() {
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::Lt, Expr::Int(2), Expr::Int(3))).unwrap(),
+            eval_expr_test(binop(BinOpKind::Lt, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO))).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::Gt, Expr::Int(2), Expr::Int(3))).unwrap(),
+            eval_expr_test(binop(BinOpKind::Gt, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO))).unwrap(),
             Value::Bool(false)
         );
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::LtEq, Expr::Int(3), Expr::Int(3))).unwrap(),
+            eval_expr_test(binop(BinOpKind::LtEq, Expr::Int(3, Span::ZERO), Expr::Int(3, Span::ZERO))).unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::GtEq, Expr::Int(2), Expr::Int(3))).unwrap(),
+            eval_expr_test(binop(BinOpKind::GtEq, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO))).unwrap(),
             Value::Bool(false)
         );
     }
@@ -2443,7 +2443,7 @@ mod tests {
     #[test]
     fn comparacion_con_promocion_int_float() {
         // 2 < 2.5 → true
-        let e = binop(BinOpKind::Lt, Expr::Int(2), Expr::Float(2.5));
+        let e = binop(BinOpKind::Lt, Expr::Int(2, Span::ZERO), Expr::Float(2.5, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
 
@@ -2451,8 +2451,8 @@ mod tests {
     fn comparacion_de_strings_es_alfabetica() {
         let e = binop(
             BinOpKind::Lt,
-            Expr::Str("abc".into()),
-            Expr::Str("abd".into()),
+            Expr::Str("abc".into(), Span::ZERO),
+            Expr::Str("abd".into(), Span::ZERO),
         );
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
@@ -2460,7 +2460,7 @@ mod tests {
     #[test]
     fn comparacion_entre_bool_es_type_error() {
         // Bool no se compara con <. Sí con ==.
-        let e = binop(BinOpKind::Lt, Expr::Bool(true), Expr::Bool(false));
+        let e = binop(BinOpKind::Lt, Expr::Bool(true, Span::ZERO), Expr::Bool(false, Span::ZERO));
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
@@ -2471,7 +2471,7 @@ mod tests {
 
     #[test]
     fn and_true_true_da_true() {
-        let e = binop(BinOpKind::And, Expr::Bool(true), Expr::Bool(true));
+        let e = binop(BinOpKind::And, Expr::Bool(true, Span::ZERO), Expr::Bool(true, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
 
@@ -2481,8 +2481,8 @@ mod tests {
         // Como `false and ...` corta, devuelve false sin error.
         let e = binop(
             BinOpKind::And,
-            Expr::Bool(false),
-            Expr::Ident("no_existe".into()),
+            Expr::Bool(false, Span::ZERO),
+            Expr::Ident("no_existe".into(), Span::ZERO),
         );
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(false));
     }
@@ -2491,21 +2491,21 @@ mod tests {
     fn or_true_corta_y_no_evalua_derecho() {
         let e = binop(
             BinOpKind::Or,
-            Expr::Bool(true),
-            Expr::Ident("no_existe".into()),
+            Expr::Bool(true, Span::ZERO),
+            Expr::Ident("no_existe".into(), Span::ZERO),
         );
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn or_false_true_da_true() {
-        let e = binop(BinOpKind::Or, Expr::Bool(false), Expr::Bool(true));
+        let e = binop(BinOpKind::Or, Expr::Bool(false, Span::ZERO), Expr::Bool(true, Span::ZERO));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Bool(true));
     }
 
     #[test]
     fn and_con_no_bool_izquierda_es_type_error() {
-        let e = binop(BinOpKind::And, Expr::Int(1), Expr::Bool(true));
+        let e = binop(BinOpKind::And, Expr::Int(1, Span::ZERO), Expr::Bool(true, Span::ZERO));
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
@@ -2515,7 +2515,7 @@ mod tests {
     #[test]
     fn and_con_no_bool_derecha_es_type_error() {
         // Para que el lado derecho se evalúe, el izquierdo debe ser true.
-        let e = binop(BinOpKind::And, Expr::Bool(true), Expr::Int(1));
+        let e = binop(BinOpKind::And, Expr::Bool(true, Span::ZERO), Expr::Int(1, Span::ZERO));
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
@@ -2527,8 +2527,8 @@ mod tests {
     #[test]
     fn expresion_anidada_2_mas_3_por_4_da_14() {
         // 2 + (3 * 4) — Stmt::Expr para verificar wiring completo.
-        let inner = binop(BinOpKind::Mul, Expr::Int(3), Expr::Int(4));
-        let outer = binop(BinOpKind::Add, Expr::Int(2), inner);
+        let inner = binop(BinOpKind::Mul, Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO));
+        let outer = binop(BinOpKind::Add, Expr::Int(2, Span::ZERO), inner);
         assert_eq!(eval_expr_test(outer).unwrap(), Value::Int(14));
     }
 
@@ -2538,7 +2538,7 @@ mod tests {
     fn neg_int() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Int(5)),
+            operand: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(-5));
     }
@@ -2547,7 +2547,7 @@ mod tests {
     fn neg_float() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Float(3.14)),
+            operand: Box::new(Expr::Float(3.14, Span::ZERO)), span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Float(-3.14));
     }
@@ -2557,11 +2557,11 @@ mod tests {
         // -(-7) = 7
         let inner = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Int(7)),
+            operand: Box::new(Expr::Int(7, Span::ZERO)), span: Span::ZERO,
         };
         let outer = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(inner),
+            operand: Box::new(inner), span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(outer).unwrap(), Value::Int(7));
     }
@@ -2570,7 +2570,7 @@ mod tests {
     fn neg_de_bool_es_type_error() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Bool(true)),
+            operand: Box::new(Expr::Bool(true, Span::ZERO)), span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
@@ -2582,7 +2582,7 @@ mod tests {
     fn neg_de_string_es_type_error() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Str("hola".into())),
+            operand: Box::new(Expr::Str("hola".into(), Span::ZERO)), span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
@@ -2597,7 +2597,7 @@ mod tests {
         let env = Environment::new();
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
-            value: Expr::Int(42),
+            value: Expr::Int(42, Span::ZERO),
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
 
@@ -2611,7 +2611,7 @@ mod tests {
 
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
-            value: Expr::Int(99),
+            value: Expr::Int(99, Span::ZERO),
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
 
@@ -2626,7 +2626,7 @@ mod tests {
         let child = Environment::new_child(global.clone());
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
-            value: Expr::Int(42),
+            value: Expr::Int(42, Span::ZERO),
          span: Span::ZERO };
         eval_stmt(&stmt, child).unwrap();
 
@@ -2641,7 +2641,7 @@ mod tests {
 
         let stmt = Stmt::Assign { target: AssignTarget::Ident("nueva".into()),
             type_: None,
-            value: Expr::Int(7),
+            value: Expr::Int(7, Span::ZERO),
          span: Span::ZERO };
         eval_stmt(&stmt, child.clone()).unwrap();
 
@@ -2657,7 +2657,7 @@ mod tests {
         let env = Environment::new();
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: Some(TypeExpr::named("Int")),
-            value: Expr::Str("soy un string".into()),
+            value: Expr::Str("soy un string".into(), Span::ZERO),
          span: Span::ZERO };
         assert!(eval_stmt(&stmt, env.clone()).is_ok());
         assert_eq!(env.borrow().get("x"), Some(Value::Str("soy un string".into())));
@@ -2672,7 +2672,7 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Str("test".into())],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Str("test".into(), Span::ZERO)], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Null);
     }
@@ -2685,8 +2685,8 @@ mod tests {
         // distingue "esto es un nombre de función" sintácticamente.
         let env = Environment::new();
         let call = Expr::Call {
-            callee: Box::new(Expr::Ident("noexiste".into())),
-            args: vec![],
+            callee: Box::new(Expr::Ident("noexiste".into(), Span::ZERO)),
+            args: vec![], span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -2699,7 +2699,7 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(5));
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("x".into())), args: vec![],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("x".into(), Span::ZERO)), args: vec![], span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -2715,11 +2715,11 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::BinOp {
+        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::BinOp {
                 op: BinOpKind::Add,
-                left: Box::new(Expr::Int(1)),
-                right: Box::new(Expr::Int(2)),
-            }],
+                left: Box::new(Expr::Int(1, Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+            }], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Null);
     }
@@ -2731,7 +2731,7 @@ mod tests {
         let e = Expr::StrInterp(vec![
             StrPart::Lit("hola ".into()),
             StrPart::Lit("mundo".into()),
-        ]);
+        ], Span::ZERO);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("hola mundo".into()));
     }
 
@@ -2742,9 +2742,9 @@ mod tests {
 
         let e = Expr::StrInterp(vec![
             StrPart::Lit("Hola, ".into()),
-            StrPart::Expr(Expr::Ident("name".into())),
+            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
             StrPart::Lit("!".into()),
-        ]);
+        ], Span::ZERO);
         assert_eq!(
             eval_expr(&e, env).unwrap(),
             Value::Str("Hola, Fitz!".into())
@@ -2758,8 +2758,8 @@ mod tests {
 
         let e = Expr::StrInterp(vec![
             StrPart::Lit("x es ".into()),
-            StrPart::Expr(Expr::Ident("x".into())),
-        ]);
+            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+        ], Span::ZERO);
         assert_eq!(eval_expr(&e, env).unwrap(), Value::Str("x es 42".into()));
     }
 
@@ -2769,10 +2769,10 @@ mod tests {
         let e = Expr::StrInterp(vec![
             StrPart::Expr(Expr::BinOp {
                 op: BinOpKind::Add,
-                left: Box::new(Expr::Int(1)),
-                right: Box::new(Expr::Int(2)),
+                left: Box::new(Expr::Int(1, Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
             }),
-        ]);
+        ], Span::ZERO);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("3".into()));
     }
 
@@ -2801,7 +2801,7 @@ mod tests {
         let env = Environment::new();
         eval_stmt(&fn_def("f", vec![], vec![]), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Null);
     }
 
@@ -2810,11 +2810,11 @@ mod tests {
         // fn f() { return 42 } ; f()
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(42), Span::ZERO)]),
+            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(42, Span::ZERO), Span::ZERO)]),
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(42));
     }
 
@@ -2825,12 +2825,12 @@ mod tests {
         let env = Environment::new();
         let body = vec![Stmt::Return(Expr::BinOp {
             op: BinOpKind::Mul,
-            left: Box::new(Expr::Ident("n".into())),
-            right: Box::new(Expr::Int(2)),
+            left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+            right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
         }, Span::ZERO)];
         eval_stmt(&fn_def("double", vec!["n"], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Int(7)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("double".into(), Span::ZERO)), args: vec![Expr::Int(7, Span::ZERO)], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(14));
     }
@@ -2841,12 +2841,12 @@ mod tests {
         let env = Environment::new();
         let body = vec![Stmt::Return(Expr::BinOp {
             op: BinOpKind::Add,
-            left: Box::new(Expr::Ident("a".into())),
-            right: Box::new(Expr::Ident("b".into())),
+            left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+            right: Box::new(Expr::Ident("b".into(), Span::ZERO)), span: Span::ZERO,
         }, Span::ZERO)];
         eval_stmt(&fn_def("add", vec!["a", "b"], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("add".into())), args: vec![Expr::Int(3), Expr::Int(4)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("add".into(), Span::ZERO)), args: vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(7));
     }
@@ -2861,10 +2861,10 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(10));
 
-        let body = vec![Stmt::Return(Expr::Ident("x".into()), Span::ZERO)];
+        let body = vec![Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO)];
         eval_stmt(&fn_def("get_x", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("get_x".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("get_x".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(10));
     }
 
@@ -2874,10 +2874,10 @@ mod tests {
         let env = Environment::new();
         env.borrow_mut().define("x", Value::Int(100));
 
-        let body = vec![Stmt::Return(Expr::Ident("x".into()), Span::ZERO)];
+        let body = vec![Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO)];
         eval_stmt(&fn_def("f", vec!["x"], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(7)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(7, Span::ZERO)], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(7));
     }
@@ -2887,11 +2887,11 @@ mod tests {
         // fn f(a, b) ... ; f(1)
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec!["a", "b"], vec![Stmt::Return(Expr::Int(0), Span::ZERO)]),
+            &fn_def("f", vec!["a", "b"], vec![Stmt::Return(Expr::Int(0, Span::ZERO), Span::ZERO)]),
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(1)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO)], span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -2905,11 +2905,11 @@ mod tests {
     fn fn_con_muchos_args_es_error() {
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(0), Span::ZERO)]),
+            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(0, Span::ZERO), Span::ZERO)]),
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(1), Expr::Int(2)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -2922,7 +2922,7 @@ mod tests {
     #[test]
     fn return_fuera_de_fn_es_error() {
         // En el top level, `return 5` no tiene caller que lo intercepte.
-        let result = eval(vec![Stmt::Return(Expr::Int(5), Span::ZERO)]);
+        let result = eval(vec![Stmt::Return(Expr::Int(5, Span::ZERO), Span::ZERO)]);
         assert!(matches!(
             result.unwrap_err().kind,
             ErrorKind::ReturnOutsideFunction
@@ -2942,19 +2942,19 @@ mod tests {
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into())),
-                    right: Box::new(Expr::Int(2)),
+                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
                 },
              span: Span::ZERO },
             Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Add,
-                left: Box::new(Expr::Ident("x".into())),
-                right: Box::new(Expr::Int(1)),
+                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
             }, Span::ZERO),
         ];
         eval_stmt(&fn_def("f", vec!["n"], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![Expr::Int(5)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(5, Span::ZERO)], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(11));
     }
@@ -2967,12 +2967,12 @@ mod tests {
         // }
         let env = Environment::new();
         let body = vec![
-            Stmt::Return(Expr::Int(1), Span::ZERO),
-            Stmt::Return(Expr::Int(2), Span::ZERO),
+            Stmt::Return(Expr::Int(1, Span::ZERO), Span::ZERO),
+            Stmt::Return(Expr::Int(2, Span::ZERO), Span::ZERO),
         ];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(1));
     }
 
@@ -2980,38 +2980,38 @@ mod tests {
 
     /// Helper: arma `if cond { then } else? { else_ }`.
     fn if_expr(cond: Expr, then: Vec<Stmt>, else_: Option<Vec<Stmt>>) -> Expr {
-        Expr::If { condition: Box::new(cond), then, else_ }
+        Expr::If { condition: Box::new(cond), then, else_, span: Span::ZERO }
     }
 
     #[test]
     fn if_true_sin_else_devuelve_valor_del_then() {
         // if true { 7 } → 7
-        let e = if_expr(Expr::Bool(true), vec![Stmt::Expr(Expr::Int(7), Span::ZERO)], None);
+        let e = if_expr(Expr::Bool(true, Span::ZERO), vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)], None);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(7));
     }
 
     #[test]
     fn if_false_sin_else_devuelve_null() {
-        let e = if_expr(Expr::Bool(false), vec![Stmt::Expr(Expr::Int(7), Span::ZERO)], None);
+        let e = if_expr(Expr::Bool(false, Span::ZERO), vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)], None);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Null);
     }
 
     #[test]
     fn if_else_toma_la_rama_correcta() {
         // if true { 1 } else { 2 } → 1
-        let then = vec![Stmt::Expr(Expr::Int(1), Span::ZERO)];
-        let else_ = vec![Stmt::Expr(Expr::Int(2), Span::ZERO)];
-        let e = if_expr(Expr::Bool(true), then.clone(), Some(else_.clone()));
+        let then = vec![Stmt::Expr(Expr::Int(1, Span::ZERO), Span::ZERO)];
+        let else_ = vec![Stmt::Expr(Expr::Int(2, Span::ZERO), Span::ZERO)];
+        let e = if_expr(Expr::Bool(true, Span::ZERO), then.clone(), Some(else_.clone()));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(1));
 
-        let e = if_expr(Expr::Bool(false), then, Some(else_));
+        let e = if_expr(Expr::Bool(false, Span::ZERO), then, Some(else_));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(2));
     }
 
     #[test]
     fn if_condicion_no_bool_es_type_error() {
         // if 1 { ... } → error (no truthy coercion).
-        let e = if_expr(Expr::Int(1), vec![], None);
+        let e = if_expr(Expr::Int(1, Span::ZERO), vec![], None);
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
@@ -3022,9 +3022,9 @@ mod tests {
     fn if_evalua_solo_la_rama_correspondiente() {
         // El then es un Ident no definido. Si se evaluara, daría error.
         // Como cond es false, no se toca → resultado del else.
-        let then = vec![Stmt::Expr(Expr::Ident("no_existe".into()), Span::ZERO)];
-        let else_ = vec![Stmt::Expr(Expr::Int(99), Span::ZERO)];
-        let e = if_expr(Expr::Bool(false), then, Some(else_));
+        let then = vec![Stmt::Expr(Expr::Ident("no_existe".into(), Span::ZERO), Span::ZERO)];
+        let else_ = vec![Stmt::Expr(Expr::Int(99, Span::ZERO), Span::ZERO)];
+        let e = if_expr(Expr::Bool(false, Span::ZERO), then, Some(else_));
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(99));
     }
 
@@ -3039,12 +3039,12 @@ mod tests {
         let if_stmt = Stmt::Expr(if_expr(
             Expr::BinOp {
                 op: BinOpKind::Eq,
-                left: Box::new(Expr::Ident("x".into())),
-                right: Box::new(Expr::Int(1)),
+                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
             },
             vec![Stmt::Assign { target: AssignTarget::Ident("y".into()),
                 type_: None,
-                value: Expr::Int(99),
+                value: Expr::Int(99, Span::ZERO),
              span: Span::ZERO }],
             None,
         ), Span::ZERO);
@@ -3059,13 +3059,13 @@ mod tests {
         //
         // El parser modela `else if` como `else_: vec![Stmt::Expr(Expr::If, Span::ZERO)]`.
         let inner = if_expr(
-            Expr::Bool(true),
-            vec![Stmt::Expr(Expr::Int(2), Span::ZERO)],
-            Some(vec![Stmt::Expr(Expr::Int(3), Span::ZERO)]),
+            Expr::Bool(true, Span::ZERO),
+            vec![Stmt::Expr(Expr::Int(2, Span::ZERO), Span::ZERO)],
+            Some(vec![Stmt::Expr(Expr::Int(3, Span::ZERO), Span::ZERO)]),
         );
         let outer = if_expr(
-            Expr::Bool(false),
-            vec![Stmt::Expr(Expr::Int(1), Span::ZERO)],
+            Expr::Bool(false, Span::ZERO),
+            vec![Stmt::Expr(Expr::Int(1, Span::ZERO), Span::ZERO)],
             Some(vec![Stmt::Expr(inner, Span::ZERO)]),
         );
         assert_eq!(eval_expr_test(outer).unwrap(), Value::Int(2));
@@ -3078,9 +3078,9 @@ mod tests {
         let stmt = Stmt::Assign { target: AssignTarget::Ident("r".into()),
             type_: None,
             value: if_expr(
-                Expr::Bool(true),
-                vec![Stmt::Expr(Expr::Int(42), Span::ZERO)],
-                Some(vec![Stmt::Expr(Expr::Int(0), Span::ZERO)]),
+                Expr::Bool(true, Span::ZERO),
+                vec![Stmt::Expr(Expr::Int(42, Span::ZERO), Span::ZERO)],
+                Some(vec![Stmt::Expr(Expr::Int(0, Span::ZERO), Span::ZERO)]),
             ),
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
@@ -3103,27 +3103,27 @@ mod tests {
             Stmt::Expr(if_expr(
                 Expr::BinOp {
                     op: BinOpKind::Eq,
-                    left: Box::new(Expr::Ident("n".into())),
-                    right: Box::new(Expr::Int(0)),
+                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
                 },
-                vec![Stmt::Return(Expr::Int(1), Span::ZERO)],
+                vec![Stmt::Return(Expr::Int(1, Span::ZERO), Span::ZERO)],
                 None,
             ), Span::ZERO),
             Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
-                left: Box::new(Expr::Ident("n".into())),
-                right: Box::new(Expr::Call { callee: Box::new(Expr::Ident("factorial".into())), args: vec![Expr::BinOp {
+                left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                right: Box::new(Expr::Call { callee: Box::new(Expr::Ident("factorial".into(), Span::ZERO)), args: vec![Expr::BinOp {
                         op: BinOpKind::Sub,
-                        left: Box::new(Expr::Ident("n".into())),
-                        right: Box::new(Expr::Int(1)),
-                    }],
-                }),
+                        left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                    }], span: Span::ZERO,
+                }), span: Span::ZERO,
             }, Span::ZERO),
         ];
 
         eval_stmt(&fn_def("factorial", vec!["n"], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("factorial".into())), args: vec![Expr::Int(5)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("factorial".into(), Span::ZERO)), args: vec![Expr::Int(5, Span::ZERO)], span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(120));
     }
@@ -3140,8 +3140,8 @@ mod tests {
     fn match_wildcard_siempre_matchea() {
         // match 42 { _ => 99 } → 99
         let e = Expr::Match {
-            value: Box::new(Expr::Int(42)),
-            arms: vec![match_arm(Pattern::Wildcard, Expr::Int(99))],
+            value: Box::new(Expr::Int(42, Span::ZERO)),
+            arms: vec![match_arm(Pattern::Wildcard, Expr::Int(99, Span::ZERO))], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(99));
     }
@@ -3150,15 +3150,15 @@ mod tests {
     fn match_ident_bindea_el_valor() {
         // match 42 { n => n + 1 } → 43
         let e = Expr::Match {
-            value: Box::new(Expr::Int(42)),
+            value: Box::new(Expr::Int(42, Span::ZERO)),
             arms: vec![match_arm(
                 Pattern::Ident("n".into()),
                 Expr::BinOp {
                     op: BinOpKind::Add,
-                    left: Box::new(Expr::Ident("n".into())),
-                    right: Box::new(Expr::Int(1)),
+                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
                 },
-            )],
+            )], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(43));
     }
@@ -3170,17 +3170,17 @@ mod tests {
         //     _ => "segundo arm (no se toca)",
         // }
         let e = Expr::Match {
-            value: Box::new(Expr::Str("hola".into())),
+            value: Box::new(Expr::Str("hola".into(), Span::ZERO)),
             arms: vec![
                 match_arm(
                     Pattern::Ident("x".into()),
                     Expr::StrInterp(vec![
                         StrPart::Lit("primer arm: ".into()),
-                        StrPart::Expr(Expr::Ident("x".into())),
-                    ]),
+                        StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                    ], Span::ZERO),
                 ),
-                match_arm(Pattern::Wildcard, Expr::Str("segundo arm".into())),
-            ],
+                match_arm(Pattern::Wildcard, Expr::Str("segundo arm".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("primer arm: hola".into()));
     }
@@ -3190,8 +3190,8 @@ mod tests {
         // El binding `n` no debe escapar al scope contenedor.
         let env = Environment::new();
         let e = Expr::Match {
-            value: Box::new(Expr::Int(7)),
-            arms: vec![match_arm(Pattern::Ident("n".into()), Expr::Ident("n".into()))],
+            value: Box::new(Expr::Int(7, Span::ZERO)),
+            arms: vec![match_arm(Pattern::Ident("n".into()), Expr::Ident("n".into(), Span::ZERO))], span: Span::ZERO,
         };
         eval_expr(&e, env.clone()).unwrap();
 
@@ -3203,18 +3203,18 @@ mod tests {
     fn match_ok_binding_bindea_inner() {
         // match Ok(5) { Ok(v) => v + 1, Err(e) => -1 } → 6
         let e = Expr::Match {
-            value: Box::new(Expr::Ok(Box::new(Expr::Int(5)))),
+            value: Box::new(Expr::Ok(Box::new(Expr::Int(5, Span::ZERO)), Span::ZERO)),
             arms: vec![
                 match_arm(
                     Pattern::OkBinding("v".into()),
                     Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("v".into())),
-                        right: Box::new(Expr::Int(1)),
+                        left: Box::new(Expr::Ident("v".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
                     },
                 ),
-                match_arm(Pattern::ErrBinding("e".into()), Expr::Int(-1)),
-            ],
+                match_arm(Pattern::ErrBinding("e".into()), Expr::Int(-1, Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(6));
     }
@@ -3223,11 +3223,11 @@ mod tests {
     fn match_err_binding_bindea_inner() {
         // match Err("boom") { Ok(v) => "ok", Err(e) => e } → "boom"
         let e = Expr::Match {
-            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into())))),
+            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
-                match_arm(Pattern::ErrBinding("e".into()), Expr::Ident("e".into())),
-            ],
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(Pattern::ErrBinding("e".into()), Expr::Ident("e".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("boom".into()));
     }
@@ -3236,11 +3236,11 @@ mod tests {
     fn match_ok_no_matchea_err() {
         // El patrón Ok(_) NO matchea contra Err(_) — sigue al siguiente arm.
         let e = Expr::Match {
-            value: Box::new(Expr::Err(Box::new(Expr::Int(1)))),
+            value: Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
-            ],
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("otro".into()));
     }
@@ -3249,11 +3249,11 @@ mod tests {
     fn match_ok_no_matchea_no_result() {
         // Ok(v) sobre un valor que no es Result → no matchea, cae en wildcard.
         let e = Expr::Match {
-            value: Box::new(Expr::Int(5)),
+            value: Box::new(Expr::Int(5, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("no-result".into())),
-            ],
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("no-result".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("no-result".into()));
     }
@@ -3264,11 +3264,11 @@ mod tests {
         // inner. Cierra la deuda vieja de 3.3 donde `_` adentro se
         // bindeaba como var llamada `_`.
         let e = Expr::Match {
-            value: Box::new(Expr::Ok(Box::new(Expr::Int(99)))),
+            value: Box::new(Expr::Ok(Box::new(Expr::Int(99, Span::ZERO)), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkWildcard, Expr::Str("ok!".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
-            ],
+                match_arm(Pattern::OkWildcard, Expr::Str("ok!".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("ok!".into()));
     }
@@ -3276,11 +3276,11 @@ mod tests {
     #[test]
     fn match_err_wildcard_matchea_err() {
         let e = Expr::Match {
-            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into())))),
+            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
-                match_arm(Pattern::ErrWildcard, Expr::Str("falló".into())),
-            ],
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(Pattern::ErrWildcard, Expr::Str("falló".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("falló".into()));
     }
@@ -3289,11 +3289,11 @@ mod tests {
     fn match_ok_wildcard_no_matchea_err() {
         // OkWildcard NO debe matchear Err.
         let e = Expr::Match {
-            value: Box::new(Expr::Err(Box::new(Expr::Int(0)))),
+            value: Box::new(Expr::Err(Box::new(Expr::Int(0, Span::ZERO)), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkWildcard, Expr::Str("ok".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
-            ],
+                match_arm(Pattern::OkWildcard, Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("otro".into()));
     }
@@ -3320,12 +3320,12 @@ print(_)\n";
     fn match_literal_int_matchea() {
         // match 2 { 1 => "uno", 2 => "dos", _ => "otro" } → "dos"
         let e = Expr::Match {
-            value: Box::new(Expr::Int(2)),
+            value: Box::new(Expr::Int(2, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Int(1), Expr::Str("uno".into())),
-                match_arm(Pattern::Int(2), Expr::Str("dos".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
-            ],
+                match_arm(Pattern::Int(1), Expr::Str("uno".into(), Span::ZERO)),
+                match_arm(Pattern::Int(2), Expr::Str("dos".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("dos".into()));
     }
@@ -3335,11 +3335,11 @@ print(_)\n";
         // match 1.0 { 1 => "int", _ => "no-int" } → "no-int"
         // (En match, igualdad es estructural — sin la coerción del `==`).
         let e = Expr::Match {
-            value: Box::new(Expr::Float(1.0)),
+            value: Box::new(Expr::Float(1.0, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Int(1), Expr::Str("int".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("no-int".into())),
-            ],
+                match_arm(Pattern::Int(1), Expr::Str("int".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("no-int".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("no-int".into()));
     }
@@ -3347,12 +3347,12 @@ print(_)\n";
     #[test]
     fn match_literal_str_matchea() {
         let e = Expr::Match {
-            value: Box::new(Expr::Str("hola".into())),
+            value: Box::new(Expr::Str("hola".into(), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Str("chau".into()), Expr::Int(1)),
-                match_arm(Pattern::Str("hola".into()), Expr::Int(2)),
-                match_arm(Pattern::Wildcard, Expr::Int(0)),
-            ],
+                match_arm(Pattern::Str("chau".into()), Expr::Int(1, Span::ZERO)),
+                match_arm(Pattern::Str("hola".into()), Expr::Int(2, Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Int(0, Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(2));
     }
@@ -3360,11 +3360,11 @@ print(_)\n";
     #[test]
     fn match_literal_bool_matchea() {
         let e = Expr::Match {
-            value: Box::new(Expr::Bool(true)),
+            value: Box::new(Expr::Bool(true, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Bool(false), Expr::Str("falso".into())),
-                match_arm(Pattern::Bool(true), Expr::Str("verdadero".into())),
-            ],
+                match_arm(Pattern::Bool(false), Expr::Str("falso".into(), Span::ZERO)),
+                match_arm(Pattern::Bool(true), Expr::Str("verdadero".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("verdadero".into()));
     }
@@ -3372,11 +3372,11 @@ print(_)\n";
     #[test]
     fn match_literal_null_matchea() {
         let e = Expr::Match {
-            value: Box::new(Expr::Null),
+            value: Box::new(Expr::Null(Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Null, Expr::Str("es null".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("no null".into())),
-            ],
+                match_arm(Pattern::Null, Expr::Str("es null".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("no null".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("es null".into()));
     }
@@ -3384,11 +3384,11 @@ print(_)\n";
     #[test]
     fn match_int_negativo_matchea() {
         let e = Expr::Match {
-            value: Box::new(Expr::Int(-5)),
+            value: Box::new(Expr::Int(-5, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Int(-5), Expr::Str("menos cinco".into())),
-                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
-            ],
+                match_arm(Pattern::Int(-5), Expr::Str("menos cinco".into(), Span::ZERO)),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("menos cinco".into()));
     }
@@ -3397,17 +3397,17 @@ print(_)\n";
     fn match_literales_caen_a_ident_si_ninguno_matchea() {
         // match 42 { 1 => "uno", n => "default ${n}" }
         let e = Expr::Match {
-            value: Box::new(Expr::Int(42)),
+            value: Box::new(Expr::Int(42, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Int(1), Expr::Str("uno".into())),
+                match_arm(Pattern::Int(1), Expr::Str("uno".into(), Span::ZERO)),
                 match_arm(
                     Pattern::Ident("n".into()),
                     Expr::StrInterp(vec![
                         StrPart::Lit("default ".into()),
-                        StrPart::Expr(Expr::Ident("n".into())),
-                    ]),
+                        StrPart::Expr(Expr::Ident("n".into(), Span::ZERO)),
+                    ], Span::ZERO),
                 ),
-            ],
+            ], span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("default 42".into()));
     }
@@ -3415,8 +3415,8 @@ print(_)\n";
     #[test]
     fn match_sin_arms_es_error() {
         let e = Expr::Match {
-            value: Box::new(Expr::Int(1)),
-            arms: vec![],
+            value: Box::new(Expr::Int(1, Span::ZERO)),
+            arms: vec![], span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr_test(e).unwrap_err(),
@@ -3439,24 +3439,24 @@ print(_)\n";
         let stmt = Stmt::While {
             condition: Expr::BinOp {
                 op: BinOpKind::Lt,
-                left: Box::new(Expr::Ident("i".into())),
-                right: Box::new(Expr::Int(5)),
+                left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
             },
             body: vec![
                 Stmt::Assign { target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("total".into())),
-                        right: Box::new(Expr::Ident("i".into())),
+                        left: Box::new(Expr::Ident("total".into(), Span::ZERO)),
+                        right: Box::new(Expr::Ident("i".into(), Span::ZERO)), span: Span::ZERO,
                     },
                  span: Span::ZERO },
                 Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("i".into())),
-                        right: Box::new(Expr::Int(1)),
+                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
                     },
                  span: Span::ZERO },
             ],
@@ -3471,10 +3471,10 @@ print(_)\n";
         env.borrow_mut().define("counter", Value::Int(0));
 
         let stmt = Stmt::While {
-            condition: Expr::Bool(false),
+            condition: Expr::Bool(false, Span::ZERO),
             body: vec![Stmt::Assign { target: AssignTarget::Ident("counter".into()),
                 type_: None,
-                value: Expr::Int(99),
+                value: Expr::Int(99, Span::ZERO),
              span: Span::ZERO }],
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).unwrap();
@@ -3488,24 +3488,24 @@ print(_)\n";
 
         // while true { i = i + 1; if i == 3 { break } }
         let stmt = Stmt::While {
-            condition: Expr::Bool(true),
+            condition: Expr::Bool(true, Span::ZERO),
             body: vec![
                 Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("i".into())),
-                        right: Box::new(Expr::Int(1)),
+                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
                     },
                  span: Span::ZERO },
                 Stmt::Expr(Expr::If {
                     condition: Box::new(Expr::BinOp {
                         op: BinOpKind::Eq,
-                        left: Box::new(Expr::Ident("i".into())),
-                        right: Box::new(Expr::Int(3)),
+                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
                     }),
                     then: vec![Stmt::Break(Span::ZERO)],
-                    else_: None,
+                    else_: None, span: Span::ZERO,
                 }, Span::ZERO),
             ],
           span: Span::ZERO };
@@ -3528,33 +3528,33 @@ print(_)\n";
         let stmt = Stmt::While {
             condition: Expr::BinOp {
                 op: BinOpKind::Lt,
-                left: Box::new(Expr::Ident("i".into())),
-                right: Box::new(Expr::Int(5)),
+                left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
             },
             body: vec![
                 Stmt::Assign { target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("i".into())),
-                        right: Box::new(Expr::Int(1)),
+                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
                     },
                  span: Span::ZERO },
                 Stmt::Expr(Expr::If {
                     condition: Box::new(Expr::BinOp {
                         op: BinOpKind::Eq,
-                        left: Box::new(Expr::Ident("i".into())),
-                        right: Box::new(Expr::Int(3)),
+                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
                     }),
                     then: vec![Stmt::Continue(Span::ZERO)],
-                    else_: None,
+                    else_: None, span: Span::ZERO,
                 }, Span::ZERO),
                 Stmt::Assign { target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("total".into())),
-                        right: Box::new(Expr::Ident("i".into())),
+                        left: Box::new(Expr::Ident("total".into(), Span::ZERO)),
+                        right: Box::new(Expr::Ident("i".into(), Span::ZERO)), span: Span::ZERO,
                     },
                  span: Span::ZERO },
             ],
@@ -3567,7 +3567,7 @@ print(_)\n";
     fn while_cond_no_bool_es_type_error() {
         let env = Environment::new();
         let stmt = Stmt::While {
-            condition: Expr::Int(1),
+            condition: Expr::Int(1, Span::ZERO),
             body: vec![],
          span: Span::ZERO };
         assert!(matches!(
@@ -3591,18 +3591,18 @@ print(_)\n";
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
-                        left: Box::new(Expr::Ident("count".into())),
-                        right: Box::new(Expr::Int(1)),
+                        left: Box::new(Expr::Ident("count".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
                     },
                  span: Span::ZERO },
                 Stmt::Expr(Expr::If {
                     condition: Box::new(Expr::BinOp {
                         op: BinOpKind::Eq,
-                        left: Box::new(Expr::Ident("count".into())),
-                        right: Box::new(Expr::Int(5)),
+                        left: Box::new(Expr::Ident("count".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
                     }),
                     then: vec![Stmt::Break(Span::ZERO)],
-                    else_: None,
+                    else_: None, span: Span::ZERO,
                 }, Span::ZERO),
             ],
           span: Span::ZERO };
@@ -3618,12 +3618,12 @@ print(_)\n";
         // f() → 42
         let env = Environment::new();
         let body = vec![Stmt::While {
-            condition: Expr::Bool(true),
-            body: vec![Stmt::Return(Expr::Int(42), Span::ZERO)],
+            condition: Expr::Bool(true, Span::ZERO),
+            body: vec![Stmt::Return(Expr::Int(42, Span::ZERO), Span::ZERO)],
          span: Span::ZERO }];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(42));
     }
 
@@ -3691,7 +3691,7 @@ print(_)\n";
             env.clone(),
         ).unwrap();
 
-        let result = eval_expr(&Expr::Ident("User".into()), env).unwrap();
+        let result = eval_expr(&Expr::Ident("User".into(), Span::ZERO), env).unwrap();
         assert!(matches!(result, Value::Type { .. }));
     }
 
@@ -3708,7 +3708,7 @@ print(_)\n";
             env.clone(),
         ).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("User".into())), args: vec![Expr::Int(1)],
+        let call = Expr::Call { callee: Box::new(Expr::Ident("User".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO)], span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).unwrap_err(),
@@ -3733,34 +3733,34 @@ print(_)\n";
         let program = vec![
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
-                value: Expr::Str("Fitz".into()),
+                value: Expr::Str("Fitz".into(), Span::ZERO),
              span: Span::ZERO },
             Stmt::Assign { target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
-                    left: Box::new(Expr::Int(10)),
-                    right: Box::new(Expr::Int(5)),
+                    left: Box::new(Expr::Int(10, Span::ZERO)),
+                    right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
                 },
              span: Span::ZERO },
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola ".into()),
-                    StrPart::Expr(Expr::Ident("name".into())),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
                     StrPart::Lit(", x es ".into()),
-                    StrPart::Expr(Expr::Ident("x".into())),
-                ])],
+                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO),
             fn_def(
                 "double",
                 vec!["n"],
                 vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into())),
-                    right: Box::new(Expr::Int(2)),
+                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
                 }, Span::ZERO)],
             ),
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into())), args: vec![Expr::Ident("x".into())],
-                }],
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
+                }], span: Span::ZERO,
             }, Span::ZERO),
         ];
         assert!(eval(program).is_ok());
@@ -3813,13 +3813,13 @@ print(factorial(5))
         let program = vec![
             Stmt::Assign { target: AssignTarget::Ident("name".into()),
                 type_: None,
-                value: Expr::Str("Patagonia".into()),
+                value: Expr::Str("Patagonia".into(), Span::ZERO),
              span: Span::ZERO },
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into())), args: vec![Expr::StrInterp(vec![
+            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into())),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
                     StrPart::Lit("!".into()),
-                ])],
+                ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO),
         ];
         assert!(eval(program).is_ok());
@@ -3855,17 +3855,17 @@ print(factorial(5))
 
     #[test]
     fn evalua_list_vacia() {
-        let v = eval_expr_test(Expr::List(vec![])).unwrap();
+        let v = eval_expr_test(Expr::List(vec![], Span::ZERO)).unwrap();
         assert_eq!(v, Value::new_list(vec![]));
     }
 
     #[test]
     fn evalua_list_con_literales() {
         let v = eval_expr_test(Expr::List(vec![
-            Expr::Int(1),
-            Expr::Int(2),
-            Expr::Int(3),
-        ])).unwrap();
+            Expr::Int(1, Span::ZERO),
+            Expr::Int(2, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        ], Span::ZERO)).unwrap();
         assert_eq!(v, Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
     }
 
@@ -3875,15 +3875,15 @@ print(factorial(5))
         let v = eval_expr_test(Expr::List(vec![
             Expr::BinOp {
                 op: BinOpKind::Add,
-                left: Box::new(Expr::Int(1)),
-                right: Box::new(Expr::Int(1)),
+                left: Box::new(Expr::Int(1, Span::ZERO)),
+                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
             },
             Expr::BinOp {
                 op: BinOpKind::Mul,
-                left: Box::new(Expr::Int(2)),
-                right: Box::new(Expr::Int(2)),
+                left: Box::new(Expr::Int(2, Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
             },
-        ])).unwrap();
+        ], Span::ZERO)).unwrap();
         assert_eq!(v, Value::new_list(vec![Value::Int(2), Value::Int(4)]));
     }
 
@@ -3891,16 +3891,16 @@ print(factorial(5))
 
     #[test]
     fn evalua_map_vacio() {
-        let v = eval_expr_test(Expr::Map(vec![])).unwrap();
+        let v = eval_expr_test(Expr::Map(vec![], Span::ZERO)).unwrap();
         assert_eq!(v, Value::new_map(vec![]));
     }
 
     #[test]
     fn evalua_map_con_pares() {
         let v = eval_expr_test(Expr::Map(vec![
-            (Expr::Str("a".into()), Expr::Int(1)),
-            (Expr::Str("b".into()), Expr::Int(2)),
-        ])).unwrap();
+            (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+            (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+        ], Span::ZERO)).unwrap();
         assert_eq!(
             v,
             Value::new_map(vec![
@@ -3915,8 +3915,8 @@ print(factorial(5))
     #[test]
     fn evalua_range_simple() {
         let v = eval_expr_test(Expr::Range {
-            start: Box::new(Expr::Int(0)),
-            end: Box::new(Expr::Int(10)),
+            start: Box::new(Expr::Int(0, Span::ZERO)),
+            end: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
         }).unwrap();
         assert_eq!(v, Value::Range { start: 0, end: 10 });
     }
@@ -3925,8 +3925,8 @@ print(factorial(5))
     fn evalua_range_con_float_es_error() {
         // 0..1.5 — float no es Int.
         let res = eval_expr_test(Expr::Range {
-            start: Box::new(Expr::Int(0)),
-            end: Box::new(Expr::Float(1.5)),
+            start: Box::new(Expr::Int(0, Span::ZERO)),
+            end: Box::new(Expr::Float(1.5, Span::ZERO)), span: Span::ZERO,
         });
         let err = res.unwrap_err();
         match err {
@@ -3941,8 +3941,8 @@ print(factorial(5))
     fn index_list_con_int_valido() {
         // [10, 20, 30][1] → 20
         let v = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(10), Expr::Int(20), Expr::Int(30)])),
-            index: Box::new(Expr::Int(1)),
+            object: Box::new(Expr::List(vec![Expr::Int(10, Span::ZERO), Expr::Int(20, Span::ZERO), Expr::Int(30, Span::ZERO)], Span::ZERO)),
+            index: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
         }).unwrap();
         assert_eq!(v, Value::Int(20));
     }
@@ -3951,8 +3951,8 @@ print(factorial(5))
     fn index_list_fuera_de_rango_es_error() {
         // [1, 2][5]
         let res = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(1), Expr::Int(2)])),
-            index: Box::new(Expr::Int(5)),
+            object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO)),
+            index: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
         });
         let err = res.unwrap_err();
         match err {
@@ -3967,11 +3967,11 @@ print(factorial(5))
     fn index_list_negativo_es_error() {
         // [1, 2][-1] — sin Python-style por ahora
         let res = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(1), Expr::Int(2)])),
+            object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO)),
             index: Box::new(Expr::UnaryOp {
                 op: UnaryOpKind::Neg,
-                operand: Box::new(Expr::Int(1)),
-            }),
+                operand: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+            }), span: Span::ZERO,
         });
         let err = res.unwrap_err();
         match err {
@@ -3983,8 +3983,8 @@ print(factorial(5))
     #[test]
     fn index_list_con_string_es_type_error() {
         let res = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(1)])),
-            index: Box::new(Expr::Str("a".into())),
+            object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO)], Span::ZERO)),
+            index: Box::new(Expr::Str("a".into(), Span::ZERO)), span: Span::ZERO,
         });
         let err = res.unwrap_err();
         match err {
@@ -3998,10 +3998,10 @@ print(factorial(5))
         // {"a": 1, "b": 2}["b"] → 2
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Map(vec![
-                (Expr::Str("a".into()), Expr::Int(1)),
-                (Expr::Str("b".into()), Expr::Int(2)),
-            ])),
-            index: Box::new(Expr::Str("b".into())),
+                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+            ], Span::ZERO)),
+            index: Box::new(Expr::Str("b".into(), Span::ZERO)), span: Span::ZERO,
         }).unwrap();
         assert_eq!(v, Value::Int(2));
     }
@@ -4010,9 +4010,9 @@ print(factorial(5))
     fn index_map_clave_inexistente_es_error() {
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Map(vec![
-                (Expr::Str("a".into()), Expr::Int(1)),
-            ])),
-            index: Box::new(Expr::Str("z".into())),
+                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+            ], Span::ZERO)),
+            index: Box::new(Expr::Str("z".into(), Span::ZERO)), span: Span::ZERO,
         });
         let err = res.unwrap_err();
         match err {
@@ -4025,8 +4025,8 @@ print(factorial(5))
     fn index_sobre_int_es_type_error() {
         // 42[0] — Int no se indexa
         let res = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::Int(42)),
-            index: Box::new(Expr::Int(0)),
+            object: Box::new(Expr::Int(42, Span::ZERO)),
+            index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
         });
         let err = res.unwrap_err();
         match err {
@@ -4041,12 +4041,12 @@ print(factorial(5))
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Index {
                 object: Box::new(Expr::List(vec![
-                    Expr::List(vec![Expr::Int(1), Expr::Int(2)]),
-                    Expr::List(vec![Expr::Int(3), Expr::Int(4)]),
-                ])),
-                index: Box::new(Expr::Int(0)),
+                    Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO),
+                    Expr::List(vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)], Span::ZERO),
+                ], Span::ZERO)),
+                index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
             }),
-            index: Box::new(Expr::Int(1)),
+            index: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
         }).unwrap();
         assert_eq!(v, Value::Int(2));
     }
@@ -4592,14 +4592,14 @@ let r = match n {
     #[test]
     fn ok_ctor_evalua_a_value_result_ok() {
         // Ok(42) → Value::Result(Ok(Int(42)))
-        let e = Expr::Ok(Box::new(Expr::Int(42)));
+        let e = Expr::Ok(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         assert_eq!(eval_expr_test(e).unwrap(), ok_value(Value::Int(42)));
     }
 
     #[test]
     fn err_ctor_evalua_a_value_result_err() {
         // Err("boom") → Value::Result(Err(Str("boom")))
-        let e = Expr::Err(Box::new(Expr::Str("boom".into())));
+        let e = Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO);
         assert_eq!(
             eval_expr_test(e).unwrap(),
             err_value(Value::Str("boom".into())),
@@ -4611,9 +4611,9 @@ let r = match n {
         // Ok(1 + 2) → Value::Result(Ok(Int(3)))
         let e = Expr::Ok(Box::new(Expr::BinOp {
             op: BinOpKind::Add,
-            left: Box::new(Expr::Int(1)),
-            right: Box::new(Expr::Int(2)),
-        }));
+            left: Box::new(Expr::Int(1, Span::ZERO)),
+            right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+        }), Span::ZERO);
         assert_eq!(eval_expr_test(e).unwrap(), ok_value(Value::Int(3)));
     }
 
@@ -4622,14 +4622,14 @@ let r = match n {
         // Ok(7)? evaluado adentro de una función debería ser 7.
         // Lo testeamos directamente: como no hay return contenedor, el `?`
         // sobre Ok no emite ningún signal y la expresión vale 7.
-        let e = Expr::Try(Box::new(Expr::Ok(Box::new(Expr::Int(7)))));
+        let e = Expr::Try(Box::new(Expr::Ok(Box::new(Expr::Int(7, Span::ZERO)), Span::ZERO)), Span::ZERO);
         assert_eq!(eval_expr_test(e).unwrap(), Value::Int(7));
     }
 
     #[test]
     fn try_sobre_err_emite_signal_return_con_err() {
         // Err("boom")? emite EvalSignal::Return(Value::Result(Err("boom"))).
-        let e = Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("boom".into())))));
+        let e = Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)), Span::ZERO);
         let env = Environment::new();
         match eval_expr(&e, env) {
             Err(EvalSignal::Return(v)) => {
@@ -4642,7 +4642,7 @@ let r = match n {
     #[test]
     fn try_sobre_no_result_es_type_error() {
         // 42? → error: el operador `?` requiere un Result, no Int.
-        let e = Expr::Try(Box::new(Expr::Int(42)));
+        let e = Expr::Try(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         let env = Environment::new();
         match eval_expr(&e, env) {
             Err(EvalSignal::Error(err)) => {
@@ -4666,11 +4666,11 @@ let r = match n {
         // signal de retorno. La función devuelve ese 5 vía su return propio.
         let env = Environment::new();
         let body = vec![Stmt::Return(Expr::Try(Box::new(Expr::Ok(Box::new(
-            Expr::Int(5),
-        )))), Span::ZERO)];
+            Expr::Int(5, Span::ZERO),
+        ), Span::ZERO)), Span::ZERO), Span::ZERO)];
         eval_stmt(&fn_def("pass", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("pass".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("pass".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(eval_expr(&call, env).unwrap(), Value::Int(5));
     }
 
@@ -4682,13 +4682,13 @@ let r = match n {
         let body = vec![
             Stmt::Assign { target: AssignTarget::Ident("_".into()),
                 type_: None,
-                value: Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("nope".into()))))),
+                value: Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("nope".into(), Span::ZERO)), Span::ZERO)), Span::ZERO),
              span: Span::ZERO },
-            Stmt::Return(Expr::Ok(Box::new(Expr::Str("nunca llega".into()))), Span::ZERO),
+            Stmt::Return(Expr::Ok(Box::new(Expr::Str("nunca llega".into(), Span::ZERO)), Span::ZERO), Span::ZERO),
         ];
         eval_stmt(&fn_def("boom", vec![], body), env.clone()).unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("boom".into())), args: vec![] };
+        let call = Expr::Call { callee: Box::new(Expr::Ident("boom".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
         assert_eq!(
             eval_expr(&call, env).unwrap(),
             err_value(Value::Str("nope".into())),
@@ -4762,7 +4762,7 @@ let r = match n {
         // En top-level, `Err(...)?` emite Return; el evaluador global lo
         // convierte en "return solo puede usarse adentro de una función".
         let env = Environment::new();
-        let stmt = Stmt::Expr(Expr::Try(Box::new(Expr::Err(Box::new(Expr::Int(1))))), Span::ZERO);
+        let stmt = Stmt::Expr(Expr::Try(Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)), Span::ZERO), Span::ZERO);
         match eval_stmt(&stmt, env.clone()) {
             Err(EvalSignal::Return(_)) => {} // ok — el global lo traduciría.
             other => panic!("se esperaba EvalSignal::Return, se obtuvo {:?}", other),
@@ -4780,9 +4780,9 @@ let r = match n {
             params: vec![crate::ast::Param { name: "x".into(), type_: None }],
             body: vec![Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
-                left: Box::new(Expr::Ident("x".into())),
-                right: Box::new(Expr::Int(2)),
-            }, Span::ZERO)],
+                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+            }, Span::ZERO)], span: Span::ZERO,
         };
         let env = Environment::new();
         let v = eval_expr(&fnexpr, env).unwrap();

@@ -474,11 +474,11 @@ fn check_field_default(
     env: &TypeEnv,
 ) -> Result<(), FitzError> {
     let lit_type = match default {
-        Expr::Int(_) => Some(Type::Int),
-        Expr::Float(_) => Some(Type::Float),
-        Expr::Str(_) => Some(Type::Str),
-        Expr::Bool(_) => Some(Type::Bool),
-        Expr::Null => Some(Type::Null),
+        Expr::Int(_, _) => Some(Type::Int),
+        Expr::Float(_, _) => Some(Type::Float),
+        Expr::Str(_, _) => Some(Type::Str),
+        Expr::Bool(_, _) => Some(Type::Bool),
+        Expr::Null(_) => Some(Type::Null),
         _ => None,
     };
     let lit_type = match lit_type {
@@ -691,13 +691,13 @@ fn ann_to_type(ann: Option<&TypeExpr>, env: &TypeEnv) -> Type {
 /// 5.3.5 FnExpr) los irán reemplazando.
 fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
     match e {
-        Expr::Int(_) => Type::Int,
-        Expr::Float(_) => Type::Float,
-        Expr::Str(_) => Type::Str,
-        Expr::Bool(_) => Type::Bool,
-        Expr::Null => Type::Null,
+        Expr::Int(_, _) => Type::Int,
+        Expr::Float(_, _) => Type::Float,
+        Expr::Str(_, _) => Type::Str,
+        Expr::Bool(_, _) => Type::Bool,
+        Expr::Null(_) => Type::Null,
 
-        Expr::StrInterp(parts) => {
+        Expr::StrInterp(parts, _) => {
             // Las sub-expresiones se evalúan para errores aunque el
             // resultado siempre sea Str.
             for p in parts {
@@ -708,7 +708,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Str
         }
 
-        Expr::Ident(name) => {
+        Expr::Ident(name, _) => {
             if let Some(t) = ctx.lookup_var(name) {
                 return t.clone();
             }
@@ -723,7 +723,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Any
         }
 
-        Expr::UnaryOp { op, operand } => {
+        Expr::UnaryOp { op, operand, .. } => {
             let t = infer_expr(ctx, operand);
             match op {
                 UnaryOpKind::Neg => match &t {
@@ -739,13 +739,13 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        Expr::BinOp { op, left, right } => {
+        Expr::BinOp { op, left, right, .. } => {
             let lt = infer_expr(ctx, left);
             let rt = infer_expr(ctx, right);
             infer_binop(ctx, op, &lt, &rt)
         }
 
-        Expr::If { condition, then, else_ } => {
+        Expr::If { condition, then, else_, .. } => {
             // Condición debe ser Bool (o Any).
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
@@ -768,7 +768,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Any
         }
 
-        Expr::List(items) => {
+        Expr::List(items, _) => {
             // List<T> con T = tipo del primer elemento si los demás
             // son compatibles; si hay mezcla, T = Any.
             if items.is_empty() {
@@ -789,7 +789,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        Expr::Map(pairs) => {
+        Expr::Map(pairs, _) => {
             if pairs.is_empty() {
                 return Type::Map(Box::new(Type::Any), Box::new(Type::Any));
             }
@@ -813,7 +813,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             )
         }
 
-        Expr::Range { start, end } => {
+        Expr::Range { start, end, .. } => {
             // Start y end deben ser Int (lo es en el evaluator).
             for (label, e) in [("inicio", start.as_ref()), ("fin", end.as_ref())] {
                 let t = infer_expr(ctx, e);
@@ -828,7 +828,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Range
         }
 
-        Expr::StructLit { type_name, fields } => {
+        Expr::StructLit { type_name, fields, .. } => {
             // Sintetiza Nominal si el nombre del tipo está declarado.
             // Validar campos contra el `type` declarado: faltantes,
             // extras, tipos incompatibles.
@@ -906,7 +906,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Nominal(id)
         }
 
-        Expr::Field { object, field } => {
+        Expr::Field { object, field, .. } => {
             let obj_ty = infer_expr(ctx, object);
             match &obj_ty {
                 Type::Nominal(id) => {
@@ -931,14 +931,14 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        Expr::Call { callee, args } => {
+        Expr::Call { callee, args, .. } => {
             // Camino de método: `obj.method(args)` ↔ callee
             // sintáctico es `Expr::Field`. Despachamos por
             // `(tipo del receptor, nombre del método)` contra la
             // tabla de built-ins (5.3.4) en lugar de pasar por la
             // ruta general — la ruta general no puede modelar
             // signatures paramétricas como `List<T>.map`.
-            if let Expr::Field { object, field } = callee.as_ref() {
+            if let Expr::Field { object, field, .. } = callee.as_ref() {
                 let obj_ty = infer_expr(ctx, object);
                 let args_ty: Vec<Type> =
                     args.iter().map(|a| infer_expr(ctx, a)).collect();
@@ -993,7 +993,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
             }
         }
-        Expr::FnExpr { params, body } => {
+        Expr::FnExpr { params, body, .. } => {
             // Walkeamos el body con un scope nuevo y los params
             // bindeados (con su tipo declarado o `Any` si la
             // anotación faltó). El tipo del FnExpr es `Function`;
@@ -1022,7 +1022,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ret: Box::new(ret),
             }
         }
-        Expr::Index { object, index } => {
+        Expr::Index { object, index, .. } => {
             let obj_ty = infer_expr(ctx, object);
             let idx_ty = infer_expr(ctx, index);
             match obj_ty.base() {
@@ -1067,7 +1067,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
             }
         }
-        Expr::Match { value, arms } => {
+        Expr::Match { value, arms, .. } => {
             let scrutinee = infer_expr(ctx, value);
             // Tipo del binding según el patrón. Para `Ok(x)` con
             // scrutinee `Result<T>`, x es T. Para `Err(e)` el error
@@ -1091,16 +1091,16 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
             first.unwrap_or(Type::Any)
         }
-        Expr::Ok(inner) => {
+        Expr::Ok(inner, _) => {
             let t = infer_expr(ctx, inner);
             Type::Result(Box::new(t))
         }
-        Expr::Err(inner) => {
+        Expr::Err(inner, _) => {
             let _ = infer_expr(ctx, inner);
             // E está fijado en Str pero el T es desconocido sin contexto.
             Type::Result(Box::new(Type::Any))
         }
-        Expr::Try(inner) => {
+        Expr::Try(inner, _) => {
             let operand_ty = infer_expr(ctx, inner);
             match &operand_ty {
                 // Gradual: operando de tipo desconocido no se chequea.
@@ -1142,7 +1142,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
 /// etiqueta genérica.
 fn describe_callee(callee: &Expr) -> String {
     match callee {
-        Expr::Ident(name) => format!("la función `{}`", name),
+        Expr::Ident(name, _) => format!("la función `{}`", name),
         Expr::Field { field, .. } => format!("el método `{}`", field),
         _ => "esta llamada".into(),
     }
@@ -2559,7 +2559,7 @@ mod tests {
             Stmt::Assign {
                 target: AssignTarget::Ident("v".into()),
                 type_: Some(TE::Nullable(Box::new(TE::named("X")))),
-                value: Expr::Null,
+                value: Expr::Null(Span::ZERO),
              span: Span::ZERO },
         ];
         let (env, errors) = resolve_program(&program);

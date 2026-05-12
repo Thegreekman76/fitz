@@ -11,142 +11,144 @@
 //    conocido en compile-time para los enums.
 
 /// Una expresión: produce un valor.
+///
+/// Cada variante carga su `Span` (posición en el source) como último
+/// componente. Para nodos sintéticos producidos por el parser o por
+/// tests, el span puede ser `Span::ZERO`. La comparación de `Span` es
+/// trivial (siempre igual) — ver `impl PartialEq for Span` — así los
+/// `assert_eq!` sobre `Expr` no se rompen por diferencias de posición.
 #[derive(Debug, Clone, PartialEq)]
-// `FnExpr` repite el sufijo "Expr" del enum, pero renombrarlo a `Fn`
-// chocaría con la keyword visual del lenguaje. Lo dejamos.
 #[allow(clippy::enum_variant_names)]
 pub enum Expr {
     // ---------- literales ----------
-    Int(i64),
-    Float(f64),
-    /// String literal sin interpolación. Ej: `"Hola"`.
-    Str(String),
-    /// String con interpolación. Ej: `"Hola, {name}!"` → partes literales y
-    /// expresiones intercaladas. El parser elige `Str` vs `StrInterp` según
-    /// el contenido. La razón de tener ambas en vez de solo `StrInterp` es
-    /// claridad y una mínima optimización en el evaluador.
-    StrInterp(Vec<StrPart>),
-    Bool(bool),
-    Null,
+    Int(i64, Span),
+    Float(f64, Span),
+    Str(String, Span),
+    StrInterp(Vec<StrPart>, Span),
+    Bool(bool, Span),
+    Null(Span),
 
     /// Referencia a un identificador (variable, parámetro, función, etc.).
-    Ident(String),
+    Ident(String, Span),
 
-    /// Operación binaria: `left <op> right`.
+    /// Operación binaria. `span` apunta al operador.
     BinOp {
         op: BinOpKind,
         left: Box<Expr>,
         right: Box<Expr>,
+        span: Span,
     },
 
-    /// Operación unaria prefijo: `<op> operand`. Por ahora solo
-    /// negación numérica (`-x`). Cuando el lexer emita `!` como
-    /// operador lógico, sumaremos `UnaryOpKind::Not`.
+    /// Negación numérica `-x`. `span` apunta al `-`.
     UnaryOp {
         op: UnaryOpKind,
         operand: Box<Expr>,
+        span: Span,
     },
 
-    /// Llamada a función: `callee(arg1, arg2, ...)`. El `callee` es cualquier
-    /// expresión que en runtime tiene que evaluar a algo invocable: un
-    /// `Ident` (`f(1, 2)`), un `Field` (`xs.map(...)` — method call),
-    /// una `FnExpr` invocada al vuelo (`(fn(x) => x + 1)(2)`), etc.
-    ///
-    /// El evaluador despacha por la forma sintáctica del callee:
-    ///  - `Expr::Field { object, field }` → method call. Evalúa el receptor
-    ///    y busca el método en una tabla por tipo (`(tipo, nombre) → fn`).
-    ///  - otra cosa → llamada "normal". Evalúa el callee y espera
-    ///    `Value::Function` o `Value::Builtin`.
-    ///
-    /// `Ok(...)` y `Err(...)` son keywords contextuales: cuando el callee es
-    /// literalmente `Expr::Ident("Ok"|"Err")`, el parser los convierte en
-    /// `Expr::Ok`/`Expr::Err` antes de construir el `Call`.
+    /// Llamada `callee(arg1, ...)`. `span` apunta al `(`.
+    /// Method calls: `callee` es `Expr::Field`. `Ok(...)`/`Err(...)`
+    /// los reemplaza el parser por `Expr::Ok`/`Expr::Err`.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        span: Span,
     },
 
-    /// Función anónima en posición de expresión: `fn(x) => x * 2` o
-    /// `fn(x) { return x * 2 }`. La forma flecha la convierte el parser a
-    /// `body: vec![Stmt::Return(expr, Span::ZERO)]` — mismo truco que `Stmt::FnDef`.
-    /// No tiene nombre; se evalúa a un `Value::Function` con closure
-    /// capturando el env del lugar de definición.
+    /// Función anónima `fn(x) => ...` o `fn(x) { ... }`. La flecha la
+    /// convierte el parser a `body: vec![Stmt::Return(expr, ...)]`.
     FnExpr {
         params: Vec<Param>,
         body: Vec<Stmt>,
+        span: Span,
     },
 
-    /// Acceso a campo: `objeto.campo`.
+    /// Acceso a campo `objeto.campo`. `span` apunta al `.`.
     Field {
         object: Box<Expr>,
         field: String,
+        span: Span,
     },
 
-    /// Indexing postfix: `objeto[indice]`. Aplica a listas (`xs[0]`),
-    /// mapas (`m["clave"]`), y strings (lectura por índice si lo
-    /// agregamos). El receptor y el índice son expresiones cualquiera.
+    /// Indexing postfix `objeto[indice]`. `span` apunta al `[`.
     Index {
         object: Box<Expr>,
         index: Box<Expr>,
+        span: Span,
     },
 
-    /// Lista literal: `[1, 2, 3]`, `[]`, `[x, y + 1]`. Anidable.
-    List(Vec<Expr>),
+    /// Lista literal `[1, 2, 3]`, `[]`. Anidable.
+    List(Vec<Expr>, Span),
 
-    /// Mapa literal: `{"k": v, "otra": 42}`, `{}`. Preserva orden de
-    /// inserción (por eso `Vec<(Expr, Expr)>` y no `HashMap`). Las
-    /// claves son expresiones (típicamente strings, pero permitido
-    /// cualquier expresión por simetría con valores).
-    Map(Vec<(Expr, Expr)>),
+    /// Mapa literal `{"k": v, ...}`, `{}`. Preserva orden de inserción.
+    Map(Vec<(Expr, Expr)>, Span),
 
-    /// Rango exclusivo: `start..end`. Itera `start, start+1, ..., end-1`.
-    /// Por ahora solo exclusivo; `..=` inclusive llega si hace falta.
+    /// Rango exclusivo `start..end`. `span` apunta al `..`.
     Range {
         start: Box<Expr>,
         end: Box<Expr>,
+        span: Span,
     },
 
-    /// `if condition { then } else { else_ }`. Puede usarse en posición de
-    /// expresión: `let x = if cond { 1 } else { 2 }`.
+    /// `if cond { then } else { else_ }`. Usable como expresión.
     If {
         condition: Box<Expr>,
         then: Vec<Stmt>,
         else_: Option<Vec<Stmt>>,
+        span: Span,
     },
 
-    /// `match value { pat1 => expr1, pat2 => expr2, _ => default }`.
+    /// `match value { pat => expr, ... }`.
     Match {
         value: Box<Expr>,
         arms: Vec<MatchArm>,
+        span: Span,
     },
 
-    /// Instanciación de un tipo custom: `User { id: 1, name: "x" }`.
-    /// `type_name` es el nombre del `type` declarado; los campos son
-    /// pares `(nombre, expresión)` y se evalúan en orden de aparición.
-    /// La validación contra los campos declarados (faltantes, extras,
-    /// defaults, nullables) la hace el evaluador, no el parser.
+    /// Instanciación `User { id: 1, name: "x" }`.
     StructLit {
         type_name: String,
         fields: Vec<(String, Expr)>,
+        span: Span,
     },
 
-    /// Constructor de la variante exitosa del tipo built-in `Result`:
-    /// `Ok(expr)`. El parser lo reconoce como keyword contextual cuando
-    /// ve el identificador `Ok` seguido de `(`. `Ok` no es una keyword
-    /// en el lexer; sigue siendo un `Token::Ident`, pero el parser le
-    /// da semántica especial acá (mismo criterio que en `parse_pattern`).
-    Ok(Box<Expr>),
+    /// Constructor `Ok(expr)`. Keyword contextual.
+    Ok(Box<Expr>, Span),
+    /// Constructor `Err(expr)`. Keyword contextual.
+    Err(Box<Expr>, Span),
+    /// Operador postfix `expr?`. `span` apunta al `?`.
+    Try(Box<Expr>, Span),
+}
 
-    /// Constructor de la variante de error: `Err(expr)`. Mismas reglas
-    /// que `Ok`. Convención (no validada en runtime hasta el type checker
-    /// de Fase 5): el inner suele ser un `Str` con el mensaje.
-    Err(Box<Expr>),
-
-    /// Operador `?` postfix: `expr?`. En runtime, si el operando es
-    /// `Ok(v)` la expresión vale `v`; si es `Err(e)` corta la función
-    /// contenedora con `return Err(e)`. Aplicable a cualquier expresión;
-    /// el chequeo de que sea un `Result` ocurre en el evaluador, no acá.
-    Try(Box<Expr>),
+impl Expr {
+    /// Devuelve el span de cualquier variante. Paralelo a `Stmt::span()`.
+    #[allow(dead_code)]
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Int(_, s) => *s,
+            Expr::Float(_, s) => *s,
+            Expr::Str(_, s) => *s,
+            Expr::StrInterp(_, s) => *s,
+            Expr::Bool(_, s) => *s,
+            Expr::Null(s) => *s,
+            Expr::Ident(_, s) => *s,
+            Expr::BinOp { span, .. } => *span,
+            Expr::UnaryOp { span, .. } => *span,
+            Expr::Call { span, .. } => *span,
+            Expr::FnExpr { span, .. } => *span,
+            Expr::Field { span, .. } => *span,
+            Expr::Index { span, .. } => *span,
+            Expr::List(_, s) => *s,
+            Expr::Map(_, s) => *s,
+            Expr::Range { span, .. } => *span,
+            Expr::If { span, .. } => *span,
+            Expr::Match { span, .. } => *span,
+            Expr::StructLit { span, .. } => *span,
+            Expr::Ok(_, s) => *s,
+            Expr::Err(_, s) => *s,
+            Expr::Try(_, s) => *s,
+        }
+    }
 }
 
 /// Pieza de un string con interpolación.
@@ -549,7 +551,7 @@ mod tests {
             Stmt::Assign {
                 target: AssignTarget::Ident("name".into()),
                 type_: None,
-                value: Expr::Str("Fitz".into()),
+                value: Expr::Str("Fitz".into(), Span::ZERO),
              span: Span::ZERO },
             // x = 10 + 5
             Stmt::Assign {
@@ -557,18 +559,18 @@ mod tests {
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
-                    left: Box::new(Expr::Int(10)),
-                    right: Box::new(Expr::Int(5)),
+                    left: Box::new(Expr::Int(10, Span::ZERO)),
+                    right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
                 },
              span: Span::ZERO },
             // print("Hola, {name}!")
             Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("print".into())),
+                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
                 args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into())),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
                     StrPart::Lit("!".into()),
-                ])],
+                ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO),
             // fn double(n) => n * 2
             Stmt::FnDef {
@@ -577,19 +579,19 @@ mod tests {
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into())),
-                    right: Box::new(Expr::Int(2)),
+                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
                 }, Span::ZERO)],
                 is_async: false,
                 decorators: vec![],
              span: Span::ZERO },
             // print(double(x))
             Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("print".into())),
+                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
                 args: vec![Expr::Call {
-                    callee: Box::new(Expr::Ident("double".into())),
-                    args: vec![Expr::Ident("x".into())],
-                }],
+                    callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
+                }], span: Span::ZERO,
             }, Span::ZERO),
         ];
 
@@ -611,10 +613,10 @@ mod tests {
     fn strpart_distinguishes_literal_from_expression() {
         let parts = [
             StrPart::Lit("Edad: ".into()),
-            StrPart::Expr(Expr::Ident("age".into())),
+            StrPart::Expr(Expr::Ident("age".into(), Span::ZERO)),
         ];
         assert_eq!(parts[0], StrPart::Lit("Edad: ".into()));
-        assert!(matches!(parts[1], StrPart::Expr(Expr::Ident(_))));
+        assert!(matches!(parts[1], StrPart::Expr(Expr::Ident(_, _))));
     }
 
     #[test]
@@ -629,16 +631,16 @@ mod tests {
     fn list_literal_holds_arbitrary_exprs() {
         // `[1, x, 2 + 3]`
         let list = Expr::List(vec![
-            Expr::Int(1),
-            Expr::Ident("x".into()),
+            Expr::Int(1, Span::ZERO),
+            Expr::Ident("x".into(), Span::ZERO),
             Expr::BinOp {
                 op: BinOpKind::Add,
-                left: Box::new(Expr::Int(2)),
-                right: Box::new(Expr::Int(3)),
+                left: Box::new(Expr::Int(2, Span::ZERO)),
+                right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
             },
-        ]);
+        ], Span::ZERO);
         match list {
-            Expr::List(items) => assert_eq!(items.len(), 3),
+            Expr::List(items, _) => assert_eq!(items.len(), 3),
             _ => panic!("se esperaba List"),
         }
     }
@@ -647,14 +649,14 @@ mod tests {
     fn map_literal_preserva_orden_de_pares() {
         // `{"a": 1, "b": 2}`
         let map = Expr::Map(vec![
-            (Expr::Str("a".into()), Expr::Int(1)),
-            (Expr::Str("b".into()), Expr::Int(2)),
-        ]);
+            (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+            (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+        ], Span::ZERO);
         match map {
-            Expr::Map(pairs) => {
+            Expr::Map(pairs, _) => {
                 assert_eq!(pairs.len(), 2);
-                assert_eq!(pairs[0].0, Expr::Str("a".into()));
-                assert_eq!(pairs[1].1, Expr::Int(2));
+                assert_eq!(pairs[0].0, Expr::Str("a".into(), Span::ZERO));
+                assert_eq!(pairs[1].1, Expr::Int(2, Span::ZERO));
             }
             _ => panic!("se esperaba Map"),
         }
@@ -664,13 +666,13 @@ mod tests {
     fn range_expr_envuelve_extremos() {
         // `0..10`
         let r = Expr::Range {
-            start: Box::new(Expr::Int(0)),
-            end: Box::new(Expr::Int(10)),
+            start: Box::new(Expr::Int(0, Span::ZERO)),
+            end: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
         };
         match r {
-            Expr::Range { start, end } => {
-                assert_eq!(*start, Expr::Int(0));
-                assert_eq!(*end, Expr::Int(10));
+            Expr::Range { start, end, .. } => {
+                assert_eq!(*start, Expr::Int(0, Span::ZERO));
+                assert_eq!(*end, Expr::Int(10, Span::ZERO));
             }
             _ => panic!("se esperaba Range"),
         }
@@ -680,13 +682,13 @@ mod tests {
     fn index_expr_envuelve_objeto_e_indice() {
         // `xs[0]`
         let ix = Expr::Index {
-            object: Box::new(Expr::Ident("xs".into())),
-            index: Box::new(Expr::Int(0)),
+            object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
+            index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
         };
         match ix {
-            Expr::Index { object, index } => {
-                assert_eq!(*object, Expr::Ident("xs".into()));
-                assert_eq!(*index, Expr::Int(0));
+            Expr::Index { object, index, .. } => {
+                assert_eq!(*object, Expr::Ident("xs".into(), Span::ZERO));
+                assert_eq!(*index, Expr::Int(0, Span::ZERO));
             }
             _ => panic!("se esperaba Index"),
         }
@@ -697,16 +699,16 @@ mod tests {
         // `for x in xs { print(x) }`
         let f = Stmt::For {
             var: "x".into(),
-            iter: Expr::Ident("xs".into()),
+            iter: Expr::Ident("xs".into(), Span::ZERO),
             body: vec![Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("print".into())),
-                args: vec![Expr::Ident("x".into())],
+                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO)],
          span: Span::ZERO };
         match f {
             Stmt::For { var, iter, body, .. } => {
                 assert_eq!(var, "x");
-                assert_eq!(iter, Expr::Ident("xs".into()));
+                assert_eq!(iter, Expr::Ident("xs".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
             }
             _ => panic!("se esperaba For"),
@@ -732,18 +734,18 @@ mod tests {
         let lit = Expr::StructLit {
             type_name: "User".into(),
             fields: vec![
-                ("id".into(), Expr::Int(1)),
-                ("name".into(), Expr::Str("x".into())),
-            ],
+                ("id".into(), Expr::Int(1, Span::ZERO)),
+                ("name".into(), Expr::Str("x".into(), Span::ZERO)),
+            ], span: Span::ZERO,
         };
         match lit {
-            Expr::StructLit { type_name, fields } => {
+            Expr::StructLit { type_name, fields, .. } => {
                 assert_eq!(type_name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "id");
-                assert_eq!(fields[0].1, Expr::Int(1));
+                assert_eq!(fields[0].1, Expr::Int(1, Span::ZERO));
                 assert_eq!(fields[1].0, "name");
-                assert_eq!(fields[1].1, Expr::Str("x".into()));
+                assert_eq!(fields[1].1, Expr::Str("x".into(), Span::ZERO));
             }
             _ => panic!("se esperaba StructLit"),
         }
@@ -755,30 +757,30 @@ mod tests {
 
     #[test]
     fn ok_ctor_envuelve_inner() {
-        // `Ok(42)` → Expr::Ok(Box(Int(42)))
-        let e = Expr::Ok(Box::new(Expr::Int(42)));
+        // `Ok(42)` → Expr::Ok(Box(Int(42)), Span::ZERO)
+        let e = Expr::Ok(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
         match e {
-            Expr::Ok(inner) => assert_eq!(*inner, Expr::Int(42)),
+            Expr::Ok(inner, _) => assert_eq!(*inner, Expr::Int(42, Span::ZERO)),
             _ => panic!("se esperaba Ok"),
         }
     }
 
     #[test]
     fn err_ctor_envuelve_inner() {
-        // `Err("boom")` → Expr::Err(Box(Str("boom")))
-        let e = Expr::Err(Box::new(Expr::Str("boom".into())));
+        // `Err("boom")` → Expr::Err(Box(Str("boom")), Span::ZERO)
+        let e = Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO);
         match e {
-            Expr::Err(inner) => assert_eq!(*inner, Expr::Str("boom".into())),
+            Expr::Err(inner, _) => assert_eq!(*inner, Expr::Str("boom".into(), Span::ZERO)),
             _ => panic!("se esperaba Err"),
         }
     }
 
     #[test]
     fn try_expr_envuelve_operando() {
-        // `x?` → Expr::Try(Box(Ident("x")))
-        let e = Expr::Try(Box::new(Expr::Ident("x".into())));
+        // `x?` → Expr::Try(Box(Ident("x")), Span::ZERO)
+        let e = Expr::Try(Box::new(Expr::Ident("x".into(), Span::ZERO)), Span::ZERO);
         match e {
-            Expr::Try(inner) => assert_eq!(*inner, Expr::Ident("x".into())),
+            Expr::Try(inner, _) => assert_eq!(*inner, Expr::Ident("x".into(), Span::ZERO)),
             _ => panic!("se esperaba Try"),
         }
     }
@@ -787,11 +789,11 @@ mod tests {
     fn try_y_ctors_son_componibles() {
         // `Ok(get(id)?)` — un `?` adentro de un constructor `Ok`.
         let e = Expr::Ok(Box::new(Expr::Try(Box::new(Expr::Call {
-            callee: Box::new(Expr::Ident("get".into())),
-            args: vec![Expr::Ident("id".into())],
-        }))));
-        if let Expr::Ok(inner) = e {
-            assert!(matches!(*inner, Expr::Try(_)));
+            callee: Box::new(Expr::Ident("get".into(), Span::ZERO)),
+            args: vec![Expr::Ident("id".into(), Span::ZERO)], span: Span::ZERO,
+        }), Span::ZERO)), Span::ZERO);
+        if let Expr::Ok(inner, _) = e {
+            assert!(matches!(*inner, Expr::Try(_, _)));
         } else {
             panic!("se esperaba Ok");
         }
@@ -802,12 +804,12 @@ mod tests {
         // -x → UnaryOp { op: Neg, operand: Ident("x") }
         let expr = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Ident("x".into())),
+            operand: Box::new(Expr::Ident("x".into(), Span::ZERO)), span: Span::ZERO,
         };
         match expr {
-            Expr::UnaryOp { op, operand } => {
+            Expr::UnaryOp { op, operand, .. } => {
                 assert_eq!(op, UnaryOpKind::Neg);
-                assert_eq!(*operand, Expr::Ident("x".into()));
+                assert_eq!(*operand, Expr::Ident("x".into(), Span::ZERO));
             }
             _ => panic!("se esperaba UnaryOp"),
         }
@@ -822,13 +824,13 @@ mod tests {
         // `xs.map(f)` → Call con callee = Field { object: xs, field: "map" }.
         let call = Expr::Call {
             callee: Box::new(Expr::Field {
-                object: Box::new(Expr::Ident("xs".into())),
-                field: "map".into(),
+                object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
+                field: "map".into(), span: Span::ZERO,
             }),
-            args: vec![Expr::Ident("f".into())],
+            args: vec![Expr::Ident("f".into(), Span::ZERO)], span: Span::ZERO,
         };
         match call {
-            Expr::Call { callee, args } => {
+            Expr::Call { callee, args, .. } => {
                 assert!(matches!(*callee, Expr::Field { .. }));
                 assert_eq!(args.len(), 1);
             }
@@ -843,12 +845,12 @@ mod tests {
             params: vec![Param { name: "x".into(), type_: None }],
             body: vec![Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
-                left: Box::new(Expr::Ident("x".into())),
-                right: Box::new(Expr::Int(2)),
-            }, Span::ZERO)],
+                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+            }, Span::ZERO)], span: Span::ZERO,
         };
         match fnexpr {
-            Expr::FnExpr { params, body } => {
+            Expr::FnExpr { params, body, .. } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "x");
                 assert_eq!(body.len(), 1);
@@ -913,11 +915,11 @@ mod tests {
         // `@get("/users/{id}")` — un decorator con un arg string.
         let d = Decorator {
             name: "get".into(),
-            args: vec![Expr::Str("/users/{id}".into())],
+            args: vec![Expr::Str("/users/{id}".into(), Span::ZERO)],
         };
         assert_eq!(d.name, "get");
         assert_eq!(d.args.len(), 1);
-        assert_eq!(d.args[0], Expr::Str("/users/{id}".into()));
+        assert_eq!(d.args[0], Expr::Str("/users/{id}".into(), Span::ZERO));
     }
 
     #[test]
@@ -948,8 +950,8 @@ mod tests {
             body: vec![],
             is_async: false,
             decorators: vec![
-                Decorator { name: "get".into(), args: vec![Expr::Str("/x".into())] },
-                Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into())] },
+                Decorator { name: "get".into(), args: vec![Expr::Str("/x".into(), Span::ZERO)] },
+                Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into(), Span::ZERO)] },
             ],
          span: Span::ZERO };
         if let Stmt::FnDef { decorators, .. } = f {
@@ -967,7 +969,7 @@ mod tests {
         let s1 = Stmt::Assign {
             target: AssignTarget::Ident("x".into()),
             type_: None,
-            value: Expr::Int(1),
+            value: Expr::Int(1, Span::ZERO),
          span: Span::ZERO };
         if let Stmt::Assign { target, .. } = s1 {
             assert_eq!(target, AssignTarget::Ident("x".into()));
@@ -978,14 +980,14 @@ mod tests {
         // `user.name = "x"` — target Field.
         let s2 = Stmt::Assign {
             target: AssignTarget::Field {
-                object: Box::new(Expr::Ident("user".into())),
+                object: Box::new(Expr::Ident("user".into(), Span::ZERO)),
                 field: "name".into(),
             },
             type_: None,
-            value: Expr::Str("x".into()),
+            value: Expr::Str("x".into(), Span::ZERO),
          span: Span::ZERO };
         if let Stmt::Assign { target: AssignTarget::Field { object, field }, .. } = s2 {
-            assert_eq!(*object, Expr::Ident("user".into()));
+            assert_eq!(*object, Expr::Ident("user".into(), Span::ZERO));
             assert_eq!(field, "name");
         } else {
             panic!("se esperaba Assign con target Field");

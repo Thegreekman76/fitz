@@ -31,6 +31,8 @@
 use std::cell::RefCell;
 
 use crate::ast::Expr;
+#[cfg(test)]
+use crate::ast::Span;
 use crate::value::{Value, ResultVariant};
 
 // ---------------------------------------------------------------------------
@@ -321,8 +323,8 @@ impl PathError {
 /// decorator HTTP y la convierte a un `PathTemplate`. Acepta dos
 /// formas:
 ///
-///  - `Expr::Str(s)`: path sin params. Ej: `"/"`, `"/users"`.
-///  - `Expr::StrInterp(parts)`: path con params. Cada `StrPart::Expr`
+///  - `Expr::Str(s, _)`: path sin params. Ej: `"/"`, `"/users"`.
+///  - `Expr::StrInterp(parts, _)`: path con params. Cada `StrPart::Expr`
 ///    tiene que ser un `Ident` simple (`{id}`). Cualquier otra cosa
 ///    es error.
 ///
@@ -331,14 +333,14 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
     use crate::ast::StrPart;
 
     let (path, params): (String, Vec<String>) = match expr {
-        Expr::Str(s) => (s.clone(), Vec::new()),
-        Expr::StrInterp(parts) => {
+        Expr::Str(s, _) => (s.clone(), Vec::new()),
+        Expr::StrInterp(parts, _) => {
             let mut buf = String::new();
             let mut params = Vec::new();
             for part in parts {
                 match part {
                     StrPart::Lit(s) => buf.push_str(s),
-                    StrPart::Expr(Expr::Ident(name)) => {
+                    StrPart::Expr(Expr::Ident(name, _)) => {
                         if params.contains(name) {
                             return Err(PathError::DuplicateParam(name.clone()));
                         }
@@ -687,11 +689,11 @@ fn json_shape_name(v: &serde_json::Value) -> &'static str {
 /// resuelto.
 fn default_to_value(expr: &Expr) -> Result<Value, ()> {
     match expr {
-        Expr::Int(n) => Ok(Value::Int(*n)),
-        Expr::Float(f) => Ok(Value::Float(*f)),
-        Expr::Str(s) => Ok(Value::Str(s.clone())),
-        Expr::Bool(b) => Ok(Value::Bool(*b)),
-        Expr::Null => Ok(Value::Null),
+        Expr::Int(n, _) => Ok(Value::Int(*n)),
+        Expr::Float(f, _) => Ok(Value::Float(*f)),
+        Expr::Str(s, _) => Ok(Value::Str(s.clone())),
+        Expr::Bool(b, _) => Ok(Value::Bool(*b)),
+        Expr::Null(_) => Ok(Value::Null),
         _ => Err(()),
     }
 }
@@ -1176,11 +1178,11 @@ mod tests {
 
     #[test]
     fn path_str_simple_sin_params() {
-        let t = parse_path_template(&Expr::Str("/".into())).unwrap();
+        let t = parse_path_template(&Expr::Str("/".into(), Span::ZERO)).unwrap();
         assert_eq!(t.path, "/");
         assert!(t.params.is_empty());
 
-        let t = parse_path_template(&Expr::Str("/users".into())).unwrap();
+        let t = parse_path_template(&Expr::Str("/users".into(), Span::ZERO)).unwrap();
         assert_eq!(t.path, "/users");
         assert!(t.params.is_empty());
     }
@@ -1190,8 +1192,8 @@ mod tests {
         // `"/users/{id}"` → StrInterp([Lit("/users/"), Expr(Ident("id"))])
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/users/".into()),
-            StrPart::Expr(Expr::Ident("id".into())),
-        ]);
+            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+        ], Span::ZERO);
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/users/{id}");
         assert_eq!(t.params, vec!["id".to_string()]);
@@ -1202,10 +1204,10 @@ mod tests {
         // `"/orgs/{org}/users/{id}"`
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/orgs/".into()),
-            StrPart::Expr(Expr::Ident("org".into())),
+            StrPart::Expr(Expr::Ident("org".into(), Span::ZERO)),
             StrPart::Lit("/users/".into()),
-            StrPart::Expr(Expr::Ident("id".into())),
-        ]);
+            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+        ], Span::ZERO);
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/orgs/{org}/users/{id}");
         assert_eq!(t.params, vec!["org".to_string(), "id".to_string()]);
@@ -1213,7 +1215,7 @@ mod tests {
 
     #[test]
     fn path_no_arranca_con_slash_es_error() {
-        let err = parse_path_template(&Expr::Str("users".into())).unwrap_err();
+        let err = parse_path_template(&Expr::Str("users".into(), Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::MustStartWithSlash);
     }
 
@@ -1224,10 +1226,10 @@ mod tests {
             StrPart::Lit("/".into()),
             StrPart::Expr(Expr::BinOp {
                 op: crate::ast::BinOpKind::Add,
-                left: Box::new(Expr::Ident("a".into())),
-                right: Box::new(Expr::Ident("b".into())),
+                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                right: Box::new(Expr::Ident("b".into(), Span::ZERO)), span: Span::ZERO,
             }),
-        ]);
+        ], Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
         assert!(matches!(err, PathError::UnsupportedInterpolation(_)));
     }
@@ -1237,10 +1239,10 @@ mod tests {
         // `"/a/{x}/b/{x}"`
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/a/".into()),
-            StrPart::Expr(Expr::Ident("x".into())),
+            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
             StrPart::Lit("/b/".into()),
-            StrPart::Expr(Expr::Ident("x".into())),
-        ]);
+            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+        ], Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
         assert_eq!(err, PathError::DuplicateParam("x".into()));
     }
@@ -1248,7 +1250,7 @@ mod tests {
     #[test]
     fn path_no_string_literal_es_error() {
         // `@get(42)` — Int en lugar de string.
-        let err = parse_path_template(&Expr::Int(42)).unwrap_err();
+        let err = parse_path_template(&Expr::Int(42, Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::NotAStringLiteral);
     }
 
@@ -1734,7 +1736,7 @@ mod tests {
     fn json_to_instance_default_literal_se_usa_si_falta() {
         let t = type_value("User", vec![
             ("id", "Int", false, None),
-            ("active", "Bool", false, Some(Expr::Bool(true))),
+            ("active", "Bool", false, Some(Expr::Bool(true, Span::ZERO))),
         ]);
         let json = serde_json::json!({ "id": 1 });
         let v = json_to_instance(&json, &t).unwrap();
