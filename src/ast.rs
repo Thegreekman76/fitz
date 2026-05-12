@@ -387,10 +387,17 @@ pub enum Pattern {
     Ident(String),
     /// `_` — siempre matchea, sin binding.
     Wildcard,
-    /// `Ok(x)` — bloqueado hasta tener tipo Result (Fase 3).
+    /// `Ok(x)` — matchea cualquier `Result::Ok(...)` y bindea el
+    /// inner como `x`.
     OkBinding(String),
-    /// `Err(e)` — bloqueado hasta tener tipo Result (Fase 3).
+    /// `Err(e)` — matchea cualquier `Result::Err(...)` y bindea el
+    /// inner como `e`.
     ErrBinding(String),
+    /// `Ok(_)` — matchea cualquier `Result::Ok(...)` sin bindear
+    /// (no ensucia el scope con una var llamada `_`).
+    OkWildcard,
+    /// `Err(_)` — matchea cualquier `Result::Err(...)` sin bindear.
+    ErrWildcard,
     /// `start..end` — matchea si el valor es Int y `start <= v < end`.
     /// Solo Int por ahora (Float complica la representación discreta).
     Range { start: i64, end: i64 },

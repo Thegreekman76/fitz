@@ -1284,6 +1284,10 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
                         Some(Some((name.clone(), (**inner).clone())))
                     }
+                    // Wildcards sobre Ok/Err: matchean la variante
+                    // sin bindear el inner. No ensucian el scope.
+                    (Pattern::OkWildcard, Value::Result(ResultVariant::Ok(_))) => Some(None),
+                    (Pattern::ErrWildcard, Value::Result(ResultVariant::Err(_))) => Some(None),
                     _ => None,
                 };
 
@@ -3246,6 +3250,64 @@ mod tests {
             ],
         };
         assert_eq!(eval_expr_test(e).unwrap(), Value::Str("no-result".into()));
+    }
+
+    #[test]
+    fn match_ok_wildcard_matchea_pero_no_bindea() {
+        // Pattern::OkWildcard matchea cualquier Ok sin bindear el
+        // inner. Cierra la deuda vieja de 3.3 donde `_` adentro se
+        // bindeaba como var llamada `_`.
+        let e = Expr::Match {
+            value: Box::new(Expr::Ok(Box::new(Expr::Int(99)))),
+            arms: vec![
+                match_arm(Pattern::OkWildcard, Expr::Str("ok!".into())),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
+            ],
+        };
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Str("ok!".into()));
+    }
+
+    #[test]
+    fn match_err_wildcard_matchea_err() {
+        let e = Expr::Match {
+            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into())))),
+            arms: vec![
+                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into())),
+                match_arm(Pattern::ErrWildcard, Expr::Str("falló".into())),
+            ],
+        };
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Str("falló".into()));
+    }
+
+    #[test]
+    fn match_ok_wildcard_no_matchea_err() {
+        // OkWildcard NO debe matchear Err.
+        let e = Expr::Match {
+            value: Box::new(Expr::Err(Box::new(Expr::Int(0)))),
+            arms: vec![
+                match_arm(Pattern::OkWildcard, Expr::Str("ok".into())),
+                match_arm(Pattern::Wildcard, Expr::Str("otro".into())),
+            ],
+        };
+        assert_eq!(eval_expr_test(e).unwrap(), Value::Str("otro".into()));
+    }
+
+    #[test]
+    fn match_ok_wildcard_no_ensucia_scope() {
+        // Después de un match con Ok(_), no debe existir una var
+        // llamada `_` en el env. Esto era el bug que cerraba 3.3.
+        let src = "\
+let x = match Ok(5) {\n\
+    Ok(_) => 1\n\
+    _ => 0\n\
+}\n\
+print(_)\n";
+        let result = parse_and_eval(src);
+        assert!(
+            result.is_err(),
+            "esperaba error de variable `_` desconocida, hubo: {:?}",
+            result
+        );
     }
 
     #[test]

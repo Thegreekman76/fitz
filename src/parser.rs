@@ -1238,10 +1238,13 @@ impl Parser {
                     &Token::RParen,
                     "se esperaba ')' al final del patrón Ok/Err",
                 )?;
-                return Ok(if is_ok {
-                    Pattern::OkBinding(binding)
-                } else {
-                    Pattern::ErrBinding(binding)
+                // `_` adentro es wildcard (no bindea): cierra deuda
+                // vieja de 3.3 donde `_` se bindeaba como var.
+                return Ok(match (is_ok, binding.as_str()) {
+                    (true, "_") => Pattern::OkWildcard,
+                    (false, "_") => Pattern::ErrWildcard,
+                    (true, _) => Pattern::OkBinding(binding),
+                    (false, _) => Pattern::ErrBinding(binding),
                 });
             }
         }
@@ -3048,6 +3051,21 @@ mod tests {
                 assert_eq!(arms.len(), 2);
                 assert_eq!(arms[0].pattern, Pattern::OkBinding("u".into()));
                 assert_eq!(arms[1].pattern, Pattern::ErrBinding("e".into()));
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn match_with_ok_and_err_wildcards() {
+        // `Ok(_)` y `Err(_)` parsean como wildcards dedicados, sin
+        // ensuciar el scope con una var llamada `_`.
+        let stmt = parse_one_stmt("match result { Ok(_) => 1, Err(_) => 0 }");
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }) => {
+                assert_eq!(arms.len(), 2);
+                assert_eq!(arms[0].pattern, Pattern::OkWildcard);
+                assert_eq!(arms[1].pattern, Pattern::ErrWildcard);
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }

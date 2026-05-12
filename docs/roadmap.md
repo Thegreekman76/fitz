@@ -1417,14 +1417,27 @@ FnExpr.ret).
 Lo que queda abierto para futuras fases (no bloquea 5b):
 - Métodos custom sobre `type` (deuda 3.2; dispatch del checker
   preparado).
-- `Pattern::OkWildcard` / `ErrWildcard` (deuda 3.3).
+- ~~`Pattern::OkWildcard` / `ErrWildcard` (deuda 3.3).~~ ✓
+  Cerrada en el paso de deuda residual post-5a: el parser
+  reconoce `Ok(_)` y `Err(_)` como wildcards dedicados, el
+  evaluator matchea sin bindear y el checker los cuenta para
+  exhaustividad.
 - Patrones imposibles sobre Result (dead-code check separado).
 - Encadenamiento multi-línea en method chains (deuda 3.4 del
   parser).
-- Reasignación sin anotación contra tipo previo (`m: Int = 1;
-  m = "x"` no chequea — el binding se relaja al tipo nuevo).
+- ~~Reasignación sin anotación contra tipo previo (`m: Int = 1;
+  m = "x"` no chequea — el binding se relaja al tipo nuevo).~~
+  ✓ Cerrada en el paso de deuda residual post-5a: `VarBinding`
+  ahora guarda un flag `annotated`; reasignaciones sin
+  anotación contra una var anotada se chequean contra el tipo
+  declarado.
 - Posiciones de error precisas en TypeExpr y errores del
-  checker.
+  checker. **Pospuesta para post-5b**: el refactor amplio del
+  AST (posiciones en `Expr`/`Stmt`/`TypeExpr` con propagación
+  desde el parser) cubre los errores de anotación pero no los
+  de expresiones; mejor combinarlo con la infra del IR tipado
+  que va a sumar 5b. Hoy los errores del checker reportan
+  posición `0:0` con mensajes descriptivos como puente.
 - FnExpr con return type declarado en sintaxis (AST/parser).
 - Sugerencias "did you mean..." en typos.
 

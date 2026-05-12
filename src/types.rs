@@ -526,13 +526,26 @@ fn annotate(mut e: FitzError, context: &str) -> FitzError {
 
 use crate::ast::{AssignTarget, BinOpKind, StrPart, UnaryOpKind};
 
+/// Binding de una variable en un scope. Lleva el tipo y un flag
+/// `annotated` que indica si la PRIMERA asignación de ese nombre
+/// vino con anotación de tipo explícita (`x: Int = ...`). El flag
+/// se usa para chequear reasignaciones: si la var fue anotada, las
+/// reasignaciones posteriores sin anotación tienen que respetar
+/// ese tipo. Si la var se infirió sin anotación, las
+/// reasignaciones pueden cambiar el tipo (modelo gradual).
+#[derive(Debug, Clone)]
+struct VarBinding {
+    ty: Type,
+    annotated: bool,
+}
+
 /// Estado mutable durante la pasada de chequeo de expresiones.
 struct CheckCtx<'a> {
     types: &'a TypeEnv,
     /// Stack de scopes para variables. El primero es el global
     /// (builtins + fns top-level + lets top-level). Cada `FnDef`
     /// body, cada loop body, abren un scope nuevo.
-    scopes: Vec<std::collections::HashMap<String, Type>>,
+    scopes: Vec<std::collections::HashMap<String, VarBinding>>,
     /// Stack de tipos de retorno esperados, uno por cada función
     /// (FnDef o FnExpr) anidada que se está chequeando. Vacío en
     /// el scope top-level. `Stmt::Return` lo consulta para validar.
@@ -566,16 +579,22 @@ impl<'a> CheckCtx<'a> {
     fn register_builtins(&mut self) {
         // `print(args...)` — variádico. Modelado como Any: ningún
         // call sobre Any se chequea (gradual escape).
-        self.scopes[0].insert("print".into(), Type::Any);
+        self.scopes[0].insert(
+            "print".into(),
+            VarBinding { ty: Type::Any, annotated: false },
+        );
         // `len(x) -> Int` — aridad 1 sobre List/Map/Str/Range. El
         // param es Any porque los receptores no comparten un solo
         // tipo (todavía no tenemos union types / "any iterable").
         // La aridad sí se valida; el tipo del receptor llega en 5.3.4.
         self.scopes[0].insert(
             "len".into(),
-            Type::Function {
-                params: vec![Type::Any],
-                ret: Box::new(Type::Int),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Any],
+                    ret: Box::new(Type::Int),
+                },
+                annotated: false,
             },
         );
     }
@@ -588,18 +607,32 @@ impl<'a> CheckCtx<'a> {
         self.scopes.pop();
     }
 
+    /// Declara una variable sin anotación de tipo (inferida o
+    /// gradual). Permite que reasignaciones futuras cambien el
+    /// tipo libremente.
     fn declare_var(&mut self, name: String, ty: Type) {
-        // Se permite shadowing — el nombre se redeclara en el scope
-        // actual sin advertir. El evaluator se comporta igual.
         if let Some(top) = self.scopes.last_mut() {
-            top.insert(name, ty);
+            top.insert(name, VarBinding { ty, annotated: false });
+        }
+    }
+
+    /// Declara una variable con anotación explícita de tipo. Las
+    /// reasignaciones posteriores sin anotación se van a chequear
+    /// contra este tipo.
+    fn declare_var_annotated(&mut self, name: String, ty: Type) {
+        if let Some(top) = self.scopes.last_mut() {
+            top.insert(name, VarBinding { ty, annotated: true });
         }
     }
 
     fn lookup_var(&self, name: &str) -> Option<&Type> {
+        self.lookup_binding(name).map(|b| &b.ty)
+    }
+
+    fn lookup_binding(&self, name: &str) -> Option<&VarBinding> {
         for s in self.scopes.iter().rev() {
-            if let Some(t) = s.get(name) {
-                return Some(t);
+            if let Some(b) = s.get(name) {
+                return Some(b);
             }
         }
         None
@@ -1452,8 +1485,8 @@ fn check_result_match_exhaustiveness(ctx: &mut CheckCtx, arms: &[crate::ast::Mat
     let mut has_catchall = false;
     for arm in arms {
         match &arm.pattern {
-            Pattern::OkBinding(_) => has_ok = true,
-            Pattern::ErrBinding(_) => has_err = true,
+            Pattern::OkBinding(_) | Pattern::OkWildcard => has_ok = true,
+            Pattern::ErrBinding(_) | Pattern::ErrWildcard => has_err = true,
             Pattern::Wildcard | Pattern::Ident(_) => has_catchall = true,
             _ => {}
         }
@@ -1493,6 +1526,8 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type)
             ctx.declare_var(name.clone(), Type::Str);
         }
         Pattern::Wildcard
+        | Pattern::OkWildcard
+        | Pattern::ErrWildcard
         | Pattern::Int(_)
         | Pattern::Float(_)
         | Pattern::Str(_)
@@ -1658,7 +1693,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         Stmt::Assign { target, type_, value } => {
             let value_ty = infer_expr(ctx, value);
             if let AssignTarget::Ident(name) = target {
-                let bound_ty = match type_ {
+                match type_ {
                     Some(ann) => {
                         let declared = resolve_type_expr(ann, ctx.types).unwrap_or(Type::Any);
                         if !is_compatible(&value_ty, &declared) {
@@ -1669,12 +1704,37 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                 value_ty.display(ctx.types)
                             ));
                         }
-                        // El binding usa el tipo declarado, no el inferido.
-                        declared
+                        // Una anotación explícita "redeclara" el binding
+                        // con el tipo declarado y marca annotated=true.
+                        ctx.declare_var_annotated(name.clone(), declared);
                     }
-                    None => value_ty,
-                };
-                ctx.declare_var(name.clone(), bound_ty);
+                    None => {
+                        // Sin anotación nueva: si la variable ya existe
+                        // con anotación previa, exigimos que el valor
+                        // nuevo sea compatible con ese tipo. Si la
+                        // variable se infirió sin anotación, el modelo
+                        // gradual permite que el tipo cambie.
+                        match ctx.lookup_binding(name) {
+                            Some(existing) if existing.annotated => {
+                                let existing_ty = existing.ty.clone();
+                                if !is_compatible(&value_ty, &existing_ty) {
+                                    ctx.error(format!(
+                                        "`{}` declarado como `{}` recibió un valor `{}`",
+                                        name,
+                                        existing_ty.display(ctx.types),
+                                        value_ty.display(ctx.types)
+                                    ));
+                                }
+                                // Conservamos el binding anotado — la
+                                // reasignación no relaja el tipo.
+                                ctx.declare_var_annotated(name.clone(), existing_ty);
+                            }
+                            _ => {
+                                ctx.declare_var(name.clone(), value_ty);
+                            }
+                        }
+                    }
+                }
             }
             // AssignTarget::Field: no introduce variable, no chequeamos
             // tipo del campo todavía (requeriría check del object como
@@ -3604,5 +3664,110 @@ mod tests {
     fn unify_returns_vacio_es_null() {
         // Sin returns explícitos → Null (matchea el evaluator).
         assert_eq!(unify_returns(&[]), Type::Null);
+    }
+
+    // ---- Deuda residual de 5a: reasignación contra tipo previo ----
+
+    #[test]
+    fn reasignacion_sin_anotacion_a_var_anotada_falla() {
+        // `m: Int = 1; m = "x"` — la primera asignación marcó `m`
+        // como anotada Int; la segunda sin anotación viola eso.
+        assert_error_with(
+            "let m: Int = 1\n\
+             m = \"no soy int\"",
+            &["m", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn reasignacion_sin_anotacion_a_var_inferida_pasa() {
+        // `n = 1; n = "x"` — la primera asignación NO tenía anotación,
+        // así que el modelo gradual permite cambiar el tipo.
+        assert_ok(
+            "let n = 1\n\
+             n = \"ahora soy texto\"",
+        );
+    }
+
+    #[test]
+    fn reasignacion_compatible_a_var_anotada_pasa() {
+        // `m: Int = 1; m = 2` — la reasignación respeta el tipo.
+        assert_ok(
+            "let m: Int = 1\n\
+             m = 2",
+        );
+    }
+
+    #[test]
+    fn reasignacion_int_a_float_anotado_pasa_por_coercion() {
+        // `f: Float = 1.0; f = 2` — Int → Float por coerción.
+        assert_ok(
+            "let f: Float = 1.0\n\
+             f = 2",
+        );
+    }
+
+    #[test]
+    fn re_anotacion_con_otro_tipo_pasa_como_redeclaracion() {
+        // `m: Int = 1; m: Str = "x"` — el segundo `m: Str = ...` es
+        // una redeclaración explícita; el modelo gradual la permite
+        // (el evaluator hace lo mismo). El bug que cierra esta deuda
+        // es la reasignación SIN anotación nueva.
+        assert_ok(
+            "let m: Int = 1\n\
+             let m: Str = \"x\"",
+        );
+    }
+
+    #[test]
+    fn match_result_con_ok_wildcard_y_err_wildcard_es_exhaustivo() {
+        // `Ok(_)` y `Err(_)` cubren las dos variantes — no falta nada.
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 Ok(_) => \"ok\"\n\
+                 Err(_) => \"err\"\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn match_result_con_solo_ok_wildcard_falta_err() {
+        // OkWildcard cuenta como variante Ok, no como catch-all.
+        // Si falta Err, error de exhaustividad.
+        assert_error_with(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 Ok(_) => \"ok\"\n\
+             }",
+            &["match", "Result", "exhaustivo", "Err"],
+        );
+    }
+
+    #[test]
+    fn reasignacion_anotada_propaga_a_uso_posterior() {
+        // Verifica que el binding sigue siendo `Int` después de un
+        // intento de reasignación incompatible: el uso posterior
+        // espera Int.
+        let (_, errors) = check_str(
+            "let m: Int = 1\n\
+             m = \"no soy int\"\n\
+             let n: Int = m + 1",
+        );
+        // Esperamos solo el error de la reasignación, no errores
+        // adicionales del `m + 1` (porque m sigue siendo Int).
+        let count_reassign = errors
+            .iter()
+            .filter(|e| e.message.contains("m") && e.message.contains("Str"))
+            .count();
+        assert!(count_reassign >= 1, "esperaba error de reasignación, hubo: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+        // El uso posterior `m + 1` tipa OK (m sigue siendo Int).
+        let count_plus = errors
+            .iter()
+            .filter(|e| e.message.contains("operador") && e.message.contains("+"))
+            .count();
+        assert_eq!(count_plus, 0, "no esperaba error en `m + 1`, hubo: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>());
     }
 }
