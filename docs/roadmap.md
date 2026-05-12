@@ -1955,13 +1955,107 @@ build` y producen output idéntico a `fitz run`.
 - **Inferencia de tipos de params** en fns sin anotar: deuda
   vieja de 5b.1, sigue.
 
-##### 5b.6 — HTTP / `@server` / handlers
-**Pendiente** — los decoradores `@get`/`@post`/etc. se traducen
-a registración en una `Router` axum dentro del `main`. `async
-fn` real cuando llegue. Bridge sync/async puede simplificarse
-porque tokio + axum corren todo async nativamente. Probablemente
-suma `[dependencies] axum = "0.8"` + `tokio` + `serde_json` al
-Cargo.toml generado.
+##### 5b.6 — HTTP / `@server` / handlers ✓
+**Cerrado.** Sexto paso de Fase 5b. Los binarios producidos por
+`fitz build` pueden ser servidores HTTP nativos: `@get`/`@post`/
+`@put`/`@delete` registran rutas en un `axum::Router`,
+`@server(port, host)` configura la addr, y el `fn main()`
+generado es `#[tokio::main] async fn main()`.
+
+**Cargo.toml condicional**: el codegen escanea decoradores HTTP
+en el AST. Si hay alguno, agrega `axum = "0.8"`, `tokio` (macros
++ rt-multi-thread), `serde` (derive), `serde_json`
+(preserve_order). Programas sin HTTP siguen siendo builds
+livianos sin estas deps.
+
+**Implementación**:
+- `has_http_routes(program)`: scan que mira si alguna `FnDef`
+  tiene `decorators` no-vacíos. Decide modo HTTP vs CLI.
+- `generate_main_rs` particiona stmts en categorías nuevas:
+  `http_fns` (FnDef con `@get/...`), `top_fns` (FnDef sin decos),
+  `type_defs`, `main_stmts`. Si hay HTTP, llama a
+  `gen_http_main(...)` en lugar de `gen_main(...)`.
+- **Handler wrapper** (`gen_http_handler_wrapper`): por cada
+  `@<method>("/path") fn name(params) -> Ret`, emite un
+  `async fn __handler_<name>(extractors) -> axum::response::Response`.
+  Extractors:
+  - Path params: `axum::extract::Path<i64>` para single, `Path<(T1,
+    T2)>` para múltiples. Los nombres del template (`{id}`) se
+    extraen con `parse_http_path` (soporta tanto `Expr::Str` como
+    `Expr::StrInterp` con idents).
+  - Body: `axum::Json<serde_json::Value>` → `<T as
+    __FromFitzJson>::__from_fitz_json(...)`. Si falla → 400.
+  - Llamada a la fn Fitz original con los args.
+  - Si retorna `Result<T>`: match Ok/Err → 200/500. Si no:
+    siempre 200.
+- **Main HTTP** (`gen_http_main`): emite `#[tokio::main]\nasync fn
+  main() { let __app = Router::new() .route(...) ...; let __addr =
+  "host:port".parse(); axum::serve(...) }`.
+- **`@server(port, host)`** (`parse_server_decorator`): valida
+  args (port Int en [1,65535], host Str), defaults
+  `(3000, "127.0.0.1")` si falta.
+- **Serialización** (preludio HTTP):
+  - Traits `__ToFitzJson` y `__FromFitzJson` con impls genéricos
+    para primitivos, `Option<T>`, `Rc<RefCell<T>>`, `Vec<T>`,
+    `Vec<(K, V)>`, `Result<T, String>`.
+  - Trait `__MapKey` para que `Vec<(K, V)>` produzca objetos
+    JSON con claves String (impls para String, i64, f64, bool).
+  - Por cada `type Foo`: `impl __ToFitzJson for FooData` (objeto
+    con field por field) + `impl __FromFitzJson for FooData`
+    (valida extras, aplica defaults, chequea required).
+  - Replica `value_to_json` / `json_to_instance` del intérprete.
+
+**Limitación aceptada — state compartido entre handlers**: el
+intérprete permite `let users = [...]` top-level usado por
+handlers (env del módulo capturado). En Rust, fns top-level no
+acceden al scope de `main`. Modelarlo bien requiere
+`Arc<Mutex<...>>` + `axum::extract::State` y un refactor profundo
+de la representación de tipos. **Decisión**: error de codegen
+explícito si hay `Stmt::Assign` top-level + decoradores HTTP,
+citando 5b.6 como deuda. Workaround: pasar state como arg, o
+`fitz run`.
+
+Esto significa que **`examples/server.fitz` y
+`examples/guide/17-http.fitz` NO compilan con `fitz build`** —
+usan `users` como state compartido. Siguen funcionando con
+`fitz run`. La guía documenta la diferencia.
+
+**`fn main()` del programa**: cuando tiene decoradores
+(`@server(...) fn main() => 0`), su decorator se procesa pero
+la fn NO se emite como item Rust (colisión con el `fn main` del
+crate, que ahora es generado por el codegen). El cuerpo `=> 0`
+es un placeholder — no se ejecuta.
+
+**Tests**: 11 unit nuevos en `src/codegen.rs` (HTTP main async,
+Router emit, path params Int/Str, handler Result match,
+body deserializa, @server custom, default 127.0.0.1:3000,
+state compartido aborta, Cargo.toml condicional, impl
+ToFitzJson por type) + 7 E2E nuevos en
+`tests/compile_e2e.rs` con un helper `build_spawn_request` que
+buildea, spawnea el binario, abre un TCP socket directo a la
+addr, envía request HTTP cruda, parsea status + body, y mata
+el server. Cubre: GET simple, GET con path Int, Result Ok→200/
+Err→500, POST body, POST defaults, POST extra→400, state
+compartido aborta. El E2E "feature no soportada" reapuntado a
+state compartido HTTP.
+
+**Validación bit-a-bit**: server simple sin state (`fn
+double(n: Int) => n * 2`) produce `42` para `/double/21` tanto
+con `fitz run` como con `fitz build && ./bin`.
+
+**Deuda explícita que sigue post-5b.6**:
+- **State compartido entre handlers**: lo más visible. Bloquea
+  los ejemplos canónicos del cap 17. Sub-paso futuro (`5b.6.1`?)
+  con `Arc<Mutex<...>>` + `State` extractor + refactor de
+  List/Map representación.
+- **`async fn` real en Fitz**: await, futures como tipo. Hoy los
+  handlers son sync, axum los wrapea.
+- **Status codes específicos por Err kind**: hoy todo Err → 500.
+  Idea futura: `Err(e: NotFound)` → 404, etc.
+- **Middleware, CORS, logging, TLS, streaming**: fuera de scope.
+- **Body sin tipo declarado**: el codegen acepta solo body con
+  tipo. Para body como `Map` libre necesitamos un FromFitzJson
+  para `Rc<RefCell<Vec<(String, T)>>>` con keys auto-converted.
 
 ##### 5b.7 — Guía + ejemplos + cierre de Fase 5b
 **Pendiente** — capítulo nuevo de la guía sobre `fitz build`,
@@ -1986,7 +2080,7 @@ compilado a binario standalone"), cierre formal de Fase 5.
 - [x] Listas, mapas, indexing, métodos built-in (5b.3)
 - [x] Result, `?`, match (5b.4)
 - [x] Módulos / `import` (5b.5)
-- [ ] HTTP / `@server` / handlers (5b.6)
+- [x] HTTP / `@server` / handlers (5b.6)
 - [ ] Optimizaciones básicas (post-5b — strings sin `.clone()`,
   pre-declaración de vars que cruzan bloques)
 - [x] Binario nativo standalone (5b.1 — subset primitivo;

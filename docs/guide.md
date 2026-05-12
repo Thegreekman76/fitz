@@ -4081,6 +4081,16 @@ mover el handler a un pool y no vas a tener que cambiar nada.
   parsea sobre handlers HTTP, pero no aporta nada en runtime. El
   bridge es síncrono. Cuando se sume async real, los handlers de
   hoy van a seguir funcionando.
+- **Compilar HTTP con `fitz build`** — desde 5b.6 el compilador
+  produce servidores HTTP nativos (axum + tokio). Funciona para
+  handlers sin **state compartido**: cada handler procesa sus
+  args y devuelve directo, sin leer/escribir vars top-level del
+  programa. El ejemplo de este capítulo y `examples/server.fitz`
+  usan `let users = [...]` que TODOS los handlers leen — eso es
+  state compartido, y NO compila con `fitz build` todavía
+  (deuda residual). Sí compila y corre con `fitz run`. Resolver
+  el caso compilado requiere `Arc<Mutex<...>>` + `State` extractor
+  en el Rust generado — sub-paso futuro.
 - **Status codes custom** — `return 401 { ... }` está en el
   syntax-spec pero el intérprete aún no lo entiende. Hoy: Result
   destila a 200/500 automático, o tipos no serializables → 500

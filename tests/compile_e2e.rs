@@ -583,16 +583,17 @@ fn lista_heterogenea_aborta_build() {
 
 #[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
-    // 5b.5 abre imports/módulos. La feature bloqueada que apuntamos
-    // acá pasa a ser `@get` (decoradores HTTP) — el codegen aborta con
-    // mensaje claro mencionando 5b.6.
+    // 5b.6 abre @get/@post/etc. La feature bloqueada que apuntamos acá
+    // pasa a ser **state compartido HTTP** (`let X = ...` top-level
+    // junto a decoradores HTTP) — el codegen aborta con mensaje claro
+    // citando 5b.6 como deuda residual.
     let stderr = build_expect_fail(
-        "unsupported-http",
-        "@get(\"/\") fn index() => 0\n",
+        "unsupported-http-state",
+        "let users = [1, 2]\n@get(\"/users\") fn list() -> Str => \"x\"\n",
     );
     assert!(
-        stderr.contains("5b.6") || stderr.contains("decorador"),
-        "esperaba mensaje sobre decorador HTTP / 5b.6, fue: {}",
+        stderr.contains("state compartido") || stderr.contains("5b.6"),
+        "esperaba mensaje sobre state compartido / 5b.6, fue: {}",
         stderr
     );
 }
@@ -912,6 +913,246 @@ fn x() -> Int => 1
     assert!(
         stderr.contains("transitivos") || stderr.contains("5b.5"),
         "esperaba mensaje sobre imports transitivos / 5b.5, fue: {}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fase 5b.6 — HTTP / @server / handlers
+// ---------------------------------------------------------------------------
+
+/// Helper: build de un programa HTTP, spawn del binario, request HTTP
+/// crudo (sin reqwest para evitar dep extra en tests), y stop. Devuelve
+/// (status_line, body) leídos del socket.
+fn build_spawn_request(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+) -> (u16, String) {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    // Spawn del server en background. Le damos tiempo a abrir el
+    // puerto antes de la primera request.
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    // Esperar a que el puerto esté escuchando (hasta 3s).
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto {} en 3s", port);
+    }
+
+    // Construir la request HTTP a mano (sin reqwest).
+    use std::io::{Read, Write};
+    let request = match body {
+        Some(b) => format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+             Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+            method,
+            path,
+            addr,
+            b.len(),
+            b
+        ),
+        None => format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            method, path, addr
+        ),
+    };
+    let mut stream =
+        std::net::TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    // Parsear status + body. Formato: "HTTP/1.1 <code> <reason>\r\n...\r\n\r\n<body>"
+    let status_line = raw.lines().next().unwrap_or("").to_string();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body_start = raw
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(raw.len());
+    let body = raw[body_start..].to_string();
+    (status, body)
+}
+
+#[test]
+fn http_get_simple_responde_200_y_body() {
+    // El criterio mínimo de 5b.6: un handler GET que devuelve un Str
+    // produce 200 + JSON con el string.
+    let src = "@server(43210)\nfn main() => 0\n\
+               @get(\"/\") fn index() -> Str => \"Fitz HTTP corriendo\"\n";
+    let (status, body) = build_spawn_request(
+        "http-get-simple",
+        src,
+        43210,
+        "GET",
+        "/",
+        None,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(body.trim(), "\"Fitz HTTP corriendo\"");
+}
+
+#[test]
+fn http_get_con_path_param_int() {
+    let src = "@server(43211)\nfn main() => 0\n\
+               @get(\"/double/{n}\") fn double(n: Int) -> Int => n * 2\n";
+    let (status, body) =
+        build_spawn_request("http-path-int", src, 43211, "GET", "/double/21", None);
+    assert_eq!(status, 200);
+    assert_eq!(body.trim(), "42");
+}
+
+#[test]
+fn http_result_ok_responde_200_err_responde_500() {
+    let src = "@server(43212)\nfn main() => 0\n\
+               @get(\"/d/{a}/{b}\") fn divide(a: Int, b: Int) -> Result<Int> {\n\
+                   if (b == 0) { return Err(\"div por cero\") }\n\
+                   return Ok(a / b)\n\
+               }\n";
+    let (status_ok, body_ok) =
+        build_spawn_request("http-result-ok", src, 43212, "GET", "/d/10/2", None);
+    assert_eq!(status_ok, 200);
+    assert_eq!(body_ok.trim(), "5");
+    let (status_err, body_err) = build_spawn_request(
+        "http-result-err",
+        src,
+        43212,
+        "GET",
+        "/d/10/0",
+        None,
+    );
+    assert_eq!(status_err, 500);
+    assert!(
+        body_err.contains("\"error\":\"div por cero\""),
+        "esperaba error JSON con mensaje, fue: {}",
+        body_err
+    );
+}
+
+#[test]
+fn http_post_body_deserializa_tipo_custom() {
+    let src = "@server(43213)\nfn main() => 0\n\
+               type Input { msg: Str, times: Int = 1 }\n\
+               @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
+    let (status, body) = build_spawn_request(
+        "http-post-body",
+        src,
+        43213,
+        "POST",
+        "/echo",
+        Some("{\"msg\":\"hola\",\"times\":3}"),
+    );
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("\"msg\":\"hola\"") && body.contains("\"times\":3"),
+        "esperaba body con msg y times, fue: {}",
+        body
+    );
+}
+
+#[test]
+fn http_post_body_aplica_defaults_a_campos_faltantes() {
+    let src = "@server(43214)\nfn main() => 0\n\
+               type Input { msg: Str, times: Int = 7 }\n\
+               @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
+    let (status, body) = build_spawn_request(
+        "http-post-default",
+        src,
+        43214,
+        "POST",
+        "/echo",
+        Some("{\"msg\":\"sin times\"}"),
+    );
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("\"times\":7"),
+        "esperaba default `times: 7` aplicado, fue: {}",
+        body
+    );
+}
+
+#[test]
+fn http_post_body_extra_field_es_400() {
+    let src = "@server(43215)\nfn main() => 0\n\
+               type Input { msg: Str }\n\
+               @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
+    let (status, body) = build_spawn_request(
+        "http-post-extra",
+        src,
+        43215,
+        "POST",
+        "/echo",
+        Some("{\"msg\":\"x\",\"extra\":\"nope\"}"),
+    );
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("campo no declarado"),
+        "esperaba mensaje sobre campo no declarado, fue: {}",
+        body
+    );
+}
+
+#[test]
+fn http_state_compartido_aborta_build() {
+    let stderr = build_expect_fail(
+        "http-state-aborts",
+        "let users = [1, 2]\n@get(\"/users\") fn list() -> Str => \"x\"\n",
+    );
+    assert!(
+        stderr.contains("state compartido"),
+        "esperaba mensaje sobre state compartido, fue: {}",
         stderr
     );
 }

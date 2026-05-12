@@ -114,6 +114,12 @@ pub fn generate_project(
     let mut loader = ModuleLoader::new(base_dir.clone());
     loader.collect_imports(program)?;
 
+    // 5b.6: detectar si el programa (o algún módulo cargado) usa
+    // decoradores HTTP/`@server`. Si sí, el Cargo.toml suma axum +
+    // tokio + serde + serde_json. Si no, queda minimalista — los
+    // ejemplos no-HTTP no pagan el costo de bajar/compilar axum.
+    let has_http = has_http_routes(program);
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
@@ -123,9 +129,19 @@ pub fn generate_project(
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
         output_basename: raw_stem,
-        cargo_toml: cargo_toml_for(&stem),
+        cargo_toml: cargo_toml_for(&stem, has_http),
         main_rs,
         mod_files: loader.into_mod_files(),
+    })
+}
+
+/// True si el programa tiene al menos una `Stmt::FnDef` con un
+/// decorador HTTP (`@get`/`@post`/`@put`/`@delete`/`@server`). El
+/// codegen lo usa para decidir si agregar deps de axum/tokio/serde
+/// al Cargo.toml y si emitir un `fn main()` async.
+fn has_http_routes(program: &Program) -> bool {
+    program.iter().any(|s| {
+        matches!(s, Stmt::FnDef { decorators, .. } if !decorators.is_empty())
     })
 }
 
@@ -153,10 +169,11 @@ fn sanitize_crate_name(raw: &str) -> String {
     s
 }
 
-/// Cargo.toml minimalista para un binario sin dependencias. Cuando
-/// llegue 5b.6 sumamos `axum`/`tokio`/`serde_json` acá.
-fn cargo_toml_for(stem: &str) -> String {
-    format!(
+/// Cargo.toml para el project generado. Si `has_http` es true,
+/// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
+/// Si no, queda sin `[dependencies]` y la compilación es rápida.
+fn cargo_toml_for(stem: &str, has_http: bool) -> String {
+    let header = format!(
         "[package]\n\
          name = \"{stem}\"\n\
          version = \"0.1.0\"\n\
@@ -165,7 +182,20 @@ fn cargo_toml_for(stem: &str) -> String {
          [[bin]]\n\
          name = \"{stem}\"\n\
          path = \"src/main.rs\"\n",
-    )
+    );
+    if has_http {
+        format!(
+            "{}\n\
+             [dependencies]\n\
+             axum = \"0.8\"\n\
+             tokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\
+             serde = {{ version = \"1\", features = [\"derive\"] }}\n\
+             serde_json = {{ version = \"1\", features = [\"preserve_order\"] }}\n",
+            header
+        )
+    } else {
+        header
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -743,49 +773,220 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
 
 /// Genera el `src/main.rs` del Cargo project. Si hay módulos cargados,
 /// emite los `mod foo;` y `use foo::{...};` correspondientes al inicio.
+/// Si el programa tiene decoradores HTTP/`@server`, emite un `fn main()`
+/// async con el Router + `axum::serve` (modo HTTP); si no, sigue el
+/// flujo single-threaded clásico (modo CLI).
 fn generate_main_rs(
     program: &Program,
     env: &TypeEnv,
     loader: &ModuleLoader,
 ) -> Result<String, FitzError> {
+    let has_http = has_http_routes(program);
+
     let mut ctx = CodegenCtx::new(env);
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
 
-    // Tres categorías de stmts top-level:
-    //   * `type Foo { ... }`     → structs + alias + impl Display, afuera de `fn main()`.
-    //   * `fn ...`               → fns top-level, afuera de `fn main()`.
-    //   * `Stmt::Import` / `Stmt::FromImport` → se traducen a `mod`/`use` en el preludio.
-    //   * el resto               → cuerpo de `fn main()`.
+    // Particionar stmts top-level. Categorías:
+    //   * `type Foo { ... }`              → structs + alias + impl Display.
+    //   * `fn ...` con decorators HTTP    → handler: emitirla como pub fn
+    //                                       + generar wrapper async.
+    //   * `fn main` con decorators        → solo procesar decorators
+    //                                       (típicamente `@server`); NO
+    //                                       emitir como Rust fn (colisión
+    //                                       con `fn main` del crate).
+    //   * `fn ...` normal                 → pub fn top-level.
+    //   * `Stmt::Import` / `FromImport`   → mod/use decls del loader.
+    //   * el resto                        → cuerpo de `fn main()` (modo
+    //                                       CLI) o se ignora (modo HTTP).
     let mut type_defs: Vec<&Stmt> = Vec::new();
+    let mut http_fns: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut main_stmts: Vec<&Stmt> = Vec::new();
+    let mut server_config: Option<ServerConfigArgs> = None;
     for s in program {
         match s {
             Stmt::TypeDef { .. } => type_defs.push(s),
-            Stmt::FnDef { .. } => top_fns.push(s),
-            Stmt::Import { .. } | Stmt::FromImport { .. } => {
-                // Manejados via `loader.emit_mod_decls` y
-                // `loader.emit_use_decls`; no entran al cuerpo
-                // de main.
+            Stmt::FnDef {
+                name,
+                decorators,
+                ..
+            } => {
+                if decorators.is_empty() {
+                    top_fns.push(s);
+                } else {
+                    // Separar `@server` de los `@get`/`@post`/etc.
+                    let mut http_decos = false;
+                    for d in decorators {
+                        match d.name.as_str() {
+                            "get" | "post" | "put" | "delete" => http_decos = true,
+                            "server" => {
+                                server_config = Some(parse_server_decorator(&d.args)?);
+                            }
+                            other => {
+                                return Err(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    0,
+                                    0,
+                                    format!(
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (5b.6 cubre @get/@post/@put/@delete/@server)",
+                                        other, name
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+                    if http_decos {
+                        http_fns.push(s);
+                    } else if name != "main" {
+                        // fn con solo `@server` y nombre distinto a main:
+                        // raro, pero lo emitimos como pub fn igual.
+                        top_fns.push(s);
+                    }
+                    // Si es `fn main` con solo `@server`: NO se emite.
+                }
             }
+            Stmt::Import { .. } | Stmt::FromImport { .. } => {}
             _ => main_stmts.push(s),
+        }
+    }
+
+    // 5b.6: state compartido entre handlers no soportado todavía. Si
+    // hay HTTP y los main_stmts incluyen un `Stmt::Assign` (`let X =
+    // ...` top-level), abortamos con mensaje claro. Esto evita que el
+    // codegen de los http_fns falle con "variable desconocida" cuando
+    // el body referencia un binding top-level.
+    if has_http {
+        for s in &main_stmts {
+            if let Stmt::Assign { target, .. } = s {
+                let name = match target {
+                    AssignTarget::Ident(n) => n.clone(),
+                    AssignTarget::Field { .. } => "<campo>".to_string(),
+                };
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    format!(
+                        "state compartido entre handlers HTTP (var top-level `{}`) no soportado \
+                         en 5b.6: las fns Rust no acceden al scope de `main`. Deuda residual — \
+                         workaround: pasar el state como argumento a cada handler, o usar `fitz \
+                         run` para mantener la semántica completa del intérprete.",
+                        name
+                    ),
+                ));
+            }
         }
     }
 
     ctx.emit_prelude();
     loader.emit_mod_decls(&mut ctx.output);
     loader.emit_use_decls(&mut ctx.output);
+
+    // 5b.6: cuando hay HTTP emitimos los helpers de serialización
+    // (`__ToFitzJson` / `__FromFitzJson`) antes de los tipos custom,
+    // porque los `impl` de cada `type` los referencian.
+    if has_http {
+        ctx.emit_http_runtime_prelude();
+    }
+
     for stmt in &type_defs {
         ctx.gen_type_def(stmt)?;
+        if has_http {
+            ctx.gen_type_http_impls(stmt)?;
+        }
+    }
+    for stmt in &http_fns {
+        ctx.gen_top_fn(stmt)?;
     }
     for stmt in top_fns {
         ctx.gen_top_fn(stmt)?;
     }
-    ctx.gen_main(&main_stmts)?;
+
+    if has_http {
+        // Emitir un wrapper `async fn __handler_<name>` por cada handler.
+        for stmt in &http_fns {
+            ctx.gen_http_handler_wrapper(stmt)?;
+        }
+        // `#[tokio::main] async fn main` con Router + serve.
+        ctx.gen_http_main(&http_fns, &server_config, &main_stmts)?;
+    } else {
+        // Modo CLI: cuerpo de `fn main()` con el resto de stmts.
+        ctx.gen_main(&main_stmts)?;
+    }
 
     Ok(ctx.output)
+}
+
+/// Valores parseados de `@server(port?, host?)`. Defaults aplicados
+/// (puerto 3000, host "127.0.0.1") si los args no están.
+#[derive(Debug, Clone)]
+struct ServerConfigArgs {
+    port: u16,
+    host: String,
+}
+
+impl Default for ServerConfigArgs {
+    fn default() -> Self {
+        ServerConfigArgs {
+            port: 3000,
+            host: "127.0.0.1".to_string(),
+        }
+    }
+}
+
+/// Parsea los args de un decorator `@server(port?, host?)`. Validaciones:
+///   - Hasta 2 args positionals: `(port: Int)` o `(port: Int, host: Str)`.
+///   - Port entre 1 y 65535.
+///   - Host parsea como `IpAddr` (sin DNS). Validación delegada al runtime
+///     porque acá solo tenemos un literal Str.
+fn parse_server_decorator(args: &[Expr]) -> Result<ServerConfigArgs, FitzError> {
+    let mut cfg = ServerConfigArgs::default();
+    if args.len() > 2 {
+        return Err(FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            format!(
+                "@server(...): admite hasta 2 args positionals (port, host), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    if let Some(port_expr) = args.first() {
+        let Expr::Int(n) = port_expr else {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                "@server: el primer arg (port) debe ser un Int literal".to_string(),
+            ));
+        };
+        if *n < 1 || *n > 65535 {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!("@server: port fuera de rango [1, 65535]: {}", n),
+            ));
+        }
+        cfg.port = *n as u16;
+    }
+    if let Some(host_expr) = args.get(1) {
+        let Expr::Str(s) = host_expr else {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                "@server: el segundo arg (host) debe ser un Str literal".to_string(),
+            ));
+        };
+        // No validamos IP acá: rustc no puede hacerlo en compile time.
+        // El parse se hace en runtime; si falla, axum/tokio reportarán.
+        cfg.host = s.clone();
+    }
+    Ok(cfg)
 }
 
 // ---------------------------------------------------------------------------
@@ -1357,12 +1558,13 @@ impl<'a> CodegenCtx<'a> {
             unreachable!("gen_top_fn solo se llama sobre Stmt::FnDef");
         };
 
-        if !decorators.is_empty() {
-            return Err(self.err(format!(
-                "fn `{}`: decoradores (`@get`/`@post`/`@server`/etc.) no soportados en 5b.1 — HTTP llega en 5b.6",
-                name
-            )));
-        }
+        // 5b.6: las fns con decoradores HTTP (`@get`/`@post`/etc.) se
+        // emiten como `pub fn` normales — el wrapper `async fn
+        // __handler_<name>` (`gen_http_handler_wrapper`) las llama
+        // adentro de la response builder. Los decoradores en sí no
+        // afectan el codegen del cuerpo, solo los pre-categoriza
+        // `generate_main_rs`. Acá los ignoramos.
+        let _ = decorators;
 
         let sig = self
             .fn_sigs
@@ -3201,7 +3403,621 @@ impl<'a> CodegenCtx<'a> {
     fn indent_str_outer(&self) -> String {
         "    ".repeat(self.indent)
     }
+
+    // ------------------------------------------------------------------
+    // 5b.6 — HTTP / @server / handlers
+    // ------------------------------------------------------------------
+
+    /// Emite el preludio HTTP: traits `__ToFitzJson` y `__FromFitzJson`,
+    /// implementaciones para primitivos / List / Map / Option / Result,
+    /// helpers de error response. Los impls específicos por `type` se
+    /// emiten junto al struct (en `gen_type_http_impls`).
+    fn emit_http_runtime_prelude(&mut self) {
+        self.emit(HTTP_RUNTIME_PRELUDE);
+    }
+
+    /// Emite los `impl __ToFitzJson` y `impl __FromFitzJson` para un
+    /// `type Foo` particular. Llamado después de `gen_type_def`.
+    fn gen_type_http_impls(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let Stmt::TypeDef { name, .. } = stmt else {
+            return Ok(());
+        };
+        let sig = self
+            .type_sigs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| self.err(format!("tipo `{}` no pre-registrado", name)))?;
+        let data_name = format!("{}Data", name);
+
+        // impl __ToFitzJson for <Foo>Data
+        writeln!(
+            &mut self.output,
+            "impl __ToFitzJson for {} {{",
+            data_name
+        )
+        .unwrap();
+        self.emit("    fn __to_fitz_json(&self) -> serde_json::Value {\n");
+        self.emit("        let mut __obj = serde_json::Map::new();\n");
+        for f in &sig.fields {
+            writeln!(
+                &mut self.output,
+                "        __obj.insert(\"{}\".to_string(), self.{}.__to_fitz_json());",
+                f.name, f.name
+            )
+            .unwrap();
+        }
+        self.emit("        serde_json::Value::Object(__obj)\n");
+        self.emit("    }\n}\n\n");
+
+        // impl __FromFitzJson for <Foo>Data
+        writeln!(
+            &mut self.output,
+            "impl __FromFitzJson for {} {{",
+            data_name
+        )
+        .unwrap();
+        self.emit("    fn __from_fitz_json(__j: &serde_json::Value) -> Result<Self, String> {\n");
+        writeln!(
+            &mut self.output,
+            "        let __obj = __j.as_object().ok_or_else(|| format!(\"body para '{}' debe ser un objeto JSON\"))?;",
+            name
+        )
+        .unwrap();
+        // Validar extras
+        self.emit("        let __allowed = [");
+        for (i, f) in sig.fields.iter().enumerate() {
+            if i > 0 {
+                self.emit(", ");
+            }
+            write!(&mut self.output, "\"{}\"", f.name).unwrap();
+        }
+        self.emit("];\n");
+        self.emit("        for __k in __obj.keys() {\n");
+        self.emit("            if !__allowed.contains(&__k.as_str()) {\n");
+        writeln!(
+            &mut self.output,
+            "                return Err(format!(\"body para '{}': campo no declarado: {{}}\", __k));",
+            name
+        )
+        .unwrap();
+        self.emit("            }\n");
+        self.emit("        }\n");
+        // Cada field: presente en JSON → from_fitz_json; ausente con
+        // default → emitir el default; ausente nullable → None; ausente
+        // sin default ni nullable → error.
+        for f in &sig.fields {
+            let rust_ty = rust_type_for(&f.type_, self.env)?;
+            writeln!(&mut self.output, "        let {}: {} = match __obj.get(\"{}\") {{", f.name, rust_ty, f.name).unwrap();
+            writeln!(
+                &mut self.output,
+                "            Some(__v) => <{} as __FromFitzJson>::__from_fitz_json(__v)?,",
+                rust_ty
+            )
+            .unwrap();
+            // Default o nullable
+            if let Some(default_expr) = &f.default {
+                let (code, ty) = self.gen_expr(default_expr)?;
+                let coerced = coerce(&code, &ty, &f.type_);
+                writeln!(&mut self.output, "            None => {},", coerced).unwrap();
+            } else if matches!(f.type_, Type::Nullable(_)) {
+                self.emit("            None => None,\n");
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "            None => return Err(format!(\"body para '{}': falta el campo `{}`\")),",
+                    name, f.name
+                )
+                .unwrap();
+            }
+            self.emit("        };\n");
+        }
+        // Construir el struct
+        writeln!(&mut self.output, "        Ok({} {{", data_name).unwrap();
+        for f in &sig.fields {
+            writeln!(&mut self.output, "            {},", f.name).unwrap();
+        }
+        self.emit("        })\n");
+        self.emit("    }\n}\n\n");
+
+        Ok(())
+    }
+
+    /// Genera el wrapper `async fn __handler_<name>(...)` para un
+    /// handler decorado con `@get/@post/@put/@delete`. Extrae path
+    /// params + body (si corresponde), llama a la fn original, y
+    /// convierte el resultado en una `axum::response::Response`.
+    fn gen_http_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let Stmt::FnDef {
+            name,
+            params,
+            decorators,
+            return_type,
+            ..
+        } = stmt
+        else {
+            return Ok(());
+        };
+
+        // Encontrar el decorator HTTP de esta fn (puede haber otros, los
+        // ignoramos — el filtrado lo hizo `generate_main_rs`).
+        let http_deco = decorators
+            .iter()
+            .find(|d| {
+                matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
+            })
+            .ok_or_else(|| self.err(format!("fn `{}`: sin decorator HTTP", name)))?;
+        let path_arg = http_deco.args.first().ok_or_else(|| {
+            self.err(format!(
+                "fn `{}`: @{} requiere un path como primer arg",
+                name, http_deco.name
+            ))
+        })?;
+        let path = parse_http_path(path_arg)?;
+
+        let template_params = extract_path_template_names(&path);
+
+        // Resolver tipos resueltos de cada param.
+        let mut resolved_params: Vec<(String, Type)> = Vec::with_capacity(params.len());
+        for p in params {
+            let te = p.type_.as_ref().ok_or_else(|| {
+                self.err(format!(
+                    "fn `{}`: parámetro `{}` necesita anotación de tipo",
+                    name, p.name
+                ))
+            })?;
+            let t = resolve_type_expr(te, self.env).map_err(|e| self.err(e.message.clone()))?;
+            resolved_params.push((p.name.clone(), t));
+        }
+
+        // Categorizar: cada param es path o body.
+        let mut path_params: Vec<(String, Type)> = Vec::new();
+        let mut body_param: Option<(String, Type)> = None;
+        for (n, t) in &resolved_params {
+            if template_params.iter().any(|tp| tp == n) {
+                path_params.push((n.clone(), t.clone()));
+            } else if body_param.is_some() {
+                return Err(self.err(format!(
+                    "fn `{}`: solo se admite un body param por handler",
+                    name
+                )));
+            } else {
+                body_param = Some((n.clone(), t.clone()));
+            }
+        }
+
+        let resolved_ret = match return_type {
+            Some(te) => resolve_type_expr(te, self.env).map_err(|e| self.err(e.message.clone()))?,
+            None => Type::Null,
+        };
+        let returns_result = matches!(resolved_ret, Type::Result(_));
+
+        // Firma del wrapper. Construimos los extractores axum en orden
+        // declarado por el usuario: path tuple primero, body al final.
+        writeln!(&mut self.output, "async fn __handler_{}(", name).unwrap();
+        if !path_params.is_empty() {
+            if path_params.len() == 1 {
+                let (pn, pt) = &path_params[0];
+                writeln!(
+                    &mut self.output,
+                    "    axum::extract::Path({}): axum::extract::Path<{}>,",
+                    pn,
+                    rust_type_for(pt, self.env)?,
+                )
+                .unwrap();
+            } else {
+                // Path<(T1, T2, ...)> con nombres tupleados.
+                let names: Vec<String> = path_params.iter().map(|(n, _)| n.clone()).collect();
+                let types: Vec<String> = path_params
+                    .iter()
+                    .map(|(_, t)| rust_type_for(t, self.env))
+                    .collect::<Result<_, _>>()?;
+                writeln!(
+                    &mut self.output,
+                    "    axum::extract::Path(({})): axum::extract::Path<({})>,",
+                    names.join(", "),
+                    types.join(", "),
+                )
+                .unwrap();
+            }
+        }
+        if let Some((bn, _bt)) = &body_param {
+            writeln!(
+                &mut self.output,
+                "    axum::Json({}_raw): axum::Json<serde_json::Value>,",
+                bn,
+            )
+            .unwrap();
+        }
+        self.emit(") -> axum::response::Response {\n");
+        self.emit("    use axum::response::IntoResponse;\n");
+
+        // Si hay body con tipo declarado, deserializar primero. El
+        // `__from_fitz_json` genérico para `Rc<RefCell<T>>` ya envuelve
+        // el resultado, así que para tipos Nominal el binding queda en
+        // la representación correcta (`Foo = Rc<RefCell<FooData>>`).
+        if let Some((bn, bt)) = &body_param {
+            let rust_ty = rust_type_for(bt, self.env)?;
+            writeln!(
+                &mut self.output,
+                "    let {} = match <{} as __FromFitzJson>::__from_fitz_json(&{}_raw) {{",
+                bn, rust_ty, bn
+            )
+            .unwrap();
+            self.emit("        Ok(v) => v,\n");
+            self.emit("        Err(e) => return (\n");
+            self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("            axum::Json(serde_json::json!({\"error\": e})),\n");
+            self.emit("        ).into_response(),\n");
+            self.emit("    };\n");
+        }
+
+        // Llamada a la fn original.
+        let call_args: Vec<String> = resolved_params
+            .iter()
+            .map(|(n, _)| n.clone())
+            .collect();
+        writeln!(
+            &mut self.output,
+            "    let __result = {}({});",
+            name,
+            call_args.join(", ")
+        )
+        .unwrap();
+
+        // Convertir a response según retorne Result o no.
+        if returns_result {
+            self.emit("    match __result {\n");
+            self.emit("        Ok(__v) => (\n");
+            self.emit("            axum::http::StatusCode::OK,\n");
+            self.emit("            axum::Json(__v.__to_fitz_json()),\n");
+            self.emit("        ).into_response(),\n");
+            self.emit("        Err(__e) => (\n");
+            self.emit("            axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
+            self.emit("            axum::Json(serde_json::json!({\"error\": __e})),\n");
+            self.emit("        ).into_response(),\n");
+            self.emit("    }\n");
+        } else {
+            self.emit("    (\n");
+            self.emit("        axum::http::StatusCode::OK,\n");
+            self.emit("        axum::Json(__result.__to_fitz_json()),\n");
+            self.emit("    ).into_response()\n");
+        }
+        self.emit("}\n\n");
+
+        Ok(())
+    }
+
+    /// Genera el `#[tokio::main] async fn main()` que construye el
+    /// `Router` axum con cada handler registrado, parsea la addr de
+    /// `@server(...)` (o usa defaults), e invoca `axum::serve`.
+    ///
+    /// `main_stmts` se ignoran en modo HTTP (los `let x = ...` top-level
+    /// no se pueden ejecutar antes del server sin diseñar un init phase
+    /// distinto; los ejemplos canónicos no los usan).
+    fn gen_http_main(
+        &mut self,
+        http_fns: &[&Stmt],
+        server_config: &Option<ServerConfigArgs>,
+        main_stmts: &[&Stmt],
+    ) -> Result<(), FitzError> {
+        // 5b.6: state compartido entre handlers no soportado. En el
+        // intérprete, las fns top-level capturan el env del módulo y
+        // un `let users = [...]` queda visible para todos. En Rust,
+        // los handlers son `fn` libres y no acceden al scope de `main`.
+        // Modelarlo bien requiere `Arc<Mutex<...>>` con extractores
+        // `axum::extract::State`, lo cual es un refactor grande de la
+        // representación de tipos (List/Map dejaría de ser
+        // `Rc<RefCell<>>` cuando es shared HTTP state). Lo cerramos
+        // como deuda visible: si el programa HTTP tiene
+        // `Stmt::Assign` top-level, abortamos con mensaje claro.
+        for s in main_stmts {
+            if let Stmt::Assign { target, .. } = s {
+                let name = match target {
+                    AssignTarget::Ident(n) => n.clone(),
+                    AssignTarget::Field { .. } => "<campo>".to_string(),
+                };
+                return Err(self.err(format!(
+                    "state compartido entre handlers HTTP (var top-level `{}`) no soportado \
+                     en 5b.6: las fns Rust no acceden al scope de `main`. Deuda residual — \
+                     workaround: pasar el state como argumento a cada handler, o usar `fitz \
+                     run` para mantener la semántica completa del intérprete.",
+                    name
+                )));
+            }
+        }
+
+        self.emit("#[tokio::main]\nasync fn main() {\n");
+        self.indent += 1;
+        self.push_scope();
+        for s in main_stmts {
+            self.gen_stmt(s)?;
+        }
+
+        // Router con cada ruta.
+        self.emit_indent();
+        self.emit("let __app = axum::Router::new()\n");
+        for stmt in http_fns {
+            let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            for d in decorators {
+                let method = match d.name.as_str() {
+                    "get" => "get",
+                    "post" => "post",
+                    "put" => "put",
+                    "delete" => "delete",
+                    _ => continue,
+                };
+                let path_arg = match d.args.first() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let path = parse_http_path(path_arg)?;
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "    .route(\"{}\", axum::routing::{}(__handler_{}))",
+                    path, method, name,
+                )
+                .unwrap();
+            }
+        }
+        self.emit_indent();
+        self.emit(";\n");
+
+        // Addr config.
+        let cfg = server_config.clone().unwrap_or_default();
+        self.emit_indent();
+        writeln!(
+            &mut self.output,
+            "let __addr: std::net::SocketAddr = \"{}:{}\".parse().expect(\"@server: addr inválida\");",
+            cfg.host, cfg.port,
+        )
+        .unwrap();
+        self.emit_indent();
+        writeln!(
+            &mut self.output,
+            "println!(\"Fitz HTTP escuchando en http://{}:{}\");",
+            cfg.host, cfg.port,
+        )
+        .unwrap();
+        self.emit_indent();
+        self.emit("let __listener = tokio::net::TcpListener::bind(__addr).await.expect(\"bind\");\n");
+        self.emit_indent();
+        self.emit("axum::serve(__listener, __app).await.expect(\"axum::serve\");\n");
+
+        self.pop_scope();
+        self.indent -= 1;
+        self.emit("}\n");
+        Ok(())
+    }
 }
+
+/// Extrae el path template de un decorator HTTP. Acepta tanto un
+/// literal puro (`Expr::Str("/users/static")`) como una interpolación
+/// (`Expr::StrInterp` con partes Lit + Ident: `"/users/{id}"`). En el
+/// segundo caso, reconstruye el path y devuelve los nombres de los
+/// params en orden. Si la interpolación tiene expresiones complejas
+/// (no-Ident), error.
+fn parse_http_path(expr: &Expr) -> Result<String, FitzError> {
+    match expr {
+        Expr::Str(s) => Ok(s.clone()),
+        Expr::StrInterp(parts) => {
+            use crate::ast::StrPart;
+            let mut buf = String::new();
+            for part in parts {
+                match part {
+                    StrPart::Lit(s) => buf.push_str(s),
+                    StrPart::Expr(Expr::Ident(name)) => {
+                        buf.push('{');
+                        buf.push_str(name);
+                        buf.push('}');
+                    }
+                    StrPart::Expr(_) => {
+                        return Err(FitzError::new(
+                            ErrorKind::TypeError,
+                            0,
+                            0,
+                            "el path de un decorator HTTP solo admite literal Str o \
+                             interpolación de identificadores: `\"/users/{id}\"`".to_string(),
+                        ));
+                    }
+                }
+            }
+            Ok(buf)
+        }
+        _ => Err(FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            "el primer arg de @get/@post/@put/@delete debe ser un Str literal".to_string(),
+        )),
+    }
+}
+
+/// Extrae los nombres de path params de un template axum: `/users/{id}`
+/// → `["id"]`; `/users/{id}/posts/{slug}` → `["id", "slug"]`. Acepta
+/// `{nombre}` literal (axum 0.8 sintaxis).
+fn extract_path_template_names(template: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut chars = template.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '{' {
+            let mut name = String::new();
+            while let Some(&n) = chars.peek() {
+                if n == '}' {
+                    chars.next();
+                    break;
+                }
+                name.push(n);
+                chars.next();
+            }
+            if !name.is_empty() {
+                out.push(name);
+            }
+        }
+    }
+    out
+}
+
+/// Preludio HTTP: traits `__ToFitzJson` y `__FromFitzJson` con impls para
+/// primitivos y combinadores genéricos (`Option`, `Rc<RefCell<Vec<T>>>`,
+/// `Rc<RefCell<Vec<(K, V)>>>`, `Result<T, String>`). Los impls específicos
+/// por cada `type Foo` los emite `gen_type_http_impls`.
+const HTTP_RUNTIME_PRELUDE: &str = r#"// --- 5b.6: runtime HTTP (serialización JSON) ---
+
+trait __ToFitzJson {
+    fn __to_fitz_json(&self) -> serde_json::Value;
+}
+
+trait __FromFitzJson: Sized {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String>;
+}
+
+impl __ToFitzJson for i64 {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::from(*self)
+    }
+}
+impl __ToFitzJson for f64 {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Number::from_f64(*self)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    }
+}
+impl __ToFitzJson for String {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::String(self.clone())
+    }
+}
+impl __ToFitzJson for bool {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Bool(*self)
+    }
+}
+impl __ToFitzJson for () {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for Option<T> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        match self {
+            Some(v) => v.__to_fitz_json(),
+            None => serde_json::Value::Null,
+        }
+    }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for std::rc::Rc<std::cell::RefCell<T>> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        self.borrow().__to_fitz_json()
+    }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for Vec<T> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Array(self.iter().map(|v| v.__to_fitz_json()).collect())
+    }
+}
+
+impl<K: __MapKey, V: __ToFitzJson> __ToFitzJson for Vec<(K, V)> {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        for (k, v) in self.iter() {
+            obj.insert(k.__as_map_key(), v.__to_fitz_json());
+        }
+        serde_json::Value::Object(obj)
+    }
+}
+
+/// Las claves de Map en JSON deben ser strings. Para K = String, usamos
+/// la clave tal cual; para otros tipos primitivos (Int/Bool), convertimos
+/// con Display. Map con claves nominales/anidadas no es serializable y
+/// rustc lo va a flaggear si el codegen lo intenta.
+trait __MapKey {
+    fn __as_map_key(&self) -> String;
+}
+impl __MapKey for String {
+    fn __as_map_key(&self) -> String { self.clone() }
+}
+impl __MapKey for i64 {
+    fn __as_map_key(&self) -> String { self.to_string() }
+}
+impl __MapKey for f64 {
+    fn __as_map_key(&self) -> String { self.to_string() }
+}
+impl __MapKey for bool {
+    fn __as_map_key(&self) -> String { self.to_string() }
+}
+
+impl<T: __ToFitzJson> __ToFitzJson for Result<T, String> {
+    /// Result anidado se etiqueta como objeto. El caso principal
+    /// (handler que devuelve `Result<T, String>` directo) se maneja
+    /// en el wrapper async, NO acá.
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        match self {
+            Ok(v) => serde_json::json!({ "Ok": v.__to_fitz_json() }),
+            Err(e) => serde_json::json!({ "Err": e }),
+        }
+    }
+}
+
+// FromFitzJson para primitivos
+impl __FromFitzJson for i64 {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_i64()
+            .ok_or_else(|| format!("se esperaba Int, se recibió {}", __json_shape(json)))
+    }
+}
+impl __FromFitzJson for f64 {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_f64()
+            .ok_or_else(|| format!("se esperaba Float, se recibió {}", __json_shape(json)))
+    }
+}
+impl __FromFitzJson for String {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_str()
+            .map(|s| s.to_string())
+            .ok_or_else(|| format!("se esperaba Str, se recibió {}", __json_shape(json)))
+    }
+}
+impl __FromFitzJson for bool {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        json.as_bool()
+            .ok_or_else(|| format!("se esperaba Bool, se recibió {}", __json_shape(json)))
+    }
+}
+
+impl<T: __FromFitzJson> __FromFitzJson for Option<T> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        if json.is_null() {
+            Ok(None)
+        } else {
+            T::__from_fitz_json(json).map(Some)
+        }
+    }
+}
+
+impl<T: __FromFitzJson> __FromFitzJson for std::rc::Rc<std::cell::RefCell<T>> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        T::__from_fitz_json(json).map(|v| std::rc::Rc::new(std::cell::RefCell::new(v)))
+    }
+}
+
+fn __json_shape(json: &serde_json::Value) -> &'static str {
+    match json {
+        serde_json::Value::Null => "null",
+        serde_json::Value::Bool(_) => "Bool",
+        serde_json::Value::Number(_) => "Number",
+        serde_json::Value::String(_) => "Str",
+        serde_json::Value::Array(_) => "Array",
+        serde_json::Value::Object(_) => "Object",
+    }
+}
+
+"#;
 
 /// Si el último stmt del bloque es un `Stmt::Expr(e)` que se puede
 /// usar como valor (no es un `print(...)`, que solo es stmt), lo
@@ -4593,11 +5409,194 @@ mod tests {
     // codegen single-file, ver `http_decoradores_no_soportados` que
     // sigue apuntando a 5b.6.)
 
+    // (El test viejo `http_decoradores_no_soportados` se reemplazó en
+    // 5b.6 por los tests específicos de HTTP más abajo.)
+
+    // ---- 5b.6: HTTP / @server / handlers --------------------------------
+
+    /// Helper: genera el código de un programa con HTTP y verifica que
+    /// los fragmentos esperados estén presentes. Replica `assert_contains`
+    /// pero pasa por `generate_main_rs` (que decide el modo HTTP).
+    fn assert_http_contains(src: &str, fragments: &[&str]) {
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        for f in fragments {
+            assert!(
+                code.contains(f),
+                "esperaba `{}` en la salida, no estaba.\nSalida:\n{}",
+                f,
+                code
+            );
+        }
+    }
+
     #[test]
-    fn http_decoradores_no_soportados() {
-        assert_err_contains(
-            "@get(\"/\") fn index() => 0",
-            &["decorador", "5b.6"],
+    fn http_main_emite_tokio_main_async() {
+        let src = "@server(3000) fn main() => 0\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        assert_http_contains(
+            src,
+            &["#[tokio::main]", "async fn main()", "axum::Router::new()"],
+        );
+    }
+
+    #[test]
+    fn http_router_registra_ruta_get() {
+        let src = "@get(\"/users\") fn list_users() -> Str => \"[]\"";
+        assert_http_contains(
+            src,
+            &[
+                ".route(\"/users\", axum::routing::get(__handler_list_users))",
+                "async fn __handler_list_users(",
+            ],
+        );
+    }
+
+    #[test]
+    fn http_path_param_int_genera_extract_path() {
+        let src = "@get(\"/u/{id}\") fn get_user(id: Int) -> Str => \"x\"";
+        assert_http_contains(
+            src,
+            &["axum::extract::Path(id): axum::extract::Path<i64>"],
+        );
+    }
+
+    #[test]
+    fn http_path_param_str_genera_extract_path_string() {
+        let src = "@get(\"/u/{name}\") fn greet(name: Str) -> Str => name";
+        assert_http_contains(
+            src,
+            &["axum::extract::Path(name): axum::extract::Path<String>"],
+        );
+    }
+
+    #[test]
+    fn http_handler_result_emite_match_ok_err() {
+        let src = "@get(\"/d/{n}\") fn divide(n: Int) -> Result<Int> { return Ok(n * 2) }";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("Ok(__v)") && code.contains("Err(__e)"),
+            "esperaba match Ok/Err en handler, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("StatusCode::OK") && code.contains("StatusCode::INTERNAL_SERVER_ERROR"),
+            "esperaba status codes 200/500, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn http_body_post_con_tipo_emite_from_fitz_json() {
+        let src = "type Input { msg: Str }\n\
+                   @post(\"/echo\") fn echo(body: Input) -> Input => body";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("axum::Json(body_raw): axum::Json<serde_json::Value>"),
+            "esperaba extractor body_raw, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__FromFitzJson>::__from_fitz_json(&body_raw)"),
+            "esperaba __from_fitz_json para deserializar, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("StatusCode::BAD_REQUEST"),
+            "esperaba 400 si la deserialización falla, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn http_server_decorator_setea_addr() {
+        let src = "@server(8080, \"0.0.0.0\") fn main() => 0\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        assert_http_contains(src, &["\"0.0.0.0:8080\".parse()"]);
+    }
+
+    #[test]
+    fn http_sin_server_decorator_usa_default_3000() {
+        let src = "@get(\"/\") fn index() -> Str => \"ok\"";
+        assert_http_contains(src, &["\"127.0.0.1:3000\".parse()"]);
+    }
+
+    #[test]
+    fn http_state_compartido_es_error_claro() {
+        let src = "let users = [1, 2, 3]\n\
+                   @get(\"/users\") fn list_users() -> Str => \"x\"";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("state compartido"),
+            "esperaba mensaje sobre state compartido, fue: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("users"),
+            "esperaba que el mensaje cite la var `users`, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn http_cargo_toml_incluye_axum_y_tokio() {
+        // El Cargo.toml condicional se prueba via `generate_project`,
+        // no via `gen` (que solo devuelve main.rs). Pasamos por el API
+        // pública para validar.
+        use std::path::Path;
+        let tokens = crate::lexer::tokenize(
+            "@get(\"/\") fn index() -> Str => \"ok\"",
+        )
+        .unwrap();
+        let program = crate::parser::parse(tokens).unwrap();
+        let (env, errs) = crate::types::check_program(&program);
+        assert!(errs.is_empty(), "checker errors: {:?}", errs);
+        let project = generate_project(Path::new("test.fitz"), &program, &env).unwrap();
+        assert!(
+            project.cargo_toml.contains("axum = \"0.8\""),
+            "esperaba axum en Cargo.toml, got:\n{}",
+            project.cargo_toml
+        );
+        assert!(
+            project.cargo_toml.contains("tokio"),
+            "esperaba tokio en Cargo.toml, got:\n{}",
+            project.cargo_toml
+        );
+        assert!(
+            project.cargo_toml.contains("serde_json"),
+            "esperaba serde_json en Cargo.toml, got:\n{}",
+            project.cargo_toml
+        );
+    }
+
+    #[test]
+    fn no_http_cargo_toml_es_minimalista() {
+        use std::path::Path;
+        let tokens = crate::lexer::tokenize("print(\"hola\")").unwrap();
+        let program = crate::parser::parse(tokens).unwrap();
+        let (env, errs) = crate::types::check_program(&program);
+        assert!(errs.is_empty());
+        let project = generate_project(Path::new("test.fitz"), &program, &env).unwrap();
+        assert!(
+            !project.cargo_toml.contains("axum"),
+            "no debería haber axum en Cargo.toml sin HTTP, got:\n{}",
+            project.cargo_toml
+        );
+    }
+
+    #[test]
+    fn http_type_emite_impl_to_fitz_json() {
+        let src = "type User { id: Int, name: Str }\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("impl __ToFitzJson for UserData"),
+            "esperaba impl ToFitzJson para UserData, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("impl __FromFitzJson for UserData"),
+            "esperaba impl FromFitzJson para UserData, got:\n{}",
+            code
         );
     }
 
