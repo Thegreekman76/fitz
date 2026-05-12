@@ -42,6 +42,16 @@ tokio = { version = "1", features = ["full"] }
 # permite armar fixtures en disco y limpiarlos automáticamente.
 tempfile = "3"
 
+# AST-inspection del Rust generado por el codegen (T1 post-5b):
+# parsear el output de `generate_rust` con `syn::parse_file` permite
+# tests estructurales en lugar de string-matching frágil sobre el
+# texto del Rust emitido. `full` habilita item bodies y expresiones
+# (no solo signatures top-level).
+syn = { version = "2", features = ["full", "visit"] }
+# `quote` viene de la mano con `syn` para stringificar subárboles
+# del AST con whitespace normalizado (`ToTokens::to_token_stream`).
+quote = "1"
+
 # tower: para tests E2E del runtime HTTP via `Router::oneshot(req)`,
 # evitando abrir un socket TCP real. Más determinista, sin port
 # allocation.

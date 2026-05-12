@@ -5310,6 +5310,315 @@ mod tests {
         }
     }
 
+    // ---- AST-based test helpers (T1 post-5b) ---------------------------
+    //
+    // Estos helpers parsean el Rust generado por el codegen con `syn` y
+    // permiten asertar sobre la estructura del AST en lugar de matchear
+    // strings literales del output. La ventaja es que cambios cosméticos
+    // del codegen (espacios, sufijos numéricos, agrupación de paréntesis)
+    // no rompen los tests — solo cambios estructurales reales lo hacen.
+    //
+    // Convención: las helpers toman `&str` como código generado y
+    // devuelven `syn::File`/`&Item*`/`String` según corresponda. Para
+    // stringificar subárboles usamos `quote::ToTokens::to_token_stream()`
+    // y normalizamos whitespace, así las comparaciones son robustas.
+    //
+    // `#[allow(dead_code)]`: la migración de tests a AST-based es
+    // incremental; algunas helpers pueden quedar sin uso hasta que se
+    // migren más tests.
+    #[allow(dead_code)]
+    mod ast_test {
+        use quote::ToTokens;
+        use syn::{File, Item, ItemFn, ItemImpl, ItemStruct, ItemType, Local, Pat, Stmt};
+
+        /// Parsea el Rust generado. Si syn no puede parsearlo, paniquea
+        /// con el código completo en el mensaje (ya es una señal: el
+        /// codegen está emitiendo Rust inválido).
+        pub fn parse(code: &str) -> File {
+            syn::parse_file(code).unwrap_or_else(|e| {
+                panic!(
+                    "syn no pudo parsear el Rust generado: {}\n\nCódigo:\n{}",
+                    e, code
+                )
+            })
+        }
+
+        /// Stringifica cualquier nodo `ToTokens` con whitespace
+        /// normalizado a un solo espacio entre tokens. Robusto contra
+        /// cambios cosméticos de formato.
+        pub fn ts<T: ToTokens>(node: &T) -> String {
+            let raw = node.to_token_stream().to_string();
+            raw.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        pub fn find_item_fn<'a>(file: &'a File, name: &str) -> Option<&'a ItemFn> {
+            file.items.iter().find_map(|i| match i {
+                Item::Fn(f) if f.sig.ident == name => Some(f),
+                _ => None,
+            })
+        }
+
+        pub fn find_item_struct<'a>(file: &'a File, name: &str) -> Option<&'a ItemStruct> {
+            file.items.iter().find_map(|i| match i {
+                Item::Struct(s) if s.ident == name => Some(s),
+                _ => None,
+            })
+        }
+
+        pub fn find_item_type<'a>(file: &'a File, name: &str) -> Option<&'a ItemType> {
+            file.items.iter().find_map(|i| match i {
+                Item::Type(t) if t.ident == name => Some(t),
+                _ => None,
+            })
+        }
+
+        /// Busca un `impl Trait for Type` por nombre del trait y del
+        /// tipo. El matching usa `contains` sobre la representación
+        /// tokenizada — sirve para `impl std::fmt::Display for Foo`
+        /// (matchea con `trait_name = "Display"`).
+        pub fn find_impl<'a>(
+            file: &'a File,
+            trait_name: &str,
+            type_name: &str,
+        ) -> Option<&'a ItemImpl> {
+            file.items.iter().find_map(|i| match i {
+                Item::Impl(im) => {
+                    let trait_match = im
+                        .trait_
+                        .as_ref()
+                        .is_some_and(|(_, p, _)| ts(p).contains(trait_name));
+                    let type_match = ts(&*im.self_ty).contains(type_name);
+                    if trait_match && type_match {
+                        Some(im)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            })
+        }
+
+        /// Devuelve los stmts del cuerpo de `fn main()`.
+        pub fn main_block_stmts(file: &File) -> &[Stmt] {
+            let f = find_item_fn(file, "main").expect("no encontré fn main en el código");
+            &f.block.stmts
+        }
+
+        /// Devuelve el primer `let` cuyo pat bindea `name`.
+        pub fn find_let<'a>(stmts: &'a [Stmt], name: &str) -> Option<&'a Local> {
+            stmts.iter().find_map(|s| match s {
+                Stmt::Local(l) if pat_binds(&l.pat, name) => Some(l),
+                _ => None,
+            })
+        }
+
+        /// Cuenta los `let` que bindean un nombre dado (útil para
+        /// validar que una reasignación NO emite un `let` nuevo).
+        pub fn count_lets(stmts: &[Stmt], name: &str) -> usize {
+            stmts
+                .iter()
+                .filter(|s| matches!(s, Stmt::Local(l) if pat_binds(&l.pat, name)))
+                .count()
+        }
+
+        fn pat_binds(p: &Pat, name: &str) -> bool {
+            match p {
+                Pat::Ident(pi) => pi.ident == name,
+                Pat::Type(pt) => pat_binds(&pt.pat, name),
+                _ => false,
+            }
+        }
+
+        /// Devuelve la representación textual del tipo del `let`
+        /// (lado derecho del `:`). `None` si el let no tiene tipo
+        /// explícito.
+        pub fn local_type(local: &Local) -> Option<String> {
+            if let Pat::Type(pt) = &local.pat {
+                return Some(ts(&*pt.ty));
+            }
+            None
+        }
+
+        /// Devuelve la representación textual del initializer del `let`
+        /// (lado derecho del `=`). `None` si el let no tiene init.
+        pub fn local_init(local: &Local) -> Option<String> {
+            local.init.as_ref().map(|li| ts(&*li.expr))
+        }
+
+        /// True si el `let` declara la var como `mut`.
+        pub fn local_is_mut(local: &Local) -> bool {
+            match &local.pat {
+                Pat::Ident(pi) => pi.mutability.is_some(),
+                Pat::Type(pt) => match pt.pat.as_ref() {
+                    Pat::Ident(pi) => pi.mutability.is_some(),
+                    _ => false,
+                },
+                _ => false,
+            }
+        }
+
+        /// Cuenta invocaciones de un macro (por nombre del segmento
+        /// final, ej. `println` matchea `println!` y `std::println!`).
+        pub fn count_macro_calls(stmts: &[Stmt], macro_name: &str) -> usize {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                count: usize,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_macro(&mut self, m: &'ast syn::Macro) {
+                    if m.path.segments.last().is_some_and(|s| s.ident == self.name) {
+                        self.count += 1;
+                    }
+                    syn::visit::visit_macro(self, m);
+                }
+            }
+            let mut v = V {
+                name: macro_name,
+                count: 0,
+            };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.count
+        }
+
+        /// True si en cualquier nivel del AST aparece una llamada a
+        /// método con el nombre dado (ej. `borrow`, `clone`).
+        pub fn contains_method_call(stmts: &[Stmt], method_name: &str) -> bool {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                found: bool,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
+                    if e.method == self.name {
+                        self.found = true;
+                    }
+                    syn::visit::visit_expr_method_call(self, e);
+                }
+            }
+            let mut v = V {
+                name: method_name,
+                found: false,
+            };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.found
+        }
+
+        /// Encuentra el primer `for` loop en los stmts (búsqueda
+        /// recursiva, no solo top-level).
+        pub fn find_for_loop(stmts: &[Stmt]) -> Option<syn::ExprForLoop> {
+            use syn::visit::Visit;
+            struct V {
+                found: Option<syn::ExprForLoop>,
+            }
+            impl<'ast> Visit<'ast> for V {
+                fn visit_expr_for_loop(&mut self, e: &'ast syn::ExprForLoop) {
+                    if self.found.is_none() {
+                        self.found = Some(e.clone());
+                    }
+                    syn::visit::visit_expr_for_loop(self, e);
+                }
+            }
+            let mut v = V { found: None };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.found
+        }
+
+        /// Encuentra el primer `while` loop en los stmts.
+        pub fn find_while_loop(stmts: &[Stmt]) -> Option<syn::ExprWhile> {
+            use syn::visit::Visit;
+            struct V {
+                found: Option<syn::ExprWhile>,
+            }
+            impl<'ast> Visit<'ast> for V {
+                fn visit_expr_while(&mut self, e: &'ast syn::ExprWhile) {
+                    if self.found.is_none() {
+                        self.found = Some(e.clone());
+                    }
+                    syn::visit::visit_expr_while(self, e);
+                }
+            }
+            let mut v = V { found: None };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.found
+        }
+
+        /// Encuentra el primer `if` (statement o expresión) en los stmts.
+        pub fn find_if(stmts: &[Stmt]) -> Option<syn::ExprIf> {
+            use syn::visit::Visit;
+            struct V {
+                found: Option<syn::ExprIf>,
+            }
+            impl<'ast> Visit<'ast> for V {
+                fn visit_expr_if(&mut self, e: &'ast syn::ExprIf) {
+                    if self.found.is_none() {
+                        self.found = Some(e.clone());
+                    }
+                    syn::visit::visit_expr_if(self, e);
+                }
+            }
+            let mut v = V { found: None };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.found
+        }
+
+        /// True si la signatura del `fn` declara un derive con el
+        /// nombre dado (ej. `PartialEq`).
+        pub fn struct_has_derive(s: &ItemStruct, derive: &str) -> bool {
+            s.attrs.iter().any(|a| {
+                if !a.path().is_ident("derive") {
+                    return false;
+                }
+                let mut found = false;
+                let _ = a.parse_nested_meta(|meta| {
+                    if meta.path.is_ident(derive) {
+                        found = true;
+                    }
+                    Ok(())
+                });
+                found
+            })
+        }
+
+        /// Cuenta el número de parámetros de un `fn`.
+        pub fn fn_arity(f: &ItemFn) -> usize {
+            f.sig.inputs.len()
+        }
+
+        /// Devuelve el tipo de retorno del `fn` como string normalizado,
+        /// o `None` si retorna `()`.
+        pub fn fn_return_type(f: &ItemFn) -> Option<String> {
+            match &f.sig.output {
+                syn::ReturnType::Default => None,
+                syn::ReturnType::Type(_, ty) => Some(ts(&**ty)),
+            }
+        }
+
+        /// Devuelve los tipos de los parámetros como strings
+        /// normalizados (omite `self`).
+        pub fn fn_param_types(f: &ItemFn) -> Vec<String> {
+            f.sig
+                .inputs
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::FnArg::Typed(pt) => Some(ts(&*pt.ty)),
+                    _ => None,
+                })
+                .collect()
+        }
+    }
+
     #[test]
     fn programa_vacio_genera_main_vacio() {
         let code = gen("").unwrap();
@@ -5318,46 +5627,78 @@ mod tests {
 
     #[test]
     fn let_int_anotado_genera_i64() {
-        assert_contains(
-            "let x: Int = 42",
-            &["let mut x: i64 = 42i64;"],
-        );
+        let file = ast_test::parse(&gen("let x: Int = 42").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        assert!(ast_test::local_is_mut(l));
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        assert_eq!(ast_test::local_init(l).as_deref(), Some("42i64"));
     }
 
     #[test]
     fn let_int_inferido_genera_i64() {
-        assert_contains("let x = 42", &["let mut x: i64 = 42i64;"]);
+        let file = ast_test::parse(&gen("let x = 42").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        assert_eq!(ast_test::local_init(l).as_deref(), Some("42i64"));
     }
 
     #[test]
     fn let_float_anotado_genera_f64_con_coercion_int() {
-        assert_contains(
-            "let pi: Float = 3",
-            &["let mut pi: f64 = (3i64 as f64);"],
+        let file = ast_test::parse(&gen("let pi: Float = 3").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "pi").expect("falta let pi");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("f64"));
+        // El init coerciona Int→Float: `(3i64 as f64)`.
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("3i64") && init.contains("as f64"),
+            "esperaba init con coerción Int→Float, fue: {}",
+            init
         );
     }
 
     #[test]
     fn let_str_genera_string() {
-        assert_contains(
-            "let name = \"Fitz\"",
-            &["let mut name: String = String::from(\"Fitz\");"],
+        let file = ast_test::parse(&gen("let name = \"Fitz\"").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "name").expect("falta let name");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("String"));
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("String :: from") && init.contains("\"Fitz\""),
+            "esperaba init `String::from(\"Fitz\")`, fue: {}",
+            init
         );
     }
 
     #[test]
     fn binop_int_int_es_int() {
-        assert_contains(
-            "let x = 1 + 2",
-            &["(1i64 + 2i64)"],
+        let file = ast_test::parse(&gen("let x = 1 + 2").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("1i64") && init.contains("2i64") && init.contains("+"),
+            "esperaba init `1i64 + 2i64`, fue: {}",
+            init
         );
     }
 
     #[test]
     fn binop_int_float_coerciona_a_float() {
-        assert_contains(
-            "let x = 1 + 2.0",
-            &["((1i64 as f64) + 2f64)"],
+        let file = ast_test::parse(&gen("let x = 1 + 2.0").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        // El resultado tipa como f64 (Int+Float promueve a Float).
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("f64"));
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("1i64") && init.contains("as f64") && init.contains("2f64"),
+            "esperaba coerción Int→Float en el init, fue: {}",
+            init
         );
     }
 
@@ -5384,102 +5725,217 @@ mod tests {
 
     #[test]
     fn print_genera_println_macro() {
-        assert_contains(
-            "let x: Int = 1\nprint(x)",
-            &["println!(\"{}\", x)"],
+        let file = ast_test::parse(&gen("let x: Int = 1\nprint(x)").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        assert_eq!(
+            ast_test::count_macro_calls(stmts, "println"),
+            1,
+            "esperaba exactamente 1 println!"
         );
     }
 
     #[test]
     fn print_multiples_args_genera_format_string_con_espacios() {
-        assert_contains(
-            "let a: Int = 1\nlet b: Int = 2\nprint(a, b)",
-            &["println!(\"{} {}\", a, b)"],
+        // El contrato es: print(a, b) emite UN solo println! que
+        // contiene tanto `a` como `b` (separación por espacio en el
+        // format string es el formato canónico, pero acá nos basta con
+        // estructura: 1 println, args contienen ambas vars).
+        let file = ast_test::parse(
+            &gen("let a: Int = 1\nlet b: Int = 2\nprint(a, b)").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        assert_eq!(ast_test::count_macro_calls(stmts, "println"), 1);
+        // Inspeccionamos el último stmt (debería ser el println!).
+        let last = ast_test::ts(stmts.last().unwrap());
+        assert!(
+            last.contains("println !") && last.contains(", a") && last.contains(", b"),
+            "esperaba println! con args a y b, fue: {}",
+            last
         );
     }
 
     #[test]
     fn print_sin_args_genera_println_vacio() {
-        assert_contains("print()", &["println!()"]);
-    }
-
-    #[test]
-    fn fn_top_level_emite_signature_completa() {
-        assert_contains(
-            "fn double(n: Int) -> Int { return n * 2 }",
-            &["fn double(mut n: i64) -> i64", "return (n * 2i64);"],
+        // `print()` sin args → `println!()` sin tokens internos.
+        let file = ast_test::parse(&gen("print()").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        assert_eq!(ast_test::count_macro_calls(stmts, "println"), 1);
+        let last = ast_test::ts(stmts.last().unwrap());
+        // No debe haber `,` adentro del println!() — sin args.
+        assert!(
+            last.contains("println ! ()") || last.contains("println !()"),
+            "esperaba println!() vacío, fue: {}",
+            last
         );
     }
 
     #[test]
+    fn fn_top_level_emite_signature_completa() {
+        let file = ast_test::parse(
+            &gen("fn double(n: Int) -> Int { return n * 2 }").unwrap(),
+        );
+        let f = ast_test::find_item_fn(&file, "double").expect("falta fn double");
+        assert_eq!(ast_test::fn_arity(f), 1);
+        assert_eq!(ast_test::fn_param_types(f), vec!["i64".to_string()]);
+        assert_eq!(ast_test::fn_return_type(f).as_deref(), Some("i64"));
+    }
+
+    #[test]
     fn fn_arrow_emite_return_implicito() {
-        assert_contains(
-            "fn double(n: Int) -> Int => n * 2",
-            &["fn double(mut n: i64) -> i64", "return (n * 2i64);"],
+        // Tanto el body con `{ return n * 2 }` como la flecha
+        // `=> n * 2` deben emitir la misma signatura y un `return` en
+        // el body. La diferencia con el test anterior es solo sintáctica
+        // del lado de Fitz.
+        let file = ast_test::parse(
+            &gen("fn double(n: Int) -> Int => n * 2").unwrap(),
+        );
+        let f = ast_test::find_item_fn(&file, "double").expect("falta fn double");
+        assert_eq!(ast_test::fn_arity(f), 1);
+        assert_eq!(ast_test::fn_return_type(f).as_deref(), Some("i64"));
+        // El body debe contener un `return` (no es solo una expresión
+        // de tail — el codegen siempre emite `return ...`).
+        let body = ast_test::ts(&f.block);
+        assert!(
+            body.contains("return"),
+            "esperaba `return` en el body de la fn flecha, fue: {}",
+            body
         );
     }
 
     #[test]
     fn llamada_a_fn_top_level_resuelve_return_type() {
-        let code = gen(
-            "fn double(n: Int) -> Int => n * 2\n\
-             let x = double(5)",
-        )
-        .unwrap();
-        // x debe quedar como i64 (return de double).
-        assert!(code.contains("let mut x: i64 = double(5i64);"), "got:\n{}", code);
+        let file = ast_test::parse(
+            &gen(
+                "fn double(n: Int) -> Int => n * 2\n\
+                 let x = double(5)",
+            )
+            .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        // x debe quedar tipado como i64 (el return type de double).
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("double") && init.contains("5i64"),
+            "esperaba init `double(5i64)`, fue: {}",
+            init
+        );
     }
 
     #[test]
     fn if_else_genera_estructura_rust() {
-        assert_contains(
-            "let x = 1\nif (x > 0) { print(\"pos\") } else { print(\"neg\") }",
-            &["if (x > 0i64) {", "} else {"],
+        let file = ast_test::parse(
+            &gen("let x = 1\nif (x > 0) { print(\"pos\") } else { print(\"neg\") }")
+                .unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let if_expr = ast_test::find_if(stmts).expect("falta if/else en main");
+        // Ambas ramas presentes (else_branch != None).
+        assert!(if_expr.else_branch.is_some(), "esperaba else branch");
+        // El test del if compara `x > 0`.
+        let cond = ast_test::ts(&*if_expr.cond);
+        assert!(cond.contains("x") && cond.contains(">"), "cond: {}", cond);
     }
 
     #[test]
     fn while_genera_estructura_rust() {
-        assert_contains(
-            "let n = 0\nwhile (n < 3) { n = n + 1 }",
-            &["while (n < 3i64) {", "n = (n + 1i64);"],
+        let file = ast_test::parse(
+            &gen("let n = 0\nwhile (n < 3) { n = n + 1 }").unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let w = ast_test::find_while_loop(stmts).expect("falta while loop");
+        let cond = ast_test::ts(&*w.cond);
+        assert!(
+            cond.contains("n") && cond.contains("<") && cond.contains("3i64"),
+            "cond del while: {}",
+            cond
+        );
+        // El body debe reasignar `n` (= no es un `let`).
+        let body = ast_test::ts(&w.body);
+        assert!(body.contains("n ="), "body del while: {}", body);
     }
 
     #[test]
     fn for_in_range_genera_rust() {
-        assert_contains(
-            "for i in 0..3 { print(i) }",
-            &["for mut i in (0i64 as i64)..(3i64 as i64) {"],
+        let file = ast_test::parse(&gen("for i in 0..3 { print(i) }").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let f = ast_test::find_for_loop(stmts).expect("falta for loop");
+        // pat es `mut i`.
+        assert!(
+            ast_test::ts(&f.pat).contains("i"),
+            "pat del for: {}",
+            ast_test::ts(&f.pat)
+        );
+        // expr es un range `0..3` (ambos bordes presentes).
+        let expr = ast_test::ts(&*f.expr);
+        assert!(
+            expr.contains("0i64") && expr.contains("3i64") && expr.contains(".."),
+            "expr del for: {}",
+            expr
         );
     }
 
     #[test]
     fn reasignacion_usa_igual_no_let() {
-        let code = gen("let x = 1\nx = 2").unwrap();
-        assert!(code.contains("let mut x: i64 = 1i64;"));
-        // La segunda asignación no es `let`.
-        assert!(code.contains("\n    x = 2i64;"), "got:\n{}", code);
+        let file = ast_test::parse(&gen("let x = 1\nx = 2").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        // Solo UN `let x` — la reasignación no es un let.
+        assert_eq!(
+            ast_test::count_lets(stmts, "x"),
+            1,
+            "esperaba exactamente 1 `let x`, hubo {}",
+            ast_test::count_lets(stmts, "x")
+        );
+        // Y debe haber un Stmt de asignación `x = 2`.
+        let body = ast_test::ts(stmts.last().expect("stmts vacío"));
+        assert!(
+            body.contains("x =") && body.contains("2i64"),
+            "esperaba reasignación `x = 2`, último stmt: {}",
+            body
+        );
     }
 
     #[test]
     fn neg_genera_unary_rust() {
-        assert_contains("let x = -5", &["(-5i64)"]);
+        let file = ast_test::parse(&gen("let x = -5").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        let init = ast_test::local_init(l).unwrap();
+        // Operator unario `-` aplicado al literal 5i64.
+        assert!(
+            init.contains("-") && init.contains("5i64"),
+            "esperaba unary `-5i64`, fue: {}",
+            init
+        );
     }
 
     #[test]
     fn bool_y_logicos_generan_bool_rust() {
-        assert_contains(
-            "let b = true and false",
-            &["let mut b: bool = (true && false);"],
+        let file = ast_test::parse(&gen("let b = true and false").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "b").expect("falta let b");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("bool"));
+        let init = ast_test::local_init(l).unwrap();
+        // `and` Fitz → `&&` Rust.
+        assert!(
+            init.contains("&&") && init.contains("true") && init.contains("false"),
+            "esperaba `true && false`, fue: {}",
+            init
         );
     }
 
     #[test]
     fn comparacion_str_usa_as_str() {
-        assert_contains(
-            "let a = \"hola\"\nlet b = a < \"mundo\"",
-            &[".as_str() < "],
+        // Comparar Strings con `<`/`>` requiere `.as_str()` (Strings no
+        // implementan `PartialOrd<&str>` directamente; sí `&str` con `&str`).
+        let file = ast_test::parse(
+            &gen("let a = \"hola\"\nlet b = a < \"mundo\"").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        assert!(
+            ast_test::contains_method_call(stmts, "as_str"),
+            "esperaba alguna call a `.as_str()` en la comparación"
         );
     }
 
@@ -5489,14 +5945,22 @@ mod tests {
 
     #[test]
     fn type_def_emite_struct_y_alias_rc_refcell() {
-        assert_contains(
-            "type User { id: Int, name: Str }",
-            &[
-                "struct UserData {",
-                "    id: i64,",
-                "    name: String,",
-                "type User = Rc<RefCell<UserData>>;",
-            ],
+        let file = ast_test::parse(&gen("type User { id: Int, name: Str }").unwrap());
+        // El struct UserData con sus dos campos.
+        let s = ast_test::find_item_struct(&file, "UserData").expect("falta UserData");
+        let field_names: Vec<String> = s
+            .fields
+            .iter()
+            .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
+            .collect();
+        assert_eq!(field_names, vec!["id".to_string(), "name".to_string()]);
+        // El alias `type User = Rc<RefCell<UserData>>;`.
+        let t = ast_test::find_item_type(&file, "User").expect("falta type alias User");
+        let ty = ast_test::ts(&*t.ty);
+        assert!(
+            ty.contains("Rc") && ty.contains("RefCell") && ty.contains("UserData"),
+            "esperaba alias `Rc<RefCell<UserData>>`, fue: {}",
+            ty
         );
     }
 
@@ -5517,9 +5981,25 @@ mod tests {
 
     #[test]
     fn struct_lit_emite_rc_new_refcell_new() {
-        assert_contains(
-            "type User { id: Int, name: Str }\nlet u = User { id: 1, name: \"x\" }",
-            &["Rc::new(RefCell::new(UserData { id: 1i64, name: String::from(\"x\") }))"],
+        let file = ast_test::parse(
+            &gen("type User { id: Int, name: Str }\nlet u = User { id: 1, name: \"x\" }")
+                .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "u").expect("falta let u");
+        let init = ast_test::local_init(l).unwrap();
+        // El struct lit se emite envuelto en `Rc::new(RefCell::new(UserData { ... }))`.
+        assert!(
+            init.contains("Rc :: new")
+                && init.contains("RefCell :: new")
+                && init.contains("UserData"),
+            "esperaba envoltorio Rc::new(RefCell::new(UserData {{ ... }})), fue: {}",
+            init
+        );
+        assert!(
+            init.contains("1i64") && init.contains("\"x\""),
+            "esperaba que el init incluya los valores 1 y \"x\", fue: {}",
+            init
         );
     }
 
@@ -5578,40 +6058,60 @@ mod tests {
 
     #[test]
     fn field_access_int_emite_borrow_sin_clone() {
-        let code = gen(
-            "type U { id: Int }\nlet u = U { id: 1 }\nlet n = u.id",
-        )
-        .unwrap();
-        assert!(
-            code.contains(".borrow().id;") || code.contains(".borrow().id\n"),
-            "esperaba acceso `borrow().id` sin clone, got:\n{}",
-            code
+        // El receptor del field access SÍ se clona (Rc::clone, barato:
+        // refcount). Lo que NO se clona es el VALOR del field — para
+        // Int (Copy) no hace falta. La forma del init es entonces:
+        // `(u.clone()).borrow().id` (acaba con field access, no con
+        // `.clone()` al final).
+        let file = ast_test::parse(
+            &gen("type U { id: Int }\nlet u = U { id: 1 }\nlet n = u.id").unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        let init_expr = &l.init.as_ref().unwrap().expr;
+        // Tope del init es Expr::Field (`<algo>.id`), no MethodCall a
+        // `.clone()` envolviendo todo. Si fuera `<algo>.clone()`, sería
+        // un `Expr::MethodCall` con method == "clone".
+        match &**init_expr {
+            syn::Expr::Field(fld) => match &fld.member {
+                syn::Member::Named(ident) => assert_eq!(ident, "id"),
+                _ => panic!("esperaba member named `id`, fue tuple-index"),
+            },
+            other => panic!(
+                "esperaba init como Expr::Field acabando en `.id`, fue: {}",
+                ast_test::ts(other)
+            ),
+        }
     }
 
     #[test]
     fn field_access_str_emite_borrow_clone() {
-        let code = gen(
-            "type U { name: Str }\nlet u = U { name: \"x\" }\nlet s = u.name",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nlet s = u.name")
+                .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "s").expect("falta let s");
+        let init = ast_test::local_init(l).unwrap();
+        // Str no es Copy → borrow + clone.
         assert!(
-            code.contains(".borrow().name.clone()"),
-            "esperaba `.borrow().name.clone()`, got:\n{}",
-            code
+            init.contains("borrow") && init.contains("clone"),
+            "esperaba `borrow` y `clone` en el field access de Str, fue: {}",
+            init
         );
     }
 
     #[test]
     fn field_assign_emite_borrow_mut() {
-        let code = gen(
-            "type U { name: Str }\nlet u = U { name: \"x\" }\nu.name = \"y\"",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nu.name = \"y\"")
+                .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        // Buscamos un `borrow_mut()` en el árbol — lo emite el field assign.
         assert!(
-            code.contains(".borrow_mut().name = String::from(\"y\");"),
-            "esperaba `.borrow_mut().name = ...`, got:\n{}",
-            code
+            ast_test::contains_method_call(stmts, "borrow_mut"),
+            "esperaba call a `.borrow_mut()` para field assign"
         );
     }
 
@@ -5654,14 +6154,20 @@ mod tests {
     fn tipo_anidado_compila_con_nullable_de_nominal() {
         // `type Order { user: User? }` se traduce a un campo de tipo
         // `Option<User>` (= `Option<Rc<RefCell<UserData>>>`).
-        let code = gen(
-            "type User { name: Str }\ntype Order { user: User? }",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("type User { name: Str }\ntype Order { user: User? }").unwrap(),
+        );
+        let s = ast_test::find_item_struct(&file, "OrderData").expect("falta OrderData");
+        let user_field = s
+            .fields
+            .iter()
+            .find(|f| f.ident.as_ref().is_some_and(|i| i == "user"))
+            .expect("falta field user");
+        let ty = ast_test::ts(&user_field.ty);
         assert!(
-            code.contains("user: Option<User>"),
-            "esperaba `user: Option<User>` en OrderData, got:\n{}",
-            code
+            ty.contains("Option") && ty.contains("User"),
+            "esperaba `Option<User>` para field `user`, fue: {}",
+            ty
         );
     }
 
@@ -5741,49 +6247,67 @@ mod tests {
     #[test]
     fn if_sin_else_no_se_trata_como_expresion() {
         // Sin else, no hay segunda rama → no es expresión con valor.
-        // El último stmt del then se emite como statement común.
-        let code = gen("if (true) { 1 }").unwrap();
+        // El último stmt del then se emite como statement común
+        // (con `;` final, no como tail expression).
+        let file = ast_test::parse(&gen("if (true) { 1 }").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let if_expr = ast_test::find_if(stmts).expect("falta if");
         assert!(
-            code.contains("1i64;"),
-            "esperaba `1i64;` como stmt (no como tail), got:\n{}",
-            code
+            if_expr.else_branch.is_none(),
+            "el if no debe tener else"
         );
+        // El último stmt del then-block debe ser `Stmt::Expr` con `;`
+        // (semicolon presente — sería tail expression sin él).
+        let last_then = if_expr.then_branch.stmts.last().expect("then vacío");
+        match last_then {
+            syn::Stmt::Expr(_, semi) => assert!(
+                semi.is_some(),
+                "esperaba `1i64;` como stmt con semicolon, fue tail expression"
+            ),
+            other => panic!(
+                "esperaba Stmt::Expr al final del then, fue: {}",
+                ast_test::ts(other)
+            ),
+        }
     }
 
     // ---- 5b.2+: métodos built-in sobre Str ----
 
     #[test]
     fn str_len_emite_chars_count_as_i64() {
-        let code = gen("let s = \"hola\"\nlet n = s.len()").unwrap();
+        let file = ast_test::parse(&gen("let s = \"hola\"\nlet n = s.len()").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        // El init combina `.chars()` y `.count()` (no `.len()` directo,
+        // que cuenta bytes en lugar de chars).
         assert!(
-            code.contains(".chars().count() as i64"),
-            "esperaba `.chars().count() as i64`, got:\n{}",
-            code
+            ast_test::contains_method_call(stmts, "chars"),
+            "esperaba `.chars()` en el init"
         );
         assert!(
-            code.contains("let mut n: i64 = "),
-            "esperaba que n quede como i64, got:\n{}",
-            code
+            ast_test::contains_method_call(stmts, "count"),
+            "esperaba `.count()` en el init"
         );
     }
 
     #[test]
     fn str_upper_emite_to_uppercase() {
-        let code = gen("let s = \"hola\"\nlet u = s.upper()").unwrap();
+        let file = ast_test::parse(&gen("let s = \"hola\"\nlet u = s.upper()").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
         assert!(
-            code.contains(".to_uppercase()"),
-            "esperaba `.to_uppercase()`, got:\n{}",
-            code
+            ast_test::contains_method_call(stmts, "to_uppercase"),
+            "esperaba call a `.to_uppercase()`"
         );
     }
 
     #[test]
     fn str_lower_emite_to_lowercase() {
-        let code = gen("let s = \"HOLA\"\nlet l = s.lower()").unwrap();
+        let file = ast_test::parse(&gen("let s = \"HOLA\"\nlet l = s.lower()").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
         assert!(
-            code.contains(".to_lowercase()"),
-            "esperaba `.to_lowercase()`, got:\n{}",
-            code
+            ast_test::contains_method_call(stmts, "to_lowercase"),
+            "esperaba call a `.to_lowercase()`"
         );
     }
 
@@ -5792,11 +6316,15 @@ mod tests {
 
     #[test]
     fn type_def_emite_derive_partialeq() {
-        let code = gen("type U { id: Int }").unwrap();
+        let file = ast_test::parse(&gen("type U { id: Int }").unwrap());
+        let s = ast_test::find_item_struct(&file, "UData").expect("falta UData");
         assert!(
-            code.contains("#[derive(Clone, PartialEq)]"),
-            "esperaba derive(PartialEq) sobre el data struct, got:\n{}",
-            code
+            ast_test::struct_has_derive(s, "Clone"),
+            "esperaba derive(Clone)"
+        );
+        assert!(
+            ast_test::struct_has_derive(s, "PartialEq"),
+            "esperaba derive(PartialEq)"
         );
     }
 
@@ -5807,12 +6335,26 @@ mod tests {
         // `[1, 2, 3]` se modela como `Rc<RefCell<Vec<i64>>>`. Los items
         // se coercen al tipo común (acá Int → i64) y se construye con
         // el macro vec![].
-        assert_contains(
-            "let xs: List<Int> = [1, 2, 3]",
-            &[
-                "let mut xs: Rc<RefCell<Vec<i64>>>",
-                "Rc::new(RefCell::new(vec![1i64, 2i64, 3i64]))",
-            ],
+        let file = ast_test::parse(&gen("let xs: List<Int> = [1, 2, 3]").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "xs").expect("falta let xs");
+        let ty = ast_test::local_type(l).unwrap();
+        assert!(
+            ty.contains("Rc") && ty.contains("RefCell") && ty.contains("Vec") && ty.contains("i64"),
+            "esperaba tipo `Rc<RefCell<Vec<i64>>>`, fue: {}",
+            ty
+        );
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("Rc :: new") && init.contains("RefCell :: new") && init.contains("vec !"),
+            "esperaba `Rc::new(RefCell::new(vec![...]))`, fue: {}",
+            init
+        );
+        // Los 3 items con sufijo `i64`.
+        assert!(
+            init.contains("1i64") && init.contains("2i64") && init.contains("3i64"),
+            "esperaba items 1i64, 2i64, 3i64, fue: {}",
+            init
         );
     }
 
@@ -5952,29 +6494,53 @@ mod tests {
 
     #[test]
     fn list_push_emite_borrow_mut_push() {
-        assert_contains(
-            "let xs: List<Int> = []\nxs.push(7)",
-            &["(xs.clone()).borrow_mut().push(7i64);"],
+        let file = ast_test::parse(&gen("let xs: List<Int> = []\nxs.push(7)").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        // `.push(...)` se emite como method call sobre `borrow_mut()`.
+        assert!(
+            ast_test::contains_method_call(stmts, "borrow_mut"),
+            "esperaba `borrow_mut` antes del push"
+        );
+        assert!(
+            ast_test::contains_method_call(stmts, "push"),
+            "esperaba `.push(...)`"
         );
     }
 
     #[test]
     fn list_pop_emite_borrow_mut_pop_con_expect() {
-        let code = gen("let xs: List<Int> = [1]\nlet x = xs.pop()").unwrap();
+        let file = ast_test::parse(&gen("let xs: List<Int> = [1]\nlet x = xs.pop()").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        let init = ast_test::local_init(l).unwrap();
+        // El pop se traduce a `.borrow_mut().pop().expect("...")` —
+        // `.expect(...)` paniquea con el mismo mensaje del intérprete.
         assert!(
-            code.contains(".borrow_mut().pop().expect(\"`.pop()` sobre lista vacía\")"),
-            "esperaba `.pop().expect(...)`, got:\n{}",
-            code
+            init.contains("borrow_mut") && init.contains("pop") && init.contains("expect"),
+            "esperaba pipeline borrow_mut + pop + expect, fue: {}",
+            init
+        );
+        // El mensaje del expect debe mencionar `pop` y `lista vacía`
+        // (matchea el del intérprete).
+        assert!(
+            init.contains("pop") && init.contains("vac"),
+            "esperaba mensaje del expect sobre lista vacía, fue: {}",
+            init
         );
     }
 
     #[test]
     fn list_len_metodo_emite_borrow_len_as_i64() {
-        let code = gen("let xs: List<Int> = []\nlet n = xs.len()").unwrap();
+        let file = ast_test::parse(&gen("let xs: List<Int> = []\nlet n = xs.len()").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        // El binding `n` debe quedar tipado como i64.
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        let init = ast_test::local_init(l).unwrap();
         assert!(
-            code.contains(".borrow().len() as i64"),
-            "esperaba `.borrow().len() as i64`, got:\n{}",
-            code
+            init.contains("borrow") && init.contains("len") && init.contains("as i64"),
+            "esperaba pipeline borrow + len + as i64, fue: {}",
+            init
         );
     }
 
@@ -6704,20 +7270,19 @@ mod tests {
     #[test]
     fn match_sobre_result_exhaustivo_no_agrega_catch_all() {
         // Ok(v) + Err(e) cubren Result completo — no se agrega panic.
-        let code = gen(
-            "fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }\n\
-             match divide(10, 2) { Ok(v) => print(\"ok: {v}\"), Err(e) => print(\"err: {e}\") }",
-        )
-        .unwrap();
-        assert!(
-            code.contains("Ok(v) =>") && code.contains("Err(e) =>"),
-            "esperaba arms `Ok(v) =>` y `Err(e) =>`, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen(
+                "fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }\n\
+                 match divide(10, 2) { Ok(v) => print(\"ok: {v}\"), Err(e) => print(\"err: {e}\") }",
+            )
+            .unwrap(),
         );
-        assert!(
-            !code.contains("no matcheó ningún brazo"),
-            "no debería haber catch-all artificial (el match es exhaustivo), got:\n{}",
-            code
+        let stmts = ast_test::main_block_stmts(&file);
+        // Sin catch-all artificial → cero panic! macros en el main.
+        assert_eq!(
+            ast_test::count_macro_calls(stmts, "panic"),
+            0,
+            "no esperaba panic! (el match es exhaustivo)"
         );
     }
 
@@ -6725,27 +7290,34 @@ mod tests {
     fn match_no_exhaustivo_sobre_int_agrega_panic() {
         // Match sobre Int sin catch-all → agregamos `_ => panic!(...)`
         // con el mismo mensaje del intérprete.
-        let code = gen(
-            "let v = 1\nlet s = match v { 0 => \"cero\", 1 => \"uno\" }",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let v = 1\nlet s = match v { 0 => \"cero\", 1 => \"uno\" }").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
         assert!(
-            code.contains("_ => panic!(\"el `match` no matcheó ningún brazo\")"),
-            "esperaba arm catch-all con panic, got:\n{}",
-            code
+            ast_test::count_macro_calls(stmts, "panic") >= 1,
+            "esperaba al menos un panic! (catch-all artificial)"
+        );
+        // Mensaje del panic matchea el del intérprete.
+        let last = ast_test::ts(stmts.last().unwrap());
+        assert!(
+            last.contains("no matche") && last.contains("ning") && last.contains("brazo"),
+            "esperaba mensaje del panic sobre brazo no matcheado, fue: {}",
+            last
         );
     }
 
     #[test]
     fn match_con_wildcard_no_agrega_panic() {
-        let code = gen(
-            "let v = 1\nlet s = match v { 0 => \"cero\", _ => \"otro\" }",
-        )
-        .unwrap();
-        assert!(
-            !code.contains("no matcheó ningún brazo"),
-            "el wildcard ya es catch-all, no debería sumarse panic, got:\n{}",
-            code
+        // El wildcard `_` ya cubre todo — no agregamos catch-all extra.
+        let file = ast_test::parse(
+            &gen("let v = 1\nlet s = match v { 0 => \"cero\", _ => \"otro\" }").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        assert_eq!(
+            ast_test::count_macro_calls(stmts, "panic"),
+            0,
+            "el wildcard ya es catch-all, no debería sumarse panic"
         );
     }
 

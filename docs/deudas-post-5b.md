@@ -14,8 +14,10 @@
 > F11 (state HTTP compartido) cerrada — `thread_local!` por var
 > top-level referenciada en handlers + tokio current_thread runtime;
 > `examples/server.fitz` y `examples/guide/17-http.fitz` compilan
-> end-to-end. Ver matriz para ítems pendientes (S1.2 expr-level, T1
-> tests frágiles).
+> end-to-end. T1 (tests frágiles del codegen) — primer batch cerrado:
+> infra AST-based con `syn` + `quote`, 37/113 unit tests del codegen
+> migrados de string-match a inspección de AST. Ver matriz para ítems
+> pendientes (S1.2 expr-level, T1 sucesivos batches).
 
 ## Resumen ejecutivo
 
@@ -123,7 +125,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| T1 | `codegen.rs` tests (~80% de 104) | Tests matchean strings literales del Rust generado (`assert_contains(code, "let mut x: i64")`). Frágiles. | Alta | Media |
+| T1 | `codegen.rs` tests | **Primer batch cerrado** — 37/113 unit tests migrados a AST-based con `syn` + `quote` (módulo `ast_test` adentro de `mod tests`). Cubierto: lets/binops/print/fns/if/while/for/types/struct lit/field access/listas/match/etc. La fragilidad bajó de ~80% a ~50% sobre los tests del codegen. **Pendientes** los batches de método sobre Map/HTTP/Result-detail/closures (donde la inspección AST tendría que armar matchers más específicos). Sumá conversiones cuando muevas `let` o cambies signatures del codegen y rompas tests viejos — es buen momento para reescribirlos AST-based en lugar de actualizar el string. | Media (sucesivos batches) | Media |
 | T2 | `tests/compile_e2e.rs:20` | Mutex `SERIAL` serializa los 48 E2E. Cada uno usa tempdir único — paralelizables con `CARGO_TARGET_DIR` per-test. ~4x speedup. | Media | Media |
 | T3 | `parser.rs` tests | Solo 4 tests de paths de error. Sin tests para: `fn f(a, a)` (params duplicados), decorator fuera de fn, escapes raros. | Media | Media |
 | T4 | E2E ~12/48 | Tests E2E que solo verifican que `build` no falle, sin validar stdout/body/status. | Media | Baja |
@@ -215,3 +217,17 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
   Trade-off documentado: server single-threaded hasta que aterrice
   async/await real (entonces se pivota a Arc/Mutex + `State`
   extractor).
+- **T1** (tests frágiles del codegen) — **primer batch cerrado**.
+  Infra `ast_test` (módulo adentro de `mod tests`) parsea el Rust
+  generado con `syn::parse_file` y expone helpers para buscar
+  items, lets, signatures, derives, macro calls, method calls,
+  loops, etc. con stringificación normalizada via `quote::ToTokens`.
+  37 tests migrados de `assert_contains(code, "literal-string")` a
+  inspección de AST. Beneficio: cambios cosméticos del codegen
+  (espacios, agrupación de paréntesis, sufijos numéricos
+  alternativos) ya no rompen estos tests — solo cambios
+  estructurales reales (renaming de tipos generados, eliminación
+  de bindings, cambio de semántica) los rompen. Pipeline
+  incremental: cuando rompas un test viejo del codegen al
+  refactorizar, considerá reescribirlo AST-based en lugar de
+  actualizar el string literal.
