@@ -1,10 +1,15 @@
 // 14-result.fitz — Manejo de errores con Result, Ok, Err y `?`.
+//
+// Las anotaciones de tipo en parámetros y retorno son opcionales para
+// `fitz run` (el intérprete infiere), pero el codegen de Fase 5b.1
+// las exige para compilar con `fitz build`. Las dejamos puestas porque
+// además documentan el contrato `Result<T>` que las fns ya respetan.
 
 type User { id: Int, name: Str }
 
 // `divide` puede fallar. Devolvemos Err con un mensaje cuando b == 0,
 // y Ok con el resultado cuando la operación es válida.
-fn divide(a, b) {
+fn divide(a: Int, b: Int) -> Result<Int> {
     if (b == 0) {
         return Err("división por cero")
     }
@@ -23,7 +28,7 @@ match divide(10, 0) {
 }
 
 // `find_user` también devuelve Result; falla si el id no está.
-fn find_user(id) {
+fn find_user(id: Int) -> Result<User> {
     if (id == 1) {
         return Ok(User { id: 1, name: "Fitz" })
     }
@@ -33,7 +38,7 @@ fn find_user(id) {
 // `?` propaga el Err automáticamente: si find_user devuelve Err,
 // describe_user corta y devuelve ese mismo Err sin tocar el resto.
 // Si devuelve Ok(u), `?` desempaqueta y `u` es el User.
-fn describe_user(id) {
+fn describe_user(id: Int) -> Result<Str> {
     let u = find_user(id)?
     return Ok("#{u.id} es {u.name}")
 }

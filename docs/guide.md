@@ -3140,11 +3140,19 @@ también, y `Ok(1) == Err(1)` da `false`.
   `Value::Result(Err(...))` saliendo por la puerta de retorno —
   por eso conviene anotar el retorno y dejar que el checker te
   avise antes.
-- **Anotaciones genéricas `Result<T>`** — el parser todavía no
-  acepta tipos compuestos en `-> ...` o en `: ...`. Hoy se anota con
-  `Result` a secas o no se anota. Mismo límite que `List<Str>`.
-- **`Ok(_)` / `Err(_)` con wildcard real** — hoy `_` adentro funciona
-  como nombre, no como wildcard. No hace daño pero ensucia el scope.
+- **Compilar con `fitz build`** — desde 5b.4 el compilador
+  soporta `Result`, `Ok`/`Err`, `?` y `match` enteros, así que
+  el ejemplo de abajo compila a binario nativo *si las funciones
+  anotan sus parámetros* (la inferencia de tipos de params en el
+  codegen es deuda residual de 5b.1). El `Err` side se modela
+  como `String` Rust pinned: si construís `Err(42)` o similar,
+  el codegen lo coerce a String con `format!`. En la práctica
+  todos los `Err(...)` útiles llevan mensajes, así que no
+  cambia nada — pero queda anotado.
+- **`Err` con valores no-Str y bindings tipados** — el binding
+  `e` del pattern `Err(e)` siempre tipa `Str` en el código
+  compilado, porque el Err side está pinned. En el intérprete
+  conserva el tipo original del inner.
 
 ### Ejemplo completo
 
@@ -3153,7 +3161,7 @@ también, y `Ok(1) == Err(1)` da `false`.
 ```fitz
 type User { id: Int, name: Str }
 
-fn divide(a, b) {
+fn divide(a: Int, b: Int) -> Result<Int> {
     if (b == 0) {
         return Err("división por cero")
     }
@@ -3170,14 +3178,14 @@ match divide(10, 0) {
     Err(e) => print("err: {e}")
 }
 
-fn find_user(id) {
+fn find_user(id: Int) -> Result<User> {
     if (id == 1) {
         return Ok(User { id: 1, name: "Fitz" })
     }
     return Err("usuario no encontrado")
 }
 
-fn describe_user(id) {
+fn describe_user(id: Int) -> Result<Str> {
     let u = find_user(id)?
     return Ok("#{u.id} es {u.name}")
 }

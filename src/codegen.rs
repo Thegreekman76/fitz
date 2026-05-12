@@ -109,6 +109,15 @@ struct CodegenCtx<'a> {
     /// instancias y los field accesses puedan resolver tipos de
     /// campo sin volver a iterar el AST.
     type_sigs: HashMap<String, TypeSig>,
+    /// Stack con el return type esperado de cada fn en curso. Se
+    /// pushea al entrar a una fn top-level o a un callback inline
+    /// (FnExpr); se consulta desde `gen_expr` para validar que el
+    /// operador `?` (`Try`) solo aparezca dentro de fns que
+    /// retornen `Result<T>`. El checker 5.3.3 ya valida lo mismo,
+    /// pero como defensa en profundidad y para emitir errores
+    /// claros del codegen, lo replicamos. Vacío fuera de toda fn
+    /// (top-level del archivo, donde `?` no aplica).
+    ret_stack: Vec<Type>,
 }
 
 #[derive(Debug, Clone)]
@@ -146,6 +155,7 @@ impl<'a> CodegenCtx<'a> {
             scopes: vec![HashMap::new()],
             fn_sigs: HashMap::new(),
             type_sigs: HashMap::new(),
+            ret_stack: Vec::new(),
         }
     }
 
@@ -457,10 +467,13 @@ impl<'a> CodegenCtx<'a> {
         for (param, pty) in params.iter().zip(sig.params.iter()) {
             self.declare_var(param.name.clone(), pty.clone());
         }
-        // Frame de "return esperado" para coerciones.
+        // Frame de "return esperado" para coerciones y para que `?`
+        // (Try) pueda validar que está adentro de una fn Result.
+        self.ret_stack.push(sig.ret.clone());
         for stmt in body {
             self.gen_stmt_in_fn(stmt, &sig.ret)?;
         }
+        self.ret_stack.pop();
         self.pop_scope();
         self.indent -= 1;
 
@@ -782,12 +795,10 @@ impl<'a> CodegenCtx<'a> {
             Expr::Index { object, index } => self.gen_index(object, index),
             Expr::Field { object, field } => self.gen_field_access(object, field),
             Expr::StructLit { type_name, fields } => self.gen_struct_lit(type_name, fields),
-            Expr::Ok(_) | Expr::Err(_) | Expr::Try(_) => Err(self.err(
-                "Result / `Ok` / `Err` / `?`: no soportados en 5b.1 — llegan en 5b.4",
-            )),
-            Expr::Match { .. } => Err(self.err(
-                "`match`: requiere Result/tipos custom — 5b.4",
-            )),
+            Expr::Ok(inner) => self.gen_ok(inner),
+            Expr::Err(inner) => self.gen_err(inner),
+            Expr::Try(inner) => self.gen_try(inner),
+            Expr::Match { value, arms } => self.gen_match(value, arms),
             // FnExpr "suelto" — usado como valor, parámetro o retorno —
             // requiere closures escapados con tipo (Box<dyn Fn(...)>) y
             // captura por clone explícita. Higher-order completo queda
@@ -817,6 +828,25 @@ impl<'a> CodegenCtx<'a> {
         let (code, _) = self.gen_expr(e)?;
         self.emit(&code);
         Ok(())
+    }
+
+    /// Genera el código de un `print(...)` como **String** (no lo emite
+    /// directo al output). Usado por contextos donde necesitamos la
+    /// llamada al `println!` como expresión adentro de otra estructura,
+    /// p.ej. un arm de `match`. `call_expr` debe ser un `Expr::Call`
+    /// con callee `print`; el caller ya lo validó vía `is_print_call`.
+    fn gen_print_to_string(&mut self, call_expr: &Expr) -> Result<String, FitzError> {
+        let Expr::Call { args, .. } = call_expr else {
+            return Err(self.err("gen_print_to_string llamada con expr que no es Call"));
+        };
+        let saved = std::mem::take(&mut self.output);
+        let saved_indent = self.indent;
+        self.indent = 0;
+        self.gen_print(args)?;
+        let out = std::mem::take(&mut self.output);
+        self.output = saved;
+        self.indent = saved_indent;
+        Ok(out)
     }
 
     fn gen_print(&mut self, args: &[Expr]) -> Result<(), FitzError> {
@@ -1101,11 +1131,7 @@ impl<'a> CodegenCtx<'a> {
             }
             (Type::List(t), "map") => self.gen_list_map(&obj_code, t, args),
             (Type::List(t), "filter") => self.gen_list_filter(&obj_code, t, args),
-            (Type::List(_), "find") => Err(self.err(
-                "`.find()` sobre List<T> devuelve `Result<T>`; el subset compilado no soporta \
-                 `Result` todavía — llega en 5b.4. Mientras tanto, podés iterar con `for` y \
-                 acumular tu propia condición, o usar `fitz run`.",
-            )),
+            (Type::List(t), "find") => self.gen_list_find(&obj_code, t, args),
             (Type::List(_), other) => Err(self.err(format!(
                 "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter)",
                 other
@@ -1133,11 +1159,7 @@ impl<'a> CodegenCtx<'a> {
                 check_method_arity(method, args, 0)?;
                 Ok((format!("(({}).borrow().len() as i64)", obj_code), Type::Int))
             }
-            (Type::Map(_, _), "get") => Err(self.err(
-                "`.get()` sobre Map<K, V> devuelve `Result<V>`; el subset compilado no soporta \
-                 `Result` todavía — llega en 5b.4. Mientras tanto, podés usar `m.has(k)` + `m[k]`, \
-                 o `fitz run`.",
-            )),
+            (Type::Map(k, v), "get") => self.gen_map_get(&obj_code, k, v, args),
             (Type::Map(_, _), other) => Err(self.err(format!(
                 "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len)",
                 other
@@ -1246,7 +1268,74 @@ impl<'a> CodegenCtx<'a> {
         Ok((code, Type::List(Box::new(elem_ty.clone()))))
     }
 
+    /// `xs.find(callback)` → bloque que itera el snapshot y devuelve
+    /// `Ok(item)` al primer match, `Err("no encontrado")` si nada matchea.
+    /// Devuelve `Result<T, String>`. Habilita el patrón canónico
+    /// `users.find(fn(u) => u.id == id)?` (con `?` propagando el Err).
+    fn gen_list_find(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("find", args, 1)?;
+        let (callback_code, _) =
+            self.gen_callback_inline(&args[0], elem_ty, Some(&Type::Bool), "find")?;
+        let elem_rs = rust_type_for(elem_ty, self.env)?;
+        let code = format!(
+            "{{ \
+                let __items: Vec<_> = ({}).borrow().clone(); \
+                let __cb = {}; \
+                let mut __result: Result<{}, String> = \
+                    Err(String::from(\"no encontrado\")); \
+                for __it in __items.into_iter() {{ \
+                    if __cb(__it.clone()) {{ __result = Ok(__it); break; }} \
+                }} \
+                __result \
+            }}",
+            obj_code, callback_code, elem_rs
+        );
+        Ok((code, Type::Result(Box::new(elem_ty.clone()))))
+    }
+
     // --- métodos Map -----------------------------------------------------
+
+    /// `m.get(k)` → búsqueda lineal por igualdad. Devuelve `Ok(v)` si
+    /// la clave existe, `Err("clave no encontrada: <k>")` si no. Mensaje
+    /// idéntico al del intérprete. Tipo retornado: `Result<V, String>`.
+    fn gen_map_get(
+        &mut self,
+        obj_code: &str,
+        key_ty: &Type,
+        val_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("get", args, 1)?;
+        let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+        let coerced_key = coerce(&arg_code, &arg_ty, key_ty);
+        // Para el mensaje de error, formateamos la clave con el mismo
+        // estilo del intérprete (`Display` de Value, **sin** comillas
+        // para Str: `clave no encontrada: z`, no `clave no encontrada:
+        // "z"`). Eso lo da `show_expr` (modo "print top-level"), no
+        // `show_expr_inline` (modo "adentro de lista/mapa", que sí mete
+        // comillas).
+        let key_show = show_expr("__k", key_ty);
+        let val_rs = rust_type_for(val_ty, self.env)?;
+        let code = format!(
+            "{{ \
+                let __map = {}; \
+                let __k = {}; \
+                let __pairs = __map.borrow(); \
+                let mut __result: Result<{}, String> = Err(format!(\"clave no encontrada: {{}}\", {})); \
+                for (__k2, __v) in __pairs.iter() {{ \
+                    if __k2 == &__k {{ __result = Ok(__v.clone()); break; }} \
+                }} \
+                __result \
+            }}",
+            obj_code, coerced_key, val_rs, key_show
+        );
+        Ok((code, Type::Result(Box::new(val_ty.clone()))))
+    }
 
     /// `m.has(k)` → búsqueda lineal por igualdad → bool.
     fn gen_map_has(
@@ -1317,6 +1406,12 @@ impl<'a> CodegenCtx<'a> {
         let ret_ty_rs = rust_type_for(&ret_ty, self.env)?;
 
         // Emit el body en un buffer aparte, con el param ligado.
+        // Pushear el ret_stack del callback para que un `?` adentro
+        // del cuerpo del closure pueda chequearse correctamente (en
+        // la práctica el checker prohibe `?` adentro de FnExpr inline
+        // salvo cuando el return_stack es Any, así que esto suele
+        // ser inerte; lo mantenemos por consistencia).
+        self.ret_stack.push(ret_ty.clone());
         self.push_scope();
         self.declare_var(param_name.clone(), param_ty.clone());
         let saved = std::mem::take(&mut self.output);
@@ -1330,6 +1425,7 @@ impl<'a> CodegenCtx<'a> {
         self.output = saved;
         self.indent = saved_indent;
         self.pop_scope();
+        self.ret_stack.pop();
 
         let code = format!(
             "|{}: {}| -> {} {{ {} }}",
@@ -1367,6 +1463,237 @@ impl<'a> CodegenCtx<'a> {
         self.output = saved;
         self.pop_scope();
         result.map(|(_, t)| t)
+    }
+
+    // --- Result, `?`, match (5b.4) ----------------------------------------
+
+    /// `Ok(e)` → `Ok(<coerced e>)`. El tipo de Fitz es `Result<T>` donde
+    /// T es el tipo sintetizado del inner. El Err side queda como `String`
+    /// (pinned, ver `rust_type_for`), pero acá no lo materializamos —
+    /// rustc lo infiere desde el contexto destino (anotación / return
+    /// type / brazo del match opuesto).
+    fn gen_ok(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
+        let (code, ty) = self.gen_expr(inner)?;
+        Ok((format!("Ok({})", code), Type::Result(Box::new(ty))))
+    }
+
+    /// `Err(e)` → `Err(<e como String>)`. El Err side está pinned a String
+    /// en el código generado (decisión 5b.4): si el inner ya es Str, se
+    /// usa directo; si no, se coerce con `format!("{}", x)` para preservar
+    /// la práctica de "Err con mensaje" del intérprete y de los ejemplos.
+    /// El tipo Fitz sintetizado es `Result<Any>` — no conocemos el T del
+    /// Ok side, el contexto destino lo refinará.
+    fn gen_err(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
+        let (code, ty) = self.gen_expr(inner)?;
+        let as_string = match ty {
+            Type::Str => code,
+            _ => format!("format!(\"{{}}\", {})", code),
+        };
+        Ok((format!("Err({})", as_string), Type::Result(Box::new(Type::Any))))
+    }
+
+    /// `expr?` — operador de propagación de errores. En Rust, `?` solo
+    /// funciona adentro de fns que retornen `Result<_, _>` con E compatible
+    /// (acá siempre `String`). Validamos contra `ret_stack` y emitimos
+    /// `<expr>?` directo: rustc se encarga de la propagación y del
+    /// desempaque del Ok.
+    fn gen_try(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
+        let (code, ty) = self.gen_expr(inner)?;
+        let inner_ty = match &ty {
+            Type::Result(t) => (**t).clone(),
+            // Any cae a gradual: probablemente vino de un `.find()` u otro
+            // call que el checker no pudo tipar concreto. Asumimos que es
+            // Result y dejamos que rustc lo confirme. (En la práctica
+            // 5b.4 los métodos built-in dan Result concreto, así que este
+            // camino no se ejerce mucho.)
+            Type::Any => Type::Any,
+            other => {
+                return Err(self.err(format!(
+                    "operador `?` sobre `{}`: el operando debe ser `Result<T>`",
+                    display_type(other, self.env)
+                )));
+            }
+        };
+        let ret = self.ret_stack.last().cloned().unwrap_or(Type::Null);
+        match &ret {
+            Type::Result(_) => {}
+            Type::Any => {}
+            _ => {
+                return Err(self.err(
+                    "operador `?` solo puede usarse adentro de una función que retorne \
+                     `Result<...>`",
+                ));
+            }
+        }
+        Ok((format!("({})?", code), inner_ty))
+    }
+
+    /// `match scrutinee { pat1 => expr1, ... }` → `match` Rust. El match
+    /// se emite siempre como **expresión** Rust (`match s { ... }`); cuando
+    /// se usa en stmt position, el `;` de `Stmt::Expr` lo cierra; cuando
+    /// alimenta una asignación o un return, su valor es el lub de los arms.
+    ///
+    /// Patrones soportados:
+    ///   - Int/Float/Str/Bool/Null literales → patrones Rust directos.
+    ///   - Ident (binding) → `name`, captura el scrutinee.
+    ///   - Wildcard `_`.
+    ///   - Ok(x) / Err(e) → `Ok(x)` / `Err(e)` Rust nativos.
+    ///   - Ok(_) / Err(_) → `Ok(_)` / `Err(_)`.
+    ///   - Range `a..b` → guard `n if (a..b).contains(&n)` (no patterns
+    ///     `a..b` directos para evitar ediciones con exhaustividad).
+    ///
+    /// Exhaustividad: si los arms no cubren todo (ni Ident/Wildcard ni
+    /// las dos variantes de Result), agregamos `_ => panic!(...)` con
+    /// el mismo mensaje que el intérprete ("el `match` no matcheó
+    /// ningún brazo") para que rustc compile.
+    fn gen_match(
+        &mut self,
+        value: &Expr,
+        arms: &[crate::ast::MatchArm],
+    ) -> Result<(String, Type), FitzError> {
+        let (scrut_code, scrut_ty) = self.gen_expr(value)?;
+        let inner_ok_ty = match &scrut_ty {
+            Type::Result(t) => Some((**t).clone()),
+            _ => None,
+        };
+
+        let mut arm_pieces: Vec<String> = Vec::with_capacity(arms.len() + 1);
+        let mut arm_tys: Vec<Type> = Vec::with_capacity(arms.len());
+        let mut has_catch_all = false;
+        let mut has_ok = false;
+        let mut has_err = false;
+
+        for arm in arms {
+            self.push_scope();
+            let pat_code = self.gen_pattern(&arm.pattern, &scrut_ty, &inner_ok_ty)?;
+            match &arm.pattern {
+                crate::ast::Pattern::Ident(_) | crate::ast::Pattern::Wildcard => {
+                    has_catch_all = true;
+                }
+                crate::ast::Pattern::OkBinding(_) | crate::ast::Pattern::OkWildcard => {
+                    has_ok = true;
+                }
+                crate::ast::Pattern::ErrBinding(_) | crate::ast::Pattern::ErrWildcard => {
+                    has_err = true;
+                }
+                _ => {}
+            }
+            // `print(...)` adentro del arm no es una expresión Fitz (es
+            // statement). Lo emitimos como bloque `{ println!(...); }`
+            // que evalúa a `()`. Para el resto delegamos a `gen_expr`.
+            let (body_code, body_ty) = if is_print_call(&arm.body) {
+                let print_code = self.gen_print_to_string(&arm.body)?;
+                (format!("{{ {}; }}", print_code), Type::Null)
+            } else {
+                self.gen_expr(&arm.body)?
+            };
+            self.pop_scope();
+            arm_pieces.push(format!("{} => {}", pat_code, body_code));
+            arm_tys.push(body_ty);
+        }
+
+        // Determinar si necesitamos un catch-all artificial para que
+        // rustc acepte el match. Casos exhaustivos sin agregar nada:
+        //   - hay un Ident/Wildcard arm;
+        //   - el scrutinee es Result<T> y tenemos al menos un Ok y un Err.
+        let result_exhaustive =
+            inner_ok_ty.is_some() && has_ok && has_err;
+        if !has_catch_all && !result_exhaustive {
+            arm_pieces.push(
+                "_ => panic!(\"el `match` no matcheó ningún brazo\")".to_string(),
+            );
+        }
+
+        // Tipo de salida: lub de los arms; si fallan a unificar, Any.
+        let result_ty = if arm_tys.is_empty() {
+            Type::Null
+        } else {
+            let mut acc = arm_tys[0].clone();
+            for t in &arm_tys[1..] {
+                acc = lub(&acc, t).unwrap_or(Type::Any);
+            }
+            acc
+        };
+
+        let code = format!(
+            "(match {} {{ {} }})",
+            scrut_code,
+            arm_pieces.join(", ")
+        );
+        Ok((code, result_ty))
+    }
+
+    /// Traduce un `Pattern` Fitz a su equivalente como pattern Rust,
+    /// declarando en el scope actual cualquier binding que el pattern
+    /// introduzca. `scrut_ty` ayuda con literales (negativos, Str con
+    /// comillas correctas); `ok_inner_ty` da el tipo del binding `x`
+    /// en `Ok(x)` cuando el scrutinee es `Result<T>`.
+    fn gen_pattern(
+        &mut self,
+        pat: &crate::ast::Pattern,
+        scrut_ty: &Type,
+        ok_inner_ty: &Option<Type>,
+    ) -> Result<String, FitzError> {
+        use crate::ast::Pattern;
+        match pat {
+            Pattern::Int(n) => Ok(format!("{}i64", n)),
+            Pattern::Float(f) => Ok(format!("{}f64", f)),
+            Pattern::Str(s) => {
+                // Comparamos con literal `&str` adentro del match
+                // contra `String`. Como Rust no acepta `"x"` como
+                // pattern contra `String` directo, usamos un guard:
+                // `_ if x.as_str() == "..."`. Esto descarta el
+                // scrutinee del binding, pero es válido. Emitimos un
+                // pattern fresco que matchea y el guard hace el check.
+                Ok(format!("ref __s if __s.as_str() == {}", rust_str_literal(s)))
+            }
+            Pattern::Bool(b) => Ok(b.to_string()),
+            Pattern::Null => {
+                // `Null` Fitz se mapea a `()` Rust; el pattern `()`
+                // matchea sólo `()`. Si el scrutinee no es Null/() el
+                // caso es inalcanzable, pero rustc lo acepta.
+                if matches!(scrut_ty, Type::Null) {
+                    Ok("()".to_string())
+                } else {
+                    // Para Option<T> u otros: dejamos `_` con guard
+                    // estructural — pero el patrón Null sobre tipos
+                    // que no son Null es raro y el checker lo veta;
+                    // por simplicidad lo dejamos pasar como `_` que
+                    // nunca matchea correctamente. (Caso teórico.)
+                    Ok("_".to_string())
+                }
+            }
+            Pattern::Ident(name) => {
+                self.declare_var(name.clone(), scrut_ty.clone());
+                Ok(name.clone())
+            }
+            Pattern::Wildcard => Ok("_".to_string()),
+            Pattern::OkBinding(name) => {
+                let bind_ty = ok_inner_ty.clone().unwrap_or(Type::Any);
+                self.declare_var(name.clone(), bind_ty);
+                Ok(format!("Ok({})", name))
+            }
+            Pattern::ErrBinding(name) => {
+                // El Err side está pinned a `String` en el código
+                // generado, así que el binding es siempre String.
+                self.declare_var(name.clone(), Type::Str);
+                Ok(format!("Err({})", name))
+            }
+            Pattern::OkWildcard => Ok("Ok(_)".to_string()),
+            Pattern::ErrWildcard => Ok("Err(_)".to_string()),
+            Pattern::Range { start, end } => {
+                // Rust acepta patterns `start..end` como exclusivos en
+                // `match` desde 2018, pero solo para tipos primitivos
+                // con `PartialOrd`. Para `i64`, funciona — pero el
+                // pattern requiere ser exhaustivo o tener catch-all.
+                // Para evitar conflictos con la cobertura, emitimos
+                // un guard sobre un binding fresco.
+                Ok(format!(
+                    "__n if ({}i64..{}i64).contains(&__n)",
+                    start, end
+                ))
+            }
+        }
     }
 
     // --- listas, mapas, indexing ------------------------------------------
@@ -1832,6 +2159,15 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
             let v = lub(av, bv)?;
             Ok(Type::Map(Box::new(k), Box::new(v)))
         }
+        // Result<a> ↔ Result<b> recursivo. Cubre el caso típico de
+        // `match r { Ok(v) => Ok(v + 1), Err(e) => Err(e) }`: ambas
+        // ramas son Result<T, String> con el mismo T, lub = T.
+        (Type::Result(a_in), Type::Result(b_in)) => {
+            lub(a_in, b_in).map(|t| Type::Result(Box::new(t)))
+        }
+        // Any cede al concreto. Permite que `Err("x")` (Result<Any>)
+        // unifique con `Ok(42)` (Result<Int>) → Result<Int>.
+        (Type::Any, other) | (other, Type::Any) => Ok(other.clone()),
         _ => Err(()),
     }
 }
@@ -1886,6 +2222,21 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 rust_type_for(k, env)?,
                 rust_type_for(v, env)?
             ))
+        }
+        // `Result<T>` Fitz → `Result<T, String>` Rust nativo (5b.4).
+        // El Err side está pinned a `String`: matchea la práctica del
+        // intérprete (find/get y todos los ejemplos construyen Err con
+        // mensajes) y deja que el `?` Rust funcione sin glue. Si T = Any
+        // (Err suelto sin contexto), dejamos que el contexto destino
+        // (anotación / return type) lo refine; rustc fallará con
+        // "type annotations needed" si nadie lo restringe.
+        Type::Result(inner) => {
+            let inner_rs = if matches!(**inner, Type::Any) {
+                "_".to_string()
+            } else {
+                rust_type_for(inner, env)?
+            };
+            Ok(format!("Result<{}, String>", inner_rs))
         }
         other => Err(FitzError::new(
             ErrorKind::TypeError,
@@ -1961,6 +2312,9 @@ fn needs_clone(t: &Type) -> bool {
         Type::Nullable(_) => true,
         // `Rc<RefCell<Vec<...>>>` — clone del Rc, barato, alias preservado.
         Type::List(_) | Type::Map(_, _) => true,
+        // `Result<T, String>` no es Copy (String tampoco lo es), y el T
+        // adentro puede ser Str/Nominal/List/etc. — clonamos por valor.
+        Type::Result(_) => true,
         // Fallback conservador: clonamos.
         _ => true,
     }
@@ -2072,8 +2426,22 @@ fn show_expr(code: &str, ty: &Type) -> String {
                 code, k_show, v_show
             )
         }
-        // Range, Any, Function, Result — fallback. Si el AST cuela algo
-        // que llega acá, el error principal viene de otro lado.
+        // Result<T> → `Ok(<inline T>)` o `Err("<msg>")`. El inner del Ok
+        // se formatea con `show_expr_inline` (strings con comillas, igual
+        // al intérprete); el Err side está pinned a `String` y siempre se
+        // muestra con comillas dobles.
+        Type::Result(inner) => {
+            let ok_show = show_expr_inline("__v", inner);
+            format!(
+                "(match &({}) {{ \
+                    Ok(__v) => format!(\"Ok({{}})\", {{ let __v = __v.clone(); {} }}), \
+                    Err(__e) => format!(\"Err(\\\"{{}}\\\")\", __e) \
+                }})",
+                code, ok_show
+            )
+        }
+        // Range, Any, Function — fallback. Si el AST cuela algo que llega
+        // acá, el error principal viene de otro lado.
         _ => format!("format!(\"{{:?}}\", {})", code),
     }
 }
@@ -3024,19 +3392,54 @@ mod tests {
     }
 
     #[test]
-    fn list_find_difere_a_5b4() {
-        // find devuelve Result<T>; Result en codegen llega en 5b.4.
-        assert_err_contains(
+    fn list_find_emite_result_con_loop() {
+        // 5b.4: find devuelve `Result<T, String>` con Ok(item) al primer
+        // match y `Err("no encontrado")` si nada matchea. Tipado del
+        // binding `x` debe ser `Result<i64, String>`.
+        let code = gen(
             "let xs: List<Int> = [1, 2]\nlet x = xs.find(fn(n) => n > 0)",
-            &["5b.4"],
+        )
+        .unwrap();
+        assert!(
+            code.contains("let mut x: Result<i64, String>"),
+            "esperaba `x: Result<i64, String>`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Err(String::from(\"no encontrado\"))"),
+            "esperaba inicializador con `Err(\"no encontrado\")`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__result = Ok(__it); break;"),
+            "esperaba la asignación de Ok + break en el loop, got:\n{}",
+            code
         );
     }
 
     #[test]
-    fn map_get_difere_a_5b4() {
-        assert_err_contains(
+    fn map_get_emite_result_con_busqueda_lineal() {
+        // 5b.4: get devuelve `Result<V, String>`. Mensaje del Err matchea
+        // bit-a-bit el del intérprete: `clave no encontrada: <k>` con `<k>`
+        // formateado inline (Str con comillas).
+        let code = gen(
             "let m: Map<Str, Int> = {\"a\": 1}\nlet v = m.get(\"a\")",
-            &["5b.4"],
+        )
+        .unwrap();
+        assert!(
+            code.contains("let mut v: Result<i64, String>"),
+            "esperaba `v: Result<i64, String>`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("clave no encontrada: {}"),
+            "esperaba mensaje `clave no encontrada: {{}}`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__result = Ok(__v.clone()); break;"),
+            "esperaba asignación de Ok + break, got:\n{}",
+            code
         );
     }
 
@@ -3081,13 +3484,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn match_no_soportado() {
-        assert_err_contains(
-            "let v = 1\nlet s = match v { 0 => \"cero\", _ => \"otro\" }",
-            &["match", "5b.4"],
-        );
-    }
+    // (El test viejo `match_no_soportado` se reemplazó por los tests
+    // de match en 5b.4 más abajo.)
 
     #[test]
     fn imports_no_soportados() {
@@ -3110,6 +3508,214 @@ mod tests {
         assert_err_contains(
             "fn double(n) -> Int { return n * 2 }",
             &["parámetro", "anotación"],
+        );
+    }
+
+    // ---- 5b.4: Result, `?`, match ---------------------------------------
+
+    #[test]
+    fn result_type_anotacion_emite_result_t_string() {
+        // `Result<Int>` Fitz → `Result<i64, String>` Rust.
+        let code = gen(
+            "fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("-> Result<i64, String>"),
+            "esperaba return type `Result<i64, String>`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ok_constructor_emite_ok_envoltorio() {
+        let code = gen(
+            "fn ok42() -> Result<Int> { return Ok(42) }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("return Ok(42i64);"),
+            "esperaba `return Ok(42i64);`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn err_con_str_literal_emite_string_from() {
+        let code = gen(
+            "fn boom() -> Result<Int> { return Err(\"explotó\") }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("return Err(String::from(\"explotó\"));"),
+            "esperaba `return Err(String::from(\"explotó\"));`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn err_con_no_str_coerciona_via_format() {
+        // Err(42): el Err side está pinned a String, así que se coerce
+        // con format!. Cambio de comportamiento sutil pero documentado.
+        let code = gen(
+            "fn boom() -> Result<Str> { return Err(42) }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("Err(format!(\"{}\", 42i64))"),
+            "esperaba coerción a String via format!, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn try_operador_emite_question_mark_rust() {
+        // Adentro de fn que retorna Result, `expr?` → `<expr>?` Rust.
+        let code = gen(
+            "fn find_user(id: Int) -> Result<Int> { return Ok(id) }\n\
+             fn describe(id: Int) -> Result<Str> { let u = find_user(id)?\n return Ok(\"x\") }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("(find_user(id))?"),
+            "esperaba `(find_user(id))?` en describe, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn try_top_level_es_error_de_codegen() {
+        // `?` en top-level (afuera de cualquier fn) pasa el checker
+        // (return_stack vacío, sin contexto a chequear) pero el
+        // codegen lo ataja: `?` Rust solo funciona adentro de fns
+        // que retornen Result. Sin ese contexto, no podemos emitirlo.
+        assert_err_contains(
+            "let x = Ok(1)?",
+            &["?", "Result"],
+        );
+    }
+
+    #[test]
+    fn match_sobre_result_exhaustivo_no_agrega_catch_all() {
+        // Ok(v) + Err(e) cubren Result completo — no se agrega panic.
+        let code = gen(
+            "fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }\n\
+             match divide(10, 2) { Ok(v) => print(\"ok: {v}\"), Err(e) => print(\"err: {e}\") }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("Ok(v) =>") && code.contains("Err(e) =>"),
+            "esperaba arms `Ok(v) =>` y `Err(e) =>`, got:\n{}",
+            code
+        );
+        assert!(
+            !code.contains("no matcheó ningún brazo"),
+            "no debería haber catch-all artificial (el match es exhaustivo), got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn match_no_exhaustivo_sobre_int_agrega_panic() {
+        // Match sobre Int sin catch-all → agregamos `_ => panic!(...)`
+        // con el mismo mensaje del intérprete.
+        let code = gen(
+            "let v = 1\nlet s = match v { 0 => \"cero\", 1 => \"uno\" }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("_ => panic!(\"el `match` no matcheó ningún brazo\")"),
+            "esperaba arm catch-all con panic, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn match_con_wildcard_no_agrega_panic() {
+        let code = gen(
+            "let v = 1\nlet s = match v { 0 => \"cero\", _ => \"otro\" }",
+        )
+        .unwrap();
+        assert!(
+            !code.contains("no matcheó ningún brazo"),
+            "el wildcard ya es catch-all, no debería sumarse panic, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn match_ok_binding_introduce_var_en_scope() {
+        // El binding `u` adentro del arm `Ok(u)` debe poder usarse
+        // (acceso a `.id`, paso a `print`, etc.).
+        let code = gen(
+            "type User { id: Int }\n\
+             fn find_user(id: Int) -> Result<User> { return Ok(User { id: id }) }\n\
+             match find_user(1) { Ok(u) => print(u.id), Err(e) => print(e) }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("Ok(u) =>"),
+            "esperaba arm `Ok(u) =>`, got:\n{}",
+            code
+        );
+        // El cuerpo del arm debe poder hacer `u.id` (lo que requiere
+        // que `u` esté declarado con tipo `User`).
+        assert!(
+            code.contains(".borrow().id"),
+            "esperaba field access sobre el binding `u`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn print_de_result_emite_match_inline() {
+        // `print(r)` con `r: Result<T>` produce un match inline que
+        // formatea `Ok(...)` o `Err("...")` igual al intérprete.
+        let code = gen(
+            "fn ok42() -> Result<Int> { return Ok(42) }\n\
+             let r = ok42()\nprint(r)",
+        )
+        .unwrap();
+        assert!(
+            code.contains("Ok(__v) => format!(\"Ok({})\""),
+            "esperaba match inline con `Ok(__v) => format!(\"Ok({{}})\", ...)`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Err(__e) => format!(\"Err(\\\"{}\\\")\", __e)"),
+            "esperaba arm Err con comillas dobles alrededor del mensaje, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn list_find_con_question_mark_emite_chain() {
+        // Patrón canónico: `users.find(...)?` adentro de fn Result.
+        let code = gen(
+            "type User { id: Int }\n\
+             fn first(us: List<User>) -> Result<User> { let u = us.find(fn(u) => u.id == 1)?\n return Ok(u) }",
+        )
+        .unwrap();
+        // El find emite un bloque Result<User, String>; el `?` Rust se
+        // aplica al bloque entero.
+        assert!(
+            code.contains("})?"),
+            "esperaba que el bloque del find termine con `}})?` (operador ? sobre Result), got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn match_range_emite_guard_con_contains() {
+        // Pattern de rango `0..10` → guard con `(0..10).contains(&__n)`.
+        let code = gen(
+            "let n = 5\nlet s = match n { 0..10 => \"chico\", _ => \"grande\" }",
+        )
+        .unwrap();
+        assert!(
+            code.contains("__n if (0i64..10i64).contains(&__n)"),
+            "esperaba guard de rango, got:\n{}",
+            code
         );
     }
 }

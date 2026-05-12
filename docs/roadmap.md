@@ -1749,10 +1749,112 @@ reducido (sin find/match/get) producen output idéntico bit-a-bit.
   (sigue siendo error de codegen). Cierra cuando lo necesite un
   ejemplo concreto.
 
-##### 5b.4 — Result, `?`, match
-**Pendiente** — `Result<T>` → enum dedicado, `?` se traduce a
-`return Err(e)` o desempaca, `match` se traduce a `match` Rust.
-Aprovecha la exhaustividad ya validada por el checker.
+##### 5b.4 — Result, `?`, match ✓
+**Cerrado.** Cuarto paso de Fase 5b. Desbloquea el cap 13 entero
+(find + match + get) y la mecánica completa de `Result` en el
+compilador.
+
+**Decisión clave**: `Result<T>` Fitz → `Result<T, String>` Rust
+nativo — el Err side está **pinned a `String`**. Trade-off
+aceptado: `Err(42)` o cualquier inner no-Str se coerce con
+`format!("{}", x)` a String. Justificación:
+- Todos los ejemplos de la guía y `examples/server.fitz`
+  construyen `Err(...)` con strings literales.
+- El intérprete mismo emite `Value::Str` desde `find`/`get`/
+  divisiones por cero.
+- Encaje natural con el `?` Rust (E = String en ambos lados):
+  propagación sin glue.
+- Encaje natural con HTTP 5b.6: el handler serializa Err como
+  `{"error": <inner>}`, y un String se mapea directo.
+
+**Alternativa rechazada — tagged `FitzValue` runtime**: añade un
+módulo de tipos boxed + Display + Eq custom, fuera del scope de
+5b. Reabrible post-5b si aparece presión real.
+
+**Implementación**:
+- `rust_type_for(Result<T>)` → `Result<T, String>`. T = Any
+  (Err suelto sin contexto) → `Result<_, String>`, rustc infiere
+  desde la anotación destino.
+- `gen_expr` para `Ok(e)`: emite `Ok(<coerced e>)`. Tipo
+  sintetizado `Result<T>` donde T es el tipo del inner.
+- `gen_expr` para `Err(e)`: emite `Err(e.to_string())` si el
+  inner es Str, o `Err(format!("{}", e))` si no. Tipo Fitz
+  sintetizado: `Result<Any>` — el contexto destino refina.
+- `gen_expr` para `Try(e)` (operador `?`): emite `(<expr>)?`
+  Rust nativo. Nuevo `CodegenCtx.ret_stack: Vec<Type>` con
+  push/pop en `gen_top_fn` y `gen_callback_inline` para
+  validar que el contenedor retorna `Result<...>` (o `Any`,
+  para el escape gradual). Top-level `?` y `?` en fn con ret
+  concreto distinto de Result → error de codegen explícito.
+- `gen_match`: emite el match siempre como **expresión Rust**
+  (`(match s { ... })`); en stmt position, el `;` de `Stmt::Expr`
+  lo cierra. Patrones soportados:
+  - Literales Int/Float/Bool/Null directos como pattern Rust.
+  - Str via guard `ref __s if __s.as_str() == "..."` (Rust no
+    acepta `"x"` contra `String` directo).
+  - Ident (binding), Wildcard.
+  - Ok(x)/Err(e)/Ok(_)/Err(_) — Rust nativos.
+  - Range `a..b` via guard `__n if (a..b).contains(&__n)`.
+
+  **Exhaustividad**: si los arms no cubren todo (sin Ident/
+  Wildcard ni cobertura completa Ok+Err sobre scrutinee Result),
+  agregamos arm `_ => panic!("el `match` no matcheó ningún
+  brazo")` — mismo mensaje del intérprete.
+
+  **Bodies con `print(...)`**: como `print` no es expresión en
+  Fitz, los emitimos como bloque stmt-wrapped `{ println!(...); }`.
+  Detalle pequeño, importante para que arms de match con `print`
+  compilen.
+- **find/get**: los errores "5b.4" desaparecen. `.find(callback)`
+  sobre `List<T>` emite loop que devuelve `Ok(item)` al primer
+  match, `Err("no encontrado".to_string())` si nada matchea
+  (mensaje idéntico al intérprete). `.get(k)` sobre `Map<K,V>`
+  devuelve `Ok(v)` o `Err(format!("clave no encontrada: {}", k))`.
+
+  Detalle clave detectado en validación bit-a-bit del cap 13:
+  la clave en el mensaje se formatea con `show_expr` (modo
+  Display de Value, sin comillas para Str), no con
+  `show_expr_inline` (que sí mete comillas — solo aplica
+  adentro de listas/mapas).
+- **`print` de Result**: `show_expr` agrega caso `Type::Result(_)`
+  con sub-match inline que emite `Ok(<inline T>)` / `Err("<msg>")`
+  con comillas dobles alrededor del mensaje. Bit-a-bit como el
+  intérprete (que usa `write_inline_value` con `Value::Str` →
+  comillas).
+- **`needs_clone(Result<_>)`** → `true` (Result no es Copy).
+- **`lub`**: agregamos caso `Result(a) ↔ Result(b)` recursivo y
+  caso `Any ↔ T → T` (Err sin contexto unifica con `Ok(<T>)`).
+
+**Tests**: 15 unit nuevos en `src/codegen.rs` (15 nuevos − 3
+viejos reemplazados que esperaban error "5b.4"; los reapunté a
+testear el nuevo comportamiento) + 6 E2E en `tests/compile_e2e.rs`
+(cap 14 con anotaciones, `?` propagation, find+match, get+match
+con clave faltante, print Result, match-range). Reapunté el E2E
+"feature no soportada en codegen" desde `Ok(...)` a `import`
+(5b.5).
+
+**Validación bit-a-bit**:
+- `examples/guide/13-metodos.fitz` entero (find + match + get)
+  compila contra `fitz run` — salida idéntica.
+- `examples/guide/14-result.fitz` se actualizó con anotaciones
+  de tipo en las fns (`divide(a: Int, b: Int) -> Result<Int>`,
+  etc.) para que también compile end-to-end. Las anotaciones
+  son didácticas — refuerzan el contrato `Result<T>` que las
+  fns ya respetaban implícitamente. Salida bit-a-bit idéntica
+  al run anterior.
+
+**Deuda residual que sigue post-5b.4**:
+- **Higher-order completo**: closures que escapan, FnExpr como
+  var/param/retorno → post-5b.6 con `Box<dyn Fn(...)>` + clone
+  explícito en captura.
+- **`?` adentro de FnExpr inline**: el codegen no maneja el caso
+  (el callback hoy no tiene un return type "Result" propio).
+  Ningún ejemplo lo usa; queda como deuda visible.
+- **Inferencia de tipos de params de fns sin anotar**: deuda
+  vieja de 5b.1. Bloquea compilación de fns como
+  `fn divide(a, b) { ... }`. Workaround: anotar.
+- **Posiciones de error precisas en codegen**: deuda
+  pospuesta de 5a.
 
 ##### 5b.5 — Módulos / `import`
 **Pendiente** — `import foo` → `mod foo;` en el Cargo project
@@ -1789,7 +1891,7 @@ compilado a binario standalone"), cierre formal de Fase 5.
 - [x] Codegen subset primitivo + `fitz build` (5b.1)
 - [x] Tipos custom + field access (5b.2)
 - [x] Listas, mapas, indexing, métodos built-in (5b.3)
-- [ ] Result, `?`, match (5b.4)
+- [x] Result, `?`, match (5b.4)
 - [ ] Módulos / `import` (5b.5)
 - [ ] HTTP / `@server` / handlers (5b.6)
 - [ ] Optimizaciones básicas (post-5b — strings sin `.clone()`,

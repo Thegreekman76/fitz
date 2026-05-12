@@ -583,15 +583,173 @@ fn lista_heterogenea_aborta_build() {
 
 #[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
-    // 5b.3 abre listas/mapas, pero `Result`/`Ok`/`Err` / `match` siguen
-    // sin soportarse en el codegen — llegan en 5b.4.
+    // 5b.4 abre Result/match. La feature bloqueada que apuntamos acá
+    // pasa a ser `import` (5b.5) — el codegen aborta con mensaje claro.
     let stderr = build_expect_fail(
-        "unsupported-result",
-        "let v = Ok(42)\nprint(v)\n",
+        "unsupported-import",
+        "from foo import bar\nprint(bar)\n",
     );
     assert!(
-        stderr.contains("5b.4") || stderr.contains("Result"),
-        "esperaba mensaje sobre Result / 5b.4, fue: {}",
+        stderr.contains("5b.5") || stderr.contains("import"),
+        "esperaba mensaje sobre import / 5b.5, fue: {}",
         stderr
     );
+}
+
+// ---------------------------------------------------------------------------
+// Fase 5b.4 — Result, `?`, match
+// ---------------------------------------------------------------------------
+
+#[test]
+fn result_ok_err_match_completo_compilado() {
+    // Cap 14 entero adaptado: `divide` retorna Result; consumimos los
+    // dos resultados con `match` Ok/Err. La salida debe matchear
+    // bit-a-bit lo que produce el intérprete.
+    let src = "\
+fn divide(a: Int, b: Int) -> Result<Int> {
+    if (b == 0) {
+        return Err(\"división por cero\")
+    }
+    return Ok(a / b)
+}
+
+match divide(10, 2) {
+    Ok(v) => print(\"ok: {v}\")
+    Err(e) => print(\"err: {e}\")
+}
+
+match divide(10, 0) {
+    Ok(v) => print(\"ok: {v}\")
+    Err(e) => print(\"err: {e}\")
+}
+";
+    let (stdout, exit) = build_and_run("result-divide-match", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["ok: 5", "err: división por cero"]);
+}
+
+#[test]
+fn try_operator_propaga_err_compilado() {
+    // `?` adentro de fn `Result<T>` propaga el Err. Replicamos el
+    // segundo bloque del cap 14: find_user / describe_user.
+    let src = "\
+type User { id: Int, name: Str }
+
+fn find_user(id: Int) -> Result<User> {
+    if (id == 1) {
+        return Ok(User { id: 1, name: \"Fitz\" })
+    }
+    return Err(\"usuario no encontrado\")
+}
+
+fn describe_user(id: Int) -> Result<Str> {
+    let u = find_user(id)?
+    return Ok(\"#{u.id} es {u.name}\")
+}
+
+match describe_user(1) {
+    Ok(desc) => print(desc)
+    Err(e) => print(\"falló: {e}\")
+}
+
+match describe_user(42) {
+    Ok(desc) => print(desc)
+    Err(e) => print(\"falló: {e}\")
+}
+";
+    let (stdout, exit) = build_and_run("try-propagation", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &["#1 es Fitz", "falló: usuario no encontrado"],
+    );
+}
+
+#[test]
+fn list_find_devuelve_result_y_se_consume_con_match_compilado() {
+    // Cap 13 con find: `.find` devuelve Ok(item) o Err. Match Ok/Err.
+    let src = "\
+type User { id: Int, name: Str }
+let usuarios: List<User> = [
+    User { id: 1, name: \"Fitz\" },
+    User { id: 2, name: \"Roy\" },
+]
+let primero = usuarios.find(fn(u) => u.id == 1)
+match primero {
+    Ok(u)  => print(\"hola, {u.name}!\")
+    Err(e) => print(\"no debería pasar: {e}\")
+}
+let nadie = usuarios.find(fn(u) => u.id == 99)
+match nadie {
+    Ok(u)  => print(\"insólito: {u.name}\")
+    Err(e) => print(\"falta: {e}\")
+}
+";
+    let (stdout, exit) = build_and_run("list-find-match", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &["hola, Fitz!", "falta: no encontrado"],
+    );
+}
+
+#[test]
+fn map_get_devuelve_result_con_mensaje_compilado() {
+    // `m.get(k)` con clave faltante: Err con mensaje "clave no encontrada: <k>"
+    // — formato idéntico al intérprete. Importante: la clave se formatea
+    // con Display (Value), no inline — Str va SIN comillas en el mensaje.
+    let src = "\
+let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}
+match m.get(\"a\") {
+    Ok(v)  => print(\"a vale {v}\")
+    Err(e) => print(\"err: {e}\")
+}
+match m.get(\"z\") {
+    Ok(v)  => print(\"insólito {v}\")
+    Err(e) => print(\"err: {e}\")
+}
+";
+    let (stdout, exit) = build_and_run("map-get-match", src);
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &["a vale 1", "err: clave no encontrada: z"],
+    );
+}
+
+#[test]
+fn print_de_result_compilado_matchea_interprete() {
+    // `print(Ok(v))` y `print(Err(e))` deben producir `Ok(42)` y
+    // `Err("texto")` (Err con comillas dobles) bit-a-bit.
+    let src = "\
+fn ok42() -> Result<Int> { return Ok(42) }
+fn boom() -> Result<Int> { return Err(\"explotó\") }
+print(ok42())
+print(boom())
+";
+    let (stdout, exit) = build_and_run("print-result", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["Ok(42)", "Err(\"explotó\")"]);
+}
+
+#[test]
+fn match_sobre_int_con_rango_compilado() {
+    // Pattern `0..10` con guard, más wildcard catch-all.
+    let src = "\
+let n = 5
+let s = match n {
+    0..10 => \"chico\"
+    _ => \"grande\"
+}
+print(s)
+let m = 50
+let t = match m {
+    0..10 => \"chico\"
+    _ => \"grande\"
+}
+print(t)
+";
+    let (stdout, exit) = build_and_run("match-range", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["chico", "grande"]);
 }
