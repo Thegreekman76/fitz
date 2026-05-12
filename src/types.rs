@@ -1752,9 +1752,56 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     }
                 }
             }
-            // AssignTarget::Field: no introduce variable, no chequeamos
-            // tipo del campo todavía (requeriría check del object como
-            // Nominal con field y compararlo — bajo el radar de 5.3.1).
+            // AssignTarget::Field { object, field }: validar que el
+            // receptor es un tipo nominal con ese campo y que el tipo
+            // del valor es compatible con el declarado. Cubre el
+            // agujero documentado en deudas-post-5b (F2): antes solo
+            // se atajaba en runtime.
+            else if let AssignTarget::Field { object, field } = target {
+                let obj_ty = infer_expr(ctx, object);
+                match &obj_ty {
+                    Type::Any => {
+                        // Gradual escape — no chequeamos (matchea
+                        // `Expr::Field` en `infer_expr`).
+                    }
+                    Type::Nominal(id) => {
+                        let info = ctx.types.info(*id);
+                        let type_name = info.name.clone();
+                        // Si los fields no están resueltos (declaración
+                        // con error previo), no chequeamos para no
+                        // doblar el error.
+                        if let Some(declared_fields) = info.fields.clone() {
+                            match declared_fields.iter().find(|f| &f.name == field) {
+                                Some(f) => {
+                                    if !is_compatible(&value_ty, &f.type_) {
+                                        ctx.error_at(*span, format!(
+                                            "el campo `{}.{}` espera `{}`, recibió `{}`",
+                                            type_name,
+                                            field,
+                                            f.type_.display(ctx.types),
+                                            value_ty.display(ctx.types)
+                                        ));
+                                    }
+                                }
+                                None => {
+                                    ctx.error_at(*span, format!(
+                                        "el tipo `{}` no tiene un campo llamado `{}`",
+                                        type_name, field
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                    other => {
+                        ctx.error_at(*span, format!(
+                            "asignación a campo `.{}` sobre `{}`: solo se permite \
+                             sobre instancias de un tipo custom",
+                            field,
+                            other.display(ctx.types)
+                        ));
+                    }
+                }
+            }
         }
 
         Stmt::Return(e, span) => {
@@ -1966,6 +2013,106 @@ mod tests {
         assert_eq!(e.line, 3, "esperaba línea 3, fue {}", e.line);
         assert_eq!(e.column, 1, "esperaba col 1, fue {}", e.column);
     }
+
+    // ---- C-F2: field assignment chequeo ----
+
+    #[test]
+    fn field_assign_con_tipo_compatible_pasa_checker() {
+        let errors = errors_of(
+            "type U { name: Str }\n\
+             let u = U { name: \"x\" }\n\
+             u.name = \"y\"",
+        );
+        assert!(errors.is_empty(), "no debería haber errores, fue {:?}", errors);
+    }
+
+    #[test]
+    fn field_assign_con_tipo_incompatible_es_error() {
+        let errors = errors_of(
+            "type U { name: Str }\n\
+             let u = U { name: \"x\" }\n\
+             u.name = 42",
+        );
+        assert_eq!(errors.len(), 1, "esperaba 1 error, fue {:?}", errors);
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("`U.name`") && msg.contains("Str") && msg.contains("Int"),
+            "esperaba mensaje sobre U.name/Str/Int, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn field_assign_a_campo_inexistente_es_error() {
+        let errors = errors_of(
+            "type U { name: Str }\n\
+             let u = U { name: \"x\" }\n\
+             u.email = \"y\"",
+        );
+        assert!(!errors.is_empty(), "esperaba error de campo inexistente");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("no tiene un campo llamado `email`"),
+            "esperaba mensaje sobre campo inexistente, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn field_assign_sobre_no_nominal_es_error() {
+        let errors = errors_of(
+            "let x = 42\n\
+             x.foo = 1",
+        );
+        assert!(!errors.is_empty(), "esperaba error: asignar a campo de Int");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("solo se permite") || msg.contains("Int"),
+            "esperaba mensaje sobre tipo incompatible, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn field_assign_sobre_any_no_chequea() {
+        // El binding `m` viene de `from foo import m` → tipo Any.
+        // El checker debe permitir el assign sin chequear el field
+        // (gradual escape).
+        // Simulamos con una var sin anotación que parser/checker
+        // tratan como Any en el contexto adecuado. Usamos
+        // `from import` que registra como Any.
+        let errors = errors_of(
+            "from external import obj\n\
+             obj.anything = 42",
+        );
+        // Aceptamos que falle la carga del módulo (no existe), pero
+        // si llega al checker el assign sobre Any debería silenciar.
+        // En la práctica el checker solo registra la var como Any
+        // si el FromImport pasa.
+        // Filtramos el error de import si lo hay y verificamos que
+        // NO haya error específico sobre el field.
+        let field_errors: Vec<_> = errors.iter()
+            .filter(|e| e.message.contains("campo") || e.message.contains(".anything"))
+            .collect();
+        assert!(
+            field_errors.is_empty(),
+            "no debería haber error sobre el campo, fue: {:?}",
+            field_errors
+        );
+    }
+
+    #[test]
+    fn field_assign_con_nullable_acepta_null() {
+        // `email: Str?` admite null o Str. Asignar null debe pasar.
+        let errors = errors_of(
+            "type U { email: Str? }\n\
+             let u = U { email: \"x\" }\n\
+             u.email = null",
+        );
+        assert!(errors.is_empty(), "Null compatible con Str?, fue: {:?}", errors);
+    }
+
+    // ---- fin C-F2 ----
 
     #[test]
     fn error_de_while_no_bool_cita_linea_real() {

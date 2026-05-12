@@ -7,8 +7,9 @@
 > **Estado de ejecución**: ruta A (quick wins) cerrada — clippy limpio,
 > helpers, validaciones; B.1 (span en Stmt) cerrada — los errores
 > stmt-level del checker ya citan línea/columna reales en lugar de
-> `0:0`. Ver matriz para ítems pendientes (B.2 Expr-level, C deudas
-> funcionales).
+> `0:0`. C-F2 (field assignment chequeo) cerrada — el checker
+> ahora valida tipos en `obj.field = value`. Ver matriz para ítems
+> pendientes (B.2 expr-level, F11 state HTTP, F12 higher-order).
 
 ## Resumen ejecutivo
 
@@ -129,7 +130,7 @@ completa abajo.
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
 | F1 | `types.rs` ~30 sitios | `Type::Any` como gradual escape — silencia errores intencionalmente. Falta documentar matriz de cobertura: qué casos son legítimos vs cuáles podrían tipar mejor. | Media | Media |
-| F2 | `types.rs:1739-1741` | `Stmt::Assign` con `AssignTarget::Field` no se chequea (deuda explícita 5.3.1+). Hoy el evaluator lo ejecuta sin validar. | Media | Media |
+| F2 | ~~`types.rs:1739-1741`~~ **CERRADO en C-F2** — el checker ahora valida que el receptor sea `Nominal`, que el field exista, y que el tipo del RHS sea compatible (`is_compatible`). Mensaje con `User.field` + tipos esperado/recibido + línea (gracias a B.1). 6 tests nuevos. | — | — |
 | F3 | `parser.rs:656-662` | `return`/`break`/`continue` huérfanos aceptados por parser, captados en runtime con mensaje genérico. El checker podría rechazarlos estáticamente. | Media | Media |
 | F4 | `parser.rs` (Field default) | `type User { id: Int = 0 }` con default a nivel `type` field — el AST tiene `Field.default` pero el parser no lo popula en todos los contextos. Verificar. | Media | Media |
 | F5 | `evaluator.rs:751`, `http.rs:27-29` | `is_async` en `FnDef` se ignora silenciosamente (deuda explícita). | Baja | Alta |
