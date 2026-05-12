@@ -650,6 +650,11 @@ impl<'a> CheckCtx<'a> {
         None
     }
 
+    /// Reporta un error sin posición conocida. Tras S1.2 sub-paso 2,
+    /// los sitios de error sobre `Expr` ya conocen su span y usan
+    /// `error_at`. Este helper queda para reportes "globales" (sin
+    /// nodo asociado) que puedan aparecer en el futuro.
+    #[allow(dead_code)]
     fn error(&mut self, msg: impl Into<String>) {
         self.errors
             .push(FitzError::new(ErrorKind::TypeError, 0, 0, msg.into()));
@@ -708,7 +713,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Str
         }
 
-        Expr::Ident(name, _) => {
+        Expr::Ident(name, span) => {
             if let Some(t) = ctx.lookup_var(name) {
                 return t.clone();
             }
@@ -719,17 +724,17 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if ctx.types.lookup(name).is_some() {
                 return Type::Any;
             }
-            ctx.error(format!("variable desconocida `{}`", name));
+            ctx.error_at(*span, format!("variable desconocida `{}`", name));
             Type::Any
         }
 
-        Expr::UnaryOp { op, operand, .. } => {
+        Expr::UnaryOp { op, operand, span } => {
             let t = infer_expr(ctx, operand);
             match op {
                 UnaryOpKind::Neg => match &t {
                     Type::Int | Type::Float | Type::Any => t,
                     other => {
-                        ctx.error(format!(
+                        ctx.error_at(*span, format!(
                             "el operador `-` (negación) espera Int o Float, recibió `{}`",
                             other.display(ctx.types)
                         ));
@@ -739,17 +744,19 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        Expr::BinOp { op, left, right, .. } => {
+        Expr::BinOp { op, left, right, span } => {
             let lt = infer_expr(ctx, left);
             let rt = infer_expr(ctx, right);
-            infer_binop(ctx, op, &lt, &rt)
+            infer_binop(ctx, op, &lt, &rt, *span)
         }
 
         Expr::If { condition, then, else_, .. } => {
             // Condición debe ser Bool (o Any).
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
-                ctx.error(format!(
+                // Apuntamos al span de la condición misma — mejor
+                // pista que el `if` mismo.
+                ctx.error_at(condition.span(), format!(
                     "la condición de `if` debe ser Bool, recibió `{}`",
                     cond_ty.display(ctx.types)
                 ));
@@ -814,11 +821,13 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::Range { start, end, .. } => {
-            // Start y end deben ser Int (lo es en el evaluator).
+            // Start y end deben ser Int (lo es en el evaluator). El
+            // span del error apunta al extremo problemático para
+            // distinguir cuál de los dos.
             for (label, e) in [("inicio", start.as_ref()), ("fin", end.as_ref())] {
                 let t = infer_expr(ctx, e);
                 if !is_compatible(&t, &Type::Int) {
-                    ctx.error(format!(
+                    ctx.error_at(e.span(), format!(
                         "{} del rango debe ser Int, recibió `{}`",
                         label,
                         t.display(ctx.types)
@@ -828,7 +837,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Range
         }
 
-        Expr::StructLit { type_name, fields, .. } => {
+        Expr::StructLit { type_name, fields, span } => {
             // Sintetiza Nominal si el nombre del tipo está declarado.
             // Validar campos contra el `type` declarado: faltantes,
             // extras, tipos incompatibles.
@@ -838,7 +847,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // resolve_program ya reporta tipos desconocidos
                     // como campos/anotaciones; un StructLit con
                     // nombre inexistente sí es propio del checker.
-                    ctx.error(format!(
+                    ctx.error_at(*span, format!(
                         "no existe el tipo `{}` para instanciar",
                         type_name
                     ));
@@ -854,32 +863,32 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             let declared = ctx.types.info(id).fields.clone();
             // Inferir tipos provistos (siempre, para que warnings adentro
             // afloren).
-            let mut provided_types: Vec<(String, Type)> = Vec::new();
+            let mut provided_types: Vec<(String, Type, Span)> = Vec::new();
             for (n, v) in fields {
                 let t = infer_expr(ctx, v);
-                provided_types.push((n.clone(), t));
+                provided_types.push((n.clone(), t, v.span()));
             }
             if let Some(declared) = declared {
                 // Extras
                 let declared_names: std::collections::HashSet<&str> =
                     declared.iter().map(|f| f.name.as_str()).collect();
-                for (n, _) in &provided_types {
+                for (n, _, fs) in &provided_types {
                     if !declared_names.contains(n.as_str()) {
-                        ctx.error(format!(
+                        ctx.error_at(*fs, format!(
                             "el tipo `{}` no tiene un campo llamado `{}`",
                             type_name, n
                         ));
                     }
                 }
                 // Faltantes y compatibilidad de los provistos.
-                let provided_map: std::collections::HashMap<&str, &Type> = provided_types
+                let provided_map: std::collections::HashMap<&str, (&Type, Span)> = provided_types
                     .iter()
-                    .map(|(n, t)| (n.as_str(), t))
+                    .map(|(n, t, fs)| (n.as_str(), (t, *fs)))
                     .collect();
                 for f in &declared {
                     match provided_map.get(f.name.as_str()) {
-                        Some(actual) if !is_compatible(actual, &f.type_) => {
-                            ctx.error(format!(
+                        Some((actual, fs)) if !is_compatible(actual, &f.type_) => {
+                            ctx.error_at(*fs, format!(
                                 "el campo `{}.{}` espera `{}`, recibió `{}`",
                                 type_name,
                                 f.name,
@@ -931,7 +940,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        Expr::Call { callee, args, .. } => {
+        Expr::Call { callee, args, span } => {
             // Camino de método: `obj.method(args)` ↔ callee
             // sintáctico es `Expr::Field`. Despachamos por
             // `(tipo del receptor, nombre del método)` contra la
@@ -942,7 +951,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 let obj_ty = infer_expr(ctx, object);
                 let args_ty: Vec<Type> =
                     args.iter().map(|a| infer_expr(ctx, a)).collect();
-                return match infer_method_call(ctx, &obj_ty, field, &args_ty) {
+                return match infer_method_call(ctx, &obj_ty, field, &args_ty, *span) {
                     Some(ret) => ret,
                     // Receptor que no entendemos (Nominal sin métodos
                     // custom, Module via import, Any): seguimos en
@@ -961,7 +970,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 Type::Function { params, ret } => {
                     let label = describe_callee(callee);
                     if args.len() != params.len() {
-                        ctx.error(format!(
+                        ctx.error_at(*span, format!(
                             "{} espera {} argumento(s), recibió {}",
                             label,
                             params.len(),
@@ -972,7 +981,9 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             args_ty.iter().zip(params.iter()).enumerate()
                         {
                             if !is_compatible(actual, expected) {
-                                ctx.error(format!(
+                                // Apuntamos al argumento concreto —
+                                // mejor pista que el `(` del Call.
+                                ctx.error_at(args[i].span(), format!(
                                     "{}: el argumento {} espera `{}`, recibió `{}`",
                                     label,
                                     i + 1,
@@ -985,7 +996,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     *ret
                 }
                 other => {
-                    ctx.error(format!(
+                    ctx.error_at(callee.span(), format!(
                         "`{}` no es una función",
                         other.display(ctx.types)
                     ));
@@ -1022,13 +1033,13 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ret: Box::new(ret),
             }
         }
-        Expr::Index { object, index, .. } => {
+        Expr::Index { object, index, span } => {
             let obj_ty = infer_expr(ctx, object);
             let idx_ty = infer_expr(ctx, index);
             match obj_ty.base() {
                 Type::List(t) => {
                     if !is_compatible(&idx_ty, &Type::Int) {
-                        ctx.error(format!(
+                        ctx.error_at(index.span(), format!(
                             "el índice de una `List` debe ser Int, recibió `{}`",
                             idx_ty.display(ctx.types)
                         ));
@@ -1037,7 +1048,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
                 Type::Map(k, v) => {
                     if !is_compatible(&idx_ty, k) {
-                        ctx.error(format!(
+                        ctx.error_at(index.span(), format!(
                             "el índice de un `Map<{}, {}>` debe ser `{}`, recibió `{}`",
                             k.display(ctx.types),
                             v.display(ctx.types),
@@ -1051,7 +1062,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // Str indexable es deuda explícita de 3.1 (la
                     // unidad — char vs byte vs grafema — sin
                     // decidir). El evaluator también corta.
-                    ctx.error("`Str` no soporta indexing con `[]` todavía".to_string());
+                    ctx.error_at(*span, "`Str` no soporta indexing con `[]` todavía".to_string());
                     Type::Any
                 }
                 // Gradual: Any y Nominal no chequean. Nominal con
@@ -1059,7 +1070,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Any es el escape habitual.
                 Type::Any | Type::Nominal(_) => Type::Any,
                 other => {
-                    ctx.error(format!(
+                    ctx.error_at(*span, format!(
                         "el tipo `{}` no soporta indexing con `[]`",
                         other.display(ctx.types)
                     ));
@@ -1067,7 +1078,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
             }
         }
-        Expr::Match { value, arms, .. } => {
+        Expr::Match { value, arms, span } => {
             let scrutinee = infer_expr(ctx, value);
             // Tipo del binding según el patrón. Para `Ok(x)` con
             // scrutinee `Result<T>`, x es T. Para `Err(e)` el error
@@ -1087,7 +1098,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // `Result<T>` (puro, no nullable). Otros tipos no tienen
             // semántica de "variantes" para Fitz todavía.
             if matches!(scrutinee, Type::Result(_)) {
-                check_result_match_exhaustiveness(ctx, arms);
+                check_result_match_exhaustiveness(ctx, arms, *span);
             }
             first.unwrap_or(Type::Any)
         }
@@ -1100,7 +1111,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // E está fijado en Str pero el T es desconocido sin contexto.
             Type::Result(Box::new(Type::Any))
         }
-        Expr::Try(inner, _) => {
+        Expr::Try(inner, span) => {
             let operand_ty = infer_expr(ctx, inner);
             match &operand_ty {
                 // Gradual: operando de tipo desconocido no se chequea.
@@ -1116,7 +1127,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     if let Some(expected) = ctx.return_stack.last().cloned() {
                         let is_ok = matches!(expected, Type::Any | Type::Result(_));
                         if !is_ok {
-                            ctx.error(format!(
+                            ctx.error_at(*span, format!(
                                 "el operador `?` solo puede usarse adentro de una función que retorne `Result<...>`; esta retorna `{}`",
                                 expected.display(ctx.types)
                             ));
@@ -1125,7 +1136,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     (**inner_ty).clone()
                 }
                 other => {
-                    ctx.error(format!(
+                    ctx.error_at(*span, format!(
                         "el operador `?` requiere un `Result`, recibió `{}`",
                         other.display(ctx.types)
                     ));
@@ -1246,6 +1257,7 @@ fn infer_method_call(
     receiver_ty: &Type,
     method: &str,
     args_ty: &[Type],
+    span: Span,
 ) -> Option<Type> {
     // Pelamos un Nullable: `xs?.map(...)` cae cuando el `?` ya
     // desempacó, así que acá raramente vemos Nullable. Por las
@@ -1254,14 +1266,14 @@ fn infer_method_call(
     match recv {
         Type::List(t) => {
             let t = (**t).clone();
-            Some(infer_list_method(ctx, &t, method, args_ty))
+            Some(infer_list_method(ctx, &t, method, args_ty, span))
         }
         Type::Map(k, v) => {
             let k = (**k).clone();
             let v = (**v).clone();
-            Some(infer_map_method(ctx, &k, &v, method, args_ty))
+            Some(infer_map_method(ctx, &k, &v, method, args_ty, span))
         }
-        Type::Str => Some(infer_str_method(ctx, method, args_ty)),
+        Type::Str => Some(infer_str_method(ctx, method, args_ty, span)),
         // Gradual: no aplicamos chequeo sobre Any (no sabemos
         // nada) ni sobre Nominal (los métodos custom sobre `type`
         // no existen todavía — deuda de 3.2). Quien llame retorna
@@ -1271,7 +1283,7 @@ fn infer_method_call(
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
             // mensaje específico.
-            ctx.error(format!(
+            ctx.error_at(span, format!(
                 "el tipo `{}` no tiene el método `{}`",
                 other.display(ctx.types),
                 method
@@ -1290,9 +1302,10 @@ fn check_method_arity(
     method: &str,
     args_ty: &[Type],
     expected: usize,
+    span: Span,
 ) -> bool {
     if args_ty.len() != expected {
-        ctx.error(format!(
+        ctx.error_at(span, format!(
             "el método `{}` espera {} argumento(s), recibió {}",
             method,
             expected,
@@ -1314,12 +1327,13 @@ fn check_unary_callback(
     elem_ty: &Type,
     method: &str,
     expected_ret: Option<&Type>,
+    span: Span,
 ) -> Type {
     match cb {
         Type::Any => Type::Any,
         Type::Function { params, ret } => {
             if params.len() != 1 {
-                ctx.error(format!(
+                ctx.error_at(span, format!(
                     "la callback de `.{}()` debe tomar 1 argumento, recibió {}",
                     method,
                     params.len()
@@ -1330,7 +1344,7 @@ fn check_unary_callback(
             // (el tipo de los elementos). Si el callback declaró un
             // tipo concreto incompatible, error.
             if !is_compatible(elem_ty, &params[0]) {
-                ctx.error(format!(
+                ctx.error_at(span, format!(
                     "la callback de `.{}()` recibe elementos `{}` pero su parámetro es `{}`",
                     method,
                     elem_ty.display(ctx.types),
@@ -1339,7 +1353,7 @@ fn check_unary_callback(
             }
             if let Some(expected) = expected_ret {
                 if !is_compatible(ret, expected) {
-                    ctx.error(format!(
+                    ctx.error_at(span, format!(
                         "la callback de `.{}()` debe devolver `{}`, devuelve `{}`",
                         method,
                         expected.display(ctx.types),
@@ -1350,7 +1364,7 @@ fn check_unary_callback(
             (**ret).clone()
         }
         other => {
-            ctx.error(format!(
+            ctx.error_at(span, format!(
                 "la callback de `.{}()` debe ser una función, recibió `{}`",
                 method,
                 other.display(ctx.types)
@@ -1365,13 +1379,14 @@ fn infer_list_method(
     t: &Type,
     method: &str,
     args_ty: &[Type],
+    span: Span,
 ) -> Type {
     match method {
         "push" => {
-            check_method_arity(ctx, "push", args_ty, 1);
+            check_method_arity(ctx, "push", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, t) {
-                    ctx.error(format!(
+                    ctx.error_at(span, format!(
                         "`push` sobre `List<{}>` recibió `{}`",
                         t.display(ctx.types),
                         arg.display(ctx.types)
@@ -1381,36 +1396,36 @@ fn infer_list_method(
             Type::Null
         }
         "pop" => {
-            check_method_arity(ctx, "pop", args_ty, 0);
+            check_method_arity(ctx, "pop", args_ty, 0, span);
             t.clone()
         }
         "len" => {
-            check_method_arity(ctx, "len", args_ty, 0);
+            check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
         "map" => {
-            if !check_method_arity(ctx, "map", args_ty, 1) {
+            if !check_method_arity(ctx, "map", args_ty, 1, span) {
                 return Type::List(Box::new(Type::Any));
             }
-            let u = check_unary_callback(ctx, &args_ty[0], t, "map", None);
+            let u = check_unary_callback(ctx, &args_ty[0], t, "map", None, span);
             Type::List(Box::new(u))
         }
         "filter" => {
-            if !check_method_arity(ctx, "filter", args_ty, 1) {
+            if !check_method_arity(ctx, "filter", args_ty, 1, span) {
                 return Type::List(Box::new(t.clone()));
             }
-            check_unary_callback(ctx, &args_ty[0], t, "filter", Some(&Type::Bool));
+            check_unary_callback(ctx, &args_ty[0], t, "filter", Some(&Type::Bool), span);
             Type::List(Box::new(t.clone()))
         }
         "find" => {
-            if !check_method_arity(ctx, "find", args_ty, 1) {
+            if !check_method_arity(ctx, "find", args_ty, 1, span) {
                 return Type::Result(Box::new(t.clone()));
             }
-            check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool));
+            check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool), span);
             Type::Result(Box::new(t.clone()))
         }
         _ => {
-            ctx.error(format!(
+            ctx.error_at(span, format!(
                 "`List<{}>` no tiene el método `{}`",
                 t.display(ctx.types),
                 method
@@ -1426,13 +1441,14 @@ fn infer_map_method(
     v: &Type,
     method: &str,
     args_ty: &[Type],
+    span: Span,
 ) -> Type {
     match method {
         "get" => {
-            check_method_arity(ctx, "get", args_ty, 1);
+            check_method_arity(ctx, "get", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, k) {
-                    ctx.error(format!(
+                    ctx.error_at(span, format!(
                         "`get` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
                         k.display(ctx.types),
                         v.display(ctx.types),
@@ -1444,10 +1460,10 @@ fn infer_map_method(
             Type::Result(Box::new(v.clone()))
         }
         "has" => {
-            check_method_arity(ctx, "has", args_ty, 1);
+            check_method_arity(ctx, "has", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, k) {
-                    ctx.error(format!(
+                    ctx.error_at(span, format!(
                         "`has` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
                         k.display(ctx.types),
                         v.display(ctx.types),
@@ -1459,19 +1475,19 @@ fn infer_map_method(
             Type::Bool
         }
         "keys" => {
-            check_method_arity(ctx, "keys", args_ty, 0);
+            check_method_arity(ctx, "keys", args_ty, 0, span);
             Type::List(Box::new(k.clone()))
         }
         "values" => {
-            check_method_arity(ctx, "values", args_ty, 0);
+            check_method_arity(ctx, "values", args_ty, 0, span);
             Type::List(Box::new(v.clone()))
         }
         "len" => {
-            check_method_arity(ctx, "len", args_ty, 0);
+            check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
         _ => {
-            ctx.error(format!(
+            ctx.error_at(span, format!(
                 "`Map<{}, {}>` no tiene el método `{}`",
                 k.display(ctx.types),
                 v.display(ctx.types),
@@ -1482,18 +1498,23 @@ fn infer_map_method(
     }
 }
 
-fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type]) -> Type {
+fn infer_str_method(
+    ctx: &mut CheckCtx,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
     match method {
         "len" => {
-            check_method_arity(ctx, "len", args_ty, 0);
+            check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
         "upper" | "lower" => {
-            check_method_arity(ctx, method, args_ty, 0);
+            check_method_arity(ctx, method, args_ty, 0, span);
             Type::Str
         }
         _ => {
-            ctx.error(format!("`Str` no tiene el método `{}`", method));
+            ctx.error_at(span, format!("`Str` no tiene el método `{}`", method));
             Type::Any
         }
     }
@@ -1505,7 +1526,11 @@ fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type]) -> Type 
 /// sobre un Result no aportan a la exhaustividad — son
 /// "imposibles" pero no los rechazamos acá (sería un check
 /// separado).
-fn check_result_match_exhaustiveness(ctx: &mut CheckCtx, arms: &[crate::ast::MatchArm]) {
+fn check_result_match_exhaustiveness(
+    ctx: &mut CheckCtx,
+    arms: &[crate::ast::MatchArm],
+    span: Span,
+) {
     use crate::ast::Pattern;
     let mut has_ok = false;
     let mut has_err = false;
@@ -1526,7 +1551,7 @@ fn check_result_match_exhaustiveness(ctx: &mut CheckCtx, arms: &[crate::ast::Mat
         (false, true) => "`Ok`",
         _ => "`Ok` y `Err`",
     };
-    ctx.error(format!(
+    ctx.error_at(span, format!(
         "match sobre `Result` no es exhaustivo: falta el caso {}",
         missing
     ));
@@ -1568,7 +1593,13 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type)
 
 /// Sintetiza el tipo de un BinOp dado los tipos de sus operandos.
 /// Aplica coerción Int→Float donde corresponde.
-fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type) -> Type {
+fn infer_binop(
+    ctx: &mut CheckCtx,
+    op: &BinOpKind,
+    lt: &Type,
+    rt: &Type,
+    span: Span,
+) -> Type {
     // Si cualquiera de los operandos es Any, no podemos chequear
     // con confianza — devolvemos Any sin error.
     if matches!(lt, Type::Any) || matches!(rt, Type::Any) {
@@ -1584,7 +1615,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type) -> Type
                 }
                 (Type::Str, Type::Str) => Type::Str,
                 _ => {
-                    ctx.error(format!(
+                    ctx.error_at(span, format!(
                         "el operador `+` no acepta `{}` y `{}`",
                         lt.display(ctx.types),
                         rt.display(ctx.types)
@@ -1606,7 +1637,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type) -> Type
                     Type::Float
                 }
                 _ => {
-                    ctx.error(format!(
+                    ctx.error_at(span, format!(
                         "el operador `{}` espera operandos numéricos, recibió `{}` y `{}`",
                         sym,
                         lt.display(ctx.types),
@@ -1627,7 +1658,7 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type) -> Type
                     | (Type::Str, Type::Str)
             );
             if !ok {
-                ctx.error(format!(
+                ctx.error_at(span, format!(
                     "comparación entre `{}` y `{}` no soportada",
                     lt.display(ctx.types),
                     rt.display(ctx.types)
@@ -1642,13 +1673,13 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type) -> Type
         }
         BinOpKind::And | BinOpKind::Or => {
             if !matches!(lt, Type::Bool) {
-                ctx.error(format!(
+                ctx.error_at(span, format!(
                     "el operador lógico espera Bool, lado izquierdo es `{}`",
                     lt.display(ctx.types)
                 ));
             }
             if !matches!(rt, Type::Bool) {
-                ctx.error(format!(
+                ctx.error_at(span, format!(
                     "el operador lógico espera Bool, lado derecho es `{}`",
                     rt.display(ctx.types)
                 ));
@@ -4055,5 +4086,127 @@ mod tests {
             "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x, x) }",
             &["espera 1", "argumento"],
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Span en errores expr-level (S1.2 sub-paso 2)
+    //
+    // Antes de S1.2 los errores sobre expresiones heredaban la línea
+    // del `Stmt` contenedor (correcta) pero con columna degradada
+    // (la del primer token del stmt). Tras este sub-paso, cada error
+    // de tipo sobre BinOp/Call/Field/Index/UnaryOp/Try/Match/Range/
+    // StructLit/Ident apunta a la columna del nodo problemático.
+    //
+    // Estos tests fijan posiciones concretas para que cualquier
+    // pérdida de span se note en la suite.
+    // -----------------------------------------------------------------------
+
+    /// Helper que devuelve el primer error reportado, o panica si no hay.
+    fn first_error(src: &str) -> FitzError {
+        let (_, mut errors) = check_str(src);
+        assert!(!errors.is_empty(), "esperado al menos un error en: {}", src);
+        errors.remove(0)
+    }
+
+    #[test]
+    fn span_binop_apunta_a_columna_del_operador() {
+        // `let x: Int = 1 + "a"` — el `+` está en columna 16. El error
+        // ahora reporta la columna del operador, no la del `let`.
+        let e = first_error("let x: Int = 1 + \"a\"");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 16);
+        assert!(e.message.contains("operador `+`"), "msg: {}", e.message);
+    }
+
+    #[test]
+    fn span_call_aridad_apunta_a_paren_del_call() {
+        // `fn f(x: Int) -> Int => x` y `let _ = f(1, 2)` — el `(` del
+        // call está en columna 41 (después de `fn f(x: Int) -> Int => x\n`,
+        // contando que `let _ = f(` arranca en línea 2).
+        let src = "fn f(x: Int) -> Int => x\nlet _ = f(1, 2)";
+        let e = first_error(src);
+        assert_eq!(e.line, 2);
+        // `let _ = f` ocupa columnas 1-9, así que `(` está en 10.
+        assert_eq!(e.column, 10);
+        assert!(e.message.contains("espera 1"), "msg: {}", e.message);
+    }
+
+    #[test]
+    fn span_call_arg_apunta_al_argumento_concreto() {
+        // El error de "argumento N espera X recibió Y" apunta al
+        // argumento, no al `(`. Permite distinguir cuál de varios args
+        // tiene mal tipo.
+        let src = "fn f(x: Int) -> Int => x\nlet _ = f(\"hola\")";
+        let e = first_error(src);
+        assert_eq!(e.line, 2);
+        // `let _ = f(` ocupa 1-10, el `"hola"` arranca en 11.
+        assert_eq!(e.column, 11);
+        assert!(
+            e.message.contains("argumento 1") && e.message.contains("Int"),
+            "msg: {}", e.message,
+        );
+    }
+
+    #[test]
+    fn span_unary_apunta_al_menos() {
+        // `let s = -"a"` — el `-` está en columna 9.
+        let e = first_error("let s = -\"a\"");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 9);
+        assert!(e.message.contains("negación"), "msg: {}", e.message);
+    }
+
+    #[test]
+    fn span_index_apunta_al_indice_concreto() {
+        // `let xs: List<Int> = [1, 2, 3]\nlet _ = xs["k"]` — el `"k"`
+        // está en columna 12 de la línea 2.
+        let src = "let xs: List<Int> = [1, 2, 3]\nlet _ = xs[\"k\"]";
+        let e = first_error(src);
+        assert_eq!(e.line, 2);
+        // `let _ = xs[` ocupa 1-11, `"k"` arranca en 12.
+        assert_eq!(e.column, 12);
+        assert!(e.message.contains("Int"), "msg: {}", e.message);
+    }
+
+    #[test]
+    fn span_field_struct_extra_apunta_al_valor_del_extra() {
+        // `type U { id: Int }; let u = U { id: 1, x: 2 }` — el `2` del
+        // field extra está en columna 44.
+        let src = "type U { id: Int }\nlet u = U { id: 1, x: 2 }";
+        let e = first_error(src);
+        assert_eq!(e.line, 2);
+        // `let u = U { id: 1, x: ` ocupa 1-22, `2` arranca en 23.
+        assert_eq!(e.column, 23);
+        assert!(
+            e.message.contains("no tiene un campo") && e.message.contains("`x`"),
+            "msg: {}", e.message,
+        );
+    }
+
+    #[test]
+    fn span_ident_desconocido_apunta_al_ident() {
+        // `let _ = no_existe` — `no_existe` arranca en columna 9.
+        let e = first_error("let _ = no_existe");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 9);
+        assert!(e.message.contains("variable desconocida"));
+    }
+
+    #[test]
+    fn span_try_apunta_al_signo_pregunta() {
+        // `let _ = 42?` — el `?` está en columna 11.
+        let e = first_error("let _ = 42?");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 11);
+        assert!(e.message.contains("`?`"), "msg: {}", e.message);
+    }
+
+    #[test]
+    fn span_range_apunta_al_extremo_problematico() {
+        // `let _ = 1..\"a\"` — el `"a"` está en columna 12.
+        let e = first_error("let _ = 1..\"a\"");
+        assert_eq!(e.line, 1);
+        assert_eq!(e.column, 12);
+        assert!(e.message.contains("fin del rango"), "msg: {}", e.message);
     }
 }
