@@ -2320,12 +2320,12 @@ print(triplicar(5))                       // 15
 [examples/guide/11-funciones.fitz](../examples/guide/11-funciones.fitz):
 
 ```fitz
-fn greet(name) {
+fn greet(name: Str) -> Str {
     return "Hola, {name}!"
 }
 print(greet("Fitz"))
 
-fn double(n) => n * 2
+fn double(n: Int) -> Int => n * 2
 print(double(21))
 
 fn add(a: Int, b: Int) -> Int {
@@ -2338,27 +2338,29 @@ fn nothing() {
 }
 print(nothing())
 
-fn fact(n) {
-    if n <= 1 {
+fn fact(n: Int) -> Int {
+    if (n <= 1) {
         return 1
     }
     return n * fact(n - 1)
 }
 print(fact(5))
 
-fn make_adder(x) {
-    fn add(y) => x + y
-    return add
+// Closure: la fn interna captura `x` del scope externo.
+fn make_adder(x: Int) -> Fn(Int) -> Int {
+    return fn(y: Int) => x + y
 }
-add5 = make_adder(5)
+let add5 = make_adder(5)
 print(add5(3))
 
-fn apply(f, x) => f(x)
-fn square(n) => n * n
+// Pasar funciones como argumento.
+fn square(n: Int) -> Int => n * n
+fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)
 print(apply(square, 7))
 
-print(apply(fn(n) => n * 10, 7))
-let abs = fn(n) {
+// Funciones anónimas inline.
+print(apply(fn(n: Int) => n * 10, 7))
+let abs = fn(n: Int) -> Int {
     if (n < 0) {
         return -n
     }
@@ -2366,6 +2368,14 @@ let abs = fn(n) {
 }
 print(abs(-5))
 ```
+
+> **Sobre las anotaciones**: con `fitz run` son opcionales — el
+> intérprete infiere desde el body. Con `fitz build` el subset
+> compilable las exige en params y retorno (deuda 5b.1). El
+> ejemplo lleva anotaciones para que compile a binario igual de
+> bit-a-bit con `fitz build` que con `fitz run`. El tipo `Fn(Int)
+> -> Int` describe una función que toma un `Int` y devuelve un
+> `Int` — es el tipo que tienen `square`, `make_adder(5)`, etc.
 
 Salida:
 
@@ -4209,8 +4219,8 @@ binario nativo standalone** con `fitz build`.
 
 Hasta acá usamos siempre `fitz run`: el intérprete lee el archivo,
 lo lexea, parsea, chequea y ejecuta en proceso. Es rápido para
-iterar y conserva toda la riqueza del lenguaje (closures
-escapadas, lista heterogénea, state HTTP compartido).
+iterar y conserva toda la riqueza del lenguaje (lista heterogénea,
+state HTTP compartido, mutación implícita).
 
 `fitz build` toma el mismo `.fitz` y produce un **binario nativo
 standalone** que corre sin Fitz instalado. Es el modo "deployar":
@@ -4283,7 +4293,7 @@ misma instancia.
 | Listas y mapas (**homogéneos**), indexing, métodos | ✅      |
 | `Result`, `?`, propagación de Err                  | ✅      |
 | Módulos: `import foo` / `from foo import X`        | ✅      |
-| Funciones anónimas como callback inline de `.map`  | ✅      |
+| Funciones anónimas, closures, `Fn(...) -> ...`     | ✅      |
 | HTTP: `@get`/`@post`/`@put`/`@delete`, `@server`   | ✅      |
 | Body JSON deserializado contra `type` custom       | ✅      |
 | Serialización JSON automática de respuestas        | ✅      |
@@ -4300,11 +4310,6 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
   tiene un tipo "Value" genérico tagged en runtime sin un
   refactor. Workaround: armar dos colecciones, o usar `fitz run`.
-- **Higher-order completo** — pasar funciones como param o
-  retornarlas (`make_adder` que devuelve una closure, `apply(f,
-  x)`). Los callbacks inline de `.map`/`.filter`/`.find` sí
-  funcionan; lo que falta es la closure escapando del scope.
-  Workaround: `fitz run`.
 - **State compartido entre handlers HTTP** — un `let users = [...]`
   top-level usado por todos los handlers. El intérprete lo
   resuelve porque cada handler captura el env del módulo; en
@@ -4413,10 +4418,9 @@ nativo standalone.
 
 - **Iterando**: `fitz run`. Cambios en el `.fitz` se reflejan
   inmediato; sin paso de compilación.
-- **Explorando features experimentales**: `fitz run`. Closures
-  escapadas, listas heterogéneas, state HTTP compartido — todo
-  lo que está en "qué todavía no anda" sigue funcionando en el
-  intérprete.
+- **Explorando features experimentales**: `fitz run`. Listas
+  heterogéneas, state HTTP compartido — todo lo que está en "qué
+  todavía no anda" sigue funcionando en el intérprete.
 - **Producción / deploy**: `fitz build`. Un binario que se
   copia a un servidor y arranca, sin runtime de Fitz alrededor.
 - **Distribuir un script CLI**: `fitz build`. El binario chico

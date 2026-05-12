@@ -8,8 +8,10 @@
 > helpers, validaciones; B.1 (span en Stmt) cerrada — los errores
 > stmt-level del checker ya citan línea/columna reales en lugar de
 > `0:0`. C-F2 (field assignment chequeo) cerrada — el checker
-> ahora valida tipos en `obj.field = value`. Ver matriz para ítems
-> pendientes (B.2 expr-level, F11 state HTTP, F12 higher-order).
+> ahora valida tipos en `obj.field = value`. F12 (higher-order
+> completo) cerrada — closures escapadas, fn como valor/param/retorno
+> compilan con `fitz build`; cap 11 anotado y validado bit-a-bit.
+> Ver matriz para ítems pendientes (S1.2 expr-level, F11 state HTTP).
 
 ## Resumen ejecutivo
 
@@ -140,7 +142,7 @@ completa abajo.
 | F9 | `lexer.rs:252-279` | Escapes en strings limitados: faltan `\u{...}`, `\x..`, `\0`, `\b`. | Baja | Media |
 | F10 | `parser.rs` | Encadenamiento multi-línea en method chains (`xs.map(f)\n.filter(g)`). Deuda explícita 3.4 del parser. | Media | Media |
 | F11 | `codegen.rs` (state HTTP) | State compartido entre handlers HTTP — la deuda más visible de 5b.6. Bloquea `examples/server.fitz`. | Alta | Alta |
-| F12 | `codegen.rs` (higher-order) | Closures escapadas y fns como param/retorno no compilan. | Media | Alta |
+| F12 | ~~`codegen.rs` (higher-order)~~ **CERRADO** — closures escapadas, fn nombrada como valor, FnExpr asignado a var, fn como param y como tipo de retorno compilan con `fitz build`. `TypeExpr::Function` nueva variante; codegen emite `Rc<dyn Fn(...) -> R>` uniforme. Cap 11 anotado y compilable bit-a-bit con el intérprete. Smoke `GUIDE_EXAMPLES_COMPILE` incluye `11-funciones.fitz`. 24 tests nuevos. | — | — |
 | F13 | `codegen.rs` | Listas/mapas heterogéneos: `[1, "dos"]` corre en intérprete, no compila. Requiere `FitzValue` tagged runtime. | Baja | Alta |
 | F14 | `codegen.rs` | `let X = <expr>` no-literal a nivel mod top-level. | Baja | Media |
 
@@ -197,7 +199,12 @@ frágiles + spans en AST): trabajo grande pero destraba mucho de lo
 otro (mejores mensajes de error → mejor UX; tests menos frágiles →
 refactors futuros más baratos).
 
-Las **deudas funcionales (F11, F12, F2)** son sub-pasos formales que
-mejor abrir como mini-fases dedicadas (state HTTP compartido,
-higher-order completo, field assignment chequeo) — cada una con
-plan corto + tests + cierre.
+Las **deudas funcionales** son sub-pasos formales que mejor se
+abren como mini-fases dedicadas, cada una con plan corto + tests
++ cierre. Estado actual:
+- **F2** (field assignment chequeo) ✅ — cerrada en C-F2.
+- **F12** (higher-order completo) ✅ — cerrada con `TypeExpr::Function`
+  + codegen a `Rc<dyn Fn(...) -> R>`. Cap 11 ahora compila.
+- **F11** (state HTTP compartido) — pendiente, sigue siendo la
+  deuda más visible (bloquea `examples/server.fitz` y
+  `examples/guide/17-http.fitz`).

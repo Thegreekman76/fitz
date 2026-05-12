@@ -2014,6 +2014,35 @@ impl<'a> CodegenCtx<'a> {
                     };
                     return Ok((code, ty));
                 }
+                // Higher-order (F12): si el ident es una fn top-level
+                // referenciada como **valor** (no como callee), emitimos
+                // `(Rc::new(<name>) as Rc<dyn Fn(...) -> R>)`. Esto
+                // habilita `let f = square` y `apply(square, 7)`. Las
+                // fn items de Rust implementan `Fn(...)` así que el
+                // `Rc::new(square)` compila directo. El caso "callee
+                // de Call" se intercepta antes en `gen_call` (mira la
+                // var como callable, no llega acá).
+                if !self.var_in_any_scope(name) {
+                    if let Some(sig) = self.fn_sigs.get(name).cloned() {
+                        let ps_rs: Vec<String> = sig
+                            .params
+                            .iter()
+                            .map(|p| rust_type_for(p, self.env))
+                            .collect::<Result<_, _>>()?;
+                        let ret_rs = rust_type_for(&sig.ret, self.env)?;
+                        let code = format!(
+                            "(Rc::new({}) as Rc<dyn Fn({}) -> {}>)",
+                            name,
+                            ps_rs.join(", "),
+                            ret_rs
+                        );
+                        let ty = Type::Function {
+                            params: sig.params.clone(),
+                            ret: Box::new(sig.ret.clone()),
+                        };
+                        return Ok((code, ty));
+                    }
+                }
                 let ty = self
                     .lookup_var(name)
                     .cloned()
@@ -2054,18 +2083,16 @@ impl<'a> CodegenCtx<'a> {
             Expr::Err(inner) => self.gen_err(inner),
             Expr::Try(inner) => self.gen_try(inner),
             Expr::Match { value, arms } => self.gen_match(value, arms),
-            // FnExpr "suelto" — usado como valor, parámetro o retorno —
-            // requiere closures escapados con tipo (Box<dyn Fn(...)>) y
-            // captura por clone explícita. Higher-order completo queda
-            // como sub-paso después de 5b.4 (Result). El único FnExpr
-            // que SÍ se acepta hoy es como callback inline de
-            // `.map`/`.filter` sobre List, y se intercepta en
-            // `gen_method_call` antes de llegar acá.
-            Expr::FnExpr { .. } => Err(self.err(
-                "funciones anónimas `fn(...) => ...` solo se admiten hoy como callback inline de \
-                 `.map(...)` o `.filter(...)` sobre listas. Usarlas como valor, parámetro o \
-                 retorno (higher-order) llega en un sub-paso posterior de 5b.",
-            )),
+            // FnExpr "suelto" — usado como valor, parámetro o retorno
+            // (higher-order, F12). Emite `Rc::new(move |p1: T1, ...|
+            // -> R { body }) as Rc<dyn Fn(T1, ...) -> R>`. Los
+            // callbacks inline de `.map`/`.filter`/`.find` siguen
+            // interceptándose en `gen_method_call` antes de llegar
+            // acá — esos no necesitan boxear porque el método los
+            // consume directo. Acá llega cualquier FnExpr usado como
+            // valor: `let f = fn(n) => ...`, `apply(fn(n) => ..., 7)`,
+            // `return fn(y) => x + y`.
+            Expr::FnExpr { params, body } => self.gen_fn_expr_as_value(params, body),
         }
     }
 
@@ -2358,6 +2385,15 @@ impl<'a> CodegenCtx<'a> {
                     }
                 }
             }
+        }
+
+        // Higher-order (F12): si el name está bindeado en algún
+        // scope local como `Type::Function`, es una var que contiene
+        // un closure → llamarla con `(*f)(args)` o `f(args)`. Rc<dyn
+        // Fn> implementa `Fn` directamente; rustc auto-derefs.
+        if let Some(Type::Function { params, ret }) = self.lookup_var(name).cloned() {
+            let sig = FnSig { params, ret: *ret };
+            return self.gen_call_with_sig(name, &sig, args);
         }
 
         let sig = self
@@ -2733,6 +2769,179 @@ impl<'a> CodegenCtx<'a> {
             param_name, param_ty_rs, ret_ty_rs, body_str
         );
         Ok((code, ret_ty))
+    }
+
+    /// Emite un `FnExpr` "suelto" (no callback inline de
+    /// map/filter/find) como **valor** de tipo `Rc<dyn Fn(...) -> R>`.
+    /// Cubre `let f = fn(n) => n * 2`, `apply(fn(n) => n * 10, 7)`,
+    /// `return fn(y) => x + y` (closure que captura `x` del scope
+    /// contenedor). Por uniformidad emitimos siempre con `move` y
+    /// el cast a `Rc<dyn Fn(...) -> R>` para que rustc no se queje
+    /// de "type annotations needed" cuando el contexto destino es
+    /// `Rc<dyn Fn>` (un closure concreto y un trait object son tipos
+    /// distintos; el `as` los reconcilia).
+    ///
+    /// Captura: dejamos que rustc resuelva quién va con `move`. El
+    /// closure pide los identifiers del scope contenedor por valor;
+    /// si son Copy (i64/f64/bool), la copia es trivial; si son
+    /// Str/Rc/...  el `move` los **consume**. Eso rompe si el caller
+    /// los necesita después. Mitigación: para vars no-Copy
+    /// referenciadas en el body (y no shadowed por param/local), el
+    /// helper detecta capturas, las clona afuera y deja que la
+    /// closure capture la copia.
+    fn gen_fn_expr_as_value(
+        &mut self,
+        params: &[crate::ast::Param],
+        body: &[Stmt],
+    ) -> Result<(String, Type), FitzError> {
+        // Cada param exige anotación de tipo — sin contexto bidireccional
+        // no podemos inferir el tipo del param desde su uso. Esta es la
+        // misma regla que aplican las fns top-level (deuda 5b.1).
+        let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
+        for p in params {
+            let Some(te) = p.type_.as_ref() else {
+                return Err(self.err(format!(
+                    "función anónima `fn({})`: el parámetro `{}` necesita una anotación de \
+                     tipo en el subset compilable (deuda 5b.1). Anotalo o usá `fitz run`.",
+                    p.name, p.name
+                )));
+            };
+            let t = resolve_type_expr(te, self.env).map_err(|e| {
+                self.err(format!(
+                    "función anónima: parámetro `{}`: {}",
+                    p.name, e.message
+                ))
+            })?;
+            param_types.push(t);
+        }
+
+        // Detectamos capturas: identifiers del scope contenedor
+        // referenciados en el body, excluyendo los params del FnExpr.
+        // Para cada captura no-Copy, emitimos un binding local
+        // `let __cap_<name> = <name>.clone();` y el closure captura
+        // **la copia**. Para Copy no hace falta — rustc copia.
+        let param_names: std::collections::HashSet<String> =
+            params.iter().map(|p| p.name.clone()).collect();
+        let mut captures: Vec<(String, Type)> = Vec::new();
+        collect_captures(body, &param_names, self, &mut captures);
+
+        // Sintetizamos el ret type del closure desde el body.
+        // Reusamos `infer_callback_ret_silently` con el primer param;
+        // si no hay params, hacemos un dry-run con scope vacío. Las
+        // capturas también deben estar visibles en el dry-run para
+        // que `gen_expr` resuelva sus tipos.
+        let ret_ty = self.infer_fn_expr_ret_silently(body, params, &param_types, &captures)?;
+        let ret_ty_rs = rust_type_for(&ret_ty, self.env)?;
+
+        // Emitimos el body adentro de la closure con scope nuevo +
+        // params bindeados + capturas declaradas como vars locales
+        // (para que el body las pueda referenciar normalmente).
+        self.ret_stack.push(ret_ty.clone());
+        self.push_scope();
+        for (p, t) in params.iter().zip(param_types.iter()) {
+            self.declare_var(p.name.clone(), t.clone());
+        }
+        for (name, ty) in &captures {
+            self.declare_var(name.clone(), ty.clone());
+        }
+        let saved = std::mem::take(&mut self.output);
+        let saved_indent = self.indent;
+        self.indent = 0;
+        let mut body_str = String::new();
+        for s in body {
+            self.gen_stmt_in_fn(s, &ret_ty)?;
+            body_str.push_str(&std::mem::take(&mut self.output));
+        }
+        self.output = saved;
+        self.indent = saved_indent;
+        self.pop_scope();
+        self.ret_stack.pop();
+
+        // Firma del closure: `|p1: T1, p2: T2| -> R { ... }`.
+        let params_sig = params
+            .iter()
+            .zip(param_types.iter())
+            .map(|(p, t)| Ok(format!("{}: {}", p.name, rust_type_for(t, self.env)?)))
+            .collect::<Result<Vec<_>, FitzError>>()?
+            .join(", ");
+        let cast_target = {
+            let ps: Vec<String> = param_types
+                .iter()
+                .map(|p| rust_type_for(p, self.env))
+                .collect::<Result<_, _>>()?;
+            format!("Rc<dyn Fn({}) -> {}>", ps.join(", "), ret_ty_rs)
+        };
+
+        // Si hay capturas no-Copy, emitimos un bloque que cline las
+        // capturas afuera del closure y después construye la closure
+        // con `move`. Cada captura se rebindea: `let <name> = <name>.clone();`.
+        // Esto preserva el aliasing semántico (clone del Rc para
+        // List/Map/Nominal/Function) sin consumir la var del caller.
+        let mut clones = String::new();
+        for (name, ty) in &captures {
+            if needs_clone(ty) {
+                clones.push_str(&format!("let {0} = {0}.clone(); ", name));
+            }
+        }
+
+        let closure = format!(
+            "|{params_sig}| -> {ret_ty_rs} {{ {body_str} }}",
+            params_sig = params_sig,
+            ret_ty_rs = ret_ty_rs,
+            body_str = body_str
+        );
+        let code = if clones.is_empty() {
+            format!("(Rc::new(move {closure}) as {cast_target})", closure = closure, cast_target = cast_target)
+        } else {
+            format!(
+                "{{ {clones}Rc::new(move {closure}) as {cast_target} }}",
+                clones = clones,
+                closure = closure,
+                cast_target = cast_target
+            )
+        };
+
+        Ok((
+            code,
+            Type::Function {
+                params: param_types,
+                ret: Box::new(ret_ty),
+            },
+        ))
+    }
+
+    /// Dry-run del body de un `FnExpr` para sintetizar el ret type.
+    /// Como en `infer_callback_ret_silently`: scope nuevo con params
+    /// + capturas bindeados, gen_expr sobre el primer `Stmt::Return`
+    /// del body (o último `Stmt::Expr` no-print, o `Null`).
+    fn infer_fn_expr_ret_silently(
+        &mut self,
+        body: &[Stmt],
+        params: &[crate::ast::Param],
+        param_types: &[Type],
+        captures: &[(String, Type)],
+    ) -> Result<Type, FitzError> {
+        let target: Option<&Expr> = body
+            .iter()
+            .find_map(|s| if let Stmt::Return(e, _) = s { Some(e) } else { None })
+            .or_else(|| {
+                body.last().and_then(|s| match s {
+                    Stmt::Expr(e, _) if !is_print_call(e) => Some(e),
+                    _ => None,
+                })
+            });
+        let Some(e) = target else { return Ok(Type::Null) };
+
+        self.push_scope();
+        for (p, t) in params.iter().zip(param_types.iter()) {
+            self.declare_var(p.name.clone(), t.clone());
+        }
+        for (name, ty) in captures {
+            self.declare_var(name.clone(), ty.clone());
+        }
+        let (_discarded, result) = self.with_temp_output(|ctx| ctx.gen_expr(e));
+        self.pop_scope();
+        result.map(|(_, t)| t)
     }
 
     /// Dry-run para sintetizar el tipo de retorno de un callback. Pushea
@@ -4071,6 +4280,201 @@ fn is_print_call(e: &Expr) -> bool {
         if matches!(callee.as_ref(), Expr::Ident(n) if n == "print"))
 }
 
+/// Recorre el body de un `FnExpr` recolectando capturas: identifiers
+/// que no son params, no son locales declarados en el propio body, y
+/// existen en algún scope contenedor del codegen. Para cada captura,
+/// devolvemos `(name, type)` con el tipo desde el scope contenedor.
+/// El orden está deduplicado: cada captura aparece una sola vez.
+///
+/// La detección es **conservadora**: si una var del scope contenedor
+/// aparece referenciada en el body (aunque después esté shadowed por
+/// una asignación local), la marcamos como capturada. El binding
+/// local va a ganar adentro del closure de todas formas, así que no
+/// se rompe; solo terminamos clonando una var que no hacía falta.
+fn collect_captures(
+    body: &[Stmt],
+    params: &std::collections::HashSet<String>,
+    ctx: &CodegenCtx,
+    out: &mut Vec<(String, Type)>,
+) {
+    let mut locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in body {
+        collect_captures_stmt(s, params, &mut locals, ctx, &mut seen, out);
+    }
+}
+
+fn collect_captures_stmt(
+    s: &Stmt,
+    params: &std::collections::HashSet<String>,
+    locals: &mut std::collections::HashSet<String>,
+    ctx: &CodegenCtx,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, Type)>,
+) {
+    match s {
+        Stmt::Assign { target, value, .. } => {
+            collect_captures_expr(value, params, locals, ctx, seen, out);
+            if let AssignTarget::Ident(name) = target {
+                // El binding local se materializa después de evaluar
+                // la RHS — el orden importa si el RHS referencia el
+                // propio name (shadowing recursivo no soportado, pero
+                // por consistencia con el evaluator declaramos
+                // después).
+                locals.insert(name.clone());
+            } else if let AssignTarget::Field { object, .. } = target {
+                collect_captures_expr(object, params, locals, ctx, seen, out);
+            }
+        }
+        Stmt::Return(e, _) | Stmt::Expr(e, _) => {
+            collect_captures_expr(e, params, locals, ctx, seen, out);
+        }
+        Stmt::While { condition, body, .. } => {
+            collect_captures_expr(condition, params, locals, ctx, seen, out);
+            for s in body {
+                collect_captures_stmt(s, params, locals, ctx, seen, out);
+            }
+        }
+        Stmt::Loop { body, .. } => {
+            for s in body {
+                collect_captures_stmt(s, params, locals, ctx, seen, out);
+            }
+        }
+        Stmt::For { var, iter, body, .. } => {
+            collect_captures_expr(iter, params, locals, ctx, seen, out);
+            locals.insert(var.clone());
+            for s in body {
+                collect_captures_stmt(s, params, locals, ctx, seen, out);
+            }
+        }
+        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
+    }
+}
+
+fn collect_captures_expr(
+    e: &Expr,
+    params: &std::collections::HashSet<String>,
+    locals: &mut std::collections::HashSet<String>,
+    ctx: &CodegenCtx,
+    seen: &mut std::collections::HashSet<String>,
+    out: &mut Vec<(String, Type)>,
+) {
+    match e {
+        Expr::Ident(name) => {
+            // Param del propio FnExpr o local declarado dentro:
+            // no es captura.
+            if params.contains(name) || locals.contains(name) {
+                return;
+            }
+            // Builtins/fn top-level/módulos: no hace falta capturar
+            // porque están en scope estático del crate Rust.
+            if name == "print" || name == "len" {
+                return;
+            }
+            if ctx.fn_sigs.contains_key(name) || ctx.own_consts.contains_key(name) {
+                return;
+            }
+            if ctx.module_bindings.contains_key(name) {
+                return;
+            }
+            // Tiene que existir en algún scope del codegen para que
+            // tenga sentido capturarlo. Si no existe, el error va a
+            // saltar en `gen_expr` del body cuando lo emita en serio.
+            if let Some(ty) = ctx.lookup_var(name) {
+                if seen.insert(name.clone()) {
+                    out.push((name.clone(), ty.clone()));
+                }
+            }
+        }
+        Expr::Int(_) | Expr::Float(_) | Expr::Str(_) | Expr::Bool(_) | Expr::Null => {}
+        Expr::StrInterp(parts) => {
+            for p in parts {
+                if let crate::ast::StrPart::Expr(inner) = p {
+                    collect_captures_expr(inner, params, locals, ctx, seen, out);
+                }
+            }
+        }
+        Expr::BinOp { left, right, .. } => {
+            collect_captures_expr(left, params, locals, ctx, seen, out);
+            collect_captures_expr(right, params, locals, ctx, seen, out);
+        }
+        Expr::UnaryOp { operand, .. } => {
+            collect_captures_expr(operand, params, locals, ctx, seen, out);
+        }
+        Expr::Call { callee, args } => {
+            collect_captures_expr(callee, params, locals, ctx, seen, out);
+            for a in args {
+                collect_captures_expr(a, params, locals, ctx, seen, out);
+            }
+        }
+        Expr::FnExpr { params: inner_params, body } => {
+            // Closure anidada: sus params introducen un scope nuevo.
+            // Para detectar capturas del FnExpr exterior, nos importa
+            // todo lo que esa closure interior use desde nuestro
+            // contexto — recursivamente, treating sus params como
+            // params extra para el cómputo de "no es captura".
+            let mut merged: std::collections::HashSet<String> = params.clone();
+            for p in inner_params {
+                merged.insert(p.name.clone());
+            }
+            // Las locals de la closure interna son separadas — no las
+            // mezclamos con las del outer.
+            let mut inner_locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for s in body {
+                collect_captures_stmt(s, &merged, &mut inner_locals, ctx, seen, out);
+            }
+        }
+        Expr::Field { object, .. } => {
+            collect_captures_expr(object, params, locals, ctx, seen, out);
+        }
+        Expr::Index { object, index } => {
+            collect_captures_expr(object, params, locals, ctx, seen, out);
+            collect_captures_expr(index, params, locals, ctx, seen, out);
+        }
+        Expr::List(items) => {
+            for it in items {
+                collect_captures_expr(it, params, locals, ctx, seen, out);
+            }
+        }
+        Expr::Map(pairs) => {
+            for (k, v) in pairs {
+                collect_captures_expr(k, params, locals, ctx, seen, out);
+                collect_captures_expr(v, params, locals, ctx, seen, out);
+            }
+        }
+        Expr::Range { start, end } => {
+            collect_captures_expr(start, params, locals, ctx, seen, out);
+            collect_captures_expr(end, params, locals, ctx, seen, out);
+        }
+        Expr::If { condition, then, else_ } => {
+            collect_captures_expr(condition, params, locals, ctx, seen, out);
+            for s in then {
+                collect_captures_stmt(s, params, locals, ctx, seen, out);
+            }
+            if let Some(els) = else_ {
+                for s in els {
+                    collect_captures_stmt(s, params, locals, ctx, seen, out);
+                }
+            }
+        }
+        Expr::Match { value, arms } => {
+            collect_captures_expr(value, params, locals, ctx, seen, out);
+            for arm in arms {
+                collect_captures_expr(&arm.body, params, locals, ctx, seen, out);
+            }
+        }
+        Expr::StructLit { fields, .. } => {
+            for (_, e) in fields {
+                collect_captures_expr(e, params, locals, ctx, seen, out);
+            }
+        }
+        Expr::Ok(inner) | Expr::Err(inner) | Expr::Try(inner) => {
+            collect_captures_expr(inner, params, locals, ctx, seen, out);
+        }
+    }
+}
+
 /// "Least upper bound" pragmático sobre dos tipos resueltos. Mismo
 /// criterio que `types.rs` para FnExpr (5.3.5) y para if-as-expression
 /// (5b.2), acotado al subset compilable hoy. Usado además para unificar
@@ -4188,6 +4592,23 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
             };
             Ok(format!("Result<{}, String>", inner_rs))
         }
+        // Higher-order (F12): tipo función Fitz → `Rc<dyn Fn(...) -> R>`
+        // Rust. Decisión simplificadora: siempre Rc<dyn Fn>, no fn
+        // pointer ni impl Fn ni Box<dyn Fn>. Trade-off: una
+        // indirección por puntero por llamada, pero uniforme (vars,
+        // params, returns todos toman el mismo tipo). Rc (no Box)
+        // porque las funciones-como-valor se clonan al referenciarse
+        // (mismo patrón que List/Map/Nominal que también van por Rc).
+        // Fn (inmutable) cubre todos los ejemplos del cap 11 —
+        // FnMut/FnOnce son deuda residual.
+        Type::Function { params, ret } => {
+            let ps: Vec<String> = params
+                .iter()
+                .map(|p| rust_type_for(p, env))
+                .collect::<Result<_, _>>()?;
+            let ret_rs = rust_type_for(ret, env)?;
+            Ok(format!("Rc<dyn Fn({}) -> {}>", ps.join(", "), ret_rs))
+        }
         other => Err(FitzError::new(
             ErrorKind::TypeError,
             0,
@@ -4265,6 +4686,10 @@ fn needs_clone(t: &Type) -> bool {
         // `Result<T, String>` no es Copy (String tampoco lo es), y el T
         // adentro puede ser Str/Nominal/List/etc. — clonamos por valor.
         Type::Result(_) => true,
+        // Funciones-como-valor: `Rc<dyn Fn(...) -> R>` — clone del Rc,
+        // barato y comparte el closure (alias semántico, mismo patrón
+        // que List/Map/Nominal).
+        Type::Function { .. } => true,
         // Fallback conservador: clonamos.
         _ => true,
     }
@@ -5394,11 +5819,155 @@ mod tests {
     }
 
     #[test]
-    fn fnexpr_suelta_da_error_claro() {
-        // FnExpr como valor (no como callback inline) no se soporta.
+    fn fnexpr_suelta_emite_rc_dyn_fn() {
+        // F12: FnExpr asignado a var emite `Rc::new(move |...| ...) as
+        // Rc<dyn Fn(...) -> ...>`. La var queda tipada como
+        // `Rc<dyn Fn(i64) -> i64>` y se puede invocar con `f(x)`.
+        let code = gen("let f: Fn(Int) -> Int = fn(x: Int) => x * 2\nprint(f(3))").unwrap();
+        assert!(
+            code.contains("Rc<dyn Fn(i64) -> i64>"),
+            "esperaba tipo Rc<dyn Fn> en el código, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Rc::new(move |x: i64|"),
+            "esperaba `Rc::new(move |x: i64| ...)` para el closure, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn fnexpr_sin_anotacion_de_param_da_error_claro() {
+        // F12: el subset compilable exige anotación en cada param del
+        // FnExpr (deuda 5b.1). Sin anotación → mensaje explícito.
         assert_err_contains(
-            "let f = fn(x: Int) => x * 2",
-            &["higher-order", "callback inline"],
+            "let f: Fn(Int) -> Int = fn(x) => x * 2",
+            &["anónima", "anotación de tipo"],
+        );
+    }
+
+    #[test]
+    fn fn_nombrada_como_valor_emite_rc_new() {
+        // F12: `let g = square` donde `square` es fn top-level emite
+        // `Rc::new(square) as Rc<dyn Fn(...) -> R>` con la firma del
+        // fn_sigs.
+        let code = gen(
+            "fn square(n: Int) -> Int => n * n\nlet g: Fn(Int) -> Int = square\nprint(g(7))",
+        )
+        .unwrap();
+        assert!(
+            code.contains("Rc::new(square)"),
+            "esperaba `Rc::new(square)`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Rc<dyn Fn(i64) -> i64>"),
+            "esperaba tipo Rc<dyn Fn(i64) -> i64>, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn fn_param_de_tipo_funcion_emite_rc_dyn_fn() {
+        // F12: param `f: Fn(Int) -> Int` en la firma de la fn top-level
+        // debe traducirse a `Rc<dyn Fn(i64) -> i64>` en el header.
+        let code = gen(
+            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
+             fn square(n: Int) -> Int => n * n\n\
+             print(apply(square, 7))",
+        )
+        .unwrap();
+        assert!(
+            code.contains("fn apply(mut f: Rc<dyn Fn(i64) -> i64>, mut x: i64) -> i64"),
+            "esperaba header de apply con `Rc<dyn Fn>`, got:\n{}",
+            code
+        );
+        // La llamada `apply(square, 7)` debe envolver `square` en Rc::new.
+        assert!(
+            code.contains("apply((Rc::new(square)"),
+            "esperaba `apply((Rc::new(square) as ...)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn fn_como_return_type_emite_rc_dyn_fn() {
+        // F12: `-> Fn(Int) -> Int` en una fn top-level emite el header
+        // con retorno `Rc<dyn Fn(i64) -> i64>`. La closure interna que
+        // captura `x` se traduce con `move`.
+        let code = gen(
+            "fn make_adder(x: Int) -> Fn(Int) -> Int {\n\
+                 return fn(y: Int) => x + y\n\
+             }\n\
+             let add5: Fn(Int) -> Int = make_adder(5)\n\
+             print(add5(3))",
+        )
+        .unwrap();
+        assert!(
+            code.contains("fn make_adder(mut x: i64) -> Rc<dyn Fn(i64) -> i64>"),
+            "esperaba header de make_adder con retorno Rc<dyn Fn>, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Rc::new(move |y: i64|"),
+            "esperaba closure con `move` capturando x, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn closure_que_captura_var_no_copy_clona_afuera() {
+        // F12: closure que captura una var no-Copy (Str). El codegen
+        // debe emitir `let saludo = saludo.clone();` afuera para
+        // preservar el aliasing semántico sin consumir la var del
+        // caller.
+        let code = gen(
+            "let saludo = \"hola\"\n\
+             let f: Fn(Str) -> Str = fn(n: Str) => \"{saludo}, {n}!\"\n\
+             print(f(\"Fitz\"))",
+        )
+        .unwrap();
+        assert!(
+            code.contains("let saludo = saludo.clone();"),
+            "esperaba clone de la captura antes del Rc::new, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Rc::new(move |n: String|"),
+            "esperaba closure con `move`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn var_de_tipo_funcion_se_llama_con_parens() {
+        // F12: `f(x)` sobre una var Fn(Int) -> Int se traduce literal a
+        // `f(x)` Rust — el auto-deref de `Rc<dyn Fn>` lo resuelve.
+        let code = gen(
+            "let f: Fn(Int) -> Int = fn(n: Int) => n + 1\nprint(f(10))",
+        )
+        .unwrap();
+        assert!(
+            code.contains("f(10i64)"),
+            "esperaba `f(10i64)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn fn_anonima_inline_como_arg_emite_closure_directo() {
+        // F12: `apply(fn(n: Int) => n * 10, 7)` no envuelve en una var
+        // intermedia — emite el `Rc::new(move |n: i64| ...)` inline
+        // como argumento.
+        let code = gen(
+            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
+             print(apply(fn(n: Int) => n * 10, 7))",
+        )
+        .unwrap();
+        assert!(
+            code.contains("apply((Rc::new(move |n: i64|"),
+            "esperaba el FnExpr emitido inline como arg, got:\n{}",
+            code
         );
     }
 

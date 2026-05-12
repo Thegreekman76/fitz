@@ -820,7 +820,8 @@ impl Parser {
     /// Gramática:
     ///
     /// ```text
-    /// type_expr := atom ( '?' )?
+    /// type_expr := fn_type | atom ( '?' )?
+    /// fn_type   := 'Fn' '(' ( type_expr ( ',' type_expr )* )? ')' '->' type_expr
     /// atom      := Ident generic_args?
     /// generic_args := '<' type_expr ( ',' type_expr )* '>'
     /// ```
@@ -831,12 +832,22 @@ impl Parser {
     /// y un segundo `?` se quedaría sin consumir, sin error explícito.
     /// El checker estático puede normalizarlo cuando llegue.
     ///
+    /// `Fn` es keyword contextual sintáctica del tipo función. Cuando
+    /// se ve `Fn` seguido de `(`, parseamos como `TypeExpr::Function`.
+    /// Si el siguiente token no es `(`, `Fn` se trata como nombre
+    /// nominal normal — fallará en resolución por no existir como
+    /// tipo en el env.
+    ///
     /// Nota sobre lexing: el lexer emite `>` siempre como `Token::Gt`
     /// (no hay `>>` como un solo token), así que `Result<List<Int>>` se
     /// cierra consumiendo dos `Token::Gt` separados — uno por nivel de
     /// genérico.
     fn parse_type_expr(&mut self) -> FitzResult<TypeExpr> {
         let name = self.expect_ident("se esperaba un nombre de tipo")?;
+        // Keyword contextual: `Fn(...)` → tipo función.
+        if name == "Fn" && matches!(self.peek(), Token::LParen) {
+            return self.parse_fn_type();
+        }
         let mut t = if matches!(self.peek(), Token::Lt) {
             self.advance(); // consume '<'
             self.skip_newlines();
@@ -873,6 +884,36 @@ impl Parser {
             t = TypeExpr::Nullable(Box::new(t));
         }
         Ok(t)
+    }
+
+    /// `Fn` ya consumido; parsea `(P1, P2, ...) -> R`.
+    fn parse_fn_type(&mut self) -> FitzResult<TypeExpr> {
+        self.expect(&Token::LParen, "se esperaba '(' después de `Fn`")?;
+        self.skip_newlines();
+        let mut params: Vec<TypeExpr> = Vec::new();
+        if !matches!(self.peek(), Token::RParen) {
+            loop {
+                self.skip_newlines();
+                params.push(self.parse_type_expr()?);
+                self.skip_newlines();
+                if matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    continue;
+                }
+                break;
+            }
+        }
+        self.skip_newlines();
+        self.expect(&Token::RParen, "se esperaba ')' para cerrar `Fn(...)`")?;
+        self.expect(
+            &Token::Arrow,
+            "se esperaba '->' con el tipo de retorno después de `Fn(...)`",
+        )?;
+        let ret = self.parse_type_expr()?;
+        Ok(TypeExpr::Function {
+            params,
+            ret: Box::new(ret),
+        })
     }
 
     fn parse_return(&mut self, span: Span) -> FitzResult<Stmt> {
@@ -4543,6 +4584,75 @@ mod tests {
         // `List<>` no debería parsear: se exige al menos un argumento.
         let err = parse_program_str("let xs: List<> = []").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn type_expr_funcion_simple() {
+        // Fn(Int) -> Int
+        let t = parse_assign_type("let f: Fn(Int) -> Int = null");
+        assert_eq!(
+            t,
+            TypeExpr::Function {
+                params: vec![TypeExpr::named("Int")],
+                ret: Box::new(TypeExpr::named("Int")),
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_funcion_sin_params() {
+        // Fn() -> Str
+        let t = parse_assign_type("let f: Fn() -> Str = null");
+        assert_eq!(
+            t,
+            TypeExpr::Function {
+                params: vec![],
+                ret: Box::new(TypeExpr::named("Str")),
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_funcion_multiples_params() {
+        // Fn(Int, Str, Bool) -> User
+        let t = parse_assign_type("let f: Fn(Int, Str, Bool) -> User = null");
+        assert_eq!(
+            t,
+            TypeExpr::Function {
+                params: vec![
+                    TypeExpr::named("Int"),
+                    TypeExpr::named("Str"),
+                    TypeExpr::named("Bool"),
+                ],
+                ret: Box::new(TypeExpr::named("User")),
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_funcion_anidada_como_param() {
+        // Fn(Fn(Int) -> Int, Int) -> Int — higher-order anotado.
+        let t = parse_assign_type("let h: Fn(Fn(Int) -> Int, Int) -> Int = null");
+        assert_eq!(
+            t,
+            TypeExpr::Function {
+                params: vec![
+                    TypeExpr::Function {
+                        params: vec![TypeExpr::named("Int")],
+                        ret: Box::new(TypeExpr::named("Int")),
+                    },
+                    TypeExpr::named("Int"),
+                ],
+                ret: Box::new(TypeExpr::named("Int")),
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_funcion_sin_arrow_es_error() {
+        // `Fn(Int)` sin `-> R` → error explícito del parser.
+        let err = parse_program_str("let f: Fn(Int) = null").unwrap_err();
+        assert!(err.message.contains("'->"));
     }
 
     #[test]

@@ -1,16 +1,21 @@
 // 11-funciones.fitz — Funciones, recursión y closures.
+//
+// Con `fitz run` las anotaciones de tipo son opcionales (el evaluador
+// infiere todo). Con `fitz build` el subset compilable necesita
+// tipos explícitos en parámetros y retornos — los sumamos abajo para
+// que el ejemplo compile a binario (deuda 5b.1).
 
 // Forma de bloque.
-fn greet(name) {
+fn greet(name: Str) -> Str {
     return "Hola, {name}!"
 }
 print(greet("Fitz"))
 
 // Forma flecha (una expresión).
-fn double(n) => n * 2
+fn double(n: Int) -> Int => n * 2
 print(double(21))
 
-// Con anotaciones (se aceptan, todavía no se validan).
+// Con anotaciones.
 fn add(a: Int, b: Int) -> Int {
     return a + b
 }
@@ -23,8 +28,8 @@ fn nothing() {
 print(nothing())
 
 // Recursión.
-fn fact(n) {
-    if n <= 1 {
+fn fact(n: Int) -> Int {
+    if (n <= 1) {
         return 1
     }
     return n * fact(n - 1)
@@ -32,21 +37,21 @@ fn fact(n) {
 print(fact(5))
 
 // Closure: la función interna captura `x` del scope externo.
-fn make_adder(x) {
-    fn add(y) => x + y
-    return add
+// Devolvemos un valor de tipo función — `Fn(Int) -> Int`.
+fn make_adder(x: Int) -> Fn(Int) -> Int {
+    return fn(y: Int) => x + y
 }
-add5 = make_adder(5)
+let add5 = make_adder(5)
 print(add5(3))
 
 // Pasar funciones como argumento.
-fn apply(f, x) => f(x)
-fn square(n) => n * n
+fn square(n: Int) -> Int => n * n
+fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)
 print(apply(square, 7))
 
 // Funciones anónimas inline — útiles cuando la función es chica y de un solo uso.
-print(apply(fn(n) => n * 10, 7))
-let abs = fn(n) {
+print(apply(fn(n: Int) => n * 10, 7))
+let abs = fn(n: Int) -> Int {
     if (n < 0) {
         return -n
     }

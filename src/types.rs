@@ -212,6 +212,17 @@ pub fn resolve_type_expr(t: &TypeExpr, env: &TypeEnv) -> Result<Type, FitzError>
             let inner = resolve_type_expr(inner, env)?;
             Ok(Type::Nullable(Box::new(inner)))
         }
+        TypeExpr::Function { params, ret } => {
+            let params: Vec<Type> = params
+                .iter()
+                .map(|p| resolve_type_expr(p, env))
+                .collect::<Result<_, _>>()?;
+            let ret = resolve_type_expr(ret, env)?;
+            Ok(Type::Function {
+                params,
+                ret: Box::new(ret),
+            })
+        }
     }
 }
 
@@ -3963,5 +3974,86 @@ mod tests {
             .count();
         assert_eq!(count_plus, 0, "no esperaba error en `m + 1`, hubo: {:?}",
             errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+    }
+
+    // ---- Tipo función `Fn(...) -> U` (higher-order, F12) ----
+
+    #[test]
+    fn type_expr_function_resuelve_a_type_function() {
+        // type Box { f: Fn(Int) -> Int } — el field tiene tipo función.
+        let (env, errors) = resolve_str("type Box { f: Fn(Int) -> Int }");
+        assert!(errors.is_empty(), "errores: {:?}", errors);
+        let id = env.lookup("Box").unwrap();
+        let fields = env.info(id).fields.as_ref().unwrap();
+        assert_eq!(
+            fields[0].type_,
+            Type::Function {
+                params: vec![Type::Int],
+                ret: Box::new(Type::Int),
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_function_sin_params_resuelve() {
+        let (env, errors) = resolve_str("type Lazy { f: Fn() -> Str }");
+        assert!(errors.is_empty(), "errores: {:?}", errors);
+        let id = env.lookup("Lazy").unwrap();
+        let fields = env.info(id).fields.as_ref().unwrap();
+        assert_eq!(
+            fields[0].type_,
+            Type::Function {
+                params: vec![],
+                ret: Box::new(Type::Str),
+            },
+        );
+    }
+
+    #[test]
+    fn type_expr_function_higher_order_resuelve() {
+        // Fn(Fn(Int) -> Int, Int) -> Int — param es a su vez función.
+        let (env, errors) = resolve_str(
+            "type Apply { f: Fn(Fn(Int) -> Int, Int) -> Int }",
+        );
+        assert!(errors.is_empty(), "errores: {:?}", errors);
+        let id = env.lookup("Apply").unwrap();
+        let fields = env.info(id).fields.as_ref().unwrap();
+        let expected = Type::Function {
+            params: vec![
+                Type::Function {
+                    params: vec![Type::Int],
+                    ret: Box::new(Type::Int),
+                },
+                Type::Int,
+            ],
+            ret: Box::new(Type::Int),
+        };
+        assert_eq!(fields[0].type_, expected);
+    }
+
+    #[test]
+    fn type_expr_function_con_tipo_inexistente_reporta_error() {
+        let (_, errors) = resolve_str("type Box { f: Fn(NoExiste) -> Int }");
+        assert!(!errors.is_empty(), "esperaba error, hubo: {:?}", errors);
+        let combined: String = errors.iter().map(|e| e.message.clone()).collect();
+        assert!(combined.contains("NoExiste"));
+    }
+
+    #[test]
+    fn anotacion_function_en_param_de_fndef_pasa_checker() {
+        // fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
+        // El checker debe tipar la llamada `f(x)` contra la firma.
+        assert_ok(
+            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }",
+        );
+    }
+
+    #[test]
+    fn anotacion_function_en_param_detecta_aridad_mala() {
+        // apply pasa 2 args a un f que toma 1.
+        assert_error_with(
+            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x, x) }",
+            &["espera 1", "argumento"],
+        );
     }
 }

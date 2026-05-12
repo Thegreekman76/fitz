@@ -2201,6 +2201,73 @@ presión real.
 
 ---
 
+## Post-Fase 5b — Cierre de deudas residuales
+
+Tras cerrar Fase 5b, una auditoría del compilador
+(`docs/deudas-post-5b.md`) generó ~45 hallazgos. La mayoría son
+incrementales; algunos son sub-pasos formales que se abren como
+mini-fases dedicadas. Los cerrados hasta hoy:
+
+- **Ruta A — Quick wins (clippy + helpers + validaciones) ✓**
+- **B.1 — Span en Stmt ✓** — los errores stmt-level del checker
+  citan línea/columna reales en lugar de `0:0`.
+- **C-F2 — Field assignment chequeo ✓** — el checker valida
+  tipos en `obj.field = value`.
+- **F12 — Higher-order completo ✓** — closures escapadas, fn
+  nombrada como valor, FnExpr asignado a var, fn como param y
+  como tipo de retorno.
+  - Nueva variante `TypeExpr::Function { params, ret }` en el AST.
+  - Parser: keyword contextual `Fn(T1, T2) -> U`. `Fn` seguido de
+    `(` se reconoce como tipo función; en cualquier otro contexto
+    sigue siendo nombre normal.
+  - Checker: `resolve_type_expr` mapea a `Type::Function` (que
+    ya existía). La validación de aridad/tipos de llamada
+    funciona sin cambios.
+  - Codegen: `Type::Function { params, ret }` → `Rc<dyn Fn(P1,
+    ...) -> R>` Rust. Decisión: **Rc, no Box** — permite clone
+    barato y matchea el patrón uniforme de List/Map/Nominal
+    (referencia compartida). Trade-off: indirección por puntero
+    por llamada, pero uniforme para vars/params/returns.
+  - `Expr::FnExpr` deja de ser error de codegen; emite
+    `Rc::new(move |p1: T1, ...| -> R { body }) as Rc<dyn Fn(...)
+    -> R>`. Detección de capturas: walker recursivo identifica
+    idents libres en el body (no params, no locals, sí en outer
+    scope). Para capturas no-Copy se clonan **afuera** del closure
+    (`let x = x.clone();`) para preservar aliasing sin consumir
+    la var del caller con `move`.
+  - `Expr::Ident` con nombre de fn top-level emite `(Rc::new(name)
+    as Rc<dyn Fn(...) -> R>)` cuando se usa como valor (no como
+    callee de Call directo). Las fn items de Rust implementan
+    `Fn(...)` así que el cast compila sin glue.
+  - `gen_call` detecta callee `Ident` que es var local de tipo
+    `Type::Function` y la invoca via la firma. Rust auto-derefs
+    el `Rc<dyn Fn>` a callable.
+  - `examples/guide/11-funciones.fitz` anotado con tipos
+    (criterio igual que caps 14/16/18 en 5b.7), agregado al
+    smoke `GUIDE_EXAMPLES_COMPILE`. Compila bit-a-bit con
+    `fitz run`.
+  - Param de FnExpr sin anotar → error de codegen claro
+    (deuda 5b.1).
+  - **Tests sumados (+24)**: 5 parser (`type_expr_funcion_*`),
+    6 checker (`type_expr_function_*` + `anotacion_function_*`),
+    8 codegen unit (`fnexpr_suelta_emite_rc_dyn_fn`,
+    `fn_nombrada_como_valor_*`, `fn_param_de_tipo_funcion_*`,
+    `fn_como_return_type_*`, `closure_que_captura_var_no_copy_*`,
+    `var_de_tipo_funcion_se_llama_*`,
+    `fn_anonima_inline_como_arg_*`, `fnexpr_sin_anotacion_*`),
+    6 E2E (`fn_anonima_asignada_a_var_*`,
+    `fn_nombrada_como_valor_*`, `apply_con_fn_y_fnexpr_inline`,
+    `closure_con_captura_int_*`, `closure_que_captura_str_*`,
+    `fnexpr_sin_anotacion_*`), -1 viejo reemplazado
+    (`fnexpr_suelta_da_error_claro` → `fnexpr_suelta_emite_rc_dyn_fn`).
+  - **Total al cierre de F12**: 986 tests (932 unit + 54 E2E).
+  - **Deuda residual que sigue**: `FnMut`/`FnOnce` (mutación de
+    capturas) — hoy solo `Fn` inmutable; `?` adentro de FnExpr
+    inline; inferencia de tipos de params en fns sin anotar
+    (deuda 5b.1); F11 (state HTTP compartido).
+
+---
+
 ## Fase 6 — Interop Python 🐍
 **Estado: PROPUESTA — no comprometida**
 

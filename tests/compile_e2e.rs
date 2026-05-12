@@ -1144,6 +1144,92 @@ fn http_post_body_extra_field_es_400() {
 }
 
 // ---------------------------------------------------------------------------
+// F12 — higher-order completo (closures, fn como valor/param/retorno)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn fn_anonima_asignada_a_var_se_invoca() {
+    let src = "\
+let f: Fn(Int) -> Int = fn(n: Int) => n * 2
+print(f(21))
+";
+    let (stdout, exit) = build_and_run("f12-fnexpr-var", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["42"]);
+}
+
+#[test]
+fn fn_nombrada_como_valor_se_invoca() {
+    let src = "\
+fn square(n: Int) -> Int => n * n
+let g: Fn(Int) -> Int = square
+print(g(7))
+";
+    let (stdout, exit) = build_and_run("f12-fn-nombrada-valor", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["49"]);
+}
+
+#[test]
+fn apply_con_fn_y_fnexpr_inline() {
+    let src = "\
+fn square(n: Int) -> Int => n * n
+fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)
+print(apply(square, 7))
+print(apply(fn(n: Int) => n * 10, 7))
+";
+    let (stdout, exit) = build_and_run("f12-apply", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["49", "70"]);
+}
+
+#[test]
+fn closure_con_captura_int_funciona() {
+    // make_adder(x) retorna una closure que captura x por valor.
+    let src = "\
+fn make_adder(x: Int) -> Fn(Int) -> Int {
+    return fn(y: Int) => x + y
+}
+let add5: Fn(Int) -> Int = make_adder(5)
+print(add5(3))
+print(add5(10))
+";
+    let (stdout, exit) = build_and_run("f12-make-adder", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["8", "15"]);
+}
+
+#[test]
+fn closure_que_captura_str_clona_afuera() {
+    // El codegen debe clonar `saludo` antes del closure para que la
+    // var siga disponible en el caller después de pasarla a la
+    // closure (move la consumiría sin el clone).
+    let src = "\
+let saludo = \"hola\"
+let f: Fn(Str) -> Str = fn(n: Str) => \"{saludo}, {n}!\"
+print(f(\"Fitz\"))
+print(saludo)
+";
+    let (stdout, exit) = build_and_run("f12-capture-str", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hola, Fitz!", "hola"]);
+}
+
+#[test]
+fn fnexpr_sin_anotacion_de_param_aborta_build() {
+    // Param sin anotar → error claro (deuda 5b.1).
+    let stderr = build_expect_fail(
+        "f12-fnexpr-sin-anot",
+        "let f: Fn(Int) -> Int = fn(x) => x * 2\n",
+    );
+    assert!(
+        stderr.contains("anónima") && stderr.contains("anotación"),
+        "esperaba mensaje sobre fn anónima sin anotación, fue: {}",
+        stderr
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Fase 5b.7 — smoke test: todos los ejemplos guía marcados como
 // compilables deben compilar con `fitz build` sin error
 // ---------------------------------------------------------------------------
@@ -1161,6 +1247,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "07-if.fitz",
     "08-loops.fitz",
     "10-match.fitz",
+    "11-funciones.fitz",
     "12-type.fitz",
     "13-metodos.fitz",
     "14-result.fitz",

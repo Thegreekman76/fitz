@@ -404,6 +404,16 @@ pub enum TypeExpr {
     /// `Nullable(Box(Named("User")))`. `List<Int>?` →
     /// `Nullable(Box(Generic { name: "List", args: [Named("Int")] }))`.
     Nullable(Box<TypeExpr>),
+    /// Tipo función: `Fn(T1, T2) -> U`. Modela un valor invocable con
+    /// los parámetros y retorno indicados. La keyword `Fn` no es un
+    /// tipo nominal del lenguaje: el parser la reconoce de forma
+    /// dedicada cuando ve `Fn` seguido de `(`. `Fn() -> U` es válido
+    /// (cero params). El retorno es obligatorio en la sintaxis para
+    /// evitar ambigüedad con `Fn(...)` como expresión.
+    Function {
+        params: Vec<TypeExpr>,
+        ret: Box<TypeExpr>,
+    },
 }
 
 impl TypeExpr {
@@ -424,6 +434,10 @@ impl TypeExpr {
                 format!("{}<{}>", name, inner.join(", "))
             }
             TypeExpr::Nullable(inner) => format!("{}?", inner.display_name()),
+            TypeExpr::Function { params, ret } => {
+                let ps: Vec<String> = params.iter().map(|p| p.display_name()).collect();
+                format!("Fn({}) -> {}", ps.join(", "), ret.display_name())
+            }
         }
     }
 
@@ -437,6 +451,7 @@ impl TypeExpr {
             TypeExpr::Named(name) => name,
             TypeExpr::Generic { name, .. } => name,
             TypeExpr::Nullable(inner) => inner.head_name(),
+            TypeExpr::Function { .. } => "Fn",
         }
     }
 
