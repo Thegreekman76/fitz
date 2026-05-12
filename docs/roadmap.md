@@ -1102,9 +1102,75 @@ de `is_compatible` en List/Map/Result/Function).
   modelo gradual; cuando 5.3.x cargue módulos cross-archivo, las
   firmas reales destrabarían el chequeo.
 
-##### 5.3.3 — Result, `?`, match exhaustivo
-**Pendiente** — `?` exige Result en operando y firma de fn
-contenedora compatible; match sobre Result exige ambas ramas.
+##### 5.3.3 — Result, `?`, match exhaustivo ✓
+**Completado** — el checker valida el operador `?` y exige
+exhaustividad de `match` cuando el scrutinee tipa como `Result<T>`.
+
+- `Expr::Try` (`?`) valida el operando:
+  - `Type::Any` → devuelve `Any` sin chequear (gradual escape;
+    cubre el caso típico de método built-in cuyo callee `Field`
+    todavía devuelve `Any` hasta 5.3.4).
+  - `Type::Result(inner)` → desempaca a `*inner`. Si el operando
+    es Result concreto y estamos adentro de una función con
+    `return_type` concreto, exige que ese return type también
+    sea `Result<...>` (o `Any`) — el `?` propaga el `Err(_)` vía
+    `return`, así que la fn contenedora tiene que poder
+    recibirlo. Reusa `return_stack`. Mensaje: "el operador `?`
+    solo puede usarse adentro de una función que retorne
+    `Result<...>`; esta retorna `X`". Top-level y `Expr::FnExpr`
+    no disparan la regla (return_stack vacío o `Any`).
+  - Otro tipo concreto → error: "el operador `?` requiere un
+    `Result`, recibió `X`".
+- `Expr::Match` exige exhaustividad **solo cuando el scrutinee
+  tipa como `Result<T>` puro** (no nullable). Decisión de
+  diseño: `Result<T>?` (un valor que puede ser ok/err/null) es
+  semánticamente raro; lo dejamos sin exigir hasta que aparezca
+  como necesidad real. Match sobre Int/Str/Bool/Any/etc. tampoco
+  exige exhaustividad — no tenemos semántica de variantes para
+  ellos todavía.
+- Helper nuevo `check_result_match_exhaustiveness`: recorre los
+  arms y setea `has_ok`, `has_err`, `has_catchall`. Catch-all =
+  `Pattern::Wildcard` o `Pattern::Ident(_)`. Si hay catch-all o
+  ambos `Ok` y `Err` → exhaustivo. Si no, error mencionando qué
+  variante falta (`Ok`, `Err`, o ambas). `Ok(_)` / `Err(_)`
+  cuentan como `Ok` / `Err` (la deuda de `Pattern::OkWildcard` /
+  `ErrWildcard` de 3.3 queda fuera de scope; el `_` adentro se
+  comporta hoy como un nombre que ensucia el scope pero a nivel
+  exhaustividad pesa lo mismo). Patrones literales/de rango
+  sobre Result son técnicamente "imposibles"; no los rechazamos
+  acá (sería un check separado).
+- E2E: los 17 ejemplos + `examples/server.fitz` pasan
+  `fitz check` sin warnings nuevos. Razón: las fns que usan `?`
+  no declaran `-> Result<X>` (return_stack queda `Any`, la regla
+  no dispara) y los `?` operan típicamente sobre métodos
+  built-in que devuelven `Any` hasta 5.3.4. Los matches sobre
+  Result existentes (`14-result.fitz`, `server.fitz`) son todos
+  `Ok + Err`, exhaustivos.
+
+Tests al cerrar 5.3.3: 742 (727 al cerrar 5.3.2 + 15 nuevos en
+`types.rs`: `?` sobre Result + fn Result OK, sobre Any (no
+chequea), sobre no-Result (error), adentro de fn no-Result
+(error), adentro de fn sin return_type (no chequea), top-level
+(no chequea regla de fn), encadenado con field access
+(`r?.id`); match sobre Result con Ok+Err exhaustivo, solo Ok
+(error falta Err), solo Err (error falta Ok), wildcard solo,
+Ok+wildcard, ident catch-all, match sobre Int / Any
+(no exige exhaustividad)).
+
+**Deuda explícita — retomar después:**
+- **`Pattern::OkWildcard` / `ErrWildcard`** — sigue deuda vieja
+  de 3.3. Hoy `Ok(_)` parsea como `OkBinding("_")` y ensucia el
+  scope con una variable llamada `_`. El checker lo trata como
+  `has_ok = true` sin diferenciar.
+- **Patrones literales sobre Result** son "imposibles" pero no
+  se emiten warnings. Es un check separado (dead-code de match)
+  que podría llegar como nice-to-have.
+- **Métodos built-in que deberían retornar `Result<T>`** —
+  `xs.find(...)`, `m.get(...)`. Hoy son `Any` (el chequeo de `?`
+  los deja pasar gradual). Cuando 5.3.4 les dé firma real, el
+  encadenado `xs.find(...)?` va a chequear con precisión real.
+- **`?` adentro de `Result<X>?`** — no exigido, decisión de
+  diseño. Revisitable si aparece el caso.
 
 ##### 5.3.4 — Métodos built-in con templates paramétricos
 **Pendiente** — `xs.map(f)`, `m.get(k)`, `s.upper()`, etc. Cada
@@ -1119,7 +1185,8 @@ desde el body. Cierre formal de 5.3.
 - [x] Resolución de tipos y checker base (5.2)
 - [x] Checker de expresiones — synthesis básico (5.3.1)
 - [x] Llamadas y return contra return_type (5.3.2)
-- [ ] Checker completo (5.3.3 → 5.3.5 + 5.4)
+- [x] Result, `?`, match exhaustivo (5.3.3)
+- [ ] Checker completo (5.3.4 → 5.3.5 + 5.4)
 - [ ] Inferencia de tipos
 - [ ] Optimizaciones básicas (5b)
 - [ ] Binario nativo standalone (5b)

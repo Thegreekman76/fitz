@@ -953,6 +953,12 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     first = Some(t);
                 }
             }
+            // Exhaustividad: solo la exigimos cuando el scrutinee es
+            // `Result<T>` (puro, no nullable). Otros tipos no tienen
+            // semántica de "variantes" para Fitz todavía.
+            if matches!(scrutinee, Type::Result(_)) {
+                check_result_match_exhaustiveness(ctx, arms);
+            }
             first.unwrap_or(Type::Any)
         }
         Expr::Ok(inner) => {
@@ -965,8 +971,37 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Result(Box::new(Type::Any))
         }
         Expr::Try(inner) => {
-            let _ = infer_expr(ctx, inner);
-            Type::Any // 5.3.3 valida que sea Result y desempaca T.
+            let operand_ty = infer_expr(ctx, inner);
+            match &operand_ty {
+                // Gradual: operando de tipo desconocido no se chequea.
+                // Cubre el caso típico de método built-in (callee
+                // Field) que todavía devuelve Any hasta 5.3.4.
+                Type::Any => Type::Any,
+                Type::Result(inner_ty) => {
+                    // Si estamos adentro de una función con
+                    // return_type concreto, exigimos que sea Result —
+                    // el `?` propaga un `Err(_)` vía `return`, así que
+                    // la fn contenedora tiene que poder recibirlo.
+                    // Fn sin return_type (Any) o top-level no chequea.
+                    if let Some(expected) = ctx.return_stack.last().cloned() {
+                        let is_ok = matches!(expected, Type::Any | Type::Result(_));
+                        if !is_ok {
+                            ctx.error(format!(
+                                "el operador `?` solo puede usarse adentro de una función que retorne `Result<...>`; esta retorna `{}`",
+                                expected.display(ctx.types)
+                            ));
+                        }
+                    }
+                    (**inner_ty).clone()
+                }
+                other => {
+                    ctx.error(format!(
+                        "el operador `?` requiere un `Result`, recibió `{}`",
+                        other.display(ctx.types)
+                    ));
+                    Type::Any
+                }
+            }
         }
     }
 }
@@ -981,6 +1016,39 @@ fn describe_callee(callee: &Expr) -> String {
         Expr::Field { field, .. } => format!("el método `{}`", field),
         _ => "esta llamada".into(),
     }
+}
+
+/// Chequea exhaustividad de un `match` sobre `Result<T>`. Los arms
+/// deben cubrir tanto `Ok` como `Err`, o tener un catch-all
+/// (wildcard `_` o ident binding). Patrones literales/de rango
+/// sobre un Result no aportan a la exhaustividad — son
+/// "imposibles" pero no los rechazamos acá (sería un check
+/// separado).
+fn check_result_match_exhaustiveness(ctx: &mut CheckCtx, arms: &[crate::ast::MatchArm]) {
+    use crate::ast::Pattern;
+    let mut has_ok = false;
+    let mut has_err = false;
+    let mut has_catchall = false;
+    for arm in arms {
+        match &arm.pattern {
+            Pattern::OkBinding(_) => has_ok = true,
+            Pattern::ErrBinding(_) => has_err = true,
+            Pattern::Wildcard | Pattern::Ident(_) => has_catchall = true,
+            _ => {}
+        }
+    }
+    if has_catchall || (has_ok && has_err) {
+        return;
+    }
+    let missing = match (has_ok, has_err) {
+        (true, false) => "`Err`",
+        (false, true) => "`Ok`",
+        _ => "`Ok` y `Err`",
+    };
+    ctx.error(format!(
+        "match sobre `Result` no es exhaustivo: falta el caso {}",
+        missing
+    ));
 }
 
 /// Bindea las variables introducidas por un patrón en el scope
@@ -2482,5 +2550,182 @@ mod tests {
             ret: Box::new(Type::Int),
         };
         assert!(!is_compatible(&a, &c));
+    }
+
+    // ---- 5.3.3: `?` y match exhaustivo sobre Result ----
+
+    #[test]
+    fn try_sobre_result_adentro_de_fn_result_pasa() {
+        // El operando es Result<Int>; la fn declara -> Result<Int>.
+        // El `?` desempaca a Int.
+        assert_ok(
+            "fn f(r: Result<Int>) -> Result<Int> {\n\
+                 let v: Int = r?\n\
+                 return Ok(v + 1)\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn try_sobre_any_no_chequea() {
+        // `users.find(...)` es método built-in: callee Field → Any.
+        // `?` sobre Any pasa sin chequear (gradual, hasta 5.3.4).
+        assert_ok(
+            "type User { id: Int }\n\
+             fn h(id: Int) {\n\
+                 let users = [User { id: 1 }]\n\
+                 let u = users.find(fn(u) => u.id == id)?\n\
+                 return u\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn try_sobre_no_result_es_error() {
+        // `?` sobre un Int no tiene sentido.
+        assert_error_with(
+            "fn f() -> Result<Int> { let x = 1?\n return Ok(x) }",
+            &["?", "Result", "Int"],
+        );
+    }
+
+    #[test]
+    fn try_adentro_de_fn_no_result_es_error() {
+        // La fn retorna Int (no Result) y adentro hay un `?`. El
+        // operando es Result<Int> concreto, así que disparamos la
+        // regla "fn debe retornar Result".
+        assert_error_with(
+            "fn f(r: Result<Int>) -> Int {\n\
+                 let v = r?\n\
+                 return v\n\
+             }",
+            &["?", "Result", "Int"],
+        );
+    }
+
+    #[test]
+    fn try_adentro_de_fn_sin_return_type_no_chequea() {
+        // Sin anotación → return_stack es Any → no chequeamos la
+        // regla de la fn contenedora. El operando sí tiene que ser
+        // Result, así que el `?` desempaca a Int sin warnings.
+        assert_ok(
+            "fn f(r: Result<Int>) {\n\
+                 let v: Int = r?\n\
+                 return v\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn try_top_level_no_chequea_la_regla_de_fn_contenedora() {
+        // `?` adentro del scope global — sin return_stack, no
+        // disparamos la regla "fn debe retornar Result". El operando
+        // sí se chequea: Result<Int> → desempaca a Int.
+        assert_ok("let r: Result<Int> = Ok(1)\nlet v: Int = r?");
+    }
+
+    #[test]
+    fn try_encadenado_con_field_access_funciona() {
+        // r?.id sobre Result<User> → User → Int.
+        assert_ok(
+            "type User { id: Int, name: Str }\n\
+             fn f(r: Result<User>) -> Result<Int> {\n\
+                 let id: Int = r?.id\n\
+                 return Ok(id)\n\
+             }",
+        );
+    }
+
+    // ---- match exhaustivo sobre Result ----
+
+    #[test]
+    fn match_result_con_ok_y_err_es_exhaustivo() {
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 Ok(v) => \"ok\"\n\
+                 Err(e) => \"err\"\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn match_result_solo_ok_falta_err() {
+        assert_error_with(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 Ok(v) => \"ok\"\n\
+             }",
+            &["match", "Result", "exhaustivo", "Err"],
+        );
+    }
+
+    #[test]
+    fn match_result_solo_err_falta_ok() {
+        assert_error_with(
+            "let r: Result<Int> = Err(\"x\")\n\
+             let s = match r {\n\
+                 Err(e) => \"err\"\n\
+             }",
+            &["match", "Result", "exhaustivo", "Ok"],
+        );
+    }
+
+    #[test]
+    fn match_result_con_wildcard_solo_es_exhaustivo() {
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 _ => \"cualquier\"\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn match_result_con_ok_mas_wildcard_es_exhaustivo() {
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 Ok(v) => \"ok\"\n\
+                 _ => \"resto\"\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn match_result_con_ident_catchall_es_exhaustivo() {
+        // Un ident binding (catch-all) cubre cualquier valor — el
+        // evaluator lo trata como wildcard.
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r {\n\
+                 x => \"siempre\"\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn match_sobre_int_no_exige_exhaustividad() {
+        // Match sobre un tipo no-Result: el checker no exige
+        // exhaustividad en 5.3.3.
+        assert_ok(
+            "let n = 1\n\
+             let s = match n {\n\
+                 0 => \"cero\"\n\
+                 1 => \"uno\"\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn match_sobre_any_no_exige_exhaustividad() {
+        // Match sobre un valor de tipo Any (gradual escape): no se
+        // exige exhaustividad.
+        assert_ok(
+            "fn pick() { return Ok(1) }\n\
+             let s = match pick() {\n\
+                 Ok(v) => \"ok\"\n\
+             }",
+        );
     }
 }

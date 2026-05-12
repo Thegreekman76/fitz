@@ -1,8 +1,8 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.2: checker de
-> llamadas y `return`, 727 tests pasando).
+> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.3: checker de
+> `?` y match exhaustivo sobre `Result`, 742 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -1916,10 +1916,13 @@ Si ningún brazo coincide, el intérprete corta:
 Error en línea 0:0 — el `match` no matcheó ningún brazo
 ```
 
-Hoy la exhaustividad no se chequea en compile time, así que es tu
-responsabilidad incluir un wildcard (`_`) o un binding final. La
-regla práctica: si el conjunto de valores posibles no está acotado
-(strings, enteros), terminá siempre con `_`.
+Desde la Fase 5.3.3, **`fitz check` exige exhaustividad cuando el
+valor matcheado tipa como `Result<T>`** — vas a ver un error si te
+falta el caso `Ok` o el caso `Err` (a menos que tengas un `_` o un
+binding final que actúe como catch-all). Para los demás tipos
+(`Int`, `Str`, etc.), la exhaustividad todavía es tu
+responsabilidad y la regla práctica sigue siendo: si el conjunto de
+valores posibles no está acotado, terminá siempre con `_`.
 
 ### Cuándo usar match vs if / else if
 
@@ -2008,8 +2011,10 @@ Lo cubrimos en detalle en [el próximo capítulo](#13-result-y-manejo-de-errores
   etc. Cuando lleguen los tipos compuestos.
 - **Guards** (`patrón if condición => ...`).
 - **Or-patterns** (`1 | 2 | 3 => ...`).
-- **Exhaustividad chequeada en compile time** — llega con el type
-  checker en Fase 5.
+- **Exhaustividad para tipos no-Result** — desde Fase 5.3.3
+  `fitz check` exige exhaustividad sobre `Result<T>`. Para Int,
+  Str y otros tipos no acotados sigue siendo responsabilidad
+  tuya cerrar con `_`.
 
 ### Ejemplo completo
 
@@ -3115,12 +3120,15 @@ también, y `Ok(1) == Err(1)` da `false`.
   un `return` con ese `Err`. Si lo usás en top-level, vas a ver el
   mensaje genérico `` `return` solo puede usarse adentro de una
   función ``. Vamos a darle un mensaje propio más adelante.
-- **No hay chequeo de tipo en runtime** — usar `?` adentro de una
-  función que no estaba pensada para devolver `Result` te va a dejar
-  con un `Value::Result(Err(...))` saliendo por la puerta de
-  retorno. Mientras tanto, la convención es: usá `?` solo en
-  funciones que ya devuelven `Result`. El type checker estático
-  (Fase 5) va a chequearlo.
+- **Chequeo estático de `?`** — desde Fase 5.3.3, `fitz check`
+  exige que el operando de `?` sea `Result<T>` y que la función
+  contenedora declare `-> Result<...>` (a menos que la función
+  esté sin anotación de retorno, donde queda en modo gradual).
+  En runtime, si `?` ve un `Err` adentro de una función que no
+  estaba pensada para devolver `Result`, vas a tener un
+  `Value::Result(Err(...))` saliendo por la puerta de retorno —
+  por eso conviene anotar el retorno y dejar que el checker te
+  avise antes.
 - **Anotaciones genéricas `Result<T>`** — el parser todavía no
   acepta tipos compuestos en `-> ...` o en `: ...`. Hoy se anota con
   `Result` a secas o no se anota. Mismo límite que `List<Str>`.
