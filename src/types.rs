@@ -533,6 +533,10 @@ struct CheckCtx<'a> {
     /// (builtins + fns top-level + lets top-level). Cada `FnDef`
     /// body, cada loop body, abren un scope nuevo.
     scopes: Vec<std::collections::HashMap<String, Type>>,
+    /// Stack de tipos de retorno esperados, uno por cada función
+    /// (FnDef o FnExpr) anidada que se está chequeando. Vacío en
+    /// el scope top-level. `Stmt::Return` lo consulta para validar.
+    return_stack: Vec<Type>,
     errors: Vec<FitzError>,
 }
 
@@ -541,6 +545,7 @@ impl<'a> CheckCtx<'a> {
         let mut ctx = Self {
             types,
             scopes: vec![std::collections::HashMap::new()],
+            return_stack: Vec::new(),
             errors: Vec::new(),
         };
         ctx.register_builtins();
@@ -548,13 +553,24 @@ impl<'a> CheckCtx<'a> {
     }
 
     /// Builtins del lenguaje que existen siempre en el env del
-    /// evaluator (`print`, `len`, etc.). En 5.3.1 los registramos
-    /// como `Any` para que el checker no se queje de "variable
-    /// desconocida"; 5.3.2 sumará firmas reales.
+    /// evaluator. Los de aridad fija reciben firma real (chequea
+    /// aridad y eventualmente tipos); los variádicos se modelan
+    /// como `Any` hasta tener una representación dedicada.
     fn register_builtins(&mut self) {
-        for name in ["print", "len"] {
-            self.scopes[0].insert(name.into(), Type::Any);
-        }
+        // `print(args...)` — variádico. Modelado como Any: ningún
+        // call sobre Any se chequea (gradual escape).
+        self.scopes[0].insert("print".into(), Type::Any);
+        // `len(x) -> Int` — aridad 1 sobre List/Map/Str/Range. El
+        // param es Any porque los receptores no comparten un solo
+        // tipo (todavía no tenemos union types / "any iterable").
+        // La aridad sí se valida; el tipo del receptor llega en 5.3.4.
+        self.scopes[0].insert(
+            "len".into(),
+            Type::Function {
+                params: vec![Type::Any],
+                ret: Box::new(Type::Int),
+            },
+        );
     }
 
     fn push_scope(&mut self) {
@@ -848,26 +864,59 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        // Resto: 5.3.2+.
         Expr::Call { callee, args } => {
-            // Walkeamos callee y args para warnings adentro; no
-            // validamos aridad/tipos en 5.3.1. Si el callee tiene
-            // tipo Function, devolvemos su `ret`; si no, Any.
+            // Sintetizamos siempre callee y args para que afloren
+            // errores adentro. Después validamos aridad y tipos según
+            // lo que sea el callee.
             let callee_ty = infer_expr(ctx, callee);
-            for a in args {
-                let _ = infer_expr(ctx, a);
-            }
+            let args_ty: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
             match callee_ty {
-                Type::Function { ret, .. } => *ret,
-                _ => Type::Any,
+                // Gradual: callee de tipo desconocido no se chequea.
+                Type::Any => Type::Any,
+                Type::Function { params, ret } => {
+                    let label = describe_callee(callee);
+                    if args.len() != params.len() {
+                        ctx.error(format!(
+                            "{} espera {} argumento(s), recibió {}",
+                            label,
+                            params.len(),
+                            args.len()
+                        ));
+                    } else {
+                        for (i, (actual, expected)) in
+                            args_ty.iter().zip(params.iter()).enumerate()
+                        {
+                            if !is_compatible(actual, expected) {
+                                ctx.error(format!(
+                                    "{}: el argumento {} espera `{}`, recibió `{}`",
+                                    label,
+                                    i + 1,
+                                    expected.display(ctx.types),
+                                    actual.display(ctx.types)
+                                ));
+                            }
+                        }
+                    }
+                    *ret
+                }
+                other => {
+                    ctx.error(format!(
+                        "`{}` no es una función",
+                        other.display(ctx.types)
+                    ));
+                    Type::Any
+                }
             }
         }
         Expr::FnExpr { params, body } => {
             // Walkeamos el body con un scope nuevo y los params
             // bindeados (con su tipo declarado o `Any` si la anotación
             // faltó). El tipo del FnExpr es `Function`; 5.3.5 refina
-            // el `ret` inferido del body.
+            // el `ret` inferido del body. Como no tenemos return_type
+            // declarado, empujamos `Any` al return_stack — los `return`
+            // adentro del FnExpr no se chequean en 5.3.2.
             ctx.push_scope();
+            ctx.return_stack.push(Type::Any);
             let param_types: Vec<Type> = params
                 .iter()
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
@@ -876,6 +925,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ctx.declare_var(p.name.clone(), t.clone());
             }
             check_block(ctx, body);
+            ctx.return_stack.pop();
             ctx.pop_scope();
             Type::Function {
                 params: param_types,
@@ -918,6 +968,18 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             let _ = infer_expr(ctx, inner);
             Type::Any // 5.3.3 valida que sea Result y desempaca T.
         }
+    }
+}
+
+/// Etiqueta amigable para el callee de un `Call`. Aparece en los
+/// errores de aridad y de tipos de argumento. Cuando podemos
+/// identificar el nombre (Ident o Field), lo usamos; si no, una
+/// etiqueta genérica.
+fn describe_callee(callee: &Expr) -> String {
+    match callee {
+        Expr::Ident(name) => format!("la función `{}`", name),
+        Expr::Field { field, .. } => format!("el método `{}`", field),
+        _ => "esta llamada".into(),
     }
 }
 
@@ -1045,14 +1107,18 @@ fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type) -> Type
     }
 }
 
-/// Compatibilidad para asignación: `actual` se puede usar donde se
-/// espera `expected`?
+/// Compatibilidad para asignación / paso de argumento: `actual` se
+/// puede usar donde se espera `expected`?
 ///
 /// Reglas:
-///   - `Any` matchea con cualquier cosa (gradual).
+///   - `Any` matchea con cualquier cosa (gradual, en ambas direcciones).
 ///   - `Null` matchea con `T?` para cualquier T.
+///   - `T` matchea con `T?` si el inner es compatible.
 ///   - `Int` matchea con `Float` (coerción implícita en aritmética
 ///     y asignación).
+///   - Generics built-in (`List`/`Map`/`Result`/`Nullable`) y
+///     `Function` se comparan recursivamente — así `Result<Any>`
+///     pasa por `Result<User>`, `List<Int>` por `List<Float>`, etc.
 ///   - Resto: igualdad estructural.
 pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
     if matches!(actual, Type::Any) || matches!(expected, Type::Any) {
@@ -1070,7 +1136,23 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
     if matches!(actual, Type::Int) && matches!(expected, Type::Float) {
         return true;
     }
-    actual == expected
+    match (actual, expected) {
+        (Type::List(a), Type::List(b)) => is_compatible(a, b),
+        (Type::Map(ka, va), Type::Map(kb, vb)) => {
+            is_compatible(ka, kb) && is_compatible(va, vb)
+        }
+        (Type::Result(a), Type::Result(b)) => is_compatible(a, b),
+        (Type::Nullable(a), Type::Nullable(b)) => is_compatible(a, b),
+        (
+            Type::Function { params: pa, ret: ra },
+            Type::Function { params: pb, ret: rb },
+        ) => {
+            pa.len() == pb.len()
+                && pa.iter().zip(pb.iter()).all(|(a, b)| is_compatible(a, b))
+                && is_compatible(ra, rb)
+        }
+        _ => actual == expected,
+    }
 }
 
 /// Walkea una lista de Stmt en orden, manteniendo el scope actual.
@@ -1111,9 +1193,21 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::Return(e) => {
-            // 5.3.2 valida contra return_type. Acá solo inferimos para
-            // que afloren errores adentro de la expresión.
-            let _ = infer_expr(ctx, e);
+            // Inferimos siempre para que los errores adentro afloren.
+            let ret_ty = infer_expr(ctx, e);
+            // Si estamos adentro de una función con return_type
+            // declarado (y resoluble), validamos. Fuera de fn o con
+            // return_type ausente (Any), no chequeamos — el evaluator
+            // ya emite error en runtime si `return` está huérfano.
+            if let Some(expected) = ctx.return_stack.last().cloned() {
+                if !is_compatible(&ret_ty, &expected) {
+                    ctx.error(format!(
+                        "`return` devuelve `{}` pero la función declara `{}`",
+                        ret_ty.display(ctx.types),
+                        expected.display(ctx.types)
+                    ));
+                }
+            }
         }
 
         Stmt::Expr(e) => {
@@ -1122,18 +1216,26 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
 
         Stmt::FnDef {
             params,
-            return_type: _,
+            return_type,
             body,
             ..
         } => {
             // Abrimos scope nuevo para params y locales. Los params se
-            // bindean con su tipo declarado (o Any).
+            // bindean con su tipo declarado (o Any). Empujamos el
+            // return type esperado al stack para que los `return`
+            // adentro lo vean. Sin anotación → `Any` (no chequea).
+            let ret = match return_type {
+                Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
+                None => Type::Any,
+            };
             ctx.push_scope();
+            ctx.return_stack.push(ret);
             for p in params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
                 ctx.declare_var(p.name.clone(), pty);
             }
             check_block(ctx, body);
+            ctx.return_stack.pop();
             ctx.pop_scope();
         }
 
@@ -2116,5 +2218,269 @@ mod tests {
         );
         assert!(errors.len() >= 3, "esperaba 3+ errores, hubo {}: {:?}",
             errors.len(), errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+    }
+
+    // ---- 5.3.2: llamadas y return ----
+
+    #[test]
+    fn call_aridad_correcta_y_tipos_ok() {
+        assert_ok(
+            "fn add(a: Int, b: Int) -> Int { return a + b }\n\
+             let n: Int = add(1, 2)",
+        );
+    }
+
+    #[test]
+    fn call_aridad_de_menos_es_error() {
+        assert_error_with(
+            "fn add(a: Int, b: Int) -> Int { return a + b }\n\
+             let n = add(1)",
+            &["add", "2 argumento", "recibió 1"],
+        );
+    }
+
+    #[test]
+    fn call_aridad_de_mas_es_error() {
+        assert_error_with(
+            "fn add(a: Int, b: Int) -> Int { return a + b }\n\
+             let n = add(1, 2, 3)",
+            &["add", "2 argumento", "recibió 3"],
+        );
+    }
+
+    #[test]
+    fn call_tipo_de_arg_incompatible_es_error() {
+        assert_error_with(
+            "fn add(a: Int, b: Int) -> Int { return a + b }\n\
+             let n = add(\"hola\", 2)",
+            &["add", "argumento 1", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn call_coercion_int_a_float_pasa() {
+        assert_ok(
+            "fn double(x: Float) -> Float { return x * 2.0 }\n\
+             let n: Float = double(3)",
+        );
+    }
+
+    #[test]
+    fn call_null_a_param_nullable_pasa() {
+        assert_ok(
+            "fn greet(name: Str?) -> Str { return \"hola\" }\n\
+             let g: Str = greet(null)",
+        );
+    }
+
+    #[test]
+    fn call_recursion_top_level_compila() {
+        // El pre-registro de firmas debe ver a `fact` antes de chequear
+        // su body para que la llamada recursiva no se queje.
+        assert_ok(
+            "fn fact(n: Int) -> Int {\n\
+                 if (n <= 1) { return 1 }\n\
+                 return n * fact(n - 1)\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn call_forward_reference_cross_fn_compila() {
+        // `a` llama a `b` definida después. El pre-registro lo hace
+        // visible.
+        assert_ok(
+            "fn a(n: Int) -> Int { return b(n) + 1 }\n\
+             fn b(n: Int) -> Int { return n * 2 }",
+        );
+    }
+
+    #[test]
+    fn call_sobre_callee_no_funcion_es_error() {
+        // `1(2)` no es una función llamable.
+        assert_error_with(
+            "let r = (1)(2)",
+            &["no es una función", "Int"],
+        );
+    }
+
+    #[test]
+    fn call_fn_expr_inline_pasa() {
+        // (fn(x) => x + 1)(2) — el callee se resuelve a Function.
+        // Aridad y param Any → cualquier arg pasa.
+        assert_ok("let r = (fn(x) => x + 1)(2)");
+    }
+
+    #[test]
+    fn call_fn_expr_inline_aridad_falla() {
+        // Aridad chequeada incluso en FnExpr inline.
+        assert_error_with(
+            "let r = (fn(x, y) => x + y)(1)",
+            &["2 argumento", "recibió 1"],
+        );
+    }
+
+    // ---- Builtins ----
+
+    #[test]
+    fn len_con_un_arg_pasa_y_devuelve_int() {
+        assert_ok("let n: Int = len([1, 2, 3])");
+    }
+
+    #[test]
+    fn len_sin_args_es_error_de_aridad() {
+        assert_error_with(
+            "let n = len()",
+            &["len", "1 argumento", "recibió 0"],
+        );
+    }
+
+    #[test]
+    fn len_con_dos_args_es_error_de_aridad() {
+        assert_error_with(
+            "let n = len([1], [2])",
+            &["len", "1 argumento", "recibió 2"],
+        );
+    }
+
+    #[test]
+    fn print_es_variadic_no_chequea_aridad() {
+        // print sigue siendo Any → cualquier número de args pasa.
+        assert_ok("print()\nprint(\"x\")\nprint(1, 2, 3, \"y\")");
+    }
+
+    // ---- Stmt::Return contra return_type ----
+
+    #[test]
+    fn return_tipo_compatible_pasa() {
+        assert_ok(
+            "fn double(n: Int) -> Int { return n * 2 }",
+        );
+    }
+
+    #[test]
+    fn return_tipo_incompatible_es_error() {
+        assert_error_with(
+            "fn double(n: Int) -> Int { return \"no soy int\" }",
+            &["return", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn return_sin_anotacion_no_chequea() {
+        // Sin return_type → Any → no chequea.
+        assert_ok("fn f() { return \"cualquier cosa\" }");
+    }
+
+    #[test]
+    fn return_arrow_implicito_chequea_contra_return_type() {
+        // `fn f() -> Int => "x"` se desugarea a `body: [Stmt::Return("x")]`.
+        assert_error_with(
+            "fn id(x: Int) -> Int => \"no soy int\"",
+            &["return", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn return_arrow_implicito_correcto_pasa() {
+        assert_ok("fn double(n: Int) -> Int => n * 2");
+    }
+
+    #[test]
+    fn return_ok_contra_result_pasa() {
+        // Ok(user) tipea como Result<User>; debe matchear con
+        // -> Result<User>.
+        assert_ok(
+            "type User { id: Int, name: Str }\n\
+             fn make(id: Int) -> Result<User> {\n\
+                 return Ok(User { id: id, name: \"x\" })\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn return_err_contra_result_pasa_por_is_compatible_recursivo() {
+        // Err(_) tipea como Result<Any>. Sin recursividad de
+        // is_compatible esto fallaría contra Result<User>.
+        assert_ok(
+            "type User { id: Int }\n\
+             fn make() -> Result<User> {\n\
+                 return Err(\"boom\")\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn return_huerfano_no_chequea() {
+        // `return` fuera de una función — el checker no se queja;
+        // el evaluator emite error en runtime.
+        let (_, errors) = check_str("return 1");
+        assert!(errors.is_empty(), "{:?}", errors);
+    }
+
+    // ---- is_compatible recursivo en generics ----
+
+    #[test]
+    fn is_compatible_list_recursivo() {
+        // List<Int> vs List<Float> pasa por coerción Int→Float adentro.
+        assert!(is_compatible(
+            &Type::List(Box::new(Type::Int)),
+            &Type::List(Box::new(Type::Float)),
+        ));
+        // List<Str> vs List<Int> no pasa.
+        assert!(!is_compatible(
+            &Type::List(Box::new(Type::Str)),
+            &Type::List(Box::new(Type::Int)),
+        ));
+    }
+
+    #[test]
+    fn is_compatible_result_recursivo() {
+        // Result<Any> matchea Result<User>.
+        let env = env_with(&["User"]);
+        let user = Type::Nominal(env.lookup("User").unwrap());
+        assert!(is_compatible(
+            &Type::Result(Box::new(Type::Any)),
+            &Type::Result(Box::new(user.clone())),
+        ));
+        // Result<Int> no matchea Result<Str>.
+        assert!(!is_compatible(
+            &Type::Result(Box::new(Type::Int)),
+            &Type::Result(Box::new(Type::Str)),
+        ));
+    }
+
+    #[test]
+    fn is_compatible_map_recursivo() {
+        // Map<Str, Int> matchea Map<Str, Float>.
+        assert!(is_compatible(
+            &Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
+            &Type::Map(Box::new(Type::Str), Box::new(Type::Float)),
+        ));
+        // Map<Int, X> no matchea Map<Str, X> (clave incompatible).
+        assert!(!is_compatible(
+            &Type::Map(Box::new(Type::Int), Box::new(Type::Int)),
+            &Type::Map(Box::new(Type::Str), Box::new(Type::Int)),
+        ));
+    }
+
+    #[test]
+    fn is_compatible_function_estructural() {
+        // fn(Int) -> Int matchea fn(Int) -> Int.
+        let a = Type::Function {
+            params: vec![Type::Int],
+            ret: Box::new(Type::Int),
+        };
+        let b = Type::Function {
+            params: vec![Type::Int],
+            ret: Box::new(Type::Int),
+        };
+        assert!(is_compatible(&a, &b));
+        // fn(Int) -> Int no matchea fn(Int, Int) -> Int (aridad distinta).
+        let c = Type::Function {
+            params: vec![Type::Int, Type::Int],
+            ret: Box::new(Type::Int),
+        };
+        assert!(!is_compatible(&a, &c));
     }
 }

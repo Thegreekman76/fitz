@@ -1,7 +1,8 @@
 # Guía de Fitz
 
 > Estado: viva — cubre solo lo que el intérprete ejecuta hoy.
-> Última actualización: 2026-05-11 (Fase 4 — paso 5: HTTP nativo, 595 tests pasando).
+> Última actualización: 2026-05-12 (Fase 5 — paso 5.3.2: checker de
+> llamadas y `return`, 727 tests pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -3355,11 +3356,31 @@ fn add(a, b) => a + b
 print(add(5))
 ```
 
-Salida (recortada — antes vienen los tokens y el AST):
+Desde la Fase 5.3.2, el chequeo estático de llamadas detecta el
+problema **antes** de ejecutar el programa. Si corrés `fitz check`,
+exit code 1:
 
 ```
+✗ examples/guide/15-errores.fitz — 1 error(es) de tipo:
+  Error — la función `add` espera 2 argumento(s), recibió 1
+```
+
+Y si corrés `fitz run`, el checker emite primero un warning y
+después el evaluator ejecuta y emite el mismo error en runtime
+(salida recortada — antes vienen los tokens y el AST):
+
+```
+⚠ 1 warning(s) del checker de tipos:
+  Error — la función `add` espera 2 argumento(s), recibió 1
+   (Fase 5.x — no abortan la ejecución; usá `fitz check` para validar).
+...
 Error en línea 0:0 — `add` espera 2 argumento(s), recibió 1
 ```
+
+El error de runtime sigue siendo el mismo que antes (`0:0` por la
+deuda de posiciones en el evaluator); lo nuevo es el warning de
+arriba, que ahora te avisa en `fitz check` sin necesidad de
+ejecutar.
 
 ---
 

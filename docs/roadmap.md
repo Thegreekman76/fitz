@@ -1024,9 +1024,83 @@ con mensajes específicos y contexto.
   Field dentro de un Call devuelve Any. Es 5.3.4.
 - `FnExpr.ret` queda en Any. 5.3.5 sintetizará a partir del body.
 
-##### 5.3.2 — Llamadas, return contra return_type
-**Pendiente** — registrar firmas, validar aridad y tipos de args,
-chequear `Stmt::Return` contra el return type declarado.
+##### 5.3.2 — Llamadas, return contra return_type ✓
+**Completado** — el checker valida llamadas (aridad + tipos de
+args) y `Stmt::Return` contra el return type declarado. Reusa el
+pre-registro de firmas top-level de 5.3.1.
+
+- `is_compatible` ahora recursa adentro de generics built-in:
+  `List<a>↔List<b>`, `Map<ka,va>↔Map<kb,vb>`, `Result<a>↔Result<b>`,
+  `Nullable<a>↔Nullable<b>`, y `Function` (estructural: misma
+  aridad + cada param compatible + ret compatible). Caso clave
+  que destraba: `Err("...")` sintetiza `Result<Any>` y ahora pasa
+  contra una declaración `-> Result<User>` sin escape adicional.
+- `CheckCtx.return_stack: Vec<Type>` — stack para soportar
+  funciones anidadas. `Stmt::FnDef` pushea el return type
+  resuelto (o `Any` si la anotación faltó / no resolvió);
+  `Expr::FnExpr` pushea `Any` porque el AST no carga return type
+  declarado para FnExpr (la inferencia desde el body llega en
+  5.3.5).
+- `Stmt::Return` infiere el tipo de la expresión y, si hay algo
+  en `return_stack`, compara con `is_compatible`. Mensaje:
+  ``` `return` devuelve `X` pero la función declara `Y` ```.
+  Return huérfano (fuera de función) no chequea — el evaluator
+  lo emite en runtime, sin solapamiento.
+- `Expr::Call` valida aridad y compatibilidad de cada arg contra
+  `Function.params`, y devuelve `*ret` como tipo sintetizado.
+  Reglas:
+  - Callee `Any` → no chequea (escape gradual). Esto cubre
+    variables traídas por `from import` cuyo tipo real
+    desconocemos hasta que carguemos módulos cross-archivo.
+  - Callee `Function { params, ret }` → aridad estricta + tipos
+    estrictos; en errores incluye índice 1-based del argumento.
+  - Callee de tipo concreto distinto (`Int`, `Str`, etc.) →
+    error explícito "`X` no es una función".
+- Helper `describe_callee` produce etiquetas amigables para los
+  mensajes de error: `Expr::Ident("foo")` → "la función `foo`",
+  `Expr::Field { field: "map", .. }` → "el método `map`", resto
+  → "esta llamada".
+- Builtins: `len` deja de ser `Any` y pasa a
+  `Function { params: [Any], ret: Int }`. Captura `len(1, 2)` /
+  `len()` como errores de aridad y permite asignar el resultado a
+  un `Int` sin warning. `print` queda como `Any` (variádico, sin
+  representación dedicada todavía). **Convención que se
+  establece**: builtins de aridad fija reciben firma real;
+  variádicos siguen siendo `Any` hasta tener `Type::Variadic` o
+  un mecanismo equivalente.
+- E2E: `examples/server.fitz` (CRUD con `-> Result<User>` y
+  `return Err("...")` / `return Ok(...)`) pasa `fitz check`
+  limpio gracias a la recursividad de `is_compatible`. Los 17
+  ejemplos de la guía pasan limpios excepto `15-errores.fitz`,
+  que es intencional — el ejemplo demuestra un error de aridad
+  (`fn add(a, b) => a + b; print(add(5))`) y ahora el checker lo
+  capta estáticamente antes del error de runtime. Cap 15 de la
+  guía actualizado con una nota corta.
+
+Tests al cerrar 5.3.2: 727 (700 al cerrar 5.3.1 + 27 nuevos en
+`types.rs` — calls con aridad correcta/menos/más/tipos, coerción
+Int→Float, Null→nullable, recursión + forward ref, callee no-fn,
+FnExpr inline; builtins `len` y `print`; Stmt::Return con tipo
+compatible/incompatible, sin anotación, arrow implícito,
+`Ok`/`Err` contra `Result<User>`, return huérfano; recursividad
+de `is_compatible` en List/Map/Result/Function).
+
+**Deuda explícita — retomar después:**
+- **Métodos built-in sin chequear** — el callee `Expr::Field`
+  evalúa a `Any` (hasta 5.3.4), por lo que `xs.map(1, 2, 3)` o
+  `s.upper(extra)` pasan sin warning. Es 5.3.4.
+- **`Expr::Try` (`?`) sin chequeo** — sigue devolviendo `Any` y
+  no exige que el operando sea `Result` ni que la fn contenedora
+  retorne `Result`. Es 5.3.3.
+- **Match sobre `Result` no exige exhaustividad** — un brazo
+  solo `Ok(x)` sin `Err(_)` (o viceversa) pasa. Es 5.3.3.
+- **`FnExpr.ret` queda en `Any`** — el cuerpo no informa el ret
+  sintetizado. Es 5.3.5.
+- **Llamadas a vars `Any` no chequean aridad** — cuando un
+  nombre importado (`from foo import bar`) viene como `Any`, las
+  llamadas a `bar(...)` no validan nada. Es consistente con el
+  modelo gradual; cuando 5.3.x cargue módulos cross-archivo, las
+  firmas reales destrabarían el chequeo.
 
 ##### 5.3.3 — Result, `?`, match exhaustivo
 **Pendiente** — `?` exige Result en operando y firma de fn
@@ -1044,7 +1118,8 @@ desde el body. Cierre formal de 5.3.
 - [x] TypeExpr en AST y parser (5.1)
 - [x] Resolución de tipos y checker base (5.2)
 - [x] Checker de expresiones — synthesis básico (5.3.1)
-- [ ] Checker completo (5.3.2 → 5.3.5 + 5.4)
+- [x] Llamadas y return contra return_type (5.3.2)
+- [ ] Checker completo (5.3.3 → 5.3.5 + 5.4)
 - [ ] Inferencia de tipos
 - [ ] Optimizaciones básicas (5b)
 - [ ] Binario nativo standalone (5b)
