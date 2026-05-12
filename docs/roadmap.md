@@ -1720,15 +1720,640 @@ compilado a binario standalone"), cierre formal de Fase 5.
 
 ---
 
-## Fase 6 — Ecosistema 🌍
+## Fase 6 — Interop Python 🐍
+**Estado: PROPUESTA — no comprometida**
+
+Una vez cerrada la Fase 5b, Fitz va a tener HTTP nativo, type
+checker estricto y binarios standalone — pero no va a poder
+hablarle a una base de datos, ni a NumPy/pandas, ni a librerías
+de criptografía o de scraping. Construir desde cero todo el
+ecosistema de un lenguaje de producción tomaría años, y
+mientras tanto Fitz quedaría como lenguaje de juguete para
+APIs in-memory.
+
+La Fase 6 abre una puerta lateral: importar librerías de Python
+desde código Fitz para heredar el ecosistema, mientras Fitz
+construye su propio stack a su ritmo.
+
+El caso de uso motivador es concreto: un proyecto Fitz con
+handlers `@get`/`@post` que adentro usan SQLAlchemy contra
+Postgres, mapeando los modelos del ORM a `type` de Fitz para
+que el checker siga validando los handlers end-to-end.
+
+### Posicionamiento estratégico
+
+Esta es una decisión más política que técnica, y la propuesta
+la pone arriba de todo a propósito: **Fitz NO se vuelve "Python
+con sintaxis distinta"**.
+
+- El código Fitz sigue compilando a binario nativo via 5b.
+- El checker sigue mandando sobre el código Fitz.
+- HTTP sigue siendo decoradores del lenguaje.
+- Result + match + `?` siguen siendo el modelo de errores.
+
+Python entra como **backend de librerías**, no como identidad
+del lenguaje. La regla operativa: si los usuarios terminan
+escribiendo handlers en `def` con sintaxis Python adentro de
+archivos `.fitz`, perdimos. Si escriben `fn` Fitz que llaman a
+`session.query(...)` y arman la respuesta con `Result<User>`,
+ganamos.
+
+Esta regla se traduce en concretos para la propuesta:
+- La guía nueva (6.8) ilustra el patrón "Python para librerías
+  pesadas, Fitz para todo lo demás" explícitamente.
+- Los ejemplos canónicos mantienen handlers `fn` Fitz puros que
+  consumen Python solo donde no hay alternativa nativa.
+- La documentación enumera qué partes del stack van a migrar a
+  Fitz nativo en fases futuras (DB driver, ORM) — Python es el
+  puente, no el destino.
+
+### Caso de uso canónico
+
+Lo concreto que esta fase tiene que habilitar:
+
+```fitz
+from python import sqlalchemy as sa
+from python.sqlalchemy.orm import Session
+
+type User { id: Int, email: Str, name: Str }
+
+let engine = sa.create_engine("postgresql://localhost/app")
+
+@get("/users/{id}")
+fn get_user(id: Int) -> Result<User> {
+    let session = Session(engine)
+    let row = session.query(UserModel).filter_by(id: id).first()?
+    return Ok(User { id: row.id, email: row.email, name: row.name })
+}
+
+@post("/users")
+fn create_user(body: UserInput) -> Result<User> {
+    let session = Session(engine)
+    let model = UserModel(email: body.email, name: body.name)
+    session.add(model)
+    session.commit()?
+    return Ok(User { id: model.id, email: model.email, name: model.name })
+}
+```
+
+La sintaxis exacta es propuesta — cada sub-paso puede afinarla.
+
+### Pasos
+
+#### 6.1 — Embedding básico de CPython
+**Pendiente** — embeber CPython en el runtime de Fitz via PyO3.
+Punto de partida de toda la fase. Sólo cubre el caso más
+chiquito: importar un módulo Python y llamar funciones top-level
+con argumentos y returns primitivos (Int, Float, Str, Bool).
+
+- Nueva sintaxis: `from python import <módulo>`. El parser
+  reconoce `python` como prefijo reservado para imports y
+  produce un nodo nuevo `Stmt::PyImport { path, alias }` (o
+  reutiliza `FromImport` con un flag, decisión a tomar al
+  implementar).
+- `from python import sqlalchemy as sa` — aliasing en imports.
+  Fitz hoy no lo soporta; cerrar esta sub-deuda como parte de
+  6.1 destraba nombres largos de módulos Python que serían
+  insufribles sin alias.
+- Nuevo valor en runtime: `Value::PyObject(Py<PyAny>)` que
+  envuelve un objeto Python con su referencia counted.
+- El evaluator detecta `Expr::Call` sobre un `Value::PyObject`
+  (función) y cruza al runtime Python via `Python::with_gil`.
+  Args se convierten a `PyObject` (sólo primitivos en 6.1),
+  return se convierte de vuelta a `Value` Fitz.
+- Build modes: `cargo build --features python` activa el
+  embedding. Sin la feature, los imports de Python disparan
+  error explícito mencionando que el binario no se compiló con
+  soporte de interop. Esto preserva la promesa "binario nativo
+  standalone" para proyectos que no la necesitan.
+
+**Criterio de éxito**:
+```fitz
+from python import math
+print(math.sqrt(16.0))  // 4
+print(math.pi)          // 3.141592653589793
+```
+
+**Decisiones técnicas a resolver**:
+- Versión mínima de CPython: probablemente 3.10 con ABI3 para
+  amortizar versiones futuras.
+- Si Fitz embebe CPython solo en el binario generado por
+  `fitz build` o también en el binario del compilador (`fitz
+  run`). Probablemente ambos, con la feature `python` activada
+  por default y switch para desactivarla.
+- Cómo el lexer distingue `python` como prefijo de import vs
+  un nombre normal. Una opción: keyword contextual (sólo
+  especial después de `from`). Otra: reservar `python` como
+  identifier prohibido para módulos del usuario.
+
+#### 6.2 — Marshaling de tipos compuestos
+**Pendiente** — extender las conversiones bidireccionales a
+List, Map, Instance y Null. Sin esto, los casos reales no son
+viables.
+
+- `List<T> ↔ list`: copia eager elemento por elemento. T
+  concreto requerido del lado Fitz (`List<Any>` cae al modelo
+  gradual).
+- `Map<K, V> ↔ dict`: copia eager. K debe ser hashable en
+  Python (Str/Int/Bool/Float). K = tipo nominal → error con
+  mensaje claro.
+- `Instance ↔ dict`: traducción nominal vía nombres de campo.
+  De Fitz a Python: `User { id: 1, name: "x" }` se convierte
+  a `{"id": 1, "name": "x"}`. De Python a Fitz: dict con
+  campos compatibles con el tipo declarado del receptor. Campos
+  faltantes (nullable o con default) se completan; faltantes
+  no-nullables → error.
+- `Null ↔ None`.
+- Tipos no marshalleables (Range, Function, otros PyObject
+  anidados) → error explícito al cruzar la frontera.
+
+**Criterio de éxito**: una función Python que recibe
+`List<User>` y devuelve `Map<Str, Int>` (un `count_by_email`,
+por ejemplo) tipa limpio en Fitz y se ejecuta sin perder data.
+
+**Decisiones técnicas a resolver**:
+- **Identidad vs referencia**: ¿`Rc<RefCell<List<T>>>` de Fitz
+  comparte estado con la `list` Python o se copia? El intérprete
+  Fitz tiene aliasing real entre instancias. Recomendación
+  para 6.2: **copia eager bidireccional**. Trade-off conocido
+  (caro para listas grandes), pero evita pesadillas de lifetime
+  entre dos GCs (refcount Rc + GC Python) y race conditions
+  GIL/tokio. Optimizaciones zero-copy con buffers protocolo
+  quedan para Fase 7+.
+- **Costo de marshaling**: una llamada Python con N args
+  primitivos + ret compuesto cuesta O(tamaño del ret) por la
+  copia. Cuantificable; las queries SQLAlchemy típicas
+  devuelven decenas de filas con pocos campos, entra cómodo en
+  el presupuesto de latencia de un endpoint HTTP.
+
+#### 6.3 — Excepciones Python → Result<T>
+**Pendiente** — convención automática: **toda** llamada a una
+función Python desde Fitz se envuelve en `Result<T>`. Si Python
+lanza `ValueError("x")`, Fitz lo recibe como `Err("ValueError:
+x")`. Esto preserva la decisión de diseño "sin excepciones"
+intacta y evita que excepciones Python escapen al runtime de
+Fitz como panics opacos.
+
+- Implementación: `Python::with_gil` envuelve la llamada en un
+  `match` sobre `PyResult<T>`. `Err(PyErr)` se serializa al
+  string del lado Fitz como `<ClassName>: <message>`.
+- El checker (6.4) refleja esta convención: una llamada Python
+  cuyo tipo de retorno no esté anotado tipa como `Result<Any>`,
+  no como `Any`. El usuario es forzado a manejar el error
+  (`match`, `?`) — el modelo de errores de Fitz se preserva.
+- KeyboardInterrupt, SystemExit y otras excepciones "de
+  control" propagan como Err también — no hay forma de matar
+  el runtime Fitz desde una excepción Python.
+
+**Criterio de éxito**:
+```fitz
+from python import json
+
+fn parse(input: Str) -> Result<Map<Str, Any>> {
+    return json.loads(input)  // implícito: Result<Map<Str, Any>>
+}
+
+match parse("{ malformado") {
+    Ok(m)  => print("ok: {m}"),
+    Err(e) => print("error: {e}")  // "error: JSONDecodeError: Expecting value..."
+}
+```
+
+**Decisiones técnicas a resolver**:
+- Formato del string de error: `<ClassName>: <message>` para
+  6.3, legible humano. Si más adelante hace falta acceso
+  estructurado (type, message, traceback), agregar un valor
+  `Value::PyException` opaco que el usuario puede inspeccionar
+  con métodos dedicados. Para 6.3 el string alcanza.
+- ¿Algún caso donde NO queremos envolver en Result?
+  Probablemente no — la consistencia es más valiosa que el
+  optimismo. Funciones Python que "nunca fallan" igual pueden
+  fallar (out-of-memory, etc.); envolver siempre es seguro.
+
+#### 6.4 — Tipos del lado del checker (anotaciones y opacidad)
+**Pendiente** — el checker estático no puede ver dentro de
+Python. Sin estrategia explícita, todas las llamadas Python
+serían `Result<Any>` y el valor del checker se diluiría en
+proyectos que dependen mucho de interop.
+
+**Estrategia escalonada**:
+
+1. **Default**: una llamada `python_module.func(args)` sin
+   anotación tipa como `Result<Any>`. El Result viene del 6.3
+   (automático), el Any preserva el modelo gradual de Fitz.
+2. **Anotación explícita del lado Fitz**: el usuario anota el
+   binding sitio con un tipo Fitz, y el checker valida que la
+   conversión es posible (las reglas del marshaling de 6.2).
+   ```fitz
+   let row: User = session.query(UserModel).filter_by(id: id).first()?
+   ```
+   Acá el `?` desempaca el `Result<Any>` a `Any`, y la anotación
+   `: User` coerciona Any→User. El runtime valida que el dict
+   Python tiene los campos requeridos.
+3. **Stubs `.pyi` parseados** (pospuesto a Fase 7+): leer
+   stubs PEP 561 y traducirlos automáticamente. Esto sería el
+   equivalente a `@types/...` de TypeScript. Mucho trabajo;
+   queda como upgrade futuro.
+
+**Criterio de éxito**: el caso de uso canónico (CRUD con
+SQLAlchemy) chequea con tipos Fitz reales (`User`, no `Any`)
+usando solo anotaciones explícitas en los puntos donde Python
+cruza a Fitz. Sin necesidad de stubs.
+
+**Decisiones técnicas a resolver**:
+- Sintaxis para tipos opacos de Python. Opciones consideradas:
+  - `Any` (gradual, sin info) — más simple, recomendado para
+    arrancar.
+  - `PyObject` (tipo dedicado, opaco) — distingue "objeto
+    Python" de "valor desconocido Fitz", útil para el checker.
+  - `PyObject<"sqlalchemy.Engine">` (string fantasma) —
+    permite distinguir engines de sessions sin saber su
+    estructura.
+  - Recomendación: empezar con `Any` opaco + anotaciones
+    explícitas en bindings. Promover a `PyObject<...>` si la
+    fricción aparece en proyectos reales.
+- Métodos sobre objetos Python (`engine.connect()`): hoy `Expr::Call`
+  con `callee: Expr::Field` sobre `Any` cae a gradual sin
+  chequear. La cadena ya funciona sin cambios al checker — los
+  imports de Python se benefician del comportamiento gradual
+  existente. No hace falta nuevo dispatch.
+
+#### 6.5 — Auto-mapeo de modelos SQLAlchemy a `type` de Fitz
+**Pendiente** — caso especial pero crítico para la ergonomía
+del caso canónico. Una clase `class User(Base): id =
+Column(Integer); ...` debería poder usarse desde Fitz como
+`type User { id: Int, ... }` sin escribir el `type` a mano
+dos veces.
+
+**Estrategia**: herramienta separada `fitz py-types
+<archivo.py> [--out <archivo.fitz>]`. La herramienta:
+1. Importa el archivo Python en un subprocess.
+2. Introspecciona `Base.metadata.tables` o subclasses de
+   `DeclarativeBase`.
+3. Por cada modelo, emite un `type` Fitz con los campos
+   traducidos:
+   - `Column(Integer)` → `Int`
+   - `Column(String)` → `Str`
+   - `Column(Float)` → `Float`
+   - `Column(Boolean)` → `Bool`
+   - `Column(DateTime)` → `Str` (ISO 8601) por ahora; tipo
+     `DateTime` nativo es deuda Fase 7+
+   - `nullable=True` → `T?`
+   - `default=...` → valor por defecto del campo
+4. El archivo generado es commiteable e inspeccionable. No
+   hay magia en build time.
+
+**Criterio de éxito**:
+```bash
+fitz py-types models.py --out models.fitz
+# models.fitz ahora tiene:
+#   type User { id: Int, email: Str, name: Str }
+#   type Order { id: Int, user_id: Int, total: Float }
+```
+Y `from models import User, Order` adentro del proyecto Fitz
+funciona como cualquier otro import.
+
+**Decisiones técnicas a resolver**:
+- Herramienta separada vs integración: la separada es más
+  simple y los archivos generados se versionan. Integración
+  (`from python.sqlalchemy import models as fitz_types`) es
+  más mágica pero introduce side effects en compile time.
+  Recomendación: arrancar con herramienta separada; promover
+  a integración si la fricción de "olvidé regenerar los
+  tipos" molesta en uso real.
+- Cobertura de otros ORMs: Django, Tortoise, Pony, peewee. Empezar
+  con SQLAlchemy (caso canónico). La arquitectura (introspección
+  + generación de `type`) se puede reusar; sub-comandos
+  específicos (`fitz py-types-django`) si hace falta.
+- Sincronía con cambios del schema: si el schema Python cambia,
+  ¿`fitz check` avisa que `models.fitz` está desactualizado?
+  Probablemente no en 6.5 — flujo manual de regeneración.
+  Verificación automática podría llegar como linter regla en
+  Fase 7+.
+
+#### 6.6 — Async + GIL — bridge tokio ↔ asyncio
+**Pendiente** — los handlers HTTP de Fitz corren sobre tokio
+(axum, desde Fase 4.2). SQLAlchemy 2.x tiene API async basada
+en asyncio. Llamar una corutina asyncio desde un task tokio no
+es trivial: requiere ejecutar el event loop de asyncio en un
+thread dedicado y schedular las corutinas en él. El paquete
+`pyo3-asyncio` resuelve esto.
+
+- Sintaxis: handlers `async fn` (cuando 5b.6 cierre con async
+  real) pueden hacer `await py_coro()` sobre una corutina
+  Python. Por debajo, `pyo3-asyncio::tokio::into_future`
+  convierte la corutina en un `Future<Output = PyResult<T>>`
+  awaiteable desde tokio.
+- Bridge invisible al usuario: desde Fitz se ve igual que
+  await sobre un future nativo.
+
+**Riesgo central — el GIL**: serializa todo el código Python.
+Aunque tengamos 100 conexiones HTTP concurrentes en axum,
+cuando todas pasen por `await session.execute(...)` van a
+serializarse en el GIL del lado Python. Para una API
+mayormente DB-bound (el caso típico de CRUD), esto es
+aceptable — la DB es el cuello de botella, no la CPU. Para
+una API CPU-intensiva con NumPy/pandas, podría ser fatal y
+hace falta soltar el GIL en las llamadas que se sabe que
+esperan I/O.
+
+**Criterio de éxito**:
+```fitz
+@get("/users/{id}")
+async fn get_user(id: Int) -> Result<User> {
+    let session = AsyncSession(engine)
+    let row = await session.execute(
+        "SELECT * FROM users WHERE id = $1",
+        [id]
+    )?
+    return Ok(User { id: row.id, email: row.email, name: row.name })
+}
+```
+50 requests concurrentes a este endpoint completan sin
+deadlock, con latencia razonable (P99 dominado por la DB,
+no por contención GIL).
+
+**Decisiones técnicas a resolver**:
+- Política de GIL por default: ¿soltarlo en cada llamada
+  (más concurrencia, overhead) o mantenerlo (menos overhead,
+  menos concurrencia)? PyO3 ofrece ambos vía
+  `Python::allow_threads`. Recomendación: soltar GIL
+  automáticamente cuando la llamada es a una corutina (caso
+  típico de I/O), mantener para llamadas síncronas (caso
+  típico de cómputo corto). Anotación opt-in
+  (`@release_gil`?) para casos donde el default no encaje.
+- Compatibilidad con 5b.6: el `async fn` que Fitz introduzca
+  como sintaxis tiene que componer con interop Python sin
+  sorpresas. El bridge `pyo3-asyncio` ya conoce tokio; el
+  trabajo es generar el código de adapter correcto desde
+  codegen.
+
+#### 6.7 — Distribución del binario con CPython embebido
+**Pendiente** — un binario Fitz que use interop Python necesita
+CPython disponible en runtime. La promesa "binario nativo
+standalone" de la Fase 5b se mantiene como **modo de build
+disponible** (proyectos sin interop), pero proyectos con
+interop tienen tres opciones de distribución:
+
+1. **CPython preinstalado en el sistema** (default 6.1-6.6,
+   simple, peor experiencia): el binario asume `python3.X` en
+   el `PATH`. Falla en máquinas que no lo tienen.
+2. **CPython embebido en el binario** (PyOxidizer o
+   equivalente, mejor experiencia, más tamaño): el binario
+   lleva su propio intérprete + standard library. ~10-30MB
+   extra de tamaño. Sin dependencias externas en runtime.
+3. **Docker base con Python** (compromise, cloud-native): el
+   binario espera Python en runtime, el contenedor lo provee.
+   Útil cuando ya estás deployando en contenedores.
+
+**Recomendación**: empezar con (1) durante desarrollo y
+testing (más rápido de iterar); agregar `fitz build
+--bundle-python` para emitir (2) cuando 6.7 cierre. Documentar
+(3) como pattern para deployments containerizados.
+
+**Criterio de éxito**: `fitz build api.fitz --bundle-python`
+produce un binario standalone que corre en un sistema fresh
+install (Ubuntu / Alpine / Windows sin Python instalado) y
+sirve el CRUD canónico de 6.5 contra una Postgres remota.
+
+**Decisiones técnicas a resolver**:
+- Herramienta de empaquetado: PyOxidizer es la opción
+  mainstream Rust-friendly, pero el proyecto se ralentizó en
+  2024-2025. Verificar estado al arrancar 6.7. Alternativas:
+  scripts custom que copian el `python3X.so` + standard lib +
+  archivo zip; o cosign de un release de python-build-standalone.
+- Librerías Python con extensiones C (numpy, pandas, psycopg2):
+  empaquetarlas standalone es notoriamente difícil. La
+  documentación de la fase debe ser honesta sobre qué funciona
+  out-of-the-box vs qué requiere venv preconfigurado.
+- Tamaño aceptable: ~30MB extra es razonable para un binario
+  de API. Si llegamos a 200MB porque NumPy+pandas+SQLAlchemy
+  cargan todo el universo, replantear.
+
+#### 6.8 — Guía + ejemplos + cierre de Fase 6
+**Pendiente** — capítulo nuevo en `docs/guide.md` titulado
+"Interop Python", probablemente entre el cap 17 (HTTP nativo)
+y el 18 ("Qué sigue"). Ejemplo ejecutable
+`examples/guide/19-python.fitz` (numeración tentativa) con un
+CRUD completo usando SQLAlchemy contra Postgres. Setup
+auxiliar `examples/guide/19-python.setup/` con `docker-compose.yml`
+para levantar Postgres local y `models.py` con los modelos
+SQLAlchemy. Actualización del cap "Qué sigue" para reflejar
+que la interop ya está cubierta.
+
+**Criterio de éxito**: un usuario que sabe Python básico + ha
+leído los caps 1-18 de la guía puede:
+1. Leer el cap nuevo (estimado 20-30 min de lectura).
+2. Correr `docker compose up` en el setup.
+3. Correr `fitz py-types models.py --out models.fitz`.
+4. Correr `fitz run 19-python.fitz`.
+5. Hacer `curl localhost:3000/users` y ver respuesta tipada.
+
+Sin pasos intermedios fuera de la guía.
+
+**Cierre formal de Fase 6**: todas las features de la lista de
+abajo marcadas, los 18 ejemplos existentes pasan `fitz check`
+sin regresiones, el ejemplo nuevo `19-python.fitz` corre
+end-to-end contra una Postgres real, y `examples/server.fitz`
+opcionalmente se reescribe para usar SQLAlchemy en lugar de
+state in-memory (decisión a tomar al cerrar — el server.fitz
+actual puede quedar como referencia de modo standalone).
+
+### Decisiones cross-cutting
+
+Estas decisiones no caen en un sub-paso específico; son
+consistencias que la fase entera tiene que mantener.
+
+1. **Sintaxis de import desde Python**. Opciones consideradas:
+   - **(A)** `from python import sqlalchemy` (namespace virtual
+     `python` reservado).
+   - **(B)** `import py:sqlalchemy` (prefijo de scheme estilo
+     URI).
+   - **(C)** `@python use sqlalchemy` (decorator a nivel
+     módulo).
+   - Recomendación: **(A)**. Reusa la sintaxis `from X import Y`
+     que el usuario ya conoce, no introduce caracteres
+     especiales nuevos, el AST puede reusar `Stmt::FromImport`
+     con un discriminante. Es la forma más cercana a
+     "se siente igual que un import normal pero el target es
+     Python".
+
+2. **Aliasing en imports (`as`)**. Fitz hoy no lo soporta para
+   imports normales; agregarlo es necesario para Python (los
+   módulos `sqlalchemy.orm.declarative_base`, etc., son
+   imposibles de usar sin alias). Decisión: cerrar la sub-deuda
+   en 6.1 — agregar `as` para imports normales también, no
+   solo Python. Beneficio bonus para el sistema de módulos
+   Fitz existente.
+
+3. **Dependencia Python como condicional**. Un proyecto Fitz
+   que no usa `from python import` no debería pagar nada
+   (tamaño del binario, tiempo de compilación, dependencia
+   runtime). Implementación: el codegen detecta presencia de
+   imports Python en el AST; sólo entonces emite el código de
+   embedding y la dependencia a PyO3 en `Cargo.toml`. Build
+   sin interop = binario igual al de la Fase 5b. **Esta
+   decisión preserva la promesa "binario nativo standalone"
+   como modo por default.**
+
+4. **Identidad en marshaling**: cubierto en 6.2. Default:
+   copia eager bidireccional, sin aliasing entre los dos
+   runtimes. Optimizaciones (zero-copy) son trabajo de Fase
+   7+.
+
+5. **Herencia desde clases Python**: explícitamente **NO
+   soportada** en Fase 6. Un `type` de Fitz no puede heredar
+   de una clase Python. Composición sí — un `type` puede
+   tener un campo `engine: Any` que envuelve un objeto Python.
+   La razón: herencia cruza modelos de objetos (Python tiene
+   MRO, Fitz no tiene clases) y abre una caja de pandora que
+   no aporta al caso de uso central.
+
+6. **Versionado de Python soportado**: ABI3 para amortizar
+   versiones. Mínimo Python 3.10 (versión más vieja con
+   soporte upstream a fecha de cierre de la fase; revisar al
+   arrancar 6.1).
+
+7. **Métodos sobre objetos Python (`obj.method()`)**: el
+   dispatch sobre Any/PyObject cae al modelo gradual del
+   checker existente (5.3.4). Sin trabajo nuevo. Anotaciones
+   explícitas siguen disponibles para casos donde se quiere
+   precisión.
+
+### Trade-offs reconocidos
+
+La fase tiene costos reales que vale la pena enumerar honestamente:
+
+- **Tensión con "binario nativo standalone"** (cap "Lo que
+  Fitz NO es" de vision.md). Resolución: dos modos de build
+  — puro nativo (sin interop, igual que Fase 5b) y nativo +
+  CPython embebido (con `--bundle-python`). El usuario elige
+  al deployar. La promesa original se preserva como modo
+  default; la interop es opt-in al nivel del proyecto.
+- **El GIL limita la concurrencia** justo donde Fitz quiere
+  brillar (handlers HTTP concurrentes). Mitigado en 6.6 con
+  soltado oportunístico del GIL en llamadas async, pero es
+  un techo real para APIs CPU-intensivas en Python.
+- **Costo de marshaling** Rust↔Python en cada cruce. Un
+  handler que hace 5 queries SQLAlchemy genera 10+ cruces.
+  Cuantificable; los benchmarks deberían formar parte del
+  criterio de cierre de 6.6.
+- **Riesgo de identidad del lenguaje**: si los usuarios usan
+  Python para TODO (HTTP, queries, JSON, lógica de negocio),
+  Fitz queda como cáscara sintáctica. Mitigación: la guía y
+  los ejemplos muestran el patrón explícitamente —
+  "Python para librerías pesadas, Fitz para lo demás" — y
+  los handlers de la guía siguen siendo `fn` Fitz puros con
+  Result, no envoltorios delgados.
+- **Tooling complejo**: la fase introduce dos artefactos
+  nuevos (CPython embebido, herramienta `fitz py-types`),
+  dos dependencias externas pesadas (PyO3,
+  posiblemente PyOxidizer), y una superficie nueva de bugs
+  que cruzan dos runtimes (refcount Rc + GC Python).
+  Estimar tiempo de implementación realista: probablemente
+  meses, no semanas.
+
+### Precedentes consultados
+
+Lenguajes y proyectos de los que esta fase aprende:
+
+- **PyO3** — la biblioteca base. Madura, mantenida, con tres
+  patrones de uso (extension modules, embedding, shared
+  layout). Fitz usa embedding como base, eventualmente puede
+  sumar extension modules para "Fitz como librería de
+  Python" en una fase futura.
+- **pyo3-asyncio** — bridge tokio ↔ asyncio. Crítico para
+  6.6.
+- **PyOxidizer** — para 6.7, empaquetado de CPython en
+  binarios standalone. Revisar estado del proyecto.
+- **Mojo** (Modular) — superset sintáctico de Python con
+  interop directa. Lección: ellos eligieron compatibilidad
+  sintáctica total. Fitz NO tiene esa restricción (y la
+  rechaza explícitamente — ver "Posicionamiento estratégico").
+- **Nim + nimpy** — precedente más directo. Lenguaje
+  compilado a nativo que importa Python. Resolvió bien la
+  sintaxis (`pyImport`) y el marshaling automático. Vale la
+  pena leer el código de nimpy antes de 6.1.
+- **Julia + PyCall** — lenguaje JIT con interop Python.
+  Resolvió el GIL con threading separado. Aplicable
+  parcialmente (Fitz no es JIT, pero el modelo de GIL
+  traduce).
+- **Crystal + Python bindings** — lenguaje compilado con
+  macros para envolver código externo. Menos relevante para
+  el caso DB, más para extender el lenguaje con C.
+
+### Riesgos
+
+- **Magnitud de la fase**: probablemente la más larga del
+  proyecto hasta acá. Estimación gruesa: 3-6 meses de
+  trabajo enfocado, muy por encima de cualquier fase de la
+  5b. Antes de arrancar 6.1, decidir explícitamente si la
+  fase entra completa o se parte en (6 — embedding y
+  marshaling, suficiente para casos simples) + (7 —
+  SQLAlchemy/async/bundling, llevándolo al caso de uso
+  canónico). Decisión a tomar al cerrar 5b.
+- **Dependencia externa pesada**: la fase atan Fitz a PyO3,
+  al equipo PyO3, y por extensión al ABI de CPython. Si
+  CPython cambia su API de embedding (cosas como GIL-free
+  Python en 3.13+), Fitz se ve afectado. Mitigación: ABI3
+  amortiza versiones, pero no protege contra cambios
+  estructurales.
+- **Fragmentación de proyectos**: parte de los proyectos
+  Fitz usan interop, parte no. Convivencia, distribución,
+  CI, todo se complica. La decisión cross-cutting #3
+  (dependencia condicional) mitiga pero no elimina.
+- **Riesgo de canibalización**: si interop Python es
+  demasiado bueno, ¿por qué alguien escribiría una librería
+  en Fitz puro? Mitigación: la performance del código Fitz
+  nativo tiene que seguir siendo claramente mejor que llamar
+  a Python (binario sin GIL, sin marshaling), y la
+  ergonomía de Fitz nativo (HTTP, tipos, Result) tiene que
+  estar varios pasos arriba de lo equivalente en Python.
+
+### Alternativa explícita: ORM y stack DB nativos (Fase 8+)
+
+A futuro, Fitz debería tener su propio stack de DB nativo:
+- Driver Postgres en Fitz puro (bindings directos a `libpq`
+  o port de `tokio-postgres` al codegen de Fitz).
+- ORM nativo declarativo sobre `type` (estilo Diesel o sqlx).
+- Migraciones, pool de conexiones, async nativo end-to-end.
+
+Eso es un proyecto en sí mismo, probablemente Fase 8+. La
+interop Python de la Fase 6 es **el puente** hasta llegar
+ahí, no el destino final. Vale la pena decirlo explícitamente
+en la documentación que la fase produce: "interop existe
+para que Fitz sea usable hoy; el stack nativo llega cuando
+lleguemos".
+
+### Features de la fase entera
+- [ ] Embedding básico de CPython + sintaxis `from python
+  import` (6.1)
+- [ ] Aliasing en imports (`as`) — sub-deuda de 6.1 que
+  beneficia a imports normales también
+- [ ] Marshaling List/Map/Instance/Null ↔ list/dict/None
+  (6.2)
+- [ ] Excepciones Python → Result<T> automático (6.3)
+- [ ] Anotaciones explícitas del lado Fitz + opacidad PyObject
+  (6.4)
+- [ ] Stubs `.pyi` — pospuesto a Fase 7+
+- [ ] Auto-mapeo SQLAlchemy → `type` via `fitz py-types` (6.5)
+- [ ] Bridge tokio ↔ asyncio + política de GIL (6.6)
+- [ ] Distribución con `--bundle-python` (6.7)
+- [ ] Guía + ejemplo CRUD + cierre formal (6.8)
+
+---
+
+## Fase 7 — Ecosistema 🌍
 **Estado: VISIÓN FUTURA**
 
 - [ ] Package manager (`fitz add`)
 - [ ] Fitz registry (repositorio de paquetes)
 - [ ] LSP (Language Server Protocol) — autocompletado en VSCode
 - [ ] Formatter (`fitz fmt`)
-- [ ] Linter (`fitz check`)
-- [ ] Interop Python via PyO3
+- [ ] Linter (`fitz check` ya cubre tipos; queda lint de estilo
+  y patrones)
+- [ ] Stubs `.pyi` para interop Python (pospuesto desde Fase 6)
+- [ ] Driver Postgres nativo (paso previo al ORM Fitz, ver Fase 8+)
 - [ ] Compilación a WebAssembly
 - [ ] Documentación oficial en español e inglés
 - [ ] Website del lenguaje
