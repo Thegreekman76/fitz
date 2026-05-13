@@ -6286,6 +6286,54 @@ mod tests {
             v.found
         }
 
+        /// Encuentra el primer `match` expr en los stmts (búsqueda
+        /// recursiva). Devuelve un clon de `ExprMatch` o None.
+        pub fn find_match(stmts: &[Stmt]) -> Option<syn::ExprMatch> {
+            use syn::visit::Visit;
+            struct V {
+                found: Option<syn::ExprMatch>,
+            }
+            impl<'ast> Visit<'ast> for V {
+                fn visit_expr_match(&mut self, e: &'ast syn::ExprMatch) {
+                    if self.found.is_none() {
+                        self.found = Some(e.clone());
+                    }
+                    syn::visit::visit_expr_match(self, e);
+                }
+            }
+            let mut v = V { found: None };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.found
+        }
+
+        /// Devuelve los tokens normalizados del primer macro call con el
+        /// nombre dado en los stmts (búsqueda recursiva, atraviesa todos
+        /// los anidamientos). None si no hay match.
+        pub fn first_macro_args_in_stmts(stmts: &[Stmt], name: &str) -> Option<String> {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                found: Option<String>,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_macro(&mut self, m: &'ast syn::Macro) {
+                    if self.found.is_none()
+                        && m.path.segments.last().is_some_and(|s| s.ident == self.name)
+                    {
+                        self.found = Some(ts(&m.tokens));
+                    }
+                    syn::visit::visit_macro(self, m);
+                }
+            }
+            let mut v = V { name, found: None };
+            for s in stmts {
+                v.visit_stmt(s);
+            }
+            v.found
+        }
+
         /// True si en el `fn` body aparece un `match` con al menos un
         /// arm cuyo pat contiene la needle dada (tokenizada).
         pub fn fn_body_has_match_arm_pat(f: &ItemFn, pat_needle: &str) -> bool {
@@ -8539,40 +8587,41 @@ mod tests {
     #[test]
     fn result_type_anotacion_emite_result_t_string() {
         // `Result<Int>` Fitz → `Result<i64, String>` Rust.
-        let code = gen(
-            "fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }",
-        )
-        .unwrap();
-        assert!(
-            code.contains("-> Result<i64, String>"),
-            "esperaba return type `Result<i64, String>`, got:\n{}",
-            code
+        let code =
+            gen("fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }").unwrap();
+        let file = ast_test::parse(&code);
+        let divide = ast_test::find_item_fn(&file, "divide").expect("falta fn divide");
+        assert_eq!(
+            ast_test::fn_return_type(divide).as_deref(),
+            Some("Result < i64 , String >"),
+            "esperaba return type `Result<i64, String>`"
         );
     }
 
     #[test]
     fn ok_constructor_emite_ok_envoltorio() {
-        let code = gen(
-            "fn ok42() -> Result<Int> { return Ok(42) }",
-        )
-        .unwrap();
+        let code = gen("fn ok42() -> Result<Int> { return Ok(42) }").unwrap();
+        let file = ast_test::parse(&code);
+        let ok42 = ast_test::find_item_fn(&file, "ok42").expect("falta fn ok42");
         assert!(
-            code.contains("return Ok(42i64);"),
-            "esperaba `return Ok(42i64);`, got:\n{}",
-            code
+            ast_test::fn_body_returns_any_matching(ok42, &["Ok", "42i64"]),
+            "esperaba `return Ok(42i64)`, body:\n{}",
+            ast_test::fn_body_text(ok42)
         );
     }
 
     #[test]
     fn err_con_str_literal_emite_string_from() {
-        let code = gen(
-            "fn boom() -> Result<Int> { return Err(\"explotó\") }",
-        )
-        .unwrap();
+        let code = gen("fn boom() -> Result<Int> { return Err(\"explotó\") }").unwrap();
+        let file = ast_test::parse(&code);
+        let boom = ast_test::find_item_fn(&file, "boom").expect("falta fn boom");
         assert!(
-            code.contains("return Err(String::from(\"explotó\"));"),
-            "esperaba `return Err(String::from(\"explotó\"));`, got:\n{}",
-            code
+            ast_test::fn_body_returns_any_matching(
+                boom,
+                &["Err", "String :: from", "\"explotó\""],
+            ),
+            "esperaba `return Err(String::from(\"explotó\"))`, body:\n{}",
+            ast_test::fn_body_text(boom)
         );
     }
 
@@ -8580,14 +8629,13 @@ mod tests {
     fn err_con_no_str_coerciona_via_format() {
         // Err(42): el Err side está pinned a String, así que se coerce
         // con format!. Cambio de comportamiento sutil pero documentado.
-        let code = gen(
-            "fn boom() -> Result<Str> { return Err(42) }",
-        )
-        .unwrap();
+        let code = gen("fn boom() -> Result<Str> { return Err(42) }").unwrap();
+        let file = ast_test::parse(&code);
+        let boom = ast_test::find_item_fn(&file, "boom").expect("falta fn boom");
         assert!(
-            code.contains("Err(format!(\"{}\", 42i64))"),
-            "esperaba coerción a String via format!, got:\n{}",
-            code
+            ast_test::fn_body_returns_any_matching(boom, &["Err", "format !", "42i64"]),
+            "esperaba coerción a String via format!, body:\n{}",
+            ast_test::fn_body_text(boom)
         );
     }
 
@@ -8599,10 +8647,28 @@ mod tests {
              fn describe(id: Int) -> Result<Str> { let u = find_user(id)?\n return Ok(\"x\") }",
         )
         .unwrap();
+        let file = ast_test::parse(&code);
+        let describe =
+            ast_test::find_item_fn(&file, "describe").expect("falta fn describe");
+        let u = ast_test::find_local_in_fn(describe, "u").expect("falta `let u`");
+        let init = ast_test::local_init_expr(&u).expect("`let u` sin init");
+        // Atraviesa paréntesis externos opcionales y verifica Try.
+        let mut e = init;
+        while let syn::Expr::Paren(p) = e {
+            e = &*p.expr;
+        }
+        let try_node = match e {
+            syn::Expr::Try(t) => t,
+            _ => panic!(
+                "esperaba `Expr::Try` como init de `u`, got tokens: {}",
+                ast_test::ts(init)
+            ),
+        };
+        let inner = ast_test::ts(&*try_node.expr);
         assert!(
-            code.contains("(find_user(id))?"),
-            "esperaba `(find_user(id))?` en describe, got:\n{}",
-            code
+            inner.contains("find_user") && inner.contains("(id)"),
+            "esperaba `find_user(id)?`, inner del Try: {}",
+            inner
         );
     }
 
@@ -8682,17 +8748,24 @@ mod tests {
              match find_user(1) { Ok(u) => print(u.id), Err(e) => print(e) }",
         )
         .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let m = ast_test::find_match(stmts).expect("falta match en main");
+        let ok_arm = m
+            .arms
+            .iter()
+            .find(|a| {
+                let p = ast_test::ts(&a.pat);
+                // `Ok (u)` con binding (no `Ok (__v)` interno ni `Ok (_)`).
+                p.contains("Ok") && p.contains("u") && !p.contains("__v") && !p.contains("_")
+                    || p == "Ok (u)"
+            })
+            .expect("falta arm `Ok(u)`");
+        let body = ast_test::ts(&*ok_arm.body);
         assert!(
-            code.contains("Ok(u) =>"),
-            "esperaba arm `Ok(u) =>`, got:\n{}",
-            code
-        );
-        // El cuerpo del arm debe poder hacer `u.id` (lo que requiere
-        // que `u` esté declarado con tipo `User`).
-        assert!(
-            code.contains(".borrow().id"),
-            "esperaba field access sobre el binding `u`, got:\n{}",
-            code
+            body.contains(". borrow") && body.contains(". id"),
+            "esperaba field access tipo `u.borrow().id` en el arm body, got: {}",
+            body
         );
     }
 
@@ -8705,15 +8778,22 @@ mod tests {
              let r = ok42()\nprint(r)",
         )
         .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let println_args = ast_test::first_macro_args_in_stmts(stmts, "println")
+            .expect("falta println! en main");
         assert!(
-            code.contains("Ok(__v) => format!(\"Ok({})\""),
-            "esperaba match inline con `Ok(__v) => format!(\"Ok({{}})\", ...)`, got:\n{}",
-            code
+            println_args.contains("Ok (__v)")
+                && println_args.contains("format !")
+                && println_args.contains("\"Ok({})\""),
+            "esperaba arm `Ok(__v) => format!(\"Ok({{}})\", ...)`, println! args:\n{}",
+            println_args
         );
         assert!(
-            code.contains("Err(__e) => format!(\"Err(\\\"{}\\\")\", __e)"),
-            "esperaba arm Err con comillas dobles alrededor del mensaje, got:\n{}",
-            code
+            println_args.contains("Err (__e)")
+                && println_args.contains("\"Err(\\\"{}\\\")\""),
+            "esperaba arm `Err(__e) => format!(\"Err(\\\"{{}}\\\")\", __e)`, println! args:\n{}",
+            println_args
         );
     }
 
@@ -8725,12 +8805,20 @@ mod tests {
              fn first(us: List<User>) -> Result<User> { let u = us.find(fn(u) => u.id == 1)?\n return Ok(u) }",
         )
         .unwrap();
-        // El find emite un bloque Result<User, String>; el `?` Rust se
-        // aplica al bloque entero.
+        let file = ast_test::parse(&code);
+        let first = ast_test::find_item_fn(&file, "first").expect("falta fn first");
+        let u = ast_test::find_local_in_fn(first, "u").expect("falta `let u` en first");
+        let init = ast_test::local_init_expr(&u).expect("`let u` sin init");
+        // El init debe ser `<expr>?` — `syn::Expr::Try` (opcionalmente
+        // envuelto en paréntesis).
+        let mut e = init;
+        while let syn::Expr::Paren(p) = e {
+            e = &*p.expr;
+        }
         assert!(
-            code.contains("})?"),
-            "esperaba que el bloque del find termine con `}})?` (operador ? sobre Result), got:\n{}",
-            code
+            matches!(e, syn::Expr::Try(_)),
+            "esperaba que el init de `u` sea `<expr>?`, got tokens: {}",
+            ast_test::ts(init)
         );
     }
 
@@ -8837,14 +8925,24 @@ mod tests {
     #[test]
     fn match_range_emite_guard_con_contains() {
         // Pattern de rango `0..10` → guard con `(0..10).contains(&__n)`.
-        let code = gen(
-            "let n = 5\nlet s = match n { 0..10 => \"chico\", _ => \"grande\" }",
-        )
-        .unwrap();
+        let code =
+            gen("let n = 5\nlet s = match n { 0..10 => \"chico\", _ => \"grande\" }").unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let m = ast_test::find_match(stmts).expect("falta match en main");
+        let guarded = m
+            .arms
+            .iter()
+            .find(|a| a.guard.is_some())
+            .expect("falta arm con guard (range pattern)");
+        let guard_tokens = ast_test::ts(&guarded.guard.as_ref().unwrap().1);
         assert!(
-            code.contains("__n if (0i64..10i64).contains(&__n)"),
-            "esperaba guard de rango, got:\n{}",
-            code
+            guard_tokens.contains("0i64")
+                && guard_tokens.contains("10i64")
+                && guard_tokens.contains(". contains")
+                && guard_tokens.contains("__n"),
+            "esperaba guard `(0i64..10i64).contains(&__n)`, got: {}",
+            guard_tokens
         );
     }
 }
