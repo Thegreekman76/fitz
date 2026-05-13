@@ -57,6 +57,12 @@ pub enum Type {
     /// que el lenguaje soporte genéricos de usuario (post-Fase 5).
     Result(Box<Type>),
 
+    /// `Future<T>` — el valor pendiente que produce una `async fn` al
+    /// llamarse. Solo `.await` (adentro de otra `async fn`) lo desempaca
+    /// a `T`. Aridad fija 1 (built-in genérico, paralelo a Result/List/
+    /// Nullable). Introducido en Fase 6.2.
+    Future(Box<Type>),
+
     /// Tipo declarado por el usuario (`type User { ... }`) o
     /// importado. La identidad va por `TypeId`.
     Nominal(TypeId),
@@ -110,6 +116,7 @@ impl Type {
             Type::List(t) => format!("List<{}>", t.display(env)),
             Type::Map(k, v) => format!("Map<{}, {}>", k.display(env), v.display(env)),
             Type::Result(t) => format!("Result<{}>", t.display(env)),
+            Type::Future(t) => format!("Future<{}>", t.display(env)),
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
             Type::Function { params, ret } => {
@@ -266,6 +273,11 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             expect_arity(name, 1, args)?;
             let inner = resolve_type_expr(&args[0], env)?;
             Ok(Type::Result(Box::new(inner)))
+        }
+        "Future" => {
+            expect_arity(name, 1, args)?;
+            let inner = resolve_type_expr(&args[0], env)?;
+            Ok(Type::Future(Box::new(inner)))
         }
         _ => {
             // Nominal declarado por el usuario.
@@ -574,6 +586,12 @@ struct CheckCtx<'a> {
     /// consulta para validar que solo aparezca adentro de un handler.
     /// `FnExpr` no es handler nunca; pushea `false`.
     in_http_handler: Vec<bool>,
+    /// Stack paralelo a `return_stack`: `true` cuando la fn actual es
+    /// `async`. `Expr::Await` lo consulta para validar que solo aparezca
+    /// adentro de una async fn. `FnExpr` no soporta async todavía
+    /// (el parser no lo admite); siempre pushea `false`. Introducido
+    /// en Fase 6.2.
+    await_stack: Vec<bool>,
     errors: Vec<FitzError>,
 }
 
@@ -585,6 +603,7 @@ impl<'a> CheckCtx<'a> {
             return_stack: Vec::new(),
             inferred_returns: Vec::new(),
             in_http_handler: Vec::new(),
+            await_stack: Vec::new(),
             errors: Vec::new(),
         };
         ctx.register_builtins();
@@ -1020,10 +1039,16 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // Empujamos `Any` al return_stack porque sin anotación
             // no podemos validar contra qué — los returns se
             // recolectan, no se chequean.
+            //
+            // `await_stack` pushea `false`: el lenguaje no soporta
+            // `async fn(...)` anónimas hoy. `.await` adentro de un
+            // FnExpr (incluso si está anidado adentro de una `async
+            // fn`) es error — el closure sync no puede await-ear.
             ctx.push_scope();
             ctx.return_stack.push(Type::Any);
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(false);
+            ctx.await_stack.push(false);
             let param_types: Vec<Type> = params
                 .iter()
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
@@ -1035,6 +1060,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             let returns = ctx.inferred_returns.pop().unwrap_or_default();
             ctx.return_stack.pop();
             ctx.in_http_handler.pop();
+            ctx.await_stack.pop();
             ctx.pop_scope();
             let ret = unify_returns(&returns);
             Type::Function {
@@ -1121,16 +1147,39 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Result(Box::new(Type::Any))
         }
         Expr::Await(inner, span) => {
-            // Barrera de 6.1: el parser construye el nodo, pero la
-            // semántica (validar contexto async + sintetizar `T` del
-            // operando `Future<T>`) entra en 6.2. Recursamos para no
-            // esconder errores de la sub-expresión.
-            let _ = infer_expr(ctx, inner);
-            ctx.error_at(
-                *span,
-                "el checker todavía no valida `.await` — llega en 6.2".to_string(),
-            );
-            Type::Any
+            // 6.2: semántica completa del checker.
+            //
+            // Regla 1 — contexto async. `.await` solo es legal adentro
+            // de una `async fn` Fitz. Top-level y FnExpr (closures
+            // sync) son inválidos. `await_stack.last()` nos dice si la
+            // fn más cercana es async. Si no, error con mensaje
+            // claro pero igual seguimos sintetizando un tipo para no
+            // confundir al usuario con errores cascada.
+            //
+            // Regla 2 — operando `Future<T>`. Lo que `.await` desempaca
+            // tiene que ser un `Future<T>` (o `Any` para escape
+            // gradual). Cualquier otro tipo concreto es error.
+            let operand_ty = infer_expr(ctx, inner);
+
+            let in_async = ctx.await_stack.last().copied().unwrap_or(false);
+            if !in_async {
+                ctx.error_at(
+                    *span,
+                    "`.await` solo es válido adentro de `async fn`".to_string(),
+                );
+            }
+
+            match &operand_ty {
+                Type::Any => Type::Any,
+                Type::Future(inner_ty) => (**inner_ty).clone(),
+                other => {
+                    ctx.error_at(*span, format!(
+                        "`.await` solo aplica a `Future<T>`, recibió `{}`",
+                        other.display(ctx.types)
+                    ));
+                    Type::Any
+                }
+            }
         }
 
         Expr::Try(inner, span) => {
@@ -1237,6 +1286,7 @@ fn lub(a: &Type, b: &Type) -> Type {
             Type::Map(Box::new(lub(ak, bk)), Box::new(lub(av, bv)))
         }
         (Type::Result(ai), Type::Result(bi)) => Type::Result(Box::new(lub(ai, bi))),
+        (Type::Future(ai), Type::Future(bi)) => Type::Future(Box::new(lub(ai, bi))),
         (Type::Nullable(ai), Type::Nullable(bi)) => Type::Nullable(Box::new(lub(ai, bi))),
         _ => Type::Any,
     }
@@ -1746,6 +1796,7 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
             is_compatible(ka, kb) && is_compatible(va, vb)
         }
         (Type::Result(a), Type::Result(b)) => is_compatible(a, b),
+        (Type::Future(a), Type::Future(b)) => is_compatible(a, b),
         (Type::Nullable(a), Type::Nullable(b)) => is_compatible(a, b),
         (
             Type::Function { params: pa, ret: ra },
@@ -1929,6 +1980,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             return_type,
             body,
             decorators,
+            is_async,
             ..
         } => {
             // Abrimos scope nuevo para params y locales. Los params se
@@ -1939,6 +1991,14 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // mantener consistencia con FnExpr (los frames van en
             // paralelo); el contenido se descarta acá porque FnDef
             // ya tiene `return_type` declarado.
+            //
+            // Async (6.2): la firma EXTERNA de una `async fn` envuelve
+            // su return type en `Future<T>` (eso se construye en
+            // `preregister_fn_signatures` para que las llamadas a la
+            // fn tipen correctamente). Pero adentro del body, los
+            // `return x` siguen produciendo `T` puro (no `Future<T>`)
+            // — `async` es transparente desde adentro. Por eso al
+            // pushear el `return_stack` usamos `T` (no envuelto).
             let ret = match return_type {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
@@ -1950,6 +2010,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(is_http_handler);
+            ctx.await_stack.push(*is_async);
             for p in params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
                 ctx.declare_var(p.name.clone(), pty);
@@ -1958,6 +2019,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.inferred_returns.pop();
             ctx.return_stack.pop();
             ctx.in_http_handler.pop();
+            ctx.await_stack.pop();
             ctx.pop_scope();
         }
 
@@ -2035,6 +2097,7 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
             name,
             params,
             return_type,
+            is_async,
             ..
         } = stmt
         {
@@ -2046,11 +2109,25 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
+            // Async (6.2): la firma EXTERNA envuelve el return type
+            // en `Future<T>`. Llamar a `async_fn(args)` produce
+            // `Future<T>`, que se desempaca con `.await`. Incluso
+            // sin anotación (T = Any), envolvemos como `Future<Any>`
+            // — el roadmap (cross-cutting #3) lo formaliza así:
+            // toda async fn produce un Future al llamarse, sin
+            // excepciones. `is_compatible` y `.await` ya tratan a
+            // `Any` como gradual escape, así que `Future<Any>`
+            // sigue dejando pasar todo.
+            let outer_ret = if *is_async {
+                Type::Future(Box::new(ret))
+            } else {
+                ret
+            };
             ctx.declare_var(
                 name.clone(),
                 Type::Function {
                     params: param_types,
-                    ret: Box::new(ret),
+                    ret: Box::new(outer_ret),
                 },
             );
         }
@@ -2112,22 +2189,176 @@ mod tests {
         assert_eq!(e.column, 1, "esperaba col 1, fue {}", e.column);
     }
 
-    // ---- Fase 6.1: barrera del checker sobre `.await` ----
+    // ---- Fase 6.2: type checker para async/await ----
 
     #[test]
-    fn await_es_error_de_checker_hasta_6_2() {
-        // El parser construye `Expr::Await` desde 6.1, pero el checker
-        // todavía no lo valida (legalidad en async fn + operando
-        // `Future<T>`). Mientras tanto emite un error explícito que
-        // cita el sub-paso (6.2) y la sintaxis (`.await`).
-        let errors = errors_of("let x = 1\nlet y = x.await");
-        assert!(!errors.is_empty(), "esperaba error del checker");
+    fn future_se_resuelve_como_generico_built_in() {
+        // `Future<T>` reusa `TypeExpr::Generic` (decisión de 6.1) y
+        // 6.2 lo mapea a `Type::Future(Box<T>)`. Aridad fija 1.
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic {
+            name: "Future".into(),
+            args: vec![TypeExpr::Named("Int".into())],
+        };
+        let ty = resolve_type_expr(&te, &env).expect("Future<Int> debe resolver");
+        assert_eq!(ty, Type::Future(Box::new(Type::Int)));
+    }
+
+    #[test]
+    fn future_sin_argumento_es_error_de_aridad() {
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic { name: "Future".into(), args: vec![] };
+        let err = resolve_type_expr(&te, &env).expect_err("aridad 0 debe fallar");
+        assert!(matches!(err.kind, ErrorKind::TypeError));
+    }
+
+    #[test]
+    fn future_con_dos_argumentos_es_error_de_aridad() {
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic {
+            name: "Future".into(),
+            args: vec![
+                TypeExpr::Named("Int".into()),
+                TypeExpr::Named("Str".into()),
+            ],
+        };
+        let err = resolve_type_expr(&te, &env).expect_err("aridad 2 debe fallar");
+        assert!(matches!(err.kind, ErrorKind::TypeError));
+    }
+
+    #[test]
+    fn future_display_muestra_inner() {
+        let env = TypeEnv::new();
+        let ty = Type::Future(Box::new(Type::Int));
+        assert_eq!(ty.display(&env), "Future<Int>");
+    }
+
+    #[test]
+    fn await_fuera_de_async_fn_es_error() {
+        // Top-level: `await_stack` está vacío → la regla "solo adentro
+        // de async fn" dispara.
+        let errors = errors_of(
+            "async fn fetch() -> Int {\n\
+                 return 0\n\
+             }\n\
+             let x = fetch().await",
+        );
+        assert!(!errors.is_empty(), "esperaba al menos 1 error");
         let msg = &errors[0].message;
         assert!(
-            msg.contains("6.2") && msg.contains(".await"),
-            "esperaba mensaje mencionando 6.2 y `.await`, fue: {}",
+            msg.contains(".await") && msg.contains("async fn"),
+            "esperaba mensaje sobre `.await` y `async fn`, fue: {}",
             msg
         );
+    }
+
+    #[test]
+    fn await_sobre_no_future_es_error() {
+        // Operando concreto distinto de `Future<T>` → error.
+        let errors = errors_of(
+            "async fn f() -> Int {\n\
+                 let x: Int = 42\n\
+                 return x.await\n\
+             }",
+        );
+        assert!(!errors.is_empty(), "esperaba 1 error");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("Future") && msg.contains("Int"),
+            "esperaba mensaje sobre Future y Int, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn await_sobre_future_dentro_de_async_fn_pasa() {
+        // Caso happy: async fn que llama a otra async fn y await-ea
+        // el resultado. La llamada a `inner()` tipa `Future<Int>`,
+        // `.await` desempaca a `Int`, return Int matchea.
+        let errors = errors_of(
+            "async fn inner() -> Int {\n\
+                 return 1\n\
+             }\n\
+             async fn outer() -> Int {\n\
+                 return inner().await\n\
+             }",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn async_fn_referenciada_como_ident_tipa_function_con_future() {
+        // Una `async fn f() -> Int` referenciada como valor (sin
+        // call) tipa `Function { ret: Future<Int> }`. La firma
+        // EXTERNA del async fn envuelve en Future. Validamos via
+        // un `let g: Future<Int> = f()` que el checker acepte.
+        let errors = errors_of(
+            "async fn f() -> Int {\n\
+                 return 0\n\
+             }\n\
+             let g: Future<Int> = f()",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn return_dentro_de_async_fn_no_envuelve_en_future() {
+        // El `async` es transparente desde adentro: un `return x: Int`
+        // adentro de `async fn -> Int` tipa Int contra Int, no
+        // Int contra Future<Int>.
+        let errors = errors_of(
+            "async fn f() -> Int {\n\
+                 return 42\n\
+             }",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn await_adentro_de_fnexpr_es_error_aunque_padre_sea_async() {
+        // FnExpr (closure) siempre pushea `await_stack` con false —
+        // el lenguaje no soporta `async fn(...)` anónimas. `.await`
+        // adentro del closure es error aunque el contenedor sea
+        // async fn.
+        let errors = errors_of(
+            "async fn fetch() -> Int {\n\
+                 return 0\n\
+             }\n\
+             async fn outer() -> Int {\n\
+                 let cb = fn() => fetch().await\n\
+                 return cb()\n\
+             }",
+        );
+        assert!(!errors.is_empty(), "esperaba error en el `.await` del closure");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("async fn"),
+            "esperaba mensaje sobre async fn, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn await_sobre_any_es_gradual_y_no_chequea() {
+        // Una fn sin anotación de return tipa `Function { ret: Any }`.
+        // La llamada produce Any; `.await` sobre Any pasa por
+        // escape gradual (resultado Any). Sin errores.
+        let errors = errors_of(
+            "fn untyped() => 0\n\
+             async fn outer() -> Int {\n\
+                 return untyped().await\n\
+             }",
+        );
+        // El `.await` no debería disparar el error de "no es Future"
+        // porque el operando es Any (gradual escape). Si hay errores
+        // otros, los inspeccionamos — pero el mensaje específico de
+        // "Future" no debe aparecer.
+        let any_future_err = errors.iter().any(|e|
+            e.message.contains("Future") && e.message.contains(".await")
+        );
+        assert!(!any_future_err,
+            "el await sobre Any no debería disparar error de Future, fue: {:?}",
+            errors);
     }
 
     // ---- C-F2: field assignment chequeo ----

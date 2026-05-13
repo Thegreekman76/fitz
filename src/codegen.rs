@@ -5376,6 +5376,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::List(_) => "List<...>",
         Type::Map(_, _) => "Map<...>",
         Type::Result(_) => "Result<...>",
+        Type::Future(_) => "Future<...>",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
@@ -5397,6 +5398,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::List(inner) => format!("List<{}>", display_type(inner, env)),
         Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
         Type::Result(inner) => format!("Result<{}>", display_type(inner, env)),
+        Type::Future(inner) => format!("Future<{}>", display_type(inner, env)),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
         Type::Function { params, ret } => {
