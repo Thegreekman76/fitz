@@ -27,6 +27,18 @@ use serde_json::{json, Map, Value};
 use crate::ast::{Field, Program, Stmt, TypeExpr};
 use crate::http::{HttpRegistry, RouteSpec};
 
+/// HTML embebido para la UI de docs (Fase 7.3). Carga el bundle de
+/// Scalar desde el CDN de jsdelivr y le apunta al `/openapi.json`
+/// que el server sirve adyacente. ~10 líneas; el peso del binario
+/// no se mueve (el bundle de Scalar baja en el browser, primera vez
+/// que se visita `/docs`).
+///
+/// Trade-off documentado: la primera carga necesita red. Después el
+/// navegador cachea. Si en el futuro queremos un bundle local
+/// embebido (offline), se reemplaza el `<script src>` por
+/// `include_bytes!` de un asset. Hoy es deuda post-F7.
+pub const SCALAR_HTML: &str = include_str!("templates/scalar.html");
+
 /// Genera el schema OpenAPI 3.1 del programa.
 ///
 /// Entradas:

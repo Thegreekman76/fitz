@@ -1106,19 +1106,31 @@ pub fn build_router(
         router = router.route(&meta.path, route_handler);
     }
 
-    // Auto-register de /openapi.json (Fase 7.2). El schema viene
-    // precomputado por `serve` (eager, una sola vez al arrancar);
-    // cada request lo clona — clone de `serde_json::Value` es lineal
-    // en el tamaño del schema, despreciable para APIs típicas.
+    // Auto-register de /openapi.json (Fase 7.2) y /docs (Fase 7.3).
+    // El schema viene precomputado por `serve` (eager, una sola vez
+    // al arrancar); cada request lo clona — clone de `serde_json::Value`
+    // es lineal en el tamaño del schema, despreciable para APIs
+    // típicas. La UI Scalar es HTML estático (incluido al binario
+    // como `&'static str`).
+    //
+    // En ambos casos: si el usuario ya declaró un handler con el
+    // mismo path, el auto-register cede.
     if let Some(schema) = openapi_schema {
-        let user_declared = metas.iter().any(|m| m.path == "/openapi.json");
-        if !user_declared {
+        if !metas.iter().any(|m| m.path == "/openapi.json") {
             let schema = std::sync::Arc::new(schema);
             router = router.route(
                 "/openapi.json",
                 axum::routing::get(move || {
                     let schema = schema.clone();
                     async move { axum::Json((*schema).clone()) }
+                }),
+            );
+        }
+        if !metas.iter().any(|m| m.path == "/docs") {
+            router = router.route(
+                "/docs",
+                axum::routing::get(|| async {
+                    axum::response::Html(crate::openapi::SCALAR_HTML)
                 }),
             );
         }
@@ -1497,6 +1509,7 @@ pub fn serve(
                     eprintln!("   {} {}", meta.method.as_str(), meta.path);
                 }
                 eprintln!("   GET /openapi.json  (schema autogenerado)");
+                eprintln!("   GET /docs          (UI Scalar)");
                 axum::serve(listener, router)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
@@ -2720,6 +2733,109 @@ mod tests {
         // NO contiene "_marker" del schema auto-register.
         assert_eq!(body, "\"mio\"");
         assert!(!body.contains("_marker"));
+    }
+
+    // ---- 7.3 auto-register de /docs (UI Scalar) ----
+
+    /// Helper local: GET /docs sobre un router armado con o sin schema.
+    async fn oneshot_get_docs(
+        metas: Vec<RouteMeta>,
+        openapi_schema: Option<serde_json::Value>,
+    ) -> (u16, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, openapi_schema);
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/docs")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_con_schema_some_registra_docs() {
+        // GET /docs devuelve el HTML embebido. Verificamos que el
+        // body referencia `/openapi.json` (data-url del script de
+        // Scalar) — eso garantiza que el HTML está conectado al
+        // schema autogenerado.
+        let schema = serde_json::json!({ "openapi": "3.1.0", "paths": {} });
+        let (status, body) = oneshot_get_docs(vec![], Some(schema)).await;
+        assert_eq!(status, 200);
+        assert!(
+            body.contains("data-url=\"/openapi.json\""),
+            "esperaba que el HTML referenciara /openapi.json, body fue:\n{}",
+            body
+        );
+        assert!(
+            body.contains("@scalar/api-reference"),
+            "esperaba que el HTML cargara el bundle de Scalar, body fue:\n{}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_con_schema_none_no_registra_docs() {
+        // Sin schema no se registra /docs (paridad con /openapi.json).
+        let (status, _body) = oneshot_get_docs(vec![], None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn usuario_declara_docs_propio_y_gana_sobre_auto_register() {
+        // El usuario declaró su propio `@get("/docs")`. El auto-register
+        // de la UI Scalar cede — la ruta del usuario es la que responde.
+        let src = "@get(\"/docs\")\nfn custom() => \"docs-personalizada\"";
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let auto_schema = serde_json::json!({ "openapi": "3.1.0" });
+
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, Some(auto_schema));
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/docs")
+            .body(Body::empty())
+            .unwrap();
+
+        let local = tokio::task::LocalSet::new();
+        let (status, body) = local
+            .run_until(async move {
+                let mut resp_fut = Box::pin(router.oneshot(req));
+                loop {
+                    tokio::select! {
+                        resp = &mut resp_fut => {
+                            let resp = resp.unwrap();
+                            let status = resp.status().as_u16();
+                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                            return (status, String::from_utf8(bytes.to_vec()).unwrap());
+                        }
+                        Some(task) = rx.recv() => {
+                            let outcome = handle_task(
+                                &registry,
+                                task.route_idx,
+                                task.path_params,
+                                task.query_params,
+                                task.body,
+                            ).await;
+                            let _ = task.reply.send(outcome);
+                        }
+                    }
+                }
+            })
+            .await;
+        assert_eq!(status, 200);
+        // Body del usuario, no el HTML de Scalar.
+        assert_eq!(body, "\"docs-personalizada\"");
+        assert!(!body.contains("@scalar/api-reference"));
     }
 
     #[tokio::test(flavor = "current_thread")]
