@@ -3440,9 +3440,9 @@ impl<'a> CodegenCtx<'a> {
     }
 
     /// Dry-run del body de un `FnExpr` para sintetizar el ret type.
-    /// Como en `infer_callback_ret_silently`: scope nuevo con params
-    /// + capturas bindeados, gen_expr sobre el primer `Stmt::Return`
-    /// del body (o último `Stmt::Expr` no-print, o `Null`).
+    /// Como en `infer_callback_ret_silently`: scope nuevo con params y
+    /// capturas bindeados, gen_expr sobre el primer `Stmt::Return` del
+    /// body (o último `Stmt::Expr` no-print, o `Null`).
     fn infer_fn_expr_ret_silently(
         &mut self,
         body: &[Stmt],
@@ -8112,7 +8112,7 @@ mod tests {
         let users = routes
             .iter()
             .find(|(p, _)| p.contains("/users"))
-            .expect(&format!("esperaba route /users, got: {:?}", routes));
+            .unwrap_or_else(|| panic!("esperaba route /users, got: {:?}", routes));
         assert!(
             users.1.contains("axum :: routing :: get") && users.1.contains("__handler_list_users"),
             "esperaba `axum::routing::get(__handler_list_users)`, got: {}",

@@ -5877,8 +5877,7 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     fn first_runtime_error(src: &str) -> FitzError {
-        let err = parse_and_eval(src).expect_err("esperado un error de runtime");
-        err
+        parse_and_eval(src).expect_err("esperado un error de runtime")
     }
 
     #[test]
