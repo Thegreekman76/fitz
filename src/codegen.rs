@@ -1200,26 +1200,27 @@ fn generate_main_rs(
                     // Separar `@server` de los `@get`/`@post`/etc.
                     let mut http_decos = false;
                     for d in decorators {
-                        // 7.0: ningún decorator soportado por codegen
-                        // acepta kwargs todavía. `@server(docs=false)`
-                        // aterriza en 7.5 (paridad build); headers en
-                        // 7.6. Hasta entonces, kwargs sobre cualquiera
-                        // de los 5 decorators son error de codegen claro.
-                        if let Some((key, _)) = d.kwargs.first() {
-                            return Err(FitzError::new(
-                                ErrorKind::TypeError,
-                                0,
-                                0,
-                                format!(
-                                    "decorator `@{}` sobre fn `{}`: el argumento por nombre '{}=...' no está soportado en codegen todavía (soporte para kwargs llega en 7.5 / 7.6)",
-                                    d.name, name, key,
-                                ),
-                            ));
+                        // 7.5: `@server` ahora acepta kwargs (delegado a
+                        // `parse_server_decorator`). Los decoradores HTTP
+                        // de ruta siguen sin aceptar kwargs hasta 7.6
+                        // (cuando aterricen headers).
+                        if d.name != "server" {
+                            if let Some((key, _)) = d.kwargs.first() {
+                                return Err(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    0,
+                                    0,
+                                    format!(
+                                        "decorator `@{}` sobre fn `{}`: el argumento por nombre '{}=...' no está soportado en codegen todavía (soporte para kwargs en decoradores HTTP llega en 7.6)",
+                                        d.name, name, key,
+                                    ),
+                                ));
+                            }
                         }
                         match d.name.as_str() {
                             "get" | "post" | "put" | "delete" => http_decos = true,
                             "server" => {
-                                server_config = Some(parse_server_decorator(&d.args)?);
+                                server_config = Some(parse_server_decorator(&d.args, &d.kwargs)?);
                             }
                             other => {
                                 return Err(FitzError::new(
@@ -1362,7 +1363,9 @@ fn generate_main_rs(
             ctx.gen_http_handler_wrapper(stmt)?;
         }
         // `#[tokio::main] async fn main` con Router + serve.
-        ctx.gen_http_main(&http_fns, &server_config, &main_stmts)?;
+        // Fase 7.5: pasamos `program` para que adentro pueda
+        // pre-computar el schema OpenAPI desde el AST.
+        ctx.gen_http_main(&http_fns, &server_config, &main_stmts, program)?;
     } else {
         // Modo CLI: cuerpo de `fn main()` con el resto de stmts.
         ctx.gen_main(&main_stmts)?;
@@ -1372,11 +1375,16 @@ fn generate_main_rs(
 }
 
 /// Valores parseados de `@server(port?, host?)`. Defaults aplicados
-/// (puerto 3000, host "127.0.0.1") si los args no están.
+/// (puerto 3000, host "127.0.0.1", docs habilitados) si los args
+/// no están.
 #[derive(Debug, Clone)]
 struct ServerConfigArgs {
     port: u16,
     host: String,
+    /// Fase 7.5: `false` apaga el auto-register de `/openapi.json` y
+    /// `/docs` en el binario nativo. Default `true`, opt-out con
+    /// `@server(docs=false)`.
+    enable_docs: bool,
 }
 
 impl Default for ServerConfigArgs {
@@ -1384,16 +1392,23 @@ impl Default for ServerConfigArgs {
         ServerConfigArgs {
             port: 3000,
             host: "127.0.0.1".to_string(),
+            enable_docs: true,
         }
     }
 }
 
-/// Parsea los args de un decorator `@server(port?, host?)`. Validaciones:
+/// Parsea los args de un decorator `@server(port?, host?, docs=Bool?)`.
+/// Validaciones:
 ///   - Hasta 2 args positionals: `(port: Int)` o `(port: Int, host: Str)`.
 ///   - Port entre 1 y 65535.
 ///   - Host parsea como `IpAddr` (sin DNS). Validación delegada al runtime
 ///     porque acá solo tenemos un literal Str.
-fn parse_server_decorator(args: &[Expr]) -> Result<ServerConfigArgs, FitzError> {
+///   - Kwargs: solo `docs: Bool` por ahora (Fase 7.5). Otros kwargs son
+///     error con el mismo mensaje que el runtime ("kwarg X no reconocido").
+fn parse_server_decorator(
+    args: &[Expr],
+    kwargs: &[(String, Expr)],
+) -> Result<ServerConfigArgs, FitzError> {
     let mut cfg = ServerConfigArgs::default();
     if args.len() > 2 {
         return Err(FitzError::new(
@@ -1437,6 +1452,36 @@ fn parse_server_decorator(args: &[Expr]) -> Result<ServerConfigArgs, FitzError> 
         // No validamos IP acá: rustc no puede hacerlo en compile time.
         // El parse se hace en runtime; si falla, axum/tokio reportarán.
         cfg.host = s.clone();
+    }
+    // Fase 7.5: kwargs. Hoy solo `docs: Bool`.
+    for (key, value_expr) in kwargs {
+        match key.as_str() {
+            "docs" => {
+                let Expr::Bool(b, _) = value_expr else {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'docs' debe ser Bool literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                };
+                cfg.enable_docs = *b;
+            }
+            other => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    format!(
+                        "@server: kwarg '{}' no reconocido. Soportados: docs.",
+                        other
+                    ),
+                ));
+            }
+        }
     }
     Ok(cfg)
 }
@@ -4778,6 +4823,7 @@ impl<'a> CodegenCtx<'a> {
         http_fns: &[&Stmt],
         server_config: &Option<ServerConfigArgs>,
         main_stmts: &[&Stmt],
+        program: &Program,
     ) -> Result<(), FitzError> {
         // F11: emitir un `thread_local!` por cada state var detectado.
         // El init es la expresión RHS original del `Stmt::Assign`. El
@@ -4822,6 +4868,70 @@ impl<'a> CodegenCtx<'a> {
         // pidiendo `Send` sobre los futures, pero los wrappers
         // `__handler_<name>` que generamos son sync (sus locals Rc no
         // cruzan ningún `.await`), así que cumplen el bound.
+
+        // Fase 7.5: auto-register de /openapi.json y /docs en el
+        // binario nativo. Decisión por (enable_docs × paths declarados
+        // por el usuario): si el usuario declaró un handler con
+        // /openapi.json o /docs, su versión gana — mismo comportamiento
+        // que el runtime (7.2/7.3).
+        let cfg = server_config.clone().unwrap_or_default();
+        let mut user_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for stmt in http_fns {
+            let Stmt::FnDef { decorators, .. } = stmt else { continue };
+            for d in decorators {
+                if !matches!(d.name.as_str(), "get" | "post" | "put" | "delete") {
+                    continue;
+                }
+                let Some(path_arg) = d.args.first() else { continue };
+                let (path, _q) = parse_http_path(path_arg)?;
+                user_paths.insert(path);
+            }
+        }
+        let auto_openapi = cfg.enable_docs && !user_paths.contains("/openapi.json");
+        let auto_docs = cfg.enable_docs && !user_paths.contains("/docs");
+
+        // Si alguna ruta auto se va a emitir, pre-computamos el schema
+        // OpenAPI desde el AST y lo embebemos como `&'static str` JSON.
+        // El HTML de Scalar viene de `crate::openapi::SCALAR_HTML` y
+        // se embebe textualmente también.
+        if auto_openapi || auto_docs {
+            // Schema: armamos las rutas desde AST y serializamos a JSON.
+            let routes = crate::openapi::pseudo_routes_from_ast(program)?;
+            let schema = crate::openapi::generate_openapi(&routes, program);
+            let schema_str = serde_json::to_string(&schema).map_err(|e| {
+                FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!("error serializando schema OpenAPI: {}", e),
+                )
+            })?;
+            if auto_openapi {
+                self.emit("/// Schema OpenAPI 3.1 generado por `fitz build` (Fase 7.5).\n");
+                self.emit("static __FITZ_OPENAPI_SCHEMA: &str = r###\"");
+                self.emit(&schema_str);
+                self.emit("\"###;\n\n");
+                self.emit("async fn __serve_openapi_json() -> axum::response::Response {\n");
+                self.emit("    use axum::response::IntoResponse;\n");
+                self.emit("    (\n");
+                self.emit("        [(axum::http::header::CONTENT_TYPE, \"application/json\")],\n");
+                self.emit("        __FITZ_OPENAPI_SCHEMA,\n");
+                self.emit("    ).into_response()\n");
+                self.emit("}\n\n");
+            }
+            if auto_docs {
+                self.emit("/// HTML de la UI Scalar embebido (Fase 7.5).\n");
+                self.emit("static __FITZ_SCALAR_HTML: &str = r###\"");
+                self.emit(crate::openapi::SCALAR_HTML);
+                self.emit("\"###;\n\n");
+                self.emit(
+                    "async fn __serve_docs() -> axum::response::Html<&'static str> {\n",
+                );
+                self.emit("    axum::response::Html(__FITZ_SCALAR_HTML)\n");
+                self.emit("}\n\n");
+            }
+        }
+
         self.emit("#[tokio::main(flavor = \"current_thread\")]\nasync fn main() {\n");
         self.indent += 1;
         self.push_scope();
@@ -4868,11 +4978,20 @@ impl<'a> CodegenCtx<'a> {
                 .unwrap();
             }
         }
+        // Fase 7.5: rutas auto-registradas. Mismo orden que el runtime
+        // (7.2/7.3): /openapi.json primero, /docs después.
+        if auto_openapi {
+            self.emit_indent();
+            self.emit("    .route(\"/openapi.json\", axum::routing::get(__serve_openapi_json))\n");
+        }
+        if auto_docs {
+            self.emit_indent();
+            self.emit("    .route(\"/docs\", axum::routing::get(__serve_docs))\n");
+        }
         self.emit_indent();
         self.emit(";\n");
 
         // Addr config.
-        let cfg = server_config.clone().unwrap_or_default();
         self.emit_indent();
         writeln!(
             &mut self.output,
@@ -8969,6 +9088,153 @@ mod tests {
                 || body.contains("\"127.0.0.1:3000\".parse"),
             "esperaba `\"127.0.0.1:3000\".parse()` (default), got:\n{}",
             body
+        );
+    }
+
+    #[test]
+    fn http_75_emite_static_openapi_schema_y_handler() {
+        // Fase 7.5: el código generado incluye el schema embebido
+        // como static + el handler async + la ruta /openapi.json
+        // en el Router.
+        let src = "@get(\"/\") fn index() -> Str => \"hola\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        // El static `__FITZ_OPENAPI_SCHEMA` aparece en el archivo
+        // como item top-level.
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_some(),
+            "esperaba static __FITZ_OPENAPI_SCHEMA en el archivo"
+        );
+        // El handler async existe.
+        assert!(
+            ast_test::find_item_fn(&file, "__serve_openapi_json").is_some(),
+            "esperaba fn __serve_openapi_json en el archivo"
+        );
+        // El Router incluye `.route("/openapi.json", ...)`.
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            body.contains("\"/openapi.json\""),
+            "esperaba .route(\"/openapi.json\", ...) en fn main, got:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn http_75_emite_scalar_html_y_ruta_docs() {
+        let src = "@get(\"/\") fn index() -> Str => \"hola\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_SCALAR_HTML").is_some(),
+            "esperaba static __FITZ_SCALAR_HTML en el archivo"
+        );
+        assert!(
+            ast_test::find_item_fn(&file, "__serve_docs").is_some(),
+            "esperaba fn __serve_docs en el archivo"
+        );
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            body.contains("\"/docs\""),
+            "esperaba .route(\"/docs\", ...) en fn main, got:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn http_75_server_docs_false_no_emite_rutas_auto() {
+        // @server(docs=false): ni el static schema ni el HTML, ni
+        // las rutas autoregistradas. Programa válido sigue compilando.
+        let src = "@server(3000, docs=false) fn main() => 0\n\
+                   @get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_none(),
+            "con docs=false NO debería emitirse __FITZ_OPENAPI_SCHEMA"
+        );
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_SCALAR_HTML").is_none(),
+            "con docs=false NO debería emitirse __FITZ_SCALAR_HTML"
+        );
+        assert!(
+            ast_test::find_item_fn(&file, "__serve_openapi_json").is_none(),
+            "con docs=false NO debería emitirse __serve_openapi_json"
+        );
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            !body.contains("\"/openapi.json\"") && !body.contains("\"/docs\""),
+            "con docs=false el Router NO debería tener rutas /openapi.json ni /docs, got:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn http_75_usuario_declara_openapi_json_propio_no_se_pisa() {
+        // Si el usuario declara `@get("/openapi.json")`, el codegen
+        // NO debe emitir la ruta auto (su handler gana). El handler
+        // del usuario sí se emite normalmente.
+        let src = "@get(\"/openapi.json\") fn custom() -> Str => \"mio\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        // /docs sí se sigue auto-registrando (el usuario no la pisó).
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_SCALAR_HTML").is_some(),
+            "/docs debería seguir auto-registrándose"
+        );
+        // El schema cacheado NO se emite (la ruta del usuario lo sirve).
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_none(),
+            "con /openapi.json del usuario, NO se debería emitir el schema cacheado"
+        );
+        // El handler del usuario sí.
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            body.contains("__handler_custom"),
+            "esperaba que el handler del usuario aparezca en el Router, got:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn http_75_server_decorator_acepta_kwarg_docs() {
+        // @server(3000, docs=true) ya no aborta el codegen (el guard
+        // de 7.0 se aflojó para @server en 7.5).
+        let src = "@server(3000, docs=true) fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        // Con docs=true (default explícito), sí se emiten las rutas auto.
+        assert!(
+            ast_test::find_item_static(&file, "__FITZ_OPENAPI_SCHEMA").is_some(),
+            "docs=true (explícito) debería emitir el schema embebido"
+        );
+    }
+
+    #[test]
+    fn http_75_server_decorator_kwarg_desconocido_es_error() {
+        let src = "@server(3000, version=\"1.0\") fn main() => 0\n\
+                   @get(\"/\") fn h() -> Str => \"ok\"";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("version") && err.message.contains("reconocido"),
+            "esperaba mensaje sobre kwarg desconocido, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn http_75_decorator_de_ruta_con_kwarg_sigue_siendo_error() {
+        // Los decoradores HTTP de ruta NO aceptan kwargs (hasta 7.6).
+        let src = "@get(\"/x\", foo=1) fn h() -> Str => \"ok\"";
+        let err = gen(src).expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("@get") && err.message.contains("7.6"),
+            "esperaba mensaje sobre kwarg en decorator HTTP de ruta, fue: {}",
+            err.message
         );
     }
 

@@ -138,7 +138,8 @@ fn openapi_file(path: &PathBuf) {
         std::process::exit(1);
     }
 
-    let schema = openapi::generate_openapi(&registry, &program);
+    let routes = openapi::routes_from_registry(&registry);
+    let schema = openapi::generate_openapi(&routes, &program);
     match serde_json::to_string_pretty(&schema) {
         Ok(s) => println!("{}", s),
         Err(e) => {

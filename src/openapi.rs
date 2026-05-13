@@ -25,7 +25,121 @@
 use serde_json::{json, Map, Value};
 
 use crate::ast::{Field, Program, Stmt, TypeExpr};
-use crate::http::{HttpRegistry, RouteSpec};
+use crate::http::{HttpMethod, HttpRegistry, RouteSpec};
+
+/// Vista liviana de una ruta HTTP — solo los campos que el generador
+/// OpenAPI necesita. Se construye desde un `RouteSpec` del runtime
+/// (`routes_from_registry`) o desde el AST en build-time del codegen
+/// (`pseudo_routes_from_ast` en codegen.rs).
+///
+/// Desacopla el generator del `Value` del runtime: el codegen no
+/// necesita inventar `Value::Function` dummies para alimentar el
+/// schema.
+#[derive(Debug, Clone)]
+pub struct OpenApiRouteInfo {
+    pub method: HttpMethod,
+    pub path: String,
+    pub handler_name: String,
+    pub path_params: Vec<String>,
+    pub query_params: Vec<String>,
+    /// Nombre del param que el handler interpreta como body, si existe.
+    /// El tipo del body se mira en `param_type_exprs` por nombre.
+    pub body_param_name: Option<String>,
+    pub param_type_exprs: Vec<(String, Option<TypeExpr>)>,
+    pub return_type_expr: Option<TypeExpr>,
+}
+
+/// Adapter: del registry runtime a vistas livianas.
+pub fn routes_from_registry(reg: &HttpRegistry) -> Vec<OpenApiRouteInfo> {
+    reg.routes.iter().map(route_info_from_spec).collect()
+}
+
+fn route_info_from_spec(s: &RouteSpec) -> OpenApiRouteInfo {
+    OpenApiRouteInfo {
+        method: s.method,
+        path: s.path.clone(),
+        handler_name: s.handler_name.clone(),
+        path_params: s.path_params.clone(),
+        query_params: s.query_params.clone(),
+        body_param_name: s.body_param.as_ref().map(|b| b.name.clone()),
+        param_type_exprs: s.param_type_exprs.clone(),
+        return_type_expr: s.return_type_expr.clone(),
+    }
+}
+
+/// Construye `OpenApiRouteInfo` desde el AST en build-time, sin
+/// evaluar el programa (Fase 7.5). Se usa desde `codegen.rs` para que
+/// `fitz build` pueda emitir el schema OpenAPI sin pasar por el
+/// runtime HTTP.
+///
+/// La detección de body param replica la regla del evaluator: cualquier
+/// param del handler que NO esté en el template del path ni en los
+/// query params se considera body. Máximo uno por handler (validación
+/// en el evaluator durante registro; acá no la repetimos — si el
+/// programa pasa el evaluator, este AST es consistente).
+///
+/// Falla solo si `parse_path_template` rechaza el path (template
+/// malformado).
+pub fn pseudo_routes_from_ast(
+    program: &crate::ast::Program,
+) -> Result<Vec<OpenApiRouteInfo>, crate::error::FitzError> {
+    use crate::ast::Stmt;
+    use crate::http::parse_path_template;
+
+    let mut out = Vec::new();
+    for s in program {
+        let Stmt::FnDef {
+            name,
+            params,
+            return_type,
+            decorators,
+            ..
+        } = s
+        else {
+            continue;
+        };
+        for d in decorators {
+            let Some(method) = HttpMethod::from_decorator_name(&d.name) else {
+                continue;
+            };
+            let Some(path_arg) = d.args.first() else {
+                continue;
+            };
+            let template = parse_path_template(path_arg).map_err(|e| {
+                crate::error::FitzError::new(
+                    crate::error::ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!("@{} sobre fn '{}': {}", d.name, name, e.message()),
+                )
+            })?;
+            let body_param_name = params.iter().find_map(|p| {
+                if !template.params.contains(&p.name)
+                    && !template.query_params.contains(&p.name)
+                {
+                    Some(p.name.clone())
+                } else {
+                    None
+                }
+            });
+            let param_type_exprs = params
+                .iter()
+                .map(|p| (p.name.clone(), p.type_.clone()))
+                .collect();
+            out.push(OpenApiRouteInfo {
+                method,
+                path: template.path,
+                handler_name: name.clone(),
+                path_params: template.params,
+                query_params: template.query_params,
+                body_param_name,
+                param_type_exprs,
+                return_type_expr: return_type.clone(),
+            });
+        }
+    }
+    Ok(out)
+}
 
 /// HTML embebido para la UI de docs (Fase 7.3). Carga el bundle de
 /// Scalar desde el CDN de jsdelivr y le apunta al `/openapi.json`
@@ -42,21 +156,23 @@ pub const SCALAR_HTML: &str = include_str!("templates/scalar.html");
 /// Genera el schema OpenAPI 3.1 del programa.
 ///
 /// Entradas:
-///   - `registry`: rutas registradas durante `eval` (con TypeExpr
-///     completos por param y return desde 7.1).
+///   - `routes`: vistas livianas de las rutas HTTP (ver
+///     `OpenApiRouteInfo`). En `fitz run` vienen del registry vía
+///     `routes_from_registry`; en `fitz build` se construyen desde
+///     el AST en build-time.
 ///   - `program`: AST original — necesario para recorrer los
 ///     `Stmt::TypeDef` y emitir `components.schemas`.
 ///
 /// Salida: un `Value` que serializado con `serde_json::to_string_pretty`
 /// es un OpenAPI 3.1 válido.
-pub fn generate_openapi(registry: &HttpRegistry, program: &Program) -> Value {
+pub fn generate_openapi(routes: &[OpenApiRouteInfo], program: &Program) -> Value {
     json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Fitz API",
             "version": "0.1.0",
         },
-        "paths": build_paths(registry),
+        "paths": build_paths(routes),
         "components": {
             "schemas": build_components_schemas(program),
         },
@@ -65,9 +181,9 @@ pub fn generate_openapi(registry: &HttpRegistry, program: &Program) -> Value {
 
 // ---------- paths ----------
 
-fn build_paths(registry: &HttpRegistry) -> Value {
+fn build_paths(routes: &[OpenApiRouteInfo]) -> Value {
     let mut paths: Map<String, Value> = Map::new();
-    for route in &registry.routes {
+    for route in routes {
         let entry = paths
             .entry(route.path.clone())
             .or_insert_with(|| json!({}));
@@ -79,7 +195,7 @@ fn build_paths(registry: &HttpRegistry) -> Value {
     Value::Object(paths)
 }
 
-fn build_operation(route: &RouteSpec) -> Value {
+fn build_operation(route: &OpenApiRouteInfo) -> Value {
     let mut op = Map::new();
     op.insert(
         "operationId".into(),
@@ -95,11 +211,11 @@ fn build_operation(route: &RouteSpec) -> Value {
         op.insert("parameters".into(), Value::Array(params));
     }
 
-    if let Some(body_param) = &route.body_param {
+    if let Some(body_name) = &route.body_param_name {
         let body_type = route
             .param_type_exprs
             .iter()
-            .find(|(n, _)| n == &body_param.name)
+            .find(|(n, _)| n == body_name)
             .and_then(|(_, t)| t.as_ref());
         op.insert("requestBody".into(), build_request_body(body_type));
     }
@@ -108,7 +224,7 @@ fn build_operation(route: &RouteSpec) -> Value {
     Value::Object(op)
 }
 
-fn build_parameters(route: &RouteSpec) -> Vec<Value> {
+fn build_parameters(route: &OpenApiRouteInfo) -> Vec<Value> {
     let mut out = Vec::new();
     for name in &route.path_params {
         let t = lookup_param_type(route, name);
@@ -136,7 +252,7 @@ fn build_parameters(route: &RouteSpec) -> Vec<Value> {
     out
 }
 
-fn lookup_param_type<'a>(route: &'a RouteSpec, name: &str) -> Option<&'a TypeExpr> {
+fn lookup_param_type<'a>(route: &'a OpenApiRouteInfo, name: &str) -> Option<&'a TypeExpr> {
     route
         .param_type_exprs
         .iter()
@@ -550,7 +666,7 @@ mod tests {
             crate::evaluator::eval_with_base_sync(program.clone(), std::env::current_dir().unwrap())
         });
         res.expect("eval OK");
-        generate_openapi(&registry, &program)
+        generate_openapi(&routes_from_registry(&registry), &program)
     }
 
     #[test]

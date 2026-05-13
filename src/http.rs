@@ -1505,7 +1505,8 @@ pub fn serve(
     // lo pasamos al router — ambas rutas auto-registradas quedan en
     // 404. Trade-off: zero overhead cuando el usuario apaga los docs.
     let openapi_schema = if enable_docs {
-        Some(crate::openapi::generate_openapi(&registry, &program))
+        let routes = crate::openapi::routes_from_registry(&registry);
+        Some(crate::openapi::generate_openapi(&routes, &program))
     } else {
         None
     };
