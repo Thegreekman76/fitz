@@ -2896,7 +2896,7 @@ lleguemos".
 
 - [ ] Package manager (`fitz add`)
 - [ ] Fitz registry (repositorio de paquetes)
-- [ ] LSP (Language Server Protocol) — autocompletado en VSCode
+- [ ] LSP + extensión VSCode (ver 7.x abajo)
 - [ ] Formatter (`fitz fmt`)
 - [ ] Linter (`fitz check` ya cubre tipos; queda lint de estilo
   y patrones)
@@ -2905,6 +2905,76 @@ lleguemos".
 - [ ] Compilación a WebAssembly
 - [ ] Documentación oficial en español e inglés
 - [ ] Website del lenguaje
+
+### 7.x — LSP + extensión VSCode (candidata)
+
+**Objetivo**: que escribir Fitz en VSCode (y Neovim, Helix, Zed,
+etc., gratis por LSP) se sienta tan vivo como TypeScript: errores
+subrayados al tipear, hover con tipos, autocomplete contextual,
+go-to-definition.
+
+**Dos piezas separadas**:
+
+1. **`fitz-lsp`** (Rust, en este repo) — nuevo bin que reusa
+   `lexer`/`parser`/`types` y habla LSP por stdio.
+   Crate sugerido: [`tower-lsp`](https://github.com/ebkalderon/tower-lsp).
+2. **Extensión VSCode** (TypeScript, carpeta `editors/vscode/`) —
+   `.vsix` con TextMate grammar para syntax highlighting +
+   cliente LSP que spawnea `fitz-lsp` como proceso hijo.
+   La extensión es delgada: toda la inteligencia vive en
+   `fitz-lsp`.
+
+**Prerrequisitos habilitantes** (deuda post-5b, ver
+`deudas-post-5b.md`):
+
+- **F15** — error recovery del parser. Sin esto el LSP no puede
+  dar diagnostics ni completions mientras el usuario tipea
+  (cada caracter dispararía un parse error y el AST quedaría
+  vacío).
+- **F16** — IR tipado persistido por nodo. Sin esto no hay
+  hover ni completion contextual sobre tipos.
+- **S1.Pattern/TypeExpr** — completar spans en los nodos que
+  todavía no los tienen (deuda residual de S1.2).
+
+**Sub-pasos sugeridos** (granito incremental, cada uno con
+valor entregable):
+
+- **7.x.1 — Diagnostics MVP**: server con `did_open`/`did_change`
+  que corre `check_program` y publica `Diagnostic`s. Extensión
+  VSCode con grammar TextMate básica + cliente LSP apuntando
+  al binario en `target/release/fitz-lsp`. Resultado:
+  highlighting + errores en vivo.
+- **7.x.2 — Hover**: `textDocument/hover` devuelve el tipo del
+  nodo bajo el cursor. Requiere F16.
+- **7.x.3 — Go-to-definition**: `textDocument/definition`
+  resuelve `Ident` → span de declaración. Requiere mantener
+  tabla de resolución de scopes del checker.
+- **7.x.4 — Autocomplete**: `textDocument/completion` con
+  cuatro contextos: símbolos en scope, fields tras `obj.`,
+  métodos built-in tras `xs.`/`m.`/`s.`, símbolos importados
+  tras `from mod import `. Requiere F15 (parser tolerante a
+  cursor parcial) + F16.
+- **7.x.5 — Distribución**: publicar al VSCode Marketplace
+  con binarios pre-compilados por plataforma (Windows
+  x64, macOS x64+ARM, Linux x64+ARM) bundleados en el
+  `.vsix`, al estilo de rust-analyzer. Alternativa de alfa:
+  `.vsix` manual + `fitz-lsp` en PATH.
+
+**Trade-offs y decisiones pendientes**:
+
+- ¿Distribuir binarios bundleados o descargarlos al instalar?
+  (Tamaño del `.vsix` vs complejidad del activador.)
+- ¿Grammar TextMate o tree-sitter? Tree-sitter es más preciso
+  e incremental pero requiere otra dependencia y otra spec.
+- ¿Reusar `fitz check` directo o forkear el pipeline? Reusar
+  es lo natural; forkear sería solo si la performance del
+  check sobre buffers grandes duele.
+
+**Por qué encaja en Fase 7**: es tooling de ecosistema, no del
+lenguaje core. Una vez que el lenguaje está estable (Fase 5
+cerrada) y el ecosistema empieza a expandirse, el LSP es lo
+que hace que escribir Fitz pase de "compilar y revisar" a
+"sentir el lenguaje mientras lo escribís".
 
 ---
 
