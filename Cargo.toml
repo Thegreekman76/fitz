@@ -37,6 +37,15 @@ serde_json = { version = "1", features = ["preserve_order"] }
 axum = "0.8"
 tokio = { version = "1", features = ["full"] }
 
+# Fase 6.4 — `#[async_recursion]` macro para que las async fns recursivas
+# del evaluator (eval_expr/eval_stmt/eval_call/eval_block) compilen sin
+# escribir `Pin<Box<dyn Future<...>>>` a mano en cada call site. Usamos
+# la variante `?Send` porque `EnvRef` y los containers de `Value` siguen
+# en `Rc<RefCell<>>` (mantiene el intérprete single-threaded; los
+# handlers HTTP cooperan en current_thread). Migrar a Send estricto
+# queda como mini-fase post-6 si entra demanda real de paralelismo.
+async-recursion = "1"
+
 [dev-dependencies]
 # Directorios temporales para tests del loader de módulos (3.5):
 # permite armar fixtures en disco y limpiarlos automáticamente.

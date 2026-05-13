@@ -238,6 +238,41 @@ where
     })
 }
 
+/// Variante async de `with_active_registry` (Fase 6.4). Misma semántica
+/// pero acepta una closure que devuelve un `Future`, para uso desde
+/// código async (handlers, tests con `#[tokio::test]`).
+///
+/// **Invariante de borrow**: NO mantenemos `cell.borrow_mut()` cross
+/// await — los borrows se toman/sueltan al entrar y al salir de cada
+/// paso atómico. Si la closure paniquea, el guard sigue restaurando
+/// el registry previo en el `Drop` implícito (mismo patrón que la
+/// versión sync, vía panics propagados después del setup).
+///
+/// `dead_code` allow: solo lo usan tests por ahora (los handlers HTTP
+/// reales aterrizan en 6.5 cuando se elimine el bridge mpsc).
+#[allow(dead_code)]
+pub async fn with_active_registry_async<F, Fut, T>(f: F) -> (T, HttpRegistry)
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let prev = HTTP_REGISTRY.with(|cell| {
+        let prev = cell.borrow_mut().take();
+        *cell.borrow_mut() = Some(HttpRegistry::new());
+        prev
+    });
+    let out = f().await;
+    let registry = HTTP_REGISTRY.with(|cell| {
+        let registry = cell
+            .borrow_mut()
+            .take()
+            .expect("with_active_registry_async instaló un registry — debería estar presente");
+        *cell.borrow_mut() = prev;
+        registry
+    });
+    (out, registry)
+}
+
 /// `true` si hay un registry HTTP activo en el thread actual. El
 /// evaluator lo consulta antes de procesar un decorator HTTP: si no
 /// hay, sigue cortando con error explícito.
@@ -683,6 +718,16 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "HttpResponse no es serializable a JSON fuera de un handler HTTP".to_string(),
             );
         }
+        // Future pendiente: no es serializable. Si llega un Future a un
+        // response, el usuario olvidó `.await`. El checker 6.2 lo
+        // detecta estáticamente para handlers anotados; este path es
+        // defensivo (handlers sin return_type, Future generado por
+        // otro camino).
+        Value::Future(_) => {
+            return Err(
+                "Future pendiente no es serializable — falta `.await` en algún lado del handler".to_string(),
+            );
+        }
     })
 }
 
@@ -918,7 +963,7 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 //   ┌──────────────────┐              ┌──────────────────────┐
 //   │  axum::serve     │   InterpTask │  loop {              │
 //   │  ┌─────────────┐ │ ───────────► │    rx.blocking_recv()│
-//   │  │ async fn    │ │              │    call_handler(...) │
+//   │  │ async fn    │ │              │    call_handler(...).await │
 //   │  │ dispatch    │ │ ◄─────────── │    send outcome      │
 //   │  └─────────────┘ │   outcome    │  }                   │
 //   └──────────────────┘              └──────────────────────┘
@@ -1210,14 +1255,22 @@ pub fn run_interpreter_loop(
     registry: HttpRegistry,
     mut rx: mpsc::UnboundedReceiver<InterpTask>,
 ) {
+    // Fase 6.4: el evaluator es ahora async (`eval_call`/`eval_stmt`/
+    // etc. devuelven futures). Para mantener el bridge mpsc/oneshot
+    // intacto en 6.4 (eliminación en 6.5), armamos un runtime
+    // tokio `current_thread` propio del loop y bloqueamos sobre
+    // cada `handle_task(...).await`. Cuando 6.5 elimine el bridge,
+    // los handlers axum llaman a `eval_call(...).await` directo y
+    // este loop entero desaparece.
+    let runtime = crate::evaluator::build_runtime();
     while let Some(task) = rx.blocking_recv() {
-        let outcome = handle_task(
+        let outcome = runtime.block_on(handle_task(
             &registry,
             task.route_idx,
             task.path_params,
             task.query_params,
             task.body,
-        );
+        ));
         // Si el oneshot del lado axum se cerró (cliente desconectado,
         // timeout), no hay nada que hacer con el outcome — descartar.
         let _ = task.reply.send(outcome);
@@ -1225,7 +1278,7 @@ pub fn run_interpreter_loop(
 }
 
 /// Procesa un único task. Aislado del loop para testearlo sin canal.
-fn handle_task(
+async fn handle_task(
     registry: &HttpRegistry,
     route_idx: usize,
     raw_path_params: HashMap<String, String>,
@@ -1324,7 +1377,7 @@ fn handle_task(
 
     // Invocar el handler. Errores del handler (return propio, error
     // de runtime) se traducen a 500 con el mensaje.
-    match call_handler(route.handler.clone(), args, &route.handler_name) {
+    match call_handler(route.handler.clone(), args, &route.handler_name).await {
         Ok(value) => value_to_outcome(&value),
         Err(err) => HandlerOutcome::internal_error(err.message),
     }
@@ -1429,8 +1482,8 @@ mod tests {
 
     // ---- HttpMethod ----
 
-    #[test]
-    fn http_method_desde_nombre_de_decorator() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn http_method_desde_nombre_de_decorator() {
         assert_eq!(HttpMethod::from_decorator_name("get"), Some(HttpMethod::Get));
         assert_eq!(HttpMethod::from_decorator_name("post"), Some(HttpMethod::Post));
         assert_eq!(HttpMethod::from_decorator_name("put"), Some(HttpMethod::Put));
@@ -1441,8 +1494,8 @@ mod tests {
 
     // ---- parse_path_template ----
 
-    #[test]
-    fn path_str_simple_sin_params() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_str_simple_sin_params() {
         let t = parse_path_template(&Expr::Str("/".into(), Span::ZERO)).unwrap();
         assert_eq!(t.path, "/");
         assert!(t.params.is_empty());
@@ -1452,8 +1505,8 @@ mod tests {
         assert!(t.params.is_empty());
     }
 
-    #[test]
-    fn path_strinterp_con_un_param() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_strinterp_con_un_param() {
         // `"/users/{id}"` → StrInterp([Lit("/users/"), Expr(Ident("id"))])
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/users/".into()),
@@ -1464,8 +1517,8 @@ mod tests {
         assert_eq!(t.params, vec!["id".to_string()]);
     }
 
-    #[test]
-    fn path_strinterp_con_varios_params_distintos() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_strinterp_con_varios_params_distintos() {
         // `"/orgs/{org}/users/{id}"`
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/orgs/".into()),
@@ -1478,14 +1531,14 @@ mod tests {
         assert_eq!(t.params, vec!["org".to_string(), "id".to_string()]);
     }
 
-    #[test]
-    fn path_no_arranca_con_slash_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_no_arranca_con_slash_es_error() {
         let err = parse_path_template(&Expr::Str("users".into(), Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::MustStartWithSlash);
     }
 
-    #[test]
-    fn path_con_expresion_no_ident_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_con_expresion_no_ident_es_error() {
         // `"{a+b}"` — interpolación con BinOp.
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/".into()),
@@ -1499,8 +1552,8 @@ mod tests {
         assert!(matches!(err, PathError::UnsupportedInterpolation(_)));
     }
 
-    #[test]
-    fn path_con_params_duplicados_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_con_params_duplicados_es_error() {
         // `"/a/{x}/b/{x}"`
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/a/".into()),
@@ -1512,8 +1565,8 @@ mod tests {
         assert_eq!(err, PathError::DuplicateParam("x".into()));
     }
 
-    #[test]
-    fn path_no_string_literal_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_no_string_literal_es_error() {
         // `@get(42)` — Int en lugar de string.
         let err = parse_path_template(&Expr::Int(42, Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::NotAStringLiteral);
@@ -1521,8 +1574,8 @@ mod tests {
 
     // ---- Query params en el template ----
 
-    #[test]
-    fn query_template_separa_path_de_query_params() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_template_separa_path_de_query_params() {
         // `"/items?limit={limit}&offset={offset}"` → path solo `/items`,
         // query_params `["limit", "offset"]` en orden.
         let e = Expr::StrInterp(
@@ -1543,8 +1596,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_template_combina_con_path_params() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_template_combina_con_path_params() {
         // `"/users/{id}/posts?limit={limit}"` → path `/users/{id}/posts`,
         // path params `["id"]`, query params `["limit"]`.
         let e = Expr::StrInterp(
@@ -1562,8 +1615,8 @@ mod tests {
         assert_eq!(t.query_params, vec!["limit".to_string()]);
     }
 
-    #[test]
-    fn query_template_key_distinta_del_nombre_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_template_key_distinta_del_nombre_es_error() {
         // `"/x?l={limit}"` — key `l` no coincide con nombre `limit`.
         let e = Expr::StrInterp(
             vec![
@@ -1580,8 +1633,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_template_malformado_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_template_malformado_es_error() {
         // `"/x?limit"` — falta `={name}`.
         let e = Expr::Str("/x?limit".into(), Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
@@ -1592,8 +1645,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn query_template_param_duplicado_con_path_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn query_template_param_duplicado_con_path_es_error() {
         // `"/users/{id}?id={id}"` — `id` aparece en path y query.
         let e = Expr::StrInterp(
             vec![
@@ -1613,8 +1666,8 @@ mod tests {
 
     // ---- value_to_json ----
 
-    #[test]
-    fn value_to_json_primitivos() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_primitivos() {
         assert_eq!(value_to_json(&Value::Int(42)).unwrap(), serde_json::json!(42));
         assert_eq!(value_to_json(&Value::Float(3.14)).unwrap(), serde_json::json!(3.14));
         assert_eq!(value_to_json(&Value::Str("hola".into())).unwrap(), serde_json::json!("hola"));
@@ -1622,8 +1675,8 @@ mod tests {
         assert_eq!(value_to_json(&Value::Null).unwrap(), serde_json::json!(null));
     }
 
-    #[test]
-    fn value_to_json_lista() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_lista() {
         let v = Value::List(shared(vec![
             Value::Int(1),
             Value::Int(2),
@@ -1632,8 +1685,8 @@ mod tests {
         assert_eq!(value_to_json(&v).unwrap(), serde_json::json!([1, 2, 3]));
     }
 
-    #[test]
-    fn value_to_json_mapa_con_claves_string() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_mapa_con_claves_string() {
         let v = Value::Map(shared(vec![
             (Value::Str("name".into()), Value::Str("fitz".into())),
             (Value::Str("port".into()), Value::Int(3000)),
@@ -1644,15 +1697,15 @@ mod tests {
         );
     }
 
-    #[test]
-    fn value_to_json_mapa_clave_no_string_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_mapa_clave_no_string_es_error() {
         let v = Value::Map(shared(vec![(Value::Int(1), Value::Int(10))]));
         let err = value_to_json(&v).unwrap_err();
         assert!(err.contains("claves de Map en JSON"));
     }
 
-    #[test]
-    fn value_to_json_instance() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_instance() {
         // Instance `{id: 1, name: "x"}` → `{"id": 1, "name": "x"}`.
         let inst = Value::new_instance(
             "User".into(),
@@ -1667,8 +1720,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn value_to_json_result_anidado_se_etiqueta() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_result_anidado_se_etiqueta() {
         // `Ok(42)` adentro de otra cosa (no debería pasar en el output
         // directo del handler, pero queremos un comportamiento total).
         let ok = Value::Result(ResultVariant::Ok(Box::new(Value::Int(42))));
@@ -1678,14 +1731,15 @@ mod tests {
         assert_eq!(value_to_json(&err).unwrap(), serde_json::json!({ "Err": "boom" }));
     }
 
-    #[test]
-    fn value_to_json_function_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn value_to_json_function_es_error() {
         // Function no es serializable.
         let env = crate::env::Environment::new();
         let v = Value::Function {
             params: vec![],
             body: vec![],
             closure: env,
+            is_async: false,
         };
         let err = value_to_json(&v).unwrap_err();
         assert!(err.contains("Function"));
@@ -1693,8 +1747,8 @@ mod tests {
 
     // ---- value_to_outcome (handler → status + body) ----
 
-    #[test]
-    fn outcome_de_value_pelado_es_200() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_value_pelado_es_200() {
         let v = Value::Str("hola".into());
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 200);
@@ -1702,16 +1756,16 @@ mod tests {
         assert_eq!(out.content_type, "application/json");
     }
 
-    #[test]
-    fn outcome_de_ok_es_200_con_inner() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_ok_es_200_con_inner() {
         let v = Value::Result(ResultVariant::Ok(Box::new(Value::Int(42))));
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 200);
         assert_eq!(out.body, "42");
     }
 
-    #[test]
-    fn outcome_de_err_es_500_con_error_obj() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_err_es_500_con_error_obj() {
         let v = Value::Result(ResultVariant::Err(Box::new(Value::Str(
             "no encontrado".into(),
         ))));
@@ -1721,8 +1775,8 @@ mod tests {
         assert_eq!(out.body, "{\"error\":\"no encontrado\"}");
     }
 
-    #[test]
-    fn outcome_de_instance_es_objeto_json() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_instance_es_objeto_json() {
         let inst = Value::new_instance(
             "User".into(),
             vec![
@@ -1739,8 +1793,8 @@ mod tests {
         assert_eq!(parsed, serde_json::json!({ "id": 7, "name": "ana" }));
     }
 
-    #[test]
-    fn outcome_de_tipo_no_serializable_es_500() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_tipo_no_serializable_es_500() {
         // Range no es serializable.
         let v = Value::Range { start: 0, end: 10 };
         let out = value_to_outcome(&v);
@@ -1750,8 +1804,8 @@ mod tests {
 
     // ---- Status codes custom (Value::HttpResponse) ----
 
-    #[test]
-    fn outcome_de_http_response_usa_su_status_y_body() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_http_response_usa_su_status_y_body() {
         // El evaluator produce `Value::HttpResponse` cuando el usuario
         // hace `return 401 { ... }`. El outcome usa el status del
         // response y serializa el body con las reglas habituales.
@@ -1769,8 +1823,8 @@ mod tests {
         assert_eq!(parsed, serde_json::json!({ "message": "no autorizado" }));
     }
 
-    #[test]
-    fn outcome_de_http_response_sin_body_es_null_json() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_http_response_sin_body_es_null_json() {
         // `HttpResponse { body: None }` → body JSON null. Reserva para
         // 204 No Content si llega; hoy el parser exige body explícito.
         let v = Value::HttpResponse { status: 204, body: None };
@@ -1779,8 +1833,8 @@ mod tests {
         assert_eq!(out.body, "null");
     }
 
-    #[test]
-    fn outcome_de_http_response_con_body_map_serializa_a_objeto() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn outcome_de_http_response_con_body_map_serializa_a_objeto() {
         // Body = map literal con string keys → objeto JSON.
         let body = Value::new_map(vec![
             (Value::Str("error".into()), Value::Str("falló".into())),
@@ -1798,39 +1852,39 @@ mod tests {
 
     // ---- coerce_path_param ----
 
-    #[test]
-    fn path_param_default_a_str_sin_anotacion() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_param_default_a_str_sin_anotacion() {
         let v = coerce_path_param("42", None).unwrap();
         assert_eq!(v, Value::Str("42".into()));
     }
 
-    #[test]
-    fn path_param_int_se_parsea_a_int() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_param_int_se_parsea_a_int() {
         let v = coerce_path_param("42", Some("Int")).unwrap();
         assert_eq!(v, Value::Int(42));
     }
 
-    #[test]
-    fn path_param_int_invalido_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_param_int_invalido_es_error() {
         let err = coerce_path_param("abc", Some("Int")).unwrap_err();
         assert!(err.contains("Int") && err.contains("abc"));
     }
 
-    #[test]
-    fn path_param_float_se_parsea() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_param_float_se_parsea() {
         let v = coerce_path_param("3.14", Some("Float")).unwrap();
         assert_eq!(v, Value::Float(3.14));
     }
 
-    #[test]
-    fn path_param_bool_true_false() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_param_bool_true_false() {
         assert_eq!(coerce_path_param("true", Some("Bool")).unwrap(), Value::Bool(true));
         assert_eq!(coerce_path_param("false", Some("Bool")).unwrap(), Value::Bool(false));
         assert!(coerce_path_param("maybe", Some("Bool")).is_err());
     }
 
-    #[test]
-    fn path_param_tipo_no_soportado_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn path_param_tipo_no_soportado_es_error() {
         // Un tipo custom no entra como path param: el handler tiene
         // que recibir el id raw y reconstruir el objeto adentro.
         let err = coerce_path_param("42", Some("User")).unwrap_err();
@@ -1839,15 +1893,15 @@ mod tests {
 
     // ---- registry ----
 
-    #[test]
-    fn registry_arranca_sin_rutas() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn registry_arranca_sin_rutas() {
         let r = HttpRegistry::new();
         assert!(r.is_empty());
         assert_eq!(r.routes.len(), 0);
     }
 
-    #[test]
-    fn with_active_registry_expone_has_active_para_el_evaluator() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn with_active_registry_expone_has_active_para_el_evaluator() {
         // Afuera: no hay registry, los decorators dan error explícito.
         assert!(!has_active_registry());
 
@@ -1867,66 +1921,70 @@ mod tests {
     /// de una fuente Fitz que la registra. Aprovecha el evaluator
     /// real, así no construimos `Value::Function` a mano (que es
     /// frágil — capturar el closure correcto importa).
-    fn registry_from_source(src: &str) -> HttpRegistry {
-        let (res, registry) = with_active_registry(|| {
+    ///
+    /// Fase 6.4: pasa a `async fn` porque `eval` ahora es async.
+    /// Los call sites suman `.await`.
+    async fn registry_from_source(src: &str) -> HttpRegistry {
+        let (res, registry) = with_active_registry_async(|| async {
             let tokens = crate::lexer::tokenize(src).unwrap();
             let program = crate::parser::parse(tokens).unwrap();
-            crate::evaluator::eval(program)
-        });
+            crate::evaluator::eval(program).await
+        })
+        .await;
         res.unwrap();
         registry
     }
 
-    #[test]
-    fn handle_task_invoca_handler_y_devuelve_outcome() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_invoca_handler_y_devuelve_outcome() {
         // `@get("/") fn hello() => "hola"`
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
-        let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"hola\"");
     }
 
-    #[test]
-    fn handle_task_coerciona_path_param_int() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_coerciona_path_param_int() {
         let src = "@get(\"/users/{id}\")\nfn h(id: Int) => id * 2";
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "21".into());
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new());
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "42");
     }
 
-    #[test]
-    fn handle_task_path_param_int_invalido_es_400() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_path_param_int_invalido_es_400() {
         let src = "@get(\"/users/{id}\")\nfn h(id: Int) => id";
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "no-es-int".into());
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new());
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("Int"));
     }
 
-    #[test]
-    fn handle_task_handler_que_retorna_err_es_500_con_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_handler_que_retorna_err_es_500_con_error() {
         // El handler devuelve Err("boom"): runtime lo traduce a 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
-        let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("boom"));
     }
 
-    #[test]
-    fn handle_task_handler_que_retorna_instance_serializa_a_json() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_handler_que_retorna_instance_serializa_a_json() {
         let src = "\
             type User { id: Int, name: Str }\n\
             @get(\"/u\")\nfn h() => User { id: 1, name: \"ana\" }\n\
         ";
-        let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
@@ -1934,15 +1992,15 @@ mod tests {
 
     // ---- ServerConfig (Fase 4.4) ----
 
-    #[test]
-    fn server_config_default_es_localhost_3000() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_config_default_es_localhost_3000() {
         let c = ServerConfig::default_addr();
         assert_eq!(c.host, "127.0.0.1");
         assert_eq!(c.port, 3000);
     }
 
-    #[test]
-    fn server_config_to_socket_addr_ipv4_ok() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_config_to_socket_addr_ipv4_ok() {
         let c = ServerConfig {
             host: "0.0.0.0".into(),
             port: 8080,
@@ -1951,8 +2009,8 @@ mod tests {
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
     }
 
-    #[test]
-    fn server_config_to_socket_addr_host_invalido_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_config_to_socket_addr_host_invalido_es_error() {
         let c = ServerConfig {
             host: "no-es-ip".into(),
             port: 80,
@@ -1961,8 +2019,8 @@ mod tests {
         assert!(err.contains("no-es-ip"));
     }
 
-    #[test]
-    fn set_server_config_segunda_vez_devuelve_existente() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn set_server_config_segunda_vez_devuelve_existente() {
         let ((), _reg) = with_active_registry(|| {
             let first = ServerConfig {
                 host: "127.0.0.1".into(),
@@ -1979,8 +2037,8 @@ mod tests {
         });
     }
 
-    #[test]
-    fn registry_resolved_config_devuelve_default_si_no_hay_explicito() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn registry_resolved_config_devuelve_default_si_no_hay_explicito() {
         let mut reg = HttpRegistry::new();
         assert!(reg.server_config.is_none());
         assert_eq!(reg.resolved_config(), ServerConfig::default_addr());
@@ -1996,8 +2054,8 @@ mod tests {
 
     // ---- json_to_value (deserialización libre) ----
 
-    #[test]
-    fn json_to_value_primitivos() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_value_primitivos() {
         assert_eq!(json_to_value(&serde_json::json!(null)), Value::Null);
         assert_eq!(json_to_value(&serde_json::json!(true)), Value::Bool(true));
         assert_eq!(json_to_value(&serde_json::json!(42)), Value::Int(42));
@@ -2008,8 +2066,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn json_to_value_array_se_vuelve_list() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_value_array_se_vuelve_list() {
         let v = json_to_value(&serde_json::json!([1, 2, "tres"]));
         match v {
             Value::List(items) => {
@@ -2022,8 +2080,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn json_to_value_object_se_vuelve_map_con_claves_str() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_value_object_se_vuelve_map_con_claves_str() {
         let v = json_to_value(&serde_json::json!({ "a": 1, "b": "x" }));
         match v {
             Value::Map(pairs) => {
@@ -2077,8 +2135,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn json_to_instance_caso_feliz() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_instance_caso_feliz() {
         let t = type_value("User", vec![
             ("id", "Int", false, None),
             ("name", "Str", false, None),
@@ -2098,8 +2156,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn json_to_instance_campo_faltante_sin_default_ni_nullable_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_instance_campo_faltante_sin_default_ni_nullable_es_error() {
         let t = type_value("User", vec![
             ("id", "Int", false, None),
             ("name", "Str", false, None),
@@ -2110,8 +2168,8 @@ mod tests {
         assert!(err.contains("falta"));
     }
 
-    #[test]
-    fn json_to_instance_campo_extra_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_instance_campo_extra_es_error() {
         let t = type_value("User", vec![("id", "Int", false, None)]);
         let json = serde_json::json!({ "id": 1, "rogue": "x" });
         let err = json_to_instance(&json, &t).unwrap_err();
@@ -2119,8 +2177,8 @@ mod tests {
         assert!(err.contains("no declarado"));
     }
 
-    #[test]
-    fn json_to_instance_campo_nullable_faltante_queda_null() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_instance_campo_nullable_faltante_queda_null() {
         let t = type_value("User", vec![
             ("id", "Int", false, None),
             ("email", "Str", true, None),
@@ -2137,8 +2195,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn json_to_instance_default_literal_se_usa_si_falta() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_instance_default_literal_se_usa_si_falta() {
         let t = type_value("User", vec![
             ("id", "Int", false, None),
             ("active", "Bool", false, Some(Expr::Bool(true, Span::ZERO))),
@@ -2155,8 +2213,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn json_to_instance_body_no_objeto_es_error() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn json_to_instance_body_no_objeto_es_error() {
         let t = type_value("User", vec![("id", "Int", false, None)]);
         let json = serde_json::json!([1, 2, 3]);
         let err = json_to_instance(&json, &t).unwrap_err();
@@ -2166,80 +2224,80 @@ mod tests {
 
     // ---- handle_task con body ----
 
-    #[test]
-    fn handle_task_post_sin_body_pero_handler_lo_espera_es_400() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_post_sin_body_pero_handler_lo_espera_es_400() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
-        let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("body requerido"));
     }
 
-    #[test]
-    fn handle_task_post_con_body_valido_construye_instance() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_post_con_body_valido_construye_instance() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body.name\n\
         ";
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"fitz\"");
     }
 
-    #[test]
-    fn handle_task_post_body_json_invalido_es_400() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_post_body_json_invalido_es_400() {
         let src = "\
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
-        let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), b"not json".to_vec());
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), b"not json".to_vec()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("JSON"));
     }
 
-    #[test]
-    fn handle_task_post_body_campo_faltante_es_400() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_post_body_campo_faltante_es_400() {
         let src = "\
             type UserInput { name: Str, email: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("email"));
     }
 
-    #[test]
-    fn handle_task_put_con_path_param_y_body() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_put_con_path_param_y_body() {
         let src = "\
             type UserInput { name: Str }\n\
             @put(\"/users/{id}\")\nfn upd(id: Int, body: UserInput) => body.name\n\
         ";
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "7".into());
         let body = br#"{"name":"ana"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), body).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"ana\"");
     }
 
-    #[test]
-    fn handle_task_body_sin_anotacion_de_tipo_acepta_libre() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_body_sin_anotacion_de_tipo_acepta_libre() {
         // `body` sin tipo → llega como Map<Str,Value>.
         let src = "\
             @post(\"/log\")\nfn log(body) => body[\"name\"]\n\
         ";
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let body = br#"{"name":"x"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"x\"");
     }
@@ -2282,7 +2340,7 @@ mod tests {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        let registry = registry_from_source(src);
+        let registry = registry_from_source(src).await;
         let metas = registry.metas();
         let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
         let router = build_router(&metas, tx);
@@ -2323,7 +2381,7 @@ mod tests {
                                 task.path_params,
                                 task.query_params,
                                 task.body,
-                            );
+                            ).await;
                             let _ = task.reply.send(outcome);
                         }
                     }
@@ -2482,14 +2540,15 @@ mod tests {
         assert!(body.contains("body requerido"));
     }
 
-    #[test]
-    fn push_route_acumula_en_el_registry_activo() {
+    #[tokio::test(flavor = "current_thread")]
+    async fn push_route_acumula_en_el_registry_activo() {
         let ((), reg) = with_active_registry(|| {
             let env = crate::env::Environment::new();
             let handler = Value::Function {
                 params: vec![],
                 body: vec![],
                 closure: env,
+                is_async: false,
             };
             push_route(RouteSpec {
                 method: HttpMethod::Get,

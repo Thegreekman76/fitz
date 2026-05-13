@@ -19,11 +19,48 @@
 //    de `Value` no depende del tamaño de `Environment`.
 
 use std::cell::RefCell;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
 
 use crate::ast::{Field, Param, Stmt};
 use crate::env::EnvRef;
 use crate::error::FitzResult;
+
+/// Future pendiente del evaluator. Se construye al llamar una `async fn`
+/// Fitz sin `.await` (guardar el future suelto) o desde builtins async
+/// como `sleep`. `.await` lo desempaca al `FitzResult<Value>` interno.
+///
+/// **Send NO se exige** (`?Send`): los containers de `Value` y `EnvRef`
+/// siguen detrás de `Rc<RefCell<>>` (no thread-safe). Eso obliga al
+/// runtime tokio a `current_thread`. La migración a `Arc<Mutex<>>`
+/// está comprometida como deuda F17 (post-Fase 6.4) — habilita
+/// paralelismo real entre tareas Fitz cuando aparezca demanda.
+pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>>>>;
+
+/// Wrapper sobre el future pendiente que aporta `Debug` manual. El
+/// `dyn Future` no implementa `Debug` así que no podemos derivarlo
+/// en `Value`. La celda envuelve `Option<...>` para que `.take()`
+/// extraiga el future al hacer `.await` sin clonar (los futures se
+/// consumen una sola vez).
+pub struct FutureCell(pub Rc<RefCell<Option<FitzFuture>>>);
+
+impl Clone for FutureCell {
+    fn clone(&self) -> Self {
+        FutureCell(Rc::clone(&self.0))
+    }
+}
+
+impl std::fmt::Debug for FutureCell {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        let occupied = self.0.borrow().is_some();
+        if occupied {
+            write!(f, "FutureCell(pending)")
+        } else {
+            write!(f, "FutureCell(consumed)")
+        }
+    }
+}
 
 /// Alias para colecciones compartidas por referencia. Las listas, los
 /// mapas y los campos de una instancia viven detrás de `Rc<RefCell<>>`:
@@ -62,10 +99,17 @@ pub enum Value {
     /// y un handle al env donde fue definida. Ese handle es el "closure":
     /// al llamar la función creamos un scope hijo de ese env, no del caller.
     /// Eso le da acceso a las variables del lugar donde se definió.
+    ///
+    /// `is_async` (Fase 6.4): replica el flag del `Stmt::FnDef` original.
+    /// `FnExpr` siempre lo marca como `false` (no se soportan async fn
+    /// anónimas hoy). El dispatcher de llamadas lo consulta: si una fn
+    /// async se llama sin `.await`, devuelve un `Value::Future` que
+    /// envuelve la evaluación del body; con `.await` desempaca al T.
     Function {
         params: Vec<Param>,
         body: Vec<Stmt>,
         closure: EnvRef,
+        is_async: bool,
     },
 
     /// Tipo custom definido por el usuario (`type User { id: Int }`).
@@ -160,6 +204,20 @@ pub enum Value {
         status: u16,
         body: Option<Box<Value>>,
     },
+
+    /// Future pendiente introducido en Fase 6.4. Se construye cuando
+    /// se llama una `async fn` Fitz sin `.await` (guardar el future
+    /// suelto en una variable) o desde builtins async (`sleep`).
+    /// `Expr::Await` lo desempaca; consumirlo dos veces es un panic
+    /// del intérprete (futures se await-ean una sola vez).
+    ///
+    /// Envuelto en `FutureCell` (`Rc<RefCell<Option<...>>>`) por dos
+    /// razones: (a) `Value: Clone` y los `Pin<Box<dyn Future>>` no
+    /// son Clone — el `Rc` da clone barato y comparte la celda;
+    /// (b) el `Option` permite extraer el future al hacer `.await`
+    /// sin clonar (mover con `.take()`), preservando la regla
+    /// "un future se await una sola vez".
+    Future(FutureCell),
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -193,6 +251,15 @@ impl Value {
         }
     }
 
+    /// Crea un `Value::Future` envolviendo un future Rust nativo.
+    /// Usado por `builtin_sleep` y por el dispatcher de async fn Fitz
+    /// al llamar sin `.await`. El future se ejecuta una sola vez:
+    /// cuando `Expr::Await` lo desempaca, el `Option` queda en `None`
+    /// y un segundo `.await` paniquea.
+    pub fn new_future(fut: FitzFuture) -> Value {
+        Value::Future(FutureCell(Rc::new(RefCell::new(Some(fut)))))
+    }
+
     /// Nombre del tipo, para mensajes de error.
     pub fn type_name(&self) -> &'static str {
         match self {
@@ -211,6 +278,7 @@ impl Value {
             Value::Result(_) => "Result",
             Value::HttpResponse { .. } => "HttpResponse",
             Value::Module { .. } => "Module",
+            Value::Future(_) => "Future",
         }
     }
 }
@@ -301,6 +369,7 @@ impl std::fmt::Display for Value {
                 }
                 None => write!(f, "<response {}>", status),
             },
+            Value::Future(_) => write!(f, "<future>"),
         }
     }
 }

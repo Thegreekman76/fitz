@@ -333,7 +333,7 @@ fn run_file(path: &PathBuf, no_typecheck: bool) {
     // tiene rutas, arrancamos el servidor; si no, terminamos como un
     // programa CLI normal.
     let (eval_result, registry) = http::with_active_registry(|| {
-        evaluator::eval_with_base(program, base_dir)
+        evaluator::eval_with_base_sync(program, base_dir)
     });
 
     if let Err(e) = eval_result {
