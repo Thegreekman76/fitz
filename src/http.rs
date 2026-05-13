@@ -1081,7 +1081,18 @@ pub type TaskTx = mpsc::UnboundedSender<InterpTask>;
 /// routing: verbo + path + si hay path params (para decidir el
 /// shape del handler). Los handlers Fitz quedan del lado del
 /// intérprete y se buscan por índice cuando llega un task.
-pub fn build_router(metas: &[RouteMeta], tx: TaskTx) -> Router {
+///
+/// `openapi_schema` (Fase 7.2): si es `Some`, registra una ruta
+/// `GET /openapi.json` que sirve el schema cacheado (precomputado al
+/// arrancar el server). Si el usuario ya declaró un handler con ese
+/// path en sus rutas, el auto-register cede — la del usuario gana.
+/// `None` para programas donde no querramos servir el schema (tests
+/// internos, server arrancado en modo opt-out cuando 7.4 cierre).
+pub fn build_router(
+    metas: &[RouteMeta],
+    tx: TaskTx,
+    openapi_schema: Option<serde_json::Value>,
+) -> Router {
     let mut router = Router::new();
     for (idx, meta) in metas.iter().enumerate() {
         let route_handler = build_method_router(
@@ -1094,6 +1105,25 @@ pub fn build_router(metas: &[RouteMeta], tx: TaskTx) -> Router {
         );
         router = router.route(&meta.path, route_handler);
     }
+
+    // Auto-register de /openapi.json (Fase 7.2). El schema viene
+    // precomputado por `serve` (eager, una sola vez al arrancar);
+    // cada request lo clona — clone de `serde_json::Value` es lineal
+    // en el tamaño del schema, despreciable para APIs típicas.
+    if let Some(schema) = openapi_schema {
+        let user_declared = metas.iter().any(|m| m.path == "/openapi.json");
+        if !user_declared {
+            let schema = std::sync::Arc::new(schema);
+            router = router.route(
+                "/openapi.json",
+                axum::routing::get(move || {
+                    let schema = schema.clone();
+                    async move { axum::Json((*schema).clone()) }
+                }),
+            );
+        }
+    }
+
     router
 }
 
@@ -1435,11 +1465,21 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
 /// Cuando axum baja por Ctrl-C, su thread termina, todos los `tx`
 /// vivos en handlers se dropean, el `rx` del main loop devuelve
 /// `None` y la función retorna.
-pub fn serve(registry: HttpRegistry, addr: std::net::SocketAddr) -> std::io::Result<()> {
+pub fn serve(
+    registry: HttpRegistry,
+    program: crate::ast::Program,
+    addr: std::net::SocketAddr,
+) -> std::io::Result<()> {
     use std::thread;
 
     let (tx, rx) = mpsc::unbounded_channel::<InterpTask>();
     let metas = registry.metas();
+
+    // Fase 7.2: precomputar el schema OpenAPI con `program` + `registry`
+    // y pasarlo a `build_router`. El auto-register de `/openapi.json`
+    // pasa por ahí (y respeta cualquier ruta declarada por el usuario
+    // con ese mismo path).
+    let openapi_schema = crate::openapi::generate_openapi(&registry, &program);
 
     // Thread tokio: owns el runtime async y el server axum. Solo
     // recibe metadata + tx (todos `Send`).
@@ -1450,12 +1490,13 @@ pub fn serve(registry: HttpRegistry, addr: std::net::SocketAddr) -> std::io::Res
                 .enable_all()
                 .build()?;
             runtime.block_on(async move {
-                let router = build_router(&metas, tx);
+                let router = build_router(&metas, tx, Some(openapi_schema));
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 eprintln!("🏔️  Fitz HTTP escuchando en http://{}", addr);
                 for meta in &metas {
                     eprintln!("   {} {}", meta.method.as_str(), meta.path);
                 }
+                eprintln!("   GET /openapi.json  (schema autogenerado)");
                 axum::serve(listener, router)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
@@ -2356,7 +2397,9 @@ mod tests {
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
         let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx);
+        // Tests existentes de routing: schema = None para no contaminar
+        // los path lookups con la ruta auto-registrada de 7.2.
+        let router = build_router(&metas, tx, None);
 
         let local = tokio::task::LocalSet::new();
         local
@@ -2551,6 +2594,132 @@ mod tests {
             run_oneshot(src, axum::http::Method::POST, "/users").await;
         assert_eq!(status, 400);
         assert!(body.contains("body requerido"));
+    }
+
+    // ---- 7.2 auto-register de /openapi.json ----
+    //
+    // Helper local: clona el patrón de `run_oneshot` pero acepta un
+    // `openapi_schema: Option<serde_json::Value>` y devuelve solo el
+    // (status, body) sin loop de tasks (la ruta /openapi.json no
+    // necesita el bridge — es 100% async axum-side).
+
+    async fn oneshot_get_openapi(
+        metas: Vec<RouteMeta>,
+        openapi_schema: Option<serde_json::Value>,
+    ) -> (u16, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (tx, _rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, openapi_schema);
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/openapi.json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_con_schema_some_registra_openapi_json() {
+        // Schema mínimo: el router lo sirve como-is en GET /openapi.json.
+        let schema = serde_json::json!({
+            "openapi": "3.1.0",
+            "info": { "title": "Fitz API", "version": "0.1.0" },
+            "paths": {},
+        });
+        let (status, body) = oneshot_get_openapi(vec![], Some(schema)).await;
+        assert_eq!(status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["openapi"], serde_json::json!("3.1.0"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_con_schema_none_no_registra_openapi_json() {
+        let (status, _body) = oneshot_get_openapi(vec![], None).await;
+        assert_eq!(status, 404);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_auto_register_convive_con_rutas_del_usuario() {
+        // Si el usuario tiene `@get("/")` y el auto-register suma
+        // `/openapi.json`, ambas funcionan. Verificamos que la ruta
+        // del usuario sigue accesible (no se pisa) y que el schema
+        // está disponible.
+        let src = "@get(\"/\")\nfn hello() => \"hola\"";
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let schema = serde_json::json!({
+            "openapi": "3.1.0",
+            "paths": { "/": {} },
+        });
+        let (status, body) = oneshot_get_openapi(metas, Some(schema)).await;
+        assert_eq!(status, 200);
+        assert!(body.contains("openapi"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn usuario_declara_openapi_json_propio_y_gana_sobre_auto_register() {
+        // El usuario declaró su propio `@get("/openapi.json")`. El
+        // auto-register debe ceder — la ruta del usuario es la que
+        // responde. Verificamos que la respuesta es la del usuario
+        // (un string `"mio"`), no el schema cacheado que pasamos.
+        let src = "@get(\"/openapi.json\")\nfn custom() => \"mio\"";
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let auto_schema = serde_json::json!({
+            "openapi": "3.1.0",
+            "_marker": "auto-register",
+        });
+
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, Some(auto_schema));
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/openapi.json")
+            .body(Body::empty())
+            .unwrap();
+
+        // Mismo patrón que run_oneshot: avanzar el response + procesar
+        // tasks. La ruta del usuario sí dispara una task (es un handler
+        // Fitz normal).
+        let local = tokio::task::LocalSet::new();
+        let (status, body) = local
+            .run_until(async move {
+                let mut resp_fut = Box::pin(router.oneshot(req));
+                loop {
+                    tokio::select! {
+                        resp = &mut resp_fut => {
+                            let resp = resp.unwrap();
+                            let status = resp.status().as_u16();
+                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                            return (status, String::from_utf8(bytes.to_vec()).unwrap());
+                        }
+                        Some(task) = rx.recv() => {
+                            let outcome = handle_task(
+                                &registry,
+                                task.route_idx,
+                                task.path_params,
+                                task.query_params,
+                                task.body,
+                            ).await;
+                            let _ = task.reply.send(outcome);
+                        }
+                    }
+                }
+            })
+            .await;
+        assert_eq!(status, 200);
+        // El body es el del handler del usuario: `"mio"` (JSON string).
+        // NO contiene "_marker" del schema auto-register.
+        assert_eq!(body, "\"mio\"");
+        assert!(!body.contains("_marker"));
     }
 
     #[tokio::test(flavor = "current_thread")]

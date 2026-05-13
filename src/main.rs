@@ -413,6 +413,11 @@ fn run_file(path: &PathBuf, no_typecheck: bool) {
     // ahí mientras corre el eval. Si después de eval el registry
     // tiene rutas, arrancamos el servidor; si no, terminamos como un
     // programa CLI normal.
+    //
+    // Fase 7.2: el server necesita el AST original también para
+    // precomputar el schema OpenAPI (`components.schemas` recorre los
+    // `Stmt::TypeDef`). Clonamos antes de moverlo al evaluator.
+    let program_for_server = program.clone();
     let (eval_result, registry) = http::with_active_registry(|| {
         evaluator::eval_with_base_sync(program, base_dir)
     });
@@ -433,7 +438,7 @@ fn run_file(path: &PathBuf, no_typecheck: bool) {
                 std::process::exit(1);
             }
         };
-        if let Err(e) = http::serve(registry, addr) {
+        if let Err(e) = http::serve(registry, program_for_server, addr) {
             eprintln!("Error del servidor HTTP: {}", e);
             std::process::exit(1);
         }
