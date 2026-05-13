@@ -6124,6 +6124,191 @@ mod tests {
                 _ => None,
             }
         }
+
+        /// Devuelve los attributes de un `fn` como strings tokenizados.
+        /// Útil para verificar `#[tokio::main(...)]` y similares.
+        pub fn fn_attrs(f: &ItemFn) -> Vec<String> {
+            f.attrs.iter().map(ts).collect()
+        }
+
+        /// True si el `fn` está marcado como `async`.
+        pub fn fn_is_async(f: &ItemFn) -> bool {
+            f.sig.asyncness.is_some()
+        }
+
+        /// Devuelve el cuerpo de un `fn` tokenizado y normalizado.
+        pub fn fn_body_text(f: &ItemFn) -> String {
+            ts(&f.block)
+        }
+
+        /// Devuelve los pares `(pat, ty)` de los params del `fn` como
+        /// strings tokenizados. Útil para verificar que un handler tiene
+        /// extractores axum específicos como params.
+        pub fn fn_param_pats_and_types(f: &ItemFn) -> Vec<(String, String)> {
+            f.sig
+                .inputs
+                .iter()
+                .filter_map(|arg| match arg {
+                    syn::FnArg::Typed(pt) => Some((ts(&*pt.pat), ts(&*pt.ty))),
+                    _ => None,
+                })
+                .collect()
+        }
+
+        /// Encuentra una invocación de macro top-level por nombre del
+        /// segmento final del path (ej. `thread_local`). None si no hay.
+        pub fn find_top_macro<'a>(file: &'a File, name: &str) -> Option<&'a syn::ItemMacro> {
+            file.items.iter().find_map(|i| match i {
+                Item::Macro(im)
+                    if im
+                        .mac
+                        .path
+                        .segments
+                        .last()
+                        .is_some_and(|s| s.ident == name) =>
+                {
+                    Some(im)
+                }
+                _ => None,
+            })
+        }
+
+        /// Cuenta cuántas invocaciones top-level de un macro con el
+        /// nombre dado hay en el archivo.
+        pub fn count_top_macros(file: &File, name: &str) -> usize {
+            file.items
+                .iter()
+                .filter(|i| {
+                    matches!(
+                        i,
+                        Item::Macro(im) if im.mac.path.segments.last().is_some_and(|s| s.ident == name)
+                    )
+                })
+                .count()
+        }
+
+        /// Devuelve todas las invocaciones de `.route(...)` dentro de
+        /// `fn main` como `(primer_arg_tokenizado, segundo_arg_tokenizado)`.
+        /// Para `.route("/users", axum::routing::get(__handler_x))` da
+        /// `("\"/users\"", "axum :: routing :: get ( __handler_x )")`.
+        pub fn find_route_registrations(file: &File) -> Vec<(String, String)> {
+            let main = match find_item_fn(file, "main") {
+                Some(m) => m,
+                None => return Vec::new(),
+            };
+            use syn::visit::Visit;
+            struct V {
+                out: Vec<(String, String)>,
+            }
+            impl<'ast> Visit<'ast> for V {
+                fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
+                    if e.method == "route" && e.args.len() == 2 {
+                        let mut iter = e.args.iter();
+                        let p = iter.next().unwrap();
+                        let h = iter.next().unwrap();
+                        self.out.push((ts(p), ts(h)));
+                    }
+                    syn::visit::visit_expr_method_call(self, e);
+                }
+            }
+            let mut v = V { out: Vec::new() };
+            v.visit_block(&main.block);
+            v.out
+        }
+
+        /// Busca un `let` con un nombre dado adentro de un `fn`,
+        /// recursivamente. Devuelve un clon del `Local` o None.
+        pub fn find_local_in_fn(f: &ItemFn, name: &str) -> Option<Local> {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                found: Option<Local>,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_local(&mut self, l: &'ast Local) {
+                    if self.found.is_none() && pat_binds(&l.pat, self.name) {
+                        self.found = Some(l.clone());
+                    }
+                    syn::visit::visit_local(self, l);
+                }
+            }
+            let mut v = V { name, found: None };
+            v.visit_block(&f.block);
+            v.found
+        }
+
+        /// Busca todos los `let` con un nombre dado adentro de un `fn`
+        /// (cualquier nivel de anidamiento). Útil para validar
+        /// reasignación vs creación múltiple del binding.
+        pub fn count_locals_in_fn(f: &ItemFn, name: &str) -> usize {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                count: usize,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_local(&mut self, l: &'ast Local) {
+                    if pat_binds(&l.pat, self.name) {
+                        self.count += 1;
+                    }
+                    syn::visit::visit_local(self, l);
+                }
+            }
+            let mut v = V { name, count: 0 };
+            v.visit_block(&f.block);
+            v.count
+        }
+
+        /// True si el `fn` body contiene un return cuya expresión
+        /// matchea (tokenizada) con todas las needles dadas.
+        pub fn fn_body_returns_any_matching(f: &ItemFn, needles: &[&str]) -> bool {
+            use syn::visit::Visit;
+            struct V<'a, 'b> {
+                needles: &'a [&'b str],
+                found: bool,
+            }
+            impl<'a, 'b, 'ast> Visit<'ast> for V<'a, 'b> {
+                fn visit_expr_return(&mut self, e: &'ast syn::ExprReturn) {
+                    if let Some(ex) = &e.expr {
+                        let t = ts(&**ex);
+                        if self.needles.iter().all(|n| t.contains(n)) {
+                            self.found = true;
+                        }
+                    }
+                    syn::visit::visit_expr_return(self, e);
+                }
+            }
+            let mut v = V {
+                needles,
+                found: false,
+            };
+            v.visit_block(&f.block);
+            v.found
+        }
+
+        /// True si en el `fn` body aparece un `match` con al menos un
+        /// arm cuyo pat contiene la needle dada (tokenizada).
+        pub fn fn_body_has_match_arm_pat(f: &ItemFn, pat_needle: &str) -> bool {
+            use syn::visit::Visit;
+            struct V<'a> {
+                needle: &'a str,
+                found: bool,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_arm(&mut self, a: &'ast syn::Arm) {
+                    if ts(&a.pat).contains(self.needle) {
+                        self.found = true;
+                    }
+                    syn::visit::visit_arm(self, a);
+                }
+            }
+            let mut v = V {
+                needle: pat_needle,
+                found: false,
+            };
+            v.visit_block(&f.block);
+            v.found
+        }
     }
 
     #[test]
@@ -7727,43 +7912,85 @@ mod tests {
         // exige sobre los futures.
         let src = "@server(3000) fn main() => 0\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
-        assert_http_contains(
-            src,
-            &[
-                "#[tokio::main(flavor = \"current_thread\")]",
-                "async fn main()",
-                "axum::Router::new()",
-            ],
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        assert!(ast_test::fn_is_async(main), "fn main debería ser async");
+        let attrs = ast_test::fn_attrs(main);
+        assert!(
+            attrs
+                .iter()
+                .any(|a| a.contains("tokio :: main") && a.contains("current_thread")),
+            "esperaba #[tokio::main(flavor = \"current_thread\")] en fn main, attrs: {:?}",
+            attrs
+        );
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            body.contains("axum :: Router :: new"),
+            "esperaba `axum::Router::new()` en fn main body"
         );
     }
 
     #[test]
     fn http_router_registra_ruta_get() {
         let src = "@get(\"/users\") fn list_users() -> Str => \"[]\"";
-        assert_http_contains(
-            src,
-            &[
-                ".route(\"/users\", axum::routing::get(__handler_list_users))",
-                "async fn __handler_list_users(",
-            ],
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let handler = ast_test::find_item_fn(&file, "__handler_list_users")
+            .expect("falta async fn __handler_list_users");
+        assert!(
+            ast_test::fn_is_async(handler),
+            "__handler_list_users debería ser async"
+        );
+        let routes = ast_test::find_route_registrations(&file);
+        let users = routes
+            .iter()
+            .find(|(p, _)| p.contains("/users"))
+            .expect(&format!("esperaba route /users, got: {:?}", routes));
+        assert!(
+            users.1.contains("axum :: routing :: get") && users.1.contains("__handler_list_users"),
+            "esperaba `axum::routing::get(__handler_list_users)`, got: {}",
+            users.1
         );
     }
 
     #[test]
     fn http_path_param_int_genera_extract_path() {
         let src = "@get(\"/u/{id}\") fn get_user(id: Int) -> Str => \"x\"";
-        assert_http_contains(
-            src,
-            &["axum::extract::Path(id): axum::extract::Path<i64>"],
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let handler = ast_test::find_item_fn(&file, "__handler_get_user")
+            .expect("falta __handler_get_user");
+        let pats_tys = ast_test::fn_param_pats_and_types(handler);
+        assert!(
+            pats_tys.iter().any(|(p, t)| {
+                p.contains("axum :: extract :: Path")
+                    && p.contains("id")
+                    && t.contains("axum :: extract :: Path")
+                    && t.contains("i64")
+            }),
+            "esperaba param `axum::extract::Path(id): axum::extract::Path<i64>` en __handler_get_user, got: {:?}",
+            pats_tys
         );
     }
 
     #[test]
     fn http_path_param_str_genera_extract_path_string() {
         let src = "@get(\"/u/{name}\") fn greet(name: Str) -> Str => name";
-        assert_http_contains(
-            src,
-            &["axum::extract::Path(name): axum::extract::Path<String>"],
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let handler =
+            ast_test::find_item_fn(&file, "__handler_greet").expect("falta __handler_greet");
+        let pats_tys = ast_test::fn_param_pats_and_types(handler);
+        assert!(
+            pats_tys.iter().any(|(p, t)| {
+                p.contains("axum :: extract :: Path")
+                    && p.contains("name")
+                    && t.contains("axum :: extract :: Path")
+                    && t.contains("String")
+            }),
+            "esperaba param `axum::extract::Path(name): axum::extract::Path<String>` en __handler_greet, got: {:?}",
+            pats_tys
         );
     }
 
@@ -7771,15 +7998,31 @@ mod tests {
     fn http_handler_result_emite_match_ok_err() {
         let src = "@get(\"/d/{n}\") fn divide(n: Int) -> Result<Int> { return Ok(n * 2) }";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let wrapper = ast_test::find_item_fn(&file, "__handler_divide")
+            .expect("falta __handler_divide");
         assert!(
-            code.contains("Ok(__v)") && code.contains("Err(__e)"),
-            "esperaba match Ok/Err en handler, got:\n{}",
-            code
+            ast_test::fn_body_has_match_arm_pat(wrapper, "Ok (__v)")
+                || ast_test::fn_body_has_match_arm_pat(wrapper, "Ok(__v)"),
+            "esperaba arm `Ok(__v)` en el wrapper, body:\n{}",
+            ast_test::fn_body_text(wrapper)
         );
         assert!(
-            code.contains("StatusCode::OK") && code.contains("StatusCode::INTERNAL_SERVER_ERROR"),
-            "esperaba status codes 200/500, got:\n{}",
-            code
+            ast_test::fn_body_has_match_arm_pat(wrapper, "Err (__e)")
+                || ast_test::fn_body_has_match_arm_pat(wrapper, "Err(__e)"),
+            "esperaba arm `Err(__e)` en el wrapper, body:\n{}",
+            ast_test::fn_body_text(wrapper)
+        );
+        let body = ast_test::fn_body_text(wrapper);
+        assert!(
+            body.contains("StatusCode :: OK"),
+            "esperaba `StatusCode::OK` (200), got:\n{}",
+            body
+        );
+        assert!(
+            body.contains("StatusCode :: INTERNAL_SERVER_ERROR"),
+            "esperaba `StatusCode::INTERNAL_SERVER_ERROR` (500), got:\n{}",
+            body
         );
     }
 
@@ -7794,20 +8037,25 @@ mod tests {
                        return 401 {\"msg\": \"no autorizado\"}\n\
                    }";
         let code = gen(src).unwrap();
-        assert!(
-            code.contains("fn protected() -> __FitzResponse"),
-            "esperaba que la fn retorne __FitzResponse, got:\n{}",
-            code
+        let file = ast_test::parse(&code);
+        let protected =
+            ast_test::find_item_fn(&file, "protected").expect("falta fn protected");
+        assert_eq!(
+            ast_test::fn_return_type(protected).as_deref(),
+            Some("__FitzResponse"),
+            "esperaba que protected retorne __FitzResponse"
         );
         assert!(
-            code.contains("return __FitzResponse { status: (401i64) as u16"),
-            "esperaba `__FitzResponse {{ status: (401i64) as u16, ... }}` en el body, got:\n{}",
-            code
+            ast_test::fn_body_returns_any_matching(
+                protected,
+                &["__FitzResponse", "status", "401i64", "as u16"],
+            ),
+            "esperaba un `return __FitzResponse {{ status: (401i64) as u16, ... }}`, body:\n{}",
+            ast_test::fn_body_text(protected)
         );
         assert!(
-            code.contains("__to_fitz_json"),
-            "esperaba que el body se serialice con __to_fitz_json, got:\n{}",
-            code
+            ast_test::fn_body_text(protected).contains("__to_fitz_json"),
+            "esperaba que el body se serialice con __to_fitz_json"
         );
     }
 
@@ -7822,17 +8070,26 @@ mod tests {
                        return 404 {\"msg\": \"no encontrado\"}\n\
                    }";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let get_user =
+            ast_test::find_item_fn(&file, "get_user").expect("falta fn get_user");
         // El return de Str "alice" debe envolverse en status 200.
         assert!(
-            code.contains("return __FitzResponse { status: 200,"),
-            "esperaba que el return normal se envuelva con status 200, got:\n{}",
-            code
+            ast_test::fn_body_returns_any_matching(
+                get_user,
+                &["__FitzResponse", "status : 200"],
+            ),
+            "esperaba return con `__FitzResponse {{ status: 200, ... }}`, body:\n{}",
+            ast_test::fn_body_text(get_user)
         );
-        // El return 404 emite su status custom.
+        // El return 404 emite su status custom como cast.
         assert!(
-            code.contains("status: (404i64) as u16"),
-            "esperaba `status: (404i64) as u16` para el return de error, got:\n{}",
-            code
+            ast_test::fn_body_returns_any_matching(
+                get_user,
+                &["__FitzResponse", "404i64", "as u16"],
+            ),
+            "esperaba return con `status: (404i64) as u16`, body:\n{}",
+            ast_test::fn_body_text(get_user)
         );
     }
 
@@ -7845,20 +8102,33 @@ mod tests {
                        return 403 {\"msg\": \"prohibido\"}\n\
                    }";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let wrapper =
+            ast_test::find_item_fn(&file, "__handler_p").expect("falta __handler_p");
+        let resp =
+            ast_test::find_local_in_fn(wrapper, "__resp").expect("falta let __resp en wrapper");
+        assert_eq!(
+            ast_test::local_type(&resp).as_deref(),
+            Some("__FitzResponse"),
+            "esperaba `let __resp: __FitzResponse`"
+        );
+        assert_eq!(
+            ast_test::local_init(&resp).as_deref(),
+            Some("__result"),
+            "esperaba `let __resp = __result`"
+        );
+        let body = ast_test::fn_body_text(wrapper);
         assert!(
-            code.contains("let __resp: __FitzResponse = __result;"),
-            "esperaba destructuring del result a __FitzResponse, got:\n{}",
-            code
+            body.contains("StatusCode :: from_u16 (__resp . status)")
+                || body.contains("StatusCode :: from_u16 (__resp .status)"),
+            "esperaba `StatusCode::from_u16(__resp.status)`, got:\n{}",
+            body
         );
         assert!(
-            code.contains("StatusCode::from_u16(__resp.status)"),
-            "esperaba `StatusCode::from_u16(__resp.status)` en el wrapper, got:\n{}",
-            code
-        );
-        assert!(
-            code.contains("axum::Json(__resp.body)"),
-            "esperaba `axum::Json(__resp.body)` en el wrapper, got:\n{}",
-            code
+            body.contains("axum :: Json (__resp . body)")
+                || body.contains("axum :: Json (__resp .body)"),
+            "esperaba `axum::Json(__resp.body)`, got:\n{}",
+            body
         );
     }
 
@@ -7866,11 +8136,12 @@ mod tests {
     fn status_codes_prelude_define_fitz_response() {
         let src = "@get(\"/p\") fn p() -> Str => \"ok\"";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
         // El preludio HTTP siempre incluye `__FitzResponse` (aunque no
         // se use; cuesta poco y permite mezclar status custom con
         // handlers normales en el mismo programa).
         assert!(
-            code.contains("struct __FitzResponse"),
+            ast_test::find_item_struct(&file, "__FitzResponse").is_some(),
             "esperaba `struct __FitzResponse` en el preludio HTTP, got:\n{}",
             code
         );
@@ -7885,22 +8156,40 @@ mod tests {
         // Falta → 400.
         let src = "@get(\"/items?limit={limit}\") fn list_items(limit: Int) -> Int => limit";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let wrapper = ast_test::find_item_fn(&file, "__handler_list_items")
+            .expect("falta __handler_list_items");
+        let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
-            code.contains(
-                "axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>"
-            ),
-            "esperaba extractor Query<HashMap>, got:\n{}",
-            code
+            pats_tys.iter().any(|(p, t)| {
+                p.contains("axum :: extract :: Query")
+                    && p.contains("__qmap")
+                    && t.contains("axum :: extract :: Query")
+                    && t.contains("HashMap")
+                    && t.contains("String")
+            }),
+            "esperaba extractor Query<HashMap<String, String>>, got: {:?}",
+            pats_tys
         );
+        let limit = ast_test::find_local_in_fn(wrapper, "limit")
+            .expect("falta `let limit` en wrapper");
+        assert_eq!(
+            ast_test::local_type(&limit).as_deref(),
+            Some("i64"),
+            "esperaba `limit: i64`"
+        );
+        let init = ast_test::local_init(&limit).unwrap_or_default();
         assert!(
-            code.contains("let limit: i64 = match __qmap.get(\"limit\")"),
-            "esperaba binding `let limit: i64 = match __qmap.get(...)`, got:\n{}",
-            code
+            init.contains("__qmap . get (\"limit\")")
+                || init.contains("__qmap .get (\"limit\")"),
+            "esperaba init que matchea __qmap.get(\"limit\"), got: {}",
+            init
         );
+        // El mensaje de error para query faltante es contrato user-visible,
+        // chequeo en el código completo.
         assert!(
             code.contains("query param 'limit': falta — es obligatorio"),
-            "esperaba mensaje 400 para query param faltante, got:\n{}",
-            code
+            "esperaba mensaje 400 para query param faltante"
         );
     }
 
@@ -7910,15 +8199,21 @@ mod tests {
         // Some(v), parse error → 400.
         let src = "@get(\"/items?limit={limit}\") fn list_items(limit: Int?) -> Int => 0";
         let code = gen(src).unwrap();
-        assert!(
-            code.contains("let limit: Option<i64> = match __qmap.get(\"limit\")"),
-            "esperaba binding `let limit: Option<i64> = ...`, got:\n{}",
-            code
+        let file = ast_test::parse(&code);
+        let wrapper = ast_test::find_item_fn(&file, "__handler_list_items")
+            .expect("falta __handler_list_items");
+        let limit = ast_test::find_local_in_fn(wrapper, "limit")
+            .expect("falta `let limit` en wrapper");
+        assert_eq!(
+            ast_test::local_type(&limit).as_deref(),
+            Some("Option < i64 >"),
+            "esperaba `limit: Option<i64>`"
         );
+        let init = ast_test::local_init(&limit).unwrap_or_default();
         assert!(
-            code.contains("None => None"),
-            "esperaba branch `None => None` para query opcional, got:\n{}",
-            code
+            init.contains("None => None"),
+            "esperaba branch `None => None` para query opcional, got init: {}",
+            init
         );
     }
 
@@ -7927,15 +8222,28 @@ mod tests {
         // `name: Str` → `String`, sin `.parse::<...>()`.
         let src = "@get(\"/x?name={name}\") fn h(name: Str) -> Str => name";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let wrapper =
+            ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
+        let name = ast_test::find_local_in_fn(wrapper, "name")
+            .expect("falta `let name` en wrapper");
+        assert_eq!(
+            ast_test::local_type(&name).as_deref(),
+            Some("String"),
+            "esperaba `name: String`"
+        );
+        let init = ast_test::local_init(&name).unwrap_or_default();
         assert!(
-            code.contains("let name: String = match __qmap.get(\"name\")"),
-            "esperaba binding `let name: String = ...`, got:\n{}",
-            code
+            init.contains("Ok ::< String , String > (__s . clone ())")
+                || init.contains("Ok ::< String, String > (__s .clone ())")
+                || init.contains("Ok :: < String , String > (__s . clone ())"),
+            "esperaba coerción `Ok::<String, String>(__s.clone())`, got: {}",
+            init
         );
         assert!(
-            code.contains("Ok::<String, String>(__s.clone())"),
-            "esperaba coerción `Ok::<String, String>(__s.clone())`, got:\n{}",
-            code
+            !init.contains(". parse"),
+            "no debería haber `.parse::<...>()` para Str, got: {}",
+            init
         );
     }
 
@@ -7943,15 +8251,21 @@ mod tests {
     fn query_params_bool_acepta_true_false() {
         let src = "@get(\"/x?on={on}\") fn h(on: Bool) -> Bool => on";
         let code = gen(src).unwrap();
-        assert!(
-            code.contains("let on: bool = match __qmap.get(\"on\")"),
-            "esperaba binding `let on: bool`, got:\n{}",
-            code
+        let file = ast_test::parse(&code);
+        let wrapper =
+            ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
+        let on = ast_test::find_local_in_fn(wrapper, "on")
+            .expect("falta `let on` en wrapper");
+        assert_eq!(
+            ast_test::local_type(&on).as_deref(),
+            Some("bool"),
+            "esperaba `on: bool`"
         );
+        let init = ast_test::local_init(&on).unwrap_or_default();
         assert!(
-            code.contains("\"true\" => Ok"),
-            "esperaba match contra `\"true\"`, got:\n{}",
-            code
+            init.contains("\"true\" => Ok") || init.contains("\"true\"=> Ok"),
+            "esperaba arm contra `\"true\"`, got init: {}",
+            init
         );
     }
 
@@ -7962,22 +8276,35 @@ mod tests {
         let src = "@get(\"/users/{id}?limit={limit}\") \
                    fn list(id: Int, limit: Int?) -> Int => id";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let wrapper =
+            ast_test::find_item_fn(&file, "__handler_list").expect("falta __handler_list");
+        let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
-            code.contains("axum::extract::Path(id): axum::extract::Path<i64>"),
-            "esperaba extractor Path<i64> para `id`, got:\n{}",
-            code
+            pats_tys.iter().any(|(p, t)| {
+                p.contains("axum :: extract :: Path")
+                    && p.contains("id")
+                    && t.contains("axum :: extract :: Path")
+                    && t.contains("i64")
+            }),
+            "esperaba extractor Path<i64> para `id`, got: {:?}",
+            pats_tys
         );
         assert!(
-            code.contains(
-                "axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>"
-            ),
-            "esperaba extractor Query<HashMap>, got:\n{}",
-            code
+            pats_tys.iter().any(|(p, t)| {
+                p.contains("axum :: extract :: Query")
+                    && t.contains("HashMap")
+                    && t.contains("String")
+            }),
+            "esperaba extractor Query<HashMap>, got: {:?}",
+            pats_tys
         );
-        assert!(
-            code.contains("let limit: Option<i64> = match __qmap.get(\"limit\")"),
-            "esperaba binding nullable de `limit`, got:\n{}",
-            code
+        let limit = ast_test::find_local_in_fn(wrapper, "limit")
+            .expect("falta `let limit` en wrapper");
+        assert_eq!(
+            ast_test::local_type(&limit).as_deref(),
+            Some("Option < i64 >"),
+            "esperaba `limit: Option<i64>`"
         );
     }
 
@@ -8011,20 +8338,30 @@ mod tests {
         let src = "type Input { msg: Str }\n\
                    @post(\"/echo\") fn echo(body: Input) -> Input => body";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let wrapper =
+            ast_test::find_item_fn(&file, "__handler_echo").expect("falta __handler_echo");
+        let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
-            code.contains("axum::Json(body_raw): axum::Json<serde_json::Value>"),
-            "esperaba extractor body_raw, got:\n{}",
-            code
+            pats_tys.iter().any(|(p, t)| {
+                p.contains("axum :: Json")
+                    && p.contains("body_raw")
+                    && t.contains("axum :: Json")
+                    && t.contains("serde_json :: Value")
+            }),
+            "esperaba extractor body_raw: axum::Json<serde_json::Value>, got: {:?}",
+            pats_tys
+        );
+        let body = ast_test::fn_body_text(wrapper);
+        assert!(
+            body.contains("__FromFitzJson") && body.contains("__from_fitz_json"),
+            "esperaba que el body llame __from_fitz_json, got:\n{}",
+            body
         );
         assert!(
-            code.contains("__FromFitzJson>::__from_fitz_json(&body_raw)"),
-            "esperaba __from_fitz_json para deserializar, got:\n{}",
-            code
-        );
-        assert!(
-            code.contains("StatusCode::BAD_REQUEST"),
+            body.contains("StatusCode :: BAD_REQUEST"),
             "esperaba 400 si la deserialización falla, got:\n{}",
-            code
+            body
         );
     }
 
@@ -8032,13 +8369,31 @@ mod tests {
     fn http_server_decorator_setea_addr() {
         let src = "@server(8080, \"0.0.0.0\") fn main() => 0\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
-        assert_http_contains(src, &["\"0.0.0.0:8080\".parse()"]);
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            body.contains("\"0.0.0.0:8080\" . parse")
+                || body.contains("\"0.0.0.0:8080\".parse"),
+            "esperaba `\"0.0.0.0:8080\".parse()` en fn main, got:\n{}",
+            body
+        );
     }
 
     #[test]
     fn http_sin_server_decorator_usa_default_3000() {
         let src = "@get(\"/\") fn index() -> Str => \"ok\"";
-        assert_http_contains(src, &["\"127.0.0.1:3000\".parse()"]);
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        let body = ast_test::fn_body_text(main);
+        assert!(
+            body.contains("\"127.0.0.1:3000\" . parse")
+                || body.contains("\"127.0.0.1:3000\".parse"),
+            "esperaba `\"127.0.0.1:3000\".parse()` (default), got:\n{}",
+            body
+        );
     }
 
     #[test]
@@ -8064,20 +8419,26 @@ mod tests {
         let src = "let users = [1, 2, 3]\n\
                    @get(\"/users\") fn list_users() -> List<Int> => users";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
+        let tl = ast_test::find_top_macro(&file, "thread_local")
+            .expect("esperaba `thread_local!` top-level");
+        let tl_tokens = ast_test::ts(&tl.mac.tokens);
         assert!(
-            code.contains("thread_local!"),
-            "esperaba bloque `thread_local!`, got:\n{}",
-            code
+            tl_tokens.contains("__FITZ_STATE_USERS"),
+            "esperaba el static __FITZ_STATE_USERS adentro del thread_local!, got:\n{}",
+            tl_tokens
         );
+        // Cada fn que toca la state debe materializarla con .with(...)
+        // (la fn `list_users` o el handler, dependiendo de la implementación).
+        let list_users =
+            ast_test::find_item_fn(&file, "list_users").expect("falta fn list_users");
+        let body = ast_test::fn_body_text(list_users);
         assert!(
-            code.contains("__FITZ_STATE_USERS"),
-            "esperaba el static __FITZ_STATE_USERS, got:\n{}",
-            code
-        );
-        assert!(
-            code.contains("__FITZ_STATE_USERS.with(|__s| __s.clone())"),
+            body.contains("__FITZ_STATE_USERS")
+                && body.contains(". with")
+                && body.contains(". clone"),
             "esperaba la materialización con `.with(|__s| __s.clone())`, got:\n{}",
-            code
+            body
         );
     }
 
@@ -8088,14 +8449,15 @@ mod tests {
         let src = "let ignorada = 42\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
         assert!(
-            !code.contains("thread_local!"),
-            "no esperaba thread_local para una var sin refs, got:\n{}",
-            code
+            ast_test::find_top_macro(&file, "thread_local").is_none(),
+            "no esperaba thread_local! para una var sin refs"
         );
+        // El static tampoco debe aparecer (ni como item ni en ningún lado).
         assert!(
             !code.contains("__FITZ_STATE_IGNORADA"),
-            "no esperaba el static, got:\n{}",
+            "no esperaba el static __FITZ_STATE_IGNORADA, got:\n{}",
             code
         );
     }
@@ -8151,14 +8513,15 @@ mod tests {
         let src = "type User { id: Int, name: Str }\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap();
+        let file = ast_test::parse(&code);
         assert!(
-            code.contains("impl __ToFitzJson for UserData"),
-            "esperaba impl ToFitzJson para UserData, got:\n{}",
+            ast_test::find_impl(&file, "__ToFitzJson", "UserData").is_some(),
+            "esperaba `impl __ToFitzJson for UserData`, got:\n{}",
             code
         );
         assert!(
-            code.contains("impl __FromFitzJson for UserData"),
-            "esperaba impl FromFitzJson para UserData, got:\n{}",
+            ast_test::find_impl(&file, "__FromFitzJson", "UserData").is_some(),
+            "esperaba `impl __FromFitzJson for UserData`, got:\n{}",
             code
         );
     }
