@@ -381,7 +381,7 @@ fn walk_expr_for_state_refs(
                 walk_expr_for_state_refs(v, candidates, locals, refs);
             }
         }
-        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => {
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             walk_expr_for_state_refs(inner, candidates, locals, refs);
         }
         Expr::Match { value, arms, .. } => {
@@ -2568,6 +2568,14 @@ impl<'a> CodegenCtx<'a> {
             Expr::Ok(inner, _) => self.gen_ok(inner),
             Expr::Err(inner, _) => self.gen_err(inner),
             Expr::Try(inner, _) => self.gen_try(inner),
+            // Barrera de 6.1: el codegen emitirá `.await` Rust en 6.6.
+            // Hasta entonces, el AST puede contener `Expr::Await`
+            // (el parser lo construye desde 6.1) pero el `fitz build`
+            // lo rechaza con error explícito apuntando al sub-paso.
+            Expr::Await(_, _) => Err(self.err_at(
+                e.span(),
+                "`.await` todavía no se compila a binario nativo — llega en 6.6",
+            )),
             Expr::Match { value, arms, .. } => self.gen_match(value, arms),
             // FnExpr "suelto" — usado como valor, parámetro o retorno
             // (higher-order, F12). Emite `Rc::new(move |p1: T1, ...|
@@ -5204,7 +5212,7 @@ fn collect_captures_expr(
                 collect_captures_expr(e, params, locals, ctx, seen, out);
             }
         }
-        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => {
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             collect_captures_expr(inner, params, locals, ctx, seen, out);
         }
     }
@@ -5675,6 +5683,32 @@ mod tests {
                 err.message
             );
         }
+    }
+
+    /// Llama a `generate_rust` ignorando errores del checker. Solo para
+    /// probar **barreras defensivas** del codegen sobre features que el
+    /// checker también rechaza (p.ej. `.await` en Fase 6.1, antes de
+    /// 6.2/6.6). El flujo normal aborta en el checker; este helper
+    /// salta esa etapa para forzar al codegen a ver el AST y verificar
+    /// que su propia barrera está en su lugar.
+    fn gen_ignoring_check(src: &str) -> Result<String, FitzError> {
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (env, _errors) = check_program(&program);
+        generate_rust(&program, &env)
+    }
+
+    // ---- Fase 6.1: barrera del codegen sobre `.await` ----
+
+    #[test]
+    fn await_aborta_codegen_hasta_6_6() {
+        let err = gen_ignoring_check("let x = 1\nlet y = x.await")
+            .expect_err("esperaba error de codegen");
+        assert!(
+            err.message.contains("6.6") && err.message.contains(".await"),
+            "esperaba mensaje mencionando 6.6 y `.await`, fue: {}",
+            err.message
+        );
     }
 
     // ---- AST-based test helpers (T1 post-5b) ---------------------------

@@ -118,6 +118,15 @@ pub enum Expr {
     Err(Box<Expr>, Span),
     /// Operador postfix `expr?`. `span` apunta al `?`.
     Try(Box<Expr>, Span),
+
+    /// Operador postfix `expr.await`. Introducido en Fase 6.1.
+    /// `span` apunta al `.` (paralelo a `Field`).
+    ///
+    /// La keyword `await` ya la tokeniza el lexer como `Token::Await`.
+    /// Solo legal adentro de `async fn` — la validación entra en 6.2
+    /// (checker). En 6.1 el evaluator y el codegen emiten un error
+    /// explícito apuntando al sub-paso que lo completará.
+    Await(Box<Expr>, Span),
 }
 
 impl Expr {
@@ -147,6 +156,7 @@ impl Expr {
             Expr::Ok(_, s) => *s,
             Expr::Err(_, s) => *s,
             Expr::Try(_, s) => *s,
+            Expr::Await(_, s) => *s,
         }
     }
 }

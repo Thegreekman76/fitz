@@ -1407,6 +1407,21 @@ fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // burbujea hasta `eval` y se reporta como "`return` solo puede
         // usarse adentro de una función". Mensaje genérico (deuda
         // explícita; mejora pendiente con un signal dedicado).
+        // Barrera de 6.1: el parser construye el nodo `Expr::Await`,
+        // pero el evaluator async (refactor amplio) llega en 6.4.
+        // Hasta entonces emitimos un error explícito apuntando al
+        // sub-paso que lo va a completar — paralelo a cómo Fase 5b
+        // emitía errores `5b.X` por feature pendiente.
+        Expr::Await(inner, await_span) => {
+            // Evaluamos el operando para no esconder errores en él.
+            let _ = eval_expr(inner, env)?;
+            Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                await_span.line, await_span.column,
+                "el evaluador todavía no soporta `.await` — llega en 6.4",
+            )))
+        }
+
         Expr::Try(inner, try_span) => {
             let v = eval_expr(inner, env)?;
             match v {
@@ -2259,6 +2274,28 @@ mod tests {
     #[test]
     fn programa_vacio_no_falla() {
         assert!(eval(vec![]).is_ok());
+    }
+
+    // ---- Fase 6.1: barrera del evaluator sobre `.await` ----
+
+    #[test]
+    fn await_es_error_de_runtime_hasta_6_4() {
+        // El parser construye `Expr::Await` desde 6.1, pero el
+        // evaluator async llega en 6.4 (refactor amplio). La barrera
+        // evalúa el operando (para no esconder errores) y después
+        // emite error explícito citando el sub-paso y la sintaxis.
+        let expr = Expr::Await(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
+        let err = eval_expr_test(expr).expect_err("esperaba error del evaluator");
+        match err {
+            EvalSignal::Error(fitz_err) => {
+                assert!(
+                    fitz_err.message.contains("6.4") && fitz_err.message.contains(".await"),
+                    "esperaba mensaje mencionando 6.4 y `.await`, fue: {}",
+                    fitz_err.message
+                );
+            }
+            other => panic!("se esperaba EvalSignal::Error, fue {:?}", other),
+        }
     }
 
     // ---- literales ----

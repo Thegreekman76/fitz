@@ -1120,6 +1120,19 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // E está fijado en Str pero el T es desconocido sin contexto.
             Type::Result(Box::new(Type::Any))
         }
+        Expr::Await(inner, span) => {
+            // Barrera de 6.1: el parser construye el nodo, pero la
+            // semántica (validar contexto async + sintetizar `T` del
+            // operando `Future<T>`) entra en 6.2. Recursamos para no
+            // esconder errores de la sub-expresión.
+            let _ = infer_expr(ctx, inner);
+            ctx.error_at(
+                *span,
+                "el checker todavía no valida `.await` — llega en 6.2".to_string(),
+            );
+            Type::Any
+        }
+
         Expr::Try(inner, span) => {
             let operand_ty = infer_expr(ctx, inner);
             match &operand_ty {
@@ -2097,6 +2110,24 @@ mod tests {
         let e = &errors[0];
         assert_eq!(e.line, 3, "esperaba línea 3, fue {}", e.line);
         assert_eq!(e.column, 1, "esperaba col 1, fue {}", e.column);
+    }
+
+    // ---- Fase 6.1: barrera del checker sobre `.await` ----
+
+    #[test]
+    fn await_es_error_de_checker_hasta_6_2() {
+        // El parser construye `Expr::Await` desde 6.1, pero el checker
+        // todavía no lo valida (legalidad en async fn + operando
+        // `Future<T>`). Mientras tanto emite un error explícito que
+        // cita el sub-paso (6.2) y la sintaxis (`.await`).
+        let errors = errors_of("let x = 1\nlet y = x.await");
+        assert!(!errors.is_empty(), "esperaba error del checker");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("6.2") && msg.contains(".await"),
+            "esperaba mensaje mencionando 6.2 y `.await`, fue: {}",
+            msg
+        );
     }
 
     // ---- C-F2: field assignment chequeo ----

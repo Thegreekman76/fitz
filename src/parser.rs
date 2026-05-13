@@ -443,6 +443,20 @@ impl Parser {
             match self.peek() {
                 Token::Dot => {
                     let span = self.cur_span();
+                    // Fase 6.1: `.await` postfix. Detectamos antes de
+                    // consumir el `.` porque `await` ya es keyword del
+                    // lexer (`Token::Await`), no un Ident — el camino
+                    // normal de `.field` falla con "se esperaba nombre
+                    // de campo" sin esto. Mismo lugar en la cadena que
+                    // `.field` y `.method()`, así que `expr.await?`,
+                    // `expr.await.field`, `expr.await()` encajan por
+                    // continuación natural del loop.
+                    if matches!(self.peek_at(1), Token::Await) {
+                        self.advance(); // consume '.'
+                        self.advance(); // consume 'await'
+                        expr = Expr::Await(Box::new(expr), span);
+                        continue;
+                    }
                     self.advance();
                     let field = self.expect_ident(
                         "se esperaba nombre de campo después de '.'",
@@ -2055,6 +2069,132 @@ mod tests {
             assert_eq!(index.span().column, 4);
         } else {
             panic!("se esperaba Index, se obtuvo {:?}", e);
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — `.await` postfix (Fase 6.1)
+    //
+    // El parser construye `Expr::Await(inner, span)` cuando ve `.await`
+    // después de cualquier expresión postfix. La keyword `await` ya está
+    // tokenizada como `Token::Await` desde antes de Fase 6 (token dormido).
+    // El checker/evaluator/codegen rechazan el nodo con error explícito
+    // hasta 6.2/6.4/6.6; los tests de barrera viven en `types.rs`,
+    // `evaluator.rs` y `codegen.rs`.
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn await_postfix_envuelve_ident_receptor() {
+        let e = parse_expr("x.await").unwrap();
+        match e {
+            Expr::Await(inner, _) => {
+                assert_eq!(*inner, Expr::Ident("x".into(), Span::ZERO));
+            }
+            other => panic!("se esperaba Await, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn await_postfix_envuelve_call() {
+        // `f(x).await` → Await(Call(...))
+        let e = parse_expr("f(x).await").unwrap();
+        match e {
+            Expr::Await(inner, _) => {
+                assert!(matches!(*inner, Expr::Call { .. }),
+                    "se esperaba Await(Call), inner fue {:?}", inner);
+            }
+            other => panic!("se esperaba Await, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn await_se_encadena_con_method_chain() {
+        // `xs.map(f).await` → Await(Call(callee=Field(xs, "map"), args=[f]))
+        let e = parse_expr("xs.map(f).await").unwrap();
+        match e {
+            Expr::Await(inner, _) => match *inner {
+                Expr::Call { callee, .. } => {
+                    assert!(matches!(*callee, Expr::Field { .. }));
+                }
+                other => panic!("se esperaba Call adentro de Await, fue {:?}", other),
+            },
+            other => panic!("se esperaba Await, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn await_seguido_de_try_es_try_de_await() {
+        // `expr.await?` → Try(Await(expr))
+        // El postfix loop procesa `.await` primero, después `?`.
+        let e = parse_expr("x.await?").unwrap();
+        match e {
+            Expr::Try(inner, _) => {
+                assert!(matches!(*inner, Expr::Await(..)),
+                    "se esperaba Try(Await(..)), fue {:?}", inner);
+            }
+            other => panic!("se esperaba Try, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn await_seguido_de_field_es_field_de_await() {
+        // `expr.await.name` → Field(Await(expr), "name")
+        let e = parse_expr("x.await.name").unwrap();
+        match e {
+            Expr::Field { object, field, .. } => {
+                assert_eq!(field, "name");
+                assert!(matches!(*object, Expr::Await(..)));
+            }
+            other => panic!("se esperaba Field, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn await_doble_anida_los_await() {
+        // `x.await.await` → Await(Await(x))
+        let e = parse_expr("x.await.await").unwrap();
+        match e {
+            Expr::Await(outer_inner, _) => match *outer_inner {
+                Expr::Await(inner, _) => {
+                    assert_eq!(*inner, Expr::Ident("x".into(), Span::ZERO));
+                }
+                other => panic!("se esperaba Await anidado, fue {:?}", other),
+            },
+            other => panic!("se esperaba Await externo, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn span_del_await_apunta_al_punto() {
+        // En `user.await`, el `.` está en columna 5. El span del nodo
+        // `Expr::Await` apunta al `.` (paralelo a `Field`).
+        let e = parse_expr("user.await").unwrap();
+        assert_eq!(e.span().line, 1);
+        assert_eq!(e.span().column, 5);
+        if let Expr::Await(inner, _) = &e {
+            // El receptor mantiene su span propio en columna 1.
+            assert_eq!(inner.span().column, 1);
+        } else {
+            panic!("se esperaba Await, se obtuvo {:?}", e);
+        }
+    }
+
+    #[test]
+    fn future_como_anotacion_de_tipo_parsea_como_generic() {
+        // `Future<T>` reusa `TypeExpr::Generic` igual que `List<T>` —
+        // no necesita variante nueva en el AST. Test ancla la decisión
+        // de 6.1: si en el futuro alguien suma `TypeExpr::Future`
+        // dedicada, este test cambia explícitamente.
+        let tokens = tokenize("fn f() -> Future<Int> => 0").expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let stmt = program.into_iter().next().expect("al menos 1 stmt");
+        match stmt {
+            Stmt::FnDef { return_type: Some(TypeExpr::Generic { name, args }), .. } => {
+                assert_eq!(name, "Future");
+                assert_eq!(args.len(), 1);
+                assert!(matches!(&args[0], TypeExpr::Named(n) if n == "Int"));
+            }
+            other => panic!("se esperaba FnDef con return Future<Int>, fue {:?}", other),
         }
     }
 
