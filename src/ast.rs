@@ -249,6 +249,20 @@ pub enum Stmt {
     /// `return expr`.
     Return(Expr, Span),
 
+    /// `return <status> <body?>` — return con status code HTTP custom.
+    /// Solo válido adentro de handlers HTTP (fn con decorator `@get`/
+    /// `@post`/`@put`/`@delete`); el checker rechaza el resto. El
+    /// `body` es opcional para casos como `return 204` (No Content).
+    /// El span apunta al `return` keyword.
+    ///
+    /// Sintaxis del spec: `return 401 { message: "no autorizado" }`,
+    /// `return 204`, `return 200 user`.
+    ReturnStatus {
+        status: Expr,
+        body: Option<Expr>,
+        span: Span,
+    },
+
     /// Una expresión usada como sentencia (típicamente una llamada).
     Expr(Expr, Span),
 
@@ -343,6 +357,7 @@ impl Stmt {
         match self {
             Stmt::Assign { span, .. } => *span,
             Stmt::Return(_, span) => *span,
+            Stmt::ReturnStatus { span, .. } => *span,
             Stmt::Expr(_, span) => *span,
             Stmt::FnDef { span, .. } => *span,
             Stmt::TypeDef { span, .. } => *span,

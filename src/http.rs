@@ -416,6 +416,23 @@ impl HandlerOutcome {
 ///   - Tipos no serializables (Function, Builtin, Type, Module, Range)
 ///     → status 500, `{"error": "valor no serializable: <tipo>"}`.
 pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
+    // Status code custom (spec): el handler hizo `return 401 { ... }`
+    // y el evaluator emitió `Value::HttpResponse`. Mapeo directo: el
+    // status va al outcome, el body (si existe) se serializa con las
+    // mismas reglas que cualquier Value. Body ausente → JSON null
+    // (HTTP 204 No Content todavía no está implementado, hoy el
+    // parser exige body explícito).
+    if let Value::HttpResponse { status, body } = value {
+        let payload_json = match body {
+            Some(b) => match value_to_json(b) {
+                Ok(j) => j,
+                Err(msg) => return HandlerOutcome::internal_error(msg),
+            },
+            None => serde_json::Value::Null,
+        };
+        return HandlerOutcome::json(*status, payload_json);
+    }
+
     // Result auto-handling: peel one layer. El inner se serializa con
     // las mismas reglas que cualquier otro Value.
     let (status, payload) = match value {
@@ -515,6 +532,15 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "valor no serializable a JSON: {}",
                 value.type_name(),
             ));
+        }
+        // HttpResponse no se serializa directo — vive en
+        // `value_to_outcome` (intercepta antes de llegar acá). Si
+        // alguien lo serializa fuera de context HTTP, es un bug del
+        // codegen/runtime, no del usuario.
+        Value::HttpResponse { .. } => {
+            return Err(
+                "HttpResponse no es serializable a JSON fuera de un handler HTTP".to_string(),
+            );
         }
     })
 }
@@ -1389,6 +1415,54 @@ mod tests {
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 500);
         assert!(out.body.contains("Range"));
+    }
+
+    // ---- Status codes custom (Value::HttpResponse) ----
+
+    #[test]
+    fn outcome_de_http_response_usa_su_status_y_body() {
+        // El evaluator produce `Value::HttpResponse` cuando el usuario
+        // hace `return 401 { ... }`. El outcome usa el status del
+        // response y serializa el body con las reglas habituales.
+        let body = Value::new_instance(
+            "Error".into(),
+            vec![("message".into(), Value::Str("no autorizado".into()))],
+        );
+        let v = Value::HttpResponse {
+            status: 401,
+            body: Some(Box::new(body)),
+        };
+        let out = value_to_outcome(&v);
+        assert_eq!(out.status, 401);
+        let parsed: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "message": "no autorizado" }));
+    }
+
+    #[test]
+    fn outcome_de_http_response_sin_body_es_null_json() {
+        // `HttpResponse { body: None }` → body JSON null. Reserva para
+        // 204 No Content si llega; hoy el parser exige body explícito.
+        let v = Value::HttpResponse { status: 204, body: None };
+        let out = value_to_outcome(&v);
+        assert_eq!(out.status, 204);
+        assert_eq!(out.body, "null");
+    }
+
+    #[test]
+    fn outcome_de_http_response_con_body_map_serializa_a_objeto() {
+        // Body = map literal con string keys → objeto JSON.
+        let body = Value::new_map(vec![
+            (Value::Str("error".into()), Value::Str("falló".into())),
+            (Value::Str("code".into()), Value::Int(42)),
+        ]);
+        let v = Value::HttpResponse {
+            status: 500,
+            body: Some(Box::new(body)),
+        };
+        let out = value_to_outcome(&v);
+        assert_eq!(out.status, 500);
+        let parsed: serde_json::Value = serde_json::from_str(&out.body).unwrap();
+        assert_eq!(parsed, serde_json::json!({ "error": "falló", "code": 42 }));
     }
 
     // ---- coerce_path_param ----

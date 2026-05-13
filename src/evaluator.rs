@@ -735,6 +735,44 @@ fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Err(EvalSignal::Return(v))
         }
 
+        // `return <status> <body?>` — return con status code HTTP custom.
+        // Evalúa el status (debe ser Int en rango u16) y el body opcional,
+        // empaqueta como `Value::HttpResponse` y lo emite por el mismo
+        // signal de Return. El runtime HTTP (en `http.rs`) lo intercepta
+        // y emite la response con el status pedido. Fuera de un handler
+        // HTTP el signal sube hasta top-level y reporta error como
+        // cualquier return huérfano — el checker debería haberlo rechazado.
+        Stmt::ReturnStatus { status, body, span } => {
+            let status_v = eval_expr(status, env.clone())?;
+            let Value::Int(n) = status_v else {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!(
+                        "status code de `return` debe ser Int, fue: {}",
+                        status_v.type_name()
+                    ),
+                )));
+            };
+            if !(100..=599).contains(&n) {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    format!("status code HTTP fuera de rango (100-599): {}", n),
+                )));
+            }
+            let body_v = match body {
+                Some(b) => Some(Box::new(eval_expr(b, env)?)),
+                None => None,
+            };
+            Err(EvalSignal::Return(Value::HttpResponse {
+                status: n as u16,
+                body: body_v,
+            }))
+        }
+
         // `fn name(params) -> ret { body }`. Construye un `Value::Function`
         // capturando el env actual como closure y lo registra con `define`.
         //

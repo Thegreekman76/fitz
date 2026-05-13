@@ -927,9 +927,28 @@ impl Parser {
         // terminadores válidos para una sentencia: fin de línea, cierre
         // de bloque o fin de archivo.
         let value = match self.peek() {
-            Token::Newline | Token::RBrace | Token::EOF => Expr::Null(span),
+            Token::Newline | Token::RBrace | Token::EOF => {
+                return Ok(Stmt::Return(Expr::Null(span), span));
+            }
             _ => self.expression()?,
         };
+        // Status code custom (spec): `return <Int> { ... }`.
+        // Disparamos `Stmt::ReturnStatus` solo cuando la expr es un Int
+        // literal Y el siguiente token es `{` (un map/struct lit como
+        // body). Body siempre presente — para "no content" usar
+        // `return 204 {}` (map vacío). El checker valida que el
+        // ReturnStatus esté adentro de un handler HTTP; fuera de eso
+        // es error.
+        if matches!(self.peek(), Token::LBrace) {
+            if let Expr::Int(_, _) = &value {
+                let body = self.expression()?;
+                return Ok(Stmt::ReturnStatus {
+                    status: value,
+                    body: Some(body),
+                    span,
+                });
+            }
+        }
         Ok(Stmt::Return(value, span))
     }
 
@@ -2529,6 +2548,43 @@ mod tests {
                 right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
             }, Span::ZERO),
         );
+    }
+
+    #[test]
+    fn return_status_con_body_map() {
+        // `return <Int> { ... }` dispara `Stmt::ReturnStatus`. El body
+        // se parsea como cualquier `Expr` — acá un map literal con key
+        // string explícita.
+        match parse_one_stmt("return 401 {\"message\": \"no autorizado\"}") {
+            Stmt::ReturnStatus { status, body, .. } => {
+                assert!(matches!(status, Expr::Int(401, _)), "status: {:?}", status);
+                let Some(b) = body else { panic!("body esperado") };
+                assert!(matches!(b, Expr::Map(..)), "body debería ser Map: {:?}", b);
+            }
+            other => panic!("se esperaba ReturnStatus, fue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn return_int_sin_body_sigue_como_return_normal() {
+        // Sin `{...}` después del Int, sigue siendo Return de Int — no
+        // dispara ReturnStatus. Esto preserva la sintaxis existente
+        // (`return 42` en una fn que devuelve Int).
+        assert_eq!(
+            parse_one_stmt("return 204"),
+            Stmt::Return(Expr::Int(204, Span::ZERO), Span::ZERO),
+        );
+    }
+
+    #[test]
+    fn return_status_solo_con_int_literal() {
+        // Solo Int literales disparan `ReturnStatus`. Una expr más
+        // compleja (`return x { ... }`) NO — sigue siendo Return de la
+        // expr completa (que igual fallaría más adelante).
+        match parse_one_stmt("return get_status() ") {
+            Stmt::Return(Expr::Call { .. }, _) => {}
+            other => panic!("se esperaba Return(Call), fue: {:?}", other),
+        }
     }
 
     #[test]

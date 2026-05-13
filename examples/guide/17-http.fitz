@@ -15,6 +15,9 @@
 //   curl -X POST http://127.0.0.1:3000/users \
 //        -H "Content-Type: application/json" \
 //        -d '{"name":"sofi"}'
+//   curl -i http://127.0.0.1:3000/protected           # status 401
+//   curl -i http://127.0.0.1:3000/users/1/profile     # status 200 con user
+//   curl -i http://127.0.0.1:3000/users/99/profile    # status 404 custom
 
 @server(3000)
 fn main() => 0
@@ -59,4 +62,33 @@ fn create_user(body: UserInput) -> User {
     let u = User { id: new_id, name: body.name, email: body.email }
     users.push(u)
     return u
+}
+
+// --- Status codes custom ---
+//
+// Sintaxis nueva del spec: `return <status> <body>` adentro de un
+// handler HTTP. El status es un Int literal (100-599), el body
+// cualquier expr serializable a JSON. El runtime emite el status
+// pedido + body, en vez del 200/500 default.
+
+@get("/protected")
+fn protected() -> Str {
+    return 401 {"message": "no autorizado"}
+}
+
+// Polimórfico: la misma fn puede `return u` (200) o `return 404 ...`.
+// El return type formal (`User`) no se chequea contra el body del
+// status custom — solo se chequea contra los returns normales.
+//
+// (En match arms el body es una Expr, no un Stmt; por eso desarmamos
+// el match con if/else sobre `.len()` del filter — patrón canónico
+// cuando hace falta `return` adentro de cada rama.)
+
+@get("/users/{id}/profile")
+fn user_profile(id: Int) -> User {
+    let matches = users.filter(fn(u) => u.id == id)
+    if (matches.len() == 0) {
+        return 404 {"error": "usuario {id} no existe"}
+    }
+    return matches[0]
 }

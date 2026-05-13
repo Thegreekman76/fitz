@@ -218,6 +218,40 @@ fn detect_shared_state(program: &Program) -> (Vec<String>, HashMap<String, Vec<S
     (final_state, fn_deps)
 }
 
+/// True si el slice de stmts contiene un `Stmt::ReturnStatus` en
+/// cualquier nivel de anidamiento (loops, ifs, etc.). Lo usa
+/// `gen_top_fn` para decidir si la fn HTTP debe emitir su return
+/// type como `__FitzResponse`.
+fn contains_return_status_stmts(stmts: &[Stmt]) -> bool {
+    stmts.iter().any(contains_return_status_stmt)
+}
+
+fn contains_return_status_stmt(stmt: &Stmt) -> bool {
+    match stmt {
+        Stmt::ReturnStatus { .. } => true,
+        Stmt::While { body, .. }
+        | Stmt::Loop { body, .. }
+        | Stmt::For { body, .. } => contains_return_status_stmts(body),
+        Stmt::Assign { value, .. } => contains_return_status_expr(value),
+        Stmt::Return(e, _) | Stmt::Expr(e, _) => contains_return_status_expr(e),
+        _ => false,
+    }
+}
+
+/// Idem para expresiones — `if`/`match` contienen bodies de stmts y
+/// pueden esconder un ReturnStatus adentro. `FnExpr` no cuenta (es
+/// otra fn, su body es otro scope).
+fn contains_return_status_expr(expr: &Expr) -> bool {
+    match expr {
+        Expr::If { then, else_, .. } => {
+            contains_return_status_stmts(then)
+                || else_.as_deref().is_some_and(contains_return_status_stmts)
+        }
+        Expr::Match { arms, .. } => arms.iter().any(|a| contains_return_status_expr(&a.body)),
+        _ => false,
+    }
+}
+
 /// Walker recursivo que detecta refs a `candidates` en un stmt,
 /// respetando bindings locales nuevos. `locals` se extiende a medida
 /// que entran asignaciones / for / params de FnExpr.
@@ -241,6 +275,12 @@ fn walk_stmt_for_state_refs(
         }
         Stmt::Return(e, _) | Stmt::Expr(e, _) => {
             walk_expr_for_state_refs(e, candidates, locals, refs);
+        }
+        Stmt::ReturnStatus { status, body, .. } => {
+            walk_expr_for_state_refs(status, candidates, locals, refs);
+            if let Some(b) = body {
+                walk_expr_for_state_refs(b, candidates, locals, refs);
+            }
         }
         Stmt::While { condition, body, .. } => {
             walk_expr_for_state_refs(condition, candidates, locals, refs);
@@ -830,6 +870,7 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         Stmt::Assign { .. } => "asignación",
         Stmt::Expr(..) => "expresión suelta",
         Stmt::Return(..) => "return",
+        Stmt::ReturnStatus { .. } => "return con status",
         Stmt::While { .. } => "while",
         Stmt::Loop { .. } => "loop",
         Stmt::For { .. } => "for",
@@ -1370,6 +1411,19 @@ struct CodegenCtx<'a> {
     /// .with(|s| s.clone());` (Rc clone — preserva aliasing). El orden
     /// es alfabético para que el output sea determinista.
     fn_state_deps: HashMap<String, Vec<String>>,
+    /// Status codes custom: `true` mientras estamos generando el body
+    /// de una fn HTTP que contiene al menos un `Stmt::ReturnStatus`.
+    /// El return type Rust se cambia a `__FitzResponse` y todos los
+    /// returns (normales y con status) se envuelven en esa struct.
+    /// El handler wrapper también lee este flag (vía
+    /// `http_handlers_returning_response`) para decidir cómo
+    /// destructurar la response. Default false.
+    response_mode: bool,
+    /// Nombres de handlers HTTP que retornan `__FitzResponse` (porque
+    /// su body contiene al menos un `Stmt::ReturnStatus`). El handler
+    /// wrapper lo consulta para emitir el destructuring apropiado en
+    /// vez del path normal de serialización.
+    http_handlers_returning_response: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1415,6 +1469,8 @@ impl<'a> CodegenCtx<'a> {
             ret_stack: Vec::new(),
             state_var_types: HashMap::new(),
             fn_state_deps: HashMap::new(),
+            response_mode: false,
+            http_handlers_returning_response: std::collections::HashSet::new(),
         }
     }
 
@@ -1884,13 +1940,22 @@ impl<'a> CodegenCtx<'a> {
             unreachable!("gen_top_fn solo se llama sobre Stmt::FnDef");
         };
 
-        // 5b.6: las fns con decoradores HTTP (`@get`/`@post`/etc.) se
-        // emiten como `pub fn` normales — el wrapper `async fn
-        // __handler_<name>` (`gen_http_handler_wrapper`) las llama
-        // adentro de la response builder. Los decoradores en sí no
-        // afectan el codegen del cuerpo, solo los pre-categoriza
-        // `generate_main_rs`. Acá los ignoramos.
-        let _ = decorators;
+        let is_http_handler = decorators.iter().any(|d| {
+            matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
+        });
+
+        // Status codes custom: si la fn HTTP contiene al menos un
+        // `Stmt::ReturnStatus`, su return type Rust pasa a ser
+        // `__FitzResponse` (en vez del declarado) y todos los returns
+        // se envuelven. El handler wrapper lo detecta vía la tabla
+        // `http_handlers_returning_response` para emitir el destructuring
+        // apropiado. Fuera de un handler HTTP, ReturnStatus es error
+        // del checker — pero como defensa, si por algún motivo aparece
+        // en una fn no-HTTP el codegen de Stmt::ReturnStatus aborta.
+        let has_return_status = is_http_handler && contains_return_status_stmts(body);
+        if has_return_status {
+            self.http_handlers_returning_response.insert(name.clone());
+        }
 
         let sig = self
             .fn_sigs
@@ -1914,7 +1979,14 @@ impl<'a> CodegenCtx<'a> {
             self.emit(&rust_type_for(pty, self.env)?);
         }
         self.emit(")");
-        if !matches!(sig.ret, Type::Null) {
+        // En response mode el return type generado es `__FitzResponse`,
+        // que la struct se define en el preludio HTTP del main. El
+        // return type declarado del usuario se ignora (es por la
+        // semántica polimórfica del spec — handler puede devolver T o
+        // un response builder).
+        if has_return_status {
+            self.emit(" -> __FitzResponse");
+        } else if !matches!(sig.ret, Type::Null) {
             self.emit(" -> ");
             self.emit(&rust_type_for(&sig.ret, self.env)?);
         }
@@ -1959,9 +2031,12 @@ impl<'a> CodegenCtx<'a> {
         // Frame de "return esperado" para coerciones y para que `?`
         // (Try) pueda validar que está adentro de una fn Result.
         self.ret_stack.push(sig.ret.clone());
+        let saved_response_mode = self.response_mode;
+        self.response_mode = has_return_status;
         for stmt in body {
             self.gen_stmt_in_fn(stmt, &sig.ret)?;
         }
+        self.response_mode = saved_response_mode;
         self.ret_stack.pop();
         self.pop_scope();
         self.indent -= 1;
@@ -1983,6 +2058,9 @@ impl<'a> CodegenCtx<'a> {
         match stmt {
             Stmt::Assign { target, type_, value, .. } => self.gen_assign(target, type_.as_ref(), value),
             Stmt::Return(e, _) => self.gen_return(e, ret_expected),
+            Stmt::ReturnStatus { status, body, span } => {
+                self.gen_return_status(status, body.as_ref(), *span)
+            }
             Stmt::Expr(e, _) => {
                 self.emit_indent();
                 self.gen_expr_for_stmt(e)?;
@@ -2182,11 +2260,80 @@ impl<'a> CodegenCtx<'a> {
 
     fn gen_return(&mut self, e: &Expr, ret_expected: &Type) -> Result<(), FitzError> {
         let (code, ty) = self.gen_expr(e)?;
-        let coerced = coerce(&code, &ty, ret_expected);
         self.emit_indent();
+        if self.response_mode {
+            // En response mode, todos los returns se envuelven en
+            // `__FitzResponse { status: 200, body: <value>.__to_fitz_json() }`.
+            // El status default para el path "no error" es 200; el
+            // usuario puede pisarlo con `return 401 { ... }` que el
+            // codegen de `Stmt::ReturnStatus` maneja aparte.
+            // Caso especial: el body `Null` (sin valor de retorno) se
+            // emite como `serde_json::Value::Null` para no llamar
+            // `__to_fitz_json` sobre `()`.
+            let body_code = if matches!(ty, Type::Null) {
+                "serde_json::Value::Null".to_string()
+            } else {
+                format!(
+                    "<{rt} as __ToFitzJson>::__to_fitz_json(&({code}))",
+                    rt = rust_type_for(&ty, self.env)?,
+                    code = code
+                )
+            };
+            self.emit("return __FitzResponse { status: 200, body: ");
+            self.emit(&body_code);
+            self.emit(" };\n");
+            return Ok(());
+        }
+        let coerced = coerce(&code, &ty, ret_expected);
         self.emit("return ");
         self.emit(&coerced);
         self.emit(";\n");
+        Ok(())
+    }
+
+    /// `return <status> <body?>` adentro de un handler HTTP. Emite el
+    /// wrap `__FitzResponse { status: <s>, body: <b>.__to_fitz_json() }`.
+    /// Llamado solo desde `gen_stmt_in_fn`, donde validamos
+    /// `response_mode == true` antes (fuera de eso es bug del codegen).
+    fn gen_return_status(
+        &mut self,
+        status: &Expr,
+        body: Option<&Expr>,
+        span: crate::ast::Span,
+    ) -> Result<(), FitzError> {
+        if !self.response_mode {
+            return Err(self.err_at(
+                span,
+                "`return <status> { ... }` solo permitido adentro de handlers HTTP — el checker debió haberlo cazado",
+            ));
+        }
+        let (status_code, status_ty) = self.gen_expr(status)?;
+        if !matches!(status_ty, Type::Int) {
+            return Err(self.err_at(span, format!(
+                "el status code de `return` debe ser Int, recibió `{}`",
+                type_name(&status_ty)
+            )));
+        }
+        let body_code = match body {
+            Some(b) => {
+                let (code, ty) = self.gen_expr(b)?;
+                if matches!(ty, Type::Null) {
+                    "serde_json::Value::Null".to_string()
+                } else {
+                    format!(
+                        "<{rt} as __ToFitzJson>::__to_fitz_json(&({code}))",
+                        rt = rust_type_for(&ty, self.env)?,
+                        code = code
+                    )
+                }
+            }
+            None => "serde_json::Value::Null".to_string(),
+        };
+        self.emit_indent();
+        self.emit(&format!(
+            "return __FitzResponse {{ status: ({}) as u16, body: {} }};\n",
+            status_code, body_code
+        ));
         Ok(())
     }
 
@@ -3094,6 +3241,15 @@ impl<'a> CodegenCtx<'a> {
         // salvo cuando el return_stack es Any, así que esto suele
         // ser inerte; lo mantenemos por consistencia).
         self.ret_stack.push(ret_ty.clone());
+        // Reset response_mode: el body del callback es otra fn (closure
+        // Rust), no comparte el retorno del handler contenedor. Si dentro
+        // del callback hay un `return`, debe envolver el valor con sus
+        // propias reglas (`bool` para filter, T → U para map). Status
+        // codes custom (`return 401 { ... }`) NO son válidos adentro de
+        // callbacks — el checker los rechazaría porque el FnExpr inline
+        // no es un handler HTTP.
+        let saved_response_mode = self.response_mode;
+        self.response_mode = false;
         self.push_scope();
         self.declare_var(param_name.clone(), param_ty.clone());
         let saved = std::mem::take(&mut self.output);
@@ -3107,6 +3263,7 @@ impl<'a> CodegenCtx<'a> {
         self.output = saved;
         self.indent = saved_indent;
         self.pop_scope();
+        self.response_mode = saved_response_mode;
         self.ret_stack.pop();
 
         let code = format!(
@@ -3183,6 +3340,13 @@ impl<'a> CodegenCtx<'a> {
         // params bindeados + capturas declaradas como vars locales
         // (para que el body las pueda referenciar normalmente).
         self.ret_stack.push(ret_ty.clone());
+        // FnExpr suelta (higher-order F12): el body es otra fn con su
+        // propio return type. Status codes custom no aplican adentro de
+        // FnExpr (el checker los rechaza fuera de handlers HTTP), así
+        // que reseteamos response_mode mientras emitimos el body para
+        // que cualquier `return` adentro use el camino normal.
+        let saved_response_mode = self.response_mode;
+        self.response_mode = false;
         self.push_scope();
         for (p, t) in params.iter().zip(param_types.iter()) {
             self.declare_var(p.name.clone(), t.clone());
@@ -3201,6 +3365,7 @@ impl<'a> CodegenCtx<'a> {
         self.output = saved;
         self.indent = saved_indent;
         self.pop_scope();
+        self.response_mode = saved_response_mode;
         self.ret_stack.pop();
 
         // Firma del closure: `|p1: T1, p2: T2| -> R { ... }`.
@@ -4266,8 +4431,23 @@ impl<'a> CodegenCtx<'a> {
         )
         .unwrap();
 
-        // Convertir a response según retorne Result o no.
-        if returns_result {
+        // Convertir a response. Tres caminos:
+        //  1. La fn retorna `__FitzResponse` (status codes custom):
+        //     destructuramos directo y emitimos `(StatusCode::from_u16,
+        //     Json(body))`. Si el status no es válido (rango 100-599
+        //     ya validado en runtime al construirlo, pero from_u16
+        //     puede fallar para valores extraños), cae a 500.
+        //  2. La fn retorna `Result<T, String>`: Ok→200, Err→500.
+        //  3. Cualquier otro tipo: 200 con el body serializado.
+        let returns_response = self.http_handlers_returning_response.contains(name);
+        if returns_response {
+            self.emit("    let __resp: __FitzResponse = __result;\n");
+            self.emit("    (\n");
+            self.emit("        axum::http::StatusCode::from_u16(__resp.status)\n");
+            self.emit("            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+            self.emit("        axum::Json(__resp.body),\n");
+            self.emit("    ).into_response()\n");
+        } else if returns_result {
             self.emit("    match __result {\n");
             self.emit("        Ok(__v) => (\n");
             self.emit("            axum::http::StatusCode::OK,\n");
@@ -4513,6 +4693,15 @@ trait __FromFitzJson: Sized {
     fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String>;
 }
 
+/// Status codes custom: response builder con status + body JSON.
+/// Producido por `return <status> { ... }` adentro de un handler.
+/// El wrapper de cada handler que lo retorna emite `(StatusCode,
+/// Json(body))` directo, en vez del path normal Ok/Err.
+struct __FitzResponse {
+    status: u16,
+    body: serde_json::Value,
+}
+
 impl __ToFitzJson for i64 {
     fn __to_fitz_json(&self) -> serde_json::Value {
         serde_json::Value::from(*self)
@@ -4727,6 +4916,12 @@ fn collect_captures_stmt(
         }
         Stmt::Return(e, _) | Stmt::Expr(e, _) => {
             collect_captures_expr(e, params, locals, ctx, seen, out);
+        }
+        Stmt::ReturnStatus { status, body, .. } => {
+            collect_captures_expr(status, params, locals, ctx, seen, out);
+            if let Some(b) = body {
+                collect_captures_expr(b, params, locals, ctx, seen, out);
+            }
         }
         Stmt::While { condition, body, .. } => {
             collect_captures_expr(condition, params, locals, ctx, seen, out);
@@ -7443,6 +7638,99 @@ mod tests {
         assert!(
             code.contains("StatusCode::OK") && code.contains("StatusCode::INTERNAL_SERVER_ERROR"),
             "esperaba status codes 200/500, got:\n{}",
+            code
+        );
+    }
+
+    // ---- Status codes custom (return <int> { ... }) ----
+
+    #[test]
+    fn status_codes_handler_con_return_status_emite_fitz_response() {
+        // El handler `protected` tiene `return 401 { ... }` adentro,
+        // así que su return type Rust se vuelve `__FitzResponse` y el
+        // body del return se envuelve con `to_fitz_json`.
+        let src = "@get(\"/p\") fn protected() -> Str {\n\
+                       return 401 {\"msg\": \"no autorizado\"}\n\
+                   }";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("fn protected() -> __FitzResponse"),
+            "esperaba que la fn retorne __FitzResponse, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("return __FitzResponse { status: (401i64) as u16"),
+            "esperaba `__FitzResponse {{ status: (401i64) as u16, ... }}` en el body, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__to_fitz_json"),
+            "esperaba que el body se serialice con __to_fitz_json, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn status_codes_handler_envuelve_returns_normales_en_200() {
+        // Spec polimórfico: una fn HTTP que contiene `Stmt::ReturnStatus`
+        // tiene su return type sobreescrito a `__FitzResponse`. Los
+        // `return user`/`return "x"` normales se envuelven en
+        // `__FitzResponse { status: 200, body: ... }`.
+        let src = "@get(\"/u/{id}\") fn get_user(id: Int) -> Str {\n\
+                       if (id == 1) { return \"alice\" }\n\
+                       return 404 {\"msg\": \"no encontrado\"}\n\
+                   }";
+        let code = gen(src).unwrap();
+        // El return de Str "alice" debe envolverse en status 200.
+        assert!(
+            code.contains("return __FitzResponse { status: 200,"),
+            "esperaba que el return normal se envuelva con status 200, got:\n{}",
+            code
+        );
+        // El return 404 emite su status custom.
+        assert!(
+            code.contains("status: (404i64) as u16"),
+            "esperaba `status: (404i64) as u16` para el return de error, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn status_codes_wrapper_destructura_fitz_response() {
+        // El wrapper `__handler_X` que llama una fn que retorna
+        // `__FitzResponse` debe emitir `from_u16(...)` + `Json(body)`
+        // directo en vez del path de Result/value plano.
+        let src = "@get(\"/p\") fn p() -> Str {\n\
+                       return 403 {\"msg\": \"prohibido\"}\n\
+                   }";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let __resp: __FitzResponse = __result;"),
+            "esperaba destructuring del result a __FitzResponse, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("StatusCode::from_u16(__resp.status)"),
+            "esperaba `StatusCode::from_u16(__resp.status)` en el wrapper, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("axum::Json(__resp.body)"),
+            "esperaba `axum::Json(__resp.body)` en el wrapper, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn status_codes_prelude_define_fitz_response() {
+        let src = "@get(\"/p\") fn p() -> Str => \"ok\"";
+        let code = gen(src).unwrap();
+        // El preludio HTTP siempre incluye `__FitzResponse` (aunque no
+        // se use; cuesta poco y permite mezclar status custom con
+        // handlers normales en el mismo programa).
+        assert!(
+            code.contains("struct __FitzResponse"),
+            "esperaba `struct __FitzResponse` en el preludio HTTP, got:\n{}",
             code
         );
     }

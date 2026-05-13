@@ -568,6 +568,12 @@ struct CheckCtx<'a> {
     /// `ret`. Para `Stmt::FnDef` se acumula también pero se
     /// descarta (ya tenemos `return_type` declarado).
     inferred_returns: Vec<Vec<Type>>,
+    /// Stack paralelo a `return_stack`: `true` cuando la fn actual
+    /// es un handler HTTP (tiene decorator `@get`/`@post`/`@put`/
+    /// `@delete`). `Stmt::ReturnStatus` (return con status code) lo
+    /// consulta para validar que solo aparezca adentro de un handler.
+    /// `FnExpr` no es handler nunca; pushea `false`.
+    in_http_handler: Vec<bool>,
     errors: Vec<FitzError>,
 }
 
@@ -578,6 +584,7 @@ impl<'a> CheckCtx<'a> {
             scopes: vec![std::collections::HashMap::new()],
             return_stack: Vec::new(),
             inferred_returns: Vec::new(),
+            in_http_handler: Vec::new(),
             errors: Vec::new(),
         };
         ctx.register_builtins();
@@ -1016,6 +1023,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             ctx.push_scope();
             ctx.return_stack.push(Type::Any);
             ctx.inferred_returns.push(Vec::new());
+            ctx.in_http_handler.push(false);
             let param_types: Vec<Type> = params
                 .iter()
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
@@ -1026,6 +1034,7 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             check_block(ctx, body);
             let returns = ctx.inferred_returns.pop().unwrap_or_default();
             ctx.return_stack.pop();
+            ctx.in_http_handler.pop();
             ctx.pop_scope();
             let ret = unify_returns(&returns);
             Type::Function {
@@ -1874,10 +1883,39 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let _ = infer_expr(ctx, e);
         }
 
+        Stmt::ReturnStatus { status, body, span } => {
+            // Inferimos las exprs para que errores adentro afloren.
+            let status_ty = infer_expr(ctx, status);
+            let body_ty = body.as_ref().map(|b| infer_expr(ctx, b));
+            // Regla: solo válido adentro de un handler HTTP. Fuera de
+            // eso es error claro — sintaxis nueva del spec, restringida
+            // a handlers para no abrir return polimórfico en cualquier fn.
+            let in_handler = ctx.in_http_handler.last().copied().unwrap_or(false);
+            if !in_handler {
+                ctx.error_at(*span,
+                    "`return <status> { ... }` solo se admite adentro de un handler HTTP (`@get`/`@post`/`@put`/`@delete`)".to_string()
+                );
+            }
+            // Status debe ser Int (rango 100-599 se valida en runtime).
+            if !is_compatible(&status_ty, &Type::Int) {
+                ctx.error_at(*span, format!(
+                    "el status code de `return` debe ser Int, recibió `{}`",
+                    status_ty.display(ctx.types)
+                ));
+            }
+            // El body puede ser cualquier valor serializable; no chequeamos
+            // contra el `return_type` formal del handler (es polimórfico:
+            // el spec permite que un handler con `-> User` también haga
+            // `return 404 { ... }`). El cuerpo se serializa a JSON en
+            // runtime con `value_to_json`.
+            let _ = body_ty;
+        }
+
         Stmt::FnDef {
             params,
             return_type,
             body,
+            decorators,
             ..
         } => {
             // Abrimos scope nuevo para params y locales. Los params se
@@ -1892,9 +1930,13 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
+            let is_http_handler = decorators.iter().any(|d| {
+                matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
+            });
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
+            ctx.in_http_handler.push(is_http_handler);
             for p in params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
                 ctx.declare_var(p.name.clone(), pty);
@@ -1902,6 +1944,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             check_block(ctx, body);
             ctx.inferred_returns.pop();
             ctx.return_stack.pop();
+            ctx.in_http_handler.pop();
             ctx.pop_scope();
         }
 
@@ -2082,6 +2125,64 @@ mod tests {
             "esperaba mensaje sobre U.name/Str/Int, fue: {}",
             msg
         );
+    }
+
+    // ---- Status codes custom (return <int> { ... }) ----
+
+    #[test]
+    fn return_status_dentro_de_handler_http_pasa_checker() {
+        // `return 401 { ... }` adentro de un handler con `@get` es
+        // válido. El checker lo permite sin importar el return_type
+        // formal del handler (decisión: polimorfismo solo en handlers
+        // HTTP).
+        let errors = errors_of(
+            "@get(\"/x\") fn protected() -> Str {\n\
+                 return 401 {\"msg\": \"no autorizado\"}\n\
+             }",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn return_status_fuera_de_handler_es_error() {
+        // `return 401 { ... }` adentro de una fn sin decorator HTTP
+        // → error claro. Bloquea uso accidental fuera de handlers.
+        let errors = errors_of(
+            "fn helper() -> Str {\n\
+                 return 401 {\"msg\": \"x\"}\n\
+             }",
+        );
+        assert!(!errors.is_empty(), "esperaba 1 error");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("handler HTTP") && msg.contains("@get"),
+            "esperaba mensaje sobre handler HTTP, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn return_status_top_level_es_error() {
+        // `return 401 { ... }` a nivel top-level (sin fn contenedora)
+        // tampoco es válido — el checker lo rechaza por la misma regla.
+        let errors = errors_of("return 401 {\"x\": 1}");
+        assert!(!errors.is_empty(), "esperaba error");
+        let msg = &errors[0].message;
+        assert!(msg.contains("handler HTTP"), "fue: {}", msg);
+    }
+
+    #[test]
+    fn return_status_no_chequea_contra_return_type_formal() {
+        // Spec: un handler `-> User` puede hacer `return user` (User) y
+        // también `return 404 { ... }`. El checker NO valida el body
+        // del ReturnStatus contra el return type — es polimórfico.
+        let errors = errors_of(
+            "type User { id: Int }\n\
+             @get(\"/u\") fn get_u() -> User {\n\
+                 return 404 {\"error\": \"no encontrado\"}\n\
+             }",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
     #[test]

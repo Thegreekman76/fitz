@@ -21,11 +21,24 @@
 > de `Expr` cargan `Span`, parser propaga spans en cada regla,
 > checker (`infer_expr` + helpers) y evaluator (`eval_expr` +
 > helpers + 14 métodos built-in) citan posición del nodo en
-> errores. **S1.codegen cerrado** — 52 sitios del codegen migrados
+> errores. S1.codegen cerrado — 52 sitios del codegen migrados
 > a `err_at` (con span del nodo); los 17 restantes son defensivos
 > contra bugs del compilador (checker debió cazar), donde citar
-> posición no aporta. Ver matriz para ítems pendientes (Pattern/
-> TypeExpr sin span, T1 sucesivos batches). 1010 tests pasando.
+> posición no aporta. **HTTP status codes custom cerrado** —
+> sintaxis del spec `return <Int> { ... }` implementada
+> end-to-end: AST (`Stmt::ReturnStatus`), parser (detecta el
+> patrón después de `return <Int>` cuando viene un `{`), checker
+> (acepta solo adentro de handlers HTTP), intérprete
+> (`Value::HttpResponse` → outcome con el status pedido), codegen
+> (override del return type a `__FitzResponse` cuando la fn HTTP
+> contiene `ReturnStatus`, envoltura uniforme de returns
+> normales y custom). Polimorfismo del spec: handler `-> User`
+> puede mezclar `return user` (200) con `return 404 { ... }`.
+> Cap 17 de la guía + ejemplo `examples/guide/17-http.fitz`
+> actualizados; intérprete y compilador validados bit-a-bit
+> con curl. Ver matriz para ítems pendientes (Pattern/TypeExpr
+> sin span, T1 sucesivos batches, query params). **1026 tests
+> pasando** (+16 dedicados: parser, checker, http, codegen, E2E).
 
 ## Resumen ejecutivo
 
@@ -261,3 +274,38 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
   AST-based en lugar de actualizar el string literal. **Pendientes**
   (~48 tests): HTTP wrappers, Result/`?`/match detail, módulos,
   declaración de fns varias.
+
+- **HTTP status codes custom** — **cerrado en mini-fase dedicada**.
+  Sintaxis del spec `return <Int> <body>` implementada end-to-end:
+  - AST: nueva variante `Stmt::ReturnStatus { status, body, span }`.
+  - Parser: después de `return <Int>` con `{` siguiente, parsea el
+    body como Expr y emite `Stmt::ReturnStatus`. Sin `{` sigue como
+    Return normal (preserva sintaxis `return 42`).
+  - Checker: rechaza `ReturnStatus` fuera de handlers HTTP (`@get`/
+    `@post`/`@put`/`@delete`). Stack `in_http_handler` paralelo al
+    `return_stack`. No chequea body contra return type formal del
+    handler (polimorfismo del spec).
+  - Intérprete: nueva `Value::HttpResponse { status, body }` opaca
+    fuera de context HTTP. `value_to_outcome` la intercepta y emite
+    el `HandlerOutcome` con el status pedido.
+  - Codegen: scan recursivo sobre body de cada fn HTTP; si hay
+    `ReturnStatus`, su return type Rust se cambia a `__FitzResponse`
+    (struct nueva en preludio HTTP) y todos los returns (normales y
+    custom) se envuelven uniforme. El handler wrapper destructura
+    `__FitzResponse` y emite `(StatusCode::from_u16(...),
+    Json(body))`. Flag `response_mode` se resetea al entrar a
+    FnExpr (callback inline + fn suelta) — el body del closure no
+    hereda el modo del handler contenedor.
+  - Polimorfismo del spec: handler `-> Str` puede mezclar
+    `return "ok"` (200) con `return 404 { ... }`. El return type
+    declarado se ignora en este path.
+  - Cap 17 de la guía actualizado con sección "Status codes custom"
+    + 3 ejemplos. `examples/guide/17-http.fitz` sumó endpoints
+    `/protected` (401) y `/users/{id}/profile` (200 ó 404).
+    Validado bit-a-bit `fitz run` vs `fitz build`.
+  - 16 tests dedicados (parser 3, checker 4, http 3, codegen 4, E2E
+    2).
+  - **Deuda explícita que queda**: `return 204` sin body (parser
+    exige body explícito; workaround `return 204 {}`); responses
+    como expresión libre (`let r = 200 { ... }`); status codes
+    desde una var (`return code { ... }` con `code` no literal).

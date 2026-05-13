@@ -1602,3 +1602,69 @@ print(t)
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["chico", "grande"]);
 }
+
+// ---------------------------------------------------------------------------
+// Status codes custom (return <int> { ... })
+// ---------------------------------------------------------------------------
+
+#[test]
+fn http_status_codes_custom_401_y_body_json() {
+    // Sintaxis del spec: `return 401 { ... }` adentro de un handler HTTP
+    // emite status 401 con el body serializado como JSON. End-to-end con
+    // curl-equivalente: status line + body matchean.
+    let src = "@server(43400)\nfn main() => 0\n\
+               @get(\"/protected\") fn protected() -> Str {\n\
+                   return 401 {\"message\": \"no autorizado\"}\n\
+               }\n";
+    let (status, body) = build_spawn_request(
+        "http-status-401",
+        src,
+        43400,
+        "GET",
+        "/protected",
+        None,
+    );
+    assert_eq!(status, 401, "esperaba status 401");
+    assert!(
+        body.contains("\"message\":\"no autorizado\""),
+        "body debería contener `message`, fue: {}",
+        body
+    );
+}
+
+#[test]
+fn http_status_codes_polimorfico_mix_ok_y_404() {
+    // Spec polimórfico: el handler retorna `-> Str` declarado pero
+    // adentro mezcla `return "alice"` (Str → 200) con `return 404
+    // {...}` (status custom). Cada uno produce la respuesta esperada.
+    let src = "@server(43401)\nfn main() => 0\n\
+               @get(\"/u/{id}\") fn get_user(id: Int) -> Str {\n\
+                   if (id == 1) { return \"alice\" }\n\
+                   return 404 {\"error\": \"no encontrado\"}\n\
+               }\n";
+    let (status_ok, body_ok) = build_spawn_request(
+        "http-status-mix-ok",
+        src,
+        43401,
+        "GET",
+        "/u/1",
+        None,
+    );
+    assert_eq!(status_ok, 200);
+    assert_eq!(body_ok.trim(), "\"alice\"");
+
+    let (status_404, body_404) = build_spawn_request(
+        "http-status-mix-404",
+        src,
+        43401,
+        "GET",
+        "/u/2",
+        None,
+    );
+    assert_eq!(status_404, 404);
+    assert!(
+        body_404.contains("\"error\":\"no encontrado\""),
+        "body 404 debería contener `error`, fue: {}",
+        body_404
+    );
+}

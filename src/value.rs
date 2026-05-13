@@ -143,6 +143,23 @@ pub enum Value {
         name: String,
         env: EnvRef,
     },
+
+    /// Response HTTP con status code custom. Solo aparece como
+    /// producto de un `return <Int> { ... }` adentro de un handler;
+    /// el runtime HTTP (en `http.rs`) lo intercepta en
+    /// `value_to_outcome` para emitir el `HandlerOutcome` con el
+    /// status y body que pidió el usuario. Fuera de context HTTP
+    /// es opaco — no se puede serializar a JSON ni se imprime, y
+    /// el checker rechaza `Stmt::ReturnStatus` fuera de handlers.
+    ///
+    /// Sin variante `Pair`: el body queda como `Box<Value>` para
+    /// reusar el camino existente de serialización. `body = None`
+    /// se reserva para 204 No Content (hoy el parser exige body;
+    /// el campo es opcional para preparar esa extensión).
+    HttpResponse {
+        status: u16,
+        body: Option<Box<Value>>,
+    },
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -192,6 +209,7 @@ impl Value {
             Value::Range { .. } => "Range",
             Value::Instance { .. } => "Instance",
             Value::Result(_) => "Result",
+            Value::HttpResponse { .. } => "HttpResponse",
             Value::Module { .. } => "Module",
         }
     }
@@ -275,6 +293,14 @@ impl std::fmt::Display for Value {
                 write!(f, ")")
             }
             Value::Module { name, .. } => write!(f, "<module {}>", name),
+            Value::HttpResponse { status, body } => match body {
+                Some(b) => {
+                    write!(f, "<response {} ", status)?;
+                    write_inline_value(f, b)?;
+                    write!(f, ">")
+                }
+                None => write!(f, "<response {}>", status),
+            },
         }
     }
 }

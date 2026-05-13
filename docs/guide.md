@@ -4225,13 +4225,72 @@ los handlers cierran sobre el mismo env del módulo top-level.
 es el env del programa.** Para producción real querés persistir
 en disco o en una DB; para prototipos y juguetes, alcanza.
 
+### Status codes custom
+
+Por default, el runtime mapea el retorno del handler así:
+
+- Cualquier valor (`Str`, `Int`, `Instance`, ...) → status **200**.
+- `Result<T>::Ok(v)` → **200** con `v` serializado.
+- `Result<T>::Err(e)` → **500** con `{"error": "<e>"}`.
+
+Para devolver otro status code, Fitz tiene sintaxis dedicada:
+`return <status> <body>` adentro del handler. El status es un
+literal Int (rango 100-599); el body es cualquier expresión
+serializable a JSON (map literal, struct, valor primitivo).
+
+```fitz
+@get("/protected") fn protected() -> Str {
+    return 401 {"message": "no autorizado"}
+}
+
+@get("/users/{id}") fn get_user(id: Int) -> Str {
+    if (id == 1) {
+        return "alice"          // 200 (default)
+    }
+    return 404 {"error": "no encontrado"}
+}
+```
+
+```bash
+curl -i http://127.0.0.1:3000/protected
+# HTTP/1.1 401 Unauthorized
+# {"message":"no autorizado"}
+
+curl -i http://127.0.0.1:3000/users/1
+# HTTP/1.1 200 OK
+# "alice"
+
+curl -i http://127.0.0.1:3000/users/2
+# HTTP/1.1 404 Not Found
+# {"error":"no encontrado"}
+```
+
+**Reglas**:
+
+1. `return <int> { ... }` solo funciona adentro de un handler HTTP
+   (`@get`/`@post`/`@put`/`@delete`). Afuera, el checker lo rechaza
+   con error claro.
+2. El body es obligatorio. Para "no content" (204), usá `{}`
+   explícito: `return 204 {}`.
+3. El status debe ser un literal Int. El parser solo dispara la
+   sintaxis nueva cuando ve `Int { ... }`; `return 200 user`
+   (sin braces) sigue siendo un `Return` normal del lenguaje.
+4. El return type formal del handler se ignora en este path —
+   un handler `-> Str` puede mezclar `return "ok"` con
+   `return 404 { ... }` en la misma fn.
+
+Las claves del map literal van entre comillas dobles porque la
+sintaxis de map literal en Fitz exige que la key sea un valor
+(`{"x": 1}`), no un identificador (`{x: 1}` lee la variable `x`).
+
 ---
 
 Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
 escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
-errores propagable, configuración del server. El próximo capítulo
-cubre el otro gran salto de Fase 5: **compilar el programa a un
-binario nativo standalone** con `fitz build`.
+errores propagable, configuración del server, status codes
+custom. El próximo capítulo cubre el otro gran salto de Fase 5:
+**compilar el programa a un binario nativo standalone** con
+`fitz build`.
 
 ---
 
