@@ -1441,12 +1441,14 @@ impl Parser {
     //   [@otro_deco(...)]*
     //   [async] fn handler(...) [-> Type] { ... }
     //
-    // Acumulamos los decoradores en `Decorator { name, args }` y los
-    // pegamos al `Stmt::FnDef` resultante. La semántica (qué hace cada
-    // decorator) es responsabilidad del evaluador: el parser solo
-    // garantiza que estructuralmente vienen antes de una fn y que la
-    // sintaxis es `@Ident(args)`. Args son expresiones cualquiera —
-    // el decorator específico decide qué tipos acepta en runtime.
+    // Acumulamos los decoradores en `Decorator { name, args, kwargs }`
+    // y los pegamos al `Stmt::FnDef` resultante. La semántica (qué
+    // hace cada decorator) es responsabilidad del evaluador: el
+    // parser solo garantiza que estructuralmente vienen antes de una
+    // fn, que la sintaxis es `@Ident(args, key=value)`, y que los
+    // kwargs van después de los positionals. Args y values son
+    // expresiones cualquiera — el decorator específico decide qué
+    // tipos acepta en runtime.
     //
     // Hasta 4.1 el evaluador corta con error explícito en cuanto ve
     // decorators no vacíos; 4.2 cablea `@get`/`@post`/`@put`/`@delete`
@@ -1514,8 +1516,94 @@ impl Parser {
             &Token::LParen,
             "se esperaba '(' después del nombre de decorador",
         )?;
-        let args = self.parse_call_args()?;
-        Ok(Decorator { name, args })
+        let (args, kwargs) = self.parse_decorator_args()?;
+        Ok(Decorator { name, args, kwargs })
+    }
+
+    /// Parsea los argumentos de un decorator después del `(` consumido.
+    /// Separa positionals de kwargs. La regla:
+    ///
+    /// - Mientras el siguiente arg sea una expresión suelta, va a
+    ///   `args` (positional).
+    /// - Detección de kwarg: `Ident '='` (con `Token::Eq`, NO
+    ///   `Token::EqEq` — `a == b` sigue siendo una expresión válida
+    ///   como arg posicional).
+    /// - Una vez visto el primer kwarg, **todos** los args siguientes
+    ///   deben ser kwargs; un positional posterior es error.
+    /// - Kwargs duplicados son error.
+    ///
+    /// Termina consumiendo el `)`. Acepta lista vacía, coma trailing
+    /// y newlines entre elementos.
+    #[allow(clippy::type_complexity)]
+    fn parse_decorator_args(
+        &mut self,
+    ) -> FitzResult<(Vec<Expr>, Vec<(String, Expr)>)> {
+        let mut args: Vec<Expr> = Vec::new();
+        let mut kwargs: Vec<(String, Expr)> = Vec::new();
+        self.skip_newlines();
+        // Caso vacío: @deco()
+        if matches!(self.peek(), Token::RParen) {
+            self.advance();
+            return Ok((args, kwargs));
+        }
+        loop {
+            self.skip_newlines();
+            // Detección de kwarg: Ident seguido de `=` (Token::Eq).
+            // `==` (Token::EqEq) NO dispara: es un BinOp en una expresión
+            // posicional.
+            let is_kwarg = matches!(self.peek(), Token::Ident(_))
+                && matches!(self.peek_at(1), Token::Eq);
+            if is_kwarg {
+                let key_tok = self.advance();
+                let key = match key_tok.token {
+                    Token::Ident(s) => s,
+                    _ => unreachable!("verificado por is_kwarg"),
+                };
+                // Consumir el `=`.
+                self.advance();
+                self.skip_newlines();
+                let value = self.expression()?;
+                // Duplicado.
+                if kwargs.iter().any(|(k, _)| k == &key) {
+                    return Err(self.error(
+                        ErrorKind::InvalidSyntax,
+                        format!(
+                            "argumento por nombre '{}=' ya fue dado en el mismo decorador",
+                            key
+                        ),
+                    ));
+                }
+                kwargs.push((key, value));
+            } else {
+                // Positional. Si ya hubo kwargs, es error.
+                if !kwargs.is_empty() {
+                    return Err(self.error(
+                        ErrorKind::InvalidSyntax,
+                        "los argumentos posicionales no pueden ir después de \
+                         argumentos por nombre (key=value)"
+                            .to_string(),
+                    ));
+                }
+                args.push(self.expression()?);
+            }
+            self.skip_newlines();
+            if matches!(self.peek(), Token::Comma) {
+                self.advance();
+                self.skip_newlines();
+                // Trailing comma: @deco(1, 2,)
+                if matches!(self.peek(), Token::RParen) {
+                    self.advance();
+                    return Ok((args, kwargs));
+                }
+            } else {
+                break;
+            }
+        }
+        self.expect(
+            &Token::RParen,
+            "se esperaba ')' para cerrar los argumentos del decorador",
+        )?;
+        Ok((args, kwargs))
     }
 
     /// Parsea los argumentos de una llamada, ya con '(' consumido.
@@ -3685,6 +3773,107 @@ mod tests {
         match stmt {
             Stmt::FnDef { decorators, .. } => {
                 assert_eq!(decorators[0].name, "patch");
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Fase 7, sub-paso 7.0 (kwargs en decoradores)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn decorator_sin_kwargs_deja_vector_vacio() {
+        // Regresión: `@get("/x")` mantiene `kwargs = []`.
+        let stmt = parse_one_stmt("@get(\"/x\")\nfn h() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators[0].name, "get");
+                assert_eq!(decorators[0].args.len(), 1);
+                assert!(decorators[0].kwargs.is_empty());
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decorator_kwarg_solo_separa_clave_y_valor() {
+        // `@server(docs=false)` — un único kwarg, ningún positional.
+        let stmt = parse_one_stmt("@server(docs=false)\nfn cfg() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert!(decorators[0].args.is_empty());
+                assert_eq!(decorators[0].kwargs.len(), 1);
+                assert_eq!(decorators[0].kwargs[0].0, "docs");
+                assert_eq!(decorators[0].kwargs[0].1, Expr::Bool(false, Span::ZERO));
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decorator_mezcla_positional_y_kwargs_en_ese_orden() {
+        // `@server(3000, host="0.0.0.0", docs=false)` —
+        // 1 positional + 2 kwargs.
+        let src = "@server(3000, host=\"0.0.0.0\", docs=false)\nfn cfg() => 0";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                let d = &decorators[0];
+                assert_eq!(d.name, "server");
+                assert_eq!(d.args, vec![Expr::Int(3000, Span::ZERO)]);
+                assert_eq!(d.kwargs.len(), 2);
+                assert_eq!(d.kwargs[0].0, "host");
+                assert_eq!(
+                    d.kwargs[0].1,
+                    Expr::Str("0.0.0.0".into(), Span::ZERO)
+                );
+                assert_eq!(d.kwargs[1].0, "docs");
+                assert_eq!(d.kwargs[1].1, Expr::Bool(false, Span::ZERO));
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn decorator_positional_despues_de_kwarg_es_error() {
+        // `@get(a=1, "/x")` — kwarg primero, positional después: rechaza.
+        let err = parse_program_str("@get(a=1, \"/x\")\nfn h() => 0").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(
+            err.message.contains("posicionales"),
+            "esperaba mensaje sobre orden positional/kwarg, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn decorator_kwarg_duplicado_es_error() {
+        // `@server(host="a", host="b")` — mismo kwarg dos veces.
+        let err = parse_program_str("@server(host=\"a\", host=\"b\")\nfn cfg() => 0").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(
+            err.message.contains("host"),
+            "esperaba que el mensaje cite la clave duplicada, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn decorator_eqeq_en_arg_no_se_confunde_con_kwarg() {
+        // `@deco(a == b)` — un arg posicional `BinOp(Eq)`, NO un kwarg
+        // con clave `a` y valor `b`. La diferencia la hace el lexer:
+        // `==` es `Token::EqEq`, mientras que `=` es `Token::Eq`.
+        let stmt = parse_one_stmt("@deco(a == b)\nfn h() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                let d = &decorators[0];
+                assert!(d.kwargs.is_empty());
+                assert_eq!(d.args.len(), 1);
+                assert!(matches!(
+                    d.args[0],
+                    Expr::BinOp { op: BinOpKind::Eq, .. }
+                ));
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }

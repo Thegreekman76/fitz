@@ -1200,6 +1200,22 @@ fn generate_main_rs(
                     // Separar `@server` de los `@get`/`@post`/etc.
                     let mut http_decos = false;
                     for d in decorators {
+                        // 7.0: ningún decorator soportado por codegen
+                        // acepta kwargs todavía. `@server(docs=false)`
+                        // aterriza en 7.5 (paridad build); headers en
+                        // 7.6. Hasta entonces, kwargs sobre cualquiera
+                        // de los 5 decorators son error de codegen claro.
+                        if let Some((key, _)) = d.kwargs.first() {
+                            return Err(FitzError::new(
+                                ErrorKind::TypeError,
+                                0,
+                                0,
+                                format!(
+                                    "decorator `@{}` sobre fn `{}`: el argumento por nombre '{}=...' no está soportado en codegen todavía (soporte para kwargs llega en 7.5 / 7.6)",
+                                    d.name, name, key,
+                                ),
+                            ));
+                        }
                         match d.name.as_str() {
                             "get" | "post" | "put" | "delete" => http_decos = true,
                             "server" => {

@@ -204,6 +204,17 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
         )));
     }
 
+    // 7.0: kwargs todavía no son aceptados por @server. El soporte
+    // para `docs=Bool` aterriza en 7.4.
+    if let Some((key, _)) = deco.kwargs.first() {
+        return Err(err(format!(
+            "@server sobre fn '{}': el argumento por nombre '{}=...' no \
+             está soportado todavía. La aceptación de kwargs (p.ej. `docs=false`) \
+             aterriza en la sub-fase 7.4.",
+            fn_name, key,
+        )));
+    }
+
     if deco.args.len() > 2 {
         return Err(err(format!(
             "@server(...) sobre fn '{}': admite hasta 2 args positionals \
@@ -284,6 +295,17 @@ fn register_http_route(
     let err = |msg: String| {
         EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
     };
+
+    // 7.0: ningún decorator HTTP de ruta acepta kwargs todavía. El
+    // soporte para headers (7.6) podría sumarlos; por ahora corte
+    // explícito.
+    if let Some((key, _)) = deco.kwargs.first() {
+        return Err(err(format!(
+            "@{} sobre fn '{}': los argumentos por nombre (recibió '{}=...') \
+             no están soportados sobre decoradores HTTP de ruta.",
+            deco.name, fn_name, key,
+        )));
+    }
 
     // Validación 1: el decorator HTTP necesita un único arg con el path.
     if deco.args.len() != 1 {
@@ -6141,6 +6163,37 @@ let r = match n {
         let cfg = reg.resolved_config();
         assert_eq!(cfg.host, "127.0.0.1");
         assert_eq!(cfg.port, 3000);
+    }
+
+    // ---- 7.0 kwargs en decoradores (rechazo runtime) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_decorator_con_kwarg_es_error_hasta_7_4() {
+        // 7.0: el parser ya acepta kwargs, pero el handler de @server
+        // todavía no los reconoce. El runtime corta con un mensaje
+        // que cita la sub-fase 7.4 (cuando llegará `docs=Bool`).
+        let src = "@server(3000, docs=false)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("docs") && err.message.contains("7.4"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn get_decorator_con_kwarg_es_error_runtime() {
+        // Decoradores HTTP de ruta no aceptan kwargs (ni en 7.0 ni
+        // antes de que 7.6 defina la convención de headers).
+        let src = "@get(\"/x\", foo=1)\nfn h() => 0";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("foo") && err.message.contains("nombre"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

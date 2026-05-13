@@ -531,7 +531,7 @@ pub enum Pattern {
     Range { start: i64, end: i64 },
 }
 
-/// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args...)`.
+/// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args..., key=value...)`.
 ///
 /// En 4.1 el parser solo acumula decoradores; el evaluador es quien
 /// despacha por nombre (`@get`/`@post`/`@put`/`@delete` registran rutas
@@ -539,10 +539,18 @@ pub enum Pattern {
 /// otro → error explícito "decorator desconocido"). Args son
 /// expresiones cualquiera, validadas en runtime por el decorator
 /// específico (ej.: `@get` exige un único `Str` con la ruta).
+///
+/// En 7.0 sumamos `kwargs` para soportar `@deco(pos1, key=value)`. Los
+/// kwargs van **después** de los positionals; el parser rechaza el
+/// orden inverso. Cada decorator decide si los acepta — hoy
+/// (mientras 7.4 no aterriza) `@get/@post/@put/@delete/@server`
+/// emiten error si reciben kwargs. Esto cambia cuando 7.4 cierre y
+/// `@server` acepte `docs: Bool`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Decorator {
     pub name: String,
     pub args: Vec<Expr>,
+    pub kwargs: Vec<(String, Expr)>,
 }
 
 /// Un programa Fitz es una lista de sentencias.
@@ -941,10 +949,12 @@ mod tests {
         let d = Decorator {
             name: "get".into(),
             args: vec![Expr::Str("/users/{id}".into(), Span::ZERO)],
+            kwargs: vec![],
         };
         assert_eq!(d.name, "get");
         assert_eq!(d.args.len(), 1);
         assert_eq!(d.args[0], Expr::Str("/users/{id}".into(), Span::ZERO));
+        assert!(d.kwargs.is_empty());
     }
 
     #[test]
@@ -975,8 +985,8 @@ mod tests {
             body: vec![],
             is_async: false,
             decorators: vec![
-                Decorator { name: "get".into(), args: vec![Expr::Str("/x".into(), Span::ZERO)] },
-                Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into(), Span::ZERO)] },
+                Decorator { name: "get".into(), args: vec![Expr::Str("/x".into(), Span::ZERO)], kwargs: vec![] },
+                Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into(), Span::ZERO)], kwargs: vec![] },
             ],
          span: Span::ZERO };
         if let Stmt::FnDef { decorators, .. } = f {
