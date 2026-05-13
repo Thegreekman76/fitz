@@ -25,12 +25,16 @@
 | `logos` | Lexer generator | https://crates.io/crates/logos |
 | `pest` | Parser generator (PEG) | https://crates.io/crates/pest |
 | `nom` | Parser combinator | https://crates.io/crates/nom |
-| `axum` | HTTP server (para Fase 4) | https://crates.io/crates/axum |
-| `serde` | Serialización JSON | https://crates.io/crates/serde |
-| `inkwell` | LLVM bindings (para Fase 5) | https://crates.io/crates/inkwell |
-| `cranelift` | Code generation alternativa | https://crates.io/crates/cranelift |
-| `miette` | Errores con diagnósticos bonitos | https://crates.io/crates/miette |
-| `clap` | CLI argument parsing | https://crates.io/crates/clap |
+| `axum` | HTTP server (Fase 4, en uso) | https://crates.io/crates/axum |
+| `tokio` | Async runtime de axum (Fase 4, en uso) | https://crates.io/crates/tokio |
+| `serde` + `serde_json` | Serialización JSON (en uso) | https://crates.io/crates/serde |
+| `miette` | Errores con diagnósticos bonitos (en uso) | https://crates.io/crates/miette |
+| `clap` | CLI argument parsing (en uso) | https://crates.io/crates/clap |
+| `inkwell` | LLVM bindings — referencia, **no se usa**: Fitz 5b transpila a Rust en vez de bajar a LLVM directo | https://crates.io/crates/inkwell |
+| `cranelift` | Codegen alternativa — referencia, no se usa por la misma razón | https://crates.io/crates/cranelift |
+| `syn` + `quote` | AST de Rust (dev-dep: tests del codegen) | https://crates.io/crates/syn |
+| `tower` + `http-body-util` | Tests E2E de HTTP sin abrir socket | https://crates.io/crates/tower |
+| `tempfile` | Fixtures temporales en tests del loader de módulos | https://crates.io/crates/tempfile |
 
 ## Lenguajes para estudiar como referencia
 

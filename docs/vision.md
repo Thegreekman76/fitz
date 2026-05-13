@@ -46,7 +46,7 @@ mejores herramientas.
 | HTTP en el core        | ✓          | ✗        | ✗          | ✗         | △ (net/http)|
 | Errores como valores   | ✓          | ✗        | ✗          | ✓         | △ (idiomático)|
 | Sin runtime en prod    | ✓          | ✗        | ✗          | ✓         | ✓         |
-| Performance            | (objetivo) | bajo     | medio      | alto      | alto      |
+| Performance            | alto (compilado) | bajo     | medio      | alto      | alto      |
 | Ecosistema             | naciente   | enorme   | enorme     | grande    | grande    |
 | Curva de aprendizaje   | suave      | suave    | suave      | empinada  | suave     |
 

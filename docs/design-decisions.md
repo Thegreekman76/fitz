@@ -23,11 +23,15 @@ en editores, copiar/pegar, y colaboración. Las llaves son explícitas y no fall
 **Razón:** El ruido visual del `;` final no aporta nada semántico. El parser
 puede determinar el fin de una sentencia por contexto.
 
-### `let` para variables locales inmutables, `=` para mutables
-**Decisión:** TBD — en debate
-**Opción A:** Todo con `=`, mutabilidad por defecto
-**Opción B:** `let` para inmutable, `let mut` para mutable (como Rust)
-**Tendencia:** Opción A para mantener la simplicidad à la Python.
+### `let` opcional para declarar variables
+**Decisión:** ambas formas conviven — `x = 1` y `let x = 1` declaran la misma var.
+**Razón:** la simplicidad à la Python (sin `let`) baja la barrera de entrada;
+`let` opcional ayuda a la legibilidad cuando hay muchas declaraciones juntas o
+cuando alguien viene de Rust/Swift/JS. El parser acepta ambas sin distinción
+semántica — no hay diferencia entre "declarar" y "reasignar" más allá del
+scope. Mutabilidad por defecto, como Python.
+**Trade-off aceptado:** dos formas para hacer lo mismo. Cuando el formateador
+exista (`fitz fmt`), va a elegir una canónica.
 
 ---
 
@@ -96,10 +100,93 @@ definís una función, le ponés un decorador, y ya es un endpoint.
 **Razón:** Elimina el boilerplate de `json.dumps`, `jsonify`, etc. El tipo
 es el contrato, el runtime se encarga del resto. Igual que FastAPI con Pydantic.
 
-### Servidor automático
-**Decisión:** Si hay rutas definidas, `fitz run` arranca un servidor HTTP.
-No hace falta un `main()` ni configuración extra.
-**Razón:** El camino feliz debe ser trivial. Escribís endpoints, corrés, funciona.
+### Servidor automático con `@server(...) fn main()` como patrón canónico
+**Decisión:** si hay rutas registradas (`@get`, `@post`, etc.), `fitz run`
+arranca un servidor HTTP automáticamente. La configuración del server vive
+en `@server(port, host)` y se aplica sobre una `fn main()` placeholder
+(`@server(3000) fn main() => 0`). La fn queda definida en el env pero **no
+se ejecuta automáticamente** — el server arranca por la presencia de rutas,
+no por la presencia de `main`.
+**Razón:** el camino feliz sigue siendo trivial (escribir endpoints, correr,
+funcionar). El patrón `@server fn main` resuelve dos cosas a la vez: tener
+un anchor sintáctico para configurar host/port sin inventar otra keyword, y
+dejar la puerta abierta a programas mixtos (CLI + HTTP) sin chocar.
+**Trade-off:** `fn main` no es entry point en sentido tradicional cuando hay
+HTTP — el "entry point real" es el reactor axum/tokio.
+
+---
+
+## Type checker (Fase 5a)
+
+### Strict por default en `fitz run`, escape vía `--no-typecheck`
+**Decisión:** `fitz run` aborta si el checker encuentra errores de tipo.
+Para volver al modo gradual (warning + ejecutar), hay que pasar
+`--no-typecheck` explícitamente. `fitz build` siempre exige tipos OK,
+sin flag de escape.
+**Razón:** el valor del tipado gradual está en que los errores se vean
+cuando aparecen, no en que se ignoren silenciosamente. Strict por default
+empuja a corregir; el flag de escape preserva la posibilidad de ejecutar
+prototipos rotos cuando hace falta. Build no debe producir un binario que
+el checker considera incorrecto.
+
+### El sistema de tipos no analiza valores
+**Decisión:** el checker se preocupa por tipos (forma), no por dominio
+(valores). División por cero, indexing fuera de rango, claves faltantes
+en `Map.get` — todo eso es runtime, no checker.
+**Razón:** un sistema de tipos que intente analizar valores se vuelve un
+solver costoso y nunca llega a cero falsos negativos. Fitz prefiere un
+checker barato y predecible, y dejar al runtime los errores de dominio
+(con `Result` cuando se puede expresar como contrato).
+
+---
+
+## Codegen a binario nativo (Fase 5b)
+
+### Transpile-a-Rust sobre LLVM/Cranelift directos
+**Decisión:** `fitz build` traduce el AST tipado de Fitz a código Rust,
+y delega el resto del trabajo a `rustc`/`cargo`.
+**Razón:** reusamos toda la infraestructura del ecosistema Rust de un
+saque — compilador maduro, optimizaciones, cross-compilation gratis,
+y las crates que ya usamos en runtime (`axum`, `tokio`, `serde`)
+encajan naturalmente cuando llega HTTP en el binario. Construir IR a
+LLVM/Cranelift desde cero implicaba reimplementar async, codegen para
+HTTP, y mantener dos representaciones de tipos.
+**Trade-off:** el tiempo de compilación queda atado a `rustc` (~2s en
+programas chicos). El binario producido es standalone y no requiere
+runtime de Fitz en producción — eso era el principio de la visión y
+hoy es realidad implementada.
+
+### `fitz build` siempre genera un proyecto Cargo
+**Decisión:** el output del codegen es `target/fitz-build/<stem>/
+{Cargo.toml, src/main.rs, src/<mod>.rs}`, y se invoca `cargo build
+--release`. No invocamos `rustc` directo aunque no haya módulos.
+**Razón:** los `import` cross-archivo necesitan múltiples `.rs` con
+`mod`, que es la abstracción nativa de Cargo. Y cuando HTTP suma
+deps (axum/tokio/serde), Cargo las maneja sin reescribir pipeline.
+Costo: ~1-2s adicionales en la primera compilación. Aceptable.
+
+### `Rc<RefCell<>>` para tipos custom y colecciones en el binario
+**Decisión:** `type Foo { ... }` Fitz → `struct FooData` Rust + alias
+`type Foo = Rc<RefCell<FooData>>`. `List<T>` → `Rc<RefCell<Vec<T>>>`.
+`Map<K, V>` → `Rc<RefCell<Vec<(K, V)>>>`.
+**Razón:** preserva la semántica de referencia compartida del intérprete
+(mutaciones vía cualquier alias se ven en todos los alias, incluyendo
+args de fn). Sin esto, el código del intérprete y el del binario
+divergirían en comportamiento — inaceptable para Fitz, donde
+`fitz run` y `fitz build` deben producir output bit-a-bit idéntico.
+**Trade-off:** `u.name` se traduce a `u.borrow().name.clone()` —
+correcto pero caro. Optimizable post-5b sin cambiar la semántica.
+
+### `Result<T>` Fitz → `Result<T, String>` Rust
+**Decisión:** en el codegen, el lado Err de `Result` queda pinned a
+`String`. Construir `Err(42)` se coerce a `Err(format!("{}", 42))`.
+**Razón:** en la práctica todos los `Err(...)` de los ejemplos y del
+runtime construyen mensajes (`find`/`get` devuelven Str, divisiones
+por cero también). Pinear E a String habilita el `?` Rust nativo sin
+glue extra. La generalización a errores tipados queda como deuda
+abierta para cuando aparezca presión real (custom error types).
+**Trade-off:** se pierde la posibilidad de matchear sobre `Err` de
+tipo arbitrario en el binario. Hoy nadie lo hacía.
 
 ---
 
@@ -114,11 +201,12 @@ Reconocible internacionalmente, único, memorable. Evoca algo sólido y permanen
 
 ### Comando CLI: `fitz`
 ```bash
-fitz run main.fitz      # ejecutar
-fitz build              # compilar
-fitz check              # type check y lint
-fitz fmt                # formatear
-fitz add http           # instalar paquete (futuro)
+fitz run main.fitz                   # ejecutar (strict por default)
+fitz run main.fitz --no-typecheck    # ejecutar ignorando errores de tipo
+fitz check main.fitz                 # solo type check
+fitz build main.fitz                 # compilar a binario nativo (vía Cargo)
+fitz fmt                             # formatear (futuro)
+fitz add http                        # instalar paquete (futuro)
 ```
 
 ---

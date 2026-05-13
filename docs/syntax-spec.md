@@ -26,20 +26,23 @@
 ## Variables
 
 ```fitz
-// sin tipo — inferido
+// sin tipo — inferido. `let` es opcional, ambas formas conviven.
 name = "Fitz"
-count = 42
+let count = 42
 active = true
 
 // con tipo explícito
 name: Str = "Fitz"
-count: Int = 42
+let count: Int = 42
 score: Float = 3.14
 
 // nullable — el ? indica que puede ser null
 email: Str? = null
 age: Int? = 25
 ```
+
+> `let x = 1` y `x = 1` son equivalentes — el parser acepta ambas
+> sin distinción semántica. Mutabilidad por defecto.
 
 ---
 
