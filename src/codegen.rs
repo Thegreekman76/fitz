@@ -120,6 +120,10 @@ pub fn generate_project(
     // ejemplos no-HTTP no pagan el costo de bajar/compilar axum.
     let has_http = has_http_routes(program);
 
+    // Fase 6.6: idem para async. Habilita `__fitz_sleep`, `tokio::main`
+    // sobre CLI, feature `time` en Cargo.toml.
+    let uses_async = program_uses_async(program);
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
@@ -129,7 +133,7 @@ pub fn generate_project(
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
         output_basename: raw_stem,
-        cargo_toml: cargo_toml_for(&stem, has_http),
+        cargo_toml: cargo_toml_for(&stem, has_http, uses_async),
         main_rs,
         mod_files: loader.into_mod_files(),
     })
@@ -143,6 +147,79 @@ fn has_http_routes(program: &Program) -> bool {
     program.iter().any(|s| {
         matches!(s, Stmt::FnDef { decorators, .. } if !decorators.is_empty())
     })
+}
+
+/// Fase 6.6: True si el programa usa async — cualquier `async fn`
+/// declarada por el usuario, cualquier `Expr::Await` en algún sitio,
+/// o una llamada al builtin `sleep`. El codegen consulta este flag
+/// para decidir tres cosas:
+///   - Emitir el helper `__fitz_sleep` en el preludio.
+///   - Para programas CLI (no-HTTP), usar `#[tokio::main(flavor =
+///     "current_thread")]` sobre `fn main()`.
+///   - Agregar `tokio` con feature `time` al Cargo.toml generado.
+///
+/// HTTP ya implica async (los handlers axum corren en tokio), así
+/// que el flag es ortogonal: un programa puede ser HTTP sin sleep
+/// (no necesita `time`), o CLI con sleep (no necesita axum).
+fn program_uses_async(program: &Program) -> bool {
+    fn expr_uses_async(e: &Expr) -> bool {
+        match e {
+            Expr::Await(_, _) => true,
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(n, _) = callee.as_ref() {
+                    if n == "sleep" {
+                        return true;
+                    }
+                }
+                expr_uses_async(callee) || args.iter().any(expr_uses_async)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_async(left) || expr_uses_async(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_async(operand),
+            Expr::Field { object, .. } => expr_uses_async(object),
+            Expr::Index { object, index, .. } => expr_uses_async(object) || expr_uses_async(index),
+            Expr::List(items, _) => items.iter().any(expr_uses_async),
+            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
+            Expr::Range { start, end, .. } => expr_uses_async(start) || expr_uses_async(end),
+            Expr::If { condition, then, else_, .. } => {
+                expr_uses_async(condition)
+                    || then.iter().any(stmt_uses_async)
+                    || else_.as_ref().map(|b| b.iter().any(stmt_uses_async)).unwrap_or(false)
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_async(value) || arms.iter().any(|a| expr_uses_async(&a.body))
+            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_async(v)),
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_async),
+            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => expr_uses_async(inner),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Expr(e) => expr_uses_async(e),
+                StrPart::Lit(_) => false,
+            }),
+            _ => false,
+        }
+    }
+    fn stmt_uses_async(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { is_async: true, .. } => true,
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_async),
+            Stmt::Assign { value, .. } => expr_uses_async(value),
+            Stmt::Return(e, _) => expr_uses_async(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_async(status)
+                    || body.as_ref().map(expr_uses_async).unwrap_or(false)
+            }
+            Stmt::Expr(e, _) => expr_uses_async(e),
+            Stmt::While { condition, body, .. } => {
+                expr_uses_async(condition) || body.iter().any(stmt_uses_async)
+            }
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_async),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_async(iter) || body.iter().any(stmt_uses_async)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_async)
 }
 
 /// F11 — detección de state HTTP compartido.
@@ -445,7 +522,7 @@ fn sanitize_crate_name(raw: &str) -> String {
 /// Cargo.toml para el project generado. Si `has_http` es true,
 /// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
 /// Si no, queda sin `[dependencies]` y la compilación es rápida.
-fn cargo_toml_for(stem: &str, has_http: bool) -> String {
+fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool) -> String {
     let header = format!(
         "[package]\n\
          name = \"{stem}\"\n\
@@ -456,15 +533,42 @@ fn cargo_toml_for(stem: &str, has_http: bool) -> String {
          name = \"{stem}\"\n\
          path = \"src/main.rs\"\n",
     );
+    // Fase 6.6: tokio se necesita con feature `time` cuando el
+    // programa usa async (`sleep`/`.await`/`async fn`). HTTP ya pide
+    // tokio con macros+rt-multi-thread; combinar las features para no
+    // emitir dos entries.
+    let tokio_features: &[&str] = match (has_http, uses_async) {
+        (true, true) => &["macros", "rt-multi-thread", "time"],
+        (true, false) => &["macros", "rt-multi-thread"],
+        (false, true) => &["macros", "rt-multi-thread", "time"],
+        (false, false) => &[],
+    };
     if has_http {
         format!(
             "{}\n\
              [dependencies]\n\
              axum = \"0.8\"\n\
-             tokio = {{ version = \"1\", features = [\"macros\", \"rt-multi-thread\"] }}\n\
+             tokio = {{ version = \"1\", features = [{}] }}\n\
              serde = {{ version = \"1\", features = [\"derive\"] }}\n\
              serde_json = {{ version = \"1\", features = [\"preserve_order\"] }}\n",
-            header
+            header,
+            tokio_features
+                .iter()
+                .map(|f| format!("\"{}\"", f))
+                .collect::<Vec<_>>()
+                .join(", "),
+        )
+    } else if uses_async {
+        format!(
+            "{}\n\
+             [dependencies]\n\
+             tokio = {{ version = \"1\", features = [{}] }}\n",
+            header,
+            tokio_features
+                .iter()
+                .map(|f| format!("\"{}\"", f))
+                .collect::<Vec<_>>()
+                .join(", "),
         )
     } else {
         header
@@ -1057,8 +1161,10 @@ fn generate_main_rs(
     loader: &ModuleLoader,
 ) -> Result<String, FitzError> {
     let has_http = has_http_routes(program);
+    let uses_async = program_uses_async(program);
 
     let mut ctx = CodegenCtx::new(env);
+    ctx.uses_async = uses_async;
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
@@ -1424,6 +1530,12 @@ struct CodegenCtx<'a> {
     /// wrapper lo consulta para emitir el destructuring apropiado en
     /// vez del path normal de serialización.
     http_handlers_returning_response: std::collections::HashSet<String>,
+    /// Fase 6.6: `true` si el programa usa async — cualquier `async fn`
+    /// declarada, `.await` adentro de un body, o llamada al builtin
+    /// `sleep`. Habilita el preludio `__fitz_sleep`, el `#[tokio::main]`
+    /// sobre `fn main()` CLI, y el feature `time` en el Cargo.toml.
+    /// Se setea en `generate_main_rs` antes de emit_prelude.
+    uses_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1471,6 +1583,7 @@ impl<'a> CodegenCtx<'a> {
             fn_state_deps: HashMap::new(),
             response_mode: false,
             http_handlers_returning_response: std::collections::HashSet::new(),
+            uses_async: false,
         }
     }
 
@@ -1635,10 +1748,32 @@ impl<'a> CodegenCtx<'a> {
             "fn __fitz_fmt_float(v: f64) -> String {\n    \
              if v.is_finite() && v.fract() == 0.0 { format!(\"{:.1}\", v) } else { format!(\"{}\", v) }\n}\n\n",
         );
+        // Fase 6.6: builtin `sleep` Fitz → wrapper async sobre
+        // `tokio::time::sleep`. Solo se emite cuando el programa lo
+        // usa (`uses_async` cubre `sleep`/`.await`/`async fn`) — los
+        // programas sync no pagan el costo de incluirlo.
+        if self.uses_async {
+            self.emit(
+                "async fn __fitz_sleep(ms: i64) {\n    \
+                 tokio::time::sleep(std::time::Duration::from_millis(\
+                 ms.max(0) as u64)).await\n}\n\n",
+            );
+        }
     }
 
     fn gen_main(&mut self, stmts: &[&Stmt]) -> Result<(), FitzError> {
-        self.emit("fn main() {\n");
+        // Fase 6.6: si el programa usa async (sin HTTP — el path
+        // HTTP tiene su propio `gen_http_main` con `#[tokio::main]`),
+        // emitimos `fn main()` como `#[tokio::main(flavor =
+        // "current_thread")] async fn main()`. Eso destraba `.await`
+        // top-level y llamadas a `async fn` Fitz que llegan acá vía
+        // statements del CLI.
+        if self.uses_async {
+            self.emit("#[tokio::main(flavor = \"current_thread\")]\n");
+            self.emit("async fn main() {\n");
+        } else {
+            self.emit("fn main() {\n");
+        }
         self.indent += 1;
         self.push_scope();
         for stmt in stmts {
@@ -1933,6 +2068,7 @@ impl<'a> CodegenCtx<'a> {
             params,
             return_type: _,
             body,
+            is_async,
             decorators,
             ..
         } = stmt
@@ -1964,8 +2100,14 @@ impl<'a> CodegenCtx<'a> {
             .ok_or_else(|| self.err(format!("fn `{}` no estaba pre-registrada", name)))?;
 
         // Header: fn <name>(p1: T1, p2: T2, ...) -> Ret {
+        // Fase 6.6: `async fn` Fitz → `pub async fn` Rust. Rust auto-
+        // envuelve el return type en `impl Future<Output = T>`, así
+        // que NO se modifica el ret renderizado abajo.
         let pub_kw = self.pub_prefix();
         self.emit(pub_kw);
+        if *is_async {
+            self.emit("async ");
+        }
         self.emit("fn ");
         self.emit(name);
         self.emit("(");
@@ -2135,14 +2277,25 @@ impl<'a> CodegenCtx<'a> {
             // mantenemos.
         } else {
             // Primera vez en este scope — declaración.
-            self.emit("let mut ");
-            self.emit(name);
-            self.emit(": ");
-            self.emit(&rust_type_for(&declared_ty, self.env)?);
-            self.emit(" = ");
-            self.emit(&final_rhs);
-            self.emit(";\n");
-            self.declare_var(name.clone(), declared_ty);
+            // Caso especial `let _ = ...` (descartar): Rust no admite
+            // `let mut _` ni anotación de tipo sobre `_`. Emitimos
+            // `let _ = ...;` plano. Útil para llamadas async cuyo
+            // resultado no se usa: `let _ = sleep(0).await`.
+            if name == "_" {
+                self.emit("let _ = ");
+                self.emit(&final_rhs);
+                self.emit(";\n");
+                // No declaramos `_` en el scope — no es un binding.
+            } else {
+                self.emit("let mut ");
+                self.emit(name);
+                self.emit(": ");
+                self.emit(&rust_type_for(&declared_ty, self.env)?);
+                self.emit(" = ");
+                self.emit(&final_rhs);
+                self.emit(";\n");
+                self.declare_var(name.clone(), declared_ty);
+            }
         }
         Ok(())
     }
@@ -2568,14 +2721,20 @@ impl<'a> CodegenCtx<'a> {
             Expr::Ok(inner, _) => self.gen_ok(inner),
             Expr::Err(inner, _) => self.gen_err(inner),
             Expr::Try(inner, _) => self.gen_try(inner),
-            // Barrera de 6.1: el codegen emitirá `.await` Rust en 6.6.
-            // Hasta entonces, el AST puede contener `Expr::Await`
-            // (el parser lo construye desde 6.1) pero el `fitz build`
-            // lo rechaza con error explícito apuntando al sub-paso.
-            Expr::Await(_, _) => Err(self.err_at(
-                e.span(),
-                "`.await` todavía no se compila a binario nativo — llega en 6.6",
-            )),
+            // `.await` Fitz → `<expr>.await` Rust. Mapping 1:1 — el
+            // checker 6.2 garantiza que el operando tipa como
+            // `Future<T>` y que estamos adentro de una `async fn`.
+            // El tipo resultante es el inner T del `Future<T>`; para
+            // operando `Type::Any` (gradual) o desconocido devolvemos
+            // `Type::Any` y dejamos que rustc infiera.
+            Expr::Await(inner, _) => {
+                let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                let result_ty = match inner_ty {
+                    Type::Future(t) => *t,
+                    _ => Type::Any,
+                };
+                Ok((format!("({}).await", inner_code), result_ty))
+            }
             Expr::Match { value, arms, .. } => self.gen_match(value, arms),
             // FnExpr "suelto" — usado como valor, parámetro o retorno
             // (higher-order, F12). Emite `Rc::new(move |p1: T1, ...|
@@ -2861,6 +3020,23 @@ impl<'a> CodegenCtx<'a> {
         if name == "print" {
             return Err(self.err_at(call_span,
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
+            ));
+        }
+        // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
+        // usuario definió una fn `sleep` propia, `fn_sigs` la captura
+        // antes y el builtin no dispara — misma política que `len`.
+        if name == "sleep" && !self.fn_sigs.contains_key(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`sleep` espera 1 argumento (ms: Int), recibió {}",
+                    args.len()
+                )));
+            }
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            let coerced = coerce(&arg_code, &arg_ty, &Type::Int);
+            return Ok((
+                format!("__fitz_sleep({})", coerced),
+                Type::Future(Box::new(Type::Null)),
             ));
         }
         // Builtin global `len(x)`: despacha por tipo del argumento a la
@@ -4319,6 +4495,7 @@ impl<'a> CodegenCtx<'a> {
             params,
             decorators,
             return_type,
+            is_async,
             ..
         } = stmt
         else {
@@ -4474,16 +4651,21 @@ impl<'a> CodegenCtx<'a> {
             self.emit("    };\n");
         }
 
-        // Llamada a la fn original.
+        // Llamada a la fn original. Si el handler Fitz es `async fn`,
+        // su firma Rust (`pub async fn`) devuelve un `Future`; el
+        // wrapper await-ea sobre la marcha para obtener el `T` interno
+        // y procesarlo igual que un handler sync.
         let call_args: Vec<String> = resolved_params
             .iter()
             .map(|(n, _)| n.clone())
             .collect();
+        let await_suffix = if *is_async { ".await" } else { "" };
         writeln!(
             &mut self.output,
-            "    let __result = {}({});",
+            "    let __result = {}({}){};",
             name,
-            call_args.join(", ")
+            call_args.join(", "),
+            await_suffix,
         )
         .unwrap();
 
@@ -5352,6 +5534,24 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
             let ret_rs = rust_type_for(ret, env)?;
             Ok(format!("Rc<dyn Fn({}) -> {}>", ps.join(", "), ret_rs))
         }
+        // Fase 6.6: `Future<T>` Fitz → `Pin<Box<dyn Future<Output = T>>>`
+        // Rust. Uniforme y compatible con `current_thread` runtime (no
+        // exigimos `+ Send`). Aparece cuando el usuario guarda el future
+        // suelto en una var o lo pasa como argumento; para return de
+        // `async fn` no se usa esta ruta (Rust auto-envuelve con
+        // `impl Future`). Si T = Any (gradual escape), emitimos `_` y
+        // dejamos que rustc infiera desde el contexto.
+        Type::Future(inner) => {
+            let inner_rs = if matches!(**inner, Type::Any) {
+                "_".to_string()
+            } else {
+                rust_type_for(inner, env)?
+            };
+            Ok(format!(
+                "std::pin::Pin<Box<dyn std::future::Future<Output = {}>>>",
+                inner_rs
+            ))
+        }
         other => Err(FitzError::new(
             ErrorKind::TypeError,
             0,
@@ -5689,10 +5889,12 @@ mod tests {
 
     /// Llama a `generate_rust` ignorando errores del checker. Solo para
     /// probar **barreras defensivas** del codegen sobre features que el
-    /// checker también rechaza (p.ej. `.await` en Fase 6.1, antes de
-    /// 6.2/6.6). El flujo normal aborta en el checker; este helper
-    /// salta esa etapa para forzar al codegen a ver el AST y verificar
-    /// que su propia barrera está en su lugar.
+    /// checker también rechaza. El flujo normal aborta en el checker;
+    /// este helper salta esa etapa para forzar al codegen a ver el AST
+    /// y verificar que su propia barrera está en su lugar. Sin barreras
+    /// activas hoy (Fase 6.6 cerró la última, `.await`), pero queda
+    /// disponible para barreras futuras.
+    #[allow(dead_code)]
     fn gen_ignoring_check(src: &str) -> Result<String, FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
@@ -5700,17 +5902,140 @@ mod tests {
         generate_rust(&program, &env)
     }
 
-    // ---- Fase 6.1: barrera del codegen sobre `.await` ----
+    // ---- Fase 6.6: codegen async (async fn / .await / sleep) ----
 
     #[test]
-    fn await_aborta_codegen_hasta_6_6() {
-        let err = gen_ignoring_check("let x = 1\nlet y = x.await")
-            .expect_err("esperaba error de codegen");
+    fn async_fn_emite_pub_async_fn_rust() {
+        // `async fn f() -> Int { return 42 }` → `pub async fn f() -> i64`.
+        let code = gen("async fn f() -> Int { return 42 }").unwrap();
+        let file = ast_test::parse(&code);
+        let f = ast_test::find_item_fn(&file, "f").expect("fn f no emitida");
+        assert!(ast_test::fn_is_async(f), "esperaba async fn, no era async");
+        // Sanidad: return type es i64.
+        let ret = ast_test::fn_return_type(f).unwrap_or_default();
+        assert!(ret.contains("i64"), "esperaba return type i64, fue: {}", ret);
+    }
+
+    #[test]
+    fn sync_fn_no_emite_async() {
+        // Programa sync no debe emitir `async fn`.
+        let code = gen("fn double(n: Int) -> Int => n * 2").unwrap();
+        let file = ast_test::parse(&code);
+        let f = ast_test::find_item_fn(&file, "double").expect("fn double");
+        assert!(!ast_test::fn_is_async(f), "no debería ser async");
+    }
+
+    #[test]
+    fn await_emite_dot_await_rust() {
+        // `inner().await` → `(inner()).await` Rust.
+        let code = gen(
+            "async fn inner() -> Int { return 1 }\n\
+             async fn outer() -> Int { return inner().await }",
+        ).unwrap();
+        // Inspeccionamos el body de `outer`: debe contener un
+        // `.await` aplicado al call.
+        let file = ast_test::parse(&code);
+        let outer = ast_test::find_item_fn(&file, "outer").expect("fn outer");
+        let body = ast_test::fn_body_text(outer);
+        // syn::ToTokens normaliza con espacios: `.await` aparece como
+        // `. await` después del `quote!`.
         assert!(
-            err.message.contains("6.6") && err.message.contains(".await"),
-            "esperaba mensaje mencionando 6.6 y `.await`, fue: {}",
-            err.message
+            body.contains(". await") || body.contains(".await"),
+            "esperaba `.await` en el body de outer, fue: {}",
+            body
         );
+    }
+
+    #[test]
+    fn sleep_builtin_emite_fitz_sleep_helper_y_call() {
+        // `sleep(100)` → `__fitz_sleep(100i64)` + preludio del helper.
+        let code = gen(
+            "async fn f() -> Int {\n\
+                 let _ = sleep(100).await\n\
+                 return 0\n\
+             }",
+        ).unwrap();
+        // Helper `__fitz_sleep` debe estar en el preludio del crate.
+        assert!(
+            code.contains("async fn __fitz_sleep"),
+            "esperaba `async fn __fitz_sleep` en el output, no encontrado"
+        );
+        // El call site usa el helper.
+        assert!(
+            code.contains("__fitz_sleep(100i64)"),
+            "esperaba llamada `__fitz_sleep(100i64)`"
+        );
+        // Y referencia a `tokio::time::sleep` adentro del helper.
+        assert!(
+            code.contains("tokio::time::sleep"),
+            "esperaba referencia a `tokio::time::sleep`"
+        );
+    }
+
+    #[test]
+    fn cargo_toml_async_sin_http_incluye_tokio_time() {
+        // Programa CLI con async → Cargo.toml mínimo + tokio con
+        // feature `time` (sin axum).
+        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/true);
+        assert!(toml.contains("tokio"), "esperaba tokio en deps");
+        assert!(toml.contains("\"time\""), "esperaba feature `time`");
+        assert!(!toml.contains("axum"), "no debería incluir axum");
+    }
+
+    #[test]
+    fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
+        let toml = cargo_toml_for("foo", /*has_http=*/true, /*uses_async=*/true);
+        assert!(toml.contains("axum"));
+        assert!(toml.contains("\"time\""));
+        assert!(toml.contains("\"macros\""));
+    }
+
+    #[test]
+    fn cargo_toml_sin_async_sin_http_es_minimal() {
+        let toml = cargo_toml_for("foo", false, false);
+        assert!(!toml.contains("[dependencies]"));
+        assert!(!toml.contains("tokio"));
+    }
+
+    #[test]
+    fn cli_con_async_emite_tokio_main_y_async_main() {
+        // Programa CLI sin HTTP con async fn declarada → `fn main()`
+        // se emite como `#[tokio::main(...)] async fn main()`.
+        let code = gen(
+            "async fn pause() -> Int { return 0 }\n\
+             print(\"hi\")",
+        ).unwrap();
+        assert!(
+            code.contains("#[tokio::main"),
+            "esperaba `#[tokio::main]` en el output"
+        );
+        assert!(
+            code.contains("async fn main"),
+            "esperaba `async fn main` para CLI con async"
+        );
+    }
+
+    #[test]
+    fn cli_sync_no_emite_tokio_main() {
+        // Programa CLI sync → `fn main()` plano, sin `#[tokio::main]`.
+        let code = gen("print(\"hi\")").unwrap();
+        assert!(
+            !code.contains("#[tokio::main"),
+            "no debería tener `#[tokio::main]` en CLI sync"
+        );
+        assert!(code.contains("fn main()"));
+    }
+
+    #[test]
+    fn future_t_como_anotacion_de_var_emite_pin_box_dyn_future() {
+        // `let f: Future<Int> = async_fn()` (sin await) → tipo
+        // `Pin<Box<dyn Future<Output = i64>>>`.
+        // Validamos vía `rust_type_for` directamente para evitar
+        // chequear todo el flow.
+        let env = crate::types::TypeEnv::new();
+        let rs = rust_type_for(&Type::Future(Box::new(Type::Int)), &env).unwrap();
+        assert!(rs.contains("Pin"), "esperaba Pin, fue: {}", rs);
+        assert!(rs.contains("Future<Output = i64>"), "fue: {}", rs);
     }
 
     // ---- AST-based test helpers (T1 post-5b) ---------------------------

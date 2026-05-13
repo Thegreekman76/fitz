@@ -581,6 +581,30 @@ fn lista_heterogenea_aborta_build() {
 }
 
 #[test]
+fn async_fn_con_sleep_compilable_y_correcta() {
+    // Fase 6.6: async fn Fitz con `sleep(...).await` adentro compila
+    // a binario nativo y corre con tokio runtime current_thread.
+    // El programa NO usa `.await` top-level (el checker lo prohíbe);
+    // toda la maquinaria async está adentro de fns nombradas. La
+    // `fn main` implícita (generada por el codegen sobre los stmts
+    // top-level) es `#[tokio::main(flavor = "current_thread")]` por
+    // detección automática.
+    let src = "\
+        async fn double(n: Int) -> Int {\n\
+            let _ = sleep(0).await\n\
+            return n * 2\n\
+        }\n\
+        async fn run() -> Int {\n\
+            return double(21).await\n\
+        }\n\
+        print(\"async ok\")\n\
+    ";
+    let (stdout, exit) = build_and_run("async_sleep_compilable", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    assert_eq!(stdout.trim(), "async ok");
+}
+
+#[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
     // 5b.6 abrió @get/@post/etc., F11 abrió state HTTP compartido.
     // La feature que apuntamos acá pasa a ser **decorator HTTP custom
@@ -1051,6 +1075,22 @@ fn http_get_con_path_param_int() {
         build_spawn_request("http-path-int", src, 43211, "GET", "/double/21", None);
     assert_eq!(status, 200);
     assert_eq!(body.trim(), "42");
+}
+
+#[test]
+fn http_async_handler_con_sleep_responde_200() {
+    // Fase 6.6: handler `async fn` con `sleep(...).await` adentro.
+    // El wrapper de axum await-ea el future del handler antes de
+    // serializar el resultado. End-to-end con tokio current_thread.
+    let src = "@server(43219)\nfn main() => 0\n\
+               @get(\"/pause\") async fn pause() -> Str {\n\
+                   let _ = sleep(0).await\n\
+                   return \"done\"\n\
+               }\n";
+    let (status, body) =
+        build_spawn_request("http-async-handler", src, 43219, "GET", "/pause", None);
+    assert_eq!(status, 200);
+    assert_eq!(body.trim(), "\"done\"");
 }
 
 #[test]
