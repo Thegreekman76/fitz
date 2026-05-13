@@ -65,7 +65,7 @@ excepciones que se escapan del scope.
 **Por qué Python igual** — el ecosistema. NumPy, pandas, scikit-learn,
 PyTorch, Django, Jupyter, 30 años de librerías. Cualquier cosa con
 ML, ciencia de datos o scripting de pegamento, Python sigue ganando.
-Por eso Fitz va a tener **interop nativo con Python** (Fase 6, vía
+Por eso Fitz va a tener **interop nativo con Python** (Fase 8, vía
 PyO3): para que no tengas que elegir entre el ecosistema y la
 performance.
 
@@ -107,7 +107,7 @@ código es lo que corre.
 
 **Por qué TypeScript igual** — frontend. Fitz no tiene intención de
 competir en el browser (al menos no por ahora; WebAssembly aparece
-en Fase 6 como visión). Si necesitás un componente UI, TypeScript +
+en Fase 9 como visión). Si necesitás un componente UI, TypeScript +
 React/Vue es la respuesta correcta. Y el ecosistema npm, con todos
 sus problemas, sigue siendo el más grande del mundo dev.
 

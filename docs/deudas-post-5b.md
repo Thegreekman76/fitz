@@ -186,8 +186,8 @@ completa abajo.
 | F12 | ~~`codegen.rs` (higher-order)~~ **CERRADO** — closures escapadas, fn nombrada como valor, FnExpr asignado a var, fn como param y como tipo de retorno compilan con `fitz build`. `TypeExpr::Function` nueva variante; codegen emite `Rc<dyn Fn(...) -> R>` uniforme. Cap 11 anotado y compilable bit-a-bit con el intérprete. Smoke `GUIDE_EXAMPLES_COMPILE` incluye `11-funciones.fitz`. 24 tests nuevos. | — | — |
 | F13 | `codegen.rs` | Listas/mapas heterogéneos: `[1, "dos"]` corre en intérprete, no compila. Requiere `FitzValue` tagged runtime. | Baja | Alta |
 | F14 | `codegen.rs` | `let X = <expr>` no-literal a nivel mod top-level. | Baja | Media |
-| F15 | `parser.rs` | **Error recovery del parser** — hoy el parser aborta al primer error. Para tooling externo (LSP/IDE) que necesita dar diagnostics y completions sobre código incompleto/roto, el parser tiene que producir un AST parcial y seguir adelante. Refactor mediano: introducir nodos `Stmt::Error`/`Expr::Error`, sync points en `{`/`}`/`;`/newline, recolectar `Vec<FitzError>` en lugar de `Result<_, FitzError>`. Pre-req habilitante para Fase 7 (LSP). | Baja | Alta |
-| F16 | `types.rs` (checker) | **IR tipado persistido por nodo** — el checker hoy sintetiza tipos en `infer_expr` y los descarta. Para hover ("¿qué tipo tiene esta expresión?") y completion contextual ("`u.` → mostrar fields de `User`"), hace falta retener `HashMap<SpanKey, Type>` (o un side-table paralelo al AST) con el tipo de cada nodo. Encaja también con el "IR tipado" que el doc ya menciona como sub-paso natural post-5b. Pre-req habilitante para Fase 7 (LSP). | Baja | Media |
+| F15 | `parser.rs` | **Error recovery del parser** — hoy el parser aborta al primer error. Para tooling externo (LSP/IDE) que necesita dar diagnostics y completions sobre código incompleto/roto, el parser tiene que producir un AST parcial y seguir adelante. Refactor mediano: introducir nodos `Stmt::Error`/`Expr::Error`, sync points en `{`/`}`/`;`/newline, recolectar `Vec<FitzError>` en lugar de `Result<_, FitzError>`. Pre-req habilitante para Fase 9 (LSP). | Baja | Alta |
+| F16 | `types.rs` (checker) | **IR tipado persistido por nodo** — el checker hoy sintetiza tipos en `infer_expr` y los descarta. Para hover ("¿qué tipo tiene esta expresión?") y completion contextual ("`u.` → mostrar fields de `User`"), hace falta retener `HashMap<SpanKey, Type>` (o un side-table paralelo al AST) con el tipo de cada nodo. Encaja también con el "IR tipado" que el doc ya menciona como sub-paso natural post-5b. Pre-req habilitante para Fase 9 (LSP). | Baja | Media |
 
 ### Docs
 
@@ -216,7 +216,7 @@ completa abajo.
 
 ## Qué NO entró en la auditoría
 
-- **Fase 6/7** (Interop Python, Ecosistema): decisión de roadmap, no
+- **Fase 6/7/8/9** (Async, DX HTTP, Interop Python, Ecosistema): decisión de roadmap, no
   auditoría.
 - **Features del syntax-spec NO implementadas** todavía
   (status codes custom, async/await real, middleware, query params,

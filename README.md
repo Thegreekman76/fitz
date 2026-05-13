@@ -55,9 +55,9 @@ para el detalle del subset soportado y de la deuda residual.
 runtime sigue siendo síncrono. Los handlers HTTP corren en un
 thread del intérprete con bridge a tokio (en `fitz run`) o como
 fns sync wrapped por axum (en `fitz build`). El `await` real
-llega post-5.
+llega en **Fase 6** (siguiente fase comprometida).
 
-§ **Interop Python via PyO3** — planificado para Fase 6,
+§ **Interop Python via PyO3** — planificado para Fase 8,
 todavía no implementado.
 
 ## Ejemplo aspiracional
@@ -146,12 +146,11 @@ Las fases cerradas:
 **949 tests pasando** (901 unit + 48 E2E que compilan binarios
 con `fitz build` y validan output).
 
-Próximo norte: **Fase 6 — Interop Python** (propuesta, no
-comprometida) y **Fase 7 — Ecosistema** (package manager, LSP,
-formatter, linter). Ver el [roadmap](docs/roadmap.md) para
-detalle y la deuda residual de Fase 5b que queda como sub-paso
-opcional (state compartido HTTP, higher-order completo, async
-real, etc.).
+Próximo norte: **Fase 6 — Async nativo** (siguiente comprometida),
+**Fase 7 — DX HTTP** (OpenAPI + Scalar), **Fase 8 — Interop
+Python**, **Fase 9 — Ecosistema**. Ver el [roadmap](docs/roadmap.md)
+para detalle. La deuda residual de Fase 5b queda como sub-paso
+opcional (state compartido HTTP, higher-order completo, etc.).
 
 ## Qué funciona hoy
 

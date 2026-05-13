@@ -240,6 +240,72 @@ match divide(10.0, 0.0) {
 
 ---
 
+## Async — `async fn` y `await`
+
+Fitz soporta concurrencia cooperativa con `async`/`await` al
+estilo Rust. Una función marcada `async fn` devuelve un
+`Future<T>` cuando se la llama; `await` extrae el `T`.
+
+```fitz
+async fn fetch_data(url: Str) -> Result<Str> {
+    let body = http_get(url).await?
+    return Ok(body)
+}
+
+async fn main() {
+    let data = fetch_data("https://example.com").await
+    print(data)
+}
+```
+
+### Reglas
+
+- `await` es **postfix**: se escribe `expr.await`, no `await expr`.
+  Encaja naturalmente en method chains: `db.find(id).await?`.
+- `await` sólo es legal **adentro de `async fn`**. Usarlo en una fn
+  sync es un error de tipos.
+- Llamar a una `async fn` sin `.await` devuelve un `Future<T>` —
+  útil para guardar el future en una variable o pasarlo como
+  argumento.
+- Sync y async **conviven libremente**. Una `async fn` puede llamar
+  a una sync fn (sin `.await`); una sync fn puede recibir un
+  `Future<T>` pero no puede await-earlo.
+
+### `Future<T>` como tipo
+
+```fitz
+let pending: Future<Int> = compute_async()  // sin await
+let value: Int = pending.await              // con await
+```
+
+`Future<T>` es un generic built-in con la misma forma que
+`List<T>`, `Map<K, V>`, `Result<T>` o `Nullable<T>` — válido en
+anotaciones, parámetros, returns, y campos de `type`.
+
+### HTTP async
+
+Cualquier handler HTTP puede ser `async fn`. El runtime tokio
+existente ejecuta los handlers async sin trabajo extra del
+usuario. Sync sigue siendo válido para handlers triviales:
+
+```fitz
+@get("/users/{id}")
+async fn get_user(id: Int) -> Result<User> {
+    let user = db.find(id).await?
+    return Ok(user)
+}
+
+@get("/health")
+fn health() -> Str => "ok"   // sync — sin await
+```
+
+> Implementado en Fase 6. Hasta entonces, `async fn` se parsea
+> pero el evaluator lo trata como sync (los handlers HTTP corren
+> con bridge sync/async via mpsc). El operador `.await` se
+> introduce en 6.1 y comienza a funcionar en 6.3.
+
+---
+
 ## HTTP — Core del lenguaje
 
 ```fitz

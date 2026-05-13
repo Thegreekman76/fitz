@@ -762,7 +762,7 @@ Validado a mano: `@server(8181, "127.0.0.1")` levanta en 8181 y
   desde 3.4).
 - Cierre cap 18 "Qué sigue" reescrito a post-Fase-4: lo aprendido
   incluye HTTP, el "más adelante" apunta a Fase 5 (compilador) y
-  Fase 6 (ecosistema).
+  Fase 9 (ecosistema).
 
 **Decisión de implementación documentada en la guía**: `return`
 adentro de un brazo de match no parsea (deuda viva del 3.4) — el
@@ -778,7 +778,7 @@ de fase es documentación + ejemplos, sin código nuevo).
 - **Named args en decorators** (`@server(port: 8080, host: "0.0.0.0")`)
   — hoy sólo positionals (`@server(8080, "0.0.0.0")`).
 - **Async real en el lenguaje** — `await`, futures, async fn que de
-  verdad sea async. Probablemente Fase 4.x o 5.
+  verdad sea async. Comprometido como Fase 6.
 - **Response builder rico** — `return 401 { ... }` del syntax-spec,
   status code custom, headers, content-type. Sigue siendo deuda.
 - **Query params** — `?page=1&size=10`. Sin soporte en 4.x.
@@ -2048,8 +2048,6 @@ con `fitz run` como con `fitz build && ./bin`.
   los ejemplos canónicos del cap 17. Sub-paso futuro (`5b.6.1`?)
   con `Arc<Mutex<...>>` + `State` extractor + refactor de
   List/Map representación.
-- **`async fn` real en Fitz**: await, futures como tipo. Hoy los
-  handlers son sync, axum los wrapea.
 - **Status codes específicos por Err kind**: hoy todo Err → 500.
   Idea futura: `Err(e: NotFound)` → 404, etc.
 - **Middleware, CORS, logging, TLS, streaming**: fuera de scope.
@@ -2086,9 +2084,10 @@ opcionales que se abrirán post-fase si aparece presión.
 - **Re-numeración** del viejo cap 18 ("Qué sigue") a **cap 19**.
   Contenido actualizado: quita referencias a "5b.1/5b.2
   cerrados, 5b.3-5b.6 pendientes" (Fase 5 ahora cerrada
-  entera). Apunta a Fase 6 (Interop Python) y Fase 7
-  (Ecosistema) como próximo norte. Lista la deuda residual
-  como sub-pasos futuros opcionales.
+  entera). Apunta a Fase 6 (Async nativo), Fase 7 (DX HTTP),
+  Fase 8 (Interop Python) y Fase 9 (Ecosistema) como próximo
+  norte. Lista la deuda residual como sub-pasos futuros
+  opcionales.
 - **`examples/guide/18-build.fitz` nuevo** — server HTTP **sin
   state compartido** que compila end-to-end. Cubre GET
   estático, GET con path param + Result Ok/Err, POST con body
@@ -2189,7 +2188,6 @@ opcional:
 - **`?` adentro de FnExpr inline**.
 - **`let X = <expr>` no literal a nivel mod** (deuda 5b.5).
 - **Imports transitivos** (deuda 5b.5).
-- **async/await reales** en el lenguaje.
 - **HTTP avanzado**: status codes custom, middleware, query
   params, headers, TLS, streaming.
 
@@ -2268,7 +2266,223 @@ mini-fases dedicadas. Los cerrados hasta hoy:
 
 ---
 
-## Fase 6 — Interop Python 🐍
+## Fase 6 — Async nativo ⚡
+**Estado: PROPUESTA — comprometida como siguiente fase**
+
+Hoy `async fn` se parsea pero el runtime es sincrónico. Los
+handlers HTTP corren en un thread del intérprete con bridge a
+tokio vía `mpsc + oneshot` (en `fitz run`), o como fns sync
+wrapeadas por axum (en `fitz build`). La promesa "HTTP nativo"
+es cierta a nivel ergonómico pero tiene asterisco a nivel de
+ejecución: no hay `await`, no hay concurrencia real adentro de
+un handler, y un futuro driver de DB no podría aprovechar
+tokio sin un bridge feo.
+
+Esta fase **cumple la promesa**: async universal en el lenguaje,
+con `await` postfix y `Future<T>` como tipo genérico de primera
+clase. El evaluator pasa de sync a async; el runtime HTTP migra a
+handlers async reales; el codegen emite `async fn` Rust directo.
+
+### Decisión de alcance — Async universal
+
+Se descartó explícitamente la alternativa "async sólo en
+contexto HTTP". El compromiso es que `async fn` y `await` sean
+válidos en cualquier parte del lenguaje, no sólo adentro de
+handlers. Trade-off aceptado: refactor profundo del evaluator
+(de `fn eval_expr(...) -> Result<Value>` a async con boxed
+futures), pero la promesa queda limpia: "Fitz tiene async
+nativo punto".
+
+### Pasos
+
+#### 6.1 — Sintaxis: `await` postfix + `Future<T>` en AST/parser
+**Pendiente** — base sintáctica.
+
+- Nueva variante `Expr::Await { inner: Box<Expr>, span: Span }`.
+- Parser: `expr.await` como sufijo postfix, con la misma
+  prioridad que method calls y field access. Encaja en el
+  parser existente de chains (`expr.field`, `expr.method()`).
+- `TypeExpr::Generic` ya cubre `Future<T>` sin cambios — es un
+  generic más con aridad fija 1.
+- Tests: parser smokes para `x.await`, `f(x).await`, `xs.map(...)
+  .await`, errores claros si falta `expr` antes de `.await`.
+
+**Criterio de éxito**: `cargo run -- check archivo.fitz` parsea
+`async fn f() -> Int { return x.await }` sin error sintáctico
+(el checker todavía lo rechazaría hasta 6.2).
+
+#### 6.2 — Type checker para async/await
+**Pendiente** — semántica de tipos.
+
+- `Type::Future(Box<Type>)` como generic built-in nuevo (aridad
+  fija 1, registrado en `TypeEnv` junto con `List`/`Map`/`Result`
+  /`Nullable`).
+- `Stmt::FnDef { is_async: true }` → la firma externa de la fn
+  envuelve el return type declarado en `Future<T>`. Adentro del
+  body, `return_stack.last()` sigue siendo `T` (sin envolver) —
+  el `async` es transparente desde adentro.
+- `Expr::Await`: legal sólo si el `CheckCtx` está adentro de un
+  `async fn`. Nuevo `CheckCtx.await_stack: Vec<bool>` paralelo a
+  `return_stack` (cada `FnDef`/`FnExpr` pushea su flag).
+  - Operando debe ser `Future<T>` (o `Any` para escape gradual).
+  - Resultado: `T`.
+  - Operando concreto distinto de `Future`/`Any` → error
+    explícito: "`.await` solo aplica a `Future<T>`".
+  - Fuera de `async fn` → error: "`.await` solo es válido
+    adentro de `async fn`".
+- Llamada a `async fn`: `is_compatible` reconoce que llamar
+  `f(x)` donde `f: Function { ret: Future<T> }` produce
+  `Future<T>`. El usuario tiene que await-earlo o pasarlo como
+  valor.
+- Tests: await fuera de async fn → error; await sobre Int →
+  error; await sobre `Future<Int>` → `Int`; async fn que
+  retorna `T` externamente tipa `Future<T>`.
+
+#### 6.3 — Evaluator async (el costo grueso)
+**Pendiente** — refactor profundo del evaluator.
+
+- `eval_expr` y `eval_stmt` pasan de `fn(...) -> Result<Value>` a
+  `async fn(...) -> Result<Value>` con futures boxeados (Rust no
+  permite `async fn` recursivo directo; se resuelve con
+  `async-recursion` crate o `Pin<Box<dyn Future<...>>>`
+  manual — decidir al implementar, ambos funcionan).
+- `main.rs::run_file` corre el future raíz con `tokio::runtime::
+  Runtime::new()?.block_on(eval_program(...))`. Único runtime
+  compartido entre evaluator y server HTTP — no más
+  `std::thread` para tokio.
+- I/O builtins existentes (`print`, `len`, métodos de
+  List/Map/Str) siguen sync. El evaluator es async, sus llamadas
+  internas se await-ean trivialmente. La firma sync de las
+  builtins no cambia.
+- `Stmt::FnDef { is_async }` se convierte en `Value::Function {
+  is_async }`. Cuando el evaluator llama una `async fn` Fitz
+  desde un contexto sync (top-level del archivo, por ejemplo,
+  o llamada desde una sync fn) sin `.await`, devuelve un
+  `Value::Future` que envuelve el future. La política exacta
+  se afina en este paso.
+- `Expr::Await` evalúa el operando y await-ea el future.
+- Tests: programa CLI con `async fn` + `await` corre con
+  `fitz run`; runtime se inicializa una sola vez; await sobre
+  no-future → panic claro (defensivo; el checker ya cierra el
+  caso).
+
+**Riesgo principal**: el refactor toca muchos lugares del
+evaluator. Probablemente requiera un PR grande en vez de
+incrementos chicos. Recomendación: rama dedicada
+`feature/async-evaluator`, tests E2E del intérprete corriendo
+verde antes de mergear.
+
+#### 6.4 — Runtime HTTP: handlers async reales
+**Pendiente** — eliminación del bridge sync/async.
+
+- Hoy `src/http.rs` corre tokio en un `std::thread` y bridgea
+  via `mpsc::UnboundedSender<InterpTask> + oneshot::Sender<...>`
+  porque el evaluator es sync. Con evaluator async (6.3), el
+  handler axum puede llamar `eval_call(handler_fn, args).await`
+  directo.
+- `InterpTask`, `run_interpreter_loop`, el thread dedicado del
+  intérprete y los canales mpsc/oneshot desaparecen.
+- `is_async` del `FnDef` finalmente significa algo en runtime:
+  un handler `async fn` se await-ea naturalmente, un handler
+  sync fn se llama directo (axum los acepta ambos).
+- `examples/server.fitz` y `examples/guide/17-http.fitz` no
+  cambian sintácticamente — siguen sin `async fn` por ahora; un
+  cap o ejemplo nuevo demuestra `async fn` end-to-end.
+
+**Criterio de éxito**: un endpoint `async fn` que `await`-ea una
+sleep simulada (cuando exista — quizás un builtin `sleep_ms(n).
+await` chico) responde N requests concurrentes sin bloquear.
+Mismo handler escrito sync responde N en serie. Diferencia
+medible en latencia P99.
+
+#### 6.5 — Codegen: `async fn` Fitz → `async fn` Rust
+**Pendiente** — emisión directa, paso fácil después del refactor.
+
+- `gen_top_fn` con `is_async: true` emite `pub async fn` en vez
+  de `pub fn`. Return type sigue siendo `T` (Rust ya envuelve
+  en `Future<Output = T>` automáticamente).
+- `Expr::Await` Fitz → `<expr>.await` Rust. Mapping 1:1.
+- Handlers HTTP en `fitz build` dejan de wrapearse en el código
+  generado: el handler async es directamente lo que axum
+  espera. El wrapper `__handler_<name>` actual sigue existiendo
+  pero su cuerpo se simplifica (no hay más `from_fitz_json` +
+  `.await` falso wrappeado).
+- Tests: codegen unit para `async fn` + `.await`; E2E que
+  compila un binario con `async fn` y verifica que corre.
+
+#### 6.6 — Guía + ejemplo + cierre formal de Fase 6
+**Pendiente** — documentación viva.
+
+- Cap nuevo en `docs/guide.md` titulado "Async y concurrencia",
+  probablemente entre el cap 17 (HTTP) y el 18 (`fitz build`).
+- Tema central: cuándo usar `async fn` y cuándo sync;
+  `Future<T>` como tipo; ergonomía de `.await` postfix;
+  ejemplo concreto con HTTP concurrente.
+- Ejemplo ejecutable `examples/guide/NN-async.fitz` (numeración
+  tentativa, se decide al cerrar). Mínimo: `sleep_ms(n).await`
+  builtin demostrando concurrencia. Idealmente: HTTP client
+  builtin chico (`fetch(url).await`) si entra en scope.
+- Actualizar cap 17 con la versión async de los handlers (y
+  mantener nota explicando que sync sigue siendo válido).
+- Cap 19 ("Qué sigue") actualizado: quitar la mención de async
+  como deuda; sumar referencia a Fase 7 (DX HTTP) como
+  próximo norte.
+- README + roadmap.
+
+### Decisiones cross-cutting
+
+1. **Ergonomía de `.await` postfix vs prefix**: Fitz adopta la
+   variante postfix (`expr.await`) en línea con Rust y con
+   method chains. Razón: `db.find(id).await?` lee
+   naturalmente de izquierda a derecha; `await db.find(id)?`
+   obliga a leer al medio. La decisión queda formalizada acá
+   y se documenta en syntax-spec.
+
+2. **Entry point con async**: `fn main()` puede ser sync o
+   async. Si es async, el runtime tokio lo await-ea al arrancar.
+   Si hay rutas HTTP, el server arranca después de `main()`
+   (mismo patrón actual). `@server(...)` sigue declarativo;
+   NO se introduce un builtin `serve().await` (alternativa
+   considerada y rechazada para preservar ergonomía actual).
+
+3. **Async como gradual escape**: `async fn` sin anotaciones
+   sigue tipando como `Function { ret: Future<Any> }`. El
+   checker no exige que toda fn sea async ni que el código
+   sync sea convertido — sync y async conviven libremente.
+
+4. **No async/cancellation primitives todavía**: `tokio::select!`,
+   `tokio::join!`, cancelación cooperativa, timeouts — todo eso
+   queda como deuda visible para Fase 6.x o post-Fase 6.
+   Esta fase entrega el modelo base; lo demás se construye encima.
+
+### Riesgos
+
+- **Refactor del evaluator es el mayor cambio interno desde el
+  parser inicial**. Boxed futures, lifetimes async, tracing del
+  flow — todo se complica. Mitigación: rama dedicada, tests
+  intensivos antes de mergear, considerar partir 6.3 en
+  sub-pasos chicos (6.3.1 = firma async + futures triviales,
+  6.3.2 = chains complejos, etc.) si aparece presión.
+- **Performance del evaluator async**: cada `eval_expr` ahora
+  asigna un future. Para programas CLI cortos no importa; para
+  hot loops podría doler. Mitigación: medir antes/después con
+  los E2E del intérprete; si duele >2x, considerar técnicas
+  estilo `tokio::task::yield_now` o async-await selectivo.
+- **Compatibilidad con código existente**: cero programas Fitz
+  hoy usan `await`. El parser lo aceptaba pero ninguna fn lo
+  llamaba (era deuda silenciosa). Riesgo bajo.
+
+### Features de la fase entera
+- [ ] `Expr::Await` + `Future<T>` en AST/parser (6.1)
+- [ ] Type checker valida `await`/`async fn` y `Future<T>` (6.2)
+- [ ] Evaluator async con boxed futures + tokio runtime único (6.3)
+- [ ] Runtime HTTP migra a handlers async reales (6.4)
+- [ ] Codegen emite `async fn` Rust + `.await` (6.5)
+- [ ] Guía + cap nuevo + ejemplo async + cierre formal (6.6)
+
+---
+
+## Fase 8 — Interop Python 🐍
 **Estado: PROPUESTA — no comprometida**
 
 Una vez cerrada la Fase 5b, Fitz va a tener HTTP nativo, type
@@ -2279,7 +2493,7 @@ ecosistema de un lenguaje de producción tomaría años, y
 mientras tanto Fitz quedaría como lenguaje de juguete para
 APIs in-memory.
 
-La Fase 6 abre una puerta lateral: importar librerías de Python
+La Fase 8 abre una puerta lateral: importar librerías de Python
 desde código Fitz para heredar el ecosistema, mientras Fitz
 construye su propio stack a su ritmo.
 
@@ -2307,7 +2521,7 @@ archivos `.fitz`, perdimos. Si escriben `fn` Fitz que llaman a
 ganamos.
 
 Esta regla se traduce en concretos para la propuesta:
-- La guía nueva (6.8) ilustra el patrón "Python para librerías
+- La guía nueva (8.8) ilustra el patrón "Python para librerías
   pesadas, Fitz para todo lo demás" explícitamente.
 - Los ejemplos canónicos mantienen handlers `fn` Fitz puros que
   consumen Python solo donde no hay alternativa nativa.
@@ -2348,7 +2562,7 @@ La sintaxis exacta es propuesta — cada sub-paso puede afinarla.
 
 ### Pasos
 
-#### 6.1 — Embedding básico de CPython
+#### 8.1 — Embedding básico de CPython
 **Pendiente** — embeber CPython en el runtime de Fitz via PyO3.
 Punto de partida de toda la fase. Sólo cubre el caso más
 chiquito: importar un módulo Python y llamar funciones top-level
@@ -2361,13 +2575,13 @@ con argumentos y returns primitivos (Int, Float, Str, Bool).
   implementar).
 - `from python import sqlalchemy as sa` — aliasing en imports.
   Fitz hoy no lo soporta; cerrar esta sub-deuda como parte de
-  6.1 destraba nombres largos de módulos Python que serían
+  8.1 destraba nombres largos de módulos Python que serían
   insufribles sin alias.
 - Nuevo valor en runtime: `Value::PyObject(Py<PyAny>)` que
   envuelve un objeto Python con su referencia counted.
 - El evaluator detecta `Expr::Call` sobre un `Value::PyObject`
   (función) y cruza al runtime Python via `Python::with_gil`.
-  Args se convierten a `PyObject` (sólo primitivos en 6.1),
+  Args se convierten a `PyObject` (sólo primitivos en 8.1),
   return se convierte de vuelta a `Value` Fitz.
 - Build modes: `cargo build --features python` activa el
   embedding. Sin la feature, los imports de Python disparan
@@ -2394,7 +2608,7 @@ print(math.pi)          // 3.141592653589793
   especial después de `from`). Otra: reservar `python` como
   identifier prohibido para módulos del usuario.
 
-#### 6.2 — Marshaling de tipos compuestos
+#### 8.2 — Marshaling de tipos compuestos
 **Pendiente** — extender las conversiones bidireccionales a
 List, Map, Instance y Null. Sin esto, los casos reales no son
 viables.
@@ -2423,18 +2637,18 @@ por ejemplo) tipa limpio en Fitz y se ejecuta sin perder data.
 - **Identidad vs referencia**: ¿`Rc<RefCell<List<T>>>` de Fitz
   comparte estado con la `list` Python o se copia? El intérprete
   Fitz tiene aliasing real entre instancias. Recomendación
-  para 6.2: **copia eager bidireccional**. Trade-off conocido
+  para 8.2: **copia eager bidireccional**. Trade-off conocido
   (caro para listas grandes), pero evita pesadillas de lifetime
   entre dos GCs (refcount Rc + GC Python) y race conditions
   GIL/tokio. Optimizaciones zero-copy con buffers protocolo
-  quedan para Fase 7+.
+  quedan para Fase 9+.
 - **Costo de marshaling**: una llamada Python con N args
   primitivos + ret compuesto cuesta O(tamaño del ret) por la
   copia. Cuantificable; las queries SQLAlchemy típicas
   devuelven decenas de filas con pocos campos, entra cómodo en
   el presupuesto de latencia de un endpoint HTTP.
 
-#### 6.3 — Excepciones Python → Result<T>
+#### 8.3 — Excepciones Python → Result<T>
 **Pendiente** — convención automática: **toda** llamada a una
 función Python desde Fitz se envuelve en `Result<T>`. Si Python
 lanza `ValueError("x")`, Fitz lo recibe como `Err("ValueError:
@@ -2445,7 +2659,7 @@ Fitz como panics opacos.
 - Implementación: `Python::with_gil` envuelve la llamada en un
   `match` sobre `PyResult<T>`. `Err(PyErr)` se serializa al
   string del lado Fitz como `<ClassName>: <message>`.
-- El checker (6.4) refleja esta convención: una llamada Python
+- El checker (8.4) refleja esta convención: una llamada Python
   cuyo tipo de retorno no esté anotado tipa como `Result<Any>`,
   no como `Any`. El usuario es forzado a manejar el error
   (`match`, `?`) — el modelo de errores de Fitz se preserva.
@@ -2469,16 +2683,16 @@ match parse("{ malformado") {
 
 **Decisiones técnicas a resolver**:
 - Formato del string de error: `<ClassName>: <message>` para
-  6.3, legible humano. Si más adelante hace falta acceso
+  8.3, legible humano. Si más adelante hace falta acceso
   estructurado (type, message, traceback), agregar un valor
   `Value::PyException` opaco que el usuario puede inspeccionar
-  con métodos dedicados. Para 6.3 el string alcanza.
+  con métodos dedicados. Para 8.3 el string alcanza.
 - ¿Algún caso donde NO queremos envolver en Result?
   Probablemente no — la consistencia es más valiosa que el
   optimismo. Funciones Python que "nunca fallan" igual pueden
   fallar (out-of-memory, etc.); envolver siempre es seguro.
 
-#### 6.4 — Tipos del lado del checker (anotaciones y opacidad)
+#### 8.4 — Tipos del lado del checker (anotaciones y opacidad)
 **Pendiente** — el checker estático no puede ver dentro de
 Python. Sin estrategia explícita, todas las llamadas Python
 serían `Result<Any>` y el valor del checker se diluiría en
@@ -2487,18 +2701,18 @@ proyectos que dependen mucho de interop.
 **Estrategia escalonada**:
 
 1. **Default**: una llamada `python_module.func(args)` sin
-   anotación tipa como `Result<Any>`. El Result viene del 6.3
+   anotación tipa como `Result<Any>`. El Result viene del 8.3
    (automático), el Any preserva el modelo gradual de Fitz.
 2. **Anotación explícita del lado Fitz**: el usuario anota el
    binding sitio con un tipo Fitz, y el checker valida que la
-   conversión es posible (las reglas del marshaling de 6.2).
+   conversión es posible (las reglas del marshaling de 8.2).
    ```fitz
    let row: User = session.query(UserModel).filter_by(id: id).first()?
    ```
    Acá el `?` desempaca el `Result<Any>` a `Any`, y la anotación
    `: User` coerciona Any→User. El runtime valida que el dict
    Python tiene los campos requeridos.
-3. **Stubs `.pyi` parseados** (pospuesto a Fase 7+): leer
+3. **Stubs `.pyi` parseados** (pospuesto a Fase 9+): leer
    stubs PEP 561 y traducirlos automáticamente. Esto sería el
    equivalente a `@types/...` de TypeScript. Mucho trabajo;
    queda como upgrade futuro.
@@ -2526,7 +2740,7 @@ cruza a Fitz. Sin necesidad de stubs.
   imports de Python se benefician del comportamiento gradual
   existente. No hace falta nuevo dispatch.
 
-#### 6.5 — Auto-mapeo de modelos SQLAlchemy a `type` de Fitz
+#### 8.5 — Auto-mapeo de modelos SQLAlchemy a `type` de Fitz
 **Pendiente** — caso especial pero crítico para la ergonomía
 del caso canónico. Una clase `class User(Base): id =
 Column(Integer); ...` debería poder usarse desde Fitz como
@@ -2545,7 +2759,7 @@ dos veces.
    - `Column(Float)` → `Float`
    - `Column(Boolean)` → `Bool`
    - `Column(DateTime)` → `Str` (ISO 8601) por ahora; tipo
-     `DateTime` nativo es deuda Fase 7+
+     `DateTime` nativo es deuda Fase 9+
    - `nullable=True` → `T?`
    - `default=...` → valor por defecto del campo
 4. El archivo generado es commiteable e inspeccionable. No
@@ -2575,23 +2789,24 @@ funciona como cualquier otro import.
   específicos (`fitz py-types-django`) si hace falta.
 - Sincronía con cambios del schema: si el schema Python cambia,
   ¿`fitz check` avisa que `models.fitz` está desactualizado?
-  Probablemente no en 6.5 — flujo manual de regeneración.
+  Probablemente no en 8.5 — flujo manual de regeneración.
   Verificación automática podría llegar como linter regla en
-  Fase 7+.
+  Fase 9+.
 
-#### 6.6 — Async + GIL — bridge tokio ↔ asyncio
-**Pendiente** — los handlers HTTP de Fitz corren sobre tokio
-(axum, desde Fase 4.2). SQLAlchemy 2.x tiene API async basada
-en asyncio. Llamar una corutina asyncio desde un task tokio no
-es trivial: requiere ejecutar el event loop de asyncio en un
-thread dedicado y schedular las corutinas en él. El paquete
-`pyo3-asyncio` resuelve esto.
+#### 8.6 — Async + GIL — bridge tokio ↔ asyncio
+**Pendiente** — Fitz ya tiene `async fn` y `.await` nativos
+desde Fase 6, corriendo sobre el runtime tokio compartido.
+SQLAlchemy 2.x tiene API async basada en asyncio; llamar una
+corutina asyncio desde un task tokio no es trivial: requiere
+ejecutar el event loop de asyncio en un thread dedicado y
+schedular las corutinas en él. El paquete `pyo3-asyncio`
+resuelve esto.
 
-- Sintaxis: handlers `async fn` (cuando 5b.6 cierre con async
-  real) pueden hacer `await py_coro()` sobre una corutina
-  Python. Por debajo, `pyo3-asyncio::tokio::into_future`
-  convierte la corutina en un `Future<Output = PyResult<T>>`
-  awaiteable desde tokio.
+- Sintaxis: `py_coro().await` sobre una corutina Python desde
+  cualquier `async fn` Fitz. Por debajo, `pyo3-asyncio::tokio
+  ::into_future` convierte la corutina en un `Future<Output =
+  PyResult<T>>` awaiteable desde tokio. Reusa el modelo
+  `Future<T>` + `.await` postfix introducido en Fase 6.
 - Bridge invisible al usuario: desde Fitz se ve igual que
   await sobre un future nativo.
 
@@ -2610,10 +2825,10 @@ esperan I/O.
 @get("/users/{id}")
 async fn get_user(id: Int) -> Result<User> {
     let session = AsyncSession(engine)
-    let row = await session.execute(
+    let row = session.execute(
         "SELECT * FROM users WHERE id = $1",
         [id]
-    )?
+    ).await?
     return Ok(User { id: row.id, email: row.email, name: row.name })
 }
 ```
@@ -2630,20 +2845,21 @@ no por contención GIL).
   típico de I/O), mantener para llamadas síncronas (caso
   típico de cómputo corto). Anotación opt-in
   (`@release_gil`?) para casos donde el default no encaje.
-- Compatibilidad con 5b.6: el `async fn` que Fitz introduzca
-  como sintaxis tiene que componer con interop Python sin
-  sorpresas. El bridge `pyo3-asyncio` ya conoce tokio; el
-  trabajo es generar el código de adapter correcto desde
-  codegen.
+- Compatibilidad con Fase 6: el modelo `async fn` + `Future<T>`
+  + `.await` postfix ya existe nativamente. El bridge
+  `pyo3-asyncio` ya conoce tokio; el trabajo es generar el
+  código de adapter correcto desde codegen para que un
+  `py_coro().await` Fitz se traduzca a
+  `pyo3_asyncio::tokio::into_future(py_coro)?.await` Rust.
 
-#### 6.7 — Distribución del binario con CPython embebido
+#### 8.7 — Distribución del binario con CPython embebido
 **Pendiente** — un binario Fitz que use interop Python necesita
 CPython disponible en runtime. La promesa "binario nativo
 standalone" de la Fase 5b se mantiene como **modo de build
 disponible** (proyectos sin interop), pero proyectos con
 interop tienen tres opciones de distribución:
 
-1. **CPython preinstalado en el sistema** (default 6.1-6.6,
+1. **CPython preinstalado en el sistema** (default 8.1-8.6,
    simple, peor experiencia): el binario asume `python3.X` en
    el `PATH`. Falla en máquinas que no lo tienen.
 2. **CPython embebido en el binario** (PyOxidizer o
@@ -2656,18 +2872,18 @@ interop tienen tres opciones de distribución:
 
 **Recomendación**: empezar con (1) durante desarrollo y
 testing (más rápido de iterar); agregar `fitz build
---bundle-python` para emitir (2) cuando 6.7 cierre. Documentar
+--bundle-python` para emitir (2) cuando 8.7 cierre. Documentar
 (3) como pattern para deployments containerizados.
 
 **Criterio de éxito**: `fitz build api.fitz --bundle-python`
 produce un binario standalone que corre en un sistema fresh
 install (Ubuntu / Alpine / Windows sin Python instalado) y
-sirve el CRUD canónico de 6.5 contra una Postgres remota.
+sirve el CRUD canónico de 8.5 contra una Postgres remota.
 
 **Decisiones técnicas a resolver**:
 - Herramienta de empaquetado: PyOxidizer es la opción
   mainstream Rust-friendly, pero el proyecto se ralentizó en
-  2024-2025. Verificar estado al arrancar 6.7. Alternativas:
+  2024-2025. Verificar estado al arrancar 8.7. Alternativas:
   scripts custom que copian el `python3X.so` + standard lib +
   archivo zip; o cosign de un release de python-build-standalone.
 - Librerías Python con extensiones C (numpy, pandas, psycopg2):
@@ -2678,7 +2894,7 @@ sirve el CRUD canónico de 6.5 contra una Postgres remota.
   de API. Si llegamos a 200MB porque NumPy+pandas+SQLAlchemy
   cargan todo el universo, replantear.
 
-#### 6.8 — Guía + ejemplos + cierre de Fase 6
+#### 8.8 — Guía + ejemplos + cierre de Fase 8
 **Pendiente** — capítulo nuevo en `docs/guide.md` titulado
 "Interop Python", probablemente entre el cap 17 (HTTP nativo)
 y el 18 ("Qué sigue"). Ejemplo ejecutable
@@ -2699,7 +2915,7 @@ leído los caps 1-18 de la guía puede:
 
 Sin pasos intermedios fuera de la guía.
 
-**Cierre formal de Fase 6**: todas las features de la lista de
+**Cierre formal de Fase 8**: todas las features de la lista de
 abajo marcadas, los 18 ejemplos existentes pasan `fitz check`
 sin regresiones, el ejemplo nuevo `19-python.fitz` corre
 end-to-end contra una Postgres real, y `examples/server.fitz`
@@ -2730,7 +2946,7 @@ consistencias que la fase entera tiene que mantener.
    imports normales; agregarlo es necesario para Python (los
    módulos `sqlalchemy.orm.declarative_base`, etc., son
    imposibles de usar sin alias). Decisión: cerrar la sub-deuda
-   en 6.1 — agregar `as` para imports normales también, no
+   en 8.1 — agregar `as` para imports normales también, no
    solo Python. Beneficio bonus para el sistema de módulos
    Fitz existente.
 
@@ -2744,13 +2960,13 @@ consistencias que la fase entera tiene que mantener.
    decisión preserva la promesa "binario nativo standalone"
    como modo por default.**
 
-4. **Identidad en marshaling**: cubierto en 6.2. Default:
+4. **Identidad en marshaling**: cubierto en 8.2. Default:
    copia eager bidireccional, sin aliasing entre los dos
    runtimes. Optimizaciones (zero-copy) son trabajo de Fase
    7+.
 
 5. **Herencia desde clases Python**: explícitamente **NO
-   soportada** en Fase 6. Un `type` de Fitz no puede heredar
+   soportada** en Fase 8. Un `type` de Fitz no puede heredar
    de una clase Python. Composición sí — un `type` puede
    tener un campo `engine: Any` que envuelve un objeto Python.
    La razón: herencia cruza modelos de objetos (Python tiene
@@ -2760,7 +2976,7 @@ consistencias que la fase entera tiene que mantener.
 6. **Versionado de Python soportado**: ABI3 para amortizar
    versiones. Mínimo Python 3.10 (versión más vieja con
    soporte upstream a fecha de cierre de la fase; revisar al
-   arrancar 6.1).
+   arrancar 8.1).
 
 7. **Métodos sobre objetos Python (`obj.method()`)**: el
    dispatch sobre Any/PyObject cae al modelo gradual del
@@ -2779,13 +2995,13 @@ La fase tiene costos reales que vale la pena enumerar honestamente:
   al deployar. La promesa original se preserva como modo
   default; la interop es opt-in al nivel del proyecto.
 - **El GIL limita la concurrencia** justo donde Fitz quiere
-  brillar (handlers HTTP concurrentes). Mitigado en 6.6 con
+  brillar (handlers HTTP concurrentes). Mitigado en 8.6 con
   soltado oportunístico del GIL en llamadas async, pero es
   un techo real para APIs CPU-intensivas en Python.
 - **Costo de marshaling** Rust↔Python en cada cruce. Un
   handler que hace 5 queries SQLAlchemy genera 10+ cruces.
   Cuantificable; los benchmarks deberían formar parte del
-  criterio de cierre de 6.6.
+  criterio de cierre de 8.6.
 - **Riesgo de identidad del lenguaje**: si los usuarios usan
   Python para TODO (HTTP, queries, JSON, lógica de negocio),
   Fitz queda como cáscara sintáctica. Mitigación: la guía y
@@ -2811,8 +3027,8 @@ Lenguajes y proyectos de los que esta fase aprende:
   sumar extension modules para "Fitz como librería de
   Python" en una fase futura.
 - **pyo3-asyncio** — bridge tokio ↔ asyncio. Crítico para
-  6.6.
-- **PyOxidizer** — para 6.7, empaquetado de CPython en
+  8.6.
+- **PyOxidizer** — para 8.7, empaquetado de CPython en
   binarios standalone. Revisar estado del proyecto.
 - **Mojo** (Modular) — superset sintáctico de Python con
   interop directa. Lección: ellos eligieron compatibilidad
@@ -2821,7 +3037,7 @@ Lenguajes y proyectos de los que esta fase aprende:
 - **Nim + nimpy** — precedente más directo. Lenguaje
   compilado a nativo que importa Python. Resolvió bien la
   sintaxis (`pyImport`) y el marshaling automático. Vale la
-  pena leer el código de nimpy antes de 6.1.
+  pena leer el código de nimpy antes de 8.1.
 - **Julia + PyCall** — lenguaje JIT con interop Python.
   Resolvió el GIL con threading separado. Aplicable
   parcialmente (Fitz no es JIT, pero el modelo de GIL
@@ -2835,11 +3051,11 @@ Lenguajes y proyectos de los que esta fase aprende:
 - **Magnitud de la fase**: probablemente la más larga del
   proyecto hasta acá. Estimación gruesa: 3-6 meses de
   trabajo enfocado, muy por encima de cualquier fase de la
-  5b. Antes de arrancar 6.1, decidir explícitamente si la
-  fase entra completa o se parte en (6 — embedding y
-  marshaling, suficiente para casos simples) + (7 —
-  SQLAlchemy/async/bundling, llevándolo al caso de uso
-  canónico). Decisión a tomar al cerrar 5b.
+  5b. Antes de arrancar 8.1, decidir explícitamente si la
+  fase entra completa o se parte en (8 — embedding y
+  marshaling, suficiente para casos simples) + (un sub-paso
+  posterior — SQLAlchemy/async/bundling, llevándolo al caso
+  de uso canónico). Decisión a tomar al cerrar Fase 7.
 - **Dependencia externa pesada**: la fase atan Fitz a PyO3,
   al equipo PyO3, y por extensión al ABI de CPython. Si
   CPython cambia su API de embedding (cosas como GIL-free
@@ -2858,7 +3074,7 @@ Lenguajes y proyectos de los que esta fase aprende:
   ergonomía de Fitz nativo (HTTP, tipos, Result) tiene que
   estar varios pasos arriba de lo equivalente en Python.
 
-### Alternativa explícita: ORM y stack DB nativos (Fase 8+)
+### Alternativa explícita: ORM y stack DB nativos (Fase 10+)
 
 A futuro, Fitz debería tener su propio stack de DB nativo:
 - Driver Postgres en Fitz puro (bindings directos a `libpq`
@@ -2866,8 +3082,8 @@ A futuro, Fitz debería tener su propio stack de DB nativo:
 - ORM nativo declarativo sobre `type` (estilo Diesel o sqlx).
 - Migraciones, pool de conexiones, async nativo end-to-end.
 
-Eso es un proyecto en sí mismo, probablemente Fase 8+. La
-interop Python de la Fase 6 es **el puente** hasta llegar
+Eso es un proyecto en sí mismo, probablemente Fase 10+. La
+interop Python de la Fase 8 es **el puente** hasta llegar
 ahí, no el destino final. Vale la pena decirlo explícitamente
 en la documentación que la fase produce: "interop existe
 para que Fitz sea usable hoy; el stack nativo llega cuando
@@ -2875,38 +3091,188 @@ lleguemos".
 
 ### Features de la fase entera
 - [ ] Embedding básico de CPython + sintaxis `from python
-  import` (6.1)
-- [ ] Aliasing en imports (`as`) — sub-deuda de 6.1 que
+  import` (8.1)
+- [ ] Aliasing en imports (`as`) — sub-deuda de 8.1 que
   beneficia a imports normales también
 - [ ] Marshaling List/Map/Instance/Null ↔ list/dict/None
-  (6.2)
-- [ ] Excepciones Python → Result<T> automático (6.3)
+  (8.2)
+- [ ] Excepciones Python → Result<T> automático (8.3)
 - [ ] Anotaciones explícitas del lado Fitz + opacidad PyObject
-  (6.4)
-- [ ] Stubs `.pyi` — pospuesto a Fase 7+
-- [ ] Auto-mapeo SQLAlchemy → `type` via `fitz py-types` (6.5)
-- [ ] Bridge tokio ↔ asyncio + política de GIL (6.6)
-- [ ] Distribución con `--bundle-python` (6.7)
-- [ ] Guía + ejemplo CRUD + cierre formal (6.8)
+  (8.4)
+- [ ] Stubs `.pyi` — pospuesto a Fase 9+
+- [ ] Auto-mapeo SQLAlchemy → `type` via `fitz py-types` (8.5)
+- [ ] Bridge tokio ↔ asyncio + política de GIL (8.6)
+- [ ] Distribución con `--bundle-python` (8.7)
+- [ ] Guía + ejemplo CRUD + cierre formal (8.8)
 
 ---
 
-## Fase 7 — Ecosistema 🌍
+## Fase 7 — DX HTTP 📋
+**Estado: PROPUESTA — siguiente comprometida después de Fase 6**
+
+Con async nativo cerrado (Fase 6), Fitz cumple la promesa de
+HTTP de primera clase a nivel de ejecución. Falta la otra mitad
+de la paridad con FastAPI: **documentación de la API
+autogenerada**. Toda la información necesaria ya vive en el
+`HttpRegistry` + `TypeEnv` (verbo, path, tipos de path params,
+schema del body, return type, defaults, nullables). Esta fase
+camina ese metadato a un OpenAPI 3.1 + UI embebida.
+
+### Decisiones de diseño tomadas
+
+1. **Built-in en el runtime HTTP, no librería externa**. Coherente
+   con "HTTP es parte del lenguaje" (decisión de diseño 1 de
+   CLAUDE.md). Sin imports, sin configuración — viene gratis.
+2. **Scalar > Redoc > Swagger UI**. Scalar es la opción más
+   moderna (mantenida activamente, mejor look default, más
+   liviana). Redoc es alternativa razonable; Swagger UI queda
+   descartado por peso y look anticuado.
+3. **Default `enable_docs: true`, opt-out con
+   `@server(docs=false)`**. Que el camino feliz "fitz build &&
+   ./bin" entregue `/docs` sin tocar nada. Quien no quiera la
+   superficie extra lo apaga explícito.
+4. **Mismo schema en `fitz run` y `fitz build`**. El generador
+   vive en un módulo nuevo `src/openapi.rs` reusado por ambos
+   pipelines. Bit-a-bit idéntico es el contrato.
+
+### Pasos
+
+#### 7.1 — Generador de schema OpenAPI + subcomando `fitz openapi`
+**Pendiente** — base de la fase.
+
+- Nuevo módulo `src/openapi.rs` con
+  `generate_openapi(registry: &HttpRegistry, type_env: &TypeEnv)
+  -> serde_json::Value`. Schema OpenAPI 3.1.
+- Walker que recorre el registry: por cada ruta, emite
+  `paths.<path>.<method>` con:
+  - `parameters` para path params (`in: path`, tipo).
+  - `requestBody` para POST/PUT con body tipado, con
+    `$ref: "#/components/schemas/<TypeName>"`.
+  - `responses` con `200` (return type serializado) y `500`
+    (sólo si el return es `Result<T>`).
+- `components.schemas` con un `JSON Schema` por cada `type`
+  Fitz declarado, incluyendo defaults, nullables, required.
+- Subcomando nuevo `fitz openapi archivo.fitz` que escupe el
+  JSON a stdout. Útil para CI, para generar SDKs con
+  openapi-generator, para snapshot testing.
+- Tests: schema generado para un `@get` simple, schema con
+  body tipado, schema con `Result<T>`, schema con nullables y
+  defaults.
+
+#### 7.2 — Endpoint `/openapi.json` autoregistrado en `fitz run`
+**Pendiente** — runtime HTTP sirve el schema.
+
+- El runtime axum suma la ruta `/openapi.json` automáticamente
+  cuando hay decorators HTTP en el programa.
+- El handler de `/openapi.json` invoca `generate_openapi` sobre
+  el `HttpRegistry` actual y devuelve el JSON.
+- Tests: `curl localhost:3000/openapi.json` devuelve un schema
+  válido para `examples/server.fitz`.
+
+#### 7.3 — UI embebida `/docs` con Scalar
+**Pendiente** — la pieza visible.
+
+- HTML estático embebido con `include_str!("templates/scalar.html")`
+  apuntando al CDN de Scalar (o al bundle si se decide
+  empaquetar). El HTML carga `/openapi.json` con fetch.
+- Ruta `/docs` autoregistrada igual que `/openapi.json`.
+- Tests: `curl localhost:3000/docs` devuelve HTML válido;
+  smoke E2E que abre el server, hace GET a `/docs`, y verifica
+  que el HTML referencia `/openapi.json`.
+
+#### 7.4 — Flag `@server(docs=false)` para opt-out
+**Pendiente** — control de superficie.
+
+- `ServerConfig` suma campo `enable_docs: bool` (default `true`).
+- Parser de `@server(...)` acepta el kwarg `docs` (kwargs son
+  deuda nueva — los args positionals actuales no cubren esto
+  bien; decidir si pasamos `@server` a kwargs ahora o mantenemos
+  positionals + caso especial `docs`).
+- Cuando `enable_docs: false`, las rutas `/openapi.json` y
+  `/docs` NO se registran.
+- Tests: `@server(3000)` levanta con docs, `@server(3000,
+  docs=false)` levanta sin docs.
+
+#### 7.5 — Paridad en `fitz build`
+**Pendiente** — el binario nativo también sirve docs.
+
+- Codegen detecta presencia de handlers HTTP y emite las rutas
+  `/openapi.json` y `/docs` adentro del `Router` generado.
+- El schema OpenAPI se calcula en build time (no en runtime —
+  el `HttpRegistry` no existe en el binario generado) y se
+  embebe como `&'static str` con `include_str!` o constante
+  generada.
+- HTML de Scalar embebido como string constante en el código
+  Rust generado.
+- Tests: programa HTTP con `fitz build` produce binario que
+  sirve `/docs` y `/openapi.json` con el mismo schema que
+  `fitz run`.
+
+#### 7.6 — Query params y headers como params del handler
+**Pendiente** — paridad con FastAPI.
+
+- Convención: un handler hoy tiene path params (matched contra
+  `{name}` en el path) o body. Sumar:
+  - **Query params**: parámetros del handler que no están en
+    el path se interpretan como query si el método es
+    GET/DELETE. Sintaxis: `fn search(q: Str, limit: Int) -> ...`.
+  - **Headers**: anotación explícita necesaria para
+    desambiguar — convención a decidir (`@header(name="Authorization")
+    fn ...` o `header_auth: Str` con convención del prefijo).
+- OpenAPI schema refleja query/header params en `parameters`
+  con `in: query` o `in: header`.
+
+#### 7.7 — Guía + ejemplo + cierre formal de Fase 7
+**Pendiente** — documentación viva.
+
+- Cap nuevo en `docs/guide.md` titulado "Docs automáticas",
+  probablemente entre el cap 17 (HTTP) y el 18 (`fitz build`)
+  — o reorganizado según donde haya quedado el cap async de 6.6.
+- Ejemplo ejecutable `examples/guide/NN-docs.fitz` con un CRUD
+  chiquito y la URL `/docs` resaltada.
+- Cap 19 ("Qué sigue") actualizado.
+- README + roadmap.
+
+### Decisiones cross-cutting
+
+1. **Schema OpenAPI vs JSON Schema interno**: usamos OpenAPI
+   3.1 que incluye JSON Schema completo (resolvió la
+   incompatibilidad histórica con 3.0). Compatible con
+   herramientas tipo openapi-generator, Scalar, Postman, Insomnia.
+2. **Tags y descripciones desde comentarios**: pospuesto. Hoy
+   el parser no retiene comentarios; agregar eso es deuda
+   nueva. Sub-paso candidato post-7.7 si aparece presión.
+3. **Versionado de la API**: hoy el schema declara
+   `info.version` fijo en `"0.1.0"`. Habilitar override via
+   `@server(api_version="...")` es deuda chica, pospuesta.
+
+### Features de la fase entera
+- [ ] Generador de schema OpenAPI + `fitz openapi` (7.1)
+- [ ] `/openapi.json` autoregistrado en `fitz run` (7.2)
+- [ ] `/docs` con Scalar embebido (7.3)
+- [ ] `@server(docs=false)` opt-out (7.4)
+- [ ] Paridad en `fitz build` (7.5)
+- [ ] Query params y headers (7.6)
+- [ ] Guía + ejemplo + cierre formal (7.7)
+
+---
+
+## Fase 9 — Ecosistema 🌍
 **Estado: VISIÓN FUTURA**
 
 - [ ] Package manager (`fitz add`)
 - [ ] Fitz registry (repositorio de paquetes)
-- [ ] LSP + extensión VSCode (ver 7.x abajo)
+- [ ] LSP + extensión VSCode (ver 9.x abajo)
 - [ ] Formatter (`fitz fmt`)
 - [ ] Linter (`fitz check` ya cubre tipos; queda lint de estilo
   y patrones)
-- [ ] Stubs `.pyi` para interop Python (pospuesto desde Fase 6)
-- [ ] Driver Postgres nativo (paso previo al ORM Fitz, ver Fase 8+)
+- [ ] Stubs `.pyi` para interop Python (pospuesto desde Fase 8)
+- [ ] Driver Postgres nativo (paso previo al ORM Fitz, ver Fase 10+)
 - [ ] Compilación a WebAssembly
 - [ ] Documentación oficial en español e inglés
 - [ ] Website del lenguaje
 
-### 7.x — LSP + extensión VSCode (candidata)
+### 9.x — LSP + extensión VSCode (candidata)
 
 **Objetivo**: que escribir Fitz en VSCode (y Neovim, Helix, Zed,
 etc., gratis por LSP) se sienta tan vivo como TypeScript: errores
@@ -2939,22 +3305,22 @@ go-to-definition.
 **Sub-pasos sugeridos** (granito incremental, cada uno con
 valor entregable):
 
-- **7.x.1 — Diagnostics MVP**: server con `did_open`/`did_change`
+- **9.x.1 — Diagnostics MVP**: server con `did_open`/`did_change`
   que corre `check_program` y publica `Diagnostic`s. Extensión
   VSCode con grammar TextMate básica + cliente LSP apuntando
   al binario en `target/release/fitz-lsp`. Resultado:
   highlighting + errores en vivo.
-- **7.x.2 — Hover**: `textDocument/hover` devuelve el tipo del
+- **9.x.2 — Hover**: `textDocument/hover` devuelve el tipo del
   nodo bajo el cursor. Requiere F16.
-- **7.x.3 — Go-to-definition**: `textDocument/definition`
+- **9.x.3 — Go-to-definition**: `textDocument/definition`
   resuelve `Ident` → span de declaración. Requiere mantener
   tabla de resolución de scopes del checker.
-- **7.x.4 — Autocomplete**: `textDocument/completion` con
+- **9.x.4 — Autocomplete**: `textDocument/completion` con
   cuatro contextos: símbolos en scope, fields tras `obj.`,
   métodos built-in tras `xs.`/`m.`/`s.`, símbolos importados
   tras `from mod import `. Requiere F15 (parser tolerante a
   cursor parcial) + F16.
-- **7.x.5 — Distribución**: publicar al VSCode Marketplace
+- **9.x.5 — Distribución**: publicar al VSCode Marketplace
   con binarios pre-compilados por plataforma (Windows
   x64, macOS x64+ARM, Linux x64+ARM) bundleados en el
   `.vsix`, al estilo de rust-analyzer. Alternativa de alfa:
@@ -2970,7 +3336,7 @@ valor entregable):
   es lo natural; forkear sería solo si la performance del
   check sobre buffers grandes duele.
 
-**Por qué encaja en Fase 7**: es tooling de ecosistema, no del
+**Por qué encaja en Fase 9**: es tooling de ecosistema, no del
 lenguaje core. Una vez que el lenguaje está estable (Fase 5
 cerrada) y el ecosistema empieza a expandirse, el LSP es lo
 que hace que escribir Fitz pase de "compilar y revisar" a

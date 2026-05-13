@@ -188,7 +188,7 @@ Fitz hoy es un intérprete escrito en Rust. Para correrlo necesitás:
 - **Git**, para clonar el repo.
 
 No hace falta nada más. No hay package manager de Fitz todavía (eso es
-Fase 6), así que el "intérprete" es directamente el ejecutable del
+Fase 9), así que el "intérprete" es directamente el ejecutable del
 proyecto.
 
 ### Bajar Fitz
@@ -4655,27 +4655,28 @@ a un Cargo project + invoca rustc para producir binarios.
 
 Lo que sigue post-5:
 
-- **Fase 6 — Interop Python** (propuesta, no comprometida): poder
-  llamar código Python desde Fitz (y viceversa). El stack inicial
-  de FastAPI/SQLAlchemy del autor vive ahí; abrir el camino sin
-  pedir que se reescriba todo es lo que justifica la fase.
-- **Fase 7 — Ecosistema**: package manager, registry, LSP,
+- **Fase 6 — Async nativo** (siguiente comprometida): `async fn` y
+  `.await` reales en el lenguaje. Evaluator async, handlers HTTP
+  async reales, codegen `async fn` Rust. Cumple la promesa "HTTP
+  nativo" a nivel de ejecución.
+- **Fase 7 — DX HTTP**: OpenAPI 3.1 autogenerado desde los
+  decoradores + UI Scalar embebida en `/docs`. Paridad con
+  FastAPI en developer experience.
+- **Fase 8 — Interop Python** (propuesta): poder llamar código
+  Python desde Fitz. El stack inicial de FastAPI/SQLAlchemy del
+  autor vive ahí; abrir el camino sin pedir que se reescriba
+  todo es lo que justifica la fase. Pre-req: Fase 6.
+- **Fase 9 — Ecosistema**: package manager, registry, LSP,
   formatter, linter, plugin de editores.
 - **Deuda residual de Fase 5b** que entra como sub-pasos
   futuros si aparece presión:
-  - **`async` / `await` reales en el lenguaje** — destrabar
-    handlers HTTP concurrentes sin bloquear el reactor. Cuando
-    aterrice, también obliga a revisitar F11: el server compilado
-    es hoy single-threaded (tokio current_thread) para que el
-    `thread_local!` del state compartido actúe como global; un
-    handler con `await` cambia el modelo y pide `Arc<Mutex<...>>`
-    + `State` extractor.
   - **Inferencia de tipos de params y returns** en fns sin
     anotar — hoy `fn greet(name)` corre en el intérprete pero
     `fitz build` exige anotación. Mismo caso para handlers HTTP
     sin return type explícito.
   - **Status codes custom**, query params, headers, middleware,
-    TLS — todo HTTP "más allá del 80%".
+    TLS — todo HTTP "más allá del 80%". Parte entra en Fase 7;
+    el resto queda como deuda.
   - **Listas/mapas heterogéneos** compilados (`[1, "dos"]`) — el
     intérprete los acepta, el compilador necesita un `FitzValue`
     tagged en runtime.
@@ -4685,9 +4686,13 @@ deuda explícita acumulada por fase.
 
 ### Más adelante
 
-- **Fase 6 — Interop Python**: aprovechar el ecosistema sin
+- **Fase 6 — Async nativo**: `async fn` y `.await` reales,
+  evaluator async, handlers HTTP async.
+- **Fase 7 — DX HTTP**: OpenAPI autogenerado + UI Scalar
+  embebida.
+- **Fase 8 — Interop Python**: aprovechar el ecosistema sin
   reescribir todo.
-- **Fase 7 — Ecosistema**: package manager, LSP, formatter,
+- **Fase 9 — Ecosistema**: package manager, LSP, formatter,
   linter, plugin de editores.
 
 ### Cómo va a crecer esta guía
