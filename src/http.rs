@@ -111,6 +111,10 @@ pub struct RouteSpec {
     /// Máximo un body por handler. La validación de cuántos hay y
     /// que sean compatibles la hace el evaluator durante el registro.
     pub body_param: Option<BodyParam>,
+    /// Headers declarados con `@header(name="X")` sobre el handler
+    /// (Fase 7.6). Vacío si el handler no declara ninguno. Cada
+    /// entry mapea un nombre HTTP a un param Fitz del handler.
+    pub headers: Vec<HeaderSpec>,
     /// TypeExpr completos de los parámetros del handler, en orden.
     /// Aditivo a `param_types` (que carga solo el `head_name` sin
     /// genéricos ni nullables, suficiente para el dispatch). Acá
@@ -124,6 +128,20 @@ pub struct RouteSpec {
     /// Sin anotación → `None` y el generador trata el response como
     /// "any" (`200` con schema vacío).
     pub return_type_expr: Option<TypeExpr>,
+}
+
+/// Especificación de un header declarado con `@header(name="X")`
+/// sobre un handler (Fase 7.6). El `http_name` es el nombre HTTP
+/// canónico declarado por el usuario; `param_name` es el nombre del
+/// parámetro Fitz al que se bindea (derivado por convención:
+/// lowercase + `-` → `_`). `is_nullable`: si el param Fitz se declaró
+/// como `Str?`, el header es opcional (falta → `Null`); si no, es
+/// obligatorio (falta → 400).
+#[derive(Debug, Clone)]
+pub struct HeaderSpec {
+    pub http_name: String,
+    pub param_name: String,
+    pub is_nullable: bool,
 }
 
 /// Descripción del parámetro body de un handler: su nombre (para
@@ -1074,6 +1092,12 @@ pub struct InterpTask {
     /// `Vec` para uniformidad. Bytes para no forzar UTF-8 acá; la
     /// validación de que sea JSON parseable la hace el intérprete.
     pub body: Vec<u8>,
+    /// Headers HTTP de la request, en lowercase (Fase 7.6). Solo se
+    /// popula cuando la ruta declara `@header(...)`. La normalización
+    /// a lowercase la hace `build_method_router` antes de mandar la
+    /// task. El dispatch hace lookup case-insensitive contra esta
+    /// HashMap.
+    pub headers: HashMap<String, String>,
     pub reply: oneshot::Sender<HandlerOutcome>,
 }
 
@@ -1147,10 +1171,28 @@ pub fn build_router(
     router
 }
 
+/// Convierte el `HeaderMap` de axum a un `HashMap<String, String>`
+/// con todas las keys en lowercase (Fase 7.6). El dispatch hace
+/// lookup case-insensitive contra esta map. Los headers no-UTF-8 se
+/// omiten (HTTP teóricamente permite bytes raros; en la práctica
+/// todos los headers usuales son ASCII).
+fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
+    let mut out: HashMap<String, String> = HashMap::new();
+    for (name, value) in hm.iter() {
+        if let Ok(v) = value.to_str() {
+            out.insert(name.as_str().to_lowercase(), v.to_string());
+        }
+    }
+    out
+}
+
 /// Construye un `MethodRouter` con el handler async correspondiente
-/// al verbo. Las cuatro combinaciones (path_params × body) viven en
-/// cuatro closures distintos porque los extractors de axum aparecen
+/// al verbo. Las ocho combinaciones (path_params × query × body)
+/// viven en closures distintos porque los extractors de axum aparecen
 /// como argumentos del handler — no se pueden hacer condicionales.
+/// `HeaderMap` se extrae **siempre** como argumento extra (Fase 7.6):
+/// es zero-cost cuando el handler no declara headers (pasa HashMap
+/// vacío y `handle_task` lo ignora).
 fn build_method_router(
     method: HttpMethod,
     route_idx: usize,
@@ -1159,69 +1201,82 @@ fn build_method_router(
     has_query_params: bool,
     expects_body: bool,
 ) -> MethodRouter {
-    // 8 combinaciones: (path × query × body), cada uno boolean.
-    // axum requiere que la firma del handler async refleje exactamente
-    // los extractores que usa, así que armamos las 8 variantes a mano.
-    // (Si en el futuro se vuelve insostenible, el escape es usar
-    // `axum::extract::RawQuery` y parsear a mano.)
     use axum::extract::Query as AxumQuery;
+    use axum::http::HeaderMap;
     type Map = HashMap<String, String>;
     match (has_path_params, has_query_params, expects_body) {
         (false, false, false) => {
-            let h = move || {
+            let h = move |headers: HeaderMap| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, Map::new(), Map::new(), Vec::new(), tx).await
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, Map::new(), Map::new(), Vec::new(), hm, tx).await
                 }
             };
             wrap(method, h)
         }
         (true, false, false) => {
-            let h = move |AxumPath(p): AxumPath<Map>| {
+            let h = move |AxumPath(p): AxumPath<Map>, headers: HeaderMap| {
                 let tx = tx.clone();
-                async move { dispatch_request(route_idx, p, Map::new(), Vec::new(), tx).await }
+                async move {
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, p, Map::new(), Vec::new(), hm, tx).await
+                }
             };
             wrap(method, h)
         }
         (false, true, false) => {
-            let h = move |AxumQuery(q): AxumQuery<Map>| {
+            let h = move |AxumQuery(q): AxumQuery<Map>, headers: HeaderMap| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, Map::new(), q, Vec::new(), tx).await
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, Map::new(), q, Vec::new(), hm, tx).await
                 }
             };
             wrap(method, h)
         }
         (true, true, false) => {
-            let h = move |AxumPath(p): AxumPath<Map>, AxumQuery(q): AxumQuery<Map>| {
+            let h = move |AxumPath(p): AxumPath<Map>,
+                          AxumQuery(q): AxumQuery<Map>,
+                          headers: HeaderMap| {
                 let tx = tx.clone();
-                async move { dispatch_request(route_idx, p, q, Vec::new(), tx).await }
+                async move {
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, p, q, Vec::new(), hm, tx).await
+                }
             };
             wrap(method, h)
         }
         (false, false, true) => {
-            let h = move |body: axum::body::Bytes| {
+            let h = move |headers: HeaderMap, body: axum::body::Bytes| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, Map::new(), Map::new(), body.to_vec(), tx).await
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, Map::new(), Map::new(), body.to_vec(), hm, tx).await
                 }
             };
             wrap(method, h)
         }
         (true, false, true) => {
-            let h = move |AxumPath(p): AxumPath<Map>, body: axum::body::Bytes| {
+            let h = move |AxumPath(p): AxumPath<Map>,
+                          headers: HeaderMap,
+                          body: axum::body::Bytes| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, p, Map::new(), body.to_vec(), tx).await
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, p, Map::new(), body.to_vec(), hm, tx).await
                 }
             };
             wrap(method, h)
         }
         (false, true, true) => {
-            let h = move |AxumQuery(q): AxumQuery<Map>, body: axum::body::Bytes| {
+            let h = move |AxumQuery(q): AxumQuery<Map>,
+                          headers: HeaderMap,
+                          body: axum::body::Bytes| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, Map::new(), q, body.to_vec(), tx).await
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, Map::new(), q, body.to_vec(), hm, tx).await
                 }
             };
             wrap(method, h)
@@ -1229,10 +1284,12 @@ fn build_method_router(
         (true, true, true) => {
             let h = move |AxumPath(p): AxumPath<Map>,
                           AxumQuery(q): AxumQuery<Map>,
+                          headers: HeaderMap,
                           body: axum::body::Bytes| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, p, q, body.to_vec(), tx).await
+                    let hm = headers_to_map(&headers);
+                    dispatch_request(route_idx, p, q, body.to_vec(), hm, tx).await
                 }
             };
             wrap(method, h)
@@ -1264,6 +1321,7 @@ async fn dispatch_request(
     path_params: HashMap<String, String>,
     query_params: HashMap<String, String>,
     body: Vec<u8>,
+    headers: HashMap<String, String>,
     tx: TaskTx,
 ) -> Response {
     let (reply_tx, reply_rx) = oneshot::channel();
@@ -1272,6 +1330,7 @@ async fn dispatch_request(
         path_params,
         query_params,
         body,
+        headers,
         reply: reply_tx,
     };
     if tx.send(task).is_err() {
@@ -1333,6 +1392,7 @@ pub fn run_interpreter_loop(
             task.path_params,
             task.query_params,
             task.body,
+            task.headers,
         ));
         // Si el oneshot del lado axum se cerró (cliente desconectado,
         // timeout), no hay nada que hacer con el outcome — descartar.
@@ -1347,6 +1407,7 @@ async fn handle_task(
     raw_path_params: HashMap<String, String>,
     raw_query_params: HashMap<String, String>,
     body_bytes: Vec<u8>,
+    raw_headers: HashMap<String, String>,
 ) -> HandlerOutcome {
     let Some(route) = registry.routes.get(route_idx) else {
         return HandlerOutcome::internal_error(format!(
@@ -1429,9 +1490,29 @@ async fn handle_task(
             // Body param: ya parseado arriba; tomarlo de `body_value`.
             // unwrap es seguro porque body_value es Some sii hay body_param.
             args.push(body_value.clone().unwrap());
+        } else if let Some(hdr) = route.headers.iter().find(|h| &h.param_name == name) {
+            // Header (Fase 7.6). Lookup case-insensitive vía lowercase
+            // del nombre HTTP. Falta + nullable → Null. Falta +
+            // obligatorio → 400.
+            let key = hdr.http_name.to_lowercase();
+            match (raw_headers.get(&key), hdr.is_nullable) {
+                (Some(v), _) => args.push(Value::Str(v.clone())),
+                (None, true) => args.push(Value::Null),
+                (None, false) => {
+                    return HandlerOutcome::json(
+                        400,
+                        serde_json::json!({
+                            "error": format!(
+                                "header '{}': falta — es obligatorio",
+                                hdr.http_name
+                            ),
+                        }),
+                    );
+                }
+            }
         } else {
             return HandlerOutcome::internal_error(format!(
-                "parámetro '{}' del handler '{}' no es ni path param ni query param ni body — \
+                "parámetro '{}' del handler '{}' no es ni path param ni query param ni body ni header — \
                  esto es un bug interno del registro",
                 name, route.handler_name,
             ));
@@ -2029,7 +2110,7 @@ mod tests {
         // `@get("/") fn hello() => "hola"`
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"hola\"");
     }
@@ -2040,7 +2121,7 @@ mod tests {
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "21".into());
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new()).await;
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new(), HashMap::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "42");
     }
@@ -2051,7 +2132,7 @@ mod tests {
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "no-es-int".into());
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new()).await;
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new(), HashMap::new()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("Int"));
     }
@@ -2061,7 +2142,7 @@ mod tests {
         // El handler devuelve Err("boom"): runtime lo traduce a 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("boom"));
     }
@@ -2073,7 +2154,7 @@ mod tests {
             @get(\"/u\")\nfn h() => User { id: 1, name: \"ana\" }\n\
         ";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
@@ -2325,7 +2406,7 @@ mod tests {
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new()).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("body requerido"));
     }
@@ -2338,7 +2419,7 @@ mod tests {
         ";
         let registry = registry_from_source(src).await;
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body, HashMap::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"fitz\"");
     }
@@ -2350,7 +2431,7 @@ mod tests {
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), b"not json".to_vec()).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), b"not json".to_vec(), HashMap::new()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("JSON"));
     }
@@ -2363,7 +2444,7 @@ mod tests {
         ";
         let registry = registry_from_source(src).await;
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body, HashMap::new()).await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("email"));
     }
@@ -2378,7 +2459,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("id".into(), "7".into());
         let body = br#"{"name":"ana"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), body).await;
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), body, HashMap::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"ana\"");
     }
@@ -2391,7 +2472,7 @@ mod tests {
         ";
         let registry = registry_from_source(src).await;
         let body = br#"{"name":"x"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body).await;
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body, HashMap::new()).await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"x\"");
     }
@@ -2425,6 +2506,61 @@ mod tests {
     /// Como `run_oneshot` pero con body opcional. Si `body` es
     /// `Some(s)`, se manda como `application/json` (aunque el runtime
     /// hoy no valida content-type).
+    /// Como `run_oneshot_with_body` pero acepta también una lista de
+    /// headers `(name, value)` que se agregan a la request. Útil para
+    /// los tests de `@header(...)` (Fase 7.6).
+    async fn run_oneshot_with_headers(
+        src: &str,
+        method: axum::http::Method,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> (u16, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, None);
+
+        let local = tokio::task::LocalSet::new();
+        let headers_owned: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        local
+            .run_until(async move {
+                let mut builder = axum::http::Request::builder().method(method).uri(path);
+                for (k, v) in &headers_owned {
+                    builder = builder.header(k.as_str(), v.as_str());
+                }
+                let req = builder.body(Body::empty()).unwrap();
+                let mut resp_fut = Box::pin(router.oneshot(req));
+                loop {
+                    tokio::select! {
+                        resp = &mut resp_fut => {
+                            let resp = resp.unwrap();
+                            let status = resp.status().as_u16();
+                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                            return (status, String::from_utf8(bytes.to_vec()).unwrap());
+                        }
+                        Some(task) = rx.recv() => {
+                            let outcome = handle_task(
+                                &registry,
+                                task.route_idx,
+                                task.path_params,
+                                task.query_params,
+                                task.body,
+                                task.headers,
+                            ).await;
+                            let _ = task.reply.send(outcome);
+                        }
+                    }
+                }
+            })
+            .await
+    }
+
     async fn run_oneshot_with_body(
         src: &str,
         method: axum::http::Method,
@@ -2477,6 +2613,7 @@ mod tests {
                                 task.path_params,
                                 task.query_params,
                                 task.body,
+                                task.headers,
                             ).await;
                             let _ = task.reply.send(outcome);
                         }
@@ -2636,6 +2773,69 @@ mod tests {
         assert!(body.contains("body requerido"));
     }
 
+    // ---- 7.6 headers como params del handler ----
+
+    #[tokio::test]
+    async fn e2e_header_obligatorio_presente_handler_lo_recibe() {
+        let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
+        let (status, body) = run_oneshot_with_headers(
+            src,
+            axum::http::Method::GET,
+            "/protected",
+            &[("Authorization", "Bearer xyz")],
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"Bearer xyz\"");
+    }
+
+    #[tokio::test]
+    async fn e2e_header_obligatorio_falta_es_400() {
+        let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
+        let (status, body) = run_oneshot_with_headers(
+            src,
+            axum::http::Method::GET,
+            "/protected",
+            &[],
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(body.contains("Authorization"), "body fue: {}", body);
+        assert!(body.contains("obligatorio"), "body fue: {}", body);
+    }
+
+    #[tokio::test]
+    async fn e2e_header_nullable_falta_handler_recibe_null() {
+        let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) -> Str { return \"ok\" }";
+        let (status, body) = run_oneshot_with_headers(
+            src,
+            axum::http::Method::GET,
+            "/traced",
+            &[],
+        )
+        .await;
+        // Handler corre OK porque el header es opcional.
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"ok\"");
+    }
+
+    #[tokio::test]
+    async fn e2e_header_lookup_es_case_insensitive() {
+        // HTTP es case-insensitive en nombres de header. Mandamos
+        // `authorization` (lowercase) y el handler declara
+        // `@header(name="Authorization")` — debe matchear.
+        let src = "@header(name=\"Authorization\")\n@get(\"/x\")\nfn h(authorization: Str) => authorization";
+        let (status, body) = run_oneshot_with_headers(
+            src,
+            axum::http::Method::GET,
+            "/x",
+            &[("authorization", "valor")],
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"valor\"");
+    }
+
     // ---- 7.2 auto-register de /openapi.json ----
     //
     // Helper local: clona el patrón de `run_oneshot` pero acepta un
@@ -2748,6 +2948,7 @@ mod tests {
                                 task.path_params,
                                 task.query_params,
                                 task.body,
+                                task.headers,
                             ).await;
                             let _ = task.reply.send(outcome);
                         }
@@ -2852,6 +3053,7 @@ mod tests {
                                 task.path_params,
                                 task.query_params,
                                 task.body,
+                                task.headers,
                             ).await;
                             let _ = task.reply.send(outcome);
                         }
@@ -2884,6 +3086,7 @@ mod tests {
                 handler_name: "index".into(),
                 param_types: vec![],
                 body_param: None,
+                headers: vec![],
                 param_type_exprs: vec![],
                 return_type_expr: None,
             });

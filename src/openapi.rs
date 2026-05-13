@@ -45,6 +45,11 @@ pub struct OpenApiRouteInfo {
     /// Nombre del param que el handler interpreta como body, si existe.
     /// El tipo del body se mira en `param_type_exprs` por nombre.
     pub body_param_name: Option<String>,
+    /// Headers declarados con `@header(name="X")` sobre el handler
+    /// (Fase 7.6). Cada entry es `(http_name, fitz_param_name,
+    /// is_nullable)`. El schema OpenAPI los emite como `parameters`
+    /// con `in: "header"`.
+    pub header_params: Vec<(String, String, bool)>,
     pub param_type_exprs: Vec<(String, Option<TypeExpr>)>,
     pub return_type_expr: Option<TypeExpr>,
 }
@@ -62,9 +67,48 @@ fn route_info_from_spec(s: &RouteSpec) -> OpenApiRouteInfo {
         path_params: s.path_params.clone(),
         query_params: s.query_params.clone(),
         body_param_name: s.body_param.as_ref().map(|b| b.name.clone()),
+        header_params: s
+            .headers
+            .iter()
+            .map(|h| (h.http_name.clone(), h.param_name.clone(), h.is_nullable))
+            .collect(),
         param_type_exprs: s.param_type_exprs.clone(),
         return_type_expr: s.return_type_expr.clone(),
     }
+}
+
+/// Extrae los `@header(name="X")` del set de decorators de una fn
+/// (Fase 7.6). Devuelve `Vec<(http_name, param_fitz, is_nullable)>`.
+/// Replica la lógica de `collect_headers` del evaluator. Asume que
+/// el programa pasó el evaluator (los decorators son válidos), así
+/// que silenciosamente skipea casos malformados — los errores los
+/// caza el runtime al evaluar.
+pub(crate) fn headers_from_decorators(
+    decorators: &[crate::ast::Decorator],
+    params: &[crate::ast::Param],
+) -> Vec<(String, String, bool)> {
+    let mut out = Vec::new();
+    for deco in decorators {
+        if deco.name != "header" {
+            continue;
+        }
+        let Some(name_kw) = deco.kwargs.iter().find(|(k, _)| k == "name") else {
+            continue;
+        };
+        let crate::ast::Expr::Str(http_name, _) = &name_kw.1 else {
+            continue;
+        };
+        if http_name.is_empty() {
+            continue;
+        }
+        let param_name = http_name.to_lowercase().replace('-', "_");
+        let Some(p) = params.iter().find(|p| p.name == param_name) else {
+            continue;
+        };
+        let is_nullable = matches!(&p.type_, Some(t) if t.is_nullable());
+        out.push((http_name.clone(), param_name, is_nullable));
+    }
+    out
 }
 
 /// Construye `OpenApiRouteInfo` desde el AST en build-time, sin
@@ -113,9 +157,17 @@ pub fn pseudo_routes_from_ast(
                     format!("@{} sobre fn '{}': {}", d.name, name, e.message()),
                 )
             })?;
+            // Fase 7.6: recolectar headers del mismo set de
+            // decorators. Mismas reglas que `collect_headers` del
+            // evaluator (derivación lowercase + `-` → `_`, validación
+            // de tipos `Str` / `Str?`). En build-time replicamos la
+            // lógica acá; si la fn pasa el evaluator, esta vista es
+            // consistente.
+            let header_params = headers_from_decorators(decorators, params);
             let body_param_name = params.iter().find_map(|p| {
                 if !template.params.contains(&p.name)
                     && !template.query_params.contains(&p.name)
+                    && !header_params.iter().any(|(_, fitz, _)| fitz == &p.name)
                 {
                     Some(p.name.clone())
                 } else {
@@ -133,6 +185,7 @@ pub fn pseudo_routes_from_ast(
                 path_params: template.params,
                 query_params: template.query_params,
                 body_param_name,
+                header_params,
                 param_type_exprs,
                 return_type_expr: return_type.clone(),
             });
@@ -247,6 +300,18 @@ fn build_parameters(route: &OpenApiRouteInfo) -> Vec<Value> {
             "in": "query",
             "required": required,
             "schema": schema,
+        }));
+    }
+    // Fase 7.6: headers como parameters con in: "header". El name es
+    // el HTTP name canónico (lo que el cliente debe mandar); el
+    // schema siempre es `string` (HTTP headers son strings; los tipos
+    // ricos son deuda explícita).
+    for (http_name, _fitz_name, is_nullable) in &route.header_params {
+        out.push(json!({
+            "name": http_name,
+            "in": "header",
+            "required": !is_nullable,
+            "schema": { "type": "string" },
         }));
     }
     out
@@ -735,6 +800,32 @@ mod tests {
         let user_input_schema = &schema["components"]["schemas"]["UserInput"];
         assert_eq!(user_input_schema["type"], json!("object"));
         assert!(user_input_schema["properties"]["name"].is_object());
+    }
+
+    #[test]
+    fn ruta_con_header_obligatorio_aparece_en_parameters() {
+        let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) -> Str => authorization";
+        let schema = schema_for(src);
+        let params = schema["paths"]["/protected"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["name"], json!("Authorization"));
+        assert_eq!(params[0]["in"], json!("header"));
+        assert_eq!(params[0]["required"], json!(true));
+        assert_eq!(params[0]["schema"], json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn ruta_con_header_nullable_es_no_requerido() {
+        let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) -> Str => \"ok\"";
+        let schema = schema_for(src);
+        let params = schema["paths"]["/traced"]["get"]["parameters"]
+            .as_array()
+            .unwrap();
+        assert_eq!(params[0]["name"], json!("X-Trace-Id"));
+        assert_eq!(params[0]["in"], json!("header"));
+        assert_eq!(params[0]["required"], json!(false));
     }
 
     #[test]

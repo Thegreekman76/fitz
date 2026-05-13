@@ -32,8 +32,8 @@ use crate::ast::{
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::http::{
-    has_active_registry, parse_path_template, push_route, set_server_config, BodyParam, HttpMethod,
-    RouteSpec, ServerConfig,
+    has_active_registry, parse_path_template, push_route, set_server_config, BodyParam,
+    HeaderSpec, HttpMethod, RouteSpec, ServerConfig,
 };
 use crate::lexer::tokenize;
 use crate::parser::parse;
@@ -160,12 +160,15 @@ fn process_decorator(
     fn_name: &str,
     params: &[Param],
     return_type: &Option<TypeExpr>,
+    headers: &[HeaderSpec],
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
     // ¿Es un decorator HTTP conocido?
     if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
-        return register_http_route(method, deco, fn_name, params, return_type, handler, env);
+        return register_http_route(
+            method, deco, fn_name, params, return_type, headers, handler, env,
+        );
     }
 
     // `@server(port?, host?)`: configura el server. La fn que decora
@@ -182,10 +185,125 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header.",
             deco.name, fn_name,
         ),
     )))
+}
+
+/// Recolecta los `@header(name="X")` declarados sobre un handler
+/// (Fase 7.6). Valida:
+///   - kwarg `name: Str` no vacío.
+///   - Existe un param Fitz con el nombre derivado
+///     (lowercase + `-` → `_`).
+///   - El param Fitz es `Str` o `Str?` (otros tipos: error claro).
+///   - No hay dos `@header` con el mismo `name`.
+///
+/// Si la fn no tiene decoradores `@header`, devuelve `vec![]`.
+fn collect_headers(
+    decorators: &[Decorator],
+    fn_name: &str,
+    params: &[Param],
+) -> Result<Vec<HeaderSpec>, EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
+    };
+
+    let mut headers: Vec<HeaderSpec> = Vec::new();
+    for deco in decorators {
+        if deco.name != "header" {
+            continue;
+        }
+        // @header no acepta args posicionales (todo va por kwarg).
+        if !deco.args.is_empty() {
+            return Err(err(format!(
+                "@header sobre fn '{}': no admite args posicionales. \
+                 Usá `@header(name=\"X\")`.",
+                fn_name,
+            )));
+        }
+        let name_kw = deco
+            .kwargs
+            .iter()
+            .find(|(k, _)| k == "name")
+            .ok_or_else(|| {
+                err(format!(
+                    "@header sobre fn '{}': falta el kwarg 'name' (nombre del header HTTP). \
+                     Ej: `@header(name=\"Authorization\")`.",
+                    fn_name,
+                ))
+            })?;
+        let http_name = match &name_kw.1 {
+            Expr::Str(s, _) if !s.is_empty() => s.clone(),
+            Expr::Str(_, _) => {
+                return Err(err(format!(
+                    "@header sobre fn '{}': el kwarg 'name' no puede ser un string vacío",
+                    fn_name,
+                )));
+            }
+            other => {
+                return Err(err(format!(
+                    "@header sobre fn '{}': el kwarg 'name' debe ser un Str literal, recibió {:?}",
+                    fn_name, other,
+                )));
+            }
+        };
+        // Kwargs extra: rechazar para no comerse typos silenciosamente.
+        if let Some((k, _)) = deco.kwargs.iter().find(|(k, _)| k != "name") {
+            return Err(err(format!(
+                "@header sobre fn '{}': kwarg '{}' no reconocido. Soportados: name.",
+                fn_name, k,
+            )));
+        }
+        let param_name = http_name.to_lowercase().replace('-', "_");
+        // Validar que el param exista en la fn y sea Str o Str?.
+        let Some(p) = params.iter().find(|p| p.name == param_name) else {
+            return Err(err(format!(
+                "@header(name=\"{}\") sobre fn '{}': el handler no tiene un param llamado '{}' \
+                 (derivado del header HTTP por convención lowercase + `-` → `_`)",
+                http_name, fn_name, param_name,
+            )));
+        };
+        let is_nullable = match &p.type_ {
+            Some(TypeExpr::Named(n)) if n == "Str" => false,
+            Some(TypeExpr::Nullable(inner)) => match inner.as_ref() {
+                TypeExpr::Named(n) if n == "Str" => true,
+                other => {
+                    return Err(err(format!(
+                        "@header(name=\"{}\") sobre fn '{}': el param '{}' debe ser `Str` o `Str?`, \
+                         pero está declarado como `{}`",
+                        http_name, fn_name, param_name, other.display_name(),
+                    )));
+                }
+            },
+            Some(other) => {
+                return Err(err(format!(
+                    "@header(name=\"{}\") sobre fn '{}': el param '{}' debe ser `Str` o `Str?`, \
+                     pero está declarado como `{}`",
+                    http_name, fn_name, param_name, other.display_name(),
+                )));
+            }
+            None => {
+                return Err(err(format!(
+                    "@header(name=\"{}\") sobre fn '{}': el param '{}' necesita una anotación \
+                     de tipo (`Str` o `Str?`)",
+                    http_name, fn_name, param_name,
+                )));
+            }
+        };
+        if headers.iter().any(|h| h.http_name.eq_ignore_ascii_case(&http_name)) {
+            return Err(err(format!(
+                "@header(name=\"{}\") sobre fn '{}': declarado dos veces (el match es case-insensitive)",
+                http_name, fn_name,
+            )));
+        }
+        headers.push(HeaderSpec {
+            http_name,
+            param_name,
+            is_nullable,
+        });
+    }
+    Ok(headers)
 }
 
 /// Procesa `@server(port?, host?)`. Args positionals; cualquiera
@@ -299,12 +417,14 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 fn register_http_route(
     method: HttpMethod,
     deco: &Decorator,
     fn_name: &str,
     params: &[Param],
     return_type: &Option<TypeExpr>,
+    headers: &[HeaderSpec],
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -385,8 +505,8 @@ fn register_http_route(
     }
 
     // Identificar el body param: cualquier parámetro que NO esté ni en
-    // template.params (path) ni en template.query_params (query).
-    // Máximo uno por handler.
+    // template.params (path), ni en template.query_params (query), ni
+    // sea un header declarado. Máximo uno por handler.
     let mut body_param: Option<BodyParam> = None;
     for p in params {
         if template.params.contains(&p.name) {
@@ -394,6 +514,9 @@ fn register_http_route(
         }
         if template.query_params.contains(&p.name) {
             continue; // es query param
+        }
+        if headers.iter().any(|h| h.param_name == p.name) {
+            continue; // es header (Fase 7.6)
         }
         if body_param.is_some() {
             return Err(err(format!(
@@ -455,6 +578,7 @@ fn register_http_route(
         handler_name: fn_name.to_string(),
         param_types,
         body_param,
+        headers: headers.to_vec(),
         param_type_exprs,
         return_type_expr: return_type.clone(),
     });
@@ -910,8 +1034,42 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // (los `type` ya fueron registrados en este mismo env). El
             // `return_type` viaja para que el handler HTTP lo almacene
             // en `RouteSpec` (insumo del generador OpenAPI, 7.1).
+            //
+            // Fase 7.6: primero recolectamos los `@header(...)` (que NO
+            // son decoradores "principales", solo aportan metadata), y
+            // los pasamos al decorator de ruta cuando lo procesemos.
+            // Validamos también que `@header` no aparezca sin un
+            // decorator HTTP de ruta (sería un no-op confuso).
+            let collected_headers = collect_headers(decorators, name, params)?;
+            if !collected_headers.is_empty()
+                && !decorators
+                    .iter()
+                    .any(|d| HttpMethod::from_decorator_name(&d.name).is_some())
+            {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!(
+                        "@header sobre fn '{}': solo aplica sobre handlers HTTP \
+                         (apilar junto a `@get`/`@post`/`@put`/`@delete`).",
+                        name,
+                    ),
+                )));
+            }
             for deco in decorators {
-                process_decorator(deco, name, params, return_type, &func, &env)?;
+                if deco.name == "header" {
+                    continue; // ya procesado por `collect_headers`
+                }
+                process_decorator(
+                    deco,
+                    name,
+                    params,
+                    return_type,
+                    &collected_headers,
+                    &func,
+                    &env,
+                )?;
             }
 
             env.borrow_mut().define(name.clone(), func);
@@ -6245,6 +6403,85 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("version") && err.message.contains("reconocido"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---- 7.6 @header(name="X") ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_registra_spec_en_routespec() {
+        let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
+        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        assert_eq!(reg.routes.len(), 1);
+        let route = &reg.routes[0];
+        assert_eq!(route.headers.len(), 1);
+        let h = &route.headers[0];
+        assert_eq!(h.http_name, "Authorization");
+        assert_eq!(h.param_name, "authorization");
+        assert!(!h.is_nullable);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_param_nullable_se_marca() {
+        // @header sobre param Str? → is_nullable = true.
+        let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) => \"ok\"";
+        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let h = &reg.routes[0].headers[0];
+        assert_eq!(h.http_name, "X-Trace-Id");
+        assert_eq!(h.param_name, "x_trace_id");
+        assert!(h.is_nullable);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_sin_param_correspondiente_es_error() {
+        // El handler no tiene el param derivado del header.
+        let src = "@header(name=\"Authorization\")\n@get(\"/x\")\nfn h() => \"ok\"";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("authorization") && err.message.contains("no tiene un param"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_param_tipo_no_str_es_error() {
+        let src = "@header(name=\"X-Count\")\n@get(\"/x\")\nfn h(x_count: Int) => x_count";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("`Str` o `Str?`") && err.message.contains("x_count"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_duplicado_es_error() {
+        // Dos @header con el mismo name → error (match case-insensitive).
+        let src = "@header(name=\"Authorization\")\n@header(name=\"authorization\")\n@get(\"/x\")\nfn h(authorization: Str) => authorization";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("declarado dos veces") || err.message.contains("dos veces"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_sin_decorator_de_ruta_es_error() {
+        // @header solo (sin @get/@post/...) → error.
+        let src = "@header(name=\"Authorization\")\nfn h(authorization: Str) => authorization";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("solo aplica sobre handlers HTTP"),
             "mensaje inesperado: {}",
             err.message,
         );

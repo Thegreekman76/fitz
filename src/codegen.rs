@@ -1200,18 +1200,21 @@ fn generate_main_rs(
                     // Separar `@server` de los `@get`/`@post`/etc.
                     let mut http_decos = false;
                     for d in decorators {
-                        // 7.5: `@server` ahora acepta kwargs (delegado a
-                        // `parse_server_decorator`). Los decoradores HTTP
-                        // de ruta siguen sin aceptar kwargs hasta 7.6
-                        // (cuando aterricen headers).
-                        if d.name != "server" {
+                        // 7.5: `@server` acepta kwargs (delegado a
+                        // `parse_server_decorator`).
+                        // 7.6: `@header(name="X")` también acepta kwargs;
+                        // los valida `collect_headers` en runtime y el
+                        // wrapper del codegen los procesa. Los
+                        // decoradores HTTP de ruta `@get/@post/@put/@delete`
+                        // siguen sin aceptar kwargs.
+                        if !matches!(d.name.as_str(), "server" | "header") {
                             if let Some((key, _)) = d.kwargs.first() {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}`: el argumento por nombre '{}=...' no está soportado en codegen todavía (soporte para kwargs en decoradores HTTP llega en 7.6)",
+                                        "decorator `@{}` sobre fn `{}`: el argumento por nombre '{}=...' no está soportado",
                                         d.name, name, key,
                                     ),
                                 ));
@@ -1222,13 +1225,19 @@ fn generate_main_rs(
                             "server" => {
                                 server_config = Some(parse_server_decorator(&d.args, &d.kwargs)?);
                             }
+                            // `@header` (Fase 7.6): no aporta a la
+                            // categorización del codegen ni configura
+                            // server; el wrapper HTTP lo procesa por
+                            // separado vía `headers_from_decorators`.
+                            // Acá solo lo aceptamos como decorator válido.
+                            "header" => {}
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (5b.6 cubre @get/@post/@put/@delete/@server)",
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (7.6 cubre @get/@post/@put/@delete/@server/@header)",
                                         other, name
                                     ),
                                 ));
@@ -4644,15 +4653,46 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
-        // Categorizar: cada param es path / query / body.
+        // Headers (Fase 7.6): recolectar desde decorators `@header`.
+        // Reusamos la lógica de openapi.rs para mantener el mapping
+        // consistente con el schema generado. Validamos que cada
+        // param header sea Str o Str?; otros tipos → error de codegen.
+        let header_specs = crate::openapi::headers_from_decorators(decorators, params);
+        for (http_name, fitz_param, _is_nullable) in &header_specs {
+            let p = resolved_params
+                .iter()
+                .find(|(n, _)| n == fitz_param)
+                .map(|(_, t)| t);
+            match p {
+                Some(Type::Str) | Some(Type::Nullable(_)) => {}
+                Some(other) => {
+                    return Err(self.err_at(fn_span, format!(
+                        "fn `{}`: @header(name=\"{}\") espera un param `Str` o `Str?`, \
+                         pero `{}` está declarado como `{}`",
+                        name,
+                        http_name,
+                        fitz_param,
+                        type_name(other),
+                    )));
+                }
+                None => {} // ya cazado por evaluator/checker
+            }
+        }
+
+        // Categorizar: cada param es path / query / header / body.
         let mut path_params: Vec<(String, Type)> = Vec::new();
         let mut query_params: Vec<(String, Type)> = Vec::new();
+        let mut header_params: Vec<(String, String, bool)> = Vec::new();
         let mut body_param: Option<(String, Type)> = None;
         for (n, t) in &resolved_params {
             if template_params.iter().any(|tp| tp == n) {
                 path_params.push((n.clone(), t.clone()));
             } else if query_template_params.iter().any(|q| q == n) {
                 query_params.push((n.clone(), t.clone()));
+            } else if let Some((http_name, _, is_nullable)) =
+                header_specs.iter().find(|(_, fp, _)| fp == n)
+            {
+                header_params.push((http_name.clone(), n.clone(), *is_nullable));
             } else if body_param.is_some() {
                 return Err(self.err_at(fn_span, format!(
                     "fn `{}`: solo se admite un body param por handler",
@@ -4705,6 +4745,9 @@ impl<'a> CodegenCtx<'a> {
                 "    axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>,\n",
             );
         }
+        if !header_params.is_empty() {
+            self.emit("    __hmap: axum::http::HeaderMap,\n");
+        }
         if let Some((bn, _bt)) = &body_param {
             writeln!(
                 &mut self.output,
@@ -4723,6 +4766,41 @@ impl<'a> CodegenCtx<'a> {
         // `coerce_path_param` del intérprete).
         for (qn, qt) in &query_params {
             emit_query_param_coerce(&mut self.output, qn, qt, self.env)?;
+        }
+
+        // Headers (Fase 7.6): lookup case-insensitive contra el
+        // HeaderMap. Nullable → Option<String>; obligatorio falta → 400.
+        for (http_name, fitz_name, is_nullable) in &header_params {
+            // Generamos un binding `let <fitz_name>: <ty> = ...`.
+            // Para nullable: Option<String>. Para obligatorio: String
+            // (con early return 400 si falta).
+            let lower = http_name.to_lowercase();
+            if *is_nullable {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: Option<String> = __hmap.get(\"{}\").and_then(|v| v.to_str().ok().map(|s| s.to_string()));",
+                    fitz_name, lower,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "    let {}: String = match __hmap.get(\"{}\").and_then(|v| v.to_str().ok()) {{",
+                    fitz_name, lower,
+                )
+                .unwrap();
+                self.emit("        Some(v) => v.to_string(),\n");
+                self.emit("        None => return (\n");
+                self.emit("            axum::http::StatusCode::BAD_REQUEST,\n");
+                writeln!(
+                    &mut self.output,
+                    "            axum::Json(serde_json::json!({{\"error\": \"header '{}': falta — es obligatorio\"}})),",
+                    http_name,
+                )
+                .unwrap();
+                self.emit("        ).into_response(),\n");
+                self.emit("    };\n");
+            }
         }
 
         // Si hay body con tipo declarado, deserializar primero. El
@@ -9228,13 +9306,86 @@ mod tests {
 
     #[test]
     fn http_75_decorator_de_ruta_con_kwarg_sigue_siendo_error() {
-        // Los decoradores HTTP de ruta NO aceptan kwargs (hasta 7.6).
+        // Los decoradores HTTP de ruta (@get/@post/@put/@delete) NO
+        // aceptan kwargs hoy. Solo @server y @header.
         let src = "@get(\"/x\", foo=1) fn h() -> Str => \"ok\"";
         let err = gen(src).expect_err("esperaba error de codegen");
         assert!(
-            err.message.contains("@get") && err.message.contains("7.6"),
+            err.message.contains("@get") && err.message.contains("foo"),
             "esperaba mensaje sobre kwarg en decorator HTTP de ruta, fue: {}",
             err.message
+        );
+    }
+
+    #[test]
+    fn http_76_wrapper_extrae_headermap_y_bindea_header_obligatorio() {
+        let src = "@header(name=\"Authorization\")\n@get(\"/protected\") fn protected(authorization: Str) -> Str => authorization";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let handler = ast_test::find_item_fn(&file, "__handler_protected")
+            .expect("falta __handler_protected");
+        let body = ast_test::fn_body_text(handler);
+        // Extractor HeaderMap presente.
+        let attrs = ast_test::fn_param_pats_and_types(handler);
+        assert!(
+            attrs.iter().any(|(_, ty)| ty.contains("HeaderMap")),
+            "esperaba `__hmap: HeaderMap` en la firma, got params: {:?}",
+            attrs
+        );
+        // Binding obligatorio con 400 si falta. El body se normaliza
+        // vía quote::ToTokens, que separa puntos con espacios; aceptamos
+        // ambas formas.
+        assert!(
+            body.contains("__hmap . get (\"authorization\")")
+                || body.contains("__hmap.get(\"authorization\")"),
+            "esperaba lookup case-insensitive en lowercase, body:\n{}",
+            body
+        );
+        assert!(
+            body.contains("BAD_REQUEST") && body.contains("Authorization") && body.contains("obligatorio"),
+            "esperaba branch 400 con mensaje 'obligatorio', body:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn http_76_wrapper_header_nullable_es_option_string() {
+        let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\") fn traced(x_trace_id: Str?) -> Str => \"ok\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        let file = ast_test::parse(&code);
+        let handler = ast_test::find_item_fn(&file, "__handler_traced")
+            .expect("falta __handler_traced");
+        let body = ast_test::fn_body_text(handler);
+        // Option<String> para el binding.
+        assert!(
+            body.contains("Option < String >") || body.contains("Option<String>"),
+            "esperaba `Option<String>` en el binding del header nullable, body:\n{}",
+            body
+        );
+        // Sin branch 400 para este header.
+        assert!(
+            !body.contains("'X-Trace-Id': falta"),
+            "header nullable NO debería tener branch 400, body:\n{}",
+            body
+        );
+    }
+
+    #[test]
+    fn http_76_schema_embebido_incluye_header_en_parameters() {
+        // Fase 7.5 + 7.6: el schema embebido en el binario incluye
+        // el header con in:"header".
+        let src = "@header(name=\"Authorization\")\n@get(\"/protected\") fn protected(authorization: Str) -> Str => authorization";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El static __FITZ_OPENAPI_SCHEMA contiene el JSON. Buscamos
+        // texto literal `"in":"header"` en el output del codegen.
+        assert!(
+            code.contains("\"in\":\"header\""),
+            "esperaba `\"in\":\"header\"` en el schema embebido. \
+             Si el formato cambia, ajustá el test."
+        );
+        assert!(
+            code.contains("\"Authorization\""),
+            "esperaba el HTTP name del header en el schema embebido"
         );
     }
 
