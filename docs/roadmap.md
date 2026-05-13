@@ -2295,8 +2295,15 @@ nativo punto".
 
 ### Pasos
 
+> **Re-numeración (sesión post-5b/T1)**: el plan original tenía 6.1-6.6.
+> Al ejecutar la fase se partió en 7 sub-pasos más chicos. Numeración
+> nueva: 6.1 AST/parser, 6.2 checker, 6.3 builtin `sleep`, 6.4 evaluator
+> async, 6.5 bridge HTTP eliminado, 6.6 codegen, 6.7 guía. Los párrafos
+> siguientes mantienen los IDs originales del documento; los estados
+> reales por sub-paso están en CLAUDE.md y los mensajes de commit.
+
 #### 6.1 — Sintaxis: `await` postfix + `Future<T>` en AST/parser
-**Pendiente** — base sintáctica.
+**CERRADO** — base sintáctica.
 
 - Nueva variante `Expr::Await { inner: Box<Expr>, span: Span }`.
 - Parser: `expr.await` como sufijo postfix, con la misma
@@ -2312,7 +2319,7 @@ nativo punto".
 (el checker todavía lo rechazaría hasta 6.2).
 
 #### 6.2 — Type checker para async/await
-**Pendiente** — semántica de tipos.
+**CERRADO** — semántica de tipos.
 
 - `Type::Future(Box<Type>)` como generic built-in nuevo (aridad
   fija 1, registrado en `TypeEnv` junto con `List`/`Map`/`Result`
@@ -2339,7 +2346,9 @@ nativo punto".
   retorna `T` externamente tipa `Future<T>`.
 
 #### 6.3 — Evaluator async (el costo grueso)
-**Pendiente** — refactor profundo del evaluator.
+**CERRADO (re-numerado como 6.4 en commits)** — refactor profundo del
+evaluator. La sesión metió un sub-paso 6.3 intermedio dedicado al
+builtin `sleep` antes del refactor amplio del evaluator.
 
 - `eval_expr` y `eval_stmt` pasan de `fn(...) -> Result<Value>` a
   `async fn(...) -> Result<Value>` con futures boxeados (Rust no
@@ -2373,30 +2382,35 @@ incrementos chicos. Recomendación: rama dedicada
 verde antes de mergear.
 
 #### 6.4 — Runtime HTTP: handlers async reales
-**Pendiente** — eliminación del bridge sync/async.
+**POSPUESTO hasta F17 (re-numerado como 6.5)** — eliminación del
+bridge sync/async **bloqueada**.
 
-- Hoy `src/http.rs` corre tokio en un `std::thread` y bridgea
-  via `mpsc::UnboundedSender<InterpTask> + oneshot::Sender<...>`
-  porque el evaluator es sync. Con evaluator async (6.3), el
-  handler axum puede llamar `eval_call(handler_fn, args).await`
-  directo.
-- `InterpTask`, `run_interpreter_loop`, el thread dedicado del
-  intérprete y los canales mpsc/oneshot desaparecen.
-- `is_async` del `FnDef` finalmente significa algo en runtime:
-  un handler `async fn` se await-ea naturalmente, un handler
-  sync fn se llama directo (axum los acepta ambos).
-- `examples/server.fitz` y `examples/guide/17-http.fitz` no
-  cambian sintácticamente — siguen sin `async fn` por ahora; un
-  cap o ejemplo nuevo demuestra `async fn` end-to-end.
+- Plan original: hoy `src/http.rs` corre tokio en un `std::thread` y
+  bridgea via `mpsc::UnboundedSender<InterpTask> + oneshot::Sender<...>`.
+  Con evaluator async (cerrado en 6.4), el handler axum **debería**
+  poder llamar `call_handler(handler_fn, args).await` directo.
+- **Realidad descubierta al intentar (sesión 2026-05-13)**:
+  `axum::handler::Handler` requiere `Send + 'static`. Los closures
+  axum capturan `Value::Function` cuya `closure: EnvRef = Rc<RefCell<
+  Environment>>` **no es Send**. El future del handler tampoco. Axum
+  0.8 no expone `Handler` `!Send` ni `tokio::task::LocalSet` lo
+  destraba (axum::serve igual exige Send adentro). La única salida
+  real es migrar `Value`/`EnvRef`/módulos a `Arc<parking_lot::Mutex>`
+  — eso es exactamente la deuda **F17** en `docs/deudas-post-5b.md`.
+- **Compromiso**: cuando F17 cierre, el bridge HTTP cae como
+  consecuencia natural — los handlers axum llaman al evaluator
+  directo y `InterpTask`/`run_interpreter_loop` desaparecen sin
+  refactor adicional. Hasta entonces, el bridge sigue vivo y
+  funcional (cumple la promesa async, es internal-only).
 
-**Criterio de éxito**: un endpoint `async fn` que `await`-ea una
-sleep simulada (cuando exista — quizás un builtin `sleep_ms(n).
-await` chico) responde N requests concurrentes sin bloquear.
-Mismo handler escrito sync responde N en serie. Diferencia
-medible en latencia P99.
+**Criterio de éxito** (cuando F17 cierre + este paso se reabra): un
+endpoint `async fn` que `await`-ea una sleep responde N requests
+concurrentes sin bloquear el thread del intérprete. Mismo handler
+sync responde en serie. Diferencia medible en latencia P99.
 
 #### 6.5 — Codegen: `async fn` Fitz → `async fn` Rust
-**Pendiente** — emisión directa, paso fácil después del refactor.
+**Pendiente (re-numerado como 6.6 en commits)** — emisión directa,
+paso fácil después del refactor.
 
 - `gen_top_fn` con `is_async: true` emite `pub async fn` en vez
   de `pub fn`. Return type sigue siendo `T` (Rust ya envuelve
@@ -2411,7 +2425,7 @@ medible en latencia P99.
   compila un binario con `async fn` y verifica que corre.
 
 #### 6.6 — Guía + ejemplo + cierre formal de Fase 6
-**Pendiente** — documentación viva.
+**Pendiente (re-numerado como 6.7 en commits)** — documentación viva.
 
 - Cap nuevo en `docs/guide.md` titulado "Async y concurrencia",
   probablemente entre el cap 17 (HTTP) y el 18 (`fitz build`).
