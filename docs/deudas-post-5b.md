@@ -21,8 +21,11 @@
 > de `Expr` cargan `Span`, parser propaga spans en cada regla,
 > checker (`infer_expr` + helpers) y evaluator (`eval_expr` +
 > helpers + 14 métodos built-in) citan posición del nodo en
-> errores. 1010 tests pasando. Ver matriz para ítems pendientes
-> (codegen call sites, Pattern/TypeExpr, T1 sucesivos batches).
+> errores. **S1.codegen cerrado** — 52 sitios del codegen migrados
+> a `err_at` (con span del nodo); los 17 restantes son defensivos
+> contra bugs del compilador (checker debió cazar), donde citar
+> posición no aporta. Ver matriz para ítems pendientes (Pattern/
+> TypeExpr sin span, T1 sucesivos batches). 1010 tests pasando.
 
 ## Resumen ejecutivo
 
@@ -99,7 +102,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| S1 | AST + propagación | **Span en AST** — Stmt-level cerrado en B.1; **Expr-level cerrado en S1.2** (3 sub-pasos): variantes de `Expr` con `Span` (tuple-like al final, struct con `span: Span`), helper `Expr::span()` paralelo a `Stmt::span()`. Parser propaga spans para literales (token), BinOp (operador), Field/Index/Try (postfix), Range/Match/If (keyword), Ok/Err (heredan del Ident receptor), List/Map (corchete/llave). Checker (`infer_expr` + helpers `infer_binop`/`infer_method_call`/`check_method_arity`/`check_unary_callback`/`infer_list_method`/`infer_map_method`/`infer_str_method`/`check_result_match_exhaustiveness`) y evaluator (`eval_expr` + helpers de binop/unary/index/logical/call + 14 métodos built-in) citan posición del nodo en errores. 5 tests de span en parser, 9 en checker, 5 en evaluator. **Pendiente residual menor**: codegen call sites (17 sitios) con `err()` → helper `err_at` disponible para migración incremental; `Pattern` y `TypeExpr` sin span (deuda explícita). | Baja (residual) | Baja |
+| S1 | AST + propagación | **Span en AST** — Stmt-level cerrado en B.1; **Expr-level cerrado en S1.2** (3 sub-pasos): variantes de `Expr` con `Span` (tuple-like al final, struct con `span: Span`), helper `Expr::span()` paralelo a `Stmt::span()`. Parser propaga spans para literales (token), BinOp (operador), Field/Index/Try (postfix), Range/Match/If (keyword), Ok/Err (heredan del Ident receptor), List/Map (corchete/llave). Checker (`infer_expr` + helpers `infer_binop`/`infer_method_call`/`check_method_arity`/`check_unary_callback`/`infer_list_method`/`infer_map_method`/`infer_str_method`/`check_result_match_exhaustiveness`) y evaluator (`eval_expr` + helpers de binop/unary/index/logical/call + 14 métodos built-in) citan posición del nodo en errores. **S1.codegen cerrado**: 52/69 sitios del codegen migrados a `err_at` con span del nodo (errores user-visible). Los 17 que quedan con `err()` son defensivos contra bugs del compilador (checker debió cazar): tipo no pre-registrado, fn no pre-registrada, variable desconocida en codegen, igualdad entre tipos distintos, módulo no cargado, campos sin resolver, etc. Doc-comments de `err`/`err_at` separan los dos casos. 5 tests de span en parser, 9 en checker, 5 en evaluator. **Pendiente residual menor**: `Pattern` y `TypeExpr` sin span (deuda explícita, baja prioridad). | Baja (residual) | Baja |
 | U1 | `evaluator.rs` | Mensajes de error inconsistentes en estilo: "no tiene método X" vs "el tipo X no soporta" vs "espera Y arg(s)". Falta helper unificado. | Media | Baja |
 | U2 | `types.rs` ~20 sitios | Mismo patrón `ctx.error(format!("...{}...{}...", ...))` repetido. Helper `type_mismatch_error(label, expected, actual)` reduce repetición. | Baja | Baja |
 | U3 | `http.rs:481` | El handler-mapping `Ok→200/Err→500` no incluye stack trace del Err en log (solo en response). Útil para debug. | Baja | Baja |
@@ -205,16 +208,19 @@ prio Alta/Media con complejidad Baja): ~2-3 horas de trabajo, deja
 `cargo clippy` limpio, mejora la mantenibilidad puntual, y
 sincroniza la guía con el estado actual.
 
-**S1 (span en AST)** ya está sustancialmente cerrado tras S1.2
-(3 sub-pasos): cada `Expr` carga su span; checker y evaluator
-citan posición del nodo en errores; mensajes pasan de `0:0` a
-línea+columna precisas. Lo que queda son call sites del codegen
-con `err()` (helper `err_at` ya disponible, migración incremental
-cuando duela), y `Pattern`/`TypeExpr` sin span (deuda explícita,
-menor impacto). El próximo trabajo grande paralelo es **T1
-batches sucesivos**: ~76 unit tests del codegen todavía
-matchean strings literales del Rust generado; cada uno migrado
-a AST-based con `syn` resiste cambios cosméticos del codegen.
+**S1 (span en AST)** está cerrado en sus tres frentes: B.1 (Stmt),
+S1.2 (Expr en checker + evaluator), y **S1.codegen** (52 sitios
+del codegen con `err_at` + 17 internos con `err()` documentados
+como defensivos). Mensajes de error pasan de `0:0` a línea/
+columna precisas en cualquier camino del compilador (checker,
+runtime, codegen). Pendiente residual menor: `Pattern` y
+`TypeExpr` sin span — deuda explícita, baja prioridad porque
+los errores de patrones suelen estar en sitios donde el match
+contenedor ya provee un span razonable. El próximo trabajo
+grande paralelo es **T1 batches sucesivos**: ~48 unit tests
+del codegen todavía matchean strings literales del Rust
+generado; cada uno migrado a AST-based con `syn` resiste
+cambios cosméticos del codegen.
 
 Las **deudas funcionales** son sub-pasos formales que mejor se
 abren como mini-fases dedicadas, cada una con plan corto + tests

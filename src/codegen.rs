@@ -1528,21 +1528,22 @@ impl<'a> CodegenCtx<'a> {
 
     // --- error helpers ----------------------------------------------------
 
+    /// Error sin posición. Reservado para errores **defensivos**: bugs
+    /// del compilador, no del código Fitz del usuario (ej. "tipo no
+    /// pre-registrado", "fn no estaba pre-registrada", "variable
+    /// desconocida en codegen"). El checker debería haberlos cazado,
+    /// así que si llegamos acá es un bug y citar una posición del
+    /// programa no aporta. Para errores que sí dispara código Fitz
+    /// válido pero no soportado por el codegen, usar `err_at`.
     fn err(&self, msg: impl Into<String>) -> FitzError {
         FitzError::new(ErrorKind::TypeError, 0, 0, msg.into())
     }
 
-    /// Variante de `err` que cita la posición real del nodo. Lo usan
-    /// los sitios del codegen que tienen un `Expr` a mano y quieren
-    /// que el mensaje apunte al token problemático (no al inicio del
-    /// programa). Span `ZERO` cae en el mismo formato sin posición
-    /// que produce `err`.
-    ///
-    /// Disponible para migración incremental — los call sites de
-    /// codegen siguen mayoritariamente con `err()` (los errores son
-    /// "feature no soportada", menos impactantes en UX que los del
-    /// evaluator). Se migran sitios uno a uno cuando duele.
-    #[allow(dead_code)]
+    /// Variante de `err` que cita la posición real del nodo del AST.
+    /// Lo usan los sitios del codegen que tienen un `Expr`/`Stmt` a
+    /// mano y quieren que el mensaje apunte al token problemático
+    /// (operador, paréntesis, statement entero, etc.). Default para
+    /// cualquier error que el usuario podría ver.
     fn err_at(&self, span: crate::ast::Span, msg: impl Into<String>) -> FitzError {
         FitzError::new(ErrorKind::TypeError, span.line, span.column, msg.into())
     }
@@ -1712,11 +1713,12 @@ impl<'a> CodegenCtx<'a> {
     /// referenciarlos. Solo aplica en modo `Module`.
     fn pre_register_top_lets(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
+            let stmt_span = stmt.span();
             let Stmt::Assign { target, type_, value, .. } = stmt else { continue };
             let AssignTarget::Ident(name) = target else { continue };
             let ty = match type_ {
                 Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
-                    self.err(format!(
+                    self.err_at(stmt_span, format!(
                         "let `{}` del módulo: anotación: {}",
                         name, e.message
                     ))
@@ -1737,16 +1739,17 @@ impl<'a> CodegenCtx<'a> {
                 ..
             } = stmt
             {
+                let fn_span = stmt.span();
                 let params: Vec<Type> = params
                     .iter()
-                    .map(|p| self.resolve_param_type(name, &p.name, p.type_.as_ref()))
+                    .map(|p| self.resolve_param_type(name, &p.name, p.type_.as_ref(), fn_span))
                     .collect::<Result<_, _>>()?;
                 let ret = match return_type {
                     Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
                         FitzError::new(
                             e.kind,
-                            0,
-                            0,
+                            fn_span.line,
+                            fn_span.column,
                             format!(
                                 "fn `{}`: return type no resuelve: {}",
                                 name, e.message
@@ -1766,20 +1769,21 @@ impl<'a> CodegenCtx<'a> {
         fn_name: &str,
         param_name: &str,
         type_: Option<&TypeExpr>,
+        fn_span: crate::ast::Span,
     ) -> Result<Type, FitzError> {
         match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
                 FitzError::new(
                     e.kind,
-                    0,
-                    0,
+                    fn_span.line,
+                    fn_span.column,
                     format!(
                         "fn `{}`: parámetro `{}`: {}",
                         fn_name, param_name, e.message
                     ),
                 )
             }),
-            None => Err(self.err(format!(
+            None => Err(self.err_at(fn_span, format!(
                 "fn `{}`: el parámetro `{}` necesita una anotación de tipo para el codegen (5b.1)",
                 fn_name, param_name
             ))),
@@ -1998,16 +2002,16 @@ impl<'a> CodegenCtx<'a> {
                 self.emit("continue;\n");
                 Ok(())
             }
-            Stmt::FnDef { name, .. } => Err(self.err(format!(
+            Stmt::FnDef { name, .. } => Err(self.err_at(stmt.span(), format!(
                 "fn anidada `{}`: no soportada en 5b.1 — declarala a nivel top",
                 name
             ))),
-            Stmt::TypeDef { name, .. } => Err(self.err(format!(
+            Stmt::TypeDef { name, .. } => Err(self.err_at(stmt.span(), format!(
                 "`type {}`: solo se admite a nivel top, no adentro de funciones u otros bloques",
                 name
             ))),
-            Stmt::Import { .. } | Stmt::FromImport { .. } => Err(self.err(
-                "`import`: módulos no soportados en 5b.1 — llegan en 5b.5",
+            Stmt::Import { .. } | Stmt::FromImport { .. } => Err(self.err_at(stmt.span(),
+                "`import`: solo se admite a nivel top del programa, no adentro de fns u otros bloques",
             )),
         }
     }
@@ -2028,7 +2032,7 @@ impl<'a> CodegenCtx<'a> {
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
         let declared_ty = match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
-                self.err(format!("anotación de `{}` no resuelve: {}", name, e.message))
+                self.err_at(value.span(), format!("anotación de `{}` no resuelve: {}", name, e.message))
             })?,
             None => rhs_ty.clone(),
         };
@@ -2071,24 +2075,25 @@ impl<'a> CodegenCtx<'a> {
     /// `collect_module_sigs` antes; acá asumimos que el value es
     /// una de las variantes literales.
     fn gen_module_top_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let stmt_span = stmt.span();
         let Stmt::Assign { target, type_, value, .. } = stmt else {
             unreachable!("gen_module_top_let solo se llama sobre Stmt::Assign");
         };
         let AssignTarget::Ident(name) = target else {
-            return Err(self.err(
+            return Err(self.err_at(stmt_span,
                 "asignación a campo a nivel top de módulo: no soportada (solo `let X = <literal>`)",
             ));
         };
 
         let declared_ty = match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
-                self.err(format!(
+                self.err_at(value.span(), format!(
                     "let `{}`: anotación: {}",
                     name, e.message
                 ))
             })?,
             None => infer_literal_type(value).ok_or_else(|| {
-                self.err(format!(
+                self.err_at(value.span(), format!(
                     "let `{}` top-level de módulo: la RHS debe ser literal o tenés que anotar el tipo",
                     name
                 ))
@@ -2125,7 +2130,7 @@ impl<'a> CodegenCtx<'a> {
                 writeln!(&mut self.output, "pub const {}: bool = {};\n", name, b).unwrap();
             }
             _ => {
-                return Err(self.err(format!(
+                return Err(self.err_at(value.span(), format!(
                     "let `{}`: combinación de tipo/valor no soportada como constante de módulo",
                     name
                 )));
@@ -2142,13 +2147,15 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<(), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         let Type::Nominal(id) = &obj_ty else {
-            return Err(self.err(format!(
+            return Err(self.err_at(object.span(), format!(
                 "asignación a campo `.{}` sobre `{}`: solo se soporta sobre instancias",
                 field,
                 type_name(&obj_ty)
             )));
         };
         let info_name = self.env.info(*id).name.clone();
+        // Defensivo: el checker garantiza fields resueltos. Si llegamos
+        // acá sin fields, es un bug del compilador, no del usuario.
         let declared = self.fields_for_id(*id).ok_or_else(|| {
             self.err(format!(
                 "tipo `{}` con campos sin resolver — no se puede generar asignación",
@@ -2156,7 +2163,7 @@ impl<'a> CodegenCtx<'a> {
             ))
         })?;
         let Some(f) = declared.iter().find(|f| f.name == field) else {
-            return Err(self.err(format!(
+            return Err(self.err_at(object.span(), format!(
                 "el tipo `{}` no tiene un campo llamado `{}`",
                 info_name, field
             )));
@@ -2262,7 +2269,7 @@ impl<'a> CodegenCtx<'a> {
         let elem_ty = match &iter_ty {
             Type::List(inner) => (**inner).clone(),
             other => {
-                return Err(self.err(format!(
+                return Err(self.err_at(iter.span(), format!(
                     "`for {} in <expr>`: el iterable es `{}`, solo se soportan Range y List<T>",
                     var,
                     display_type(other, self.env)
@@ -2270,7 +2277,7 @@ impl<'a> CodegenCtx<'a> {
             }
         };
         if matches!(elem_ty, Type::Any) {
-            return Err(self.err(format!(
+            return Err(self.err_at(iter.span(), format!(
                 "`for {} in ...` sobre `List<Any>`: el subset compilado exige tipo homogéneo \
                  concreto",
                 var
@@ -2394,23 +2401,23 @@ impl<'a> CodegenCtx<'a> {
 
             Expr::StrInterp(parts, _) => self.gen_str_interp(parts),
 
-            Expr::BinOp { op, left, right, .. } => self.gen_binop(op, left, right),
+            Expr::BinOp { op, left, right, span } => self.gen_binop(op, left, right, *span),
             Expr::UnaryOp { op, operand, .. } => self.gen_unary(op, operand),
 
-            Expr::Call { callee, args, .. } => self.gen_call(callee, args),
+            Expr::Call { callee, args, span } => self.gen_call(callee, args, *span),
 
-            Expr::If { condition, then, else_, .. } => {
-                self.gen_if_expr(condition, then, else_.as_deref())
+            Expr::If { condition, then, else_, span } => {
+                self.gen_if_expr(condition, then, else_.as_deref(), *span)
             }
 
-            Expr::Range { .. } => Err(self.err(
+            Expr::Range { .. } => Err(self.err_at(e.span(),
                 "`Range` solo se acepta como iterable de `for`; otros usos no se generan",
             )),
-            Expr::List(items, _) => self.gen_list_lit(items),
-            Expr::Map(pairs, _) => self.gen_map_lit(pairs),
-            Expr::Index { object, index, .. } => self.gen_index(object, index),
-            Expr::Field { object, field, .. } => self.gen_field_access(object, field),
-            Expr::StructLit { type_name, fields, .. } => self.gen_struct_lit(type_name, fields),
+            Expr::List(items, span) => self.gen_list_lit(items, *span),
+            Expr::Map(pairs, span) => self.gen_map_lit(pairs, *span),
+            Expr::Index { object, index, span } => self.gen_index(object, index, *span),
+            Expr::Field { object, field, span } => self.gen_field_access(object, field, *span),
+            Expr::StructLit { type_name, fields, span } => self.gen_struct_lit(type_name, fields, *span),
             Expr::Ok(inner, _) => self.gen_ok(inner),
             Expr::Err(inner, _) => self.gen_err(inner),
             Expr::Try(inner, _) => self.gen_try(inner),
@@ -2424,7 +2431,7 @@ impl<'a> CodegenCtx<'a> {
             // consume directo. Acá llega cualquier FnExpr usado como
             // valor: `let f = fn(n) => ...`, `apply(fn(n) => ..., 7)`,
             // `return fn(y) => x + y`.
-            Expr::FnExpr { params, body, .. } => self.gen_fn_expr_as_value(params, body),
+            Expr::FnExpr { params, body, span } => self.gen_fn_expr_as_value(params, body, *span),
         }
     }
 
@@ -2539,6 +2546,7 @@ impl<'a> CodegenCtx<'a> {
         op: &BinOpKind,
         left: &Expr,
         right: &Expr,
+        span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let (lc, lt) = self.gen_expr(left)?;
         let (rc, rt) = self.gen_expr(right)?;
@@ -2549,7 +2557,7 @@ impl<'a> CodegenCtx<'a> {
                     return Ok((format!("format!(\"{{}}{{}}\", {}, {})", lc, rc), Type::Str));
                 }
                 let (l, r, t) = numeric_coerce(&lc, &lt, &rc, &rt)
-                    .ok_or_else(|| self.err(format!(
+                    .ok_or_else(|| self.err_at(span, format!(
                         "operador `+` no aplicable a `{}` y `{}` en codegen",
                         type_name(&lt),
                         type_name(&rt)
@@ -2564,7 +2572,7 @@ impl<'a> CodegenCtx<'a> {
                     _ => unreachable!(),
                 };
                 let (l, r, t) = numeric_coerce(&lc, &lt, &rc, &rt)
-                    .ok_or_else(|| self.err(format!(
+                    .ok_or_else(|| self.err_at(span, format!(
                         "operador `{}` no aplicable a `{}` y `{}` en codegen",
                         sym, type_name(&lt), type_name(&rt)
                     )))?;
@@ -2586,7 +2594,7 @@ impl<'a> CodegenCtx<'a> {
                     ));
                 }
                 let (l, r, _t) = numeric_coerce(&lc, &lt, &rc, &rt)
-                    .ok_or_else(|| self.err(format!(
+                    .ok_or_else(|| self.err_at(span, format!(
                         "comparación entre `{}` y `{}` no aplicable",
                         type_name(&lt), type_name(&rt)
                     )))?;
@@ -2645,6 +2653,7 @@ impl<'a> CodegenCtx<'a> {
         &mut self,
         callee: &Expr,
         args: &[Expr],
+        call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         // Method call: el callee es `Expr::Field { object, field, .. }`.
         // Despachamos por `(tipo del receptor, nombre del método)`
@@ -2661,23 +2670,23 @@ impl<'a> CodegenCtx<'a> {
                     self.module_bindings.get(ns).cloned()
                 {
                     if let Some((path, sig)) = self.resolve_namespace_call(ns, field) {
-                        return self.gen_call_with_sig(&path, &sig, args);
+                        return self.gen_call_with_sig(&path, &sig, args, call_span);
                     }
-                    return Err(self.err(format!(
+                    return Err(self.err_at(call_span, format!(
                         "el módulo `{}` no exporta una función llamada `{}`",
                         ns, field
                     )));
                 }
             }
-            return self.gen_method_call(object, field, args);
+            return self.gen_method_call(object, field, args, call_span);
         }
         let Expr::Ident(name, _) = callee else {
-            return Err(self.err(
+            return Err(self.err_at(callee.span(),
                 "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
             ));
         };
         if name == "print" {
-            return Err(self.err(
+            return Err(self.err_at(call_span,
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
             ));
         }
@@ -2687,6 +2696,7 @@ impl<'a> CodegenCtx<'a> {
         // válido), su sig prevalece — chequeamos `fn_sigs` antes del
         // builtin.
         if name == "len" && !self.fn_sigs.contains_key(name) && args.len() == 1 {
+            let arg_span = args[0].span();
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             return match arg_ty {
                 Type::Str => Ok((
@@ -2697,7 +2707,7 @@ impl<'a> CodegenCtx<'a> {
                     format!("(({}).borrow().len() as i64)", arg_code),
                     Type::Int,
                 )),
-                other => Err(self.err(format!(
+                other => Err(self.err_at(arg_span, format!(
                     "`len(...)`: no aplica a `{}` — solo Str, List<T> y Map<K, V>",
                     display_type(&other, self.env)
                 ))),
@@ -2713,7 +2723,7 @@ impl<'a> CodegenCtx<'a> {
             if matches!(kind, NamedKind::Fn) {
                 if let Some(m) = self.loaded_modules.get(module_index) {
                     if let Some(sig) = m.fn_sigs.get(&item).cloned() {
-                        return self.gen_call_with_sig(name, &sig, args);
+                        return self.gen_call_with_sig(name, &sig, args, call_span);
                     }
                 }
             }
@@ -2725,7 +2735,7 @@ impl<'a> CodegenCtx<'a> {
         // Fn> implementa `Fn` directamente; rustc auto-derefs.
         if let Some(Type::Function { params, ret }) = self.lookup_var(name).cloned() {
             let sig = FnSig { params, ret: *ret };
-            return self.gen_call_with_sig(name, &sig, args);
+            return self.gen_call_with_sig(name, &sig, args, call_span);
         }
 
         let sig = self
@@ -2733,7 +2743,7 @@ impl<'a> CodegenCtx<'a> {
             .get(name)
             .cloned()
             .ok_or_else(|| self.err(format!("función `{}` desconocida en codegen", name)))?;
-        self.gen_call_with_sig(name, &sig, args)
+        self.gen_call_with_sig(name, &sig, args, call_span)
     }
 
     /// Emite una llamada con una firma conocida: `<callee>(arg1, arg2, ...)`
@@ -2745,9 +2755,10 @@ impl<'a> CodegenCtx<'a> {
         callee_expr: &str,
         sig: &FnSig,
         args: &[Expr],
+        call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         if args.len() != sig.params.len() {
-            return Err(self.err(format!(
+            return Err(self.err_at(call_span, format!(
                 "`{}` espera {} argumento(s), recibió {}",
                 callee_expr,
                 sig.params.len(),
@@ -2770,6 +2781,7 @@ impl<'a> CodegenCtx<'a> {
         object: &Expr,
         method: &str,
         args: &[Expr],
+        call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         match (&obj_ty, method) {
@@ -2786,7 +2798,7 @@ impl<'a> CodegenCtx<'a> {
                 check_method_arity(method, args, 0)?;
                 Ok((format!("({}).to_lowercase()", obj_code), Type::Str))
             }
-            (Type::Str, other) => Err(self.err(format!(
+            (Type::Str, other) => Err(self.err_at(call_span, format!(
                 "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower)",
                 other
             ))),
@@ -2801,7 +2813,7 @@ impl<'a> CodegenCtx<'a> {
             (Type::List(t), "map") => self.gen_list_map(&obj_code, t, args),
             (Type::List(t), "filter") => self.gen_list_filter(&obj_code, t, args),
             (Type::List(t), "find") => self.gen_list_find(&obj_code, t, args),
-            (Type::List(_), other) => Err(self.err(format!(
+            (Type::List(_), other) => Err(self.err_at(call_span, format!(
                 "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter)",
                 other
             ))),
@@ -2829,19 +2841,19 @@ impl<'a> CodegenCtx<'a> {
                 Ok((format!("(({}).borrow().len() as i64)", obj_code), Type::Int))
             }
             (Type::Map(k, v), "get") => self.gen_map_get(&obj_code, k, v, args),
-            (Type::Map(_, _), other) => Err(self.err(format!(
+            (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
                 "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len)",
                 other
             ))),
 
             // ---- Tipos custom ----
-            (Type::Nominal(_), m) => Err(self.err(format!(
+            (Type::Nominal(_), m) => Err(self.err_at(call_span, format!(
                 "métodos custom sobre `type` (`.{}`): primero hay que cerrar la deuda de 3.2 en el parser",
                 m
             ))),
 
             // ---- Otros ----
-            (other, m) => Err(self.err(format!(
+            (other, m) => Err(self.err_at(call_span, format!(
                 "method call `.{}` sobre `{}`: no soportado en codegen",
                 m,
                 display_type(other, self.env)
@@ -3046,10 +3058,11 @@ impl<'a> CodegenCtx<'a> {
         expected_ret_ty: Option<&Type>,
         method: &str,
     ) -> Result<(String, Type), FitzError> {
+        let arg_span = arg.span();
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),
             _ => {
-                return Err(self.err(format!(
+                return Err(self.err_at(arg_span, format!(
                     "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}`. \
                      Pasar una fn nombrada como callback (higher-order) llega en un sub-paso \
                      posterior de 5b.",
@@ -3058,7 +3071,7 @@ impl<'a> CodegenCtx<'a> {
             }
         };
         if params.len() != 1 {
-            return Err(self.err(format!(
+            return Err(self.err_at(arg_span, format!(
                 "el callback de `.{}` toma 1 parámetro, recibió {}",
                 method,
                 params.len()
@@ -3125,6 +3138,7 @@ impl<'a> CodegenCtx<'a> {
         &mut self,
         params: &[crate::ast::Param],
         body: &[Stmt],
+        fn_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         // Cada param exige anotación de tipo — sin contexto bidireccional
         // no podemos inferir el tipo del param desde su uso. Esta es la
@@ -3132,14 +3146,14 @@ impl<'a> CodegenCtx<'a> {
         let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
         for p in params {
             let Some(te) = p.type_.as_ref() else {
-                return Err(self.err(format!(
+                return Err(self.err_at(fn_span, format!(
                     "función anónima `fn({})`: el parámetro `{}` necesita una anotación de \
                      tipo en el subset compilable (deuda 5b.1). Anotalo o usá `fitz run`.",
                     p.name, p.name
                 )));
             };
             let t = resolve_type_expr(te, self.env).map_err(|e| {
-                self.err(format!(
+                self.err_at(fn_span, format!(
                     "función anónima: parámetro `{}`: {}",
                     p.name, e.message
                 ))
@@ -3338,6 +3352,7 @@ impl<'a> CodegenCtx<'a> {
     /// `<expr>?` directo: rustc se encarga de la propagación y del
     /// desempaque del Ok.
     fn gen_try(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
+        let inner_span = inner.span();
         let (code, ty) = self.gen_expr(inner)?;
         let inner_ty = match &ty {
             Type::Result(t) => (**t).clone(),
@@ -3348,7 +3363,7 @@ impl<'a> CodegenCtx<'a> {
             // camino no se ejerce mucho.)
             Type::Any => Type::Any,
             other => {
-                return Err(self.err(format!(
+                return Err(self.err_at(inner_span, format!(
                     "operador `?` sobre `{}`: el operando debe ser `Result<T>`",
                     display_type(other, self.env)
                 )));
@@ -3359,7 +3374,7 @@ impl<'a> CodegenCtx<'a> {
             Type::Result(_) => {}
             Type::Any => {}
             _ => {
-                return Err(self.err(
+                return Err(self.err_at(inner_span,
                     "operador `?` solo puede usarse adentro de una función que retorne \
                      `Result<...>`",
                 ));
@@ -3543,7 +3558,7 @@ impl<'a> CodegenCtx<'a> {
     /// como en el checker (5.3.1): primer elemento define el tipo, los
     /// demás deben unificar via `lub` (Int↔Float, T↔Null). Mezcla
     /// irrecuperable o lista vacía sin contexto → error claro.
-    fn gen_list_lit(&mut self, items: &[Expr]) -> Result<(String, Type), FitzError> {
+    fn gen_list_lit(&mut self, items: &[Expr], list_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
         if items.is_empty() {
             // Lista vacía: no podemos sintetizar T. Emitimos un código
             // genérico `Vec::new()` y devolvemos `List<Any>`. El
@@ -3564,7 +3579,7 @@ impl<'a> CodegenCtx<'a> {
         let mut common_ty = item_codes_tys[0].1.clone();
         for (_, t) in &item_codes_tys[1..] {
             common_ty = lub(&common_ty, t).map_err(|_| {
-                self.err(format!(
+                self.err_at(list_span, format!(
                     "lista con elementos de tipos incompatibles (`{}` y `{}`): el subset compilado \
                      exige una lista homogénea (todos del mismo tipo, con coerciones Int→Float y \
                      T→T? permitidas)",
@@ -3574,7 +3589,7 @@ impl<'a> CodegenCtx<'a> {
             })?;
         }
         if matches!(common_ty, Type::Any) {
-            return Err(self.err(
+            return Err(self.err_at(list_span,
                 "lista con elementos cuyo tipo común es `Any`: el subset compilado exige tipo \
                  homogéneo concreto. Anotá el tipo o usá `fitz run` para interpretarlo sin restricción.",
             ));
@@ -3595,7 +3610,7 @@ impl<'a> CodegenCtx<'a> {
     /// (mismas reglas que List). Para `m["k"]` (Index) y `m.get(k)` la
     /// búsqueda es lineal O(n), pero matchea exactamente lo que hace
     /// el intérprete.
-    fn gen_map_lit(&mut self, pairs: &[(Expr, Expr)]) -> Result<(String, Type), FitzError> {
+    fn gen_map_lit(&mut self, pairs: &[(Expr, Expr)], map_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
         if pairs.is_empty() {
             return Ok((
                 "Rc::new(RefCell::new(Vec::new()))".to_string(),
@@ -3612,7 +3627,7 @@ impl<'a> CodegenCtx<'a> {
         let mut common_v = entries[0].1 .1.clone();
         for ((_, kt), (_, vt)) in &entries[1..] {
             common_k = lub(&common_k, kt).map_err(|_| {
-                self.err(format!(
+                self.err_at(map_span, format!(
                     "mapa con claves de tipos incompatibles (`{}` y `{}`): el subset compilado \
                      exige claves homogéneas",
                     display_type(&common_k, self.env),
@@ -3620,7 +3635,7 @@ impl<'a> CodegenCtx<'a> {
                 ))
             })?;
             common_v = lub(&common_v, vt).map_err(|_| {
-                self.err(format!(
+                self.err_at(map_span, format!(
                     "mapa con valores de tipos incompatibles (`{}` y `{}`): el subset compilado \
                      exige valores homogéneos",
                     display_type(&common_v, self.env),
@@ -3629,7 +3644,7 @@ impl<'a> CodegenCtx<'a> {
             })?;
         }
         if matches!(common_k, Type::Any) || matches!(common_v, Type::Any) {
-            return Err(self.err(
+            return Err(self.err_at(map_span,
                 "mapa con claves o valores cuyo tipo común es `Any`: el subset compilado exige \
                  tipos homogéneos concretos. Anotá el tipo o usá `fitz run` para interpretarlo \
                  sin restricción.",
@@ -3667,13 +3682,14 @@ impl<'a> CodegenCtx<'a> {
         &mut self,
         object: &Expr,
         index: &Expr,
+        index_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         let (idx_code, idx_ty) = self.gen_expr(index)?;
         match &obj_ty {
             Type::List(inner) => {
                 if !matches!(idx_ty, Type::Int) {
-                    return Err(self.err(format!(
+                    return Err(self.err_at(index.span(), format!(
                         "indexing de lista con `{}`: el índice debe ser Int",
                         display_type(&idx_ty, self.env)
                     )));
@@ -3706,7 +3722,7 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, (**v_ty).clone()))
             }
-            other => Err(self.err(format!(
+            other => Err(self.err_at(index_span, format!(
                 "indexing `[]` sobre `{}`: solo soportado en List<T> y Map<K, V>",
                 display_type(other, self.env)
             ))),
@@ -3717,6 +3733,7 @@ impl<'a> CodegenCtx<'a> {
         &mut self,
         type_name: &str,
         provided: &[(String, Expr)],
+        struct_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let sig = self
             .type_sigs
@@ -3728,7 +3745,7 @@ impl<'a> CodegenCtx<'a> {
         // este chequeo es defensa en profundidad.
         for (provided_name, _) in provided {
             if !sig.fields.iter().any(|f| &f.name == provided_name) {
-                return Err(self.err(format!(
+                return Err(self.err_at(struct_span, format!(
                     "el tipo `{}` no tiene un campo llamado `{}`",
                     type_name, provided_name
                 )));
@@ -3750,7 +3767,7 @@ impl<'a> CodegenCtx<'a> {
             } else if matches!(f.type_, Type::Nullable(_)) {
                 "None".to_string()
             } else {
-                return Err(self.err(format!(
+                return Err(self.err_at(struct_span, format!(
                     "falta el campo `{}` al instanciar `{}` (no tiene default y no es nullable)",
                     f.name, type_name
                 )));
@@ -3772,6 +3789,7 @@ impl<'a> CodegenCtx<'a> {
         &mut self,
         object: &Expr,
         field: &str,
+        field_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         // 5b.5: si el objeto es `Ident(ns)` con `ns` siendo un namespace
         // de módulo importado (`import foo`), traducimos `foo.bar` a
@@ -3785,7 +3803,7 @@ impl<'a> CodegenCtx<'a> {
                 if let Some((code, ty)) = self.resolve_namespace_field(ns, field) {
                     return Ok((code, ty));
                 }
-                return Err(self.err(format!(
+                return Err(self.err_at(field_span, format!(
                     "el módulo `{}` no exporta `{}` (ni fn ni constante)",
                     ns, field
                 )));
@@ -3794,13 +3812,15 @@ impl<'a> CodegenCtx<'a> {
 
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         let Type::Nominal(id) = &obj_ty else {
-            return Err(self.err(format!(
+            return Err(self.err_at(object.span(), format!(
                 "field access `.{}` sobre `{}`: solo se soporta sobre instancias de tipos custom",
                 field,
                 type_name(&obj_ty)
             )));
         };
         let info_name = self.env.info(*id).name.clone();
+        // Defensivo: el checker garantiza fields resueltos. Si llegamos
+        // acá sin fields, es un bug del compilador, no del usuario.
         let declared = self.fields_for_id(*id).ok_or_else(|| {
             self.err(format!(
                 "tipo `{}` con campos sin resolver — no se puede generar acceso",
@@ -3808,7 +3828,7 @@ impl<'a> CodegenCtx<'a> {
             ))
         })?;
         let Some(f) = declared.iter().find(|f| f.name == field) else {
-            return Err(self.err(format!(
+            return Err(self.err_at(field_span, format!(
                 "el tipo `{}` no tiene un campo llamado `{}`",
                 info_name, field
             )));
@@ -3832,6 +3852,7 @@ impl<'a> CodegenCtx<'a> {
         condition: &Expr,
         then: &[Stmt],
         else_: Option<&[Stmt]>,
+        if_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let (cond_code, _) = self.gen_expr(condition)?;
 
@@ -3869,7 +3890,7 @@ impl<'a> CodegenCtx<'a> {
                 (stmts, c, t)
             };
             let result_ty = lub(&then_tail_ty, &else_tail_ty).map_err(|_| {
-                self.err(format!(
+                self.err_at(if_span, format!(
                     "ramas de `if` con tipos incompatibles: `{}` y `{}`",
                     type_name(&then_tail_ty),
                     type_name(&else_tail_ty)
@@ -4101,6 +4122,7 @@ impl<'a> CodegenCtx<'a> {
     /// params + body (si corresponde), llama a la fn original, y
     /// convierte el resultado en una `axum::response::Response`.
     fn gen_http_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let fn_span = stmt.span();
         let Stmt::FnDef {
             name,
             params,
@@ -4114,6 +4136,8 @@ impl<'a> CodegenCtx<'a> {
 
         // Encontrar el decorator HTTP de esta fn (puede haber otros, los
         // ignoramos — el filtrado lo hizo `generate_main_rs`).
+        // Defensivo: `generate_main_rs` solo nos llama si la fn tiene
+        // decorator HTTP. Si llegamos acá sin uno, es un bug del codegen.
         let http_deco = decorators
             .iter()
             .find(|d| {
@@ -4121,7 +4145,7 @@ impl<'a> CodegenCtx<'a> {
             })
             .ok_or_else(|| self.err(format!("fn `{}`: sin decorator HTTP", name)))?;
         let path_arg = http_deco.args.first().ok_or_else(|| {
-            self.err(format!(
+            self.err_at(fn_span, format!(
                 "fn `{}`: @{} requiere un path como primer arg",
                 name, http_deco.name
             ))
@@ -4134,12 +4158,14 @@ impl<'a> CodegenCtx<'a> {
         let mut resolved_params: Vec<(String, Type)> = Vec::with_capacity(params.len());
         for p in params {
             let te = p.type_.as_ref().ok_or_else(|| {
-                self.err(format!(
+                self.err_at(fn_span, format!(
                     "fn `{}`: parámetro `{}` necesita anotación de tipo",
                     name, p.name
                 ))
             })?;
-            let t = resolve_type_expr(te, self.env).map_err(|e| self.err(e.message.clone()))?;
+            let t = resolve_type_expr(te, self.env).map_err(|e| {
+                self.err_at(fn_span, format!("fn `{}`: parámetro `{}`: {}", name, p.name, e.message))
+            })?;
             resolved_params.push((p.name.clone(), t));
         }
 
@@ -4150,7 +4176,7 @@ impl<'a> CodegenCtx<'a> {
             if template_params.iter().any(|tp| tp == n) {
                 path_params.push((n.clone(), t.clone()));
             } else if body_param.is_some() {
-                return Err(self.err(format!(
+                return Err(self.err_at(fn_span, format!(
                     "fn `{}`: solo se admite un body param por handler",
                     name
                 )));
@@ -4160,7 +4186,9 @@ impl<'a> CodegenCtx<'a> {
         }
 
         let resolved_ret = match return_type {
-            Some(te) => resolve_type_expr(te, self.env).map_err(|e| self.err(e.message.clone()))?,
+            Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
+                self.err_at(fn_span, format!("fn `{}`: return type: {}", name, e.message))
+            })?,
             None => Type::Null,
         };
         let returns_result = matches!(resolved_ret, Type::Result(_));
