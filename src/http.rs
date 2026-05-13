@@ -30,7 +30,7 @@
 
 use std::cell::RefCell;
 
-use crate::ast::Expr;
+use crate::ast::{Expr, TypeExpr};
 #[cfg(test)]
 use crate::ast::Span;
 use crate::value::{Value, ResultVariant};
@@ -111,6 +111,19 @@ pub struct RouteSpec {
     /// Máximo un body por handler. La validación de cuántos hay y
     /// que sean compatibles la hace el evaluator durante el registro.
     pub body_param: Option<BodyParam>,
+    /// TypeExpr completos de los parámetros del handler, en orden.
+    /// Aditivo a `param_types` (que carga solo el `head_name` sin
+    /// genéricos ni nullables, suficiente para el dispatch). Acá
+    /// guardamos el `TypeExpr` íntegro para que la generación de
+    /// schema OpenAPI (Fase 7.1) pueda emitir `List<Int>`, `Int?`,
+    /// `Result<User>`, etc. sin perder estructura.
+    pub param_type_exprs: Vec<(String, Option<TypeExpr>)>,
+    /// Return type declarado del handler (si lo declaró). Lo usa el
+    /// generador OpenAPI para distinguir `200` solo vs `200` + `500`
+    /// (handlers que devuelven `Result<T>` mapean a ambos status).
+    /// Sin anotación → `None` y el generador trata el response como
+    /// "any" (`200` con schema vacío).
+    pub return_type_expr: Option<TypeExpr>,
 }
 
 /// Descripción del parámetro body de un handler: su nombre (para
@@ -2559,6 +2572,8 @@ mod tests {
                 handler_name: "index".into(),
                 param_types: vec![],
                 body_param: None,
+                param_type_exprs: vec![],
+                return_type_expr: None,
             });
         });
         assert_eq!(reg.routes.len(), 1);

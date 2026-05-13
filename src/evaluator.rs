@@ -27,7 +27,7 @@ use async_recursion::async_recursion;
 
 use crate::ast::{
     AssignTarget, BinOpKind, Decorator, Expr, Param, Pattern, Program, Span, Stmt, StrPart,
-    UnaryOpKind,
+    TypeExpr, UnaryOpKind,
 };
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
@@ -159,12 +159,13 @@ fn process_decorator(
     deco: &Decorator,
     fn_name: &str,
     params: &[Param],
+    return_type: &Option<TypeExpr>,
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
     // ¿Es un decorator HTTP conocido?
     if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
-        return register_http_route(method, deco, fn_name, params, handler, env);
+        return register_http_route(method, deco, fn_name, params, return_type, handler, env);
     }
 
     // `@server(port?, host?)`: configura el server. La fn que decora
@@ -288,6 +289,7 @@ fn register_http_route(
     deco: &Decorator,
     fn_name: &str,
     params: &[Param],
+    return_type: &Option<TypeExpr>,
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -421,6 +423,14 @@ fn register_http_route(
         })
         .collect();
 
+    // TypeExpr completos por param, en orden. Aditivo: el dispatch
+    // HTTP usa `param_types` (head names); el generador OpenAPI (7.1)
+    // consume estos TypeExpr íntegros.
+    let param_type_exprs: Vec<(String, Option<TypeExpr>)> = params
+        .iter()
+        .map(|p| (p.name.clone(), p.type_.clone()))
+        .collect();
+
     push_route(RouteSpec {
         method,
         path: template.path,
@@ -430,6 +440,8 @@ fn register_http_route(
         handler_name: fn_name.to_string(),
         param_types,
         body_param,
+        param_type_exprs,
+        return_type_expr: return_type.clone(),
     });
 
     Ok(())
@@ -868,7 +880,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // — los tests y el REPL evalúan sin HTTP. Cualquier decorator no
         // HTTP también es error: `@server` (4.4) y otros entran cuando
         // los implementemos.
-        Stmt::FnDef { name, params, return_type: _, body, is_async, decorators, span: _ } => {
+        Stmt::FnDef { name, params, return_type, body, is_async, decorators, span: _ } => {
             let func = Value::Function {
                 params: params.clone(),
                 body: body.clone(),
@@ -880,9 +892,11 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // alguno falla, no queremos un binding mitad-registrado.
             // Pasamos el env actual para que el resolver del decorator
             // pueda mirar el `type` declarado de un parámetro body
-            // (los `type` ya fueron registrados en este mismo env).
+            // (los `type` ya fueron registrados en este mismo env). El
+            // `return_type` viaja para que el handler HTTP lo almacene
+            // en `RouteSpec` (insumo del generador OpenAPI, 7.1).
             for deco in decorators {
-                process_decorator(deco, name, params, &func, &env)?;
+                process_decorator(deco, name, params, return_type, &func, &env)?;
             }
 
             env.borrow_mut().define(name.clone(), func);

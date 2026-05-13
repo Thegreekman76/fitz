@@ -13,6 +13,7 @@ mod error;      // manejo de errores del compilador
 mod http;       // Fase 4 — HTTP nativo (registry + runtime)
 mod types;      // Fase 5.2 — sistema de tipos resuelto + checker base
 mod codegen;    // Fase 5b.1 — transpile AST → Rust → binario
+mod openapi;    // Fase 7.1 — generador OpenAPI 3.1
 
 use clap::{Parser, Subcommand};
 use std::fs;
@@ -49,6 +50,11 @@ enum Commands {
         /// Archivo a verificar
         file: PathBuf,
     },
+    /// Emite el schema OpenAPI 3.1 del programa a stdout
+    Openapi {
+        /// Archivo a inspeccionar
+        file: PathBuf,
+    },
 }
 
 fn main() {
@@ -63,6 +69,81 @@ fn main() {
         }
         Commands::Check { file } => {
             check_file(&file);
+        }
+        Commands::Openapi { file } => {
+            openapi_file(&file);
+        }
+    }
+}
+
+/// `fitz openapi <archivo>` — Fase 7.1. Lex + parse + check + eval
+/// con un `HttpRegistry` activo para que los decoradores HTTP registren
+/// sus rutas; después escupe el schema OpenAPI 3.1 a stdout
+/// (pretty-printed).
+///
+/// No levanta el server: el registry se popula durante `eval` (los
+/// decoradores HTTP son side-effects del top-level) y el schema se
+/// puede derivar de ahí + el AST.
+///
+/// Útil para CI, generar SDKs con openapi-generator, snapshot testing
+/// del contrato.
+fn openapi_file(path: &PathBuf) {
+    let source = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error leyendo {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+
+    let tokens = match lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // Checker estricto: no tiene sentido emitir un schema de un programa
+    // con errores de tipo (el handler quizá ni siquiera tipa). Mismo
+    // criterio que `fitz build`.
+    let (_env, type_errors) = types::check_program(&program);
+    if !type_errors.is_empty() {
+        eprintln!(
+            "✗ {} — {} error(es) de tipo:",
+            path.display(),
+            type_errors.len()
+        );
+        for e in &type_errors {
+            eprintln!("  {}", e);
+        }
+        std::process::exit(1);
+    }
+
+    let base_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    let (eval_result, registry) = http::with_active_registry(|| {
+        evaluator::eval_with_base_sync(program.clone(), base_dir)
+    });
+    if let Err(e) = eval_result {
+        eprintln!("{}", e);
+        std::process::exit(1);
+    }
+
+    let schema = openapi::generate_openapi(&registry, &program);
+    match serde_json::to_string_pretty(&schema) {
+        Ok(s) => println!("{}", s),
+        Err(e) => {
+            eprintln!("Error serializando schema: {}", e);
+            std::process::exit(1);
         }
     }
 }
