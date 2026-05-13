@@ -5665,18 +5665,6 @@ mod tests {
         generate_rust(&program, &env)
     }
 
-    fn assert_contains(src: &str, fragments: &[&str]) {
-        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
-        for f in fragments {
-            assert!(
-                code.contains(f),
-                "esperaba `{}` en la salida, no estaba.\nSalida:\n{}",
-                f,
-                code
-            );
-        }
-    }
-
     fn assert_err_contains(src: &str, needles: &[&str]) {
         let err = gen(src).expect_err("esperaba error de codegen");
         for n in needles {
@@ -6384,7 +6372,16 @@ mod tests {
     #[test]
     fn programa_vacio_genera_main_vacio() {
         let code = gen("").unwrap();
-        assert!(code.contains("fn main()"));
+        let file = ast_test::parse(&code);
+        let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
+        // main vacío: sin params, sin return type, body sin stmts.
+        assert_eq!(ast_test::fn_arity(main), 0);
+        assert!(ast_test::fn_return_type(main).is_none());
+        assert!(
+            main.block.stmts.is_empty(),
+            "esperaba main body vacío, got: {}",
+            ast_test::fn_body_text(main)
+        );
     }
 
     #[test]
@@ -6468,9 +6465,21 @@ mod tests {
     fn str_interp_genera_format_macro() {
         // Para una var Int adentro de StrInterp, generamos `format!`
         // pasando la var directo (no necesita `.clone()`).
-        assert_contains(
-            "let n = 5\nlet s = \"x es {n}\"",
-            &["format!(\"x es {}\", n)"],
+        let code = gen("let n = 5\nlet s = \"x es {n}\"").unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let args = ast_test::first_macro_args_in_stmts(stmts, "format")
+            .expect("falta format!");
+        assert!(
+            args.contains("\"x es {}\""),
+            "esperaba template `\"x es {{}}\"`, got: {}",
+            args
+        );
+        // n: Int (Copy) pasa directo sin .clone().
+        assert!(
+            !args.contains("n . clone") && !args.contains("n .clone"),
+            "Int no debería usar .clone(), got: {}",
+            args
         );
     }
 
@@ -6479,9 +6488,15 @@ mod tests {
         // Para Str, generamos `.clone()` porque format! borrowea
         // pero seguimos pasando el `Ident` evaluado, que sí incluye
         // el clone.
-        assert_contains(
-            "let name = \"Fitz\"\nlet s = \"hola, {name}\"",
-            &["format!(\"hola, {}\", name.clone())"],
+        let code = gen("let name = \"Fitz\"\nlet s = \"hola, {name}\"").unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let args = ast_test::first_macro_args_in_stmts(stmts, "format")
+            .expect("falta format!");
+        assert!(
+            args.contains("\"hola, {}\"") && args.contains("name . clone"),
+            "esperaba `format!(\"hola, {{}}\", name.clone())`, got: {}",
+            args
         );
     }
 
@@ -6729,16 +6744,23 @@ mod tests {
     #[test]
     fn type_def_emite_impl_display_canonico() {
         let code = gen("type User { id: Int, name: Str }").unwrap();
-        assert!(
-            code.contains("impl std::fmt::Display for UserData"),
-            "falta impl Display, got:\n{}",
-            code
-        );
+        let file = ast_test::parse(&code);
+        let im = ast_test::find_impl(&file, "Display", "UserData")
+            .expect("falta impl Display for UserData");
+        let impl_text = ast_test::ts(im);
         // El Display escribe `User { id: <int>, name: "<str>" }` —
         // strings con comillas adentro de la instancia (igual al
         // intérprete).
-        assert!(code.contains("\"User {{\""), "falta el header del Display");
-        assert!(code.contains("\"\\\"{}\\\"\""), "falta el patrón con comillas para Str");
+        assert!(
+            impl_text.contains("\"User {{\""),
+            "falta el header del Display `\"User {{{{\"`, got:\n{}",
+            impl_text
+        );
+        assert!(
+            impl_text.contains("\"\\\"{}\\\"\""),
+            "falta el patrón con comillas para Str, got:\n{}",
+            impl_text
+        );
     }
 
     #[test]
@@ -6768,53 +6790,62 @@ mod tests {
     #[test]
     fn struct_lit_aplica_default_inline_si_falta_campo() {
         // `active: Bool = true` debe inyectarse cuando no se pasa.
-        let code = gen(
-            "type C { port: Int, active: Bool = true }\nlet c = C { port: 8080 }",
-        )
-        .unwrap();
+        let code = gen("type C { port: Int, active: Bool = true }\nlet c = C { port: 8080 }")
+            .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "c").expect("falta let c");
+        let init = ast_test::local_init(l).unwrap();
         assert!(
-            code.contains("active: true"),
-            "esperaba que el default `true` esté inyectado, got:\n{}",
-            code
+            init.contains("active : true"),
+            "esperaba que el default `active: true` esté inyectado, fue: {}",
+            init
         );
     }
 
     #[test]
     fn struct_lit_nullable_omitido_se_resuelve_como_none() {
-        let code = gen(
-            "type U { id: Int, email: Str? }\nlet u = U { id: 1 }",
-        )
-        .unwrap();
+        let code = gen("type U { id: Int, email: Str? }\nlet u = U { id: 1 }").unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "u").expect("falta let u");
+        let init = ast_test::local_init(l).unwrap();
         assert!(
-            code.contains("email: None"),
-            "esperaba `email: None`, got:\n{}",
-            code
+            init.contains("email : None"),
+            "esperaba `email: None` (nullable omitido), fue: {}",
+            init
         );
     }
 
     #[test]
     fn struct_lit_valor_str_a_campo_nullable_se_envuelve_en_some() {
-        let code = gen(
-            "type U { id: Int, email: Str? }\nlet u = U { id: 1, email: \"a@b\" }",
-        )
-        .unwrap();
+        let code = gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: \"a@b\" }")
+            .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "u").expect("falta let u");
+        let init = ast_test::local_init(l).unwrap();
         assert!(
-            code.contains("email: Some(String::from(\"a@b\"))"),
-            "esperaba `Some(String::from(...))`, got:\n{}",
-            code
+            init.contains("email : Some")
+                && init.contains("String :: from")
+                && init.contains("\"a@b\""),
+            "esperaba `email: Some(String::from(\"a@b\"))`, fue: {}",
+            init
         );
     }
 
     #[test]
     fn struct_lit_null_literal_a_campo_nullable_es_none() {
-        let code = gen(
-            "type U { id: Int, email: Str? }\nlet u = U { id: 1, email: null }",
-        )
-        .unwrap();
+        let code = gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: null }")
+            .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "u").expect("falta let u");
+        let init = ast_test::local_init(l).unwrap();
         assert!(
-            code.contains("email: None"),
-            "esperaba `email: None`, got:\n{}",
-            code
+            init.contains("email : None"),
+            "esperaba `email: None` (null literal), fue: {}",
+            init
         );
     }
 
@@ -6885,10 +6916,25 @@ mod tests {
             "type U { id: Int }\nfn f(x: U) -> Int => x.id\nlet u = U { id: 1 }\nlet n = f(u)",
         )
         .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        let init_expr = ast_test::local_init_expr(l).expect("falta init de n");
+        let call = match init_expr {
+            syn::Expr::Call(c) => c,
+            other => panic!(
+                "esperaba init como Call, fue: {}",
+                ast_test::ts(other)
+            ),
+        };
+        assert_eq!(ast_test::ts(&*call.func), "f", "callee debería ser `f`");
+        assert_eq!(call.args.len(), 1, "esperaba 1 arg");
+        let arg = call.args.first().unwrap();
+        let arg_text = ast_test::ts(arg);
         assert!(
-            code.contains("f(u.clone())"),
-            "esperaba `f(u.clone())`, got:\n{}",
-            code
+            arg_text.contains("u") && arg_text.contains(". clone"),
+            "esperaba arg `u.clone()`, fue: {}",
+            arg_text
         );
     }
 
@@ -6896,19 +6942,17 @@ mod tests {
     fn print_de_instance_usa_show_expr_con_display() {
         // `print(u)` para u: U → format!("{}", &*u.borrow()) dentro
         // del println!.
-        let code = gen(
-            "type U { id: Int }\nlet u = U { id: 1 }\nprint(u)",
-        )
-        .unwrap();
+        let code = gen("type U { id: Int }\nlet u = U { id: 1 }\nprint(u)").unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let args = ast_test::first_macro_args_in_stmts(stmts, "println")
+            .expect("falta println!");
         assert!(
-            code.contains("format!(\"{}\", &*"),
-            "esperaba `format!(\"{{}}\", &*(...).borrow())`, got:\n{}",
-            code
-        );
-        assert!(
-            code.contains(".borrow())"),
-            "esperaba `.borrow())` en el print, got:\n{}",
-            code
+            args.contains("format !")
+                && (args.contains("& *") || args.contains("&*"))
+                && args.contains(". borrow"),
+            "esperaba `format!(\"{{}}\", &*(...).borrow())` en el println!, got: {}",
+            args
         );
     }
 
@@ -6939,10 +6983,23 @@ mod tests {
             "type U { id: Int }\nlet a = U { id: 1 }\nlet b = U { id: 1 }\nlet eq = a == b",
         )
         .unwrap();
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "eq").expect("falta let eq");
+        let init = ast_test::local_init(l).unwrap();
+        // `*a.borrow() == *b.borrow()`: ambos lados aplican .borrow() y
+        // se desreferencian antes de comparar.
+        let borrow_count = init.matches(". borrow").count();
         assert!(
-            code.contains(").borrow() == *(") || code.contains(".borrow() == *"),
-            "esperaba comparación con `*x.borrow() == *y.borrow()`, got:\n{}",
-            code
+            borrow_count >= 2,
+            "esperaba al menos 2 `.borrow()` en la comparación, fue {} en: {}",
+            borrow_count,
+            init
+        );
+        assert!(
+            init.contains("=="),
+            "esperaba operador `==`, fue: {}",
+            init
         );
     }
 
@@ -6951,39 +7008,77 @@ mod tests {
     #[test]
     fn if_como_expresion_emite_branches_sin_punto_y_coma() {
         let code = gen("let x = if (true) { 1 } else { 2 }").unwrap();
-        // El bloque del if tiene su última expresión sin `;` para que
-        // el `if` evalúe a un valor (`1` o `2`).
-        assert!(
-            code.contains("(if true {") || code.contains("(if (true)"),
-            "esperaba un if-expression envuelto en paréntesis, got:\n{}",
-            code
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("i64"),
+            "esperaba `x: i64`"
         );
+        // El init es un Expr::If (opcionalmente envuelto en paréntesis).
+        let init = ast_test::local_init_expr(l).expect("falta init de x");
+        let mut e = init;
+        while let syn::Expr::Paren(p) = e {
+            e = &*p.expr;
+        }
+        let if_expr = match e {
+            syn::Expr::If(i) => i,
+            _ => panic!(
+                "esperaba Expr::If como init de x, fue: {}",
+                ast_test::ts(init)
+            ),
+        };
+        // then y else terminan en tail (Stmt::Expr sin `;`) — clave
+        // para que el if devuelva valor.
+        let then_tail = if_expr
+            .then_branch
+            .stmts
+            .last()
+            .expect("rama then sin stmts");
         assert!(
-            code.contains("1i64\n") && code.contains("2i64\n"),
-            "esperaba `1i64` y `2i64` como tail sin `;`, got:\n{}",
-            code
+            matches!(then_tail, syn::Stmt::Expr(_, None)),
+            "rama then debe terminar en tail sin `;`, last stmt: {}",
+            ast_test::ts(then_tail)
         );
-        // x debe quedar como i64.
+        let else_block = match if_expr.else_branch.as_ref() {
+            Some((_, expr)) => match expr.as_ref() {
+                syn::Expr::Block(b) => &b.block,
+                _ => panic!("else no es Block, fue: {}", ast_test::ts(expr.as_ref())),
+            },
+            None => panic!("falta rama else"),
+        };
+        let else_tail = else_block.stmts.last().expect("rama else sin stmts");
         assert!(
-            code.contains("let mut x: i64 = "),
-            "esperaba `let mut x: i64 = ...`, got:\n{}",
-            code
+            matches!(else_tail, syn::Stmt::Expr(_, None)),
+            "rama else debe terminar en tail sin `;`"
+        );
+        // Los valores 1 y 2 aparecen como literales i64.
+        let body = ast_test::ts(if_expr);
+        assert!(
+            body.contains("1i64") && body.contains("2i64"),
+            "esperaba `1i64` y `2i64` en las ramas, fue: {}",
+            body
         );
     }
 
     #[test]
     fn if_expresion_unifica_int_float_a_float() {
         let code = gen("let x = if (true) { 1 } else { 2.5 }").unwrap();
-        assert!(
-            code.contains("let mut x: f64 = "),
-            "esperaba `x: f64`, got:\n{}",
-            code
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("f64"),
+            "esperaba `x: f64`"
         );
-        // La rama Int se coerciona explícitamente: `(1i64 as f64)`.
+        let init = ast_test::local_init(l).unwrap();
+        // La rama Int se coerciona explícitamente: `1i64 as f64`.
         assert!(
-            code.contains("(1i64 as f64)"),
-            "esperaba coerción Int→Float en la rama then, got:\n{}",
-            code
+            init.contains("1i64 as f64"),
+            "esperaba coerción Int→Float en rama then, fue: {}",
+            init
         );
     }
 
@@ -6993,16 +7088,31 @@ mod tests {
         // statement; print no se trata como tail expression
         // (no es una expresión con valor en Fitz).
         let code = gen("if (true) { print(\"a\") } else { print(\"b\") }").unwrap();
-        // Cada print queda emitido con `;` final (terminator de stmt).
+        let file = ast_test::parse(&code);
+        let stmts = ast_test::main_block_stmts(&file);
+        let if_expr = ast_test::find_if(stmts).expect("falta if en main");
+        // Las ramas son Block; cada una emite el print como stmt con `;`.
+        let then_text = ast_test::ts(&if_expr.then_branch);
         assert!(
-            code.contains("println!(\"{}\", String::from(\"a\"));"),
-            "esperaba print como stmt con `;`, got:\n{}",
-            code
+            then_text.contains("println !")
+                && then_text.contains("\"a\"")
+                && then_text.contains(";"),
+            "esperaba `println!(...\"a\"...);` en then, fue: {}",
+            then_text
         );
+        let else_text = match if_expr.else_branch.as_ref() {
+            Some((_, expr)) => match expr.as_ref() {
+                syn::Expr::Block(b) => ast_test::ts(&b.block),
+                _ => panic!("else no es Block"),
+            },
+            None => panic!("falta else"),
+        };
         assert!(
-            code.contains("println!(\"{}\", String::from(\"b\"));"),
-            "esperaba print como stmt con `;` en else, got:\n{}",
-            code
+            else_text.contains("println !")
+                && else_text.contains("\"b\"")
+                && else_text.contains(";"),
+            "esperaba `println!(...\"b\"...);` en else, fue: {}",
+            else_text
         );
     }
 
