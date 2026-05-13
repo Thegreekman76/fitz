@@ -3132,15 +3132,18 @@ lleguemos".
 ---
 
 ## Fase 7 — DX HTTP 📋
-**Estado: PROPUESTA — siguiente comprometida después de Fase 6**
+**Estado: PROPUESTA — siguiente comprometida (Fase 6 cerrada
+2026-05-13)**
 
 Con async nativo cerrado (Fase 6), Fitz cumple la promesa de
 HTTP de primera clase a nivel de ejecución. Falta la otra mitad
 de la paridad con FastAPI: **documentación de la API
 autogenerada**. Toda la información necesaria ya vive en el
 `HttpRegistry` + `TypeEnv` (verbo, path, tipos de path params,
-schema del body, return type, defaults, nullables). Esta fase
-camina ese metadato a un OpenAPI 3.1 + UI embebida.
+**query params** ya cerrados en post-5b, schema del body,
+return type, defaults, nullables, **status codes custom** ya
+cerrados en post-5b). Esta fase camina ese metadato a un
+OpenAPI 3.1 + UI embebida.
 
 ### Decisiones de diseño tomadas
 
@@ -3151,15 +3154,58 @@ camina ese metadato a un OpenAPI 3.1 + UI embebida.
    moderna (mantenida activamente, mejor look default, más
    liviana). Redoc es alternativa razonable; Swagger UI queda
    descartado por peso y look anticuado.
-3. **Default `enable_docs: true`, opt-out con
+3. **Scalar vía CDN** (confirmado en sesión post-6). El HTML
+   embebido es ~10 líneas que cargan el bundle de Scalar desde
+   unpkg/jsdelivr. Cero peso extra al binario; trade-off
+   aceptado: la primera carga necesita red (después el
+   navegador cachea). Mismo patrón que FastAPI con Swagger.
+   Bundle local queda como deuda post-7 si aparece presión.
+4. **Default `enable_docs: true`, opt-out con
    `@server(docs=false)`**. Que el camino feliz "fitz build &&
    ./bin" entregue `/docs` sin tocar nada. Quien no quiera la
    superficie extra lo apaga explícito.
-4. **Mismo schema en `fitz run` y `fitz build`**. El generador
+5. **Mismo schema en `fitz run` y `fitz build`**. El generador
    vive en un módulo nuevo `src/openapi.rs` reusado por ambos
    pipelines. Bit-a-bit idéntico es el contrato.
+6. **Kwargs en decoradores como sub-paso dedicado** (confirmado
+   en sesión post-6). En lugar de hack-ear `@server(docs=...)`
+   como caso especial, sumamos kwargs generales al parser/AST
+   de decorators: `@deco(pos1, pos2, key=value, ...)`. Sirve
+   para 7.4 (`@server(docs=false)`) y desbloquea futuros
+   decorators con configuración. Sub-paso 7.0.
+7. **Doc-strings sobre handlers (descripciones OpenAPI):
+   pospuestos** (confirmado en sesión post-6). El parser hoy
+   descarta comentarios; retenerlos como doc-strings es
+   refactor mediano (lexer + parser + AST + tests). F7 sale
+   con `summary`/`description` ausentes en el schema. Refresh
+   menor cuando la deuda se cierre.
 
 ### Pasos
+
+#### 7.0 — Kwargs en decoradores
+**Pendiente** — pre-requisito para `@server(docs=false)` y para
+cualquier decorator futuro con configuración no-posicional.
+
+- Parser: `@deco(pos1, pos2, key1=value1, key2=value2)` — los
+  kwargs van al final, después de los positionals. Sintaxis
+  alineada con Python/Rust (que ya conocen la mayoría de los
+  usuarios objetivo de Fitz).
+- AST: `Decorator { name: String, args: Vec<Expr>, kwargs:
+  Vec<(String, Expr)> }`. Mantenemos los positionals como
+  `Vec<Expr>` para compat; los kwargs van separados.
+- Checker: validación de tipos de cada kwarg igual que un arg
+  posicional (cada decorator define qué kwargs acepta).
+- Evaluator: `process_decorator` consume kwargs sin tocar el
+  flow general; el handler de cada decorator (`@server`,
+  `@get`, etc.) decide cuáles acepta.
+- Tests: parser smokes para `@get("/x", a=1)`, validar mezcla
+  positional + kwarg, rechazar `@get(a=1, "/x")` (positional
+  después de kwarg), rechazar kwargs duplicados.
+
+**Criterio de éxito**: `@server(3000, host="0.0.0.0",
+docs=false)` parsea, chequea, y evalúa correctamente — con
+`docs=false` aún no haciendo nada (lo cierra 7.4 cuando el
+campo se exponga en `ServerConfig`).
 
 #### 7.1 — Generador de schema OpenAPI + subcomando `fitz openapi`
 **Pendiente** — base de la fase.
@@ -3208,14 +3254,15 @@ camina ese metadato a un OpenAPI 3.1 + UI embebida.
 **Pendiente** — control de superficie.
 
 - `ServerConfig` suma campo `enable_docs: bool` (default `true`).
-- Parser de `@server(...)` acepta el kwarg `docs` (kwargs son
-  deuda nueva — los args positionals actuales no cubren esto
-  bien; decidir si pasamos `@server` a kwargs ahora o mantenemos
-  positionals + caso especial `docs`).
+- Aprovecha los kwargs de 7.0: `@server(...)` acepta el kwarg
+  `docs: Bool`. El handler de `@server` en el evaluator lee
+  `kwargs` y popula `enable_docs` si está; si no, default
+  `true`.
 - Cuando `enable_docs: false`, las rutas `/openapi.json` y
-  `/docs` NO se registran.
+  `/docs` NO se registran (ni en `fitz run` ni en el binario
+  de `fitz build`).
 - Tests: `@server(3000)` levanta con docs, `@server(3000,
-  docs=false)` levanta sin docs.
+  docs=false)` levanta sin docs (404 en `/docs`).
 
 #### 7.5 — Paridad en `fitz build`
 **Pendiente** — el binario nativo también sirve docs.
@@ -3232,19 +3279,24 @@ camina ese metadato a un OpenAPI 3.1 + UI embebida.
   sirve `/docs` y `/openapi.json` con el mismo schema que
   `fitz run`.
 
-#### 7.6 — Query params y headers como params del handler
-**Pendiente** — paridad con FastAPI.
+#### 7.6 — Headers como params del handler (query params YA CERRADOS)
+**Parcialmente cerrado** — query params ya implementados en una
+mini-fase post-5b (sintaxis `@get("/items?key={name}")`); falta:
 
-- Convención: un handler hoy tiene path params (matched contra
-  `{name}` en el path) o body. Sumar:
-  - **Query params**: parámetros del handler que no están en
-    el path se interpretan como query si el método es
-    GET/DELETE. Sintaxis: `fn search(q: Str, limit: Int) -> ...`.
-  - **Headers**: anotación explícita necesaria para
-    desambiguar — convención a decidir (`@header(name="Authorization")
-    fn ...` o `header_auth: Str` con convención del prefijo).
-- OpenAPI schema refleja query/header params en `parameters`
-  con `in: query` o `in: header`.
+- **Headers**: anotación explícita necesaria para desambiguar.
+  Convención a decidir en 7.x:
+  - Opción A — decorator dedicado: `@header(name="Authorization")
+    fn protected(auth: Str) -> ...`.
+  - Opción B — convención del nombre: `header_<name>: Str` se
+    interpreta como header.
+  - Opción C — kwargs explícitos en `@get(...)`: `@get("/x",
+    headers=["Authorization"])`.
+- OpenAPI schema (7.1) refleja query/header params en
+  `parameters` con `in: query` (ya disponible) o `in: header`
+  (depende del approach).
+- Tests: handler con header obligatorio rechaza request sin él
+  con 400; con valor coercionado a `Str` (siempre); schema
+  declara el header en `parameters`.
 
 #### 7.7 — Guía + ejemplo + cierre formal de Fase 7
 **Pendiente** — documentación viva.
@@ -3271,13 +3323,35 @@ camina ese metadato a un OpenAPI 3.1 + UI embebida.
    `@server(api_version="...")` es deuda chica, pospuesta.
 
 ### Features de la fase entera
+- [ ] Kwargs en decoradores (7.0) — pre-req
 - [ ] Generador de schema OpenAPI + `fitz openapi` (7.1)
 - [ ] `/openapi.json` autoregistrado en `fitz run` (7.2)
-- [ ] `/docs` con Scalar embebido (7.3)
+- [ ] `/docs` con Scalar via CDN (7.3)
 - [ ] `@server(docs=false)` opt-out (7.4)
 - [ ] Paridad en `fitz build` (7.5)
-- [ ] Query params y headers (7.6)
+- [ ] Headers como params del handler (7.6) — query params ya cerrados
 - [ ] Guía + ejemplo + cierre formal (7.7)
+
+### Pre-reqs / contexto al arrancar Fase 7
+
+- **Fase 6 cerrada** ✓. El runtime HTTP corre sobre tokio
+  current_thread con el bridge mpsc/oneshot que sobrevivió a
+  6.5 (postergado a F17). Las rutas nuevas `/openapi.json` y
+  `/docs` se suman al `Router` que arma `serve()` igual que
+  cualquier ruta del usuario.
+- **Query params ya cerrados** en una mini-fase post-5b. El
+  schema OpenAPI (7.1) los expone en `parameters` con
+  `in: query` reusando la metadata existente de `RouteSpec`.
+- **Status codes custom ya cerrados** en una mini-fase post-5b.
+  El schema OpenAPI debe reflejar los posibles statuses por
+  handler — pero como hoy el AST guarda solo `Stmt::ReturnStatus
+  { status, body, span }` sin contar el conjunto completo a
+  nivel del handler, el primer pass emite solo `200` (caso
+  feliz) y `500` (Result Err). Códigos custom específicos
+  quedan como deuda menor de F7.
+- **F17 sigue pendiente** y no bloquea F7. La fase trabaja
+  sobre la superficie del lenguaje (schema + UI), no sobre la
+  mecánica interna del runtime.
 
 ---
 
