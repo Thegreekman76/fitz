@@ -81,38 +81,33 @@ Las áreas con más superficie a mejorar:
 
 ## Top 5 recomendaciones
 
-Por **valor/esfuerzo**, en orden:
+Por **valor/esfuerzo**, en orden (estado a fecha de hoy entre paréntesis):
 
-1. **L1 — Limpiar clippy** (Baja complejidad, alto valor): 12 errores
-   + 25 warnings. La mayoría son auto-fixables (`cargo clippy --fix`)
-   o triviales (`#[allow(clippy::approx_constant)]` en tests con
-   `3.14`, eliminar imports no usados). **Resultado**: `cargo clippy`
-   queda limpio, los CI futuros pueden bloquear regresiones nuevas.
-2. **L2 — Helper `with_temp_output`** en codegen (Baja): patrón
-   `mem::take(&mut self.output)` repetido 6 veces. Refactor a un
-   helper genérico que toma una closure. Reduce ~40 líneas, hace
-   futuros refactors más seguros.
-3. **R1 — Validar `fn main` con decoradores no-`@server`** (Baja):
-   hoy el codegen ignora silenciosamente `@get` si está sobre
-   `fn main`. Sumar validación explícita: error claro si `fn main`
-   tiene cualquier decorador HTTP que no sea `@server`.
-4. **T1 — Refactor de tests frágiles a snapshot/AST-based** (Media):
-   los unit del codegen usan `code.contains("string literal")`. Es
-   poco realista cambiar los 100+ tests, pero un buen 30-40% se
-   pueden mover a tests que validen *comportamiento* (compile + run)
-   vs *forma textual*. Trabajo de granito incremental.
-5. **S1 — Span en AST** (Alta complejidad, alto valor a largo plazo):
-   agregar `Span { line: usize, col: usize, len: usize }` a `Expr`
-   y `Stmt` (y opcionalmente `TypeExpr`), propagar desde tokens del
-   parser, consumir en mensajes de error de checker/evaluator/codegen.
-   Esto destraba mensajes de error útiles. Es trabajo grande
-   (refactor amplio) pero el roadmap ya lo cita como pospuesto, y es
-   condición habilitante para varias mejoras de UX. Sub-paso natural
-   para post-5b.
+1. **L1 — Limpiar clippy** (Baja complejidad, alto valor) ✅ **CERRADO**:
+   `cargo clippy --all-targets -- -D warnings` queda limpio. Los 12
+   errores + 25 warnings originales se cerraron a lo largo de los
+   sub-pasos post-5b; la última mini-sesión cerró 3 warnings
+   residuales (doc lazy continuation, let_and_return, expect_fun_call).
+2. **L2 — Helper `with_temp_output`** en codegen (Baja) — **ABIERTO**:
+   patrón `mem::take(&mut self.output)` ahora repetido ~13 veces
+   (creció con los sub-pasos de codegen). Refactor a helper genérico
+   que toma una closure. Reduce líneas, hace refactors más seguros.
+3. **R1 — Validar `fn main` con decoradores no-`@server`** (Baja) ✅
+   **CERRADO** en `codegen.rs:1128` + test E2E
+   `http_decorator_de_ruta_sobre_fn_main_es_error_claro`.
+4. **T1 — Refactor de tests frágiles a snapshot/AST-based** (Media)
+   ✅ **CERRADO ENTERO** en 3 batches (~115 unit tests migrados a
+   `syn`+`quote`). Ver fila T1 de la matriz y bullet en
+   "Próximos pasos".
+5. **S1 — Span en AST** (Alta complejidad, alto valor a largo plazo)
+   ✅ **CERRADO** en sus 3 frentes: B.1 (Stmt), S1.2 (Expr en checker
+   + evaluator), S1.codegen (52 sitios). Residual menor: `Pattern` y
+   `TypeExpr` sin span — baja prioridad.
 
 Los otros ~40 hallazgos son **incrementales**: cada uno suma poco
 solo, pero entre todos son una mejora de calidad significativa. Lista
-completa abajo.
+completa abajo (con marcas ✅ CERRADO / PARCIALMENTE CERRADO según
+estado real).
 
 ---
 
@@ -122,7 +117,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| R1 | `codegen.rs:811-849` | `fn main` con decorators no-`@server` se ignora silenciosamente. Falta validación. | Media | Baja |
+| R1 | ~~`codegen.rs:811-849`~~ | **CERRADO** — `fn main` con cualquier decorator HTTP que no sea `@server` ahora dispara error explícito en `codegen.rs:1128` ("`fn main` solo admite `@server(...)` como decorator"). Test E2E: `http_decorator_de_ruta_sobre_fn_main_es_error_claro`. | — | — |
 | R2 | `codegen.rs:3444+` | Nombres de variables/campos del usuario se inyectan en strings Rust sin sanitizar. Defensa en profundidad: agregar sanity check. Teórico hoy (parser filtra), pero frágil. | Media | Baja |
 | R3 | `codegen.rs` (múltiples) | `write!`/`writeln!` con `.unwrap()` ~36 sitios. No falla sobre `String` pero acopla a la representación de output. | Media | Media |
 | R4 | `evaluator.rs:1578` y otros | `unwrap()` sobre args ya validados por aridad. Seguro hoy, pero fragiliza ante refactor. | Baja | Baja |
@@ -153,7 +148,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| L2 | `codegen.rs` 6 sitios | Patrón `mem::take(&mut self.output)` + restore repetido. Helper `with_temp_output(f)` lo abstrae. | Baja | Baja |
+| L2 | `codegen.rs` ~13 sitios | Patrón `mem::take(&mut self.output)` + restore repetido (el conteo creció post-5b con los sub-pasos de codegen). Helper `with_temp_output(f)` lo abstrae. | Baja | Baja |
 | M1 | `codegen.rs:779-920` | `generate_main_rs` (~140 líneas) mezcla particionado + validaciones + emisión. Partir en `partition_stmts`, `validate_http`, etc. | Media | Media |
 | M2 | `codegen.rs:3529-3688` | `gen_http_handler_wrapper` (~160 líneas) hace todo: resuelve params, categoriza, emite. Extraer sub-fns. | Media | Media |
 | M3 | `types.rs:664-1110` | `infer_expr` 446 líneas con mega-match de 30+ branches. Extraer branches grandes. | Baja | Media |
@@ -197,24 +192,17 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| D1 | `guide.md:4-5` | Header desactualizado: cita Fase 5a / 784 tests. Debe ser Fase 5b cerrada / 949. | Alta | Baja |
+| D1 | `guide.md:4-5` | **PARCIALMENTE CERRADO** — el header ya cita "Fase 5b cerrada / 949 tests" (vs el original "Fase 5a / 784"). Sigue stale al estado actual (1043 tests, mini-fases post-5b cerradas). Mejor refresh recurrente cada vez que se mueve el contador, no deuda permanente. | Baja | Baja |
 | D2 | `guide.md:881-883` | Cita métodos de Str y reenvía a cap 13, pero cap 13 no los desarrolla. Verificar. | Baja | Baja |
 | D3 | `syntax-spec.md:1-8` | Header dice "BORRADOR v0.1" sin actualizar a Fase 5 cerrada. Falta marcar features ya implementadas. | Media | Media |
 | D4 | Repo root | Sin `CHANGELOG.md`. Con 5 fases cerradas, vale un registro histórico. | Baja | Media |
-| D5 | `guide.md:225-226` y otros | Status codes custom (`return 401 { ... }`) citados como "deuda" pero estado real ambiguo entre guía / README / spec. | Media | Media |
+| D5 | ~~`guide.md:225-226`~~ | **CERRADO** — status codes custom implementados end-to-end en su mini-fase dedicada (ver bullet en "Próximos pasos"); cap 17 de la guía documenta la sintaxis con ejemplos. README puede quedar stale (cita "deuda residual post-5") — refresh menor cuando se mueva. | — | — |
 | D6 | `guide.md:2725-2738` vs `:4305-4310` | Deudas residuales duplicadas en cap 13 y cap 18 (asignación a índice, state HTTP). Centralizar. | Baja | Baja |
-| D7 | `README.md:38` | Tabla async marca `🚧` con nota "se parsea pero runtime sync". Alinea con guía pero la nota podría ser más clara. | Baja | Baja |
+| D7 | `README.md:38` | **CERRADO** (suficiente) — la nota actual ("la sintaxis `async fn` se parsea, pero el runtime sigue siendo síncrono") es clara. Re-evaluar cuando aterrice Fase 6 (Async nativo). | — | — |
 
 ### Linter (clippy)
 
-| ID | Ubicación | Descripción | Prio | Comp |
-|----|-----------|-------------|------|------|
-| L1a | `lexer.rs:539`, `parser.rs:1914`, `value.rs:375` + 9 más | 12 errores: `3.14` literal en tests rechazado por clippy como "approximate value of PI". Falso positivo. | Alta | Baja |
-| L1b | varios módulos | Warnings: unused imports (`PathBuf`, `Param`, `delete/get/post/put`), `unused variable: return_type`. | Baja | Baja |
-| L1c | varios | Warnings: `if let` colapsables, `map_or` simplificables, `repeat().take()` más conciso, `vec!` innecesario. ~6 sugerencias auto-aplicables con `cargo clippy --fix`. | Baja | Baja |
-| L1d | `error.rs` | Variantes `UndefinedFunction`, `NullReference` nunca construidas. Fields `expected`/`found` nunca leídos. Limpiar muertos. | Baja | Baja |
-| L1e | `lexer.rs` | `EOF` flaggeado por "name contains capitalized acronym". Cosmético, ignorable con `#[allow]`. | Baja | Baja |
-| L1f | `parser.rs` | `.unwrap()` sobre `field.default` después de chequear `.is_some()` → reemplazar por `if let Some(_)`. | Baja | Baja |
+**L1 entero CERRADO** — `cargo clippy --all-targets --all-features -- -D warnings` queda limpio. Los items originales L1a-L1f se resolvieron a lo largo de los sub-pasos post-5b; el último pase (3 warnings residuales: doc lazy continuation, let_and_return, expect_fun_call) cerró en una mini-sesión dedicada tras T1 batch 3. Re-correr `cargo clippy` antes de cualquier commit grande.
 
 ---
 
@@ -223,9 +211,11 @@ completa abajo.
 - **Fase 6/7/8/9** (Async, DX HTTP, Interop Python, Ecosistema): decisión de roadmap, no
   auditoría.
 - **Features del syntax-spec NO implementadas** todavía
-  (status codes custom, async/await real, middleware, query params,
-  headers): documentadas como dirección, no contrato. La auditoría
-  solo señala donde docs/código discrepan sobre el estado actual.
+  (async/await real, middleware, headers, TLS, streaming):
+  documentadas como dirección, no contrato. La auditoría solo
+  señala donde docs/código discrepan sobre el estado actual.
+  **Nota post-5b**: status codes custom y query params se
+  cerraron en mini-fases dedicadas y salieron de esta lista.
 - **Verificación bit-a-bit profunda** de cada feature: el smoke test
   E2E ya cubre los ejemplos compilables; no re-verifiqué cada uno.
 - **Benchmarks de performance**: las menciones P1-P5 son
@@ -236,10 +226,10 @@ completa abajo.
 
 ## Próximos pasos sugeridos
 
-Una sesión razonable de cleanup ataca **L1 + L2 + R1 + D1** (todos
-prio Alta/Media con complejidad Baja): ~2-3 horas de trabajo, deja
-`cargo clippy` limpio, mejora la mantenibilidad puntual, y
-sincroniza la guía con el estado actual.
+**Quick wins cerrados** (L1 clippy, R1 fn main + decorators no-@server,
+D1 header guía parcial, D5 status codes spec). El cleanup chico que
+queda en pie son **L2** (helper `with_temp_output` — ~13 sitios) y
+**D3** (syntax-spec header desactualizado).
 
 **S1 (span en AST)** está cerrado en sus tres frentes: B.1 (Stmt),
 S1.2 (Expr en checker + evaluator), y **S1.codegen** (52 sitios
