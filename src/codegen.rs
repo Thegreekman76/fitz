@@ -5751,6 +5751,28 @@ mod tests {
             })
         }
 
+        /// Encuentra un `static NAME: T = expr;` top-level por nombre.
+        pub fn find_item_static<'a>(file: &'a File, name: &str) -> Option<&'a syn::ItemStatic> {
+            file.items.iter().find_map(|i| match i {
+                Item::Static(s) if s.ident == name => Some(s),
+                _ => None,
+            })
+        }
+
+        /// Encuentra un `const NAME: T = expr;` top-level por nombre.
+        pub fn find_item_const<'a>(file: &'a File, name: &str) -> Option<&'a syn::ItemConst> {
+            file.items.iter().find_map(|i| match i {
+                Item::Const(c) if c.ident == name => Some(c),
+                _ => None,
+            })
+        }
+
+        /// True si la visibilidad declarada es `pub` (no `pub(crate)` ni
+        /// privada).
+        pub fn vis_is_pub(vis: &syn::Visibility) -> bool {
+            matches!(vis, syn::Visibility::Public(_))
+        }
+
         /// Busca un `impl Trait for Type` por nombre del trait y del
         /// tipo. El matching usa `contains` sobre la representación
         /// tokenizada — sirve para `impl std::fmt::Display for Foo`
@@ -7936,20 +7958,6 @@ mod tests {
 
     // ---- 5b.6: HTTP / @server / handlers --------------------------------
 
-    /// Helper: genera el código de un programa con HTTP y verifica que
-    /// los fragmentos esperados estén presentes. Replica `assert_contains`
-    /// pero pasa por `generate_main_rs` (que decide el modo HTTP).
-    fn assert_http_contains(src: &str, fragments: &[&str]) {
-        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
-        for f in fragments {
-            assert!(
-                code.contains(f),
-                "esperaba `{}` en la salida, no estaba.\nSalida:\n{}",
-                f,
-                code
-            );
-        }
-    }
 
     #[test]
     fn http_main_emite_tokio_main_async() {
@@ -8841,45 +8849,66 @@ mod tests {
     fn modulo_emite_pub_en_struct_y_alias() {
         // Un módulo expone tipos custom con `pub` en struct + alias.
         let code = gen_module("type User { id: Int, name: Str }").unwrap();
+        let file = ast_test::parse(&code);
+        let user_data =
+            ast_test::find_item_struct(&file, "UserData").expect("falta struct UserData");
         assert!(
-            code.contains("pub struct UserData"),
-            "esperaba `pub struct UserData`, got:\n{}",
-            code
+            ast_test::vis_is_pub(&user_data.vis),
+            "esperaba `pub struct UserData`"
         );
+        let user_alias =
+            ast_test::find_item_type(&file, "User").expect("falta type alias User");
         assert!(
-            code.contains("pub type User = "),
-            "esperaba `pub type User = ...`, got:\n{}",
-            code
+            ast_test::vis_is_pub(&user_alias.vis),
+            "esperaba `pub type User`"
         );
     }
 
     #[test]
     fn modulo_emite_pub_en_fn() {
         let code = gen_module("fn add(a: Int, b: Int) -> Int => a + b").unwrap();
-        assert!(
-            code.contains("pub fn add("),
-            "esperaba `pub fn add(`, got:\n{}",
-            code
-        );
+        let file = ast_test::parse(&code);
+        let add = ast_test::find_item_fn(&file, "add").expect("falta fn add");
+        assert!(ast_test::vis_is_pub(&add.vis), "esperaba `pub fn add`");
     }
 
     #[test]
     fn modulo_let_str_top_level_se_emite_como_pub_static() {
         let code = gen_module("let MSG = \"hola\"").unwrap();
-        assert!(
-            code.contains("pub static MSG: &str = \"hola\""),
-            "esperaba `pub static MSG: &str = \"hola\"`, got:\n{}",
-            code
+        let file = ast_test::parse(&code);
+        let msg = ast_test::find_item_static(&file, "MSG").expect("falta static MSG");
+        assert!(ast_test::vis_is_pub(&msg.vis), "esperaba `pub static MSG`");
+        assert_eq!(
+            ast_test::ts(&*msg.ty),
+            "& str",
+            "esperaba tipo &str para MSG"
+        );
+        assert_eq!(
+            ast_test::ts(&*msg.expr),
+            "\"hola\"",
+            "esperaba init literal `\"hola\"` para MSG"
         );
     }
 
     #[test]
     fn modulo_let_int_top_level_se_emite_como_pub_const() {
         let code = gen_module("let MAX_RETRIES: Int = 5").unwrap();
+        let file = ast_test::parse(&code);
+        let max = ast_test::find_item_const(&file, "MAX_RETRIES")
+            .expect("falta const MAX_RETRIES");
         assert!(
-            code.contains("pub const MAX_RETRIES: i64 = 5i64"),
-            "esperaba `pub const MAX_RETRIES: i64 = 5i64`, got:\n{}",
-            code
+            ast_test::vis_is_pub(&max.vis),
+            "esperaba `pub const MAX_RETRIES`"
+        );
+        assert_eq!(
+            ast_test::ts(&*max.ty),
+            "i64",
+            "esperaba tipo i64 para MAX_RETRIES"
+        );
+        assert_eq!(
+            ast_test::ts(&*max.expr),
+            "5i64",
+            "esperaba init `5i64` para MAX_RETRIES"
         );
     }
 
@@ -8905,20 +8934,32 @@ mod tests {
             "let PREFIX = \"hola, \"\nfn greet(name: Str) -> Str => \"{PREFIX}{name}\"",
         )
         .unwrap();
+        let file = ast_test::parse(&code);
+        let prefix = ast_test::find_item_static(&file, "PREFIX")
+            .expect("falta static PREFIX");
+        assert!(ast_test::vis_is_pub(&prefix.vis), "esperaba `pub static PREFIX`");
+        assert_eq!(ast_test::ts(&*prefix.ty), "& str");
+        assert_eq!(ast_test::ts(&*prefix.expr), "\"hola, \"");
+        let greet = ast_test::find_item_fn(&file, "greet").expect("falta fn greet");
+        assert!(ast_test::vis_is_pub(&greet.vis), "esperaba `pub fn greet`");
+        let pats_tys = ast_test::fn_param_pats_and_types(greet);
+        assert_eq!(pats_tys.len(), 1, "esperaba 1 param");
         assert!(
-            code.contains("pub static PREFIX: &str = \"hola, \""),
-            "esperaba `pub static PREFIX`, got:\n{}",
-            code
+            pats_tys[0].0.contains("mut") && pats_tys[0].0.contains("name"),
+            "esperaba pat `mut name`, got: {:?}",
+            pats_tys
         );
-        assert!(
-            code.contains("pub fn greet(mut name: String) -> String"),
-            "esperaba `pub fn greet(mut name: String) -> String`, got:\n{}",
-            code
+        assert_eq!(pats_tys[0].1, "String", "esperaba tipo String para name");
+        assert_eq!(
+            ast_test::fn_return_type(greet).as_deref(),
+            Some("String"),
+            "esperaba return type String"
         );
+        let body = ast_test::fn_body_text(greet);
         assert!(
-            code.contains("String::from(PREFIX)"),
-            "esperaba que el body use `String::from(PREFIX)`, got:\n{}",
-            code
+            body.contains("String :: from (PREFIX)"),
+            "esperaba `String::from(PREFIX)` en el body, got:\n{}",
+            body
         );
     }
 
