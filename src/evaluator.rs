@@ -205,17 +205,6 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
         )));
     }
 
-    // 7.0: kwargs todavía no son aceptados por @server. El soporte
-    // para `docs=Bool` aterriza en 7.4.
-    if let Some((key, _)) = deco.kwargs.first() {
-        return Err(err(format!(
-            "@server sobre fn '{}': el argumento por nombre '{}=...' no \
-             está soportado todavía. La aceptación de kwargs (p.ej. `docs=false`) \
-             aterriza en la sub-fase 7.4.",
-            fn_name, key,
-        )));
-    }
-
     if deco.args.len() > 2 {
         return Err(err(format!(
             "@server(...) sobre fn '{}': admite hasta 2 args positionals \
@@ -267,6 +256,32 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                 return Err(err(format!(
                     "@server sobre fn '{}': segundo argumento (host) debe ser Str literal, \
                      recibió {:?}",
+                    fn_name, other,
+                )));
+            }
+        }
+    }
+
+    // 7.4: kwargs aceptados por @server. Hoy solo `docs: Bool` (opt-out
+    // de /openapi.json y /docs). Cualquier otro kwarg es error claro.
+    for (key, value_expr) in &deco.kwargs {
+        match key.as_str() {
+            "docs" => match value_expr {
+                Expr::Bool(b, _) => {
+                    config.enable_docs = *b;
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'docs' debe ser Bool literal, \
+                         recibió {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
+            other => {
+                return Err(err(format!(
+                    "@server sobre fn '{}': kwarg '{}' no reconocido. \
+                     Soportados: docs.",
                     fn_name, other,
                 )));
             }
@@ -6182,15 +6197,54 @@ let r = match n {
     // ---- 7.0 kwargs en decoradores (rechazo runtime) ----
 
     #[tokio::test(flavor = "current_thread")]
-    async fn server_decorator_con_kwarg_es_error_hasta_7_4() {
-        // 7.0: el parser ya acepta kwargs, pero el handler de @server
-        // todavía no los reconoce. El runtime corta con un mensaje
-        // que cita la sub-fase 7.4 (cuando llegará `docs=Bool`).
+    async fn server_decorator_acepta_kwarg_docs_false() {
+        // 7.4: @server(3000, docs=false) popula enable_docs=false.
         let src = "@server(3000, docs=false)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert_eq!(cfg.port, 3000);
+        assert!(!cfg.enable_docs);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_decorator_acepta_kwarg_docs_true_explicito() {
+        let src = "@server(3000, docs=true)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert!(cfg.enable_docs);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_decorator_default_enable_docs_es_true() {
+        // Sin kwarg: default true.
+        let src = "@server(3000)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
+        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.unwrap();
+        assert!(cfg.enable_docs);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_decorator_docs_no_bool_es_error() {
+        let src = "@server(3000, docs=\"si\")\nfn cfg() => 0";
         let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("docs") && err.message.contains("7.4"),
+            err.message.contains("docs") && err.message.contains("Bool"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_decorator_kwarg_desconocido_es_error() {
+        let src = "@server(3000, version=\"1.0\")\nfn cfg() => 0";
+        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("version") && err.message.contains("reconocido"),
             "mensaje inesperado: {}",
             err.message,
         );

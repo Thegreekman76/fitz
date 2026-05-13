@@ -148,12 +148,19 @@ pub struct BodyParam {
 
 /// Configuración del servidor que un `@server(...)` pudo haber
 /// declarado en el programa. Si está en `None`, se usan defaults
-/// (127.0.0.1:3000). Solo se admite un `@server` por programa —
-/// la unicidad la enforcea el evaluator durante el registro.
+/// (127.0.0.1:3000, docs habilitados). Solo se admite un `@server`
+/// por programa — la unicidad la enforcea el evaluator durante el
+/// registro.
+///
+/// `enable_docs` (Fase 7.4): cuando `false`, el server NO
+/// autoregistra `/openapi.json` ni `/docs`. Default: `true` —
+/// el camino feliz entrega docs sin tocar nada. Opt-out con
+/// `@server(docs=false)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServerConfig {
     pub host: String,
     pub port: u16,
+    pub enable_docs: bool,
 }
 
 impl ServerConfig {
@@ -162,6 +169,7 @@ impl ServerConfig {
         ServerConfig {
             host: "127.0.0.1".into(),
             port: 3000,
+            enable_docs: true,
         }
     }
 
@@ -1486,12 +1494,21 @@ pub fn serve(
 
     let (tx, rx) = mpsc::unbounded_channel::<InterpTask>();
     let metas = registry.metas();
+    let enable_docs = registry.resolved_config().enable_docs;
 
     // Fase 7.2: precomputar el schema OpenAPI con `program` + `registry`
     // y pasarlo a `build_router`. El auto-register de `/openapi.json`
-    // pasa por ahí (y respeta cualquier ruta declarada por el usuario
-    // con ese mismo path).
-    let openapi_schema = crate::openapi::generate_openapi(&registry, &program);
+    // y `/docs` pasa por ahí (y respeta cualquier ruta declarada por
+    // el usuario con esos paths).
+    //
+    // Fase 7.4: si `@server(docs=false)`, ni computamos el schema ni
+    // lo pasamos al router — ambas rutas auto-registradas quedan en
+    // 404. Trade-off: zero overhead cuando el usuario apaga los docs.
+    let openapi_schema = if enable_docs {
+        Some(crate::openapi::generate_openapi(&registry, &program))
+    } else {
+        None
+    };
 
     // Thread tokio: owns el runtime async y el server axum. Solo
     // recibe metadata + tx (todos `Send`).
@@ -1502,14 +1519,18 @@ pub fn serve(
                 .enable_all()
                 .build()?;
             runtime.block_on(async move {
-                let router = build_router(&metas, tx, Some(openapi_schema));
+                let router = build_router(&metas, tx, openapi_schema);
                 let listener = tokio::net::TcpListener::bind(addr).await?;
                 eprintln!("🏔️  Fitz HTTP escuchando en http://{}", addr);
                 for meta in &metas {
                     eprintln!("   {} {}", meta.method.as_str(), meta.path);
                 }
-                eprintln!("   GET /openapi.json  (schema autogenerado)");
-                eprintln!("   GET /docs          (UI Scalar)");
+                if enable_docs {
+                    eprintln!("   GET /openapi.json  (schema autogenerado)");
+                    eprintln!("   GET /docs          (UI Scalar)");
+                } else {
+                    eprintln!("   (docs apagadas por @server(docs=false))");
+                }
                 axum::serve(listener, router)
                     .with_graceful_shutdown(shutdown_signal())
                     .await
@@ -2071,6 +2092,7 @@ mod tests {
         let c = ServerConfig {
             host: "0.0.0.0".into(),
             port: 8080,
+            enable_docs: true,
         };
         let addr = c.to_socket_addr().unwrap();
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
@@ -2081,6 +2103,7 @@ mod tests {
         let c = ServerConfig {
             host: "no-es-ip".into(),
             port: 80,
+            enable_docs: true,
         };
         let err = c.to_socket_addr().unwrap_err();
         assert!(err.contains("no-es-ip"));
@@ -2092,11 +2115,13 @@ mod tests {
             let first = ServerConfig {
                 host: "127.0.0.1".into(),
                 port: 8080,
+                enable_docs: true,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
                 host: "0.0.0.0".into(),
                 port: 9090,
+                enable_docs: true,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -2113,6 +2138,7 @@ mod tests {
         reg.server_config = Some(ServerConfig {
             host: "0.0.0.0".into(),
             port: 80,
+            enable_docs: true,
         });
         let resolved = reg.resolved_config();
         assert_eq!(resolved.port, 80);
