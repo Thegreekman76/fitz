@@ -18,6 +18,9 @@
 //   curl -i http://127.0.0.1:3000/protected           # status 401
 //   curl -i http://127.0.0.1:3000/users/1/profile     # status 200 con user
 //   curl -i http://127.0.0.1:3000/users/99/profile    # status 404 custom
+//   curl "http://127.0.0.1:3000/search?name=ana"          # query obligatorio
+//   curl "http://127.0.0.1:3000/search"                    # 400 (falta name)
+//   curl "http://127.0.0.1:3000/search?name=ana&limit=1"   # con opcional
 
 @server(3000)
 fn main() => 0
@@ -91,4 +94,18 @@ fn user_profile(id: Int) -> User {
         return 404 {"error": "usuario {id} no existe"}
     }
     return matches[0]
+}
+
+// --- Query params ---
+//
+// `?key={name}` adentro del path declara un query param. El nombre
+// del param Fitz tiene que coincidir con la key. `Str?` lo hace
+// opcional (null si falta); `Str` lo hace obligatorio (400 si falta).
+
+@get("/search?name={name}&limit={limit}")
+fn search_users(name: Str, limit: Int?) -> Str {
+    if (limit == null) {
+        return "buscando '{name}' sin límite"
+    }
+    return "buscando '{name}' con límite {limit}"
 }

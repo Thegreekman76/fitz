@@ -2753,6 +2753,24 @@ impl<'a> CodegenCtx<'a> {
                     BinOpKind::NotEq => "!=",
                     _ => unreachable!(),
                 };
+                // Comparación contra Null sobre un Nullable: el lado
+                // Nullable es `Option<T>` en Rust y `null` Fitz es `()`,
+                // así que `Option<T> == ()` no compila. Lo traducimos
+                // a `.is_none()` / `.is_some()`.
+                let null_check = |opt_code: &str, eq: bool| -> String {
+                    if eq {
+                        format!("({}).is_none()", opt_code)
+                    } else {
+                        format!("({}).is_some()", opt_code)
+                    }
+                };
+                let is_eq = matches!(op, BinOpKind::Eq);
+                if matches!(lt, Type::Nullable(_)) && matches!(rt, Type::Null) {
+                    return Ok((null_check(&lc, is_eq), Type::Bool));
+                }
+                if matches!(rt, Type::Nullable(_)) && matches!(lt, Type::Null) {
+                    return Ok((null_check(&rc, is_eq), Type::Bool));
+                }
                 // Igualdad estructural entre instancias del mismo
                 // tipo: borroweamos ambos lados y comparamos por
                 // valor — `#[derive(PartialEq)]` sobre `FooData`
@@ -4315,7 +4333,7 @@ impl<'a> CodegenCtx<'a> {
                 name, http_deco.name
             ))
         })?;
-        let path = parse_http_path(path_arg)?;
+        let (path, query_template_params) = parse_http_path(path_arg)?;
 
         let template_params = extract_path_template_names(&path);
 
@@ -4334,12 +4352,28 @@ impl<'a> CodegenCtx<'a> {
             resolved_params.push((p.name.clone(), t));
         }
 
-        // Categorizar: cada param es path o body.
+        // Validar que cada query_param del template tenga un param Fitz
+        // correspondiente con el mismo nombre. Espejo del check del
+        // evaluator.
+        for qname in &query_template_params {
+            if !resolved_params.iter().any(|(n, _)| n == qname) {
+                return Err(self.err_at(fn_span, format!(
+                    "fn `{}`: el query param `{}` está en el path pero el handler no \
+                     tiene un parámetro con ese nombre",
+                    name, qname
+                )));
+            }
+        }
+
+        // Categorizar: cada param es path / query / body.
         let mut path_params: Vec<(String, Type)> = Vec::new();
+        let mut query_params: Vec<(String, Type)> = Vec::new();
         let mut body_param: Option<(String, Type)> = None;
         for (n, t) in &resolved_params {
             if template_params.iter().any(|tp| tp == n) {
                 path_params.push((n.clone(), t.clone()));
+            } else if query_template_params.iter().any(|q| q == n) {
+                query_params.push((n.clone(), t.clone()));
             } else if body_param.is_some() {
                 return Err(self.err_at(fn_span, format!(
                     "fn `{}`: solo se admite un body param por handler",
@@ -4387,6 +4421,11 @@ impl<'a> CodegenCtx<'a> {
                 .unwrap();
             }
         }
+        if !query_params.is_empty() {
+            self.emit(
+                "    axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>,\n",
+            );
+        }
         if let Some((bn, _bt)) = &body_param {
             writeln!(
                 &mut self.output,
@@ -4397,6 +4436,15 @@ impl<'a> CodegenCtx<'a> {
         }
         self.emit(") -> axum::response::Response {\n");
         self.emit("    use axum::response::IntoResponse;\n");
+
+        // Query params: para cada uno emitir el binding con coerción
+        // desde el HashMap. Si el tipo es nullable (`Int?`), missing →
+        // None; si es obligatorio, missing → 400. Tipos soportados en
+        // query: Int, Float, Str, Bool (los primitivos que coerciona
+        // `coerce_path_param` del intérprete).
+        for (qn, qt) in &query_params {
+            emit_query_param_coerce(&mut self.output, qn, qt, self.env)?;
+        }
 
         // Si hay body con tipo declarado, deserializar primero. El
         // `__from_fitz_json` genérico para `Rc<RefCell<T>>` ya envuelve
@@ -4571,7 +4619,7 @@ impl<'a> CodegenCtx<'a> {
                     Some(p) => p,
                     None => continue,
                 };
-                let path = parse_http_path(path_arg)?;
+                let (path, _q) = parse_http_path(path_arg)?;
                 self.emit_indent();
                 writeln!(
                     &mut self.output,
@@ -4612,13 +4660,25 @@ impl<'a> CodegenCtx<'a> {
     }
 }
 
-/// Extrae el path template de un decorator HTTP. Acepta tanto un
-/// literal puro (`Expr::Str("/users/static", Span::ZERO)`) como una interpolación
-/// (`Expr::StrInterp` con partes Lit + Ident: `"/users/{id}"`). En el
-/// segundo caso, reconstruye el path y devuelve los nombres de los
-/// params en orden. Si la interpolación tiene expresiones complejas
-/// (no-Ident), error.
-fn parse_http_path(expr: &Expr) -> Result<String, FitzError> {
+/// Extrae el path template de un decorator HTTP, separando el path
+/// "axum" (lo que va al router) del query template (`?key={name}&...`)
+/// y devolviendo los nombres de query params en orden. Delega a
+/// `crate::http::parse_path_template` para mantener la lógica
+/// compartida con el intérprete.
+fn parse_http_path(expr: &Expr) -> Result<(String, Vec<String>), FitzError> {
+    match crate::http::parse_path_template(expr) {
+        Ok(t) => Ok((t.path, t.query_params)),
+        Err(e) => Err(FitzError::new(
+            ErrorKind::TypeError,
+            0,
+            0,
+            e.message(),
+        )),
+    }
+}
+
+#[allow(dead_code)]
+fn parse_http_path_legacy(expr: &Expr) -> Result<String, FitzError> {
     match expr {
         Expr::Str(s, _) => Ok(s.clone()),
         Expr::StrInterp(parts, _) => {
@@ -4652,6 +4712,87 @@ fn parse_http_path(expr: &Expr) -> Result<String, FitzError> {
             "el primer arg de @get/@post/@put/@delete debe ser un Str literal".to_string(),
         )),
     }
+}
+
+/// Emite el binding Rust para un query param: lee `__qmap` por su
+/// nombre, coerciona al tipo base con el parse correspondiente, y
+/// según `nullable` emite `Option<T>` o `T` directo. Errores → 400.
+///
+/// Tipos soportados en query (los mismos que `coerce_path_param` del
+/// intérprete): Int, Float, Str, Bool. Listas/instancias/Result no se
+/// soportan — el checker debería rechazarlos pero el codegen aborta
+/// con error explícito como defensa.
+fn emit_query_param_coerce(
+    output: &mut String,
+    name: &str,
+    ty: &Type,
+    env: &TypeEnv,
+) -> Result<(), FitzError> {
+    use std::fmt::Write;
+    // Pelar Nullable para obtener el tipo base.
+    let (base_ty, nullable) = match ty {
+        Type::Nullable(inner) => ((**inner).clone(), true),
+        other => (other.clone(), false),
+    };
+    // Mapear base_ty a un parser. `Str` no necesita parsear (string es
+    // string); los numéricos usan `parse::<T>()`; Bool acepta
+    // "true"/"false".
+    let (rust_base, parse_expr): (&str, String) = match &base_ty {
+        Type::Int => ("i64", format!("__s.parse::<i64>().map_err(|_| format!(\"query param '{}': '{{}}' no es Int\", __s))", name)),
+        Type::Float => ("f64", format!("__s.parse::<f64>().map_err(|_| format!(\"query param '{}': '{{}}' no es Float\", __s))", name)),
+        Type::Str => ("String", "Ok::<String, String>(__s.clone())".to_string()),
+        Type::Bool => ("bool", format!("match __s.as_str() {{ \"true\" => Ok::<bool, String>(true), \"false\" => Ok::<bool, String>(false), _ => Err(format!(\"query param '{}': '{{}}' no es Bool (esperado true/false)\", __s)) }}", name)),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!(
+                    "query param `{}`: tipo `{}` no soportado en codegen — solo Int/Float/Str/Bool (opcionalmente nullable)",
+                    name,
+                    display_type(&base_ty, env)
+                ),
+            ));
+        }
+    };
+
+    if nullable {
+        // Opcional: missing → None, presente y coerce OK → Some(v),
+        // presente con coerce err → 400.
+        writeln!(output, "    let {name}: Option<{rust_base}> = match __qmap.get(\"{name}\") {{").unwrap();
+        writeln!(output, "        Some(__s) => {{").unwrap();
+        writeln!(output, "            let __r: Result<{rust_base}, String> = {parse_expr};").unwrap();
+        writeln!(output, "            match __r {{").unwrap();
+        writeln!(output, "                Ok(__v) => Some(__v),").unwrap();
+        writeln!(output, "                Err(__e) => return (").unwrap();
+        writeln!(output, "                    axum::http::StatusCode::BAD_REQUEST,").unwrap();
+        writeln!(output, "                    axum::Json(serde_json::json!({{\"error\": __e}})),").unwrap();
+        writeln!(output, "                ).into_response(),").unwrap();
+        writeln!(output, "            }}").unwrap();
+        writeln!(output, "        }}").unwrap();
+        writeln!(output, "        None => None,").unwrap();
+        writeln!(output, "    }};").unwrap();
+    } else {
+        // Obligatorio: missing → 400; presente y coerce OK → v;
+        // presente con coerce err → 400.
+        writeln!(output, "    let {name}: {rust_base} = match __qmap.get(\"{name}\") {{").unwrap();
+        writeln!(output, "        Some(__s) => {{").unwrap();
+        writeln!(output, "            let __r: Result<{rust_base}, String> = {parse_expr};").unwrap();
+        writeln!(output, "            match __r {{").unwrap();
+        writeln!(output, "                Ok(__v) => __v,").unwrap();
+        writeln!(output, "                Err(__e) => return (").unwrap();
+        writeln!(output, "                    axum::http::StatusCode::BAD_REQUEST,").unwrap();
+        writeln!(output, "                    axum::Json(serde_json::json!({{\"error\": __e}})),").unwrap();
+        writeln!(output, "                ).into_response(),").unwrap();
+        writeln!(output, "            }}").unwrap();
+        writeln!(output, "        }}").unwrap();
+        writeln!(output, "        None => return (").unwrap();
+        writeln!(output, "            axum::http::StatusCode::BAD_REQUEST,").unwrap();
+        writeln!(output, "            axum::Json(serde_json::json!({{\"error\": \"query param '{name}': falta — es obligatorio\"}})),").unwrap();
+        writeln!(output, "        ).into_response(),").unwrap();
+        writeln!(output, "    }};").unwrap();
+    }
+    Ok(())
 }
 
 /// Extrae los nombres de path params de un template axum: `/users/{id}`
@@ -7732,6 +7873,136 @@ mod tests {
             code.contains("struct __FitzResponse"),
             "esperaba `struct __FitzResponse` en el preludio HTTP, got:\n{}",
             code
+        );
+    }
+
+    // ---- Query params HTTP ----
+
+    #[test]
+    fn query_params_obligatorio_emite_match_some_404_si_falta() {
+        // `@get("/x?limit={limit}") fn h(limit: Int)`: el wrapper
+        // extrae `Query<HashMap>` y bindea `limit: i64` con coerción.
+        // Falta → 400.
+        let src = "@get(\"/items?limit={limit}\") fn list_items(limit: Int) -> Int => limit";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains(
+                "axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>"
+            ),
+            "esperaba extractor Query<HashMap>, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let limit: i64 = match __qmap.get(\"limit\")"),
+            "esperaba binding `let limit: i64 = match __qmap.get(...)`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("query param 'limit': falta — es obligatorio"),
+            "esperaba mensaje 400 para query param faltante, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn query_params_nullable_emite_option_none_si_falta() {
+        // `limit: Int?` → `Option<i64>`. Missing → None, presente OK →
+        // Some(v), parse error → 400.
+        let src = "@get(\"/items?limit={limit}\") fn list_items(limit: Int?) -> Int => 0";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let limit: Option<i64> = match __qmap.get(\"limit\")"),
+            "esperaba binding `let limit: Option<i64> = ...`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("None => None"),
+            "esperaba branch `None => None` para query opcional, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn query_params_str_no_necesita_parse() {
+        // `name: Str` → `String`, sin `.parse::<...>()`.
+        let src = "@get(\"/x?name={name}\") fn h(name: Str) -> Str => name";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let name: String = match __qmap.get(\"name\")"),
+            "esperaba binding `let name: String = ...`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Ok::<String, String>(__s.clone())"),
+            "esperaba coerción `Ok::<String, String>(__s.clone())`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn query_params_bool_acepta_true_false() {
+        let src = "@get(\"/x?on={on}\") fn h(on: Bool) -> Bool => on";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let on: bool = match __qmap.get(\"on\")"),
+            "esperaba binding `let on: bool`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("\"true\" => Ok"),
+            "esperaba match contra `\"true\"`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn query_params_path_y_query_combinados_emiten_ambos_extractores() {
+        // `/users/{id}?limit={limit}` con `id: Int, limit: Int?`. Emite
+        // ambos extractores: AxumPath<i64> y AxumQuery<HashMap>.
+        let src = "@get(\"/users/{id}?limit={limit}\") \
+                   fn list(id: Int, limit: Int?) -> Int => id";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("axum::extract::Path(id): axum::extract::Path<i64>"),
+            "esperaba extractor Path<i64> para `id`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains(
+                "axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>"
+            ),
+            "esperaba extractor Query<HashMap>, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let limit: Option<i64> = match __qmap.get(\"limit\")"),
+            "esperaba binding nullable de `limit`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn query_params_template_sin_param_correspondiente_es_error() {
+        // El template declara `?limit={limit}` pero el handler no
+        // tiene un param `limit` → error claro.
+        let src = "@get(\"/x?limit={limit}\") fn h() -> Int => 0";
+        let err = gen(src).expect_err("esperaba error");
+        assert!(
+            err.message.contains("query param") && err.message.contains("limit"),
+            "esperaba mensaje sobre query param sin param correspondiente, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn query_params_tipo_no_soportado_es_error_de_codegen() {
+        // Listas no se soportan como query param.
+        let src = "@get(\"/x?ids={ids}\") fn h(ids: List<Int>) -> Int => 0";
+        let err = gen(src).expect_err("esperaba error");
+        assert!(
+            err.message.contains("query param") && err.message.contains("no soportado"),
+            "esperaba mensaje sobre tipo no soportado, fue: {}",
+            err.message
         );
     }
 

@@ -79,21 +79,29 @@ impl HttpMethod {
 pub struct RouteSpec {
     pub method: HttpMethod,
     /// Path en formato axum (`/users/{id}`). Ya canonicalizado del
-    /// `Expr::Str` o `Expr::StrInterp` del decorator.
+    /// `Expr::Str` o `Expr::StrInterp` del decorator. El query
+    /// template (después del `?`) NO entra acá — vive en
+    /// `query_params`.
     pub path: String,
     /// Nombres de los path params, en el orden en que aparecen en el
     /// path. Vacío si la ruta no tiene params.
     pub path_params: Vec<String>,
+    /// Nombres de los query params declarados con `?key={name}` en el
+    /// path del decorator. Cada uno se bindea al param Fitz del mismo
+    /// nombre. Vacío si la ruta no declara query.
+    pub query_params: Vec<String>,
     /// Handler Fitz. Tiene que ser `Value::Function` — el evaluator
     /// valida esto en registro.
     pub handler: Value,
     /// Nombre del handler para mensajes de error/log.
     pub handler_name: String,
     /// Tipos declarados de los parámetros del handler, en orden. Cada
-    /// uno es `Option<String>` igual que en el AST. Sirve para
-    /// convertir path params crudos (siempre llegan como string desde
-    /// axum) al tipo Fitz correspondiente antes de invocar al handler.
-    pub param_types: Vec<(String, Option<String>)>,
+    /// tupla es `(nombre, head_name_sin_genericos_ni_nullable,
+    /// is_nullable)`. `head_name` sirve para `coerce_path_param`
+    /// (Int/Float/Str/Bool); `is_nullable` sirve para query params
+    /// (un `Int?` faltante en la query queda como `Null` en vez de
+    /// 400).
+    pub param_types: Vec<(String, Option<String>, bool)>,
     /// Si el handler declara un parámetro que no es path param, lo
     /// tratamos como body. Acá guardamos su nombre y, opcionalmente,
     /// el `Value::Type` declarado (resuelto del env en momento de
@@ -274,10 +282,18 @@ pub fn set_server_config(config: ServerConfig) -> Result<(), ServerConfig> {
 /// Resultado de extraer un path declarado en un decorator HTTP.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PathTemplate {
-    /// Path en formato axum: `/users/{id}`, `/`, `/users`.
+    /// Path en formato axum: `/users/{id}`, `/`, `/users`. Lo que viene
+    /// después de un `?` en el template original NO entra acá — vive
+    /// adentro de `query_params`. Axum hace su routing solo con esto.
     pub path: String,
     /// Nombres de los path params en el orden de aparición.
     pub params: Vec<String>,
+    /// Nombres de los query params declarados en el template. Cada uno
+    /// proviene de un `?key={name}&...` después del path. Por ahora
+    /// exigimos que la key del query y el nombre del param Fitz
+    /// coincidan (`?limit={limit}`, no `?l={limit}`). El orden de
+    /// `query_params` es el de aparición en el template.
+    pub query_params: Vec<String>,
 }
 
 /// Errores al normalizar el path de un decorator. Mensajes en español
@@ -293,6 +309,12 @@ pub enum PathError {
     UnsupportedInterpolation(String),
     /// Algún path param se repitió (`/a/{x}/b/{x}`).
     DuplicateParam(String),
+    /// Un query param declarado tiene una key distinta del nombre del
+    /// param (`?l={limit}`). Hoy exigimos que coincidan.
+    QueryKeyNameMismatch { key: String, name: String },
+    /// El template del query no respeta `key={name}` con identificador
+    /// simple — ej. `?{limit}`, `?limit=`, `?limit={x.y}`, `?=v`.
+    MalformedQueryTemplate(String),
 }
 
 impl PathError {
@@ -315,6 +337,16 @@ impl PathError {
                 "path param '{{{}}}' aparece más de una vez en el path",
                 name
             ),
+            PathError::QueryKeyNameMismatch { key, name } => format!(
+                "query param `?{key}={{{name}}}`: la key y el nombre del \
+                 param deben coincidir — usá `?{name}={{{name}}}` o renombrá \
+                 el parámetro del handler"
+            ),
+            PathError::MalformedQueryTemplate(t) => format!(
+                "template de query mal formado adentro del path: `?{t}` — \
+                 esperado `?key={{name}}&otra_key={{otro_name}}` con \
+                 identificadores simples"
+            ),
         }
     }
 }
@@ -332,7 +364,11 @@ impl PathError {
 pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
     use crate::ast::StrPart;
 
-    let (path, params): (String, Vec<String>) = match expr {
+    // Primera pasada: reconstruir el texto del path canonicalizado y
+    // recolectar todos los `{name}` en orden (sin distinguir path vs
+    // query todavía). El `?` que separa path de query queda como
+    // carácter literal en `buf` — lo dividimos abajo.
+    let (full, all_params): (String, Vec<String>) = match expr {
         Expr::Str(s, _) => (s.clone(), Vec::new()),
         Expr::StrInterp(parts, _) => {
             let mut buf = String::new();
@@ -361,11 +397,116 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
         _ => return Err(PathError::NotAStringLiteral),
     };
 
-    if !path.starts_with('/') {
+    if !full.starts_with('/') {
         return Err(PathError::MustStartWithSlash);
     }
 
-    Ok(PathTemplate { path, params })
+    // Separar path de query template por el primer `?`. Si no hay,
+    // toda la cadena es path y `query_params` queda vacío.
+    let (path, query_template) = match full.find('?') {
+        Some(idx) => (full[..idx].to_string(), Some(&full[idx + 1..])),
+        None => (full, None),
+    };
+
+    // Para distinguir path_params de query_params: los que aparecen
+    // adentro del path quedan en `path_params`; los que aparecen
+    // adentro del query template (con su key) van a `query_params`.
+    let mut path_params: Vec<String> = Vec::new();
+    let mut query_params: Vec<String> = Vec::new();
+
+    // Re-escanear el path canonicalizado para extraer los `{name}` que
+    // están adentro de él (sin parsear de cero — solo buscamos
+    // `{ident}` entre llaves para ordenar correcto).
+    extract_brace_idents_into(&path, &mut path_params);
+
+    // Parsear el query template si existe.
+    if let Some(q) = query_template {
+        // Formato: `key={name}&otra={otra}` con cada pair separado por
+        // `&`. Validar que cada pair tenga `key={name}` con key
+        // identificador simple y `{name}` también identificador simple,
+        // y que key == name.
+        if q.is_empty() {
+            return Err(PathError::MalformedQueryTemplate(String::new()));
+        }
+        for pair in q.split('&') {
+            let Some(eq_idx) = pair.find('=') else {
+                return Err(PathError::MalformedQueryTemplate(pair.to_string()));
+            };
+            let key = &pair[..eq_idx];
+            let value = &pair[eq_idx + 1..];
+            if key.is_empty() || !is_simple_ident(key) {
+                return Err(PathError::MalformedQueryTemplate(pair.to_string()));
+            }
+            // El value tiene que ser exactamente `{name}` (un brace
+            // pair con un identificador adentro). Cualquier otra cosa
+            // (literal, expr, vacío) no se soporta.
+            if !(value.starts_with('{') && value.ends_with('}') && value.len() >= 3) {
+                return Err(PathError::MalformedQueryTemplate(pair.to_string()));
+            }
+            let name = &value[1..value.len() - 1];
+            if !is_simple_ident(name) {
+                return Err(PathError::MalformedQueryTemplate(pair.to_string()));
+            }
+            if key != name {
+                return Err(PathError::QueryKeyNameMismatch {
+                    key: key.to_string(),
+                    name: name.to_string(),
+                });
+            }
+            if path_params.contains(&name.to_string())
+                || query_params.contains(&name.to_string())
+            {
+                return Err(PathError::DuplicateParam(name.to_string()));
+            }
+            query_params.push(name.to_string());
+        }
+    }
+
+    // Sanity check: la suma path + query debería matchear `all_params`
+    // (todos los `{name}` que extrajimos en la primera pasada). Si no,
+    // hay algo raro en el path (ej. `{name}` adentro del query value
+    // sin ser exactamente `={name}`). El parser de query ya lo cazaría
+    // pero validamos por defensa.
+    let _ = all_params;
+
+    Ok(PathTemplate {
+        path,
+        params: path_params,
+        query_params,
+    })
+}
+
+/// Extrae nombres entre `{...}` en un path canonicalizado, en orden de
+/// aparición, y los empuja a `out`. Asume que el path ya fue
+/// reconstruido por `parse_path_template` (las llaves vienen siempre
+/// alrededor de identificadores simples).
+fn extract_brace_idents_into(path: &str, out: &mut Vec<String>) {
+    let bytes = path.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'{' {
+            if let Some(end) = path[i + 1..].find('}') {
+                let name = &path[i + 1..i + 1 + end];
+                out.push(name.to_string());
+                i = i + 1 + end + 1;
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Identificador "simple" para keys y param names en query templates:
+/// ASCII letras/digits/underscore, primer char no-digit. No usamos
+/// `char::is_alphanumeric` para evitar aceptar unicode (Fitz lo
+/// rechaza también en idents del lexer).
+fn is_simple_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 // ---------------------------------------------------------------------------
@@ -819,6 +960,11 @@ pub struct RouteMeta {
     pub method: HttpMethod,
     pub path: String,
     pub has_path_params: bool,
+    /// `true` si el handler declara al menos un query param. Hace que
+    /// axum extraiga `Query<HashMap<String, String>>` y lo mande al
+    /// intérprete. Cuando es `false`, no extraemos nada (cualquier
+    /// query string de la request se ignora).
+    pub has_query_params: bool,
     /// `true` si el handler declara un parámetro body. Sirve para
     /// que el handler de axum sepa si extraer el body de la request
     /// y mandarlo al intérprete. Cuando es `false`, ignoramos
@@ -836,6 +982,7 @@ impl HttpRegistry {
                 method: r.method,
                 path: r.path.clone(),
                 has_path_params: !r.path_params.is_empty(),
+                has_query_params: !r.query_params.is_empty(),
                 expects_body: r.body_param.is_some(),
             })
             .collect()
@@ -850,6 +997,12 @@ pub struct InterpTask {
     /// Path params crudos extraídos por axum (siempre llegan como
     /// strings; la coerción al tipo declarado la hace el intérprete).
     pub path_params: HashMap<String, String>,
+    /// Query params crudos extraídos por axum desde la query string
+    /// (`?limit=10&offset=20`). Siempre strings; coerción al tipo
+    /// declarado del param Fitz la hace el intérprete. Si la ruta no
+    /// declara query params en su template, este HashMap queda vacío
+    /// (cualquier query string del request se descarta).
+    pub query_params: HashMap<String, String>,
     /// Body crudo de la request. Vacío cuando el handler no declara
     /// body — axum no lo extrae en ese caso, pero igual mandamos
     /// `Vec` para uniformidad. Bytes para no forzar UTF-8 acá; la
@@ -878,6 +1031,7 @@ pub fn build_router(metas: &[RouteMeta], tx: TaskTx) -> Router {
             idx,
             tx.clone(),
             meta.has_path_params,
+            meta.has_query_params,
             meta.expects_body,
         );
         router = router.route(&meta.path, route_handler);
@@ -894,40 +1048,83 @@ fn build_method_router(
     route_idx: usize,
     tx: TaskTx,
     has_path_params: bool,
+    has_query_params: bool,
     expects_body: bool,
 ) -> MethodRouter {
-    match (has_path_params, expects_body) {
-        (false, false) => {
+    // 8 combinaciones: (path × query × body), cada uno boolean.
+    // axum requiere que la firma del handler async refleje exactamente
+    // los extractores que usa, así que armamos las 8 variantes a mano.
+    // (Si en el futuro se vuelve insostenible, el escape es usar
+    // `axum::extract::RawQuery` y parsear a mano.)
+    use axum::extract::Query as AxumQuery;
+    type Map = HashMap<String, String>;
+    match (has_path_params, has_query_params, expects_body) {
+        (false, false, false) => {
             let h = move || {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, HashMap::new(), Vec::new(), tx).await
+                    dispatch_request(route_idx, Map::new(), Map::new(), Vec::new(), tx).await
                 }
             };
             wrap(method, h)
         }
-        (true, false) => {
-            let h = move |AxumPath(params): AxumPath<HashMap<String, String>>| {
+        (true, false, false) => {
+            let h = move |AxumPath(p): AxumPath<Map>| {
                 let tx = tx.clone();
-                async move { dispatch_request(route_idx, params, Vec::new(), tx).await }
+                async move { dispatch_request(route_idx, p, Map::new(), Vec::new(), tx).await }
             };
             wrap(method, h)
         }
-        (false, true) => {
+        (false, true, false) => {
+            let h = move |AxumQuery(q): AxumQuery<Map>| {
+                let tx = tx.clone();
+                async move {
+                    dispatch_request(route_idx, Map::new(), q, Vec::new(), tx).await
+                }
+            };
+            wrap(method, h)
+        }
+        (true, true, false) => {
+            let h = move |AxumPath(p): AxumPath<Map>, AxumQuery(q): AxumQuery<Map>| {
+                let tx = tx.clone();
+                async move { dispatch_request(route_idx, p, q, Vec::new(), tx).await }
+            };
+            wrap(method, h)
+        }
+        (false, false, true) => {
             let h = move |body: axum::body::Bytes| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, HashMap::new(), body.to_vec(), tx).await
+                    dispatch_request(route_idx, Map::new(), Map::new(), body.to_vec(), tx).await
                 }
             };
             wrap(method, h)
         }
-        (true, true) => {
-            let h = move |AxumPath(params): AxumPath<HashMap<String, String>>,
+        (true, false, true) => {
+            let h = move |AxumPath(p): AxumPath<Map>, body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    dispatch_request(route_idx, p, Map::new(), body.to_vec(), tx).await
+                }
+            };
+            wrap(method, h)
+        }
+        (false, true, true) => {
+            let h = move |AxumQuery(q): AxumQuery<Map>, body: axum::body::Bytes| {
+                let tx = tx.clone();
+                async move {
+                    dispatch_request(route_idx, Map::new(), q, body.to_vec(), tx).await
+                }
+            };
+            wrap(method, h)
+        }
+        (true, true, true) => {
+            let h = move |AxumPath(p): AxumPath<Map>,
+                          AxumQuery(q): AxumQuery<Map>,
                           body: axum::body::Bytes| {
                 let tx = tx.clone();
                 async move {
-                    dispatch_request(route_idx, params, body.to_vec(), tx).await
+                    dispatch_request(route_idx, p, q, body.to_vec(), tx).await
                 }
             };
             wrap(method, h)
@@ -957,6 +1154,7 @@ where
 async fn dispatch_request(
     route_idx: usize,
     path_params: HashMap<String, String>,
+    query_params: HashMap<String, String>,
     body: Vec<u8>,
     tx: TaskTx,
 ) -> Response {
@@ -964,6 +1162,7 @@ async fn dispatch_request(
     let task = InterpTask {
         route_idx,
         path_params,
+        query_params,
         body,
         reply: reply_tx,
     };
@@ -1012,7 +1211,13 @@ pub fn run_interpreter_loop(
     mut rx: mpsc::UnboundedReceiver<InterpTask>,
 ) {
     while let Some(task) = rx.blocking_recv() {
-        let outcome = handle_task(&registry, task.route_idx, task.path_params, task.body);
+        let outcome = handle_task(
+            &registry,
+            task.route_idx,
+            task.path_params,
+            task.query_params,
+            task.body,
+        );
         // Si el oneshot del lado axum se cerró (cliente desconectado,
         // timeout), no hay nada que hacer con el outcome — descartar.
         let _ = task.reply.send(outcome);
@@ -1024,6 +1229,7 @@ fn handle_task(
     registry: &HttpRegistry,
     route_idx: usize,
     raw_path_params: HashMap<String, String>,
+    raw_query_params: HashMap<String, String>,
     body_bytes: Vec<u8>,
 ) -> HandlerOutcome {
     let Some(route) = registry.routes.get(route_idx) else {
@@ -1051,15 +1257,20 @@ fn handle_task(
 
     // Armar args en el orden declarado del handler. Para cada
     // parámetro:
-    //   - si su nombre coincide con un path param, coercionar el
-    //     valor crudo al tipo declarado;
+    //   - si su nombre está en `path_params`, tomar el valor crudo del
+    //     map de path y coercionarlo al tipo declarado;
+    //   - si está en `query_params`, idem desde el map de query
+    //     (nullable → Null si falta; obligatorio → 400 si falta);
     //   - si es el body param, usar el valor parseado;
-    //   - cualquier otro caso (no path, no body) es un bug del
-    //     registro: el evaluator no permite registrarlo.
+    //   - cualquier otro caso (no path, no query, no body) es un bug
+    //     del registro: el evaluator no permite registrarlo.
     let mut args = Vec::with_capacity(route.param_types.len());
-    for (name, declared_type) in &route.param_types {
-        if let Some(raw) = raw_path_params.get(name) {
-            match coerce_path_param(raw, declared_type.as_deref()) {
+    for (name, head_type, is_nullable) in &route.param_types {
+        if route.path_params.iter().any(|p| p == name) {
+            // Path params son siempre obligatorios (axum garantiza que
+            // llegan si la ruta matcheó). Coerción al tipo declarado.
+            let raw = raw_path_params.get(name).map(|s| s.as_str()).unwrap_or("");
+            match coerce_path_param(raw, head_type.as_deref()) {
                 Ok(v) => args.push(v),
                 Err(msg) => {
                     return HandlerOutcome::json(
@@ -1070,13 +1281,41 @@ fn handle_task(
                     );
                 }
             }
+        } else if route.query_params.iter().any(|q| q == name) {
+            // Query params: si el tipo declarado es nullable (`Int?`),
+            // missing → Null. Si es obligatorio, missing → 400.
+            let raw = raw_query_params.get(name);
+            match (raw, *is_nullable) {
+                (Some(s), _) => {
+                    match coerce_path_param(s, head_type.as_deref()) {
+                        Ok(v) => args.push(v),
+                        Err(msg) => {
+                            return HandlerOutcome::json(
+                                400,
+                                serde_json::json!({
+                                    "error": format!("query param '{}': {}", name, msg),
+                                }),
+                            );
+                        }
+                    }
+                }
+                (None, true) => args.push(Value::Null),
+                (None, false) => {
+                    return HandlerOutcome::json(
+                        400,
+                        serde_json::json!({
+                            "error": format!("query param '{}': falta — es obligatorio", name),
+                        }),
+                    );
+                }
+            }
         } else if route.body_param.as_ref().map(|bp| bp.name.as_str()) == Some(name) {
             // Body param: ya parseado arriba; tomarlo de `body_value`.
             // unwrap es seguro porque body_value es Some sii hay body_param.
             args.push(body_value.clone().unwrap());
         } else {
             return HandlerOutcome::internal_error(format!(
-                "parámetro '{}' del handler '{}' no es ni path param ni body — \
+                "parámetro '{}' del handler '{}' no es ni path param ni query param ni body — \
                  esto es un bug interno del registro",
                 name, route.handler_name,
             ));
@@ -1278,6 +1517,98 @@ mod tests {
         // `@get(42)` — Int en lugar de string.
         let err = parse_path_template(&Expr::Int(42, Span::ZERO)).unwrap_err();
         assert_eq!(err, PathError::NotAStringLiteral);
+    }
+
+    // ---- Query params en el template ----
+
+    #[test]
+    fn query_template_separa_path_de_query_params() {
+        // `"/items?limit={limit}&offset={offset}"` → path solo `/items`,
+        // query_params `["limit", "offset"]` en orden.
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/items?limit=".into()),
+                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO)),
+                StrPart::Lit("&offset=".into()),
+                StrPart::Expr(Expr::Ident("offset".into(), Span::ZERO)),
+            ],
+            Span::ZERO,
+        );
+        let t = parse_path_template(&e).unwrap();
+        assert_eq!(t.path, "/items");
+        assert!(t.params.is_empty(), "no debería haber path params");
+        assert_eq!(
+            t.query_params,
+            vec!["limit".to_string(), "offset".to_string()]
+        );
+    }
+
+    #[test]
+    fn query_template_combina_con_path_params() {
+        // `"/users/{id}/posts?limit={limit}"` → path `/users/{id}/posts`,
+        // path params `["id"]`, query params `["limit"]`.
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/users/".into()),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+                StrPart::Lit("/posts?limit=".into()),
+                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO)),
+            ],
+            Span::ZERO,
+        );
+        let t = parse_path_template(&e).unwrap();
+        assert_eq!(t.path, "/users/{id}/posts");
+        assert_eq!(t.params, vec!["id".to_string()]);
+        assert_eq!(t.query_params, vec!["limit".to_string()]);
+    }
+
+    #[test]
+    fn query_template_key_distinta_del_nombre_es_error() {
+        // `"/x?l={limit}"` — key `l` no coincide con nombre `limit`.
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/x?l=".into()),
+                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO)),
+            ],
+            Span::ZERO,
+        );
+        let err = parse_path_template(&e).unwrap_err();
+        assert!(
+            matches!(err, PathError::QueryKeyNameMismatch { .. }),
+            "esperaba QueryKeyNameMismatch, fue: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn query_template_malformado_es_error() {
+        // `"/x?limit"` — falta `={name}`.
+        let e = Expr::Str("/x?limit".into(), Span::ZERO);
+        let err = parse_path_template(&e).unwrap_err();
+        assert!(
+            matches!(err, PathError::MalformedQueryTemplate(_)),
+            "esperaba MalformedQueryTemplate, fue: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn query_template_param_duplicado_con_path_es_error() {
+        // `"/users/{id}?id={id}"` — `id` aparece en path y query.
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/users/".into()),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+                StrPart::Lit("?id=".into()),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+            ],
+            Span::ZERO,
+        );
+        let err = parse_path_template(&e).unwrap_err();
+        // El parser dispara DuplicateParam al ver el segundo `{id}` en
+        // la primera pasada (antes de separar path de query). Eso es
+        // OK — el mensaje es claro al usuario igualmente.
+        assert_eq!(err, PathError::DuplicateParam("id".into()));
     }
 
     // ---- value_to_json ----
@@ -1551,7 +1882,7 @@ mod tests {
         // `@get("/") fn hello() => "hola"`
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"hola\"");
     }
@@ -1562,7 +1893,7 @@ mod tests {
         let registry = registry_from_source(src);
         let mut params = HashMap::new();
         params.insert("id".into(), "21".into());
-        let outcome = handle_task(&registry, 0, params, Vec::new());
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "42");
     }
@@ -1573,7 +1904,7 @@ mod tests {
         let registry = registry_from_source(src);
         let mut params = HashMap::new();
         params.insert("id".into(), "no-es-int".into());
-        let outcome = handle_task(&registry, 0, params, Vec::new());
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("Int"));
     }
@@ -1583,7 +1914,7 @@ mod tests {
         // El handler devuelve Err("boom"): runtime lo traduce a 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("boom"));
     }
@@ -1595,7 +1926,7 @@ mod tests {
             @get(\"/u\")\nfn h() => User { id: 1, name: \"ana\" }\n\
         ";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
@@ -1842,7 +2173,7 @@ mod tests {
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), Vec::new());
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new());
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("body requerido"));
     }
@@ -1855,7 +2186,7 @@ mod tests {
         ";
         let registry = registry_from_source(src);
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body);
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"fitz\"");
     }
@@ -1867,7 +2198,7 @@ mod tests {
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
         let registry = registry_from_source(src);
-        let outcome = handle_task(&registry, 0, HashMap::new(), b"not json".to_vec());
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), b"not json".to_vec());
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("JSON"));
     }
@@ -1880,7 +2211,7 @@ mod tests {
         ";
         let registry = registry_from_source(src);
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body);
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("email"));
     }
@@ -1895,7 +2226,7 @@ mod tests {
         let mut params = HashMap::new();
         params.insert("id".into(), "7".into());
         let body = br#"{"name":"ana"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, params, body);
+        let outcome = handle_task(&registry, 0, params, HashMap::new(), body);
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"ana\"");
     }
@@ -1908,7 +2239,7 @@ mod tests {
         ";
         let registry = registry_from_source(src);
         let body = br#"{"name":"x"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), body);
+        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body);
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"x\"");
     }
@@ -1990,6 +2321,7 @@ mod tests {
                                 &registry,
                                 task.route_idx,
                                 task.path_params,
+                                task.query_params,
                                 task.body,
                             );
                             let _ = task.reply.send(outcome);
@@ -2163,6 +2495,7 @@ mod tests {
                 method: HttpMethod::Get,
                 path: "/".into(),
                 path_params: vec![],
+                query_params: vec![],
                 handler,
                 handler_name: "index".into(),
                 param_types: vec![],

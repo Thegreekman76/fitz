@@ -308,12 +308,30 @@ fn register_http_route(
         )));
     }
 
-    // Identificar el body param: cualquier parámetro que NO esté en
-    // template.params. Máximo uno por handler.
+    // Validar que cada query_param del template tenga un param Fitz
+    // correspondiente con el mismo nombre. Si el template dice
+    // `?limit={limit}` pero el handler no declara `limit`, es un bug
+    // del usuario — error claro.
+    for qname in &template.query_params {
+        if !params.iter().any(|p| &p.name == qname) {
+            return Err(err(format!(
+                "@{} sobre fn '{}': el query param '{}' está en el path \
+                 pero el handler no tiene un parámetro con ese nombre",
+                deco.name, fn_name, qname,
+            )));
+        }
+    }
+
+    // Identificar el body param: cualquier parámetro que NO esté ni en
+    // template.params (path) ni en template.query_params (query).
+    // Máximo uno por handler.
     let mut body_param: Option<BodyParam> = None;
     for p in params {
         if template.params.contains(&p.name) {
             continue; // es path param
+        }
+        if template.query_params.contains(&p.name) {
+            continue; // es query param
         }
         if body_param.is_some() {
             return Err(err(format!(
@@ -347,12 +365,13 @@ fn register_http_route(
     // tipo Fitz correcto antes de invocar al handler. Pasamos el nombre
     // cabeza del tipo (sin genéricos ni `?`) porque `coerce_path_param`
     // solo soporta primitivos.
-    let param_types: Vec<(String, Option<String>)> = params
+    let param_types: Vec<(String, Option<String>, bool)> = params
         .iter()
         .map(|p| {
             (
                 p.name.clone(),
                 p.type_.as_ref().map(|t| t.head_name().to_string()),
+                p.type_.as_ref().map(|t| t.is_nullable()).unwrap_or(false),
             )
         })
         .collect();
@@ -361,6 +380,7 @@ fn register_http_route(
         method,
         path: template.path,
         path_params: template.params,
+        query_params: template.query_params,
         handler: handler.clone(),
         handler_name: fn_name.to_string(),
         param_types,
@@ -5590,7 +5610,7 @@ let r = match n {
         assert_eq!(r.path, "/users/{id}");
         assert_eq!(r.path_params, vec!["id".to_string()]);
         assert_eq!(r.handler_name, "get_user");
-        assert_eq!(r.param_types, vec![("id".to_string(), Some("Int".into()))]);
+        assert_eq!(r.param_types, vec![("id".to_string(), Some("Int".into()), false)]);
     }
 
     #[test]

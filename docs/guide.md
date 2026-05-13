@@ -4283,14 +4283,83 @@ Las claves del map literal van entre comillas dobles porque la
 sintaxis de map literal en Fitz exige que la key sea un valor
 (`{"x": 1}`), no un identificador (`{x: 1}` lee la variable `x`).
 
+### Query params
+
+Para recibir parámetros de la query string (`?limit=10&offset=20`),
+declarálos adentro del path del decorator con la misma sintaxis
+de path params, pero después de un `?`:
+
+```fitz
+@get("/items?limit={limit}&offset={offset}")
+fn list_items(limit: Int, offset: Int) -> List<Item> {
+    // limit y offset llegan ya tipados como Int
+    ...
+}
+```
+
+Cada `{name}` adentro del query corresponde a un parámetro del
+handler con el mismo nombre. La key del query y el nombre del
+parámetro deben coincidir — `?l={limit}` es error.
+
+**Obligatorios vs opcionales**:
+
+- `limit: Int` → obligatorio. Si la query no incluye `limit=...`,
+  la response es 400 con `{"error": "query param 'limit': falta
+  — es obligatorio"}`.
+- `limit: Int?` → opcional. Si falta, el handler ve `null`.
+
+```fitz
+@get("/items?name={name}&limit={limit}")
+fn search(name: Str, limit: Int?) -> Str {
+    // name es obligatorio; limit puede llegar null
+    if (limit == null) {
+        return "buscando '{name}' sin límite"
+    }
+    return "buscando '{name}' con límite {limit}"
+}
+```
+
+```bash
+curl "http://127.0.0.1:3000/items?name=fitz"
+# "buscando 'fitz' sin límite"
+
+curl "http://127.0.0.1:3000/items?name=fitz&limit=10"
+# "buscando 'fitz' con límite 10"
+
+curl "http://127.0.0.1:3000/items?limit=10"
+# {"error":"query param 'name': falta — es obligatorio"}
+```
+
+**Tipos soportados** en query params: `Int`, `Float`, `Str`,
+`Bool` (los primitivos), opcionalmente nullables (`Int?`, etc.).
+`List<T>` y tipos custom no se soportan todavía — irían como
+body, no como query param.
+
+**Coerción**: los valores de query siempre llegan como `String`
+desde HTTP. Fitz los parsea al tipo declarado. Si el parse falla
+(`limit=abc` con `limit: Int`), 400 con el mensaje claro.
+
+**Combinable con path params y body**: una ruta puede tener
+los tres a la vez.
+
+```fitz
+type Patch { value: Int }
+
+@put("/items/{id}?dry_run={dry_run}")
+fn update_item(id: Int, dry_run: Bool, body: Patch) -> Str {
+    // id ← path, dry_run ← query, body ← JSON del request
+    ...
+}
+```
+
 ---
 
 Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
 escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
 errores propagable, configuración del server, status codes
-custom. El próximo capítulo cubre el otro gran salto de Fase 5:
-**compilar el programa a un binario nativo standalone** con
-`fitz build`.
+custom, query params. El próximo capítulo cubre el otro gran
+salto de Fase 5: **compilar el programa a un binario nativo
+standalone** con `fitz build`.
 
 ---
 

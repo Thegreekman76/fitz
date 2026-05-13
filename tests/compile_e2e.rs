@@ -1668,3 +1668,126 @@ fn http_status_codes_polimorfico_mix_ok_y_404() {
         body_404
     );
 }
+
+// ---------------------------------------------------------------------------
+// Query params HTTP (?key={name})
+// ---------------------------------------------------------------------------
+
+#[test]
+fn http_query_params_obligatorios_extraen_y_coercen() {
+    // `?limit={limit}&offset={offset}` con ambos `Int` obligatorios.
+    // El handler los recibe coercionados, los inscrusta en la response.
+    let src = "@server(43500)\nfn main() => 0\n\
+               @get(\"/items?limit={limit}&offset={offset}\")\n\
+               fn list_items(limit: Int, offset: Int) -> Str {\n\
+                   return \"limit={limit} offset={offset}\"\n\
+               }\n";
+    let (status, body) = build_spawn_request(
+        "http-query-required",
+        src,
+        43500,
+        "GET",
+        "/items?limit=10&offset=20",
+        None,
+    );
+    assert_eq!(status, 200);
+    assert_eq!(body.trim(), "\"limit=10 offset=20\"");
+}
+
+#[test]
+fn http_query_param_obligatorio_faltante_es_400() {
+    let src = "@server(43501)\nfn main() => 0\n\
+               @get(\"/items?limit={limit}\")\n\
+               fn list_items(limit: Int) -> Int => limit\n";
+    let (status, body) = build_spawn_request(
+        "http-query-missing-required",
+        src,
+        43501,
+        "GET",
+        "/items",
+        None,
+    );
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("query param 'limit'") && body.contains("obligatorio"),
+        "body debería decir 'obligatorio', fue: {}",
+        body
+    );
+}
+
+#[test]
+fn http_query_param_nullable_falta_devuelve_null() {
+    // `name: Str?` → si falta en la query, el handler ve `Null`. El
+    // print/interpolación lo serializa como `null`.
+    let src = "@server(43502)\nfn main() => 0\n\
+               @get(\"/items?name={name}\")\n\
+               fn list_items(name: Str?) -> Str {\n\
+                   return \"name={name}\"\n\
+               }\n";
+    let (status_falta, body_falta) = build_spawn_request(
+        "http-query-nullable-missing",
+        src,
+        43502,
+        "GET",
+        "/items",
+        None,
+    );
+    assert_eq!(status_falta, 200);
+    assert_eq!(body_falta.trim(), "\"name=null\"");
+
+    let (status_present, body_present) = build_spawn_request(
+        "http-query-nullable-present",
+        src,
+        43502,
+        "GET",
+        "/items?name=fitz",
+        None,
+    );
+    assert_eq!(status_present, 200);
+    assert_eq!(body_present.trim(), "\"name=fitz\"");
+}
+
+#[test]
+fn http_query_path_y_body_combinados() {
+    // Caso completo: path param + query param + body. Cada categoría
+    // se extrae del lugar correcto y el handler los recibe en el
+    // orden declarado.
+    let src = "@server(43503)\nfn main() => 0\n\
+               type Patch { value: Int }\n\
+               @put(\"/items/{id}?dry_run={dry_run}\")\n\
+               fn update_item(id: Int, dry_run: Bool, body: Patch) -> Str {\n\
+                   return \"id={id} dry_run={dry_run} value={body.value}\"\n\
+               }\n";
+    let (status, body) = build_spawn_request(
+        "http-query-path-body",
+        src,
+        43503,
+        "PUT",
+        "/items/42?dry_run=true",
+        Some(r#"{"value":7}"#),
+    );
+    assert_eq!(status, 200);
+    assert_eq!(body.trim(), "\"id=42 dry_run=true value=7\"");
+}
+
+#[test]
+fn http_query_param_parse_error_es_400() {
+    // `limit: Int` recibe `"abc"` → 400 con mensaje de coerción.
+    let src = "@server(43504)\nfn main() => 0\n\
+               @get(\"/items?limit={limit}\")\n\
+               fn list_items(limit: Int) -> Int => limit\n";
+    let (status, body) = build_spawn_request(
+        "http-query-parse-error",
+        src,
+        43504,
+        "GET",
+        "/items?limit=abc",
+        None,
+    );
+    assert_eq!(status, 400);
+    assert!(
+        body.contains("query param 'limit'"),
+        "body debería mencionar el query param, fue: {}",
+        body
+    );
+}

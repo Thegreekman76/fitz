@@ -24,7 +24,7 @@
 > errores. S1.codegen cerrado — 52 sitios del codegen migrados
 > a `err_at` (con span del nodo); los 17 restantes son defensivos
 > contra bugs del compilador (checker debió cazar), donde citar
-> posición no aporta. **HTTP status codes custom cerrado** —
+> posición no aporta. HTTP status codes custom cerrado —
 > sintaxis del spec `return <Int> { ... }` implementada
 > end-to-end: AST (`Stmt::ReturnStatus`), parser (detecta el
 > patrón después de `return <Int>` cuando viene un `{`), checker
@@ -34,11 +34,25 @@
 > contiene `ReturnStatus`, envoltura uniforme de returns
 > normales y custom). Polimorfismo del spec: handler `-> User`
 > puede mezclar `return user` (200) con `return 404 { ... }`.
-> Cap 17 de la guía + ejemplo `examples/guide/17-http.fitz`
-> actualizados; intérprete y compilador validados bit-a-bit
-> con curl. Ver matriz para ítems pendientes (Pattern/TypeExpr
-> sin span, T1 sucesivos batches, query params). **1026 tests
-> pasando** (+16 dedicados: parser, checker, http, codegen, E2E).
+> **HTTP query params cerrado** — sintaxis del spec `?key={name}`
+> implementada end-to-end: `parse_path_template` separa path y
+> query y devuelve `query_params: Vec<String>` adicional;
+> `RouteSpec`/`RouteMeta`/`InterpTask` cargan los nombres y
+> raw values; `build_method_router` extrae `Query<HashMap>` en
+> 8 combinaciones (path × query × body); evaluator valida que el
+> handler tenga param Fitz por cada `?key={name}` y coerciona
+> (`Int?` opcional → Null si falta; `Int` obligatorio → 400);
+> codegen emite `axum::extract::Query<HashMap>` + binding
+> tipado para cada param (Int/Float/Str/Bool, opcional `Option<T>`).
+> Tipos no soportados (Lists, custom) abortan codegen con
+> mensaje claro. Cap 17 de la guía + ejemplo `17-http.fitz` con
+> nuevo endpoint `/search?name={name}&limit={limit}`. Bug fix
+> colateral del codegen: `BinOp Eq` entre `Nullable<T>` y `Null`
+> ahora emite `.is_none()` / `.is_some()` en vez del literal
+> `== ()`. Intérprete y compilador validados bit-a-bit.
+> Ver matriz para ítems pendientes (Pattern/TypeExpr sin span,
+> T1 sucesivos batches). **1043 tests pasando** (+17 dedicados:
+> http path 5, codegen 7, E2E 5).
 
 ## Resumen ejecutivo
 
@@ -311,3 +325,51 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
     exige body explícito; workaround `return 204 {}`); responses
     como expresión libre (`let r = 200 { ... }`); status codes
     desde una var (`return code { ... }` con `code` no literal).
+
+- **HTTP query params** — **cerrado en mini-fase dedicada** (segunda
+  mitad de la mini-fase HTTP combinada con status codes).
+  Sintaxis del spec `@get("/items?limit={limit}&offset={offset}")`
+  implementada end-to-end:
+  - `parse_path_template` (http.rs): separa el path real del query
+    template por el primer `?` y devuelve `query_params:
+    Vec<String>` adicional. Validaciones: la key del query debe
+    coincidir con el nombre del param Fitz; template malformado
+    (`?limit`, `?=v`, `?{x}`) emite error específico; duplicados
+    entre path y query también.
+  - `RouteSpec`/`RouteMeta`: sumaron `query_params: Vec<String>` y
+    `has_query_params: bool`. `InterpTask` lleva
+    `query_params: HashMap<String, String>` con los raw values
+    del request.
+  - `build_method_router`: 8 combinaciones de `(has_path × has_query
+    × expects_body)` con axum extractors apropiados (`AxumPath`,
+    `Query<HashMap>`, `Bytes`).
+  - `handle_task` (intérprete): para cada param Fitz, decide si es
+    path/query/body. Query nullable (`Int?`) faltante → `Value::Null`;
+    obligatorio faltante → 400 con mensaje. Coerción al tipo
+    declarado vía `coerce_path_param` (Int/Float/Str/Bool).
+  - Evaluator registro de `@get/@post`: valida que cada
+    `?key={name}` del template tenga un param Fitz correspondiente.
+    Mismatch → error claro. `param_types` ahora carga también
+    `is_nullable: bool` para que el dispatch HTTP decida si Null
+    o 400.
+  - Codegen: `parse_http_path` delega a `parse_path_template` para
+    devolver `(path_axum, query_params)`. El wrapper HTTP categoriza
+    cada param en path/query/body; para los query emite
+    `Query<HashMap<String, String>>` + binding tipado con coerción
+    (`limit: i64 = match __qmap.get("limit") { ... }`). Nullable →
+    `Option<T>`. Tipos no soportados (Lists, custom, Result) →
+    error de codegen claro.
+  - **Bug fix colateral del codegen**: `BinOp Eq/NotEq` entre
+    `Nullable<T>` y `Null` ahora emite `.is_none()`/`.is_some()` en
+    vez del literal `== ()` (que Rust rechaza por mismatched types
+    sobre `Option<T>`). Habilita patrones tipo
+    `if (limit == null) { ... }` adentro del handler.
+  - Cap 17 de la guía actualizado con sección "Query params" + 3
+    ejemplos. `examples/guide/17-http.fitz` sumó endpoint
+    `/search?name={name}&limit={limit}` con `Str`/`Int?`.
+    Validado bit-a-bit `fitz run` vs `fitz build` con curl.
+  - 17 tests dedicados (http path 5, codegen 7, E2E 5).
+  - **Deuda explícita que queda**: tipos no-primitivos en query
+    params (List, instancias); aliases de key (`?l={limit}`,
+    rechazado hoy); query params via vector (`?ids=1&ids=2`);
+    query params como una struct ad-hoc (Map<Str, Str> implícito).
