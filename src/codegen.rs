@@ -1927,6 +1927,7 @@ impl<'a> CodegenCtx<'a> {
                 name,
                 params,
                 return_type,
+                is_async,
                 ..
             } = stmt
             {
@@ -1935,7 +1936,7 @@ impl<'a> CodegenCtx<'a> {
                     .iter()
                     .map(|p| self.resolve_param_type(name, &p.name, p.type_.as_ref(), fn_span))
                     .collect::<Result<_, _>>()?;
-                let ret = match return_type {
+                let inner_ret = match return_type {
                     Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
                         FitzError::new(
                             e.kind,
@@ -1948,6 +1949,19 @@ impl<'a> CodegenCtx<'a> {
                         )
                     })?,
                     None => Type::Null,
+                };
+                // Fase 6.6: la firma EXTERNA de una `async fn` envuelve
+                // su return type en `Future<T>` — espejo de lo que hace
+                // el checker (`preregister_fn_signatures` en
+                // `types.rs`). Sin esto, `gen_call` sobre una async fn
+                // creería que el call site tipa como `T` y el `.await`
+                // posterior caería al path gradual (`Any`), perdiendo
+                // info de tipo. La emisión Rust del body NO usa esta
+                // firma envuelta (Rust auto-envuelve con `async fn`).
+                let ret = if *is_async {
+                    Type::Future(Box::new(inner_ret))
+                } else {
+                    inner_ret
                 };
                 self.fn_sigs.insert(name.clone(), FnSig { params, ret });
             }
@@ -2126,11 +2140,26 @@ impl<'a> CodegenCtx<'a> {
         // return type declarado del usuario se ignora (es por la
         // semántica polimórfica del spec — handler puede devolver T o
         // un response builder).
+        //
+        // Fase 6.6: `sig.ret` en `fn_sigs` carga `Future<T>` cuando la
+        // fn es async (alineado con la firma del checker que usan los
+        // call sites). Pero Rust auto-envuelve con `async fn`: emitir
+        // `-> Pin<Box<dyn Future<...>>>` además daría doble wrapping.
+        // Por eso al renderizar el return Rust usamos el INNER si la
+        // fn es async, y `sig.ret` directo si no.
+        let emit_ret = if *is_async {
+            match &sig.ret {
+                Type::Future(inner) => (**inner).clone(),
+                other => other.clone(),
+            }
+        } else {
+            sig.ret.clone()
+        };
         if has_return_status {
             self.emit(" -> __FitzResponse");
-        } else if !matches!(sig.ret, Type::Null) {
+        } else if !matches!(emit_ret, Type::Null) {
             self.emit(" -> ");
-            self.emit(&rust_type_for(&sig.ret, self.env)?);
+            self.emit(&rust_type_for(&emit_ret, self.env)?);
         }
         self.emit(" {\n");
 
@@ -2172,11 +2201,15 @@ impl<'a> CodegenCtx<'a> {
         }
         // Frame de "return esperado" para coerciones y para que `?`
         // (Try) pueda validar que está adentro de una fn Result.
-        self.ret_stack.push(sig.ret.clone());
+        // Fase 6.6: usamos `emit_ret` (el inner del `Future<T>` para
+        // async fn, o `sig.ret` directo) porque adentro del body los
+        // `return x` retornan `T` puro — `async` es transparente
+        // desde adentro (espejo del checker en `types.rs`).
+        self.ret_stack.push(emit_ret.clone());
         let saved_response_mode = self.response_mode;
         self.response_mode = has_return_status;
         for stmt in body {
-            self.gen_stmt_in_fn(stmt, &sig.ret)?;
+            self.gen_stmt_in_fn(stmt, &emit_ret)?;
         }
         self.response_mode = saved_response_mode;
         self.ret_stack.pop();

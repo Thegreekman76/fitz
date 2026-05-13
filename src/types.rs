@@ -1178,11 +1178,16 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // gradual). Cualquier otro tipo concreto es error.
             let operand_ty = infer_expr(ctx, inner);
 
-            let in_async = ctx.await_stack.last().copied().unwrap_or(false);
-            if !in_async {
+            // Top-level (stack vacío) cuenta como contexto async válido
+            // — el evaluator arranca el runtime tokio ahí y el codegen
+            // emite `#[tokio::main] async fn main()` cuando el programa
+            // usa async. Solo rechazamos cuando estamos adentro de una
+            // fn sync explícita (`Some(false)`): FnDef no-async o
+            // FnExpr (los closures no soportan async todavía).
+            if matches!(ctx.await_stack.last(), Some(false)) {
                 ctx.error_at(
                     *span,
-                    "`.await` solo es válido adentro de `async fn`".to_string(),
+                    "`.await` solo es válido adentro de `async fn` o a nivel top-level".to_string(),
                 );
             }
 
@@ -2251,16 +2256,37 @@ mod tests {
     }
 
     #[test]
-    fn await_fuera_de_async_fn_es_error() {
-        // Top-level: `await_stack` está vacío → la regla "solo adentro
-        // de async fn" dispara.
+    fn await_top_level_es_valido() {
+        // Fase 6.7: el top-level acepta `.await` — el evaluator arranca
+        // el runtime tokio ahí y el codegen emite `#[tokio::main]
+        // async fn main()` automáticamente. Solo las fns sync
+        // explícitas (FnDef no-async o FnExpr) lo rechazan.
         let errors = errors_of(
             "async fn fetch() -> Int {\n\
                  return 0\n\
              }\n\
              let x = fetch().await",
         );
-        assert!(!errors.is_empty(), "esperaba al menos 1 error");
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores (await top-level es válido), fue: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn await_dentro_de_fn_sync_es_error() {
+        // FnDef sin `async` cuenta como contexto sync → `.await`
+        // adentro emite error claro.
+        let errors = errors_of(
+            "async fn fetch() -> Int {\n\
+                 return 0\n\
+             }\n\
+             fn sync_caller() -> Int {\n\
+                 return fetch().await\n\
+             }",
+        );
+        assert!(!errors.is_empty(), "esperaba error en .await dentro de fn sync");
         let msg = &errors[0].message;
         assert!(
             msg.contains(".await") && msg.contains("async fn"),

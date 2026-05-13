@@ -2267,7 +2267,17 @@ mini-fases dedicadas. Los cerrados hasta hoy:
 ---
 
 ## Fase 6 — Async nativo ⚡
-**Estado: PROPUESTA — comprometida como siguiente fase**
+**Estado: CERRADA (2026-05-13)** — `async fn`, `.await`,
+`Future<T>`, builtin `sleep`, evaluator async, handlers HTTP
+async, codegen async todo end-to-end. **Excepción**: el sub-paso
+6.4 original (eliminar bridge HTTP `mpsc/oneshot`) quedó
+**POSPUESTO hasta F17** (Send completo) por bloqueo de
+`axum::Handler: Send`. Compromiso documentado en
+`docs/deudas-post-5b.md`.
+
+1085+ tests pasando al cierre. Validación bit-a-bit `fitz run`
+vs `fitz build` para programa CLI con `async fn` + `sleep` y
+para handler HTTP `async fn`.
 
 Hoy `async fn` se parsea pero el runtime es sincrónico. Los
 handlers HTTP corren en un thread del intérprete con bridge a

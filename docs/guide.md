@@ -46,14 +46,15 @@ abrí un issue.
 **Parte 6 — Organización**
 16. [Módulos](#16-módulos)
 
-**Parte 7 — HTTP nativo**
+**Parte 7 — HTTP nativo y concurrencia**
 17. [HTTP nativo](#17-http-nativo)
+18. [Async y concurrencia](#18-async-y-concurrencia)
 
 **Parte 8 — Compilar**
-18. [`fitz build` — compilar a binario nativo](#18-fitz-build--compilar-a-binario-nativo)
+19. [`fitz build` — compilar a binario nativo](#19-fitz-build--compilar-a-binario-nativo)
 
 **Parte 9 — Cerrando**
-19. [Qué sigue](#19-qué-sigue)
+20. [Qué sigue](#20-qué-sigue)
 
 ---
 
@@ -4357,13 +4358,176 @@ fn update_item(id: Int, dry_run: Bool, body: Patch) -> Str {
 Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
 escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
 errores propagable, configuración del server, status codes
-custom, query params. El próximo capítulo cubre el otro gran
-salto de Fase 5: **compilar el programa a un binario nativo
-standalone** con `fitz build`.
+custom, query params. El próximo capítulo cubre la **otra mitad
+de "HTTP nativo"**: concurrencia con `async fn` y `.await`.
 
 ---
 
-## 18. `fitz build` — compilar a binario nativo
+## 18. Async y concurrencia
+
+Hasta acá las funciones de Fitz son sincrónicas: corren, devuelven,
+fin. `async fn` agrega una segunda forma: la función devuelve un
+**valor pendiente** (un `Future<T>`) que se "ejecuta" cuando otra
+parte del código lo **await**-ea. Sirve para operaciones que toman
+tiempo sin trabajo de CPU — esperar una respuesta HTTP, leer de
+disco, dormir N milisegundos — sin bloquear todo el intérprete.
+
+Fitz cumple la promesa de async nativo: `async fn`, `Future<T>` y
+el operador `.await` están en el core del lenguaje, no en una lib.
+El runtime tokio (de Rust) maneja el scheduling abajo; el usuario
+solo ve la sintaxis.
+
+### `async fn` — declarar una función async
+
+Una `async fn` se ve igual que una `fn` normal pero con el prefijo
+`async`:
+
+```fitz
+async fn pausa(ms: Int) -> Int {
+    let _ = sleep(ms).await
+    return ms
+}
+```
+
+Por fuera, la firma de `pausa` es `(Int) -> Future<Int>`: llamarla
+NO ejecuta el cuerpo, devuelve un `Future` que representa la
+ejecución pendiente. Por dentro, los `return n` siguen retornando
+`Int` puro — el `async` es **transparente desde adentro** del cuerpo.
+
+### `.await` — desempaqueta un `Future`
+
+`.await` es **postfix** (después del valor) y encaja naturalmente
+en method chains:
+
+```fitz
+let n = pausa(100).await        // espera 100ms, devuelve 100
+let m = pausa(50).await + 1     // chain: 50 + 1 = 51
+```
+
+Sin `.await`, la llamada devuelve el `Future<Int>` "crudo" — útil
+para guardarlo, pasarlo como argumento o componerlo. Con `.await`,
+el future se ejecuta y obtenemos el `Int` interno.
+
+### `Future<T>` como tipo
+
+`Future<T>` es un genérico built-in, igual que `List<T>` o
+`Result<T>`:
+
+```fitz
+let pending: Future<Int> = pausa(0)
+let value: Int = pending.await
+```
+
+Aparece naturalmente en el return type de cualquier `async fn`
+(desde afuera) y se puede usar en anotaciones de variables,
+parámetros y campos de tipo.
+
+### El builtin `sleep(ms)`
+
+`sleep(ms: Int) -> Future<Null>` produce un future que pausa N
+milisegundos cuando se await-ea. Es el primer "async primitive"
+del lenguaje:
+
+```fitz
+async fn esperar_y_saludar(nombre: Str) -> Str {
+    let _ = sleep(100).await
+    return "hola, {nombre}"
+}
+```
+
+### Dónde se permite `.await`
+
+`.await` solo dispara la ejecución de un `Future` si está adentro
+de un contexto async. Las reglas:
+
+| Contexto                                          | `.await` permitido |
+|---------------------------------------------------|--------------------|
+| Adentro de una `async fn`                         | ✅ sí              |
+| A nivel **top-level** del archivo                 | ✅ sí (el runtime tokio se arma al ejecutar) |
+| Adentro de una `fn` sync                          | ❌ error de tipo   |
+| Adentro de `fn(x) => ...` (FnExpr / closure)      | ❌ error de tipo   |
+
+El último caso es porque Fitz **no soporta closures async**
+todavía (`async fn(x) => ...` no existe en la gramática). Si
+necesitás un callback async, declarate una `async fn` con nombre
+y pasala como valor.
+
+### Handlers HTTP async
+
+Cualquier handler HTTP puede ser `async fn`. El runtime tokio
+existente lo invoca con `.await` automático; el usuario no escribe
+nada extra:
+
+```fitz
+@server(3000)
+fn main() => 0
+
+@get("/lento")
+async fn lento() -> Str {
+    let _ = sleep(500).await
+    return "después de medio segundo"
+}
+
+@get("/rapido")
+fn rapido() -> Str => "ya"
+```
+
+Los handlers sync y async **conviven libremente**. axum los acepta
+ambos. La diferencia se nota cuando el handler async hace I/O real
+(en el futuro: `fetch(url).await`, `db.query(...).await`): un
+endpoint que está esperando una respuesta externa cede CPU para
+que el intérprete avance otras tareas adentro del mismo handler.
+
+### Limitación actual: server single-threaded
+
+El runtime HTTP es `tokio::flavor = "current_thread"`. Esto
+significa que **dos requests HTTP simultáneos no se ejecutan en
+paralelo**: el segundo espera a que el primero termine. La promesa
+de async (concurrencia real entre tareas) está cumplida adentro de
+un handler (`sleep().await` cede CPU mientras espera) pero no entre
+handlers.
+
+La razón es estructural: los `Value::Function` de Fitz arrastran
+`Rc<RefCell<>>` internamente y no son `Send`, así que axum (que
+exige `Send` en sus handlers) no puede ejecutarlos en su pool
+multi-thread. Hay una **deuda explícita comprometida** (F17 en
+[docs/deudas-post-5b.md](deudas-post-5b.md)): cuando esa migración
+cierre — Rc/RefCell → Arc/Mutex — el server pasa a multi-thread y
+se gana paralelismo entre handlers.
+
+Para programas CLI con `sleep().await`, esto no afecta: hay una
+sola tarea a la vez.
+
+### Ejemplo del capítulo
+
+Ver [examples/guide/18-async.fitz](../examples/guide/18-async.fitz).
+Declara tres `async fn` que se componen, y desde el top-level las
+await-ea para imprimir los resultados.
+
+```sh
+fitz run examples/guide/18-async.fitz
+fitz build examples/guide/18-async.fitz
+./examples/guide/18-async                # Linux/macOS
+.\examples\guide\18-async.exe            # Windows
+```
+
+Salida esperada:
+
+```
+hola, Fitz
+total ms = 0
+```
+
+---
+
+Async cumple la promesa de "HTTP nativo" a nivel de ejecución:
+podés escribir un handler que pausa, cede CPU, sigue. El próximo
+capítulo cubre el otro gran salto: **compilar el programa a un
+binario nativo standalone** con `fitz build`.
+
+---
+
+## 19. `fitz build` — compilar a binario nativo
 
 Hasta acá usamos siempre `fitz run`: el intérprete lee el archivo,
 lo lexea, parsea, chequea y ejecuta en proceso. Es rápido para
@@ -4512,7 +4676,7 @@ Hola, Fitz, x es 15
 
 ### Ejemplo: server HTTP compilado
 
-[examples/guide/18-build.fitz](../examples/guide/18-build.fitz)
+[examples/guide/19-build.fitz](../examples/guide/19-build.fitz)
 es un server HTTP simple que cubre endpoints estáticos, path params,
 Result con Err → 500, y un POST con body deserializado a un `type`
 custom:
@@ -4543,10 +4707,10 @@ fn echo(body: Echo) -> Echo => body
 ```
 
 ```
-$ fitz build examples/guide/18-build.fitz
-✓ binario: examples/guide/18-build.exe
+$ fitz build examples/guide/19-build.fitz
+✓ binario: examples/guide/19-build.exe
 
-$ ./examples/guide/18-build.exe &
+$ ./examples/guide/19-build.exe &
 Fitz HTTP escuchando en http://127.0.0.1:3000
 
 $ curl http://127.0.0.1:3000/
@@ -4600,14 +4764,14 @@ y un compilador que genera binarios nativos para CLI y HTTP. El
 
 ---
 
-## 19. Qué sigue
+## 20. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 18 podés:
+Con los capítulos 1 a 19 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -4646,54 +4810,42 @@ Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
 ejecuten y un compilador que produce binarios standalone.
 
-### Lo que viene — más allá de Fase 5
+### Lo que viene — más allá de Fase 6
 
-Fase 5 está cerrada: **5a (type checker estático)** validó las
-anotaciones que durante Fases 2 a 4 se parseaban pero no se
-chequeaban, y **5b (codegen a binario nativo)** transpila el AST
-a un Cargo project + invoca rustc para producir binarios.
+Fase 5 cerró el **type checker estático** (5a) y el **codegen a
+binario nativo** (5b). Fase 6 cerró el **async nativo**:
+`async fn`, `.await`, `Future<T>`, builtin `sleep` y handlers HTTP
+async corriendo end-to-end con tokio. Con eso, la promesa "HTTP
+nativo" queda cumplida tanto a nivel ergonómico (cap 17) como a
+nivel de ejecución (cap 18).
 
-Lo que sigue post-5:
+Lo que sigue post-6:
 
-- **Fase 6 — Async nativo** (siguiente comprometida): `async fn` y
-  `.await` reales en el lenguaje. Evaluator async, handlers HTTP
-  async reales, codegen `async fn` Rust. Cumple la promesa "HTTP
-  nativo" a nivel de ejecución.
-- **Fase 7 — DX HTTP**: OpenAPI 3.1 autogenerado desde los
-  decoradores + UI Scalar embebida en `/docs`. Paridad con
-  FastAPI en developer experience.
+- **Fase 7 — DX HTTP** (siguiente comprometida): OpenAPI 3.1
+  autogenerado desde los decoradores + UI Scalar embebida en
+  `/docs`. Paridad con FastAPI en developer experience.
 - **Fase 8 — Interop Python** (propuesta): poder llamar código
   Python desde Fitz. El stack inicial de FastAPI/SQLAlchemy del
   autor vive ahí; abrir el camino sin pedir que se reescriba
-  todo es lo que justifica la fase. Pre-req: Fase 6.
+  todo es lo que justifica la fase.
 - **Fase 9 — Ecosistema**: package manager, registry, LSP,
   formatter, linter, plugin de editores.
-- **Deuda residual de Fase 5b** que entra como sub-pasos
-  futuros si aparece presión:
+- **Deuda residual comprometida**:
+  - **F17 — Send + paralelismo HTTP**: migrar `Rc<RefCell<>>` →
+    `Arc<Mutex<>>` en Value/EnvRef/módulos para destrabar (a)
+    spawn paralelo desde Fitz (`tokio::join!`, `tokio::spawn`),
+    (b) eliminación del bridge mpsc interno del server HTTP,
+    (c) server multi-thread (handlers en paralelo). Cuando
+    aparezca presión real.
   - **Inferencia de tipos de params y returns** en fns sin
     anotar — hoy `fn greet(name)` corre en el intérprete pero
-    `fitz build` exige anotación. Mismo caso para handlers HTTP
-    sin return type explícito.
-  - **Status codes custom**, query params, headers, middleware,
-    TLS — todo HTTP "más allá del 80%". Parte entra en Fase 7;
-    el resto queda como deuda.
+    `fitz build` exige anotación.
   - **Listas/mapas heterogéneos** compilados (`[1, "dos"]`) — el
     intérprete los acepta, el compilador necesita un `FitzValue`
     tagged en runtime.
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
 deuda explícita acumulada por fase.
-
-### Más adelante
-
-- **Fase 6 — Async nativo**: `async fn` y `.await` reales,
-  evaluator async, handlers HTTP async.
-- **Fase 7 — DX HTTP**: OpenAPI autogenerado + UI Scalar
-  embebida.
-- **Fase 8 — Interop Python**: aprovechar el ecosistema sin
-  reescribir todo.
-- **Fase 9 — Ecosistema**: package manager, LSP, formatter,
-  linter, plugin de editores.
 
 ### Cómo va a crecer esta guía
 

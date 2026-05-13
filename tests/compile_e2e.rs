@@ -1293,7 +1293,8 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "14-result.fitz",
     "16-modulos.fitz",
     "17-http.fitz",
-    "18-build.fitz",
+    "18-async.fitz",
+    "19-build.fitz",
 ];
 
 #[test]

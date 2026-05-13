@@ -1,0 +1,52 @@
+// 18-async.fitz — Ejemplo del capítulo 18 "Async y concurrencia".
+//
+// `async fn` declara una función concurrente: al llamarla devuelve un
+// `Future<T>` pendiente, y `.await` (postfix) lo desempaca al `T`. El
+// builtin `sleep(ms)` produce un `Future<Null>` que pausa N
+// milisegundos cuando se await-ea.
+//
+// `.await` es válido a nivel top-level (este archivo) y adentro de
+// otras `async fn`. NO se permite adentro de una `fn` sync (sin
+// async) — el checker lo rechaza con error explícito.
+//
+// Correr:
+//   fitz run examples/guide/18-async.fitz
+//
+// Compilar:
+//   fitz build examples/guide/18-async.fitz
+//   ./examples/guide/18-async         # Linux / macOS
+//   .\examples\guide\18-async.exe     # Windows
+
+// `pausa_corta` espera N ms y devuelve la cantidad pasada como input.
+// `sleep(n)` produce `Future<Null>`; `.await` lo dispara y obtenemos
+// Null. Después retornamos `n`.
+async fn pausa_corta(ms: Int) -> Int {
+    let _ = sleep(ms).await
+    return ms
+}
+
+// `saludo` pausa 0ms y devuelve un Str interpolado. Encadenar `.await`
+// es natural en method chains: `pausa_corta(0).await`.
+async fn saludo(nombre: Str) -> Str {
+    let _ = pausa_corta(0).await
+    return "hola, {nombre}"
+}
+
+// `dos_pausas` muestra cómo un `async fn` puede await-ear a otra y
+// componer fácilmente. El return type externo sigue siendo `Int`;
+// adentro del body los `return` devuelven `T` puro (no `Future<T>`)
+// — `async` es transparente desde adentro.
+async fn dos_pausas() -> Int {
+    let a = pausa_corta(0).await
+    let b = pausa_corta(0).await
+    return a + b
+}
+
+// Top-level: usamos `.await` directamente. El runtime tokio
+// `current_thread` se arma automáticamente al ejecutar el programa
+// (en `fitz run` o en el `#[tokio::main]` que emite `fitz build`).
+let mensaje = saludo("Fitz").await
+print(mensaje)
+
+let total = dos_pausas().await
+print("total ms = {total}")
