@@ -635,6 +635,23 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
             },
         );
+        // `sleep(ms: Int) -> Future<Null>` — primer async primitive.
+        // Introducido en Fase 6.3. La firma envuelve `Null` en
+        // `Future<Null>` (paralelo a cualquier `async fn` del usuario):
+        // el usuario obligatoriamente la await-ea adentro de otra
+        // `async fn`, o guarda el Future suelto. El evaluator tiene
+        // un stub que falla con "llega en 6.4" hasta que aterrice
+        // el evaluator async.
+        self.scopes[0].insert(
+            "sleep".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Int],
+                    ret: Box::new(Type::Future(Box::new(Type::Null))),
+                },
+                annotated: false,
+            },
+        );
     }
 
     fn push_scope(&mut self) {
@@ -2359,6 +2376,53 @@ mod tests {
         assert!(!any_future_err,
             "el await sobre Any no debería disparar error de Future, fue: {:?}",
             errors);
+    }
+
+    // ---- Fase 6.3: built-in `sleep` ----
+
+    #[test]
+    fn sleep_tipa_su_call_como_future_null() {
+        // `sleep(100)` tipa `Future<Null>`. Validamos vía una
+        // anotación destino — si el RHS no fuera `Future<Null>`,
+        // el checker emitiría error de incompatibilidad.
+        let errors = errors_of("let r: Future<Null> = sleep(100)");
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn sleep_con_argumento_no_int_es_error() {
+        let errors = errors_of("let r = sleep(\"x\")");
+        assert!(!errors.is_empty(), "esperaba error de tipo");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("sleep") && msg.contains("Int") && msg.contains("Str"),
+            "esperaba mensaje sobre sleep/Int/Str, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn sleep_con_aridad_incorrecta_es_error() {
+        let errors = errors_of("let r = sleep(1, 2)");
+        assert!(!errors.is_empty(), "esperaba error de aridad");
+        let msg = &errors[0].message;
+        assert!(
+            msg.contains("sleep") && msg.contains("1") && msg.contains("2"),
+            "esperaba mensaje sobre sleep/1/2, fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn sleep_await_dentro_de_async_fn_tipa_null() {
+        // Integración con 6.2: `sleep(50).await` adentro de `async fn`
+        // tipa `Null`. La fn declara `-> Null` y el return matchea.
+        let errors = errors_of(
+            "async fn pausa() -> Null {\n\
+                 return sleep(50).await\n\
+             }",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
     // ---- C-F2: field assignment chequeo ----

@@ -2202,6 +2202,21 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_len,
         },
     );
+    // `sleep(ms: Int)` — async primitive introducido en Fase 6.3. El
+    // checker lo tipa como `Function { ret: Future<Null> }`. Acá
+    // registramos un stub que emite error claro: el evaluator async
+    // (refactor de eval_expr/eval_stmt/etc. a `async fn`) entra en
+    // 6.4, así que hasta entonces no podemos esperar ni construir
+    // un `Value::Future`. La barrera del evaluator sobre `Expr::Await`
+    // suele cortar antes; este builtin es para el caso de llamar a
+    // `sleep(100)` sin `.await` (guardar el Future suelto).
+    env.borrow_mut().define(
+        "sleep",
+        Value::Builtin {
+            name: "sleep",
+            func: builtin_sleep,
+        },
+    );
 }
 
 /// `print(arg1, arg2, ...)` — imprime los args convertidos a string,
@@ -2210,6 +2225,19 @@ fn builtin_print(args: &[Value]) -> FitzResult<Value> {
     let parts: Vec<String> = args.iter().map(|v| v.to_string()).collect();
     println!("{}", parts.join(" "));
     Ok(Value::Null)
+}
+
+/// Stub de `sleep(ms: Int) -> Future<Null>` introducido en Fase 6.3.
+/// El evaluator async llega en 6.4: hasta entonces, llamar a
+/// `sleep(...)` en `fitz run` (con o sin `.await`) emite un error
+/// explícito apuntando al sub-paso. El checker tipa correctamente
+/// el call site (`Future<Null>`) y `.await` adentro de `async fn`.
+fn builtin_sleep(_args: &[Value]) -> FitzResult<Value> {
+    Err(FitzError::new(
+        ErrorKind::InvalidSyntax,
+        0, 0,
+        "`sleep` todavía no se ejecuta en `fitz run` — llega en 6.4 (evaluator async)",
+    ))
 }
 
 /// `len(x)` — longitud de listas, mapas, strings y rangos.
@@ -2274,6 +2302,32 @@ mod tests {
     #[test]
     fn programa_vacio_no_falla() {
         assert!(eval(vec![]).is_ok());
+    }
+
+    // ---- Fase 6.3: builtin `sleep` stub ----
+
+    #[test]
+    fn sleep_builtin_emite_error_6_4_en_fitz_run() {
+        // El builtin está registrado en el env y tipa correctamente
+        // en el checker (`Function { ret: Future<Null> }`). Pero el
+        // evaluator async llega en 6.4: hasta entonces, la llamada
+        // emite un error explícito citando el sub-paso.
+        let env = Environment::new();
+        register_builtins(&env);
+        let prog = vec![Stmt::Expr(
+            Expr::Call {
+                callee: Box::new(Expr::Ident("sleep".into(), Span::ZERO)),
+                args: vec![Expr::Int(100, Span::ZERO)],
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        )];
+        let err = eval(prog).expect_err("esperaba error de evaluator");
+        assert!(
+            err.message.contains("sleep") && err.message.contains("6.4"),
+            "esperaba mensaje sobre sleep y 6.4, fue: {}",
+            err.message
+        );
     }
 
     // ---- Fase 6.1: barrera del evaluator sobre `.await` ----
