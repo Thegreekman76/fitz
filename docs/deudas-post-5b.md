@@ -14,15 +14,15 @@
 > F11 (state HTTP compartido) cerrada — `thread_local!` por var
 > top-level referenciada en handlers + tokio current_thread runtime;
 > `examples/server.fitz` y `examples/guide/17-http.fitz` compilan
-> end-to-end. T1 (tests frágiles del codegen) — primer batch cerrado:
-> infra AST-based con `syn` + `quote`, 37/113 unit tests del codegen
-> migrados de string-match a inspección de AST. S1.2 (span en Expr)
-> — los 3 sub-pasos cerrados: variantes de `Expr` cargan `Span`,
-> parser propaga spans en cada regla, checker (`infer_expr` +
-> helpers) y evaluator (`eval_expr` + helpers + 14 métodos
-> built-in) citan posición del nodo en errores. 1010 tests
-> pasando. Ver matriz para ítems pendientes (codegen call sites,
-> Pattern/TypeExpr, T1 sucesivos batches).
+> end-to-end. T1 (tests frágiles del codegen) — primer y segundo
+> batch cerrados: infra AST-based con `syn` + `quote`, **65/113**
+> unit tests del codegen migrados de string-match a inspección de
+> AST. S1.2 (span en Expr) — los 3 sub-pasos cerrados: variantes
+> de `Expr` cargan `Span`, parser propaga spans en cada regla,
+> checker (`infer_expr` + helpers) y evaluator (`eval_expr` +
+> helpers + 14 métodos built-in) citan posición del nodo en
+> errores. 1010 tests pasando. Ver matriz para ítems pendientes
+> (codegen call sites, Pattern/TypeExpr, T1 sucesivos batches).
 
 ## Resumen ejecutivo
 
@@ -130,7 +130,7 @@ completa abajo.
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| T1 | `codegen.rs` tests | **Primer batch cerrado** — 37/113 unit tests migrados a AST-based con `syn` + `quote` (módulo `ast_test` adentro de `mod tests`). Cubierto: lets/binops/print/fns/if/while/for/types/struct lit/field access/listas/match/etc. La fragilidad bajó de ~80% a ~50% sobre los tests del codegen. **Pendientes** los batches de método sobre Map/HTTP/Result-detail/closures (donde la inspección AST tendría que armar matchers más específicos). Sumá conversiones cuando muevas `let` o cambies signatures del codegen y rompas tests viejos — es buen momento para reescribirlos AST-based en lugar de actualizar el string. | Media (sucesivos batches) | Media |
+| T1 | `codegen.rs` tests | **Primer + segundo batch cerrados** — 65/113 unit tests migrados a AST-based con `syn` + `quote` (módulo `ast_test` adentro de `mod tests`). El batch 2 cubrió Listas/Mapas/Indexing/Métodos built-in (literales con vec!, indexing con borrow+clone, for snapshot, len/has/keys/values, map/filter/find/get, print de colecciones) + F12 closures (FnExpr suelta, fn nombrada como valor, fn como param y como return type, captura no-Copy, llamadas a vars Fn, FnExpr inline como arg). Helpers nuevos en `ast_test`: `local_init_expr`, `call_path`, `method_chain_names` (atraviesa Paren+Cast), `find_macro_args`, `count_method_calls_in_expr`, `contains_method_call_in_expr`, `contains_macro_in_expr`, `cast_target_type`. La fragilidad bajó de ~80% (pre-T1) a ~30% sobre los tests del codegen. **Pendientes** los tests de HTTP / Result-detail / módulos / fn-decl varios (~48 tests) y los `assert_err_contains` que son contratos de mensajes al usuario y no necesitan migración. Sumá conversiones cuando muevas `let` o cambies signatures del codegen y rompas tests viejos — es buen momento para reescribirlos AST-based en lugar de actualizar el string. | Media (sucesivos batches) | Media |
 | T2 | `tests/compile_e2e.rs:20` | Mutex `SERIAL` serializa los 48 E2E. Cada uno usa tempdir único — paralelizables con `CARGO_TARGET_DIR` per-test. ~4x speedup. | Media | Media |
 | T3 | `parser.rs` tests | Solo 4 tests de paths de error. Sin tests para: `fn f(a, a)` (params duplicados), decorator fuera de fn, escapes raros. | Media | Media |
 | T4 | E2E ~12/48 | Tests E2E que solo verifican que `build` no falle, sin validar stdout/body/status. | Media | Baja |
@@ -235,17 +235,23 @@ abren como mini-fases dedicadas, cada una con plan corto + tests
   etc.). 19 tests dedicados de span entre parser/checker/
   evaluator. Deuda residual menor: codegen call sites siguen con
   `err()` (helper `err_at` listo en `CodegenCtx`).
-- **T1** (tests frágiles del codegen) — **primer batch cerrado**.
-  Infra `ast_test` (módulo adentro de `mod tests`) parsea el Rust
-  generado con `syn::parse_file` y expone helpers para buscar
-  items, lets, signatures, derives, macro calls, method calls,
-  loops, etc. con stringificación normalizada via `quote::ToTokens`.
-  37 tests migrados de `assert_contains(code, "literal-string")` a
-  inspección de AST. Beneficio: cambios cosméticos del codegen
-  (espacios, agrupación de paréntesis, sufijos numéricos
-  alternativos) ya no rompen estos tests — solo cambios
-  estructurales reales (renaming de tipos generados, eliminación
-  de bindings, cambio de semántica) los rompen. Pipeline
-  incremental: cuando rompas un test viejo del codegen al
-  refactorizar, considerá reescribirlo AST-based en lugar de
-  actualizar el string literal.
+- **T1** (tests frágiles del codegen) — **primer + segundo batch
+  cerrados**. Infra `ast_test` (módulo adentro de `mod tests`) parsea
+  el Rust generado con `syn::parse_file` y expone helpers para buscar
+  items, lets, signatures, derives, macro calls, method calls, loops,
+  casts, etc. con stringificación normalizada via `quote::ToTokens`.
+  **65/113** tests migrados de `assert_contains(code, "literal-string")`
+  a inspección de AST. El batch 2 (28 tests) cubrió Listas/Mapas/
+  Indexing/Métodos built-in + F12 closures, y sumó helpers nuevos
+  (`local_init_expr`, `call_path`, `method_chain_names`,
+  `find_macro_args`, `count_method_calls_in_expr`,
+  `contains_method_call_in_expr`, `contains_macro_in_expr`,
+  `cast_target_type`). Beneficio acumulado: cambios cosméticos del
+  codegen (espacios, agrupación de paréntesis, sufijos numéricos
+  alternativos) ya no rompen estos tests — solo cambios estructurales
+  reales (renaming de tipos generados, eliminación de bindings,
+  cambio de semántica) los rompen. Pipeline incremental: cuando rompas
+  un test viejo del codegen al refactorizar, considerá reescribirlo
+  AST-based en lugar de actualizar el string literal. **Pendientes**
+  (~48 tests): HTTP wrappers, Result/`?`/match detail, módulos,
+  declaración de fns varias.

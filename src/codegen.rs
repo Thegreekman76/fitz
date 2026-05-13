@@ -5632,6 +5632,134 @@ mod tests {
                 })
                 .collect()
         }
+
+        /// Devuelve la expresión del initializer del `let` como
+        /// `&syn::Expr`. Útil para inspección estructural cuando
+        /// `local_init` (que devuelve String) no alcanza.
+        pub fn local_init_expr(local: &Local) -> Option<&syn::Expr> {
+            local.init.as_ref().map(|li| &*li.expr)
+        }
+
+        /// Si la expresión es una llamada (`Expr::Call`), devuelve el
+        /// path del callee normalizado. None si no es una llamada.
+        pub fn call_path(expr: &syn::Expr) -> Option<String> {
+            // Atravesamos paréntesis para que `(Rc::new(...))` matchee.
+            let mut e = expr;
+            while let syn::Expr::Paren(p) = e {
+                e = &*p.expr;
+            }
+            match e {
+                syn::Expr::Call(c) => Some(ts(&*c.func)),
+                _ => None,
+            }
+        }
+
+        /// Devuelve los nombres de los métodos en la cadena de method
+        /// calls que termina en `expr`, en orden de aplicación
+        /// (receptor → puntas). Ej. `xs.borrow().clone().into_iter()`
+        /// → `["borrow", "clone", "into_iter"]`.
+        ///
+        /// Atraviesa paréntesis y casts (`expr as T`) — si el `expr`
+        /// es `(xs.borrow().len() as i64)` devuelve la chain de
+        /// adentro del cast, ignorando el cast.
+        pub fn method_chain_names(expr: &syn::Expr) -> Vec<String> {
+            let mut names = Vec::new();
+            let mut e = expr;
+            loop {
+                match e {
+                    syn::Expr::MethodCall(mc) => {
+                        names.push(mc.method.to_string());
+                        e = &*mc.receiver;
+                    }
+                    syn::Expr::Paren(p) => {
+                        e = &*p.expr;
+                    }
+                    syn::Expr::Cast(c) => {
+                        e = &*c.expr;
+                    }
+                    _ => break,
+                }
+            }
+            names.reverse();
+            names
+        }
+
+        /// Encuentra el primer macro call con el nombre dado adentro
+        /// del expr y devuelve sus tokens normalizados. None si no
+        /// hay match.
+        pub fn find_macro_args(expr: &syn::Expr, macro_name: &str) -> Option<String> {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                found: Option<String>,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_macro(&mut self, m: &'ast syn::Macro) {
+                    if self.found.is_none()
+                        && m.path.segments.last().is_some_and(|s| s.ident == self.name)
+                    {
+                        self.found = Some(ts(&m.tokens));
+                    }
+                    syn::visit::visit_macro(self, m);
+                }
+            }
+            let mut v = V {
+                name: macro_name,
+                found: None,
+            };
+            v.visit_expr(expr);
+            v.found
+        }
+
+        /// Cuenta cuántas veces aparece una llamada a un método con el
+        /// nombre dado en cualquier nivel del AST de la expresión.
+        pub fn count_method_calls_in_expr(expr: &syn::Expr, method_name: &str) -> usize {
+            use syn::visit::Visit;
+            struct V<'a> {
+                name: &'a str,
+                count: usize,
+            }
+            impl<'a, 'ast> Visit<'ast> for V<'a> {
+                fn visit_expr_method_call(&mut self, e: &'ast syn::ExprMethodCall) {
+                    if e.method == self.name {
+                        self.count += 1;
+                    }
+                    syn::visit::visit_expr_method_call(self, e);
+                }
+            }
+            let mut v = V {
+                name: method_name,
+                count: 0,
+            };
+            v.visit_expr(expr);
+            v.count
+        }
+
+        /// True si en cualquier nivel del expr aparece una llamada a
+        /// método con el nombre dado.
+        pub fn contains_method_call_in_expr(expr: &syn::Expr, method_name: &str) -> bool {
+            count_method_calls_in_expr(expr, method_name) > 0
+        }
+
+        /// True si el expr contiene una invocación de macro con el
+        /// nombre dado (búsqueda recursiva).
+        pub fn contains_macro_in_expr(expr: &syn::Expr, macro_name: &str) -> bool {
+            find_macro_args(expr, macro_name).is_some()
+        }
+
+        /// Si el expr es un cast `<inner> as <ty>` (opcionalmente
+        /// envuelto en paréntesis), devuelve el tipo destino del cast
+        /// normalizado. None si la expresión raíz no es un cast.
+        pub fn cast_target_type(expr: &syn::Expr) -> Option<String> {
+            let mut e = expr;
+            while let syn::Expr::Paren(p) = e {
+                e = &*p.expr;
+            }
+            match e {
+                syn::Expr::Cast(c) => Some(ts(&*c.ty)),
+                _ => None,
+            }
+        }
     }
 
     #[test]
@@ -6353,40 +6481,49 @@ mod tests {
         let file = ast_test::parse(&gen("let xs: List<Int> = [1, 2, 3]").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "xs").expect("falta let xs");
-        let ty = ast_test::local_type(l).unwrap();
-        assert!(
-            ty.contains("Rc") && ty.contains("RefCell") && ty.contains("Vec") && ty.contains("i64"),
-            "esperaba tipo `Rc<RefCell<Vec<i64>>>`, fue: {}",
-            ty
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < i64 > > >"),
+            "tipo declarado de xs"
         );
-        let init = ast_test::local_init(l).unwrap();
-        assert!(
-            init.contains("Rc :: new") && init.contains("RefCell :: new") && init.contains("vec !"),
-            "esperaba `Rc::new(RefCell::new(vec![...]))`, fue: {}",
-            init
-        );
-        // Los 3 items con sufijo `i64`.
-        assert!(
-            init.contains("1i64") && init.contains("2i64") && init.contains("3i64"),
-            "esperaba items 1i64, 2i64, 3i64, fue: {}",
-            init
-        );
+        let init = ast_test::local_init_expr(l).expect("falta init de xs");
+        // El init es `Rc::new(RefCell::new(vec![...]))`. Confirmamos el
+        // outer call al path Rc::new y la presencia del macro vec! con
+        // los 3 items con sufijo i64.
+        assert_eq!(ast_test::call_path(init).as_deref(), Some("Rc :: new"));
+        let vec_args = ast_test::find_macro_args(init, "vec")
+            .expect("esperaba un macro vec! adentro del init");
+        for n in ["1i64", "2i64", "3i64"] {
+            assert!(
+                vec_args.contains(n),
+                "esperaba item {} en vec!, fue: {}",
+                n,
+                vec_args
+            );
+        }
     }
 
     #[test]
     fn list_literal_homogeneo_int_float_promueve_a_float() {
         // Int+Float en la misma lista → `List<Float>` (mismo lub que
         // if-expression y FnExpr ret).
-        let code = gen("let xs = [1, 2.5, 3]").unwrap();
-        assert!(
-            code.contains("Rc<RefCell<Vec<f64>>>"),
-            "esperaba List<f64>, got:\n{}",
-            code
+        let file = ast_test::parse(&gen("let xs = [1, 2.5, 3]").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "xs").expect("falta let xs");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < f64 > > >"),
+            "esperaba que xs quede tipado List<Float>"
         );
+        let init = ast_test::local_init_expr(l).unwrap();
+        let vec_args = ast_test::find_macro_args(init, "vec")
+            .expect("esperaba un macro vec! adentro del init");
+        // Los Int (1, 3) se coercen a f64 con `(N as f64)`; el Float
+        // queda literal.
         assert!(
-            code.contains("(1i64 as f64)") && code.contains("(3i64 as f64)"),
-            "esperaba coerción Int→Float en los items, got:\n{}",
-            code
+            vec_args.contains("(1i64 as f64)") && vec_args.contains("(3i64 as f64)"),
+            "esperaba coerción Int→Float en los items Int, fue: {}",
+            vec_args
         );
     }
 
@@ -6394,16 +6531,26 @@ mod tests {
     fn list_literal_vacia_es_list_any_a_resolver_por_contexto() {
         // `[]` sin contexto da `List<Any>`. Con anotación, el contexto
         // restringe a List<T> y el `Vec::new()` infiere desde el target.
-        let code = gen("let xs: List<Int> = []").unwrap();
+        let file = ast_test::parse(&gen("let xs: List<Int> = []").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "xs").expect("falta let xs");
+        assert!(ast_test::local_is_mut(l), "esperaba `let mut`");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < i64 > > >"),
+            "esperaba `List<Int>` por anotación"
+        );
+        // El init es `Rc::new(RefCell::new(Vec::new()))` — verifico
+        // que ningún macro vec! aparezca y que la chain Vec::new exista.
+        let init = ast_test::local_init_expr(l).unwrap();
         assert!(
-            code.contains("let mut xs: Rc<RefCell<Vec<i64>>>"),
-            "esperaba `List<Int>` por anotación, got:\n{}",
-            code
+            ast_test::find_macro_args(init, "vec").is_none(),
+            "lista vacía no debería emitir macro vec!"
         );
         assert!(
-            code.contains("Rc::new(RefCell::new(Vec::new()))"),
-            "esperaba `Rc::new(RefCell::new(Vec::new()))` para lista vacía, got:\n{}",
-            code
+            ast_test::ts(init).contains("Vec :: new"),
+            "esperaba `Vec::new()` para lista vacía, fue: {}",
+            ast_test::ts(init)
         );
     }
 
@@ -6419,23 +6566,51 @@ mod tests {
 
     #[test]
     fn map_literal_emite_vec_pares() {
-        assert_contains(
-            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}",
-            &[
-                "let mut m: Rc<RefCell<Vec<(String, i64)>>>",
-                "(String::from(\"a\"), 1i64)",
-                "(String::from(\"b\"), 2i64)",
-            ],
+        // `{"a": 1, "b": 2}` se modela como
+        // `Rc<RefCell<Vec<(String, i64)>>>` con tuplas como items.
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}").unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "m").expect("falta let m");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < (String , i64) > > >"),
+            "tipo declarado de m"
+        );
+        let init = ast_test::local_init_expr(l).unwrap();
+        let vec_args = ast_test::find_macro_args(init, "vec")
+            .expect("esperaba un macro vec! con los pares");
+        // Verifico que ambas tuplas (clave, valor) aparezcan.
+        for pair in [
+            "(String :: from (\"a\") , 1i64)",
+            "(String :: from (\"b\") , 2i64)",
+        ] {
+            assert!(
+                vec_args.contains(pair),
+                "esperaba par {} en vec!, fue: {}",
+                pair,
+                vec_args
+            );
+        }
     }
 
     #[test]
     fn map_literal_vacio_resuelto_por_anotacion() {
-        let code = gen("let m: Map<Str, Int> = {}").unwrap();
+        let file = ast_test::parse(&gen("let m: Map<Str, Int> = {}").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "m").expect("falta let m");
+        assert!(ast_test::local_is_mut(l));
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < (String , i64) > > >"),
+            "esperaba `Map<Str, Int>` por anotación"
+        );
+        // Mapa vacío → sin macro vec!.
+        let init = ast_test::local_init_expr(l).unwrap();
         assert!(
-            code.contains("let mut m: Rc<RefCell<Vec<(String, i64)>>>"),
-            "esperaba `Map<Str, Int>` por anotación, got:\n{}",
-            code
+            ast_test::find_macro_args(init, "vec").is_none(),
+            "mapa vacío no debería emitir macro vec!"
         );
     }
 
@@ -6452,35 +6627,57 @@ mod tests {
         // `xs[0]` → `(xs.clone()).borrow()[(0i64) as usize].clone()`.
         // El `.clone()` final es del Rc para Nominal/List/Map o copy
         // para primitivos — siempre seguro.
-        let code = gen("let xs: List<Int> = [10, 20]\nlet x = xs[0]").unwrap();
+        let file = ast_test::parse(
+            &gen("let xs: List<Int> = [10, 20]\nlet x = xs[0]").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        // El binding `x` debe quedar tipado i64 (List<Int> indexing).
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        // El init debe contener el pipeline borrow + index + clone.
+        let init = ast_test::local_init_expr(l).unwrap();
         assert!(
-            code.contains(".borrow()[(0i64) as usize].clone()"),
-            "esperaba acceso por borrow + index + clone, got:\n{}",
-            code
+            ast_test::contains_method_call_in_expr(init, "borrow"),
+            "esperaba .borrow() en el init de x, fue: {}",
+            ast_test::ts(init)
         );
         assert!(
-            code.contains("let mut x: i64 ="),
-            "esperaba que x quede tipado como i64, got:\n{}",
-            code
+            ast_test::contains_method_call_in_expr(init, "clone"),
+            "esperaba .clone() en el init de x, fue: {}",
+            ast_test::ts(init)
+        );
+        // El subscript `[(0i64) as usize]` se preserva tokenizado.
+        assert!(
+            ast_test::ts(init).contains("(0i64) as usize"),
+            "esperaba subscript `[(0i64) as usize]`, fue: {}",
+            ast_test::ts(init)
         );
     }
 
     #[test]
     fn map_indexing_emite_busqueda_lineal_con_panic() {
         // `m["a"]` → bloque que linea la búsqueda y paniquea si falta.
-        let code = gen(
-            "let m: Map<Str, Int> = {\"a\": 1}\nlet n = m[\"a\"]",
-        )
-        .unwrap();
-        assert!(
-            code.contains(".find(|(__k2, _)| __k2 == &__k)"),
-            "esperaba búsqueda lineal en map, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m[\"a\"]").unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        let init = ast_test::local_init_expr(l).unwrap();
+        // El pipeline `.iter().find(...).unwrap_or_else(|| panic!(...))`
+        // está adentro del init: chequeo presencia de los métodos clave.
         assert!(
-            code.contains("clave no encontrada en mapa"),
-            "esperaba mensaje de panic con texto del intérprete, got:\n{}",
-            code
+            ast_test::contains_method_call_in_expr(init, "find"),
+            "esperaba `.find(...)` en el init de n, fue: {}",
+            ast_test::ts(init)
+        );
+        // El panic con el mensaje del intérprete sigue como string
+        // (es un contrato bit-a-bit con el evaluator).
+        let panic_args = ast_test::find_macro_args(init, "panic")
+            .expect("esperaba un panic! adentro del bloque");
+        assert!(
+            panic_args.contains("clave no encontrada en mapa"),
+            "esperaba mensaje del intérprete en panic!, fue: {}",
+            panic_args
         );
     }
 
@@ -6488,14 +6685,19 @@ mod tests {
     fn for_sobre_list_genera_snapshot_iter() {
         // `for v in xs` → snapshot via `borrow().clone().into_iter()`
         // (evita re-entrancia si el body muta `xs`).
-        let code = gen(
-            "let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let fl = ast_test::find_for_loop(stmts).expect("falta el for loop");
+        // El iterable es una method chain: receptor → borrow → clone →
+        // into_iter. La inspección estructural ignora paréntesis y
+        // formato.
+        let chain = ast_test::method_chain_names(&fl.expr);
         assert!(
-            code.contains(".borrow().clone().into_iter()"),
-            "esperaba snapshot iter, got:\n{}",
-            code
+            chain.windows(3).any(|w| w == ["borrow", "clone", "into_iter"]),
+            "esperaba chain `borrow().clone().into_iter()` en el for, fue: {:?}",
+            chain
         );
     }
 
@@ -6563,44 +6765,83 @@ mod tests {
     fn len_builtin_global_sobre_list_resuelve_a_borrow_len() {
         // `len(xs)` despacha por tipo del argumento — mismo código que
         // `xs.len()` para List/Map; para Str sigue siendo chars().count.
-        let code = gen("let xs: List<Int> = [1]\nlet n = len(xs)").unwrap();
+        let file = ast_test::parse(
+            &gen("let xs: List<Int> = [1]\nlet n = len(xs)").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        let init = ast_test::local_init_expr(l).unwrap();
+        // El init es `(<chain> as i64)` con la chain `xs.clone()
+        // .borrow().len()`. Verifico el cast y los métodos.
+        assert_eq!(
+            ast_test::cast_target_type(init).as_deref(),
+            Some("i64"),
+            "esperaba cast final `as i64`"
+        );
+        let chain = ast_test::method_chain_names(init);
         assert!(
-            code.contains(".borrow().len() as i64"),
-            "esperaba `.borrow().len() as i64` desde el builtin global, got:\n{}",
-            code
+            chain.contains(&"borrow".to_string()) && chain.contains(&"len".to_string()),
+            "esperaba chain con borrow + len, fue: {:?}",
+            chain
         );
     }
 
     #[test]
     fn len_builtin_global_sobre_str_usa_chars_count() {
-        let code = gen("let s = \"hola\"\nlet n = len(s)").unwrap();
+        let file = ast_test::parse(&gen("let s = \"hola\"\nlet n = len(s)").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        let init = ast_test::local_init_expr(l).unwrap();
+        // Para Str el builtin global emite `(s.chars().count() as i64)`.
+        assert_eq!(
+            ast_test::cast_target_type(init).as_deref(),
+            Some("i64"),
+            "esperaba cast final `as i64`"
+        );
+        let chain = ast_test::method_chain_names(init);
         assert!(
-            code.contains(".chars().count() as i64"),
-            "esperaba `.chars().count() as i64`, got:\n{}",
-            code
+            chain.contains(&"chars".to_string()) && chain.contains(&"count".to_string()),
+            "esperaba chain con chars + count, fue: {:?}",
+            chain
         );
     }
 
     #[test]
     fn list_map_con_fnexpr_inline_emite_closure() {
-        let code = gen(
-            "let xs: List<Int> = [1, 2, 3]\nlet ys = xs.map(fn(x) => x * 2)",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.map(fn(x) => x * 2)")
+                .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "ys").expect("falta let ys");
+        assert!(ast_test::local_is_mut(l));
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < i64 > > >"),
+            "esperaba que `ys` quede tipado List<Int>"
+        );
+        // El init invoca `.map(|x: i64| -> i64 { ... })` adentro de un
+        // Rc::new(RefCell::new(...)). Chequeo estructural: hay un
+        // method call `map` y el primer arg del map es una closure
+        // tipada `|x: i64| -> i64`.
+        let init = ast_test::local_init_expr(l).unwrap();
         assert!(
-            code.contains(".into_iter().map(|x: i64| -> i64"),
-            "esperaba closure inline `|x: i64| -> i64`, got:\n{}",
-            code
+            ast_test::contains_method_call_in_expr(init, "map"),
+            "esperaba `.map(...)` en el init, fue: {}",
+            ast_test::ts(init)
+        );
+        let init_text = ast_test::ts(init);
+        assert!(
+            init_text.contains("| x : i64 | -> i64"),
+            "esperaba closure `|x: i64| -> i64`, fue: {}",
+            init_text
         );
         assert!(
-            code.contains("Rc::new(RefCell::new"),
-            "esperaba envoltorio Rc::new(RefCell::new(...)), got:\n{}",
-            code
-        );
-        assert!(
-            code.contains("let mut ys: Rc<RefCell<Vec<i64>>>"),
-            "esperaba que `ys` quede tipado `List<Int>`, got:\n{}",
-            code
+            init_text.contains("Rc :: new (RefCell :: new"),
+            "esperaba envoltorio Rc::new(RefCell::new(...)), fue: {}",
+            init_text
         );
     }
 
@@ -6608,19 +6849,26 @@ mod tests {
     fn list_filter_con_fnexpr_inline_emite_for_manual() {
         // Filter usa un for manual (no .filter()) porque el callback
         // toma T por valor pero `Iterator::filter` quiere &T.
-        let code = gen(
-            "let xs: List<Int> = [1, 2, 3]\nlet ys = xs.filter(fn(x) => x > 1)",
-        )
-        .unwrap();
-        assert!(
-            code.contains("let __cb = |x: i64| -> bool"),
-            "esperaba binding del callback como `|x: i64| -> bool`, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.filter(fn(x) => x > 1)")
+                .unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "ys").expect("falta let ys");
+        let init = ast_test::local_init_expr(l).unwrap();
+        let init_text = ast_test::ts(init);
+        // El bloque del init debe declarar un closure `__cb` tipado
+        // `|x: i64| -> bool`.
         assert!(
-            code.contains("if __cb(__it.clone())"),
-            "esperaba aplicación del cb con clone, got:\n{}",
-            code
+            init_text.contains("let __cb = | x : i64 | -> bool"),
+            "esperaba binding del callback `__cb`, fue: {}",
+            init_text
+        );
+        // El callback se aplica adentro de un for con clone del item.
+        assert!(
+            init_text.contains("__cb (__it . clone ())"),
+            "esperaba aplicación `__cb(__it.clone())` adentro del for, fue: {}",
+            init_text
         );
     }
 
@@ -6629,77 +6877,128 @@ mod tests {
         // `xs.map(f).map(g)` debe poder componerse. El test es de
         // estructura: el tipo de salida del primer map alimenta al
         // siguiente sin friction.
-        let code = gen(
-            "let xs: List<Int> = [1, 2]\n\
-             let ys = xs.map(fn(x) => x * 2).map(fn(x) => x + 1)",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen(
+                "let xs: List<Int> = [1, 2]\n\
+                 let ys = xs.map(fn(x) => x * 2).map(fn(x) => x + 1)",
+            )
+            .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "ys").expect("falta let ys");
+        let init = ast_test::local_init_expr(l).unwrap();
+        // Esperamos dos closures `|x: i64| -> i64` (uno por cada .map)
+        // adentro del init de ys.
+        let init_text = ast_test::ts(init);
+        let n = init_text.matches("| x : i64 | -> i64").count();
         assert!(
-            code.matches(".into_iter().map(|x: i64| -> i64").count() >= 2,
-            "esperaba dos map closures encadenados, got:\n{}",
-            code
+            n >= 2,
+            "esperaba ≥2 closures `|x: i64| -> i64` en chain, fue {} en: {}",
+            n,
+            init_text
         );
     }
 
     #[test]
     fn map_has_emite_iter_any() {
-        let code = gen(
-            "let m: Map<Str, Int> = {\"a\": 1}\nlet b = m.has(\"a\")",
-        )
-        .unwrap();
-        assert!(
-            code.contains(".iter().any(|(__k2, _)| __k2 == &__k)"),
-            "esperaba `.iter().any(...)`, got:\n{}",
-            code
+        // `m.has(k)` se traduce a un bloque
+        // `{ let __k = k; (m.clone()).borrow().iter().any(...) }`. El
+        // chequeo estructural busca `iter` + `any` adentro del init,
+        // sin importar si están envueltos en bloque o expresión.
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet b = m.has(\"a\")").unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "b").expect("falta let b");
+        let init = ast_test::local_init_expr(l).unwrap();
+        assert!(
+            ast_test::contains_method_call_in_expr(init, "iter"),
+            "esperaba `.iter()` en el init de b, fue: {}",
+            ast_test::ts(init)
+        );
+        assert!(
+            ast_test::contains_method_call_in_expr(init, "any"),
+            "esperaba `.any(...)` en el init de b, fue: {}",
+            ast_test::ts(init)
+        );
+        // Tipo del binding `b` es bool.
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("bool"));
     }
 
     #[test]
     fn map_keys_emite_lista_nueva_de_claves() {
-        let code = gen(
-            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\nlet ks = m.keys()",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\nlet ks = m.keys()")
+                .unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "ks").expect("falta let ks");
+        // keys() retorna `List<Str>` envuelto en Rc/RefCell.
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < String > > >"),
+            "esperaba que keys retorne List<Str>"
+        );
+        let init = ast_test::local_init_expr(l).unwrap();
+        // El pipeline interno usa `.iter().map(...).collect()`.
+        let init_text = ast_test::ts(init);
         assert!(
-            code.contains(".iter().map(|(__k, _)| __k.clone()).collect::<Vec<_>>()"),
-            "esperaba pipeline de keys, got:\n{}",
-            code
+            init_text.contains(". iter () . map (| (__k , _) | __k . clone ())"),
+            "esperaba pipeline `.iter().map(|(__k, _)| __k.clone())`, fue: {}",
+            init_text
         );
         assert!(
-            code.contains("let mut ks: Rc<RefCell<Vec<String>>>"),
-            "esperaba que keys retorne List<Str>, got:\n{}",
-            code
+            init_text.contains("collect :: < Vec < _ > > ()"),
+            "esperaba `.collect::<Vec<_>>()`, fue: {}",
+            init_text
         );
     }
 
     #[test]
     fn map_values_emite_lista_nueva_de_valores() {
-        let code = gen(
-            "let m: Map<Str, Int> = {\"a\": 1}\nlet vs = m.values()",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet vs = m.values()").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "vs").expect("falta let vs");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < RefCell < Vec < i64 > > >"),
+            "esperaba que values retorne List<Int>"
+        );
+        let init = ast_test::local_init_expr(l).unwrap();
+        let init_text = ast_test::ts(init);
         assert!(
-            code.contains(".iter().map(|(_, __v)| __v.clone()).collect::<Vec<_>>()"),
-            "esperaba pipeline de values, got:\n{}",
-            code
+            init_text.contains(". iter () . map (| (_ , __v) | __v . clone ())"),
+            "esperaba pipeline `.iter().map(|(_, __v)| __v.clone())`, fue: {}",
+            init_text
         );
         assert!(
-            code.contains("let mut vs: Rc<RefCell<Vec<i64>>>"),
-            "esperaba que values retorne List<Int>, got:\n{}",
-            code
+            init_text.contains("collect :: < Vec < _ > > ()"),
+            "esperaba `.collect::<Vec<_>>()`, fue: {}",
+            init_text
         );
     }
 
     #[test]
     fn map_len_metodo_emite_borrow_len_as_i64() {
-        let code = gen(
-            "let m: Map<Str, Int> = {\"a\": 1}\nlet n = m.len()",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m.len()").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "n").expect("falta let n");
+        assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
+        let init = ast_test::local_init_expr(l).unwrap();
+        assert_eq!(
+            ast_test::cast_target_type(init).as_deref(),
+            Some("i64"),
+            "esperaba cast final `as i64`"
+        );
+        let chain = ast_test::method_chain_names(init);
         assert!(
-            code.contains(".borrow().len() as i64"),
-            "esperaba `.borrow().len() as i64`, got:\n{}",
-            code
+            chain.contains(&"borrow".to_string()) && chain.contains(&"len".to_string()),
+            "esperaba chain con borrow + len, fue: {:?}",
+            chain
         );
     }
 
@@ -6708,24 +7007,31 @@ mod tests {
         // 5b.4: find devuelve `Result<T, String>` con Ok(item) al primer
         // match y `Err("no encontrado")` si nada matchea. Tipado del
         // binding `x` debe ser `Result<i64, String>`.
-        let code = gen(
-            "let xs: List<Int> = [1, 2]\nlet x = xs.find(fn(n) => n > 0)",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let xs: List<Int> = [1, 2]\nlet x = xs.find(fn(n) => n > 0)").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "x").expect("falta let x");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Result < i64 , String >"),
+            "esperaba `x: Result<i64, String>`"
+        );
+        // El init es un bloque con un loop manual; chequeo presencia de
+        // las piezas clave (el mensaje del Err y la asignación de Ok)
+        // como sub-strings de la representación normalizada — son
+        // contratos del codegen estables.
+        let init = ast_test::local_init_expr(l).unwrap();
+        let init_text = ast_test::ts(init);
         assert!(
-            code.contains("let mut x: Result<i64, String>"),
-            "esperaba `x: Result<i64, String>`, got:\n{}",
-            code
+            init_text.contains("Err (String :: from (\"no encontrado\"))"),
+            "esperaba inicializador con `Err(\"no encontrado\")`, fue: {}",
+            init_text
         );
         assert!(
-            code.contains("Err(String::from(\"no encontrado\"))"),
-            "esperaba inicializador con `Err(\"no encontrado\")`, got:\n{}",
-            code
-        );
-        assert!(
-            code.contains("__result = Ok(__it); break;"),
-            "esperaba la asignación de Ok + break en el loop, got:\n{}",
-            code
+            init_text.contains("__result = Ok (__it) ; break ;"),
+            "esperaba asignación `__result = Ok(__it); break;`, fue: {}",
+            init_text
         );
     }
 
@@ -6734,24 +7040,32 @@ mod tests {
         // 5b.4: get devuelve `Result<V, String>`. Mensaje del Err matchea
         // bit-a-bit el del intérprete: `clave no encontrada: <k>` con `<k>`
         // formateado inline (Str con comillas).
-        let code = gen(
-            "let m: Map<Str, Int> = {\"a\": 1}\nlet v = m.get(\"a\")",
-        )
-        .unwrap();
-        assert!(
-            code.contains("let mut v: Result<i64, String>"),
-            "esperaba `v: Result<i64, String>`, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet v = m.get(\"a\")").unwrap(),
         );
-        assert!(
-            code.contains("clave no encontrada: {}"),
-            "esperaba mensaje `clave no encontrada: {{}}`, got:\n{}",
-            code
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "v").expect("falta let v");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Result < i64 , String >"),
+            "esperaba `v: Result<i64, String>`"
         );
+        let init = ast_test::local_init_expr(l).unwrap();
+        // El mensaje del Err lleva el template `clave no encontrada: {}`
+        // (contrato bit-a-bit con el intérprete) — lo busco adentro de
+        // un format! macro call.
+        let fmt = ast_test::find_macro_args(init, "format")
+            .expect("esperaba un format! con el mensaje del Err");
         assert!(
-            code.contains("__result = Ok(__v.clone()); break;"),
-            "esperaba asignación de Ok + break, got:\n{}",
-            code
+            fmt.contains("clave no encontrada: {}"),
+            "esperaba template `clave no encontrada: {{}}` en format!, fue: {}",
+            fmt
+        );
+        let init_text = ast_test::ts(init);
+        assert!(
+            init_text.contains("__result = Ok (__v . clone ()) ; break ;"),
+            "esperaba asignación `__result = Ok(__v.clone()); break;`, fue: {}",
+            init_text
         );
     }
 
@@ -6760,16 +7074,23 @@ mod tests {
         // F12: FnExpr asignado a var emite `Rc::new(move |...| ...) as
         // Rc<dyn Fn(...) -> ...>`. La var queda tipada como
         // `Rc<dyn Fn(i64) -> i64>` y se puede invocar con `f(x)`.
-        let code = gen("let f: Fn(Int) -> Int = fn(x: Int) => x * 2\nprint(f(3))").unwrap();
-        assert!(
-            code.contains("Rc<dyn Fn(i64) -> i64>"),
-            "esperaba tipo Rc<dyn Fn> en el código, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen("let f: Fn(Int) -> Int = fn(x: Int) => x * 2\nprint(f(3))").unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "f").expect("falta let f");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < dyn Fn (i64) -> i64 >"),
+            "esperaba tipo `Rc<dyn Fn(i64) -> i64>`"
+        );
+        // El init debe contener `Rc::new(move |x: i64| ...)`. Verifico
+        // sub-string sobre la representación normalizada.
+        let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
-            code.contains("Rc::new(move |x: i64|"),
-            "esperaba `Rc::new(move |x: i64| ...)` para el closure, got:\n{}",
-            code
+            init_text.contains("Rc :: new (move | x : i64 |"),
+            "esperaba `Rc::new(move |x: i64| ...)`, fue: {}",
+            init_text
         );
     }
 
@@ -6788,19 +7109,22 @@ mod tests {
         // F12: `let g = square` donde `square` es fn top-level emite
         // `Rc::new(square) as Rc<dyn Fn(...) -> R>` con la firma del
         // fn_sigs.
-        let code = gen(
-            "fn square(n: Int) -> Int => n * n\nlet g: Fn(Int) -> Int = square\nprint(g(7))",
-        )
-        .unwrap();
-        assert!(
-            code.contains("Rc::new(square)"),
-            "esperaba `Rc::new(square)`, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen("fn square(n: Int) -> Int => n * n\nlet g: Fn(Int) -> Int = square\nprint(g(7))")
+                .unwrap(),
         );
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "g").expect("falta let g");
+        assert_eq!(
+            ast_test::local_type(l).as_deref(),
+            Some("Rc < dyn Fn (i64) -> i64 >"),
+            "esperaba tipo `Rc<dyn Fn(i64) -> i64>`"
+        );
+        let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
-            code.contains("Rc<dyn Fn(i64) -> i64>"),
-            "esperaba tipo Rc<dyn Fn(i64) -> i64>, got:\n{}",
-            code
+            init_text.contains("Rc :: new (square)"),
+            "esperaba `Rc::new(square)`, fue: {}",
+            init_text
         );
     }
 
@@ -6808,22 +7132,36 @@ mod tests {
     fn fn_param_de_tipo_funcion_emite_rc_dyn_fn() {
         // F12: param `f: Fn(Int) -> Int` en la firma de la fn top-level
         // debe traducirse a `Rc<dyn Fn(i64) -> i64>` en el header.
-        let code = gen(
-            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
-             fn square(n: Int) -> Int => n * n\n\
-             print(apply(square, 7))",
-        )
-        .unwrap();
-        assert!(
-            code.contains("fn apply(mut f: Rc<dyn Fn(i64) -> i64>, mut x: i64) -> i64"),
-            "esperaba header de apply con `Rc<dyn Fn>`, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen(
+                "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
+                 fn square(n: Int) -> Int => n * n\n\
+                 print(apply(square, 7))",
+            )
+            .unwrap(),
         );
-        // La llamada `apply(square, 7)` debe envolver `square` en Rc::new.
+        // Header de `apply`: tipos de params + return type.
+        let apply = ast_test::find_item_fn(&file, "apply").expect("falta fn apply");
+        assert_eq!(
+            ast_test::fn_param_types(apply),
+            vec!["Rc < dyn Fn (i64) -> i64 >", "i64"],
+            "tipos de params de apply"
+        );
+        assert_eq!(
+            ast_test::fn_return_type(apply).as_deref(),
+            Some("i64"),
+            "return type de apply"
+        );
+        // La llamada `apply(square, 7)` debe envolver `square` en
+        // `Rc::new(square)`. Lo busco como sub-string sobre el `main`
+        // tokenizado (la llamada vive adentro del print).
+        let main_text = ast_test::ts(
+            ast_test::find_item_fn(&file, "main").expect("falta fn main"),
+        );
         assert!(
-            code.contains("apply((Rc::new(square)"),
-            "esperaba `apply((Rc::new(square) as ...)`, got:\n{}",
-            code
+            main_text.contains("apply ((Rc :: new (square)"),
+            "esperaba `apply((Rc::new(square) as ...))` en main, fue: {}",
+            main_text
         );
     }
 
@@ -6832,23 +7170,34 @@ mod tests {
         // F12: `-> Fn(Int) -> Int` en una fn top-level emite el header
         // con retorno `Rc<dyn Fn(i64) -> i64>`. La closure interna que
         // captura `x` se traduce con `move`.
-        let code = gen(
-            "fn make_adder(x: Int) -> Fn(Int) -> Int {\n\
-                 return fn(y: Int) => x + y\n\
-             }\n\
-             let add5: Fn(Int) -> Int = make_adder(5)\n\
-             print(add5(3))",
-        )
-        .unwrap();
-        assert!(
-            code.contains("fn make_adder(mut x: i64) -> Rc<dyn Fn(i64) -> i64>"),
-            "esperaba header de make_adder con retorno Rc<dyn Fn>, got:\n{}",
-            code
+        let file = ast_test::parse(
+            &gen(
+                "fn make_adder(x: Int) -> Fn(Int) -> Int {\n\
+                     return fn(y: Int) => x + y\n\
+                 }\n\
+                 let add5: Fn(Int) -> Int = make_adder(5)\n\
+                 print(add5(3))",
+            )
+            .unwrap(),
         );
+        let make_adder = ast_test::find_item_fn(&file, "make_adder")
+            .expect("falta fn make_adder");
+        assert_eq!(
+            ast_test::fn_param_types(make_adder),
+            vec!["i64"],
+            "tipos de params de make_adder"
+        );
+        assert_eq!(
+            ast_test::fn_return_type(make_adder).as_deref(),
+            Some("Rc < dyn Fn (i64) -> i64 >"),
+            "return type de make_adder"
+        );
+        // El body de make_adder contiene `Rc::new(move |y: i64| ...)`.
+        let body_text = ast_test::ts(&make_adder.block);
         assert!(
-            code.contains("Rc::new(move |y: i64|"),
-            "esperaba closure con `move` capturando x, got:\n{}",
-            code
+            body_text.contains("Rc :: new (move | y : i64 |"),
+            "esperaba closure con `move` capturando x, fue: {}",
+            body_text
         );
     }
 
@@ -6858,21 +7207,29 @@ mod tests {
         // debe emitir `let saludo = saludo.clone();` afuera para
         // preservar el aliasing semántico sin consumir la var del
         // caller.
-        let code = gen(
-            "let saludo = \"hola\"\n\
-             let f: Fn(Str) -> Str = fn(n: Str) => \"{saludo}, {n}!\"\n\
-             print(f(\"Fitz\"))",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen(
+                "let saludo = \"hola\"\n\
+                 let f: Fn(Str) -> Str = fn(n: Str) => \"{saludo}, {n}!\"\n\
+                 print(f(\"Fitz\"))",
+            )
+            .unwrap(),
+        );
+        // El clone afuera y el closure interno viven adentro del init
+        // de `f` (es un bloque Rust). Tomo el init y verifico sub-strings
+        // estructurales.
+        let stmts = ast_test::main_block_stmts(&file);
+        let l = ast_test::find_let(stmts, "f").expect("falta let f");
+        let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
-            code.contains("let saludo = saludo.clone();"),
-            "esperaba clone de la captura antes del Rc::new, got:\n{}",
-            code
+            init_text.contains("let saludo = saludo . clone () ;"),
+            "esperaba clone de la captura antes del Rc::new, fue: {}",
+            init_text
         );
         assert!(
-            code.contains("Rc::new(move |n: String|"),
-            "esperaba closure con `move`, got:\n{}",
-            code
+            init_text.contains("Rc :: new (move | n : String |"),
+            "esperaba closure `Rc::new(move |n: String| ...)`, fue: {}",
+            init_text
         );
     }
 
@@ -6880,14 +7237,19 @@ mod tests {
     fn var_de_tipo_funcion_se_llama_con_parens() {
         // F12: `f(x)` sobre una var Fn(Int) -> Int se traduce literal a
         // `f(x)` Rust — el auto-deref de `Rc<dyn Fn>` lo resuelve.
-        let code = gen(
-            "let f: Fn(Int) -> Int = fn(n: Int) => n + 1\nprint(f(10))",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen("let f: Fn(Int) -> Int = fn(n: Int) => n + 1\nprint(f(10))").unwrap(),
+        );
+        // El cuerpo del main debe tener una llamada `f(10i64)` adentro
+        // del println!. Lo busco sobre la representación tokenizada
+        // (es un macro call, el argumento entero se ve serializado).
+        let main_text = ast_test::ts(
+            ast_test::find_item_fn(&file, "main").expect("falta fn main"),
+        );
         assert!(
-            code.contains("f(10i64)"),
-            "esperaba `f(10i64)`, got:\n{}",
-            code
+            main_text.contains("f (10i64)"),
+            "esperaba `f(10i64)` en main, fue: {}",
+            main_text
         );
     }
 
@@ -6896,15 +7258,20 @@ mod tests {
         // F12: `apply(fn(n: Int) => n * 10, 7)` no envuelve en una var
         // intermedia — emite el `Rc::new(move |n: i64| ...)` inline
         // como argumento.
-        let code = gen(
-            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
-             print(apply(fn(n: Int) => n * 10, 7))",
-        )
-        .unwrap();
+        let file = ast_test::parse(
+            &gen(
+                "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
+                 print(apply(fn(n: Int) => n * 10, 7))",
+            )
+            .unwrap(),
+        );
+        let main_text = ast_test::ts(
+            ast_test::find_item_fn(&file, "main").expect("falta fn main"),
+        );
         assert!(
-            code.contains("apply((Rc::new(move |n: i64|"),
-            "esperaba el FnExpr emitido inline como arg, got:\n{}",
-            code
+            main_text.contains("apply ((Rc :: new (move | n : i64 |"),
+            "esperaba el FnExpr emitido inline como arg de apply, fue: {}",
+            main_text
         );
     }
 
@@ -6912,30 +7279,49 @@ mod tests {
     fn print_de_lista_emite_iter_inline() {
         // El print/interp construye el string `[a, b, c]` en runtime
         // ligando primero el Rc a una var (vida del temporal).
-        let code = gen("let xs: List<Int> = [1, 2]\nprint(xs)").unwrap();
+        let file = ast_test::parse(&gen("let xs: List<Int> = [1, 2]\nprint(xs)").unwrap());
+        let stmts = ast_test::main_block_stmts(&file);
+        // Debe haber un `println!` (es el print de la lista).
         assert!(
-            code.contains("let __list = "),
-            "esperaba binding del Rc antes del borrow, got:\n{}",
+            ast_test::count_macro_calls(stmts, "println") >= 1,
+            "esperaba al menos un println! para imprimir xs"
+        );
+        // El bloque inline liga el Rc a `__list` antes del borrow (vida
+        // del temporal). Lo verifico chequeando que el código total
+        // contiene un `let __list` adentro de algún bloque.
+        let code = ast_test::ts(&file);
+        assert!(
+            code.contains("let __list ="),
+            "esperaba binding `let __list = ...` adentro del print, fue:\n{}",
             code
         );
+        // El header `[` se emite como literal Str adentro del format.
         assert!(
-            code.contains("String::from(\"[\")"),
-            "esperaba header `[` para lista, got:\n{}",
+            code.contains("String :: from (\"[\")"),
+            "esperaba `String::from(\"[\")` como header de lista, fue:\n{}",
             code
         );
     }
 
     #[test]
     fn print_de_mapa_emite_iter_inline_con_llaves() {
-        let code = gen("let m: Map<Str, Int> = {\"a\": 1}\nprint(m)").unwrap();
+        let file = ast_test::parse(
+            &gen("let m: Map<Str, Int> = {\"a\": 1}\nprint(m)").unwrap(),
+        );
+        let stmts = ast_test::main_block_stmts(&file);
         assert!(
-            code.contains("let __map = "),
-            "esperaba binding del Rc antes del borrow, got:\n{}",
+            ast_test::count_macro_calls(stmts, "println") >= 1,
+            "esperaba al menos un println! para imprimir m"
+        );
+        let code = ast_test::ts(&file);
+        assert!(
+            code.contains("let __map ="),
+            "esperaba binding `let __map = ...` adentro del print, fue:\n{}",
             code
         );
         assert!(
-            code.contains("String::from(\"{\")"),
-            "esperaba header `{{` para mapa, got:\n{}",
+            code.contains("String :: from (\"{\")"),
+            "esperaba `String::from(\"{{\")` como header de mapa, fue:\n{}",
             code
         );
     }
