@@ -10,10 +10,13 @@
 //
 // Threading model (tomado en 4.2, en migración por F17):
 //
-//   `Value` y `EnvRef` se migraron a `Arc<parking_lot::Mutex<>>` en F17.2,
-//   pero el evaluator sigue con `#[async_recursion(?Send)]` hasta F17.3,
-//   así que los futures todavía no son Send. Mientras tanto el bridge
-//   mpsc/oneshot sigue activo:
+//   Post-F17.3 `Value` y `EnvRef` son `Send` (contenedores
+//   `Arc<parking_lot::Mutex<>>`) y el evaluator emite futures `Send`
+//   (`#[async_recursion]` sin `?Send`). Eso destraba la futura
+//   eliminación del bridge (F17.5), pero por ahora el bridge sigue
+//   armado mientras F17.4 cambia el runtime tokio a `rt-multi-thread`
+//   y F17.5 reescribe los handlers axum para llamar al evaluator
+//   directo:
 //
 //     - El intérprete vive en un thread `std::thread` propio (el
 //       mismo que corrió `eval`, ahora reutilizado para servir
@@ -27,10 +30,9 @@
 //       Fitz async (sobre tokio current_thread) → manda
 //       `HandlerOutcome` por el oneshot.
 //
-// El bridge cae como deuda comprometida en F17.5 cuando el future del
-// handler ya sea Send y axum pueda invocar `eval_call(...).await`
-// directo. F17.4 switcheará el tokio runtime a `rt-multi-thread` para
-// habilitar paralelismo real entre tareas Fitz.
+// El bridge cae como deuda comprometida en F17.5: una vez que axum
+// pueda invocar `eval_call(...).await` directo, `InterpTask` y
+// `run_interpreter_loop` desaparecen.
 
 use std::cell::RefCell;
 
@@ -1160,10 +1162,11 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 //   └──────────────────┘              └──────────────────────┘
 //
 // El intérprete vive en el thread main (el mismo que corrió `eval`).
-// Aunque post-F17.2 `Value`/`EnvRef` ya usan `Arc<Mutex<>>`, los futures
-// del evaluator siguen siendo `!Send` (`#[async_recursion(?Send)]` se
-// quita recién en F17.3). tokio corre en un std::thread spawneado,
-// con su propio runtime current_thread. Lo que cruza el canal:
+// Post-F17.3 los futures del evaluator ya son `Send` (los contenedores
+// son `Arc<Mutex<>>` y el macro perdió `?Send`), pero el bridge sigue
+// activo hasta F17.5. tokio corre en un std::thread spawneado, con su
+// propio runtime current_thread (cambia a `rt-multi-thread` en F17.4).
+// Lo que cruza el canal:
 //
 //   - tokio → main: `InterpTask` con índice de ruta + path params
 //     crudos (`HashMap<String,String>`).
@@ -1901,12 +1904,11 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
 /// Arranca el servidor HTTP y bloquea el thread llamador hasta Ctrl-C.
 ///
 /// Modelo de threading (revertido respecto del borrador inicial; en
-/// transición hacia F17 — async puro sin bridge en F17.5):
+/// transición hacia F17 — bridge cae en F17.5):
 ///   - El thread llamador (main, donde corrió `eval`) NO se mueve —
-///     contiene los handlers con `EnvRef` cuyo future ejecutor sigue
-///     siendo `!Send` hasta F17.3 (post-F17.2 los contenedores ya son
-///     `Arc<Mutex<>>` pero el macro `?Send` mantiene los futures
-///     locales al thread).
+///     mantiene el handler dispatch del bridge. Post-F17.3 sus
+///     futures son `Send` y podrían invocarse directo desde axum,
+///     pero la reescritura ocurre en F17.5.
 ///   - Spawneamos un std::thread separado para tokio + axum. Recibe
 ///     solo `Vec<RouteMeta>` (estructural, `Send + Clone`) y el `tx`
 ///     del canal.
@@ -3298,15 +3300,11 @@ mod tests {
     // abrir socket TCP, vía `tower::ServiceExt::oneshot`.
     //
     // Threading: en `serve()` real, el intérprete vive en el thread
-    // main y tokio en un std::thread spawneado. Aunque post-F17.2 los
-    // contenedores de `Value`/`EnvRef` ya son `Arc<Mutex<>>`, el future
-    // del evaluator sigue siendo `!Send` por el `#[async_recursion(?Send)]`
-    // (se quita en F17.3), así que no podemos mover el registry a un
-    // thread spawneado todavía — eso mismo es lo que `serve()` evita.
-    // En los tests usamos `tokio::task::LocalSet` para correr tanto el
-    // router como el loop del intérprete adentro del mismo thread del
-    // test, eludiendo el bound `Send`. Es el patrón estándar de tokio
-    // para coexistencia de futures `!Send` con futures async.
+    // main y tokio en un std::thread spawneado. Post-F17.3 los futures
+    // del evaluator son `Send`, pero seguimos usando el bridge mpsc/
+    // oneshot por consistencia con `serve()` real hasta que F17.5 lo
+    // elimine. Los tests usan `tokio::task::LocalSet` solo para coexistir
+    // con futures del axum extractor que no exigen Send.
 
     /// Helper: corre un request contra el router usando LocalSet. El
     /// loop del intérprete y el `oneshot` del router viven juntos en

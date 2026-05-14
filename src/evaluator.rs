@@ -862,7 +862,7 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
 /// el invariante de no tener borrows vivos del `LOADER` cuando entramos a
 /// `eval_stmt` — cada operación sobre el loader se hace en un bloque chico
 /// que termina antes de la recursión.
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn load_module(segments: &[String]) -> EvalResult<Value> {
     let resolved = resolve_module_path(segments)?;
 
@@ -1065,7 +1065,7 @@ fn signal_to_error(signal: EvalSignal) -> FitzError {
 // el valor del último stmt evaluado (o `Null` si fue sentencia-puro).
 // ---------------------------------------------------------------------------
 
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
     match stmt {
         Stmt::Expr(expr, _) => eval_expr(expr, env).await,
@@ -1311,18 +1311,21 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - Otros: type error explícito.
         Stmt::For { var, iter, body, span: _ } => {
             let iter_v = eval_expr(iter, env.clone()).await?;
-            let items_iter: Box<dyn Iterator<Item = Value>> = match iter_v {
+            // F17.3: materializamos a `Vec<Value>` en lugar de
+            // `Box<dyn Iterator>` porque el `dyn Iterator` no es `Send` y
+            // el future del for cruza `.await` (con `#[async_recursion]`
+            // sin `?Send` el bound es obligatorio). El Vec ya estaba
+            // siendo construido como snapshot para evitar re-entrancia
+            // sobre la lista — el cambio solo materializa el caso `Range`.
+            let items: Vec<Value> = match iter_v {
                 // La lista va por referencia compartida (`Arc<Mutex<>>`).
                 // Para iterar tomamos un snapshot del Vec (cloneando los
                 // valores): si el body muta la lista misma, el iterator
                 // ya tiene su copia y no se altera a mitad de iteración.
                 // Eso evita problemas estilo "modifying a list while
                 // iterating" sin renunciar a mutación.
-                Value::List(items) => {
-                    let snapshot: Vec<Value> = items.lock().clone();
-                    Box::new(snapshot.into_iter())
-                }
-                Value::Range { start, end } => Box::new((start..end).map(Value::Int)),
+                Value::List(items) => items.lock().clone(),
+                Value::Range { start, end } => (start..end).map(Value::Int).collect(),
                 Value::Map(_) => return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     0, 0,
@@ -1340,7 +1343,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 ))),
             };
-            for item in items_iter {
+            for item in items {
                 env.lock().define(var.clone(), item);
                 match run_loop_body(body, env.clone()).await {
                     LoopControl::Continue => continue,
@@ -1457,7 +1460,7 @@ enum LoopControl {
 /// Ejecuta los stmts del body en orden. Si alguno emite `Break` o `Continue`,
 /// los traduce a control local. Cualquier otro signal (Error, Return) sube
 /// como `Propagate` para que el loop lo devuelva al caller.
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn run_loop_body(body: &[Stmt], env: EnvRef) -> LoopControl {
     for stmt in body {
         match eval_stmt(stmt, env.clone()).await {
@@ -1474,7 +1477,7 @@ async fn run_loop_body(body: &[Stmt], env: EnvRef) -> LoopControl {
 // eval_expr — evalúa una expresión a un Value.
 // ---------------------------------------------------------------------------
 
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
     let span = expr.span();
     match expr {
@@ -1934,7 +1937,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 ///
 /// Los signals (Return/Break/Continue/Error) se propagan: si un stmt los
 /// emite, el resto del bloque no se ejecuta.
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
     let mut last = Value::Null;
     for stmt in stmts {
@@ -1955,7 +1958,7 @@ async fn eval_block(stmts: &[Stmt], env: EnvRef) -> EvalResult<Value> {
 ///
 /// El identificador para mensajes de error se deriva de la forma del
 /// callee: `Expr::Ident(n, _)` → `"n"`, otro → `"<expr>"`.
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> EvalResult<Value> {
     // Method call.
     if let Expr::Field { object, field, .. } = callee {
@@ -1989,7 +1992,7 @@ fn callee_display_name(callee: &Expr) -> String {
 
 /// Invoca un valor que ya sabemos que tiene que ser una función. Maneja
 /// builtins, user-defined functions y errores de "no es invocable".
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn invoke_value(
     value: Value, arg_values: Vec<Value>, display_name: &str, span: Span,
 ) -> EvalResult<Value> {
@@ -2076,7 +2079,7 @@ async fn invoke_value(
 /// Si no hay un método registrado para `(tipo, nombre)`, devuelve error
 /// "método no encontrado". El usuario lo va a ver como
 /// `xs.metodo_inexistente(...) — Lista no tiene un método llamado ...`.
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn dispatch_method(
     receiver: Value,
     method: &str,
@@ -2165,7 +2168,7 @@ fn expect_arity(method: &str, args: &[Value], expected: usize, span: Span) -> Ev
 /// Helper: invoca un `Value` que tiene que ser callable, con UN solo
 /// argumento. Para `map`/`filter`/`find`, donde la callback es siempre
 /// unaria.
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn invoke_callback(
     callback: &Value,
     arg: Value,
@@ -2206,7 +2209,7 @@ fn list_pop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     }
 }
 
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn list_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("map", &args, 1, span)?;
     let items = match receiver {
@@ -2224,7 +2227,7 @@ async fn list_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     Ok(Value::new_list(out))
 }
 
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn list_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("filter", &args, 1, span)?;
     let items = match receiver {
@@ -2257,7 +2260,7 @@ async fn list_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
     Ok(Value::new_list(out))
 }
 
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn list_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("find", &args, 1, span)?;
     let items = match receiver {
@@ -2512,7 +2515,7 @@ fn as_f64(v: &Value) -> Option<f64> {
 /// And/Or con short-circuit y type-check de Bool. Vive aparte de `eval_binop`
 /// porque necesita acceso a las expresiones SIN evaluar (para no evaluar el
 /// lado derecho cuando el izquierdo ya determina el resultado).
-#[async_recursion(?Send)]
+#[async_recursion]
 async fn eval_logical(
     op: &BinOpKind, left: &Expr, right: &Expr, env: EnvRef, span: Span,
 ) -> EvalResult<Value> {
@@ -3141,8 +3144,6 @@ mod tests {
         // intenta hacerlo dos veces sobre el mismo Value::Future,
         // emite error explícito.
         let f: crate::value::FitzFuture = Box::pin(async { Ok(Value::Int(1)) });
-        // Allow arc_with_non_send_sync: ver doc-comment de `Value::new_future`.
-        #[allow(clippy::arc_with_non_send_sync)]
         let cell = crate::value::FutureCell(std::sync::Arc::new(parking_lot::Mutex::new(Some(f))));
         let v = Value::Future(cell);
 

@@ -53,13 +53,6 @@ pub type EnvRef = Arc<Mutex<Environment>>;
 
 impl Environment {
     /// Crea un environment raíz, sin padre. Típicamente uno solo por programa.
-    ///
-    /// Allow `arc_with_non_send_sync`: `Environment` contiene `Value` y
-    /// `Value::Future` lleva un `FitzFuture: !Send` hasta F17.3. El lint
-    /// será correcto-y-redundante recién cuando quitemos `?Send` del
-    /// `#[async_recursion]` del evaluator y el future cierre la promesa
-    /// de Send. Por ahora silenciamos para no bloquear F17.2.
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> EnvRef {
         Arc::new(Mutex::new(Environment {
             vars: HashMap::new(),
@@ -68,7 +61,6 @@ impl Environment {
     }
 
     /// Crea un scope hijo de `parent`. Usado al entrar a una función o bloque.
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_child(parent: EnvRef) -> EnvRef {
         Arc::new(Mutex::new(Environment {
             vars: HashMap::new(),

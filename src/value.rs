@@ -20,11 +20,12 @@
 //  - **F17.2**: `Shared<T>` migrado de `Rc<RefCell<T>>` a
 //    `Arc<parking_lot::Mutex<T>>`. El cambio es transparente para los call
 //    sites que usaban `.borrow()`/`.borrow_mut()` → ambos pasan a `.lock()`
-//    (parking_lot::Mutex no distingue lectura de escritura). El objetivo
-//    final es destrabar `Send` para Value y EnvRef y eliminar el bridge
-//    HTTP mpsc/oneshot (F17.5). Hasta F17.3 el evaluator sigue con
-//    `#[async_recursion(?Send)]` y el runtime tokio sigue en
-//    `current_thread`; nada del comportamiento observable cambia acá.
+//    (parking_lot::Mutex no distingue lectura de escritura).
+//  - **F17.3**: `Value` ya es `Send` post-F17.2 (los contenedores son
+//    `Arc<Mutex<>>`) y el evaluator pasó a `#[async_recursion]` sin
+//    `(?Send)`. `FitzFuture` carga `+ Send` ahora. Queda F17.4 para
+//    switchear el runtime tokio a `rt-multi-thread` y F17.5 para
+//    eliminar el bridge HTTP mpsc/oneshot.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -40,13 +41,15 @@ use crate::error::FitzResult;
 /// Fitz sin `.await` (guardar el future suelto) o desde builtins async
 /// como `sleep`. `.await` lo desempaca al `FitzResult<Value>` interno.
 ///
-/// **Send todavía NO se exige acá**: el evaluator sigue con
-/// `#[async_recursion(?Send)]` hasta F17.3, así que los futures que
-/// construye siguen siendo `!Send` (capturan locals con `EnvRef`,
-/// pero los locales `Arc<Mutex<...>>` no cruzan `.await` directamente;
-/// la barrera real es el macro). Cuando F17.3 quite `?Send` esta
-/// definición pasará a `dyn Future<...> + Send` sin romper call sites.
-pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>>>>;
+/// **`+ Send` post-F17.3**: el evaluator pasó a `#[async_recursion]` sin
+/// `(?Send)`. Eso pide que cada future del eval sea `Send`, lo que se
+/// propaga acá: los `Value::Future` que el lenguaje expone también
+/// tienen que cargar un future `Send`. La condición se cumple porque
+/// los contenedores compartidos (`Shared<T>` = `Arc<Mutex<T>>`,
+/// `EnvRef`) ya son `Send` post-F17.2, y el resto de los capturados
+/// del eval (`Vec<Stmt>`, `Param`, `Value` shallow) ya cumplían el
+/// bound de antes. Habilita `tokio::spawn` y `rt-multi-thread`.
+pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>> + Send>>;
 
 /// Wrapper sobre el future pendiente que aporta `Debug` manual. El
 /// `dyn Future` no implementa `Debug` así que no podemos derivarlo
@@ -54,11 +57,11 @@ pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>>>>;
 /// extraiga el future al hacer `.await` sin clonar (los futures se
 /// consumen una sola vez).
 ///
-/// **F17.2**: usa `Arc<Mutex<>>` igual que el resto de `Shared<T>`.
-/// Mientras el inner `FitzFuture` siga siendo `!Send` (hasta F17.3),
-/// `Mutex<Option<FitzFuture>>` también es `!Send` (Mutex<T> es Send
-/// solo si T es Send). Eso está bien — F17.2 no requiere Send todavía,
-/// solo prepara la representación.
+/// **F17.2-3**: usa `Arc<Mutex<>>` igual que el resto de `Shared<T>`.
+/// Como `FitzFuture` carga `+ Send` post-F17.3, `Mutex<Option<FitzFuture>>`
+/// es `Send + Sync` y `FutureCell` es Send — un `Value::Future` puede
+/// viajar entre tareas tokio cuando el runtime sea `rt-multi-thread`
+/// (F17.4).
 pub struct FutureCell(pub Arc<Mutex<Option<FitzFuture>>>);
 
 impl Clone for FutureCell {
@@ -296,13 +299,6 @@ impl Value {
     /// al llamar sin `.await`. El future se ejecuta una sola vez:
     /// cuando `Expr::Await` lo desempaca, el `Option` queda en `None`
     /// y un segundo `.await` paniquea.
-    ///
-    /// Allow `arc_with_non_send_sync`: en F17.2 `FitzFuture` sigue siendo
-    /// `!Send` (el evaluator todavía lleva `#[async_recursion(?Send)]`).
-    /// Cuando F17.3 quite `?Send`, el lint pasa solo y el `allow` se
-    /// puede eliminar — junto con los gemelos en `env.rs:new` y
-    /// `env.rs:new_child`.
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_future(fut: FitzFuture) -> Value {
         Value::Future(FutureCell(Arc::new(Mutex::new(Some(fut)))))
     }
