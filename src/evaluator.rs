@@ -260,20 +260,50 @@ fn collect_headers(
                 )));
             }
         };
+        // Mini-fase Q.1: `into="alias"` opcional permite mapear a un
+        // param con nombre distinto al derivado por convención.
+        // Útil para headers con caracteres no idiomáticos en Fitz
+        // (`X-Forwarded-For` → param `forwarded_for` no es muy lindo).
+        let into_kw = deco.kwargs.iter().find(|(k, _)| k == "into");
+        let into_alias: Option<String> = match into_kw {
+            Some((_, Expr::Str(s, _))) if !s.is_empty() => Some(s.clone()),
+            Some((_, Expr::Str(_, _))) => {
+                return Err(err(format!(
+                    "@header(name=\"{}\") sobre fn '{}': el kwarg 'into' no puede ser un string vacío",
+                    http_name, fn_name,
+                )));
+            }
+            Some((_, other)) => {
+                return Err(err(format!(
+                    "@header(name=\"{}\") sobre fn '{}': el kwarg 'into' debe ser un Str literal, recibió {:?}",
+                    http_name, fn_name, other,
+                )));
+            }
+            None => None,
+        };
         // Kwargs extra: rechazar para no comerse typos silenciosamente.
-        if let Some((k, _)) = deco.kwargs.iter().find(|(k, _)| k != "name") {
+        if let Some((k, _)) = deco.kwargs.iter().find(|(k, _)| k != "name" && k != "into") {
             return Err(err(format!(
-                "@header sobre fn '{}': kwarg '{}' no reconocido. Soportados: name.",
+                "@header sobre fn '{}': kwarg '{}' no reconocido. Soportados: name, into.",
                 fn_name, k,
             )));
         }
-        let param_name = http_name.to_lowercase().replace('-', "_");
+        let param_name = into_alias
+            .clone()
+            .unwrap_or_else(|| http_name.to_lowercase().replace('-', "_"));
         // Validar que el param exista en la fn y sea Str o Str?.
         let Some(p) = params.iter().find(|p| p.name == param_name) else {
             return Err(err(format!(
-                "@header(name=\"{}\") sobre fn '{}': el handler no tiene un param llamado '{}' \
-                 (derivado del header HTTP por convención lowercase + `-` → `_`)",
-                http_name, fn_name, param_name,
+                "@header(name=\"{}\"{}) sobre fn '{}': el handler no tiene un param llamado '{}'{}",
+                http_name,
+                into_alias.as_ref().map(|a| format!(", into=\"{}\"", a)).unwrap_or_default(),
+                fn_name,
+                param_name,
+                if into_alias.is_none() {
+                    " (derivado del header HTTP por convención lowercase + `-` → `_`)".to_string()
+                } else {
+                    String::new()
+                },
             )));
         };
         let is_nullable = match &p.type_ {
@@ -6801,6 +6831,121 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("solo aplica sobre handlers HTTP"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---- Q.1: @header(name="X", into="alias") ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_con_into_usa_alias_explicito() {
+        // `into="token"` mapea el header `X-Auth` al param `token`
+        // (override de la convención de derivar el nombre).
+        let src = "\
+            @header(name=\"X-Auth\", into=\"token\")\n\
+            @get(\"/x\")\n\
+            fn h(token: Str) => token\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let h = &reg.routes[0].headers[0];
+        assert_eq!(h.http_name, "X-Auth");
+        assert_eq!(h.param_name, "token");
+        assert!(!h.is_nullable);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_into_mantiene_nullable_del_param() {
+        let src = "\
+            @header(name=\"X-Forwarded-For\", into=\"client_ip\")\n\
+            @get(\"/x\")\n\
+            fn h(client_ip: Str?) => \"ok\"\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let h = &reg.routes[0].headers[0];
+        assert_eq!(h.param_name, "client_ip");
+        assert!(h.is_nullable);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_into_inexistente_es_error_sin_mencionar_convencion() {
+        // Si `into="..."` apunta a un param que no existe, el mensaje
+        // de error NO menciona la convención de derivar (el usuario
+        // pidió un alias explícito; mencionar la convención confundiría).
+        let src = "\
+            @header(name=\"X-Auth\", into=\"token\")\n\
+            @get(\"/x\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("into=\"token\"") && err.message.contains("'token'"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+        assert!(
+            !err.message.contains("derivado del header"),
+            "no debería mencionar la convención cuando hay alias explícito: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_into_string_vacio_es_error() {
+        let src = "\
+            @header(name=\"X-Auth\", into=\"\")\n\
+            @get(\"/x\")\n\
+            fn h(token: Str) => token\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("into") && err.message.contains("vacío"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_into_no_str_literal_es_error() {
+        let src = "\
+            @header(name=\"X-Auth\", into=42)\n\
+            @get(\"/x\")\n\
+            fn h(token: Str) => token\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("into") && err.message.contains("Str literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn header_decorator_kwarg_desconocido_lista_into_y_name() {
+        // El mensaje de error sobre kwarg desconocido ahora cita tanto
+        // `name` como `into` (Q.1).
+        let src = "\
+            @header(name=\"X\", foo=\"bar\")\n\
+            @get(\"/x\")\n\
+            fn h(x: Str) => x\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("foo")
+                && err.message.contains("name")
+                && err.message.contains("into"),
             "mensaje inesperado: {}",
             err.message,
         );

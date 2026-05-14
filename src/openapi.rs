@@ -101,7 +101,13 @@ pub(crate) fn headers_from_decorators(
         if http_name.is_empty() {
             continue;
         }
-        let param_name = http_name.to_lowercase().replace('-', "_");
+        // Mini-fase Q.1: `into="alias"` permite que el param Fitz tenga
+        // un nombre distinto al derivado por convención. Si no está,
+        // se mantiene la convención previa (lowercase + `-` → `_`).
+        let param_name = match deco.kwargs.iter().find(|(k, _)| k == "into") {
+            Some((_, crate::ast::Expr::Str(alias, _))) if !alias.is_empty() => alias.clone(),
+            _ => http_name.to_lowercase().replace('-', "_"),
+        };
         let Some(p) = params.iter().find(|p| p.name == param_name) else {
             continue;
         };
