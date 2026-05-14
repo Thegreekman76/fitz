@@ -2891,11 +2891,35 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
             };
             match key_str.as_str() {
                 "allow_origin" => match value {
-                    Value::Str(s) => config.allow_origin = s.clone(),
+                    // Q.3: Str → literal (modo previo: emite valor fijo).
+                    Value::Str(s) => {
+                        config.allow_origin = crate::http::AllowOrigin::Literal(s.clone());
+                    }
+                    // Q.3: List<Str> → set de orígenes permitidos. El
+                    // dispatch HTTP echo del Origin del request si está
+                    // en la lista; si no, omite el header (browser
+                    // rechaza la response — CORS estricto). Útil con
+                    // credenciales (`Allow-Origin: *` incompatible).
+                    Value::List(items) => {
+                        let mut set = Vec::with_capacity(items.borrow().len());
+                        for it in items.borrow().iter() {
+                            match it {
+                                Value::Str(s) => set.push(s.clone()),
+                                other => {
+                                    return Err(cors_type_err(
+                                        "allow_origin",
+                                        "Str | List<Str>",
+                                        other.type_name(),
+                                    ));
+                                }
+                            }
+                        }
+                        config.allow_origin = crate::http::AllowOrigin::Set(set);
+                    }
                     other => {
                         return Err(cors_type_err(
                             "allow_origin",
-                            "Str",
+                            "Str | List<Str>",
                             other.type_name(),
                         ));
                     }
@@ -7303,6 +7327,57 @@ let r = match n {
     }
 
     // -----------------------------------------------------------------------
+    // Tests — Q.3: cors({"allow_origin": ["..."]}) modo Set
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_allow_origin_lista_construye_set() {
+        let src = "let c = cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]})";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::CorsConfig(cfg) => match &cfg.allow_origin {
+                crate::http::AllowOrigin::Set(items) => {
+                    assert_eq!(items, &vec![
+                        "https://a.com".to_string(),
+                        "https://b.com".to_string(),
+                    ]);
+                }
+                other => panic!("se esperaba AllowOrigin::Set, fue: {:?}", other),
+            },
+            other => panic!("se esperaba CorsConfig, fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_allow_origin_lista_con_no_str_es_error() {
+        let src = "let c = cors({\"allow_origin\": [\"https://a.com\", 42]})";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("allow_origin")
+                && err.message.contains("Str | List<Str>"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_allow_origin_tipo_invalido_menciona_str_y_list() {
+        // Pasar Int en allow_origin → error que cita ambas formas válidas.
+        let src = "let c = cors({\"allow_origin\": 42})";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("allow_origin")
+                && err.message.contains("Str | List<Str>"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // -----------------------------------------------------------------------
     // Tests — mini-fase MW.2: built-in cors(...)
     // -----------------------------------------------------------------------
 
@@ -7314,7 +7389,10 @@ let r = match n {
         let c = env.borrow().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
-                assert_eq!(cfg.allow_origin, "*");
+                assert_eq!(
+                    cfg.allow_origin,
+                    crate::http::AllowOrigin::Literal("*".to_string())
+                );
                 assert!(cfg.allow_methods.contains(&"GET".to_string()));
                 assert!(cfg.allow_methods.contains(&"OPTIONS".to_string()));
                 assert!(cfg.allow_headers.contains(&"content-type".to_string()));
@@ -7332,7 +7410,10 @@ let r = match n {
         let c = env.borrow().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
-                assert_eq!(cfg.allow_origin, "*");
+                assert_eq!(
+                    cfg.allow_origin,
+                    crate::http::AllowOrigin::Literal("*".to_string())
+                );
                 assert_eq!(cfg.max_age, None);
             }
             other => panic!("se esperaba CorsConfig, fue: {:?}", other),
@@ -7354,7 +7435,10 @@ let r = match n {
         let c = env.borrow().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
-                assert_eq!(cfg.allow_origin, "https://app.example.com");
+                assert_eq!(
+                    cfg.allow_origin,
+                    crate::http::AllowOrigin::Literal("https://app.example.com".to_string())
+                );
                 assert_eq!(cfg.allow_methods, vec!["GET".to_string(), "POST".into()]);
                 assert_eq!(cfg.allow_headers, vec!["x-custom".to_string()]);
                 assert_eq!(cfg.max_age, Some(3600));
@@ -7371,7 +7455,10 @@ let r = match n {
         let c = env.borrow().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
-                assert_eq!(cfg.allow_origin, "*"); // default
+                assert_eq!(
+                    cfg.allow_origin,
+                    crate::http::AllowOrigin::Literal("*".to_string())
+                ); // default
                 assert!(cfg.allow_methods.contains(&"POST".to_string())); // default
                 assert_eq!(cfg.max_age, Some(600));
             }
@@ -7431,7 +7518,10 @@ let r = match n {
         let r = &reg.routes[0];
         assert!(r.middlewares.is_empty(), "cors NO debe entrar a middlewares chain");
         let cors = r.cors.as_ref().expect("se esperaba RouteSpec.cors");
-        assert_eq!(cors.allow_origin, "https://x.com");
+        assert_eq!(
+            cors.allow_origin,
+            crate::http::AllowOrigin::Literal("https://x.com".to_string())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

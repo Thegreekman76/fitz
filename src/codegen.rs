@@ -5024,10 +5024,11 @@ impl<'a> CodegenCtx<'a> {
             );
         }
         // HeaderMap: hace falta cuando el handler declara `@header(...)`
-        // (Fase 7.6) o cuando hay middlewares (MW.3) que reciben Request
-        // — para popular `req.headers`. Cuando ninguno aplica, axum NO
-        // extrae el HeaderMap (zero-overhead en handlers simples).
-        if !header_params.is_empty() || has_middleware {
+        // (Fase 7.6), hay middlewares (MW.3) que reciben Request, o hay
+        // CORS (Q.3) que necesita leer el `Origin` del request para
+        // resolver los headers `Access-Control-Allow-*`. Sin ninguno,
+        // axum NO extrae el HeaderMap (zero-overhead en handlers simples).
+        if !header_params.is_empty() || has_middleware || has_cors {
             self.emit("    __hmap: axum::http::HeaderMap,\n");
         }
         if let Some((bn, _bt)) = &body_param {
@@ -5123,10 +5124,13 @@ impl<'a> CodegenCtx<'a> {
                 self.emit("                axum::Json(__resp.body),\n");
                 self.emit("            ).into_response(),\n");
                 if has_cors {
+                    // Q.3: resolver headers CORS contra el Origin del
+                    // request actual. `__cors_resolve_<NAME>(origin)`
+                    // devuelve un Vec<(&'static str, String)>.
                     writeln!(
                         &mut self.output,
-                        "            Some({}),",
-                        cors_static_name(name),
+                        "            Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok()))),",
+                        cors_resolve_fn_name(name),
                     )
                     .unwrap();
                 } else {
@@ -5230,8 +5234,13 @@ impl<'a> CodegenCtx<'a> {
         // MW.3: si la ruta declara cors, envolvemos el resultado en
         // `__apply_cors_and_respond(...)` para inyectar headers.
         let returns_response = self.http_handlers_returning_response.contains(name);
+        // Q.3: resolver headers CORS contra el Origin del request actual.
+        // `__hmap` se extrajo arriba (la condición incluye `has_cors`).
         let cors_arg = if has_cors {
-            format!("Some({})", cors_static_name(name))
+            format!(
+                "Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok())))",
+                cors_resolve_fn_name(name)
+            )
         } else {
             "None".to_string()
         };
@@ -5282,46 +5291,98 @@ impl<'a> CodegenCtx<'a> {
         }
         self.emit("}\n\n");
 
-        // MW.3: emitir el static con los headers CORS precomputados,
-        // y el handler de preflight para el método OPTIONS.
+        // Q.3: en lugar de un static con los headers precomputados,
+        // emitir una `fn __cors_resolve_<NAME>(origin: Option<&str>)`
+        // que devuelve el Vec de headers resuelto para una request
+        // (con su Origin). Esto permite el modo `Set` (echo del Origin
+        // si está en la lista permitida). El wrapper del handler y el
+        // preflight la llaman.
         if let Some(cors) = &mw_cors {
-            let static_name = cors_static_name(name);
-            let headers = cors.response_headers();
-            self.emit(&format!(
-                "static {}: &[(&'static str, &'static str)] = &[",
-                static_name
-            ));
-            for (i, (n, v)) in headers.iter().enumerate() {
-                if i > 0 {
-                    self.emit(", ");
-                }
-                // Strings con escape mínimo (los valores típicos son
-                // ASCII sin caracteres especiales; allow_origin puede
-                // tener URLs con `.` y `/`, válidos sin escape).
-                self.emit(&format!(
-                    "(\"{}\", \"{}\")",
-                    n.replace('"', "\\\""),
-                    v.replace('"', "\\\""),
-                ));
-            }
-            self.emit("];\n\n");
-            // Handler preflight: responde 204 con los mismos headers.
+            let resolve_fn = cors_resolve_fn_name(name);
+            let methods = cors.methods_joined();
+            let headers_csv = cors.headers_joined();
+            let origin = cors.origin_resolved();
+
             writeln!(
                 &mut self.output,
-                "async fn __preflight_{}() -> axum::response::Response {{",
+                "fn {}(origin: Option<&str>) -> Vec<(&'static str, String)> {{",
+                resolve_fn
+            )
+            .unwrap();
+            self.emit("    let mut __out: Vec<(&'static str, String)> = Vec::with_capacity(4);\n");
+            match &origin {
+                BuildAllowOrigin::Literal(s) => {
+                    writeln!(
+                        &mut self.output,
+                        "    __out.push((\"access-control-allow-origin\", \"{}\".to_string()));",
+                        s.replace('\\', "\\\\").replace('"', "\\\"")
+                    )
+                    .unwrap();
+                    // `origin` no se usa en este caso — silenciar warning.
+                    self.emit("    let _ = origin;\n");
+                }
+                BuildAllowOrigin::Set(set) => {
+                    self.emit("    let __set: &[&'static str] = &[");
+                    for (i, s) in set.iter().enumerate() {
+                        if i > 0 {
+                            self.emit(", ");
+                        }
+                        self.emit(&format!(
+                            "\"{}\"",
+                            s.replace('\\', "\\\\").replace('"', "\\\"")
+                        ));
+                    }
+                    self.emit("];\n");
+                    self.emit("    if let Some(__req) = origin {\n");
+                    self.emit("        if __set.iter().any(|s| *s == __req) {\n");
+                    self.emit("            __out.push((\"access-control-allow-origin\", __req.to_string()));\n");
+                    self.emit("        }\n");
+                    self.emit("    }\n");
+                }
+            }
+            writeln!(
+                &mut self.output,
+                "    __out.push((\"access-control-allow-methods\", \"{}\".to_string()));",
+                methods.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "    __out.push((\"access-control-allow-headers\", \"{}\".to_string()));",
+                headers_csv.replace('\\', "\\\\").replace('"', "\\\"")
+            )
+            .unwrap();
+            if let Some(age) = cors.max_age {
+                writeln!(
+                    &mut self.output,
+                    "    __out.push((\"access-control-max-age\", \"{}\".to_string()));",
+                    age
+                )
+                .unwrap();
+            }
+            self.emit("    __out\n");
+            self.emit("}\n\n");
+
+            // Handler preflight: lee el Origin del request OPTIONS y
+            // emite 204 con los headers resueltos.
+            writeln!(
+                &mut self.output,
+                "async fn __preflight_{}(headers: axum::http::HeaderMap) -> axum::response::Response {{",
                 name
             )
             .unwrap();
             self.emit("    use axum::response::IntoResponse;\n");
-            self.emit("    let mut resp = axum::http::StatusCode::NO_CONTENT.into_response();\n");
+            self.emit("    let __origin = headers.get(\"origin\").and_then(|v| v.to_str().ok()).map(|s| s.to_string());\n");
             writeln!(
                 &mut self.output,
-                "    for (n, v) in {} {{",
-                static_name
+                "    let __headers = {}(__origin.as_deref());",
+                resolve_fn
             )
             .unwrap();
-            self.emit("        let parsed_n = axum::http::HeaderName::try_from(*n);\n");
-            self.emit("        let parsed_v = axum::http::HeaderValue::try_from(*v);\n");
+            self.emit("    let mut resp = axum::http::StatusCode::NO_CONTENT.into_response();\n");
+            self.emit("    for (n, v) in __headers {\n");
+            self.emit("        let parsed_n = axum::http::HeaderName::try_from(n);\n");
+            self.emit("        let parsed_v = axum::http::HeaderValue::try_from(v);\n");
             self.emit("        if let (Ok(n), Ok(v)) = (parsed_n, parsed_v) {\n");
             self.emit("            resp.headers_mut().insert(n, v);\n");
             self.emit("        }\n");
@@ -5739,26 +5800,30 @@ fn extract_path_template_names(template: &str) -> Vec<String> {
 }
 
 /// Mini-fase MW.3: representación build-time del `cors(...)` aplicado a
-/// una ruta vía `@middleware(cors({...}))`. Se construye una vez al
-/// generar el wrapper y se materializa como `static __CORS_<idx>` en
-/// el código Rust generado, más un handler de preflight `OPTIONS` y
-/// la inyección de headers en la response real.
+/// una ruta vía `@middleware(cors({...}))`. Q.3: `allow_origin` puede ser
+/// Literal (valor fijo) o Set (echo del Origin del request si está en la
+/// lista). El codegen emite `fn __cors_resolve_<NAME>(origin) -> Vec<(...)>`
+/// que el wrapper y el preflight handler llaman por request.
+#[derive(Debug, Clone)]
+enum BuildAllowOrigin {
+    Literal(String),
+    Set(Vec<String>),
+}
+
 #[derive(Debug, Clone, Default)]
 struct BuildCorsConfig {
-    allow_origin: Option<String>,
+    /// `None` → default `Literal("*")` cuando se emite el código.
+    allow_origin: Option<BuildAllowOrigin>,
     allow_methods: Option<Vec<String>>,
     allow_headers: Option<Vec<String>>,
     max_age: Option<i64>,
 }
 
 impl BuildCorsConfig {
-    /// Lista de headers HTTP que el server emite con cada response
-    /// CORS (real o preflight). Defaults paralelos a
+    /// Métodos efectivos a emitir. Defaults paralelos a
     /// `crate::http::CorsConfig::permissive_default()`.
-    fn response_headers(&self) -> Vec<(String, String)> {
-        let allow_origin = self.allow_origin.clone().unwrap_or_else(|| "*".to_string());
-        let allow_methods = self
-            .allow_methods
+    fn methods_joined(&self) -> String {
+        self.allow_methods
             .clone()
             .unwrap_or_else(|| {
                 vec![
@@ -5769,21 +5834,22 @@ impl BuildCorsConfig {
                     "OPTIONS".into(),
                 ]
             })
-            .join(", ");
-        let allow_headers = self
-            .allow_headers
+            .join(", ")
+    }
+
+    /// Headers efectivos a emitir.
+    fn headers_joined(&self) -> String {
+        self.allow_headers
             .clone()
             .unwrap_or_else(|| vec!["content-type".into(), "authorization".into()])
-            .join(", ");
-        let mut out = vec![
-            ("access-control-allow-origin".to_string(), allow_origin),
-            ("access-control-allow-methods".to_string(), allow_methods),
-            ("access-control-allow-headers".to_string(), allow_headers),
-        ];
-        if let Some(age) = self.max_age {
-            out.push(("access-control-max-age".to_string(), age.to_string()));
-        }
-        out
+            .join(", ")
+    }
+
+    /// `allow_origin` efectivo (con default Literal("*") si no se setó).
+    fn origin_resolved(&self) -> BuildAllowOrigin {
+        self.allow_origin
+            .clone()
+            .unwrap_or_else(|| BuildAllowOrigin::Literal("*".to_string()))
     }
 }
 
@@ -5821,8 +5887,28 @@ fn parse_build_cors_args(args: &[Expr]) -> Result<BuildCorsConfig, FitzError> {
             };
             match key.as_str() {
                 "allow_origin" => match v {
-                    Expr::Str(s, _) => cfg.allow_origin = Some(s.clone()),
-                    _ => return Err(err("`cors`: 'allow_origin' debe ser un Str literal")),
+                    // Q.3: Str → Literal (modo previo, valor fijo).
+                    Expr::Str(s, _) => {
+                        cfg.allow_origin = Some(BuildAllowOrigin::Literal(s.clone()));
+                    }
+                    // Q.3: List<Str> → Set, echo del Origin del request.
+                    Expr::List(items, _) => {
+                        let mut set = Vec::with_capacity(items.len());
+                        for it in items {
+                            match it {
+                                Expr::Str(s, _) => set.push(s.clone()),
+                                _ => {
+                                    return Err(err(
+                                        "`cors`: cada elemento de 'allow_origin' (como lista) debe ser un Str literal",
+                                    ));
+                                }
+                            }
+                        }
+                        cfg.allow_origin = Some(BuildAllowOrigin::Set(set));
+                    }
+                    _ => return Err(err(
+                        "`cors`: 'allow_origin' debe ser un Str literal o una List<Str> literal",
+                    )),
                 },
                 "allow_methods" => cfg.allow_methods = Some(parse_build_str_list(v, "allow_methods")?),
                 "allow_headers" => cfg.allow_headers = Some(parse_build_str_list(v, "allow_headers")?),
@@ -5848,12 +5934,12 @@ fn parse_build_cors_args(args: &[Expr]) -> Result<BuildCorsConfig, FitzError> {
     Ok(cfg)
 }
 
-/// MW.3: nombre del `static __FITZ_CORS_<handler>` que carga los headers
-/// CORS precomputados para el handler. Mantenemos el nombre del handler
-/// tal cual (Fitz exige identificadores ASCII alfanuméricos + `_`,
-/// directamente válidos como identificadores Rust).
-fn cors_static_name(handler_name: &str) -> String {
-    format!("__FITZ_CORS_{}", handler_name.to_uppercase())
+/// Q.3: nombre de la fn `__cors_resolve_<handler>(origin: Option<&str>)`
+/// emitida por el codegen. Cada ruta con `@middleware(cors(...))` la
+/// llama por request para obtener el Vec de headers CORS resuelto
+/// (incluido el modo `Set` con echo del Origin).
+fn cors_resolve_fn_name(handler_name: &str) -> String {
+    format!("__cors_resolve_{}", handler_name)
 }
 
 fn parse_build_str_list(expr: &Expr, key: &str) -> Result<Vec<String>, FitzError> {
@@ -5959,20 +6045,19 @@ impl __ToFitzJson for ResponseData {
     }
 }
 
-/// MW.3: inyecta los headers CORS precomputados (si los hay) en una
-/// `axum::response::Response` ya armada. Si `cors_headers` es `None`,
-/// devuelve la response sin cambios. Cualquier nombre o valor de
-/// header inválido se omite — preferimos perder un header malformado
-/// a panic en una request. En la práctica los headers CORS que el
-/// codegen emite son válidos por construcción.
+/// MW.3 + Q.3: inyecta los headers CORS resueltos (si los hay) en una
+/// `axum::response::Response` ya armada. `cors_headers` viene del helper
+/// `__cors_resolve_<NAME>(origin)` emitido por el codegen. Si es `None`,
+/// devuelve la response sin cambios. Header inválido → se omite (no
+/// panic).
 fn __apply_cors_and_respond(
     mut resp: axum::response::Response,
-    cors_headers: Option<&[(&'static str, &'static str)]>,
+    cors_headers: Option<Vec<(&'static str, String)>>,
 ) -> axum::response::Response {
     if let Some(hs) = cors_headers {
         for (name, value) in hs {
-            let parsed_name = axum::http::HeaderName::try_from(*name);
-            let parsed_value = axum::http::HeaderValue::try_from(*value);
+            let parsed_name = axum::http::HeaderName::try_from(name);
+            let parsed_value = axum::http::HeaderValue::try_from(value);
             if let (Ok(n), Ok(v)) = (parsed_name, parsed_value) {
                 resp.headers_mut().insert(n, v);
             }

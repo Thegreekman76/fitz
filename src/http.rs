@@ -161,26 +161,52 @@ pub struct MiddlewareSpec {
     pub handler: Value,
 }
 
-/// Configuración de un `cors(...)` aplicado a una ruta vía
-/// `@middleware(cors(...))` (mini-fase MW.2). Es `Send + Sync + Clone`
-/// trivialmente — los valores son strings y vectores de strings. Vive
-/// detrás de `Arc<>` en `RouteSpec.cors` (para no clonar por request)
-/// y se copia idéntica al `RouteMeta.cors` que viaja al thread tokio
-/// (preflight `OPTIONS`).
+/// Mini-fase Q.3: la política de `Access-Control-Allow-Origin` admite
+/// dos modos: literal (valor fijo, como hasta MW.2) o set de orígenes
+/// permitidos (echo del `Origin` del request si pertenece al set).
 ///
-/// Defaults aplicados cuando un kwarg no se especifica:
-///   - `allow_origin`: `"*"` (permissive total).
-///   - `allow_methods`: `["GET", "POST", "PUT", "DELETE", "OPTIONS"]`
-///     — los métodos típicos de un browser preflight; `OPTIONS` adentro
-///     habilita el preflight mismo.
-///   - `allow_headers`: `["content-type", "authorization"]` — los
-///     headers que un browser normalmente manda con `fetch` y los más
-///     pedidos en preflight.
-///   - `max_age`: `None` → no se emite header (browser decide su
-///     cache default, típicamente 5s).
+///       - `Literal("*")` o `Literal("https://x.com")` → emite el valor
+///         tal cual (modo previo).
+///       - `Set(["https://a.com", "https://b.com"])` → si el header
+///         `Origin` del request matchea uno de la lista, emite **ese**
+///         valor (no la lista entera). Si no matchea, NO emite el header
+///         (el browser rechaza la response — comportamiento estándar de
+///         CORS estricto). Útil cuando se necesitan credenciales (cookies/
+///         Authorization) sobre múltiples frontends: `Allow-Origin: *`
+///         incompatible con credentials, echo del Origin específico sí.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AllowOrigin {
+    /// Valor literal, emitido idéntico en cada response.
+    Literal(String),
+    /// Set de orígenes permitidos. El runtime echo si el `Origin` del
+    /// request está en la lista.
+    Set(Vec<String>),
+}
+
+impl AllowOrigin {
+    /// Computa el valor a emitir en `Access-Control-Allow-Origin`
+    /// dado el `Origin` del request (si lo hay):
+    ///       - Literal → siempre el valor, sin importar el request.
+    ///       - Set → el valor del request si está en la lista; `None`
+    ///         si no.
+    pub fn resolve(&self, request_origin: Option<&str>) -> Option<String> {
+        match self {
+            AllowOrigin::Literal(s) => Some(s.clone()),
+            AllowOrigin::Set(set) => {
+                let req = request_origin?;
+                if set.iter().any(|s| s == req) {
+                    Some(req.to_string())
+                } else {
+                    None
+                }
+            }
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CorsConfig {
-    pub allow_origin: String,
+    pub allow_origin: AllowOrigin,
     pub allow_methods: Vec<String>,
     pub allow_headers: Vec<String>,
     pub max_age: Option<i64>,
@@ -192,7 +218,7 @@ impl CorsConfig {
     /// + `authorization`. Casos más restrictivos exigen kwargs explícitos.
     pub fn permissive_default() -> Self {
         CorsConfig {
-            allow_origin: "*".to_string(),
+            allow_origin: AllowOrigin::Literal("*".to_string()),
             allow_methods: vec![
                 "GET".into(),
                 "POST".into(),
@@ -205,23 +231,25 @@ impl CorsConfig {
         }
     }
 
-    /// Lista de headers HTTP que el server emite con cada response
-    /// CORS (real o preflight). Se computa una vez al registrar la
-    /// ruta y se reutiliza por request — sin allocs en hot path.
-    /// El header `Access-Control-Max-Age` solo se emite si el usuario
-    /// pasó `max_age=<int>`.
-    pub fn response_headers(&self) -> Vec<(String, String)> {
-        let mut out = vec![
-            ("access-control-allow-origin".into(), self.allow_origin.clone()),
-            (
-                "access-control-allow-methods".into(),
-                self.allow_methods.join(", "),
-            ),
-            (
-                "access-control-allow-headers".into(),
-                self.allow_headers.join(", "),
-            ),
-        ];
+    /// Lista de headers HTTP que el server emite con una response
+    /// CORS (real o preflight), resuelta contra el `Origin` del
+    /// request. Si la política es `Set` y el origin no está permitido,
+    /// el header `Access-Control-Allow-Origin` se OMITE (el browser
+    /// rechaza la response, comportamiento CORS estricto correcto).
+    /// El resto de los headers (methods/headers/max_age) sí se emiten.
+    pub fn response_headers(&self, request_origin: Option<&str>) -> Vec<(String, String)> {
+        let mut out = Vec::with_capacity(4);
+        if let Some(origin) = self.allow_origin.resolve(request_origin) {
+            out.push(("access-control-allow-origin".into(), origin));
+        }
+        out.push((
+            "access-control-allow-methods".into(),
+            self.allow_methods.join(", "),
+        ));
+        out.push((
+            "access-control-allow-headers".into(),
+            self.allow_headers.join(", "),
+        ));
         if let Some(age) = self.max_age {
             out.push(("access-control-max-age".into(), age.to_string()));
         }
@@ -1455,19 +1483,26 @@ where
 
 /// Suma un handler `OPTIONS` al MethodRouter dado para responder
 /// preflight CORS (mini-fase MW.2). El handler devuelve 204 con los
-/// headers `Access-Control-Allow-*` precomputados — no toca el
-/// intérprete, así que es rápido y no usa el bridge mpsc.
+/// headers `Access-Control-Allow-*` resueltos contra el `Origin` del
+/// request — no toca el intérprete, así que es rápido y no usa el
+/// bridge mpsc. Q.3: el header `Access-Control-Allow-Origin` puede
+/// omitirse si la política `Set` rechaza el origin recibido (browser
+/// rechaza el preflight, comportamiento estándar CORS estricto).
 fn attach_preflight(
     mr: MethodRouter,
     cors: std::sync::Arc<CorsConfig>,
 ) -> MethodRouter {
-    let headers = cors.response_headers();
-    mr.options(move || {
-        let headers = headers.clone();
+    mr.options(move |headers: axum::http::HeaderMap| {
+        let cors = cors.clone();
         async move {
+            let request_origin = headers
+                .get("origin")
+                .and_then(|v| v.to_str().ok())
+                .map(|s| s.to_string());
+            let resolved = cors.response_headers(request_origin.as_deref());
             let mut resp = Response::new(Body::empty());
             *resp.status_mut() = StatusCode::NO_CONTENT;
-            for (name, value) in headers {
+            for (name, value) in resolved {
                 let parsed_name = axum::http::HeaderName::try_from(name);
                 let parsed_value = HeaderValue::try_from(value);
                 if let (Ok(n), Ok(v)) = (parsed_name, parsed_value) {
@@ -1821,8 +1856,14 @@ async fn handle_task(
     // parsear el body, así que sin estos headers cualquier error
     // sale como un "CORS error" en consola en vez del 500/400 que
     // de verdad ocurrió.
+    // Q.3: pasamos el `Origin` del request al config; si la política
+    // es `Set` y matchea, echo del Origin recibido; si no, NO se
+    // emite el header (browser rechaza la response — CORS estricto).
     if let Some(cors) = &route.cors {
-        outcome.extra_headers.extend(cors.response_headers());
+        let request_origin = raw_headers.get("origin").map(|s| s.as_str());
+        outcome
+            .extra_headers
+            .extend(cors.response_headers(request_origin));
     }
     outcome
 }
@@ -2643,7 +2684,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cors_response_headers_emite_los_tres_headers_basicos() {
         let cfg = CorsConfig::permissive_default();
-        let headers = cfg.response_headers();
+        let headers = cfg.response_headers(None);
         let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
         assert!(names.contains(&"access-control-allow-origin"));
         assert!(names.contains(&"access-control-allow-methods"));
@@ -2652,13 +2693,89 @@ mod tests {
         assert!(!names.contains(&"access-control-max-age"));
     }
 
+    // ---- Q.3: AllowOrigin Set + echo del Origin del request ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_set_echo_si_origin_esta_en_la_lista() {
+        let cfg = CorsConfig {
+            allow_origin: AllowOrigin::Set(vec![
+                "https://a.com".into(),
+                "https://b.com".into(),
+            ]),
+            ..CorsConfig::permissive_default()
+        };
+        let headers = cfg.response_headers(Some("https://a.com"));
+        let origin = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-origin")
+            .map(|(_, v)| v.clone());
+        assert_eq!(origin, Some("https://a.com".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_set_omite_origin_header_si_request_no_matchea() {
+        let cfg = CorsConfig {
+            allow_origin: AllowOrigin::Set(vec!["https://a.com".into()]),
+            ..CorsConfig::permissive_default()
+        };
+        // Origin del request NO está en la lista → el header
+        // access-control-allow-origin NO se emite; el browser
+        // rechaza la response.
+        let headers = cfg.response_headers(Some("https://evil.com"));
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"access-control-allow-origin"));
+        // El resto de headers CORS sí se emiten (no son request-aware).
+        assert!(names.contains(&"access-control-allow-methods"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_set_omite_origin_si_request_no_trae_origin() {
+        // Sin header `Origin` (request same-origin, browser no lo manda),
+        // el modo Set tampoco emite — no hay nada que echo. El browser
+        // de all modos no lo necesitaría en ese caso.
+        let cfg = CorsConfig {
+            allow_origin: AllowOrigin::Set(vec!["https://a.com".into()]),
+            ..CorsConfig::permissive_default()
+        };
+        let headers = cfg.response_headers(None);
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"access-control-allow-origin"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_literal_ignora_el_origin_del_request() {
+        // Literal emite siempre el mismo valor, sin importar el request.
+        let cfg = CorsConfig {
+            allow_origin: AllowOrigin::Literal("*".into()),
+            ..CorsConfig::permissive_default()
+        };
+        let headers_with = cfg.response_headers(Some("https://x.com"));
+        let headers_without = cfg.response_headers(None);
+        assert_eq!(headers_with, headers_without);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn allow_origin_resolve_set_match_y_miss() {
+        let any = AllowOrigin::Literal("*".to_string());
+        assert_eq!(any.resolve(None), Some("*".to_string()));
+        assert_eq!(any.resolve(Some("https://x.com")), Some("*".to_string()));
+
+        let single = AllowOrigin::Literal("https://x.com".to_string());
+        assert_eq!(single.resolve(Some("https://y.com")), Some("https://x.com".to_string()));
+
+        let set = AllowOrigin::Set(vec!["https://a.com".into(), "https://b.com".into()]);
+        assert_eq!(set.resolve(Some("https://b.com")), Some("https://b.com".to_string()));
+        assert_eq!(set.resolve(Some("https://evil.com")), None);
+        assert_eq!(set.resolve(None), None);
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn cors_response_headers_emite_max_age_cuando_esta_seteado() {
         let cfg = CorsConfig {
             max_age: Some(3600),
             ..CorsConfig::permissive_default()
         };
-        let headers = cfg.response_headers();
+        let headers = cfg.response_headers(None);
         let max_age = headers
             .iter()
             .find(|(n, _)| n == "access-control-max-age")
@@ -2740,6 +2857,61 @@ mod tests {
             .find(|(n, _)| n == "access-control-allow-origin")
             .map(|(_, v)| v.clone());
         assert_eq!(origin, Some("https://app.x.com".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_cors_set_echo_request_origin_si_matchea() {
+        // Q.3: cors con lista de orígenes permitidos. Request con
+        // `Origin: https://a.com` en la lista → echo del origin.
+        let src = "\
+            @middleware(cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]}))\n\
+            @get(\"/\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let mut headers = HashMap::new();
+        headers.insert("origin".into(), "https://a.com".into());
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            headers,
+        )
+        .await;
+        let origin = outcome
+            .extra_headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-origin")
+            .map(|(_, v)| v.clone());
+        assert_eq!(origin, Some("https://a.com".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_cors_set_omite_origin_si_no_matchea() {
+        let src = "\
+            @middleware(cors({\"allow_origin\": [\"https://a.com\"]}))\n\
+            @get(\"/\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let mut headers = HashMap::new();
+        headers.insert("origin".into(), "https://evil.com".into());
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            headers,
+        )
+        .await;
+        let names: Vec<&str> = outcome.extra_headers.iter().map(|(n, _)| n.as_str()).collect();
+        // El header origin NO se emite (browser rechaza la response).
+        assert!(!names.contains(&"access-control-allow-origin"));
+        // El resto de headers CORS sí.
+        assert!(names.contains(&"access-control-allow-methods"));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3365,6 +3537,116 @@ mod tests {
             .find(|(n, _)| n == "access-control-allow-origin")
             .map(|(_, v)| v.clone());
         assert_eq!(origin, Some("https://x.com".to_string()));
+    }
+
+    #[tokio::test]
+    async fn e2e_preflight_set_echo_si_origin_en_la_lista() {
+        // Q.3: preflight con cors({"allow_origin": [...]}) hace echo
+        // del Origin si está permitido.
+        let src = "\
+            @middleware(cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]}))\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (status, headers, _) = run_oneshot_full_with_headers(
+            src,
+            axum::http::Method::OPTIONS,
+            "/api",
+            &[("origin", "https://b.com")],
+        )
+        .await;
+        assert_eq!(status, 204);
+        let origin = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-origin")
+            .map(|(_, v)| v.clone());
+        assert_eq!(origin, Some("https://b.com".to_string()));
+    }
+
+    #[tokio::test]
+    async fn e2e_preflight_set_sin_match_omite_origin() {
+        let src = "\
+            @middleware(cors({\"allow_origin\": [\"https://a.com\"]}))\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (status, headers, _) = run_oneshot_full_with_headers(
+            src,
+            axum::http::Method::OPTIONS,
+            "/api",
+            &[("origin", "https://evil.com")],
+        )
+        .await;
+        assert_eq!(status, 204);
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(!names.contains(&"access-control-allow-origin"));
+        assert!(names.contains(&"access-control-allow-methods"));
+    }
+
+    /// Variante de `run_oneshot_full` que acepta headers extra para
+    /// la request (Q.3: para mandar `Origin: ...` y verificar echo).
+    async fn run_oneshot_full_with_headers(
+        src: &str,
+        method: axum::http::Method,
+        path: &str,
+        headers: &[(&str, &str)],
+    ) -> (u16, Vec<(String, String)>, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, None);
+
+        let local = tokio::task::LocalSet::new();
+        let headers_owned: Vec<(String, String)> = headers
+            .iter()
+            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+            .collect();
+        local
+            .run_until(async move {
+                let mut builder = axum::http::Request::builder()
+                    .method(method)
+                    .uri(path);
+                for (k, v) in &headers_owned {
+                    builder = builder.header(k.as_str(), v.as_str());
+                }
+                let req = builder.body(Body::empty()).unwrap();
+                let mut resp_fut = Box::pin(router.oneshot(req));
+                loop {
+                    tokio::select! {
+                        resp = &mut resp_fut => {
+                            let resp = resp.unwrap();
+                            let status = resp.status().as_u16();
+                            let response_headers: Vec<(String, String)> = resp
+                                .headers()
+                                .iter()
+                                .map(|(n, v)| {
+                                    (
+                                        n.as_str().to_lowercase(),
+                                        v.to_str().unwrap_or_default().to_string(),
+                                    )
+                                })
+                                .collect();
+                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                            return (status, response_headers, String::from_utf8(bytes.to_vec()).unwrap());
+                        }
+                        Some(task) = rx.recv() => {
+                            let outcome = handle_task(
+                                &registry,
+                                task.route_idx,
+                                task.path_params,
+                                task.query_params,
+                                task.body,
+                                task.headers,
+                            ).await;
+                            let _ = task.reply.send(outcome);
+                        }
+                    }
+                }
+            })
+            .await
     }
 
     #[tokio::test]

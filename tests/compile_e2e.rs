@@ -715,6 +715,184 @@ fn list_items() -> Str => \"[]\"
 }
 
 #[test]
+fn http_q3_cors_set_echo_origin_en_response_real() {
+    // Q.3: cors({"allow_origin": [...]}) build-time. Una request con
+    // Origin en la lista permitida → echo del origin en la response.
+    let src = "\
+@server(43380)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]}))
+@get(\"/api\")
+fn h() -> Str => \"ok\"
+";
+    let (status, raw_headers) = build_spawn_request_raw_with_headers(
+        "q3-cors-set-match",
+        src,
+        43380,
+        "GET",
+        "/api",
+        &[("Origin", "https://b.com")],
+    );
+    assert_eq!(status, 200);
+    let lower = raw_headers.to_lowercase();
+    assert!(
+        lower.contains("access-control-allow-origin: https://b.com"),
+        "esperaba echo del Origin permitido, fue: {}",
+        raw_headers
+    );
+}
+
+#[test]
+fn http_q3_cors_set_omite_origin_si_request_no_matchea() {
+    let src = "\
+@server(43381)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": [\"https://a.com\"]}))
+@get(\"/api\")
+fn h() -> Str => \"ok\"
+";
+    let (status, raw_headers) = build_spawn_request_raw_with_headers(
+        "q3-cors-set-miss",
+        src,
+        43381,
+        "GET",
+        "/api",
+        &[("Origin", "https://evil.com")],
+    );
+    assert_eq!(status, 200);
+    let lower = raw_headers.to_lowercase();
+    assert!(
+        !lower.contains("access-control-allow-origin"),
+        "el header allow-origin NO debe emitirse con origin no permitido: {}",
+        raw_headers
+    );
+    // El resto de headers CORS sí.
+    assert!(
+        lower.contains("access-control-allow-methods"),
+        "esperaba allow-methods igual: {}",
+        raw_headers
+    );
+}
+
+#[test]
+fn http_q3_cors_set_preflight_echo_y_miss() {
+    let src = "\
+@server(43382)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": [\"https://a.com\"]}))
+@get(\"/api\")
+fn h() -> Str => \"ok\"
+";
+    // Preflight con Origin permitido → 204 + echo.
+    let (status, raw_headers) = build_spawn_request_raw_with_headers(
+        "q3-cors-preflight-match",
+        src,
+        43382,
+        "OPTIONS",
+        "/api",
+        &[("Origin", "https://a.com")],
+    );
+    assert_eq!(status, 204);
+    let lower = raw_headers.to_lowercase();
+    assert!(
+        lower.contains("access-control-allow-origin: https://a.com"),
+        "preflight: esperaba echo, fue: {}",
+        raw_headers
+    );
+}
+
+/// Variante de `build_spawn_request_raw` que envía headers HTTP
+/// custom (`Origin: ...`). Usado por los tests Q.3 de CORS.
+fn build_spawn_request_raw_with_headers(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    headers: &[(&str, &str)],
+) -> (u16, String) {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto {} en 3s", port);
+    }
+
+    use std::io::{Read, Write};
+    let mut extra = String::new();
+    for (k, v) in headers {
+        extra.push_str(&format!("{}: {}\r\n", k, v));
+    }
+    let request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+        method, path, addr, extra
+    );
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let status_line = raw.lines().next().unwrap_or("").to_string();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let headers_end = raw.find("\r\n\r\n").unwrap_or(raw.len());
+    let headers_section = raw[..headers_end].to_string();
+    (status, headers_section)
+}
+
+#[test]
 fn http_mw3_cors_response_real_lleva_headers_inyectados() {
     let src = "\
 @server(43373)
