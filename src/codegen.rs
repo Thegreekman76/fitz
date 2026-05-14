@@ -43,7 +43,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Expr, Field, Program, Stmt, StrPart, TypeExpr, UnaryOpKind,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, Program, Stmt, StrPart, TypeExpr,
+    UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError};
 use crate::types::{check_program, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
@@ -1231,26 +1232,12 @@ fn generate_main_rs(
                             // separado vía `headers_from_decorators`.
                             // Acá solo lo aceptamos como decorator válido.
                             "header" => {}
-                            // Mini-fase MW.1: `@middleware(fn)` está
-                            // soportado solo por el intérprete por ahora.
-                            // El codegen aborta con error claro citando
-                            // MW.3 como la mini-fase que aterriza la
-                            // paridad para `fitz build`.
-                            "middleware" => {
-                                return Err(FitzError::new(
-                                    ErrorKind::TypeError,
-                                    0,
-                                    0,
-                                    format!(
-                                        "decorator `@middleware` sobre fn `{}` todavía no \
-                                         está soportado en `fitz build` (mini-fase MW.1 \
-                                         lo aterriza en el intérprete; MW.3 lo trae al \
-                                         compilador). Workaround: usá `fitz run` mientras \
-                                         tanto, o sacá el `@middleware(...)` del programa.",
-                                        name
-                                    ),
-                                ));
-                            }
+                            // `@middleware(...)` (MW.3): no aporta a la
+                            // categorización del codegen acá; el wrapper
+                            // HTTP lo procesa por separado al generar el
+                            // handler async. Solo validamos que sea un
+                            // decorator HTTP de ruta válido en otro lugar.
+                            "middleware" => {}
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
@@ -1615,11 +1602,35 @@ struct CodegenCtx<'a> {
     /// `http_handlers_returning_response`) para decidir cómo
     /// destructurar la response. Default false.
     response_mode: bool,
+    /// MW.3: `true` mientras estamos emitiendo el body de una fn marcada
+    /// como middleware (su nombre está en `middleware_fn_names`). Cambia
+    /// la emisión de `Stmt::ReturnStatus` y `Stmt::Return` para
+    /// envolver en `Some(__FitzResponse { ... })` y `None`
+    /// respectivamente, alineado con el return type
+    /// `Option<__FitzResponse>` de la firma. Default false. Combinable
+    /// con `response_mode` (el flag general "esta fn produce
+    /// __FitzResponse") — middleware tiene ambos en true cuando su
+    /// body contiene Stmt::ReturnStatus.
+    in_middleware_fn: bool,
     /// Nombres de handlers HTTP que retornan `__FitzResponse` (porque
     /// su body contiene al menos un `Stmt::ReturnStatus`). El handler
     /// wrapper lo consulta para emitir el destructuring apropiado en
     /// vez del path normal de serialización.
     http_handlers_returning_response: std::collections::HashSet<String>,
+    /// Mini-fase MW.3: nombres de fns Fitz que aparecen como
+    /// `@middleware(name)` en algún FnDef del programa. Pre-scaneado en
+    /// `pre_register_fn_signatures` (o equivalente). Esas fns se
+    /// codegenan distinto:
+    ///   - Return type Rust: `Option<__FitzResponse>` (gate-only:
+    ///     `None` = la chain continúa, `Some(resp)` = short-circuit).
+    ///   - `return null`/sin return → `None` (default si el body
+    ///     cae fuera del último stmt sin Stmt::Return).
+    ///   - `return <status> { body }` (Stmt::ReturnStatus) →
+    ///     `Some(__FitzResponse { ... })`.
+    ///
+    /// El handler wrapper invoca cada uno en orden y short-circuita
+    /// con la primera response.
+    middleware_fn_names: std::collections::HashSet<String>,
     /// Fase 6.6: `true` si el programa usa async — cualquier `async fn`
     /// declarada, `.await` adentro de un body, o llamada al builtin
     /// `sleep`. Habilita el preludio `__fitz_sleep`, el `#[tokio::main]`
@@ -1672,7 +1683,9 @@ impl<'a> CodegenCtx<'a> {
             state_var_types: HashMap::new(),
             fn_state_deps: HashMap::new(),
             response_mode: false,
+            in_middleware_fn: false,
             http_handlers_returning_response: std::collections::HashSet::new(),
+            middleware_fn_names: std::collections::HashSet::new(),
             uses_async: false,
         }
     }
@@ -1883,6 +1896,35 @@ impl<'a> CodegenCtx<'a> {
     /// recursividad de tipos, así que acá los `lookup`/`info` siempre
     /// resuelven.
     fn pre_register_types(&mut self, program: &Program) -> Result<(), FitzError> {
+        // MW.3: pre-registrar los tipos built-in `Request` y `Response`.
+        // Existen en TypeEnv (registrados por `register_http_builtin_types`
+        // de `types.rs`) y se referencian desde los middlewares del
+        // usuario. Necesitamos sus entries en `type_sigs`/`fields_by_id`
+        // para que `rust_type_for(Nominal(<Request>))` emita `Request`
+        // y que el preludio HTTP los emita como structs Rust legítimos.
+        for builtin in &["Request", "Response"] {
+            if let Some(id) = self.env.lookup(builtin) {
+                let resolved: Vec<ResolvedField> = self
+                    .env
+                    .info(id)
+                    .fields
+                    .clone()
+                    .unwrap_or_default();
+                let combined: Vec<TypeSigField> = resolved
+                    .iter()
+                    .map(|r| TypeSigField {
+                        name: r.name.clone(),
+                        type_: r.type_.clone(),
+                        default: None,
+                    })
+                    .collect();
+                self.fields_by_id.insert(id, resolved);
+                self.type_sigs.insert(
+                    (*builtin).to_string(),
+                    TypeSig { id, fields: combined },
+                );
+            }
+        }
         for stmt in program {
             let Stmt::TypeDef { name, fields: ast_fields, .. } = stmt else { continue };
             let id = self.env.lookup(name).ok_or_else(|| {
@@ -2012,6 +2054,27 @@ impl<'a> CodegenCtx<'a> {
     }
 
     fn pre_register_fns(&mut self, program: &Program) -> Result<(), FitzError> {
+        // Mini-fase MW.3: pre-scan de fns referenciadas como
+        // `@middleware(name)` en cualquier FnDef del programa. Esas fns
+        // mutan su return type Rust a `Option<__FitzResponse>` y sus
+        // returns se envuelven (`return null` → `None`, `return <s> { ... }`
+        // → `Some(...)`). Lo hacemos antes de pre-registrar las firmas
+        // para que `fn_sigs` de cada middleware refleje el override.
+        for stmt in program {
+            if let Stmt::FnDef { decorators, .. } = stmt {
+                for deco in decorators {
+                    if deco.name != "middleware" {
+                        continue;
+                    }
+                    for arg in &deco.args {
+                        if let Expr::Ident(n, _) = arg {
+                            self.middleware_fn_names.insert(n.clone());
+                        }
+                    }
+                }
+            }
+        }
+
         for stmt in program {
             if let Stmt::FnDef {
                 name,
@@ -2183,17 +2246,26 @@ impl<'a> CodegenCtx<'a> {
         let is_http_handler = decorators.iter().any(|d| {
             matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
         });
+        // MW.3: una fn referenciada como `@middleware(name)` en algún
+        // FnDef se trata como contexto HTTP (paridad con el checker en
+        // types.rs). Su return type Rust override a
+        // `Option<__FitzResponse>` y los returns se envuelven igual que
+        // un handler con ReturnStatus (gate-only: None = continúa,
+        // Some = short-circuit). Ver `gen_middleware_return_*`.
+        let is_middleware = self.middleware_fn_names.contains(name);
+        let has_return_status_inner = contains_return_status_stmts(body);
 
         // Status codes custom: si la fn HTTP contiene al menos un
         // `Stmt::ReturnStatus`, su return type Rust pasa a ser
         // `__FitzResponse` (en vez del declarado) y todos los returns
         // se envuelven. El handler wrapper lo detecta vía la tabla
         // `http_handlers_returning_response` para emitir el destructuring
-        // apropiado. Fuera de un handler HTTP, ReturnStatus es error
-        // del checker — pero como defensa, si por algún motivo aparece
-        // en una fn no-HTTP el codegen de Stmt::ReturnStatus aborta.
-        let has_return_status = is_http_handler && contains_return_status_stmts(body);
-        if has_return_status {
+        // apropiado. Para middlewares (MW.3) reusamos el mismo flag
+        // `response_mode` para envolver `Stmt::ReturnStatus`, pero la
+        // emisión final difiere — los middlewares retornan
+        // `Option<__FitzResponse>`, no `__FitzResponse`.
+        let has_return_status = (is_http_handler || is_middleware) && has_return_status_inner;
+        if has_return_status && is_http_handler {
             self.http_handlers_returning_response.insert(name.clone());
         }
 
@@ -2207,6 +2279,14 @@ impl<'a> CodegenCtx<'a> {
         // Fase 6.6: `async fn` Fitz → `pub async fn` Rust. Rust auto-
         // envuelve el return type en `impl Future<Output = T>`, así
         // que NO se modifica el ret renderizado abajo.
+        // MW.3: middlewares llevan #[allow(unreachable_code)] porque
+        // emitimos `None` trailing al cierre del body — si el body
+        // termina con un `return Some(...)` (caso típico de auth que
+        // siempre rechaza), el `None` queda inalcanzable y rustc
+        // emitiría warning. La etiqueta es zero-overhead.
+        if is_middleware {
+            self.emit("#[allow(unreachable_code)]\n");
+        }
         let pub_kw = self.pub_prefix();
         self.emit(pub_kw);
         if *is_async {
@@ -2245,7 +2325,13 @@ impl<'a> CodegenCtx<'a> {
         } else {
             sig.ret.clone()
         };
-        if has_return_status {
+        if is_middleware {
+            // MW.3: middlewares siempre retornan Option<__FitzResponse>,
+            // sin importar el return type declarado por el usuario. El
+            // checker ya validó la signatura (Request param, retorno
+            // implícito `()` o `Response?` decorativo).
+            self.emit(" -> Option<__FitzResponse>");
+        } else if has_return_status {
             self.emit(" -> __FitzResponse");
         } else if !matches!(emit_ret, Type::Null) {
             self.emit(" -> ");
@@ -2297,11 +2383,24 @@ impl<'a> CodegenCtx<'a> {
         // desde adentro (espejo del checker en `types.rs`).
         self.ret_stack.push(emit_ret.clone());
         let saved_response_mode = self.response_mode;
+        let saved_in_middleware = self.in_middleware_fn;
         self.response_mode = has_return_status;
+        self.in_middleware_fn = is_middleware;
         for stmt in body {
             self.gen_stmt_in_fn(stmt, &emit_ret)?;
         }
+        // MW.3: tail-fall del body de un middleware sin return explícito.
+        // El return type es `Option<__FitzResponse>` y el body cae al
+        // final sin generar `None;`. Rust quejaría con "expected
+        // Option<...>, found ()". Emitimos `None` siempre — si el body
+        // ya hizo un return explícito esto es código muerto que rustc
+        // elimina sin warning (porque viene después de un `return`).
+        if is_middleware {
+            self.emit_indent();
+            self.emit("None\n");
+        }
         self.response_mode = saved_response_mode;
+        self.in_middleware_fn = saved_in_middleware;
         self.ret_stack.pop();
         self.pop_scope();
         self.indent -= 1;
@@ -2537,6 +2636,33 @@ impl<'a> CodegenCtx<'a> {
     fn gen_return(&mut self, e: &Expr, ret_expected: &Type) -> Result<(), FitzError> {
         let (code, ty) = self.gen_expr(e)?;
         self.emit_indent();
+        // MW.3: en el body de un middleware, `return` sin valor (o
+        // `return null`) significa "continuar la cadena". Lo emitimos
+        // como `return None;`. Para `return <status> { ... }` se usa
+        // `gen_return_status` que ya envuelve en Some/__FitzResponse.
+        // Para cualquier otro retorno del middleware (que el checker
+        // permite porque el return type Fitz puede ser `Response?`):
+        // si es `Null` (sin valor) → None; cualquier otra cosa es un
+        // bug del usuario que el checker no caza (todavía) — emitimos
+        // None con un comment para que falle bien si el código lo
+        // toca.
+        if self.in_middleware_fn {
+            if matches!(ty, Type::Null) {
+                self.emit("return None;\n");
+                return Ok(());
+            }
+            // Si el middleware devuelve algo no-Null sin haber usado
+            // `return <status> { ... }`, es un valor que no encaja como
+            // gate-only. Por consistencia con MW.1 (donde el runtime da
+            // 500 con mensaje claro), abortar con error de codegen:
+            return Err(self.err_at(e.span(), format!(
+                "middleware: `return` con un valor no-null no es válido — \
+                 un middleware debe usar `return null` (o ningún return) \
+                 para continuar la cadena, o `return <status> {{ ... }}` \
+                 para cortocircuitar. Recibió `{}`",
+                type_name(&ty)
+            )));
+        }
         if self.response_mode {
             // En response mode, todos los returns se envuelven en
             // `__FitzResponse { status: 200, body: <value>.__to_fitz_json() }`.
@@ -2606,10 +2732,20 @@ impl<'a> CodegenCtx<'a> {
             None => "serde_json::Value::Null".to_string(),
         };
         self.emit_indent();
-        self.emit(&format!(
-            "return __FitzResponse {{ status: ({}) as u16, body: {} }};\n",
-            status_code, body_code
-        ));
+        // MW.3: en una fn middleware, el return type es
+        // `Option<__FitzResponse>`. Envolvemos el __FitzResponse en
+        // `Some(...)` para que el short-circuit sea visible al wrapper.
+        if self.in_middleware_fn {
+            self.emit(&format!(
+                "return Some(__FitzResponse {{ status: ({}) as u16, body: {} }});\n",
+                status_code, body_code
+            ));
+        } else {
+            self.emit(&format!(
+                "return __FitzResponse {{ status: ({}) as u16, body: {} }};\n",
+                status_code, body_code
+            ));
+        }
         Ok(())
     }
 
@@ -4607,6 +4743,90 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
+    /// MW.3: recolecta los `@middleware(...)` apilados sobre un handler
+    /// y los clasifica en (a) user-fn middlewares (chain gate-only que
+    /// el wrapper invocará en orden), y (b) un CorsConfig single-slot
+    /// (precomputado build-time desde el arg literal de `cors({...})`).
+    ///
+    /// Distinción por shape de la expresión del arg:
+    ///   - `Expr::Ident(n, _)` que está en `fn_sigs` → user-fn middleware.
+    ///   - `Expr::Call { callee: Expr::Ident("cors", _), args, .. }` →
+    ///     CORS. Args admitidos: 0 o 1 `Expr::Map` literal con keys
+    ///     conocidas (`allow_origin/allow_methods/allow_headers/max_age`).
+    ///   - Otra cosa → error de codegen claro. Factories user-defined
+    ///     que retornen Function quedan como deuda (post-MW.3).
+    ///
+    /// Dos `cors(...)` sobre la misma ruta → error "uno por ruta".
+    /// El orden de la chain refleja el orden de los decoradores
+    /// (top-down igual que MW.1).
+    fn collect_route_middlewares(
+        &self,
+        fn_name: &str,
+        decorators: &[Decorator],
+    ) -> Result<(Vec<String>, Option<BuildCorsConfig>), FitzError> {
+        let mut user_fns: Vec<String> = Vec::new();
+        let mut cors: Option<BuildCorsConfig> = None;
+        for deco in decorators {
+            if deco.name != "middleware" {
+                continue;
+            }
+            if !deco.kwargs.is_empty() {
+                return Err(self.err(format!(
+                    "@middleware sobre fn `{}`: no admite kwargs",
+                    fn_name
+                )));
+            }
+            if deco.args.len() != 1 {
+                return Err(self.err(format!(
+                    "@middleware sobre fn `{}`: espera exactamente un argumento",
+                    fn_name
+                )));
+            }
+            let arg = &deco.args[0];
+            match arg {
+                // user-fn middleware
+                Expr::Ident(n, _) => {
+                    if !self.fn_sigs.contains_key(n.as_str()) {
+                        return Err(self.err(format!(
+                            "@middleware(`{}`) sobre fn `{}`: la fn no está \
+                             definida en este programa (build-time check)",
+                            n, fn_name
+                        )));
+                    }
+                    user_fns.push(n.clone());
+                }
+                // cors(...) build-time
+                Expr::Call { callee, args, .. } => {
+                    let is_cors = matches!(callee.as_ref(), Expr::Ident(n, _) if n == "cors");
+                    if !is_cors {
+                        return Err(self.err(format!(
+                            "@middleware(...) sobre fn `{}`: solo se admite \
+                             un Ident o `cors(...)` como argumento en `fitz build` (MW.3)",
+                            fn_name
+                        )));
+                    }
+                    if cors.is_some() {
+                        return Err(self.err(format!(
+                            "@middleware sobre fn `{}`: el handler ya tiene un \
+                             `cors(...)` aplicado, solo se admite uno por ruta",
+                            fn_name
+                        )));
+                    }
+                    let cfg = parse_build_cors_args(args.as_slice())?;
+                    cors = Some(cfg);
+                }
+                _ => {
+                    return Err(self.err(format!(
+                        "@middleware sobre fn `{}`: argumento no soportado \
+                         en `fitz build` (admitido: Ident o `cors(...)`)",
+                        fn_name
+                    )));
+                }
+            }
+        }
+        Ok((user_fns, cors))
+    }
+
     /// Genera el wrapper `async fn __handler_<name>(...)` para un
     /// handler decorado con `@get/@post/@put/@delete`. Extrae path
     /// params + body (si corresponde), llama a la fn original, y
@@ -4644,6 +4864,15 @@ impl<'a> CodegenCtx<'a> {
         let (path, query_template_params) = parse_http_path(path_arg)?;
 
         let template_params = extract_path_template_names(&path);
+
+        // MW.3: recolectar middlewares apilados sobre esta ruta. Separamos
+        // user-fn middlewares (chain a invocar en orden) y CorsConfig
+        // (slot dedicado). `has_middleware` decide si el wrapper extrae
+        // HeaderMap incluso cuando no hay headers declarados (necesario
+        // para construir el Request del middleware).
+        let (mw_user_fns, mw_cors) = self.collect_route_middlewares(name, decorators)?;
+        let has_middleware = !mw_user_fns.is_empty();
+        let has_cors = mw_cors.is_some();
 
         // Resolver tipos resueltos de cada param.
         let mut resolved_params: Vec<(String, Type)> = Vec::with_capacity(params.len());
@@ -4765,7 +4994,11 @@ impl<'a> CodegenCtx<'a> {
                 "    axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>,\n",
             );
         }
-        if !header_params.is_empty() {
+        // HeaderMap: hace falta cuando el handler declara `@header(...)`
+        // (Fase 7.6) o cuando hay middlewares (MW.3) que reciben Request
+        // — para popular `req.headers`. Cuando ninguno aplica, axum NO
+        // extrae el HeaderMap (zero-overhead en handlers simples).
+        if !header_params.is_empty() || has_middleware {
             self.emit("    __hmap: axum::http::HeaderMap,\n");
         }
         if let Some((bn, _bt)) = &body_param {
@@ -4778,6 +5011,102 @@ impl<'a> CodegenCtx<'a> {
         }
         self.emit(") -> axum::response::Response {\n");
         self.emit("    use axum::response::IntoResponse;\n");
+
+        // MW.3: si hay middlewares, construir el Request y ejecutar la
+        // chain ANTES de parsear body o coercionar params. Si algún
+        // middleware corta, devolvemos la response (con headers CORS
+        // si la ruta declara `cors(...)`).
+        if has_middleware {
+            let http_method = match http_deco.name.as_str() {
+                "get" => "GET",
+                "post" => "POST",
+                "put" => "PUT",
+                "delete" => "DELETE",
+                other => {
+                    return Err(self.err_at(
+                        fn_span,
+                        format!("método HTTP no soportado en wrapper: {}", other),
+                    ));
+                }
+            };
+            // Reconstruir el path con los path params sustituidos.
+            // Usamos `format!` con los bindings que axum::extract::Path
+            // ya bindeó arriba. Si la ruta no tiene path params, el
+            // template está libre de `{...}`.
+            let mut fmt_template = String::new();
+            let mut fmt_args: Vec<String> = Vec::new();
+            for ch in path.chars() {
+                if ch == '{' {
+                    // tomar hasta '}'.
+                    fmt_template.push_str("{}");
+                } else if ch == '}' {
+                    // skip
+                } else {
+                    fmt_template.push(ch);
+                }
+            }
+            for (pn, _) in &path_params {
+                fmt_args.push(pn.clone());
+            }
+            self.emit("    let __req_headers_vec: std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>> = std::rc::Rc::new(std::cell::RefCell::new(\n");
+            self.emit("        __hmap.iter()\n");
+            self.emit("            .filter_map(|(n, v)| v.to_str().ok().map(|s| (n.as_str().to_lowercase(), s.to_string())))\n");
+            self.emit("            .collect()\n");
+            self.emit("    ));\n");
+            if fmt_args.is_empty() {
+                writeln!(
+                    &mut self.output,
+                    "    let __req_path = String::from(\"{}\");",
+                    path,
+                )
+                .unwrap();
+            } else {
+                writeln!(
+                    &mut self.output,
+                    "    let __req_path = format!(\"{}\", {});",
+                    fmt_template,
+                    fmt_args.join(", "),
+                )
+                .unwrap();
+            }
+            self.emit("    let __req: Request = std::rc::Rc::new(std::cell::RefCell::new(RequestData {\n");
+            writeln!(
+                &mut self.output,
+                "        method: \"{}\".to_string(),",
+                http_method,
+            )
+            .unwrap();
+            self.emit("        path: __req_path,\n");
+            self.emit("        headers: __req_headers_vec,\n");
+            self.emit("    }));\n");
+            // Chain de middlewares.
+            for mw_name in &mw_user_fns {
+                writeln!(
+                    &mut self.output,
+                    "    if let Some(__resp) = {}(__req.clone()) {{",
+                    mw_name,
+                )
+                .unwrap();
+                self.emit("        return __apply_cors_and_respond(\n");
+                self.emit("            (\n");
+                self.emit("                axum::http::StatusCode::from_u16(__resp.status)\n");
+                self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+                self.emit("                axum::Json(__resp.body),\n");
+                self.emit("            ).into_response(),\n");
+                if has_cors {
+                    writeln!(
+                        &mut self.output,
+                        "            Some({}),",
+                        cors_static_name(name),
+                    )
+                    .unwrap();
+                } else {
+                    self.emit("            None,\n");
+                }
+                self.emit("        );\n");
+                self.emit("    }\n");
+            }
+        }
 
         // Query params: para cada uno emitir el binding con coerción
         // desde el HashMap. Si el tipo es nullable (`Int?`), missing →
@@ -4869,16 +5198,30 @@ impl<'a> CodegenCtx<'a> {
         //     puede fallar para valores extraños), cae a 500.
         //  2. La fn retorna `Result<T, String>`: Ok→200, Err→500.
         //  3. Cualquier otro tipo: 200 con el body serializado.
+        // MW.3: si la ruta declara cors, envolvemos el resultado en
+        // `__apply_cors_and_respond(...)` para inyectar headers.
         let returns_response = self.http_handlers_returning_response.contains(name);
+        let cors_arg = if has_cors {
+            format!("Some({})", cors_static_name(name))
+        } else {
+            "None".to_string()
+        };
         if returns_response {
             self.emit("    let __resp: __FitzResponse = __result;\n");
-            self.emit("    (\n");
+            self.emit("    let __built = (\n");
             self.emit("        axum::http::StatusCode::from_u16(__resp.status)\n");
             self.emit("            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
             self.emit("        axum::Json(__resp.body),\n");
-            self.emit("    ).into_response()\n");
+            self.emit("    ).into_response();\n");
+            writeln!(
+                &mut self.output,
+                "    __apply_cors_and_respond(__built, {})",
+                cors_arg
+            )
+            .unwrap();
+            self.emit("\n");
         } else if returns_result {
-            self.emit("    match __result {\n");
+            self.emit("    let __built = match __result {\n");
             self.emit("        Ok(__v) => (\n");
             self.emit("            axum::http::StatusCode::OK,\n");
             self.emit("            axum::Json(__v.__to_fitz_json()),\n");
@@ -4887,14 +5230,76 @@ impl<'a> CodegenCtx<'a> {
             self.emit("            axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
             self.emit("            axum::Json(serde_json::json!({\"error\": __e})),\n");
             self.emit("        ).into_response(),\n");
-            self.emit("    }\n");
+            self.emit("    };\n");
+            writeln!(
+                &mut self.output,
+                "    __apply_cors_and_respond(__built, {})",
+                cors_arg
+            )
+            .unwrap();
+            self.emit("\n");
         } else {
-            self.emit("    (\n");
+            self.emit("    let __built = (\n");
             self.emit("        axum::http::StatusCode::OK,\n");
             self.emit("        axum::Json(__result.__to_fitz_json()),\n");
-            self.emit("    ).into_response()\n");
+            self.emit("    ).into_response();\n");
+            writeln!(
+                &mut self.output,
+                "    __apply_cors_and_respond(__built, {})",
+                cors_arg
+            )
+            .unwrap();
+            self.emit("\n");
         }
         self.emit("}\n\n");
+
+        // MW.3: emitir el static con los headers CORS precomputados,
+        // y el handler de preflight para el método OPTIONS.
+        if let Some(cors) = &mw_cors {
+            let static_name = cors_static_name(name);
+            let headers = cors.response_headers();
+            self.emit(&format!(
+                "static {}: &[(&'static str, &'static str)] = &[",
+                static_name
+            ));
+            for (i, (n, v)) in headers.iter().enumerate() {
+                if i > 0 {
+                    self.emit(", ");
+                }
+                // Strings con escape mínimo (los valores típicos son
+                // ASCII sin caracteres especiales; allow_origin puede
+                // tener URLs con `.` y `/`, válidos sin escape).
+                self.emit(&format!(
+                    "(\"{}\", \"{}\")",
+                    n.replace('"', "\\\""),
+                    v.replace('"', "\\\""),
+                ));
+            }
+            self.emit("];\n\n");
+            // Handler preflight: responde 204 con los mismos headers.
+            writeln!(
+                &mut self.output,
+                "async fn __preflight_{}() -> axum::response::Response {{",
+                name
+            )
+            .unwrap();
+            self.emit("    use axum::response::IntoResponse;\n");
+            self.emit("    let mut resp = axum::http::StatusCode::NO_CONTENT.into_response();\n");
+            writeln!(
+                &mut self.output,
+                "    for (n, v) in {} {{",
+                static_name
+            )
+            .unwrap();
+            self.emit("        let parsed_n = axum::http::HeaderName::try_from(*n);\n");
+            self.emit("        let parsed_v = axum::http::HeaderValue::try_from(*v);\n");
+            self.emit("        if let (Ok(n), Ok(v)) = (parsed_n, parsed_v) {\n");
+            self.emit("            resp.headers_mut().insert(n, v);\n");
+            self.emit("        }\n");
+            self.emit("    }\n");
+            self.emit("    resp\n");
+            self.emit("}\n\n");
+        }
 
         Ok(())
     }
@@ -5054,6 +5459,20 @@ impl<'a> CodegenCtx<'a> {
         self.emit("let __app = axum::Router::new()\n");
         for stmt in http_fns {
             let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            // MW.3: detectar si esta ruta tiene cors → registrar
+            // OPTIONS al mismo path con el preflight handler.
+            let route_has_cors = decorators
+                .iter()
+                .filter(|d| d.name == "middleware")
+                .any(|d| {
+                    d.args.first().is_some_and(|a| {
+                        matches!(
+                            a,
+                            Expr::Call { callee, .. }
+                                if matches!(callee.as_ref(), Expr::Ident(n, _) if n == "cors")
+                        )
+                    })
+                });
             for d in decorators {
                 let method = match d.name.as_str() {
                     "get" => "get",
@@ -5068,12 +5487,21 @@ impl<'a> CodegenCtx<'a> {
                 };
                 let (path, _q) = parse_http_path(path_arg)?;
                 self.emit_indent();
-                writeln!(
-                    &mut self.output,
-                    "    .route(\"{}\", axum::routing::{}(__handler_{}))",
-                    path, method, name,
-                )
-                .unwrap();
+                if route_has_cors {
+                    writeln!(
+                        &mut self.output,
+                        "    .route(\"{}\", axum::routing::{}(__handler_{}).options(__preflight_{}))",
+                        path, method, name, name,
+                    )
+                    .unwrap();
+                } else {
+                    writeln!(
+                        &mut self.output,
+                        "    .route(\"{}\", axum::routing::{}(__handler_{}))",
+                        path, method, name,
+                    )
+                    .unwrap();
+                }
             }
         }
         // Fase 7.5: rutas auto-registradas. Mismo orden que el runtime
@@ -5276,6 +5704,150 @@ fn extract_path_template_names(template: &str) -> Vec<String> {
     out
 }
 
+/// Mini-fase MW.3: representación build-time del `cors(...)` aplicado a
+/// una ruta vía `@middleware(cors({...}))`. Se construye una vez al
+/// generar el wrapper y se materializa como `static __CORS_<idx>` en
+/// el código Rust generado, más un handler de preflight `OPTIONS` y
+/// la inyección de headers en la response real.
+#[derive(Debug, Clone, Default)]
+struct BuildCorsConfig {
+    allow_origin: Option<String>,
+    allow_methods: Option<Vec<String>>,
+    allow_headers: Option<Vec<String>>,
+    max_age: Option<i64>,
+}
+
+impl BuildCorsConfig {
+    /// Lista de headers HTTP que el server emite con cada response
+    /// CORS (real o preflight). Defaults paralelos a
+    /// `crate::http::CorsConfig::permissive_default()`.
+    fn response_headers(&self) -> Vec<(String, String)> {
+        let allow_origin = self.allow_origin.clone().unwrap_or_else(|| "*".to_string());
+        let allow_methods = self
+            .allow_methods
+            .clone()
+            .unwrap_or_else(|| {
+                vec![
+                    "GET".into(),
+                    "POST".into(),
+                    "PUT".into(),
+                    "DELETE".into(),
+                    "OPTIONS".into(),
+                ]
+            })
+            .join(", ");
+        let allow_headers = self
+            .allow_headers
+            .clone()
+            .unwrap_or_else(|| vec!["content-type".into(), "authorization".into()])
+            .join(", ");
+        let mut out = vec![
+            ("access-control-allow-origin".to_string(), allow_origin),
+            ("access-control-allow-methods".to_string(), allow_methods),
+            ("access-control-allow-headers".to_string(), allow_headers),
+        ];
+        if let Some(age) = self.max_age {
+            out.push(("access-control-max-age".to_string(), age.to_string()));
+        }
+        out
+    }
+}
+
+/// Parsea los args de `cors(...)` en build-time. Soporta:
+///       - `cors()` — sin args.
+///       - `cors({ "key": value, ... })` — un único Expr::Map literal.
+///
+/// Validaciones espejo del built-in runtime (en `evaluator.rs`).
+fn parse_build_cors_args(args: &[Expr]) -> Result<BuildCorsConfig, FitzError> {
+    let err =
+        |msg: &str| FitzError::new(ErrorKind::TypeError, 0, 0, msg.to_string());
+    if args.len() > 1 {
+        return Err(err(
+            "`cors` espera 0 o 1 argumento (un Map literal de configuración)",
+        ));
+    }
+    let mut cfg = BuildCorsConfig::default();
+    if let Some(arg) = args.first() {
+        let pairs = match arg {
+            Expr::Map(p, _) => p,
+            _ => {
+                return Err(err(
+                    "`cors`: el argumento debe ser un Map literal en `fitz build` (MW.3)",
+                ));
+            }
+        };
+        for (k, v) in pairs {
+            let key = match k {
+                Expr::Str(s, _) => s.clone(),
+                _ => {
+                    return Err(err(
+                        "`cors`: las keys del Map de configuración deben ser Str literales",
+                    ));
+                }
+            };
+            match key.as_str() {
+                "allow_origin" => match v {
+                    Expr::Str(s, _) => cfg.allow_origin = Some(s.clone()),
+                    _ => return Err(err("`cors`: 'allow_origin' debe ser un Str literal")),
+                },
+                "allow_methods" => cfg.allow_methods = Some(parse_build_str_list(v, "allow_methods")?),
+                "allow_headers" => cfg.allow_headers = Some(parse_build_str_list(v, "allow_headers")?),
+                "max_age" => match v {
+                    Expr::Int(n, _) => cfg.max_age = Some(*n),
+                    _ => return Err(err("`cors`: 'max_age' debe ser un Int literal")),
+                },
+                other => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "`cors`: key '{}' no reconocida. Soportadas: \
+                             allow_origin, allow_methods, allow_headers, max_age.",
+                            other
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(cfg)
+}
+
+/// MW.3: nombre del `static __FITZ_CORS_<handler>` que carga los headers
+/// CORS precomputados para el handler. Mantenemos el nombre del handler
+/// tal cual (Fitz exige identificadores ASCII alfanuméricos + `_`,
+/// directamente válidos como identificadores Rust).
+fn cors_static_name(handler_name: &str) -> String {
+    format!("__FITZ_CORS_{}", handler_name.to_uppercase())
+}
+
+fn parse_build_str_list(expr: &Expr, key: &str) -> Result<Vec<String>, FitzError> {
+    let err = |msg: String| FitzError::new(ErrorKind::TypeError, 0, 0, msg);
+    let items = match expr {
+        Expr::List(items, _) => items,
+        _ => {
+            return Err(err(format!(
+                "`cors`: '{}' debe ser una lista literal de Str",
+                key
+            )));
+        }
+    };
+    let mut out = Vec::with_capacity(items.len());
+    for item in items {
+        match item {
+            Expr::Str(s, _) => out.push(s.clone()),
+            _ => {
+                return Err(err(format!(
+                    "`cors`: cada elemento de '{}' debe ser un Str literal",
+                    key
+                )));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Preludio HTTP: traits `__ToFitzJson` y `__FromFitzJson` con impls para
 /// primitivos y combinadores genéricos (`Option`, `Rc<RefCell<Vec<T>>>`,
 /// `Rc<RefCell<Vec<(K, V)>>>`, `Result<T, String>`). Los impls específicos
@@ -5297,6 +5869,82 @@ trait __FromFitzJson: Sized {
 struct __FitzResponse {
     status: u16,
     body: serde_json::Value,
+}
+
+/// Mini-fase MW.3: tipo built-in `Request` que se pasa a cada middleware.
+/// Los wrappers de cada handler con `@middleware(...)` lo construyen
+/// antes de iterar la chain. La representación matchea cualquier `type`
+/// nominal del lenguaje: `Rc<RefCell<RequestData>>`.
+#[derive(Clone)]
+struct RequestData {
+    method: String,
+    path: String,
+    headers: std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>,
+}
+type Request = std::rc::Rc<std::cell::RefCell<RequestData>>;
+
+impl std::fmt::Display for RequestData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "Request {{ method: \"{}\", path: \"{}\", headers: <map> }}",
+            self.method, self.path,
+        )
+    }
+}
+
+impl __ToFitzJson for RequestData {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("method".to_string(), serde_json::Value::String(self.method.clone()));
+        obj.insert("path".to_string(), serde_json::Value::String(self.path.clone()));
+        obj.insert("headers".to_string(), self.headers.__to_fitz_json());
+        serde_json::Value::Object(obj)
+    }
+}
+
+/// `Response` (MW.1) — nominal opaco usable como anotación
+/// `-> Response?` en middlewares; el value real lo produce
+/// `return <status> { ... }` (= `__FitzResponse` envuelto en
+/// `Some(...)`). El struct está vacío por construcción y no se
+/// instancia: existe solo para que la anotación tipa.
+#[derive(Clone, PartialEq)]
+#[allow(dead_code)]
+struct ResponseData;
+type Response = std::rc::Rc<std::cell::RefCell<ResponseData>>;
+
+impl std::fmt::Display for ResponseData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "<response>")
+    }
+}
+
+impl __ToFitzJson for ResponseData {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        serde_json::Value::Null
+    }
+}
+
+/// MW.3: inyecta los headers CORS precomputados (si los hay) en una
+/// `axum::response::Response` ya armada. Si `cors_headers` es `None`,
+/// devuelve la response sin cambios. Cualquier nombre o valor de
+/// header inválido se omite — preferimos perder un header malformado
+/// a panic en una request. En la práctica los headers CORS que el
+/// codegen emite son válidos por construcción.
+fn __apply_cors_and_respond(
+    mut resp: axum::response::Response,
+    cors_headers: Option<&[(&'static str, &'static str)]>,
+) -> axum::response::Response {
+    if let Some(hs) = cors_headers {
+        for (name, value) in hs {
+            let parsed_name = axum::http::HeaderName::try_from(*name);
+            let parsed_value = axum::http::HeaderValue::try_from(*value);
+            if let (Ok(n), Ok(v)) = (parsed_name, parsed_value) {
+                resp.headers_mut().insert(n, v);
+            }
+        }
+    }
+    resp
 }
 
 impl __ToFitzJson for i64 {

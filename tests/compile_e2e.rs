@@ -621,23 +621,207 @@ fn build_aborta_si_codegen_no_soporta_feature() {
     );
 }
 
+// MW.3 — E2E: middleware user-fn + cors compilados + server + request real.
+// Cada test usa puertos únicos (rango 43370-43399) para que las corridas
+// no choquen entre tests serializados.
+
 #[test]
-fn build_aborta_sobre_middleware_decorator_mw1() {
-    // Mini-fase MW.1: `@middleware(fn)` está soportado solo en el
-    // intérprete. El codegen aborta con error explícito que cita
-    // MW.3 como la mini-fase que aterriza paridad para `fitz build`.
-    let stderr = build_expect_fail(
-        "unsupported-middleware-codegen",
-        "fn logger(req: Request) {}\n\
-         @middleware(logger)\n\
-         @get(\"/x\")\n\
-         fn h() => \"ok\"\n",
+fn http_mw3_middleware_passthrough_responde_200() {
+    // Middleware que no corta — request llega al handler.
+    let src = "\
+fn logger(req: Request) {}
+
+@server(43370)
+fn main() => 0
+
+@middleware(logger)
+@get(\"/x\")
+fn h() -> Str => \"ok\"
+";
+    let (status, body) = build_spawn_request(
+        "mw3-passthrough",
+        src,
+        43370,
+        "GET",
+        "/x",
+        None,
+    );
+    assert_eq!(status, 200);
+    assert!(body.contains("ok"));
+}
+
+#[test]
+fn http_mw3_middleware_short_circuita_con_401() {
+    // Middleware corta con 401 — handler NO se invoca.
+    let src = "\
+fn auth(req: Request) {
+    return 401 {\"error\": \"sin autorizacion\"}
+}
+
+@server(43371)
+fn main() => 0
+
+@middleware(auth)
+@get(\"/protected\")
+fn h() -> Str => \"NO DEBERIA APARECER\"
+";
+    let (status, body) = build_spawn_request(
+        "mw3-shortcircuit",
+        src,
+        43371,
+        "GET",
+        "/protected",
+        None,
+    );
+    assert_eq!(status, 401);
+    assert!(body.contains("sin autorizacion"), "body fue: {}", body);
+    assert!(!body.contains("NO DEBERIA APARECER"));
+}
+
+#[test]
+fn http_mw3_cors_preflight_options_devuelve_204_con_headers() {
+    let src = "\
+@server(43372)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": \"https://app.x.com\", \"max_age\": 600}))
+@get(\"/api\")
+fn list_items() -> Str => \"[]\"
+";
+    let (status, raw_headers) = build_spawn_request_raw(
+        "mw3-preflight",
+        src,
+        43372,
+        "OPTIONS",
+        "/api",
+    );
+    assert_eq!(status, 204);
+    let headers_lower = raw_headers.to_lowercase();
+    assert!(
+        headers_lower.contains("access-control-allow-origin: https://app.x.com"),
+        "headers preflight no llevan allow-origin custom: {}",
+        raw_headers
     );
     assert!(
-        stderr.contains("@middleware") && stderr.contains("MW.3"),
-        "esperaba mensaje sobre @middleware no soportado + MW.3, fue: {}",
-        stderr
+        headers_lower.contains("access-control-allow-methods"),
+        "headers preflight no llevan allow-methods: {}",
+        raw_headers
     );
+    assert!(
+        headers_lower.contains("access-control-max-age: 600"),
+        "headers preflight no llevan max-age: {}",
+        raw_headers
+    );
+}
+
+#[test]
+fn http_mw3_cors_response_real_lleva_headers_inyectados() {
+    let src = "\
+@server(43373)
+fn main() => 0
+
+@middleware(cors())
+@get(\"/api\")
+fn list_items() -> Str => \"ok\"
+";
+    let (status, raw_headers) = build_spawn_request_raw(
+        "mw3-cors-real",
+        src,
+        43373,
+        "GET",
+        "/api",
+    );
+    assert_eq!(status, 200);
+    let headers_lower = raw_headers.to_lowercase();
+    assert!(
+        headers_lower.contains("access-control-allow-origin: *"),
+        "headers de la response real no llevan allow-origin default: {}",
+        raw_headers
+    );
+}
+
+/// Como `build_spawn_request` pero devuelve la sección entera de headers
+/// crudos (todo lo que va entre la status line y el `\r\n\r\n`). Usado
+/// por los tests CORS de MW.3 para verificar `Access-Control-Allow-*`.
+fn build_spawn_request_raw(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+) -> (u16, String) {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto {} en 3s", port);
+    }
+
+    use std::io::{Read, Write};
+    let request = format!(
+        "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+        method, path, addr
+    );
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let status_line = raw.lines().next().unwrap_or("").to_string();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let headers_end = raw.find("\r\n\r\n").unwrap_or(raw.len());
+    let headers_section = raw[..headers_end].to_string();
+    (status, headers_section)
 }
 
 // ---------------------------------------------------------------------------
