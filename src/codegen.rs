@@ -1612,7 +1612,7 @@ struct CodegenCtx<'a> {
     /// con decorator HTTP). Indexado por nombre → tipo resuelto.
     /// Vacío para programas no-HTTP o HTTP sin state compartido.
     /// Las vars se emiten como `thread_local!` con la representación
-    /// usual `Rc<RefCell<...>>` (no cambia la repr de tipos) y se
+    /// usual `Arc<Mutex<...>>` (no cambia la repr de tipos) y se
     /// materializan al inicio de cada fn que las referencia.
     /// El tokio runtime queda `flavor = "current_thread"` para que el
     /// thread_local actúe como global de verdad.
@@ -1866,11 +1866,13 @@ impl<'a> CodegenCtx<'a> {
                 "#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n",
             );
         }
-        // Rc<RefCell<>> es la representación de las instancias de
-        // tipos custom — coincide con el modelo del intérprete (las
-        // mutaciones se ven a través de cualquier alias).
-        self.emit("use std::rc::Rc;\n");
-        self.emit("use std::cell::RefCell;\n\n");
+        // Arc<Mutex<>> es la representación de las instancias de
+        // tipos custom — coincide con el modelo del intérprete post-
+        // F17.2 (las mutaciones se ven a través de cualquier alias y
+        // los binarios HTTP son thread-safe sobre el runtime
+        // `rt-multi-thread`). std::sync sobre parking_lot para que el
+        // binario generado no arrastre deps extras.
+        self.emit("use std::sync::{Arc, Mutex};\n\n");
         // Helper de formato para Float: alinea con `Display` del
         // intérprete (`3.0` se imprime como `\"3.0\"`, no `\"3\"`).
         // Cada archivo (main.rs o mod) trae su propio `__fitz_fmt_float`;
@@ -2193,16 +2195,16 @@ impl<'a> CodegenCtx<'a> {
 
         // struct <Foo>Data { f1: T1, f2: T2, ... }
         //
-        // `PartialEq` derivado compara campo a campo. Para campos
-        // `Rc<RefCell<T>>` (instancias anidadas) `PartialEq` de
-        // `Rc<T>` compara por **contenido** (no identidad), y
-        // `RefCell<T>` compara borroweando — matchea exacto la
-        // semántica estructural del intérprete.
+        // F17.4b: `#[derive(Clone)]` solo. `PartialEq` se emite manual
+        // abajo porque `std::sync::Mutex<T>` no impl `PartialEq` (por
+        // diseño — comparar a través de un lock tiene semántica sutil).
+        // El intérprete usa el mismo patrón en `value.rs` (`Arc::ptr_eq`
+        // o lock+deref); replicamos esa lógica por campo según su tipo.
         let pub_kw = self.pub_prefix();
         let field_pub = pub_kw;
         write!(
             &mut self.output,
-            "#[derive(Clone, PartialEq)]\n{}struct {} {{\n",
+            "#[derive(Clone)]\n{}struct {} {{\n",
             pub_kw, data_name
         )
         .unwrap();
@@ -2218,13 +2220,37 @@ impl<'a> CodegenCtx<'a> {
         }
         self.emit("}\n\n");
 
-        // type Foo = Rc<RefCell<FooData>>;
+        // type Foo = Arc<Mutex<FooData>>;
         write!(
             &mut self.output,
-            "{}type {} = Rc<RefCell<{}>>;\n\n",
+            "{}type {} = Arc<Mutex<{}>>;\n\n",
             pub_kw, name, data_name
         )
         .unwrap();
+
+        // impl PartialEq for FooData — comparación estructural campo a
+        // campo. Para nominales/listas/mapas usa el patrón del
+        // intérprete: `Arc::ptr_eq` shortcut + lock+deref si los Arc no
+        // son el mismo. Para primitivos, `==` directo. Para Option,
+        // pattern-match con recursión en el inner.
+        write!(
+            &mut self.output,
+            "impl PartialEq for {} {{\n    fn eq(&self, __other: &Self) -> bool {{\n",
+            data_name
+        )
+        .unwrap();
+        if sig.fields.is_empty() {
+            self.emit("        true\n");
+        } else {
+            self.emit("        true");
+            for f in &sig.fields {
+                let lhs = format!("self.{}", f.name);
+                let rhs = format!("__other.{}", f.name);
+                let expr = field_eq_expr(&f.type_, &lhs, &rhs, self.env)?;
+                writeln!(&mut self.output, "\n            && {}", expr).unwrap();
+            }
+        }
+        self.emit("    }\n}\n\n");
 
         // impl Display for FooData — reproduce el formato del
         // intérprete: `Foo { f1: v1, f2: v2 }`. Strings con comillas,
@@ -2375,11 +2401,12 @@ impl<'a> CodegenCtx<'a> {
             self.declare_var(param.name.clone(), pty.clone());
         }
         // F11: si esta fn referencia algún state HTTP shared, lo
-        // materializamos como var local al inicio del body. El `clone()`
-        // sobre el contenido del thread_local es Rc clone (barato) y
-        // preserva aliasing — mutaciones via `users.push(...)` se ven en
-        // todas las llamadas posteriores porque el thread_local guarda
-        // el Rc, no el contenido.
+        // materializamos como var local al inicio del body. El `(*X).clone()`
+        // es Arc clone (barato) y preserva aliasing — mutaciones via
+        // `users.push(...)` se ven en todas las llamadas posteriores
+        // porque el LazyLock guarda el Arc, no el contenido. F11
+        // original usaba `thread_local!` + `.with(|s| s.clone())`;
+        // F17.4b migró a LazyLock para destrabar multi-thread.
         if let Some(deps) = self.fn_state_deps.get(name).cloned() {
             for dep_name in &deps {
                 let ty = self
@@ -2397,7 +2424,7 @@ impl<'a> CodegenCtx<'a> {
                 self.emit_indent();
                 writeln!(
                     &mut self.output,
-                    "let mut {}: {} = {}.with(|__s| __s.clone());",
+                    "let mut {}: {} = (*{}).clone();",
                     dep_name, rust_ty, static_name
                 )
                 .unwrap();
@@ -2655,7 +2682,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit_indent();
         writeln!(
             &mut self.output,
-            "({}).borrow_mut().{} = {};",
+            "({}).lock().unwrap().{} = {};",
             obj_code, field, coerced
         )
         .unwrap();
@@ -2874,7 +2901,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit_indent();
         writeln!(
             &mut self.output,
-            "for mut {var} in ({iter_code}).borrow().clone().into_iter() {{"
+            "for mut {var} in ({iter_code}).lock().unwrap().clone().into_iter() {{"
         )
         .unwrap();
         self.indent += 1;
@@ -2943,10 +2970,10 @@ impl<'a> CodegenCtx<'a> {
                 }
                 // Higher-order (F12): si el ident es una fn top-level
                 // referenciada como **valor** (no como callee), emitimos
-                // `(Rc::new(<name>) as Rc<dyn Fn(...) -> R>)`. Esto
+                // `(Arc::new(<name>) as Arc<dyn Fn(...) -> R>)`. Esto
                 // habilita `let f = square` y `apply(square, 7)`. Las
                 // fn items de Rust implementan `Fn(...)` así que el
-                // `Rc::new(square)` compila directo. El caso "callee
+                // `Arc::new(square)` compila directo. El caso "callee
                 // de Call" se intercepta antes en `gen_call` (mira la
                 // var como callable, no llega acá).
                 if !self.var_in_any_scope(name) {
@@ -2958,7 +2985,7 @@ impl<'a> CodegenCtx<'a> {
                             .collect::<Result<_, _>>()?;
                         let ret_rs = rust_type_for(&sig.ret, self.env)?;
                         let code = format!(
-                            "(Rc::new({}) as Rc<dyn Fn({}) -> {}>)",
+                            "(Arc::new({}) as Arc<dyn Fn({}) -> {} + Send + Sync>)",
                             name,
                             ps_rs.join(", "),
                             ret_rs
@@ -3025,8 +3052,8 @@ impl<'a> CodegenCtx<'a> {
             }
             Expr::Match { value, arms, .. } => self.gen_match(value, arms),
             // FnExpr "suelto" — usado como valor, parámetro o retorno
-            // (higher-order, F12). Emite `Rc::new(move |p1: T1, ...|
-            // -> R { body }) as Rc<dyn Fn(T1, ...) -> R>`. Los
+            // (higher-order, F12). Emite `Arc::new(move |p1: T1, ...|
+            // -> R { body }) as Arc<dyn Fn(T1, ...) -> R>`. Los
             // callbacks inline de `.map`/`.filter`/`.find` siguen
             // interceptándose en `gen_method_call` antes de llegar
             // acá — esos no necesitan boxear porque el método los
@@ -3230,7 +3257,7 @@ impl<'a> CodegenCtx<'a> {
                 // tipo: borroweamos ambos lados y comparamos por
                 // valor — `#[derive(PartialEq)]` sobre `FooData`
                 // recursea campo a campo (incluyendo nominales
-                // anidados como `Rc<RefCell<T>>`, que comparan por
+                // anidados como `Arc<Mutex<T>>`, que comparan por
                 // contenido, no identidad).
                 if let (Type::Nominal(id_l), Type::Nominal(id_r)) = (&lt, &rt) {
                     if id_l != id_r {
@@ -3239,7 +3266,7 @@ impl<'a> CodegenCtx<'a> {
                         ));
                     }
                     return Ok((
-                        format!("(*({}).borrow() {} *({}).borrow())", lc, sym, rc),
+                        format!("(*({}).lock().unwrap() {} *({}).lock().unwrap())", lc, sym, rc),
                         Type::Bool,
                     ));
                 }
@@ -3341,7 +3368,7 @@ impl<'a> CodegenCtx<'a> {
                     Type::Int,
                 )),
                 Type::List(_) | Type::Map(_, _) => Ok((
-                    format!("(({}).borrow().len() as i64)", arg_code),
+                    format!("(({}).lock().unwrap().len() as i64)", arg_code),
                     Type::Int,
                 )),
                 other => Err(self.err_at(arg_span, format!(
@@ -3445,7 +3472,7 @@ impl<'a> CodegenCtx<'a> {
             (Type::List(t), "pop") => self.gen_list_pop(&obj_code, t, args),
             (Type::List(_), "len") => {
                 check_method_arity(method, args, 0)?;
-                Ok((format!("(({}).borrow().len() as i64)", obj_code), Type::Int))
+                Ok((format!("(({}).lock().unwrap().len() as i64)", obj_code), Type::Int))
             }
             (Type::List(t), "map") => self.gen_list_map(&obj_code, t, args),
             (Type::List(t), "filter") => self.gen_list_filter(&obj_code, t, args),
@@ -3460,7 +3487,7 @@ impl<'a> CodegenCtx<'a> {
             (Type::Map(k, _), "keys") => {
                 check_method_arity(method, args, 0)?;
                 let code = format!(
-                    "Rc::new(RefCell::new(({}).borrow().iter().map(|(__k, _)| __k.clone()).collect::<Vec<_>>()))",
+                    "Arc::new(Mutex::new(({}).lock().unwrap().iter().map(|(__k, _)| __k.clone()).collect::<Vec<_>>()))",
                     obj_code
                 );
                 Ok((code, Type::List(Box::new((**k).clone()))))
@@ -3468,14 +3495,14 @@ impl<'a> CodegenCtx<'a> {
             (Type::Map(_, v), "values") => {
                 check_method_arity(method, args, 0)?;
                 let code = format!(
-                    "Rc::new(RefCell::new(({}).borrow().iter().map(|(_, __v)| __v.clone()).collect::<Vec<_>>()))",
+                    "Arc::new(Mutex::new(({}).lock().unwrap().iter().map(|(_, __v)| __v.clone()).collect::<Vec<_>>()))",
                     obj_code
                 );
                 Ok((code, Type::List(Box::new((**v).clone()))))
             }
             (Type::Map(_, _), "len") => {
                 check_method_arity(method, args, 0)?;
-                Ok((format!("(({}).borrow().len() as i64)", obj_code), Type::Int))
+                Ok((format!("(({}).lock().unwrap().len() as i64)", obj_code), Type::Int))
             }
             (Type::Map(k, v), "get") => self.gen_map_get(&obj_code, k, v, args),
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
@@ -3500,7 +3527,7 @@ impl<'a> CodegenCtx<'a> {
 
     // --- métodos List ----------------------------------------------------
 
-    /// `xs.push(x)` → `({xs}).borrow_mut().push({coerce x → T})`. Devuelve
+    /// `xs.push(x)` → `({xs}).lock().unwrap().push({coerce x → T})`. Devuelve
     /// `()` (Null en Fitz). El stmt-mode agrega el `;` final por encima.
     fn gen_list_push(
         &mut self,
@@ -3511,11 +3538,11 @@ impl<'a> CodegenCtx<'a> {
         check_method_arity("push", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
         let coerced = coerce(&arg_code, &arg_ty, elem_ty);
-        let code = format!("({}).borrow_mut().push({})", obj_code, coerced);
+        let code = format!("({}).lock().unwrap().push({})", obj_code, coerced);
         Ok((code, Type::Null))
     }
 
-    /// `xs.pop()` → `({xs}).borrow_mut().pop().expect(...)`. El intérprete
+    /// `xs.pop()` → `({xs}).lock().unwrap().pop().expect(...)`. El intérprete
     /// tira error de runtime sobre lista vacía con ese mensaje; el binario
     /// generado paniquea — comportamiento esencial (abortar con mensaje)
     /// equivalente.
@@ -3527,14 +3554,14 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("pop", args, 0)?;
         let code = format!(
-            "({}).borrow_mut().pop().expect(\"`.pop()` sobre lista vacía\")",
+            "({}).lock().unwrap().pop().expect(\"`.pop()` sobre lista vacía\")",
             obj_code
         );
         Ok((code, elem_ty.clone()))
     }
 
     /// `xs.map(callback)` → snapshot del Vec + map + collect, envuelto en
-    /// `Rc::new(RefCell::new(...))`. El callback debe ser un FnExpr
+    /// `Arc::new(Mutex::new(...))`. El callback debe ser un FnExpr
     /// inline; no admitimos referencias a fns nombradas hoy (eso necesita
     /// higher-order, deuda explícita).
     fn gen_list_map(
@@ -3548,8 +3575,8 @@ impl<'a> CodegenCtx<'a> {
             self.gen_callback_inline(&args[0], elem_ty, None, "map")?;
         let code = format!(
             "{{ \
-                let __items: Vec<_> = ({}).borrow().clone(); \
-                Rc::new(RefCell::new(__items.into_iter().map({}).collect::<Vec<_>>())) \
+                let __items: Vec<_> = ({}).lock().unwrap().clone(); \
+                Arc::new(Mutex::new(__items.into_iter().map({}).collect::<Vec<_>>())) \
             }}",
             obj_code, callback_code
         );
@@ -3573,13 +3600,13 @@ impl<'a> CodegenCtx<'a> {
             self.gen_callback_inline(&args[0], elem_ty, Some(&Type::Bool), "filter")?;
         let code = format!(
             "{{ \
-                let __items: Vec<_> = ({}).borrow().clone(); \
+                let __items: Vec<_> = ({}).lock().unwrap().clone(); \
                 let __cb = {}; \
                 let mut __out: Vec<_> = Vec::new(); \
                 for __it in __items.into_iter() {{ \
                     if __cb(__it.clone()) {{ __out.push(__it); }} \
                 }} \
-                Rc::new(RefCell::new(__out)) \
+                Arc::new(Mutex::new(__out)) \
             }}",
             obj_code, callback_code
         );
@@ -3602,7 +3629,7 @@ impl<'a> CodegenCtx<'a> {
         let elem_rs = rust_type_for(elem_ty, self.env)?;
         let code = format!(
             "{{ \
-                let __items: Vec<_> = ({}).borrow().clone(); \
+                let __items: Vec<_> = ({}).lock().unwrap().clone(); \
                 let __cb = {}; \
                 let mut __result: Result<{}, String> = \
                     Err(String::from(\"no encontrado\")); \
@@ -3643,7 +3670,7 @@ impl<'a> CodegenCtx<'a> {
             "{{ \
                 let __map = {}; \
                 let __k = {}; \
-                let __pairs = __map.borrow(); \
+                let __pairs = __map.lock().unwrap(); \
                 let mut __result: Result<{}, String> = Err(format!(\"clave no encontrada: {{}}\", {})); \
                 for (__k2, __v) in __pairs.iter() {{ \
                     if __k2 == &__k {{ __result = Ok(__v.clone()); break; }} \
@@ -3666,7 +3693,7 @@ impl<'a> CodegenCtx<'a> {
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
         let coerced = coerce(&arg_code, &arg_ty, key_ty);
         let code = format!(
-            "{{ let __k = {}; ({}).borrow().iter().any(|(__k2, _)| __k2 == &__k) }}",
+            "{{ let __k = {}; ({}).lock().unwrap().iter().any(|(__k2, _)| __k2 == &__k) }}",
             coerced, obj_code
         );
         Ok((code, Type::Bool))
@@ -3764,11 +3791,11 @@ impl<'a> CodegenCtx<'a> {
     }
 
     /// Emite un `FnExpr` "suelto" (no callback inline de
-    /// map/filter/find) como **valor** de tipo `Rc<dyn Fn(...) -> R>`.
+    /// map/filter/find) como **valor** de tipo `Arc<dyn Fn(...) -> R>`.
     /// Cubre `let f = fn(n) => n * 2`, `apply(fn(n) => n * 10, 7)`,
     /// `return fn(y) => x + y` (closure que captura `x` del scope
     /// contenedor). Por uniformidad emitimos siempre con `move` y
-    /// el cast a `Rc<dyn Fn(...) -> R>` para que rustc no se queje
+    /// el cast a `Arc<dyn Fn(...) -> R>` para que rustc no se queje
     /// de "type annotations needed" cuando el contexto destino es
     /// `Rc<dyn Fn>` (un closure concreto y un trait object son tipos
     /// distintos; el `as` los reconcilia).
@@ -3870,7 +3897,7 @@ impl<'a> CodegenCtx<'a> {
                 .iter()
                 .map(|p| rust_type_for(p, self.env))
                 .collect::<Result<_, _>>()?;
-            format!("Rc<dyn Fn({}) -> {}>", ps.join(", "), ret_ty_rs)
+            format!("Arc<dyn Fn({}) -> {} + Send + Sync>", ps.join(", "), ret_ty_rs)
         };
 
         // Si hay capturas no-Copy, emitimos un bloque que cline las
@@ -3892,10 +3919,10 @@ impl<'a> CodegenCtx<'a> {
             body_str = body_str
         );
         let code = if clones.is_empty() {
-            format!("(Rc::new(move {closure}) as {cast_target})", closure = closure, cast_target = cast_target)
+            format!("(Arc::new(move {closure}) as {cast_target})", closure = closure, cast_target = cast_target)
         } else {
             format!(
-                "{{ {clones}Rc::new(move {closure}) as {cast_target} }}",
+                "{{ {clones}Arc::new(move {closure}) as {cast_target} }}",
                 clones = clones,
                 closure = closure,
                 cast_target = cast_target
@@ -4208,7 +4235,7 @@ impl<'a> CodegenCtx<'a> {
 
     // --- listas, mapas, indexing ------------------------------------------
 
-    /// `[e1, e2, ...]` → `Rc::new(RefCell::new(vec![v1, v2, ...]))` con
+    /// `[e1, e2, ...]` → `Arc::new(Mutex::new(vec![v1, v2, ...]))` con
     /// coerción de cada elemento al tipo común. Tipo común sintetizado
     /// como en el checker (5.3.1): primer elemento define el tipo, los
     /// demás deben unificar via `lub` (Int↔Float, T↔Null). Mezcla
@@ -4222,7 +4249,7 @@ impl<'a> CodegenCtx<'a> {
             // fallará con "type annotations needed", reflejando que el
             // usuario tiene que anotar.
             return Ok((
-                "Rc::new(RefCell::new(Vec::new()))".to_string(),
+                "Arc::new(Mutex::new(Vec::new()))".to_string(),
                 Type::List(Box::new(Type::Any)),
             ));
         }
@@ -4254,13 +4281,13 @@ impl<'a> CodegenCtx<'a> {
             .map(|(c, t)| coerce(c, t, &common_ty))
             .collect();
         let code = format!(
-            "Rc::new(RefCell::new(vec![{}]))",
+            "Arc::new(Mutex::new(vec![{}]))",
             coerced.join(", ")
         );
         Ok((code, Type::List(Box::new(common_ty))))
     }
 
-    /// `{k1: v1, k2: v2, ...}` → `Rc::new(RefCell::new(vec![(k1, v1), ...]))`.
+    /// `{k1: v1, k2: v2, ...}` → `Arc::new(Mutex::new(vec![(k1, v1), ...]))`.
     /// Orden de inserción preservado por Vec. K y V deben ser homogéneos
     /// (mismas reglas que List). Para `m["k"]` (Index) y `m.get(k)` la
     /// búsqueda es lineal O(n), pero matchea exactamente lo que hace
@@ -4268,7 +4295,7 @@ impl<'a> CodegenCtx<'a> {
     fn gen_map_lit(&mut self, pairs: &[(Expr, Expr)], map_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
         if pairs.is_empty() {
             return Ok((
-                "Rc::new(RefCell::new(Vec::new()))".to_string(),
+                "Arc::new(Mutex::new(Vec::new()))".to_string(),
                 Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
             ));
         }
@@ -4316,7 +4343,7 @@ impl<'a> CodegenCtx<'a> {
             })
             .collect();
         let code = format!(
-            "Rc::new(RefCell::new(vec![{}]))",
+            "Arc::new(Mutex::new(vec![{}]))",
             pieces.join(", ")
         );
         Ok((code, Type::Map(Box::new(common_k), Box::new(common_v))))
@@ -4324,7 +4351,7 @@ impl<'a> CodegenCtx<'a> {
 
     /// `obj[idx]` — dispatch por tipo del receptor.
     ///
-    ///   - `List<T>[Int]`   → `({xs}.borrow()[idx as usize].clone())`.
+    ///   - `List<T>[Int]`   → `({xs}.lock().unwrap()[idx as usize].clone())`.
     ///     Index out-of-bounds panicea en Rust (igual que el intérprete
     ///     que tira error de runtime).
     ///   - `Map<K, V>[K]`   → búsqueda lineal por igualdad. Si no hay,
@@ -4350,7 +4377,7 @@ impl<'a> CodegenCtx<'a> {
                     )));
                 }
                 let code = format!(
-                    "({}).borrow()[({}) as usize].clone()",
+                    "({}).lock().unwrap()[({}) as usize].clone()",
                     obj_code, idx_code
                 );
                 Ok((code, (**inner).clone()))
@@ -4359,14 +4386,14 @@ impl<'a> CodegenCtx<'a> {
                 let coerced_idx = coerce(&idx_code, &idx_ty, k_ty);
                 // Búsqueda lineal por igualdad. `unwrap_or_else(panic)` con
                 // mensaje al estilo del intérprete. Ligamos el Rc a una
-                // var local antes de `.borrow()` para extender la vida
-                // del temporal — `(m.clone()).borrow()` solo cuando la
+                // var local antes de `.lock().unwrap()` para extender la vida
+                // del temporal — `(m.clone()).lock().unwrap()` solo cuando la
                 // expresión completa cabe en una stmt simple; acá usamos
                 // un `let __m = ...` y necesitamos el holder.
                 let code = format!(
                     "{{ \
                         let __map = {}; \
-                        let __m = __map.borrow(); \
+                        let __m = __map.lock().unwrap(); \
                         let __k = {}; \
                         __m.iter() \
                             .find(|(__k2, _)| __k2 == &__k) \
@@ -4432,7 +4459,7 @@ impl<'a> CodegenCtx<'a> {
 
         let data_name = format!("{}Data", type_name);
         let code = format!(
-            "Rc::new(RefCell::new({} {{ {} }}))",
+            "Arc::new(Mutex::new({} {{ {} }}))",
             data_name,
             field_codes.join(", ")
         );
@@ -4488,16 +4515,26 @@ impl<'a> CodegenCtx<'a> {
                 info_name, field
             )));
         };
-        // `code.borrow().field` es válido cuando el accesor consume
-        // el valor en una expresión que se evalúa inmediatamente.
-        // Como devolvemos una expresión Rust que puede entrar en
-        // arbitrary contextos, agregamos `.clone()` cuando el tipo lo
-        // requiere (Str, Nominal, Option de cualquier cosa). Para
-        // tipos `Copy` (Int/Float/Bool/Null), el borrow basta.
+        // F17.4b: emitimos el acceso como bloque con scope acotado.
+        // Cada acceso bindea su propio Arc + guard en el bloque, así el
+        // guard se libera al fin del bloque (inmediato) y no al fin del
+        // statement contenedor. Sin esto, dos accesos al mismo valor
+        // adentro de un `format!(...)` o de cualquier expresión con
+        // múltiples sub-expresiones intentarían tomar el lock dos veces
+        // del mismo thread → deadlock (std::sync::Mutex no es
+        // reentrante). El `let __obj` extra evita E0716 (temporary
+        // dropped while borrowed) — sin ese binding, el `(u.clone())`
+        // temporal moriría mientras el guard lo borrowea.
         let access = if needs_clone(&f.type_) {
-            format!("({}).borrow().{}.clone()", obj_code, field)
+            format!(
+                "{{ let __obj = {}; let __g = __obj.lock().unwrap(); __g.{}.clone() }}",
+                obj_code, field
+            )
         } else {
-            format!("({}).borrow().{}", obj_code, field)
+            format!(
+                "{{ let __obj = {}; let __g = __obj.lock().unwrap(); __g.{} }}",
+                obj_code, field
+            )
         };
         Ok((access, f.type_.clone()))
     }
@@ -5078,7 +5115,7 @@ impl<'a> CodegenCtx<'a> {
             for (pn, _) in &path_params {
                 fmt_args.push(pn.clone());
             }
-            self.emit("    let __req_headers_vec: std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>> = std::rc::Rc::new(std::cell::RefCell::new(\n");
+            self.emit("    let __req_headers_vec: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = std::sync::Arc::new(std::sync::Mutex::new(\n");
             self.emit("        __hmap.iter()\n");
             self.emit("            .filter_map(|(n, v)| v.to_str().ok().map(|s| (n.as_str().to_lowercase(), s.to_string())))\n");
             self.emit("            .collect()\n");
@@ -5099,7 +5136,7 @@ impl<'a> CodegenCtx<'a> {
                 )
                 .unwrap();
             }
-            self.emit("    let __req: Request = std::rc::Rc::new(std::cell::RefCell::new(RequestData {\n");
+            self.emit("    let __req: Request = std::sync::Arc::new(std::sync::Mutex::new(RequestData {\n");
             writeln!(
                 &mut self.output,
                 "        method: \"{}\".to_string(),",
@@ -5186,9 +5223,9 @@ impl<'a> CodegenCtx<'a> {
         }
 
         // Si hay body con tipo declarado, deserializar primero. El
-        // `__from_fitz_json` genérico para `Rc<RefCell<T>>` ya envuelve
+        // `__from_fitz_json` genérico para `Arc<Mutex<T>>` ya envuelve
         // el resultado, así que para tipos Nominal el binding queda en
-        // la representación correcta (`Foo = Rc<RefCell<FooData>>`).
+        // la representación correcta (`Foo = Arc<Mutex<FooData>>`).
         if let Some((bn, bt)) = &body_param {
             let rust_ty = rust_type_for(bt, self.env)?;
             writeln!(
@@ -5394,18 +5431,18 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
-    /// Genera el `#[tokio::main(flavor = "current_thread")] async fn main()`
-    /// que construye el `Router` axum con cada handler registrado,
-    /// parsea la addr de `@server(...)` (o usa defaults), e invoca
-    /// `axum::serve`.
+    /// Genera el `#[tokio::main] async fn main()` que construye el
+    /// `Router` axum con cada handler registrado, parsea la addr de
+    /// `@server(...)` (o usa defaults), e invoca `axum::serve`.
     ///
-    /// F11: si el programa tiene `Stmt::Assign` top-level (state
-    /// compartido), emitimos un `thread_local!` por cada uno antes del
-    /// `fn main()`. Cada handler (y cada fn helper) materializa el
-    /// state al inicio de su body via `state.with(|s| s.clone())` — un
-    /// Rc clone que preserva aliasing. El tokio runtime queda en
-    /// `flavor = "current_thread"` para que el thread_local funcione
-    /// como global (sin él, cada worker thread tendría su propia copia).
+    /// F11 + F17.4b: si el programa tiene `Stmt::Assign` top-level
+    /// (state compartido), emitimos un `static LazyLock<Arc<Mutex<T>>>`
+    /// por cada uno antes del `fn main()`. Cada handler (y cada fn
+    /// helper) materializa el state al inicio de su body via
+    /// `(*X).clone()` — un Arc clone que preserva aliasing entre
+    /// requests concurrentes. F11 originalmente usaba `thread_local!`
+    /// más tokio `current_thread`; F17.4b cambia a LazyLock + tokio
+    /// multi-thread para destrabar paralelismo HTTP real.
     ///
     /// El resto de los `main_stmts` (que no sean `Stmt::Assign`
     /// top-level usados como state) se emiten dentro del `fn main()`
@@ -5418,19 +5455,15 @@ impl<'a> CodegenCtx<'a> {
         main_stmts: &[&Stmt],
         program: &Program,
     ) -> Result<(), FitzError> {
-        // F11: emitir un `thread_local!` por cada state var detectado.
-        // El init es la expresión RHS original del `Stmt::Assign`. El
-        // `Rc::new(RefCell::new(...))` está embebido en gen_expr para
-        // List/Map/Nominal — la representación matchea exactamente la
-        // del intérprete y la del CLI compilado, por eso el Rc clone
-        // del `.with(|s| s.clone())` preserva aliasing across handler
-        // calls. Orden determinista por orden de aparición.
+        // F11 + F17.4b: emitir un `static LazyLock<Arc<Mutex<T>>>` por
+        // cada state var detectado. El init es la expresión RHS del
+        // `Stmt::Assign`, evaluada lazy en el primer acceso. Como
+        // todas las repr internas (`Arc<Mutex<Vec<...>>>`, etc.) ya son
+        // Send + Sync post-F17.4b, el LazyLock se comparte directo
+        // entre workers tokio. El `(*X).clone()` que materializa los
+        // handlers solo clona el Arc (~ns), no el contenido — alias
+        // preservado, mutaciones visibles entre requests.
         if !self.state_var_types.is_empty() {
-            // Reconstruimos el orden caminando main_stmts (que vienen
-            // en orden de aparición). Solo emitimos para los que están
-            // en state_var_types (los referenciados por al menos una
-            // fn). Los `Stmt::Assign` sin referencia se ignoran — se
-            // re-emiten como locales en `fn main()` (caso raro).
             for s in main_stmts {
                 if let Stmt::Assign {
                     target: AssignTarget::Ident(name),
@@ -5443,24 +5476,18 @@ impl<'a> CodegenCtx<'a> {
                         let rust_ty = rust_type_for(&ty, self.env)?;
                         let (init_code, init_ty) = self.gen_expr(value)?;
                         let coerced = coerce(&init_code, &init_ty, &ty);
-                        self.emit("thread_local! {\n");
                         writeln!(
                             &mut self.output,
-                            "    static {}: {} = {};",
+                            "static {}: std::sync::LazyLock<{}> = \
+                             std::sync::LazyLock::new(|| {});",
                             static_name, rust_ty, coerced
                         )
                         .unwrap();
-                        self.emit("}\n\n");
+                        self.emit("\n");
                     }
                 }
             }
         }
-
-        // F11: tokio current_thread. Justificación arriba en el doc-
-        // comment. Los `tokio::spawn` que axum hace internamente siguen
-        // pidiendo `Send` sobre los futures, pero los wrappers
-        // `__handler_<name>` que generamos son sync (sus locals Rc no
-        // cruzan ningún `.await`), así que cumplen el bound.
 
         // Fase 7.5: auto-register de /openapi.json y /docs en el
         // binario nativo. Decisión por (enable_docs × paths declarados
@@ -5530,7 +5557,9 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
-        self.emit("#[tokio::main(flavor = \"current_thread\")]\nasync fn main() {\n");
+        // F17.4b: tokio default (multi-thread). N workers según cores,
+        // paralelismo HTTP real entre requests sobre los handlers.
+        self.emit("#[tokio::main]\nasync fn main() {\n");
         self.indent += 1;
         self.push_scope();
         // Emitimos los main_stmts que NO son state (no están en
@@ -5969,8 +5998,8 @@ fn parse_build_str_list(expr: &Expr, key: &str) -> Result<Vec<String>, FitzError
 }
 
 /// Preludio HTTP: traits `__ToFitzJson` y `__FromFitzJson` con impls para
-/// primitivos y combinadores genéricos (`Option`, `Rc<RefCell<Vec<T>>>`,
-/// `Rc<RefCell<Vec<(K, V)>>>`, `Result<T, String>`). Los impls específicos
+/// primitivos y combinadores genéricos (`Option`, `Arc<Mutex<Vec<T>>>`,
+/// `Arc<Mutex<Vec<(K, V)>>>`, `Result<T, String>`). Los impls específicos
 /// por cada `type Foo` los emite `gen_type_http_impls`.
 const HTTP_RUNTIME_PRELUDE: &str = r#"// --- 5b.6: runtime HTTP (serialización JSON) ---
 
@@ -5994,14 +6023,14 @@ struct __FitzResponse {
 /// Mini-fase MW.3: tipo built-in `Request` que se pasa a cada middleware.
 /// Los wrappers de cada handler con `@middleware(...)` lo construyen
 /// antes de iterar la chain. La representación matchea cualquier `type`
-/// nominal del lenguaje: `Rc<RefCell<RequestData>>`.
+/// nominal del lenguaje: `Arc<Mutex<RequestData>>` (F17.4b).
 #[derive(Clone)]
 struct RequestData {
     method: String,
     path: String,
-    headers: std::rc::Rc<std::cell::RefCell<Vec<(String, String)>>>,
+    headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>>,
 }
-type Request = std::rc::Rc<std::cell::RefCell<RequestData>>;
+type Request = std::sync::Arc<std::sync::Mutex<RequestData>>;
 
 impl std::fmt::Display for RequestData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -6031,7 +6060,7 @@ impl __ToFitzJson for RequestData {
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)]
 struct ResponseData;
-type Response = std::rc::Rc<std::cell::RefCell<ResponseData>>;
+type Response = std::sync::Arc<std::sync::Mutex<ResponseData>>;
 
 impl std::fmt::Display for ResponseData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -6103,9 +6132,9 @@ impl<T: __ToFitzJson> __ToFitzJson for Option<T> {
     }
 }
 
-impl<T: __ToFitzJson> __ToFitzJson for std::rc::Rc<std::cell::RefCell<T>> {
+impl<T: __ToFitzJson> __ToFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
     fn __to_fitz_json(&self) -> serde_json::Value {
-        self.borrow().__to_fitz_json()
+        self.lock().unwrap().__to_fitz_json()
     }
 }
 
@@ -6194,9 +6223,9 @@ impl<T: __FromFitzJson> __FromFitzJson for Option<T> {
     }
 }
 
-impl<T: __FromFitzJson> __FromFitzJson for std::rc::Rc<std::cell::RefCell<T>> {
+impl<T: __FromFitzJson> __FromFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
     fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
-        T::__from_fitz_json(json).map(|v| std::rc::Rc::new(std::cell::RefCell::new(v)))
+        T::__from_fitz_json(json).map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)))
     }
 }
 
@@ -6484,6 +6513,106 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
     }
 }
 
+/// Genera la expresión Rust que compara dos valores del mismo tipo
+/// como `bool`. Reemplaza el `==` derivado en `gen_type_def` post-F17.4b:
+/// `std::sync::Mutex<T>` no impl PartialEq, así que el derive falla
+/// cuando un campo es nominal / List / Map (todos `Arc<Mutex<...>>`).
+///
+/// Estrategia espejo del intérprete (value.rs `PartialEq for Value`):
+///   - Primitivos: `lhs == rhs` directo (impls de stdlib).
+///   - Nominal `Arc<Mutex<XData>>`: `Arc::ptr_eq` shortcut + lock+deref.
+///     El lock+deref llega a `XData::eq` que también es custom.
+///   - List `Arc<Mutex<Vec<T>>>` / Map `Arc<Mutex<Vec<(K,V)>>>`:
+///     mismo patrón ptr_eq + lock; comparación interna por elemento
+///     con recursión sobre T (resp. K, V).
+///   - Option<T>: pattern match (Some+Some recurse, None+None true,
+///     mismatch false).
+///   - Result<T>: pattern match (Ok+Ok recurse, Err+Err == String).
+///   - Function/Future/Any: `false` (Fitz nunca compara funciones, y
+///     Future/Any no llegan a tipos de campo de `type`).
+fn field_eq_expr(
+    ty: &Type,
+    lhs: &str,
+    rhs: &str,
+    _env: &TypeEnv,
+) -> Result<String, FitzError> {
+    // `_env` se conserva en la firma por simetría con `rust_type_for`
+    // y para no romper call sites si en el futuro hace falta resolver
+    // un Nominal por TypeId (hoy todos los casos se manejan por la
+    // variante de `Type` directamente).
+    match ty {
+        Type::Int
+        | Type::Float
+        | Type::Str
+        | Type::Bool
+        | Type::Null
+        | Type::Range => Ok(format!("({} == {})", lhs, rhs)),
+        Type::Nominal(_) => Ok(format!(
+            "(Arc::ptr_eq(&{lhs}, &{rhs}) \
+             || *{lhs}.lock().unwrap() == *{rhs}.lock().unwrap())",
+            lhs = lhs,
+            rhs = rhs,
+        )),
+        Type::Nullable(inner) => {
+            let inner_eq = field_eq_expr(inner, "__a", "__b", _env)?;
+            Ok(format!(
+                "(match (&{lhs}, &{rhs}) {{ \
+                 (None, None) => true, \
+                 (Some(__a), Some(__b)) => {inner_eq}, \
+                 _ => false \
+                 }})",
+                lhs = lhs,
+                rhs = rhs,
+                inner_eq = inner_eq,
+            ))
+        }
+        Type::List(inner) => {
+            let inner_eq = field_eq_expr(inner, "__a", "__b", _env)?;
+            Ok(format!(
+                "(Arc::ptr_eq(&{lhs}, &{rhs}) || {{ \
+                 let __x = {lhs}.lock().unwrap(); \
+                 let __y = {rhs}.lock().unwrap(); \
+                 __x.len() == __y.len() \
+                 && __x.iter().zip(__y.iter()).all(|(__a, __b)| {inner_eq}) \
+                 }})",
+                lhs = lhs,
+                rhs = rhs,
+                inner_eq = inner_eq,
+            ))
+        }
+        Type::Map(k, v) => {
+            let k_eq = field_eq_expr(k, "__a.0", "__b.0", _env)?;
+            let v_eq = field_eq_expr(v, "__a.1", "__b.1", _env)?;
+            Ok(format!(
+                "(Arc::ptr_eq(&{lhs}, &{rhs}) || {{ \
+                 let __x = {lhs}.lock().unwrap(); \
+                 let __y = {rhs}.lock().unwrap(); \
+                 __x.len() == __y.len() \
+                 && __x.iter().zip(__y.iter()).all(|(__a, __b)| ({k_eq} && {v_eq})) \
+                 }})",
+                lhs = lhs,
+                rhs = rhs,
+                k_eq = k_eq,
+                v_eq = v_eq,
+            ))
+        }
+        Type::Result(inner) => {
+            let inner_eq = field_eq_expr(inner, "__a", "__b", _env)?;
+            Ok(format!(
+                "(match (&{lhs}, &{rhs}) {{ \
+                 (Ok(__a), Ok(__b)) => {inner_eq}, \
+                 (Err(__a), Err(__b)) => __a == __b, \
+                 _ => false \
+                 }})",
+                lhs = lhs,
+                rhs = rhs,
+                inner_eq = inner_eq,
+            ))
+        }
+        Type::Function { .. } | Type::Future(_) | Type::Any => Ok("false".to_string()),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -6497,7 +6626,7 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         Type::Null => Ok("()".to_string()),
         Type::Nominal(id) => Ok(env.info(*id).name.clone()),
         Type::Nullable(inner) => Ok(format!("Option<{}>", rust_type_for(inner, env)?)),
-        // List<T> y Map<K, V> se modelan con `Rc<RefCell<>>` para
+        // List<T> y Map<K, V> se modelan con `Arc<Mutex<>>` para
         // preservar la semántica de referencia compartida del intérprete
         // (push/pop/asignación de elementos visibles vía cualquier alias).
         // T = Any (literal mixto sin contexto) → error explícito; el
@@ -6514,7 +6643,7 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                         .to_string(),
                 ));
             }
-            Ok(format!("Rc<RefCell<Vec<{}>>>", rust_type_for(inner, env)?))
+            Ok(format!("Arc<Mutex<Vec<{}>>>", rust_type_for(inner, env)?))
         }
         Type::Map(k, v) => {
             if matches!(**k, Type::Any) || matches!(**v, Type::Any) {
@@ -6530,7 +6659,7 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 ));
             }
             Ok(format!(
-                "Rc<RefCell<Vec<({}, {})>>>",
+                "Arc<Mutex<Vec<({}, {})>>>",
                 rust_type_for(k, env)?,
                 rust_type_for(v, env)?
             ))
@@ -6550,22 +6679,22 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
             };
             Ok(format!("Result<{}, String>", inner_rs))
         }
-        // Higher-order (F12): tipo función Fitz → `Rc<dyn Fn(...) -> R>`
-        // Rust. Decisión simplificadora: siempre Rc<dyn Fn>, no fn
-        // pointer ni impl Fn ni Box<dyn Fn>. Trade-off: una
-        // indirección por puntero por llamada, pero uniforme (vars,
-        // params, returns todos toman el mismo tipo). Rc (no Box)
-        // porque las funciones-como-valor se clonan al referenciarse
-        // (mismo patrón que List/Map/Nominal que también van por Rc).
-        // Fn (inmutable) cubre todos los ejemplos del cap 11 —
-        // FnMut/FnOnce son deuda residual.
+        // Higher-order (F12): tipo función Fitz → `Arc<dyn Fn(...) -> R
+        // + Send + Sync>` Rust. F17.4b: el bound `Send + Sync` permite
+        // que la closure viaje al runtime tokio multi-thread (handlers
+        // HTTP en `fitz build`). Cumple solo si las capturas también
+        // lo son — y `Shared<T>` = `Arc<Mutex<T>>` lo es, igual que
+        // todos los primitivos Fitz. Trade-off: una indirección por
+        // puntero por llamada, uniforme (vars, params, returns todos
+        // toman el mismo tipo). Fn (inmutable) cubre todos los ejemplos
+        // del cap 11 — FnMut/FnOnce son deuda residual.
         Type::Function { params, ret } => {
             let ps: Vec<String> = params
                 .iter()
                 .map(|p| rust_type_for(p, env))
                 .collect::<Result<_, _>>()?;
             let ret_rs = rust_type_for(ret, env)?;
-            Ok(format!("Rc<dyn Fn({}) -> {}>", ps.join(", "), ret_rs))
+            Ok(format!("Arc<dyn Fn({}) -> {} + Send + Sync>", ps.join(", "), ret_rs))
         }
         // Fase 6.6: `Future<T>` Fitz → `Pin<Box<dyn Future<Output = T>>>`
         // Rust. Uniforme y compatible con `current_thread` runtime (no
@@ -6659,12 +6788,12 @@ fn needs_clone(t: &Type) -> bool {
         Type::Str | Type::Nominal(_) => true,
         // `Option<T>` no es Copy salvo casos extremos; clonamos siempre.
         Type::Nullable(_) => true,
-        // `Rc<RefCell<Vec<...>>>` — clone del Rc, barato, alias preservado.
+        // `Arc<Mutex<Vec<...>>>` — clone del Rc, barato, alias preservado.
         Type::List(_) | Type::Map(_, _) => true,
         // `Result<T, String>` no es Copy (String tampoco lo es), y el T
         // adentro puede ser Str/Nominal/List/etc. — clonamos por valor.
         Type::Result(_) => true,
-        // Funciones-como-valor: `Rc<dyn Fn(...) -> R>` — clone del Rc,
+        // Funciones-como-valor: `Arc<dyn Fn(...) -> R>` — clone del Rc,
         // barato y comparte el closure (alias semántico, mismo patrón
         // que List/Map/Nominal).
         Type::Function { .. } => true,
@@ -6719,7 +6848,7 @@ fn show_expr(code: &str, ty: &Type) -> String {
         Type::Float => format!("__fitz_fmt_float({})", code),
         Type::Str => format!("({}).clone()", code),
         Type::Null => "String::from(\"null\")".to_string(),
-        Type::Nominal(_) => format!("format!(\"{{}}\", &*({}).borrow())", code),
+        Type::Nominal(_) => format!("format!(\"{{}}\", &*({}).lock().unwrap())", code),
         Type::Nullable(inner) => {
             // Capturamos el valor por referencia para no consumirlo.
             // Para `Option<T>`, el match bindea `Some(__v)` y delega a
@@ -6735,19 +6864,19 @@ fn show_expr(code: &str, ty: &Type) -> String {
         // con comillas adentro de los items, igual que `write_inline_value`
         // del intérprete). Construimos el string en runtime concatenando
         // sub-shows item por item. Ligamos primero el `Rc` a una `let`
-        // antes de hacer `.borrow()` para extender la vida del temporal
-        // — `(xs.clone()).borrow()` cae con la expresión.
+        // antes de hacer `.lock().unwrap()` para extender la vida del temporal
+        // — `(xs.clone()).lock().unwrap()` cae con la expresión.
         Type::List(inner) => {
             // Iteramos con `.cloned()` para que `__it` sea por valor
             // (no `&T`) — uniforma el código de `show_expr_inline` con
             // el de `show_expr` general (que asume valor). El clone es
-            // barato para `Rc<RefCell<...>>` (Nominal/List/Map) y vivible
+            // barato para `Arc<Mutex<...>>` (Nominal/List/Map) y vivible
             // para `String` en contexto de print.
             let item_show = show_expr_inline("__it", inner);
             format!(
                 "{{ \
                     let __list = {}; \
-                    let __items = __list.borrow(); \
+                    let __items = __list.lock().unwrap(); \
                     let mut __s = String::from(\"[\"); \
                     for (__i, __it) in __items.iter().cloned().enumerate() {{ \
                         if __i > 0 {{ __s.push_str(\", \"); }} \
@@ -6765,7 +6894,7 @@ fn show_expr(code: &str, ty: &Type) -> String {
             format!(
                 "{{ \
                     let __map = {}; \
-                    let __pairs = __map.borrow(); \
+                    let __pairs = __map.lock().unwrap(); \
                     let mut __s = String::from(\"{{\"); \
                     for (__i, (__k, __v)) in __pairs.iter().cloned().enumerate() {{ \
                         if __i > 0 {{ __s.push_str(\", \"); }} \
@@ -6823,13 +6952,13 @@ fn inline_display_stmt(code: &str, ty: &Type) -> String {
         Type::Str => format!("        write!(__f, \"\\\"{{}}\\\"\", {})?;\n", code),
         Type::Null => "        write!(__f, \"null\")?;\n".to_string(),
         Type::Nominal(_) => format!(
-            "        {{ let __t = ({}).borrow(); write!(__f, \"{{}}\", &*__t)?; }}\n",
+            "        {{ let __t = ({}).lock().unwrap(); write!(__f, \"{{}}\", &*__t)?; }}\n",
             code
         ),
         Type::Nullable(inner) => {
             // Borroweamos el `Option<T>` y matcheamos por referencia.
             // Para Nominal adentro de Some, el match bindea `__v` como
-            // `&Rc<RefCell<T>>`, así que necesitamos `(*__v)` o pasar
+            // `&Arc<Mutex<T>>`, así que necesitamos `(*__v)` o pasar
             // un sub-código. Para tipos primitivos, `&T` también
             // funciona porque Display está implementado para &T.
             let inner_body = match inner.as_ref() {
@@ -6838,7 +6967,7 @@ fn inline_display_stmt(code: &str, ty: &Type) -> String {
                 Type::Str => "                write!(__f, \"\\\"{}\\\"\", __v)?;\n".to_string(),
                 Type::Null => "                write!(__f, \"null\")?;\n".to_string(),
                 Type::Nominal(_) => {
-                    "                { let __t = (*__v).borrow(); write!(__f, \"{}\", &*__t)?; }\n"
+                    "                { let __t = (*__v).lock().unwrap(); write!(__f, \"{}\", &*__t)?; }\n"
                         .to_string()
                 }
                 _ => "                write!(__f, \"{:?}\", __v)?;\n".to_string(),
@@ -7411,7 +7540,7 @@ mod tests {
         /// Si la expresión es una llamada (`Expr::Call`), devuelve el
         /// path del callee normalizado. None si no es una llamada.
         pub fn call_path(expr: &syn::Expr) -> Option<String> {
-            // Atravesamos paréntesis para que `(Rc::new(...))` matchee.
+            // Atravesamos paréntesis para que `(Arc::new(...))` matchee.
             let mut e = expr;
             while let syn::Expr::Paren(p) = e {
                 e = &*p.expr;
@@ -7424,11 +7553,11 @@ mod tests {
 
         /// Devuelve los nombres de los métodos en la cadena de method
         /// calls que termina en `expr`, en orden de aplicación
-        /// (receptor → puntas). Ej. `xs.borrow().clone().into_iter()`
+        /// (receptor → puntas). Ej. `xs.lock().unwrap().clone().into_iter()`
         /// → `["borrow", "clone", "into_iter"]`.
         ///
         /// Atraviesa paréntesis y casts (`expr as T`) — si el `expr`
-        /// es `(xs.borrow().len() as i64)` devuelve la chain de
+        /// es `(xs.lock().unwrap().len() as i64)` devuelve la chain de
         /// adentro del cast, ignorando el cast.
         pub fn method_chain_names(expr: &syn::Expr) -> Vec<String> {
             let mut names = Vec::new();
@@ -8115,7 +8244,7 @@ mod tests {
     // ---- 5b.2: tipos custom (sí soportados, salvo igualdad) ----
 
     #[test]
-    fn type_def_emite_struct_y_alias_rc_refcell() {
+    fn type_def_emite_struct_y_alias_arc_mutex() {
         let file = ast_test::parse(&gen("type User { id: Int, name: Str }").unwrap());
         // El struct UserData con sus dos campos.
         let s = ast_test::find_item_struct(&file, "UserData").expect("falta UserData");
@@ -8125,12 +8254,12 @@ mod tests {
             .filter_map(|f| f.ident.as_ref().map(|i| i.to_string()))
             .collect();
         assert_eq!(field_names, vec!["id".to_string(), "name".to_string()]);
-        // El alias `type User = Rc<RefCell<UserData>>;`.
+        // El alias `type User = Arc<Mutex<UserData>>;`.
         let t = ast_test::find_item_type(&file, "User").expect("falta type alias User");
         let ty = ast_test::ts(&*t.ty);
         assert!(
-            ty.contains("Rc") && ty.contains("RefCell") && ty.contains("UserData"),
-            "esperaba alias `Rc<RefCell<UserData>>`, fue: {}",
+            ty.contains("Arc") && ty.contains("Mutex") && ty.contains("UserData"),
+            "esperaba alias `Arc<Mutex<UserData>>`, fue: {}",
             ty
         );
     }
@@ -8158,7 +8287,7 @@ mod tests {
     }
 
     #[test]
-    fn struct_lit_emite_rc_new_refcell_new() {
+    fn struct_lit_emite_arc_new_mutex_new() {
         let file = ast_test::parse(
             &gen("type User { id: Int, name: Str }\nlet u = User { id: 1, name: \"x\" }")
                 .unwrap(),
@@ -8166,12 +8295,12 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "u").expect("falta let u");
         let init = ast_test::local_init(l).unwrap();
-        // El struct lit se emite envuelto en `Rc::new(RefCell::new(UserData { ... }))`.
+        // El struct lit se emite envuelto en `Arc::new(Mutex::new(UserData { ... }))`.
         assert!(
-            init.contains("Rc :: new")
-                && init.contains("RefCell :: new")
+            init.contains("Arc :: new")
+                && init.contains("Mutex :: new")
                 && init.contains("UserData"),
-            "esperaba envoltorio Rc::new(RefCell::new(UserData {{ ... }})), fue: {}",
+            "esperaba envoltorio Arc::new(Mutex::new(UserData {{ ... }})), fue: {}",
             init
         );
         assert!(
@@ -8244,35 +8373,32 @@ mod tests {
     }
 
     #[test]
-    fn field_access_int_emite_borrow_sin_clone() {
-        // El receptor del field access SÍ se clona (Rc::clone, barato:
-        // refcount). Lo que NO se clona es el VALOR del field — para
-        // Int (Copy) no hace falta. La forma del init es entonces:
-        // `(u.clone()).borrow().id` (acaba con field access, no con
-        // `.clone()` al final).
-        let file = ast_test::parse(
-            &gen("type U { id: Int }\nlet u = U { id: 1 }\nlet n = u.id").unwrap(),
-        );
+    fn field_access_int_emite_block_sin_field_clone() {
+        // F17.4b: el field access se emite como bloque con guard
+        // acotado para evitar holds del Mutex cross-expression.
+        // Para Int (Copy) el block return es `__g.id` (no
+        // `__g.id.clone()`). `u.clone()` sí aparece (Arc::clone para
+        // compartir el handle); lo que NO debe aparecer es
+        // `__g.id.clone()` (clone del value Copy es redundante).
+        let code = gen("type U { id: Int }\nlet u = U { id: 1 }\nlet n = u.id").unwrap();
+        let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("falta let n");
-        let init_expr = &l.init.as_ref().unwrap().expr;
-        // Tope del init es Expr::Field (`<algo>.id`), no MethodCall a
-        // `.clone()` envolviendo todo. Si fuera `<algo>.clone()`, sería
-        // un `Expr::MethodCall` con method == "clone".
-        match &**init_expr {
-            syn::Expr::Field(fld) => match &fld.member {
-                syn::Member::Named(ident) => assert_eq!(ident, "id"),
-                _ => panic!("esperaba member named `id`, fue tuple-index"),
-            },
-            other => panic!(
-                "esperaba init como Expr::Field acabando en `.id`, fue: {}",
-                ast_test::ts(other)
-            ),
-        }
+        let init = ast_test::local_init(l).unwrap();
+        assert!(
+            init.contains("let __g") && init.contains("__g . id"),
+            "esperaba bloque `{{ let __g = ...; __g.id }}`, fue: {}",
+            init
+        );
+        assert!(
+            !init.contains("__g . id . clone"),
+            "no se debe clonar Int (Copy), fue: {}",
+            init
+        );
     }
 
     #[test]
-    fn field_access_str_emite_borrow_clone() {
+    fn field_access_str_emite_lock_clone() {
         let file = ast_test::parse(
             &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nlet s = u.name")
                 .unwrap(),
@@ -8280,25 +8406,25 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "s").expect("falta let s");
         let init = ast_test::local_init(l).unwrap();
-        // Str no es Copy → borrow + clone.
+        // Str no es Copy → lock + unwrap + clone (post-F17.4b).
         assert!(
-            init.contains("borrow") && init.contains("clone"),
-            "esperaba `borrow` y `clone` en el field access de Str, fue: {}",
+            init.contains("lock") && init.contains("clone"),
+            "esperaba `lock` y `clone` en el field access de Str, fue: {}",
             init
         );
     }
 
     #[test]
-    fn field_assign_emite_borrow_mut() {
+    fn field_assign_emite_lock() {
         let file = ast_test::parse(
             &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nu.name = \"y\"")
                 .unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
-        // Buscamos un `borrow_mut()` en el árbol — lo emite el field assign.
+        // Post-F17.4b: el field assign emite `(obj).lock().unwrap().<f> = ...`.
         assert!(
-            ast_test::contains_method_call(stmts, "borrow_mut"),
-            "esperaba call a `.borrow_mut()` para field assign"
+            ast_test::contains_method_call(stmts, "lock"),
+            "esperaba call a `.lock().unwrap()` para field assign"
         );
     }
 
@@ -8334,7 +8460,7 @@ mod tests {
 
     #[test]
     fn print_de_instance_usa_show_expr_con_display() {
-        // `print(u)` para u: U → format!("{}", &*u.borrow()) dentro
+        // `print(u)` para u: U → format!("{}", &*u.lock().unwrap()) dentro
         // del println!.
         let code = gen("type U { id: Int }\nlet u = U { id: 1 }\nprint(u)").unwrap();
         let file = ast_test::parse(&code);
@@ -8344,8 +8470,8 @@ mod tests {
         assert!(
             args.contains("format !")
                 && (args.contains("& *") || args.contains("&*"))
-                && args.contains(". borrow"),
-            "esperaba `format!(\"{{}}\", &*(...).borrow())` en el println!, got: {}",
+                && args.contains(". lock"),
+            "esperaba `format!(\"{{}}\", &*(...).lock().unwrap())` en el println!, got: {}",
             args
         );
     }
@@ -8353,7 +8479,7 @@ mod tests {
     #[test]
     fn tipo_anidado_compila_con_nullable_de_nominal() {
         // `type Order { user: User? }` se traduce a un campo de tipo
-        // `Option<User>` (= `Option<Rc<RefCell<UserData>>>`).
+        // `Option<User>` (= `Option<Arc<Mutex<UserData>>>`).
         let file = ast_test::parse(
             &gen("type User { name: Str }\ntype Order { user: User? }").unwrap(),
         );
@@ -8372,7 +8498,7 @@ mod tests {
     }
 
     #[test]
-    fn igualdad_estructural_entre_instancias_emite_borrow_eq() {
+    fn igualdad_estructural_entre_instancias_emite_lock_eq() {
         let code = gen(
             "type U { id: Int }\nlet a = U { id: 1 }\nlet b = U { id: 1 }\nlet eq = a == b",
         )
@@ -8381,13 +8507,13 @@ mod tests {
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "eq").expect("falta let eq");
         let init = ast_test::local_init(l).unwrap();
-        // `*a.borrow() == *b.borrow()`: ambos lados aplican .borrow() y
-        // se desreferencian antes de comparar.
-        let borrow_count = init.matches(". borrow").count();
+        // `*a.lock().unwrap() == *b.lock().unwrap()`: ambos lados aplican
+        // .lock().unwrap() y se desreferencian antes de comparar.
+        let lock_count = init.matches(". lock").count();
         assert!(
-            borrow_count >= 2,
-            "esperaba al menos 2 `.borrow()` en la comparación, fue {} en: {}",
-            borrow_count,
+            lock_count >= 2,
+            "esperaba al menos 2 `.lock().unwrap()` en la comparación, fue {} en: {}",
+            lock_count,
             init
         );
         assert!(
@@ -8581,24 +8707,33 @@ mod tests {
     // llegar al codegen, así que no testeamos ese path desde acá.)
 
     #[test]
-    fn type_def_emite_derive_partialeq() {
-        let file = ast_test::parse(&gen("type U { id: Int }").unwrap());
+    fn type_def_emite_derive_clone_y_impl_partialeq() {
+        let code = gen("type U { id: Int }").unwrap();
+        let file = ast_test::parse(&code);
         let s = ast_test::find_item_struct(&file, "UData").expect("falta UData");
         assert!(
             ast_test::struct_has_derive(s, "Clone"),
             "esperaba derive(Clone)"
         );
+        // F17.4b: PartialEq ya no se deriva porque `std::sync::Mutex<T>`
+        // no impl PartialEq. Se emite manual abajo, espejando el patrón
+        // del intérprete (`Arc::ptr_eq` shortcut + lock+deref por campo
+        // nominal).
         assert!(
-            ast_test::struct_has_derive(s, "PartialEq"),
-            "esperaba derive(PartialEq)"
+            !ast_test::struct_has_derive(s, "PartialEq"),
+            "PartialEq NO debe derivarse post-F17.4b (Mutex no impl PartialEq)"
+        );
+        assert!(
+            ast_test::find_impl(&file, "PartialEq", "UData").is_some(),
+            "esperaba impl PartialEq for UData (manual post-F17.4b)"
         );
     }
 
     // ---- 5b.3: listas, mapas, indexing, métodos built-in ----
 
     #[test]
-    fn list_literal_emite_rc_refcell_vec() {
-        // `[1, 2, 3]` se modela como `Rc<RefCell<Vec<i64>>>`. Los items
+    fn list_literal_emite_arc_mutex_vec() {
+        // `[1, 2, 3]` se modela como `Arc<Mutex<Vec<i64>>>`. Los items
         // se coercen al tipo común (acá Int → i64) y se construye con
         // el macro vec![].
         let file = ast_test::parse(&gen("let xs: List<Int> = [1, 2, 3]").unwrap());
@@ -8606,14 +8741,14 @@ mod tests {
         let l = ast_test::find_let(stmts, "xs").expect("falta let xs");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < i64 > > >"),
+            Some("Arc < Mutex < Vec < i64 > > >"),
             "tipo declarado de xs"
         );
         let init = ast_test::local_init_expr(l).expect("falta init de xs");
-        // El init es `Rc::new(RefCell::new(vec![...]))`. Confirmamos el
+        // El init es `Arc::new(Mutex::new(vec![...]))`. Confirmamos el
         // outer call al path Rc::new y la presencia del macro vec! con
         // los 3 items con sufijo i64.
-        assert_eq!(ast_test::call_path(init).as_deref(), Some("Rc :: new"));
+        assert_eq!(ast_test::call_path(init).as_deref(), Some("Arc :: new"));
         let vec_args = ast_test::find_macro_args(init, "vec")
             .expect("esperaba un macro vec! adentro del init");
         for n in ["1i64", "2i64", "3i64"] {
@@ -8635,7 +8770,7 @@ mod tests {
         let l = ast_test::find_let(stmts, "xs").expect("falta let xs");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < f64 > > >"),
+            Some("Arc < Mutex < Vec < f64 > > >"),
             "esperaba que xs quede tipado List<Float>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
@@ -8660,10 +8795,10 @@ mod tests {
         assert!(ast_test::local_is_mut(l), "esperaba `let mut`");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < i64 > > >"),
+            Some("Arc < Mutex < Vec < i64 > > >"),
             "esperaba `List<Int>` por anotación"
         );
-        // El init es `Rc::new(RefCell::new(Vec::new()))` — verifico
+        // El init es `Arc::new(Mutex::new(Vec::new()))` — verifico
         // que ningún macro vec! aparezca y que la chain Vec::new exista.
         let init = ast_test::local_init_expr(l).unwrap();
         assert!(
@@ -8690,7 +8825,7 @@ mod tests {
     #[test]
     fn map_literal_emite_vec_pares() {
         // `{"a": 1, "b": 2}` se modela como
-        // `Rc<RefCell<Vec<(String, i64)>>>` con tuplas como items.
+        // `Arc<Mutex<Vec<(String, i64)>>>` con tuplas como items.
         let file = ast_test::parse(
             &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}").unwrap(),
         );
@@ -8698,7 +8833,7 @@ mod tests {
         let l = ast_test::find_let(stmts, "m").expect("falta let m");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < (String , i64) > > >"),
+            Some("Arc < Mutex < Vec < (String , i64) > > >"),
             "tipo declarado de m"
         );
         let init = ast_test::local_init_expr(l).unwrap();
@@ -8726,7 +8861,7 @@ mod tests {
         assert!(ast_test::local_is_mut(l));
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < (String , i64) > > >"),
+            Some("Arc < Mutex < Vec < (String , i64) > > >"),
             "esperaba `Map<Str, Int>` por anotación"
         );
         // Mapa vacío → sin macro vec!.
@@ -8747,7 +8882,7 @@ mod tests {
 
     #[test]
     fn list_indexing_emite_borrow_clone() {
-        // `xs[0]` → `(xs.clone()).borrow()[(0i64) as usize].clone()`.
+        // `xs[0]` → `(xs.clone()).lock().unwrap()[(0i64) as usize].clone()`.
         // El `.clone()` final es del Rc para Nominal/List/Map o copy
         // para primitivos — siempre seguro.
         let file = ast_test::parse(
@@ -8760,8 +8895,8 @@ mod tests {
         // El init debe contener el pipeline borrow + index + clone.
         let init = ast_test::local_init_expr(l).unwrap();
         assert!(
-            ast_test::contains_method_call_in_expr(init, "borrow"),
-            "esperaba .borrow() en el init de x, fue: {}",
+            ast_test::contains_method_call_in_expr(init, "lock"),
+            "esperaba .lock().unwrap() en el init de x, fue: {}",
             ast_test::ts(init)
         );
         assert!(
@@ -8806,20 +8941,21 @@ mod tests {
 
     #[test]
     fn for_sobre_list_genera_snapshot_iter() {
-        // `for v in xs` → snapshot via `borrow().clone().into_iter()`
-        // (evita re-entrancia si el body muta `xs`).
+        // `for v in xs` → snapshot via `lock().unwrap().clone().into_iter()`
+        // (evita re-entrancia si el body muta `xs`). Post-F17.4b
+        // el lock reemplaza al borrow del RefCell viejo.
         let file = ast_test::parse(
             &gen("let xs: List<Int> = [1, 2, 3]\nfor v in xs { print(v) }").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let fl = ast_test::find_for_loop(stmts).expect("falta el for loop");
-        // El iterable es una method chain: receptor → borrow → clone →
-        // into_iter. La inspección estructural ignora paréntesis y
-        // formato.
+        // El iterable es una method chain: receptor → lock → unwrap →
+        // clone → into_iter. La inspección estructural ignora
+        // paréntesis y formato.
         let chain = ast_test::method_chain_names(&fl.expr);
         assert!(
-            chain.windows(3).any(|w| w == ["borrow", "clone", "into_iter"]),
-            "esperaba chain `borrow().clone().into_iter()` en el for, fue: {:?}",
+            chain.windows(3).any(|w| w == ["unwrap", "clone", "into_iter"]),
+            "esperaba chain `lock().unwrap().clone().into_iter()` en el for, fue: {:?}",
             chain
         );
     }
@@ -8833,13 +8969,13 @@ mod tests {
     }
 
     #[test]
-    fn list_push_emite_borrow_mut_push() {
+    fn list_push_emite_lock_push() {
         let file = ast_test::parse(&gen("let xs: List<Int> = []\nxs.push(7)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
-        // `.push(...)` se emite como method call sobre `borrow_mut()`.
+        // `.push(...)` se emite como method call sobre `lock().unwrap()`.
         assert!(
-            ast_test::contains_method_call(stmts, "borrow_mut"),
-            "esperaba `borrow_mut` antes del push"
+            ast_test::contains_method_call(stmts, "lock"),
+            "esperaba `lock` antes del push"
         );
         assert!(
             ast_test::contains_method_call(stmts, "push"),
@@ -8848,16 +8984,16 @@ mod tests {
     }
 
     #[test]
-    fn list_pop_emite_borrow_mut_pop_con_expect() {
+    fn list_pop_emite_lock_pop_con_expect() {
         let file = ast_test::parse(&gen("let xs: List<Int> = [1]\nlet x = xs.pop()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("falta let x");
         let init = ast_test::local_init(l).unwrap();
-        // El pop se traduce a `.borrow_mut().pop().expect("...")` —
+        // El pop se traduce a `.lock().unwrap().pop().expect("...")` —
         // `.expect(...)` paniquea con el mismo mensaje del intérprete.
         assert!(
-            init.contains("borrow_mut") && init.contains("pop") && init.contains("expect"),
-            "esperaba pipeline borrow_mut + pop + expect, fue: {}",
+            init.contains("lock") && init.contains("pop") && init.contains("expect"),
+            "esperaba pipeline lock + pop + expect, fue: {}",
             init
         );
         // El mensaje del expect debe mencionar `pop` y `lista vacía`
@@ -8870,7 +9006,7 @@ mod tests {
     }
 
     #[test]
-    fn list_len_metodo_emite_borrow_len_as_i64() {
+    fn list_len_metodo_emite_lock_len_as_i64() {
         let file = ast_test::parse(&gen("let xs: List<Int> = []\nlet n = xs.len()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("falta let n");
@@ -8878,14 +9014,14 @@ mod tests {
         assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
         let init = ast_test::local_init(l).unwrap();
         assert!(
-            init.contains("borrow") && init.contains("len") && init.contains("as i64"),
-            "esperaba pipeline borrow + len + as i64, fue: {}",
+            init.contains("lock") && init.contains("len") && init.contains("as i64"),
+            "esperaba pipeline lock + len + as i64, fue: {}",
             init
         );
     }
 
     #[test]
-    fn len_builtin_global_sobre_list_resuelve_a_borrow_len() {
+    fn len_builtin_global_sobre_list_resuelve_a_lock_len() {
         // `len(xs)` despacha por tipo del argumento — mismo código que
         // `xs.len()` para List/Map; para Str sigue siendo chars().count.
         let file = ast_test::parse(
@@ -8896,7 +9032,7 @@ mod tests {
         assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
         let init = ast_test::local_init_expr(l).unwrap();
         // El init es `(<chain> as i64)` con la chain `xs.clone()
-        // .borrow().len()`. Verifico el cast y los métodos.
+        // .lock().unwrap().len()`. Verifico el cast y los métodos.
         assert_eq!(
             ast_test::cast_target_type(init).as_deref(),
             Some("i64"),
@@ -8904,8 +9040,8 @@ mod tests {
         );
         let chain = ast_test::method_chain_names(init);
         assert!(
-            chain.contains(&"borrow".to_string()) && chain.contains(&"len".to_string()),
-            "esperaba chain con borrow + len, fue: {:?}",
+            chain.contains(&"lock".to_string()) && chain.contains(&"len".to_string()),
+            "esperaba chain con lock + len, fue: {:?}",
             chain
         );
     }
@@ -8942,11 +9078,11 @@ mod tests {
         assert!(ast_test::local_is_mut(l));
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < i64 > > >"),
+            Some("Arc < Mutex < Vec < i64 > > >"),
             "esperaba que `ys` quede tipado List<Int>"
         );
         // El init invoca `.map(|x: i64| -> i64 { ... })` adentro de un
-        // Rc::new(RefCell::new(...)). Chequeo estructural: hay un
+        // Arc::new(Mutex::new(...)). Chequeo estructural: hay un
         // method call `map` y el primer arg del map es una closure
         // tipada `|x: i64| -> i64`.
         let init = ast_test::local_init_expr(l).unwrap();
@@ -8962,8 +9098,8 @@ mod tests {
             init_text
         );
         assert!(
-            init_text.contains("Rc :: new (RefCell :: new"),
-            "esperaba envoltorio Rc::new(RefCell::new(...)), fue: {}",
+            init_text.contains("Arc :: new (Mutex :: new"),
+            "esperaba envoltorio Arc::new(Mutex::new(...)), fue: {}",
             init_text
         );
     }
@@ -9025,7 +9161,7 @@ mod tests {
     #[test]
     fn map_has_emite_iter_any() {
         // `m.has(k)` se traduce a un bloque
-        // `{ let __k = k; (m.clone()).borrow().iter().any(...) }`. El
+        // `{ let __k = k; (m.clone()).lock().unwrap().iter().any(...) }`. El
         // chequeo estructural busca `iter` + `any` adentro del init,
         // sin importar si están envueltos en bloque o expresión.
         let file = ast_test::parse(
@@ -9059,7 +9195,7 @@ mod tests {
         // keys() retorna `List<Str>` envuelto en Rc/RefCell.
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < String > > >"),
+            Some("Arc < Mutex < Vec < String > > >"),
             "esperaba que keys retorne List<Str>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
@@ -9086,7 +9222,7 @@ mod tests {
         let l = ast_test::find_let(stmts, "vs").expect("falta let vs");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < RefCell < Vec < i64 > > >"),
+            Some("Arc < Mutex < Vec < i64 > > >"),
             "esperaba que values retorne List<Int>"
         );
         let init = ast_test::local_init_expr(l).unwrap();
@@ -9119,8 +9255,8 @@ mod tests {
         );
         let chain = ast_test::method_chain_names(init);
         assert!(
-            chain.contains(&"borrow".to_string()) && chain.contains(&"len".to_string()),
-            "esperaba chain con borrow + len, fue: {:?}",
+            chain.contains(&"lock".to_string()) && chain.contains(&"len".to_string()),
+            "esperaba chain con lock + len, fue: {:?}",
             chain
         );
     }
@@ -9193,10 +9329,10 @@ mod tests {
     }
 
     #[test]
-    fn fnexpr_suelta_emite_rc_dyn_fn() {
-        // F12: FnExpr asignado a var emite `Rc::new(move |...| ...) as
-        // Rc<dyn Fn(...) -> ...>`. La var queda tipada como
-        // `Rc<dyn Fn(i64) -> i64>` y se puede invocar con `f(x)`.
+    fn fnexpr_suelta_emite_arc_dyn_fn() {
+        // F12: FnExpr asignado a var emite `Arc::new(move |...| ...) as
+        // Arc<dyn Fn(...) -> ...>`. La var queda tipada como
+        // `Arc<dyn Fn(i64) -> i64>` y se puede invocar con `f(x)`.
         let file = ast_test::parse(
             &gen("let f: Fn(Int) -> Int = fn(x: Int) => x * 2\nprint(f(3))").unwrap(),
         );
@@ -9204,15 +9340,15 @@ mod tests {
         let l = ast_test::find_let(stmts, "f").expect("falta let f");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < dyn Fn (i64) -> i64 >"),
-            "esperaba tipo `Rc<dyn Fn(i64) -> i64>`"
+            Some("Arc < dyn Fn (i64) -> i64 + Send + Sync >"),
+            "esperaba tipo `Arc<dyn Fn(i64) -> i64>`"
         );
-        // El init debe contener `Rc::new(move |x: i64| ...)`. Verifico
+        // El init debe contener `Arc::new(move |x: i64| ...)`. Verifico
         // sub-string sobre la representación normalizada.
         let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
-            init_text.contains("Rc :: new (move | x : i64 |"),
-            "esperaba `Rc::new(move |x: i64| ...)`, fue: {}",
+            init_text.contains("Arc :: new (move | x : i64 |"),
+            "esperaba `Arc::new(move |x: i64| ...)`, fue: {}",
             init_text
         );
     }
@@ -9228,9 +9364,9 @@ mod tests {
     }
 
     #[test]
-    fn fn_nombrada_como_valor_emite_rc_new() {
+    fn fn_nombrada_como_valor_emite_arc_new() {
         // F12: `let g = square` donde `square` es fn top-level emite
-        // `Rc::new(square) as Rc<dyn Fn(...) -> R>` con la firma del
+        // `Arc::new(square) as Arc<dyn Fn(...) -> R>` con la firma del
         // fn_sigs.
         let file = ast_test::parse(
             &gen("fn square(n: Int) -> Int => n * n\nlet g: Fn(Int) -> Int = square\nprint(g(7))")
@@ -9240,21 +9376,21 @@ mod tests {
         let l = ast_test::find_let(stmts, "g").expect("falta let g");
         assert_eq!(
             ast_test::local_type(l).as_deref(),
-            Some("Rc < dyn Fn (i64) -> i64 >"),
-            "esperaba tipo `Rc<dyn Fn(i64) -> i64>`"
+            Some("Arc < dyn Fn (i64) -> i64 + Send + Sync >"),
+            "esperaba tipo `Arc<dyn Fn(i64) -> i64>`"
         );
         let init_text = ast_test::ts(ast_test::local_init_expr(l).unwrap());
         assert!(
-            init_text.contains("Rc :: new (square)"),
-            "esperaba `Rc::new(square)`, fue: {}",
+            init_text.contains("Arc :: new (square)"),
+            "esperaba `Arc::new(square)`, fue: {}",
             init_text
         );
     }
 
     #[test]
-    fn fn_param_de_tipo_funcion_emite_rc_dyn_fn() {
+    fn fn_param_de_tipo_funcion_emite_arc_dyn_fn() {
         // F12: param `f: Fn(Int) -> Int` en la firma de la fn top-level
-        // debe traducirse a `Rc<dyn Fn(i64) -> i64>` en el header.
+        // debe traducirse a `Arc<dyn Fn(i64) -> i64>` en el header.
         let file = ast_test::parse(
             &gen(
                 "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
@@ -9267,7 +9403,7 @@ mod tests {
         let apply = ast_test::find_item_fn(&file, "apply").expect("falta fn apply");
         assert_eq!(
             ast_test::fn_param_types(apply),
-            vec!["Rc < dyn Fn (i64) -> i64 >", "i64"],
+            vec!["Arc < dyn Fn (i64) -> i64 + Send + Sync >", "i64"],
             "tipos de params de apply"
         );
         assert_eq!(
@@ -9276,22 +9412,22 @@ mod tests {
             "return type de apply"
         );
         // La llamada `apply(square, 7)` debe envolver `square` en
-        // `Rc::new(square)`. Lo busco como sub-string sobre el `main`
+        // `Arc::new(square)`. Lo busco como sub-string sobre el `main`
         // tokenizado (la llamada vive adentro del print).
         let main_text = ast_test::ts(
             ast_test::find_item_fn(&file, "main").expect("falta fn main"),
         );
         assert!(
-            main_text.contains("apply ((Rc :: new (square)"),
-            "esperaba `apply((Rc::new(square) as ...))` en main, fue: {}",
+            main_text.contains("apply ((Arc :: new (square)"),
+            "esperaba `apply((Arc::new(square) as ...))` en main, fue: {}",
             main_text
         );
     }
 
     #[test]
-    fn fn_como_return_type_emite_rc_dyn_fn() {
+    fn fn_como_return_type_emite_arc_dyn_fn() {
         // F12: `-> Fn(Int) -> Int` en una fn top-level emite el header
-        // con retorno `Rc<dyn Fn(i64) -> i64>`. La closure interna que
+        // con retorno `Arc<dyn Fn(i64) -> i64>`. La closure interna que
         // captura `x` se traduce con `move`.
         let file = ast_test::parse(
             &gen(
@@ -9312,13 +9448,13 @@ mod tests {
         );
         assert_eq!(
             ast_test::fn_return_type(make_adder).as_deref(),
-            Some("Rc < dyn Fn (i64) -> i64 >"),
+            Some("Arc < dyn Fn (i64) -> i64 + Send + Sync >"),
             "return type de make_adder"
         );
-        // El body de make_adder contiene `Rc::new(move |y: i64| ...)`.
+        // El body de make_adder contiene `Arc::new(move |y: i64| ...)`.
         let body_text = ast_test::ts(&make_adder.block);
         assert!(
-            body_text.contains("Rc :: new (move | y : i64 |"),
+            body_text.contains("Arc :: new (move | y : i64 |"),
             "esperaba closure con `move` capturando x, fue: {}",
             body_text
         );
@@ -9350,8 +9486,8 @@ mod tests {
             init_text
         );
         assert!(
-            init_text.contains("Rc :: new (move | n : String |"),
-            "esperaba closure `Rc::new(move |n: String| ...)`, fue: {}",
+            init_text.contains("Arc :: new (move | n : String |"),
+            "esperaba closure `Arc::new(move |n: String| ...)`, fue: {}",
             init_text
         );
     }
@@ -9379,7 +9515,7 @@ mod tests {
     #[test]
     fn fn_anonima_inline_como_arg_emite_closure_directo() {
         // F12: `apply(fn(n: Int) => n * 10, 7)` no envuelve en una var
-        // intermedia — emite el `Rc::new(move |n: i64| ...)` inline
+        // intermedia — emite el `Arc::new(move |n: i64| ...)` inline
         // como argumento.
         let file = ast_test::parse(
             &gen(
@@ -9392,7 +9528,7 @@ mod tests {
             ast_test::find_item_fn(&file, "main").expect("falta fn main"),
         );
         assert!(
-            main_text.contains("apply ((Rc :: new (move | n : i64 |"),
+            main_text.contains("apply ((Arc :: new (move | n : i64 |"),
             "esperaba el FnExpr emitido inline como arg de apply, fue: {}",
             main_text
         );
@@ -9465,11 +9601,10 @@ mod tests {
 
     #[test]
     fn http_main_emite_tokio_main_async() {
-        // F11: tokio runtime queda en `flavor = "current_thread"` para
-        // que el `thread_local!` del state compartido funcione como
-        // global. Los handlers Fitz son sync (sus locals Rc no cruzan
-        // ningún `.await`), así que cumplen el bound `Send` que axum
-        // exige sobre los futures.
+        // F17.4b: tokio runtime default = `multi_thread` (N workers según
+        // cores), paralelismo HTTP real. F11 originalmente lo dejaba en
+        // `current_thread` por el `thread_local!` del state; F17.4b lo
+        // migró a `LazyLock<Arc<Mutex<T>>>` y destrabó multi-thread.
         let src = "@server(3000) fn main() => 0\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
@@ -9478,10 +9613,15 @@ mod tests {
         assert!(ast_test::fn_is_async(main), "fn main debería ser async");
         let attrs = ast_test::fn_attrs(main);
         assert!(
+            attrs.iter().any(|a| a.contains("tokio :: main")),
+            "esperaba #[tokio::main] en fn main, attrs: {:?}",
             attrs
-                .iter()
-                .any(|a| a.contains("tokio :: main") && a.contains("current_thread")),
-            "esperaba #[tokio::main(flavor = \"current_thread\")] en fn main, attrs: {:?}",
+        );
+        // El flavor `current_thread` NO debe aparecer (F17.4b switcheó
+        // a multi-thread, que es el default — sin override explícito).
+        assert!(
+            !attrs.iter().any(|a| a.contains("current_thread")),
+            "no esperaba `current_thread` en attrs, fue: {:?}",
             attrs
         );
         let body = ast_test::fn_body_text(main);
@@ -10191,50 +10331,44 @@ mod tests {
     }
 
     #[test]
-    fn http_state_compartido_emite_thread_local() {
-        // F11 — antes (5b.6) este caso abortaba con "state compartido
-        // no soportado". Ahora el codegen emite un `thread_local!` por
-        // cada state var detectado, y cada fn que la referencia
-        // materializa la Rc al inicio del body via `.with(|s| s.clone())`.
+    fn http_state_compartido_emite_lazy_lock() {
+        // F11 + F17.4b — el codegen emite un `static LazyLock<Arc<Mutex<T>>>`
+        // por cada state var detectado, y cada fn que la referencia
+        // materializa el Arc al inicio del body via `(*__FITZ_STATE_X).clone()`.
+        // Antes de F17.4b era `thread_local!` + `.with(|s| s.clone())`;
+        // el cambio destrabó tokio multi-thread (paralelismo HTTP real).
         let src = "let users = [1, 2, 3]\n\
                    @get(\"/users\") fn list_users() -> List<Int> => users";
         let code = gen(src).unwrap();
-        let file = ast_test::parse(&code);
-        let tl = ast_test::find_top_macro(&file, "thread_local")
-            .expect("esperaba `thread_local!` top-level");
-        let tl_tokens = ast_test::ts(&tl.mac.tokens);
+        // El static aparece como `static __FITZ_STATE_USERS: ...
+        // LazyLock<...> = LazyLock::new(|| ...);`. Validación liviana
+        // por sub-string sobre el output (no hay helper `find_top_static`).
         assert!(
-            tl_tokens.contains("__FITZ_STATE_USERS"),
-            "esperaba el static __FITZ_STATE_USERS adentro del thread_local!, got:\n{}",
-            tl_tokens
+            code.contains("static __FITZ_STATE_USERS")
+                && code.contains("LazyLock"),
+            "esperaba `static __FITZ_STATE_USERS: ... LazyLock<...>`, got:\n{}",
+            code
         );
-        // Cada fn que toca la state debe materializarla con .with(...)
-        // (la fn `list_users` o el handler, dependiendo de la implementación).
+        // Cada fn que toca la state debe materializarla con `(*X).clone()`.
+        let file = ast_test::parse(&code);
         let list_users =
             ast_test::find_item_fn(&file, "list_users").expect("falta fn list_users");
         let body = ast_test::fn_body_text(list_users);
         assert!(
-            body.contains("__FITZ_STATE_USERS")
-                && body.contains(". with")
-                && body.contains(". clone"),
-            "esperaba la materialización con `.with(|__s| __s.clone())`, got:\n{}",
+            body.contains("__FITZ_STATE_USERS") && body.contains(". clone"),
+            "esperaba materialización con `(*__FITZ_STATE_USERS).clone()`, got:\n{}",
             body
         );
     }
 
     #[test]
-    fn http_state_no_referenciado_no_se_promueve_a_thread_local() {
+    fn http_state_no_referenciado_no_se_promueve_a_lazy_lock() {
         // Si una var top-level NO es referenciada por ninguna fn HTTP,
         // no es state compartido — se queda como var local en `fn main()`.
         let src = "let ignorada = 42\n\
                    @get(\"/\") fn index() -> Str => \"ok\"";
         let code = gen(src).unwrap();
-        let file = ast_test::parse(&code);
-        assert!(
-            ast_test::find_top_macro(&file, "thread_local").is_none(),
-            "no esperaba thread_local! para una var sin refs"
-        );
-        // El static tampoco debe aparecer (ni como item ni en ningún lado).
+        // El static no debe aparecer (ni como item ni en ningún lado).
         assert!(
             !code.contains("__FITZ_STATE_IGNORADA"),
             "no esperaba el static __FITZ_STATE_IGNORADA, got:\n{}",
@@ -10495,8 +10629,8 @@ mod tests {
             .expect("falta arm `Ok(u)`");
         let body = ast_test::ts(&*ok_arm.body);
         assert!(
-            body.contains(". borrow") && body.contains(". id"),
-            "esperaba field access tipo `u.borrow().id` en el arm body, got: {}",
+            body.contains(". lock") && body.contains(". id"),
+            "esperaba field access tipo `u.lock().unwrap().id` en el arm body, got: {}",
             body
         );
     }
