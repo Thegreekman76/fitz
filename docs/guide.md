@@ -4727,40 +4727,75 @@ ambos. La diferencia se nota cuando el handler async hace I/O real
 endpoint que está esperando una respuesta externa cede CPU para
 que el intérprete avance otras tareas adentro del mismo handler.
 
-### Limitación actual: server single-threaded
+### Paralelismo HTTP real
 
-El runtime HTTP es `tokio::flavor = "current_thread"`. Esto
-significa que **dos requests HTTP simultáneos no se ejecutan en
-paralelo**: el segundo espera a que el primero termine. La promesa
-de async (concurrencia real entre tareas) está cumplida adentro de
-un handler (`sleep().await` cede CPU mientras espera) pero no entre
-handlers.
+El runtime HTTP usa `tokio` en modo **multi-thread**: N workers
+según los cores disponibles procesan handlers en simultáneo. Dos
+requests al mismo handler — aún uno lento — corren en paralelo,
+una por worker. Concurrencia real, no solo intercalada adentro
+de un mismo handler.
 
-La razón es estructural: los `Value::Function` de Fitz arrastran
-`Rc<RefCell<>>` internamente y no son `Send`, así que axum (que
-exige `Send` en sus handlers) no puede ejecutarlos en su pool
-multi-thread. Hay una **deuda explícita comprometida** (F17 en
-[docs/deudas-post-5b.md](deudas-post-5b.md)): cuando esa migración
-cierre — Rc/RefCell → Arc/Mutex — el server pasa a multi-thread y
-se gana paralelismo entre handlers.
+Demostración con `examples/guide/19b-paralelismo.fitz`:
 
-Para programas CLI con `sleep().await`, esto no afecta: hay una
-sola tarea a la vez.
+```fitz
+@server(3000)
+fn main() => 0
 
-### Ejemplo del capítulo
+@get("/lento")
+async fn lento() -> Str {
+    let _ = sleep(1000).await
+    return "ok"
+}
+```
 
-Ver [examples/guide/19-async.fitz](../examples/guide/19-async.fitz).
-Declara tres `async fn` que se componen, y desde el top-level las
-await-ea para imprimir los resultados.
+5 requests concurrentes vs 5 en serie:
 
 ```sh
+fitz run examples/guide/19b-paralelismo.fitz &
+
+# Paralelo: 5 requests al mismo tiempo
+time seq 5 | xargs -P 5 -I _ curl -s http://127.0.0.1:3000/lento
+# real    0m1.2s   ← cada worker duerme 1s, todos en paralelo
+
+# Serie: una atrás de otra
+time for i in 1 2 3 4 5; do curl -s http://127.0.0.1:3000/lento; done
+# real    0m5.3s   ← suma de los sleeps
+```
+
+Pre-F17 ambos eran ~5s (el server estaba en `current_thread`).
+Post-F17 los contenedores de `Value` y `EnvRef` migraron a
+`Arc<Mutex<>>` (Send + Sync) y axum invoca el evaluator directo
+sobre sus workers — sin bridge, sin serialización.
+
+Para programas CLI con `.await`, esto no cambia nada: hay una
+sola tarea a la vez, runtime `current_thread` es suficiente.
+
+### Ejemplos del capítulo
+
+Dos ejemplos:
+
+- **[examples/guide/19-async.fitz](../examples/guide/19-async.fitz)**
+  — CLI con tres `async fn` que se componen y se await-ean desde
+  top-level.
+- **[examples/guide/19b-paralelismo.fitz](../examples/guide/19b-paralelismo.fitz)**
+  — server HTTP con un handler lento (`sleep(1000)`) y uno rápido
+  para medir paralelismo real con curl.
+
+```sh
+# CLI async
 fitz run examples/guide/19-async.fitz
 fitz build examples/guide/19-async.fitz
 ./examples/guide/19-async                # Linux/macOS
 .\examples\guide\19-async.exe            # Windows
+
+# Server con paralelismo
+fitz run examples/guide/19b-paralelismo.fitz
+fitz build examples/guide/19b-paralelismo.fitz
+./examples/guide/19b-paralelismo &
+time seq 5 | xargs -P 5 -I _ curl -s http://127.0.0.1:3000/lento
 ```
 
-Salida esperada:
+Salida esperada del cap 19 CLI:
 
 ```
 hola, Fitz
@@ -4770,7 +4805,8 @@ total ms = 0
 ---
 
 Async cumple la promesa de "HTTP nativo" a nivel de ejecución:
-podés escribir un handler que pausa, cede CPU, sigue. El próximo
+podés escribir un handler que pausa, cede CPU, sigue. Y con N
+workers tokio, varios pueden estar pausando a la vez. El próximo
 capítulo cubre el otro gran salto: **compilar el programa a un
 binario nativo standalone** con `fitz build`.
 

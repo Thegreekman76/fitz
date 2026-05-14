@@ -2392,8 +2392,8 @@ incrementos chicos. Recomendación: rama dedicada
 verde antes de mergear.
 
 #### 6.4 — Runtime HTTP: handlers async reales
-**POSPUESTO hasta F17 (re-numerado como 6.5)** — eliminación del
-bridge sync/async **bloqueada**.
+**CERRADO en F17.5 (2026-05-14)** — el bridge HTTP `mpsc/oneshot`
+desapareció.
 
 - Plan original: hoy `src/http.rs` corre tokio en un `std::thread` y
   bridgea via `mpsc::UnboundedSender<InterpTask> + oneshot::Sender<...>`.
@@ -2402,21 +2402,21 @@ bridge sync/async **bloqueada**.
 - **Realidad descubierta al intentar (sesión 2026-05-13)**:
   `axum::handler::Handler` requiere `Send + 'static`. Los closures
   axum capturan `Value::Function` cuya `closure: EnvRef = Rc<RefCell<
-  Environment>>` **no es Send**. El future del handler tampoco. Axum
-  0.8 no expone `Handler` `!Send` ni `tokio::task::LocalSet` lo
-  destraba (axum::serve igual exige Send adentro). La única salida
-  real es migrar `Value`/`EnvRef`/módulos a `Arc<parking_lot::Mutex>`
-  — eso es exactamente la deuda **F17** en `docs/deudas-post-5b.md`.
-- **Compromiso**: cuando F17 cierre, el bridge HTTP cae como
-  consecuencia natural — los handlers axum llaman al evaluator
-  directo y `InterpTask`/`run_interpreter_loop` desaparecen sin
-  refactor adicional. Hasta entonces, el bridge sigue vivo y
-  funcional (cumple la promesa async, es internal-only).
+  Environment>>` **no es Send**. La única salida real era migrar
+  `Value`/`EnvRef`/módulos a `Arc<Mutex>` — eso es exactamente la
+  deuda **F17** en `docs/deudas-post-5b.md`.
+- **Cierre real (2026-05-14)**: F17.2 (Arc/Mutex), F17.3 (Send
+  completo) y F17.4a (multi-thread) destrabaron la eliminación.
+  F17.5 reescribió `serve()`, `build_router` y `build_method_router`
+  para invocar `handle_task(&registry, ...).await` directo sobre un
+  `Arc<HttpRegistry>` compartido. `InterpTask`, `TaskTx`,
+  `run_interpreter_loop` y `dispatch_request` (versión vieja con
+  canal) borrados — ~269 LoC netas menos en `http.rs`.
 
-**Criterio de éxito** (cuando F17 cierre + este paso se reabra): un
-endpoint `async fn` que `await`-ea una sleep responde N requests
-concurrentes sin bloquear el thread del intérprete. Mismo handler
-sync responde en serie. Diferencia medible en latencia P99.
+**Criterio de éxito cumplido**: `examples/guide/19b-paralelismo.fitz`
+demuestra paralelismo HTTP real — 5 requests concurrentes a un
+handler `sleep(1000).await` responden en ~1.2s; las mismas en serie
+toman ~5.3s. Pre-F17 ambos casos eran ~5s.
 
 #### 6.5 — Codegen: `async fn` Fitz → `async fn` Rust
 **Pendiente (re-numerado como 6.6 en commits)** — emisión directa,
@@ -3602,3 +3602,117 @@ que hace que escribir Fitz pase de "compilar y revisar" a
 | v0.4 | HTTP nativo funcional |
 | v0.5 | Primera API real escrita en Fitz |
 | v1.0 | Compilador, binario nativo, package manager |
+
+---
+
+## Fase F17 — Send completo + paralelismo HTTP real + bridge eliminado (cerrada, 2026-05-14)
+
+Mini-fase post-tanda Q. Cierra la deuda más grande arrastrada desde
+Fase 4: el bridge HTTP `mpsc/oneshot` que serializaba todas las
+requests a través del thread main del intérprete. Eliminación
+condicionada a migrar `Value` y `EnvRef` a contenedores Send. Seis
+sub-pasos:
+
+- **F17.1** — Agregar dep `parking_lot` al `Cargo.toml` del
+  intérprete. Commit verde, sin cambios funcionales.
+- **F17.2** — Migrar `Shared<T>` y `EnvRef` de `Rc<RefCell<T>>` a
+  `Arc<parking_lot::Mutex<T>>`. Refactor atómico (Value y EnvRef
+  entrelazados), ~284 sitios `.borrow()/.borrow_mut()` → `.lock()`,
+  `Rc::ptr_eq` → `Arc::ptr_eq`. LOADER del evaluator y
+  HTTP_REGISTRY siguen como `RefCell` adentro de `thread_local!`
+  (single-thread por definición). `#[allow(clippy::
+  arc_with_non_send_sync)]` puntual en `Value::new_future` y
+  `Environment::new/new_child` mientras los futures siguen `!Send`
+  hasta F17.3. Doc-comments stale ajustados a la nueva realidad.
+- **F17.3** — Quitar `(?Send)` del macro `#[async_recursion]` en
+  los 13 sitios del evaluator. `FitzFuture` pasa de
+  `Pin<Box<dyn Future<...>>>` a `Pin<Box<dyn Future<...> + Send>>`.
+  Único fix funcional: el `for` sobre List/Range emitía
+  `Box<dyn Iterator>` (!Send); cambiado a `Vec<Value>` materializado
+  (el caso List ya era snapshot, solo Range necesitó `.collect()`).
+  Los `#[allow(arc_with_non_send_sync)]` de F17.2 quedan
+  redundantes y se eliminan.
+- **F17.4a** — Switch `serve()` tokio runtime de `new_current_thread()`
+  a `new_multi_thread()` (auto-detección de cores). Cambio chico
+  (~17 LoC). Habilita los siguientes pasos sin cambiar
+  funcionalidad observable todavía (el bridge sigue serializando
+  hasta F17.5).
+- **F17.5** — Eliminar el bridge HTTP `mpsc/oneshot`. Borra
+  `InterpTask`, `TaskTx`, `run_interpreter_loop` y `dispatch_request`
+  (versión vieja basada en canal). `serve()` ahora corre tokio
+  directo en el thread main (sin spawn) sobre un `Arc<HttpRegistry>`
+  compartido; cada handler axum invoca
+  `handle_task(&registry, ...).await` directo. `build_router` y
+  `build_method_router` cambian firma de `TaskTx` a
+  `Arc<HttpRegistry>`. Test helpers `run_oneshot_*` simplificados
+  (sin `LocalSet`, sin `select!`, sin canal — solo
+  `router.oneshot(req).await`). ~269 LoC netas menos en `http.rs`.
+  Smoke real: `fitz run examples/server.fitz` + curl secuencial
+  con state compartido entre requests responde bit-a-bit como
+  pre-F17.5.
+- **F17.4b** — Migración paralela del **codegen output** (lo que
+  `fitz build` emite). `type Foo = Rc<RefCell<FooData>>` →
+  `type Foo = Arc<Mutex<FooData>>` (std::sync — sin dep extra en
+  el binario generado). `.borrow()/.borrow_mut()` →
+  `.lock().unwrap()`. F12 closures pasan de `Rc<dyn Fn(...) -> R>`
+  a `Arc<dyn Fn(...) -> R + Send + Sync>`. State HTTP de F11
+  pasa de `thread_local! { static __FITZ_STATE_X: T = init; }` a
+  `static __FITZ_STATE_X: LazyLock<Arc<Mutex<T>>> = LazyLock::new(|| ...);`,
+  con materialización `(*X).clone()` en cada handler. Runtime
+  emitido pasa de `#[tokio::main(flavor = "current_thread")]` a
+  `#[tokio::main]` default (multi-thread). Bug residual descubierto
+  y arreglado: el field access se emitía como
+  `(u.clone()).lock().unwrap().<f>`, dos accesos al mismo Mutex en
+  el mismo `format!(...)` deadlock-eaban (`std::sync::Mutex` no es
+  reentrante); cambio a bloque acotado
+  `{ let __obj = ...; let __g = __obj.lock().unwrap(); __g.<f> }`
+  para liberar el guard inmediato. `#[derive(PartialEq)]` falla
+  para `FooData` con campos nominales (porque `Mutex<T>` no impl
+  `PartialEq`); reemplazado por impl manual con helper recursivo
+  `field_eq_expr` que sigue el patrón del intérprete
+  (`Arc::ptr_eq` shortcut + lock+deref).
+- **F17.6** — Guía cap 19 sub-sección "Paralelismo HTTP real"
+  (reescribe la vieja "Limitación actual: server single-threaded").
+  Ejemplo nuevo `examples/guide/19b-paralelismo.fitz` con un
+  handler `sleep(1000).await`; validado a mano con curl + xargs:
+  5 requests concurrentes en **1.2s** vs 5 en serie en **5.3s**
+  (pre-F17 ambos eran ~5s). Smoke `GUIDE_EXAMPLES_COMPILE`
+  incluye el ejemplo. CLAUDE.md + roadmap + deudas-post-5b
+  actualizados con el cierre. README.md ajustado para reflejar
+  paralelismo HTTP real.
+
+**Total al cierre**: 1153 unit + 74 E2E verdes, clippy
+`-D warnings` limpio. **Próximo norte**: Fase 8 (Interop Python).
+
+Decisiones técnicas relevantes:
+
+- **`parking_lot::Mutex` para el intérprete, `std::sync::Mutex`
+  para el codegen output**. El intérprete acepta una dep nueva a
+  cambio de `.lock()` sin `.unwrap()` y mejor performance; el
+  codegen prioriza un `Cargo.toml` generado mínimo (sin deps
+  extras especialmente para binarios CLI sin HTTP) — el
+  `.lock().unwrap()` queda en código generado, no visible al
+  usuario.
+- **`LazyLock` sobre `OnceLock`** para el state HTTP del codegen.
+  std-puro desde Rust 1.80; el `Cargo.toml` generado no agrega
+  `once_cell`. Sintaxis cleaner.
+- **Política de re-entrancia**: lock scope mínimo + clone-out.
+  Auditoría manual sobre `eval_call` y `EnvRef::get` en F17.2.
+  Convención en codegen output: bloque acotado por field access
+  para que el guard del Mutex se libere al fin del bloque
+  inmediato (no al fin del statement contenedor).
+
+Deudas residuales que NO bloquean Fase 8:
+
+- Performance de `MutexGuard` en hot paths del intérprete vs
+  el `Ref<T>` de RefCell — esperable que sea similar o mejor
+  con parking_lot, pero sin benchmarks. Re-evaluar si aparece
+  presión.
+- Re-entrancia detectable en compile-time o tests: la auditoría
+  fue manual. Una mejora a futuro sería un lint/test que detecte
+  patrones de re-lock potencial.
+- El intérprete `LOADER` sigue como `thread_local! { RefCell<...> }`.
+  Con multi-thread hoy cada worker tendría su propia copia del
+  cache de módulos — re-cargando los archivos. Wasteful pero
+  correcto. Si aparece presión, migrar a `LazyLock<Mutex<...>>`
+  igual que el state HTTP del codegen.

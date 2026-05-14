@@ -56,15 +56,16 @@ HTTP y async a binario standalone. Ver
 [cap 20 de la guía](docs/guide.md#20-fitz-build--compilar-a-binario-nativo)
 para el detalle del subset soportado y de la deuda residual.
 
-‡ **Async nativo** — Fase 6 completada. `async fn` y `.await`
-postfix reales en el lenguaje. `Future<T>` como tipo built-in,
-builtin `sleep`, evaluator async sobre tokio current_thread,
-handlers HTTP async, codegen `async fn` Rust. Ver
-[cap 19 de la guía](docs/guide.md#19-async-y-concurrencia).
-Deuda visible: el server HTTP sigue single-threaded
-(`current_thread` runtime) — el paralelismo real entre
-handlers requiere F17 (Send completo, comprometida en
-`docs/deudas-post-5b.md`).
+‡ **Async nativo + paralelismo HTTP real** — Fase 6 + F17
+completadas. `async fn` y `.await` postfix reales en el
+lenguaje. `Future<T>` como tipo built-in, builtin `sleep`,
+evaluator async sobre tokio multi-thread, handlers HTTP async,
+codegen `async fn` Rust. El server HTTP corre N workers en
+paralelo (sin bridge `mpsc/oneshot`): 5 requests concurrentes a
+un handler `sleep(1000)` responden en ~1.2s, no en ~5s. Ver
+[cap 19 de la guía](docs/guide.md#19-async-y-concurrencia) y
+el ejemplo
+[`examples/guide/19b-paralelismo.fitz`](examples/guide/19b-paralelismo.fitz).
 
 ◊ **Docs HTTP automáticas** — Fase 7 completada. OpenAPI 3.1
 autogenerado desde los decoradores (path/query/body/headers

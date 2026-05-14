@@ -149,13 +149,16 @@ codegen los pueda procesar.
 
 El enum `Value` que vive durante `fitz run`: `Int`, `Float`, `Str`,
 `Bool`, `Null`, `List`, `Map`, `Instance` (de un `type`), `Result`,
-`Function` (built-in o user), `FnValue` (closure), `Module`, `Type`.
-`List`, `Map` e `Instance` están envueltos en `Rc<RefCell<...>>` para
-modelar semántica de referencia compartida (mutar a través de cualquier
-alias afecta a todos). Incluye los `impl Display` que producen el
-formato canónico de Fitz (strings con comillas dobles dentro de
-colecciones, `Float` con `.0`, etc.) — formato que el codegen replica
-bit-a-bit en el binario.
+`Function` (built-in o user), `FnValue` (closure), `Module`, `Type`,
+`Future` (post-Fase 6), `HttpResponse`, `CorsConfig`. `List`, `Map`
+e `Instance` están envueltos en `Arc<parking_lot::Mutex<...>>` (alias
+`Shared<T>`) para modelar semántica de referencia compartida (mutar
+a través de cualquier alias afecta a todos) y para que `Value` sea
+`Send` — lo que destrabó F17.5 (eliminación del bridge HTTP) y el
+runtime tokio multi-thread del server. Incluye los `impl Display`
+que producen el formato canónico de Fitz (strings con comillas
+dobles dentro de colecciones, `Float` con `.0`, etc.) — formato que
+el codegen replica bit-a-bit en el binario.
 
 ### env.rs — entornos / scopes
 
@@ -194,19 +197,25 @@ ejecutar la fn.
 
 ### http.rs — runtime HTTP
 
-Activa la capa HTTP nativa del lenguaje. Componentes:
+Activa la capa HTTP nativa del lenguaje. Post-F17.5 ya no hay
+bridge `mpsc/oneshot` ni std::thread separado para tokio —
+`serve()` corre el runtime tokio `rt-multi-thread` directo en
+el thread main y los handlers axum invocan al evaluator directo.
+Componentes:
 
 - `HttpRegistry`: tabla de rutas (`method`, `path_template`, `handler`,
   `RouteMeta`). Hay un registry "activo" (thread-local + global
   `RwLock`) que el evaluator usa para registrar rutas cuando ve `@get`,
   `@post`, etc.
-- `serve(registry, addr)`: spawnea un thread con
-  [tokio](https://tokio.rs) + [axum](https://docs.rs/axum), construye
-  el `Router`, y entra al `run_interpreter_loop` en el thread main.
-  Bridging via `mpsc::UnboundedSender<InterpTask>` +
-  `oneshot::Sender<HandlerOutcome>`. Cada request HTTP se serializa
-  como un `InterpTask` que el evaluator ejecuta sync (porque `Value`
-  no es `Send` por los `Rc`).
+- `serve(registry, addr)`: construye un `Arc<HttpRegistry>` y un
+  `axum::Router` compartido, bindea `TcpListener`, e invoca
+  `axum::serve(...).await` con graceful shutdown. Un solo runtime
+  tokio multi-thread (N workers según cores) procesa las requests
+  en paralelo.
+- `build_router(metas, registry: Arc<HttpRegistry>, openapi_schema)`:
+  arma el `Router` con un closure por ruta. Cada closure clona el
+  `Arc<HttpRegistry>` y llama `dispatch_request(&registry, ...).await`
+  → `handle_task(&registry, ...).await` directo al evaluator.
 - `value_to_json` / `json_to_value` / `json_to_instance`: traducen
   entre `Value` y `serde_json::Value`. Con schema (`type` declarado en
   el handler), `json_to_instance` valida campos, aplica defaults,
@@ -221,17 +230,27 @@ Activa la capa HTTP nativa del lenguaje. Componentes:
 Genera un Cargo project completo a partir del AST tipado.
 `generate_project(path, program, type_env) -> Result<Project>` devuelve
 `Cargo.toml` + `src/main.rs` + módulos auxiliares. Decisiones de
-mapping de tipos: `Int → i64`, `Float → f64`, `Str → String`,
-`Bool → bool`, `List<T> → Rc<RefCell<Vec<T>>>`,
-`Map<K,V> → Rc<RefCell<Vec<(K,V)>>>`, `Result<T> → Result<T, String>`,
-`type Foo { ... } → struct FooData { ... } + type Foo = Rc<RefCell<FooData>>`.
+mapping de tipos (post-F17.4b): `Int → i64`, `Float → f64`,
+`Str → String`, `Bool → bool`, `List<T> → Arc<Mutex<Vec<T>>>`,
+`Map<K,V> → Arc<Mutex<Vec<(K,V)>>>`, `Result<T> → Result<T, String>`,
+`type Foo { ... } → struct FooData { ... } + type Foo = Arc<Mutex<FooData>>`.
+Mutex es `std::sync::Mutex` (sin deps extras en el Cargo.toml
+generado); `PartialEq` se emite manual por cada `FooData` (porque
+`Mutex<T>` no impl PartialEq) con un helper recursivo
+`field_eq_expr` que combina `Arc::ptr_eq` shortcut + lock+deref
+por campo. State HTTP compartido pasa de `thread_local!` (pre-F17)
+a `static X: LazyLock<Arc<Mutex<T>>> = LazyLock::new(|| ...);` con
+materialización `(*X).clone()` en cada handler. Field access se
+emite como bloque acotado `{ let __obj = ...; let __g = __obj.lock().unwrap();
+__g.<f>.clone() }` para evitar deadlock por re-lock del mismo Mutex
+en una sola expresión (`std::sync::Mutex` no es reentrante).
 Tiene su propio `ModuleLoader` que replica el del evaluator pero AOT
 (carga + parsea + chequea + transpila cada módulo importado). Cuando
 detecta decoradores HTTP, suma `axum`/`tokio`/`serde` al `Cargo.toml`
-generado y emite `#[tokio::main] async fn main()` con `Router` y
-handler wrappers. La regla de oro: el output del binario tiene que ser
-bit-a-bit idéntico al de `fitz run` para los programas dentro del
-subset soportado.
+generado y emite `#[tokio::main] async fn main()` (default multi-thread
+post-F17.4b) con `Router` y handler wrappers. La regla de oro: el
+output del binario tiene que ser bit-a-bit idéntico al de `fitz run`
+para los programas dentro del subset soportado.
 
 ### error.rs — manejo de errores
 

@@ -165,17 +165,35 @@ hoy es realidad implementada.
 deps (axum/tokio/serde), Cargo las maneja sin reescribir pipeline.
 Costo: ~1-2s adicionales en la primera compilación. Aceptable.
 
-### `Rc<RefCell<>>` para tipos custom y colecciones en el binario
+### `Arc<Mutex<>>` para tipos custom y colecciones en el binario (post-F17.4b)
 **Decisión:** `type Foo { ... }` Fitz → `struct FooData` Rust + alias
-`type Foo = Rc<RefCell<FooData>>`. `List<T>` → `Rc<RefCell<Vec<T>>>`.
-`Map<K, V>` → `Rc<RefCell<Vec<(K, V)>>>`.
+`type Foo = Arc<Mutex<FooData>>`. `List<T>` → `Arc<Mutex<Vec<T>>>`.
+`Map<K, V>` → `Arc<Mutex<Vec<(K, V)>>>`. `Mutex` es `std::sync::Mutex`
+(sin deps extras en el Cargo.toml generado).
 **Razón:** preserva la semántica de referencia compartida del intérprete
 (mutaciones vía cualquier alias se ven en todos los alias, incluyendo
-args de fn). Sin esto, el código del intérprete y el del binario
-divergirían en comportamiento — inaceptable para Fitz, donde
-`fitz run` y `fitz build` deben producir output bit-a-bit idéntico.
-**Trade-off:** `u.name` se traduce a `u.borrow().name.clone()` —
-correcto pero caro. Optimizable post-5b sin cambiar la semántica.
+args de fn) **y** habilita que `Value` y `EnvRef` sean `Send + Sync`
+— condición necesaria para que axum pueda invocar al evaluator
+sobre un runtime tokio multi-thread. Pre-F17 el codegen emitía
+`Rc<RefCell<>>` (single-thread, sin Send) y el runtime HTTP estaba
+forzado a `current_thread`. Post-F17 el server compilado responde N
+requests en paralelo (validado con 5 reqs concurrentes a un handler
+`sleep(1000)` en ~1.2s vs ~5s pre-F17). El intérprete usa
+`parking_lot::Mutex` (más rápido, no envenena); el codegen output
+usa `std::sync::Mutex` para no agregar deps al binario producido.
+**Trade-off:** `u.name` se traduce a un bloque acotado
+`{ let __obj = u.clone(); let __g = __obj.lock().unwrap(); __g.name.clone() }`
+en lugar de un simple field access. El bloque libera el guard al fin
+del bloque (no del statement) — sin esto, dos accesos al mismo
+Mutex en una sola expresión (típicamente adentro de `format!(...)`)
+producen deadlock porque `std::sync::Mutex` no es reentrante.
+`PartialEq` deja de derivarse y se emite manual con helper
+`field_eq_expr` (Mutex<T> no impl PartialEq) — espejo del patrón del
+intérprete (`Arc::ptr_eq` shortcut + lock+deref).
+**Decisión paralela:** state HTTP compartido pasa de `thread_local!`
+(F11 pre-F17, asumía current_thread) a
+`static X: LazyLock<Arc<Mutex<T>>> = LazyLock::new(|| ...);`
+para que un solo Arc se comparta entre todos los workers tokio.
 
 ### `Result<T>` Fitz → `Result<T, String>` Rust
 **Decisión:** en el codegen, el lado Err de `Result` queda pinned a

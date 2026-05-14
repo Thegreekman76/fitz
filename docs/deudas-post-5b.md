@@ -130,8 +130,26 @@
 > codes en schema). Q.5 (bundle offline) postergado por
 > trade-off de tamaño. Q.6 (docs refresh) cerrado en este mismo
 > bloque. Total al cierre de la tanda: **1153 unit + 74 E2E**.
-> Próximo norte: F17 (Send + paralelismo + bridge HTTP off),
-> después Fase 8 (Python interop).
+>
+> **Fase F17 (2026-05-14): CERRADA** — Send completo +
+> paralelismo HTTP real + bridge eliminado. La deuda más grande
+> arrastrada desde Fase 4. Seis sub-pasos: F17.1 dep parking_lot;
+> F17.2 `Shared<T>`/`EnvRef` → `Arc<parking_lot::Mutex<T>>` (~284
+> sitios mecánicos); F17.3 quitar `?Send` del `#[async_recursion]`
+> (`FitzFuture: Send`); F17.4a `serve()` tokio multi-thread;
+> F17.5 eliminar bridge HTTP `mpsc/oneshot` (~269 LoC netas menos
+> en `http.rs`, handlers axum invocan `handle_task(...).await`
+> directo sobre `Arc<HttpRegistry>`); F17.4b codegen output paralela
+> migración (`Rc<RefCell<>>` → `Arc<Mutex<>>` con std::sync, state
+> HTTP `thread_local!` → `LazyLock<Arc<Mutex<T>>>`, runtime
+> generado a `#[tokio::main]` multi-thread, `PartialEq` custom
+> por tipo, field access como bloque acotado para evitar deadlocks
+> de re-lock); F17.6 guía cap 19 + ejemplo
+> `examples/guide/19b-paralelismo.fitz` (validado 5 reqs en 1.2s
+> paralelo vs 5.3s serie). Total al cierre: **1153 unit + 74 E2E**,
+> clippy `-D warnings` limpio. Detalles completos en
+> `docs/roadmap.md` → "Fase F17". Próximo norte: **Fase 8
+> (Interop Python)**.
 
 ## Resumen ejecutivo
 
@@ -262,7 +280,7 @@ estado real).
 | F14 | `codegen.rs` | `let X = <expr>` no-literal a nivel mod top-level. | Baja | Media |
 | F15 | `parser.rs` | **Error recovery del parser** — hoy el parser aborta al primer error. Para tooling externo (LSP/IDE) que necesita dar diagnostics y completions sobre código incompleto/roto, el parser tiene que producir un AST parcial y seguir adelante. Refactor mediano: introducir nodos `Stmt::Error`/`Expr::Error`, sync points en `{`/`}`/`;`/newline, recolectar `Vec<FitzError>` en lugar de `Result<_, FitzError>`. Pre-req habilitante para Fase 9 (LSP). | Baja | Alta |
 | F16 | `types.rs` (checker) | **IR tipado persistido por nodo** — el checker hoy sintetiza tipos en `infer_expr` y los descarta. Para hover ("¿qué tipo tiene esta expresión?") y completion contextual ("`u.` → mostrar fields de `User`"), hace falta retener `HashMap<SpanKey, Type>` (o un side-table paralelo al AST) con el tipo de cada nodo. Encaja también con el "IR tipado" que el doc ya menciona como sub-paso natural post-5b. Pre-req habilitante para Fase 9 (LSP). | Baja | Media |
-| F17 | `evaluator.rs` + `value.rs` + `env.rs` + `http.rs` | **Migración a Send + spawn paralelo + eliminación del bridge HTTP** — Fase 6.4 dejó el evaluator async con `#[async_recursion(?Send)]` sobre tokio `current_thread`. Los containers de `Value` (`Value::List`/`Map`/`Instance.fields`) y `EnvRef` siguen detrás de `Rc<RefCell<>>`. Eso cumple la promesa "async nativo punto" pero **no habilita paralelismo real entre tareas Fitz**: ni `tokio::join!`, ni `tokio::spawn` desde un handler, ni dos requests HTTP ejecutándose simultáneamente. **Bridge HTTP sigue activo**: `axum::handler::Handler` requiere `Send + 'static`, así que los handlers axum no pueden invocar `eval_call(...).await` directo mientras `Value::Function` arrastre `EnvRef` no-Send — se quedan en el `mpsc/oneshot` bridge introducido en Fase 4. El sub-paso 6.5 ("eliminar bridge HTTP") del plan original quedó **bloqueado** por esta misma deuda. **Compromiso explícito (acordado con el autor)**: cuando aparezca presión por concurrencia real (handler HTTP lento que aguanta otros requests, builtin `fetch` que pide paralelizar I/O, etc.), abrir mini-fase dedicada: migrar `Shared<T>` de `Rc<RefCell<T>>` a `Arc<parking_lot::Mutex<T>>`, idem `EnvRef`, eliminar `(?Send)` del macro, switchear runtime a `rt-multi-thread`, y **como consecuencia automática eliminar el bridge HTTP** (handlers axum llaman `call_handler(...).await` directo). Refactor estimado: 261 sitios de `.borrow()/.borrow_mut()` → `.lock()`, riesgo medio-alto (deadlock potencial en re-entrancia). Es deuda **comprometida**, no opcional — la promesa de async nativo sin spawn paralelo está incompleta y se cierra acá. | Media | Alta |
+| F17 | ~~`evaluator.rs` + `value.rs` + `env.rs` + `http.rs` + `codegen.rs`~~ | **CERRADO (2026-05-14, 1153 unit + 74 E2E)** — Send completo + paralelismo HTTP real + bridge HTTP eliminado. Seis sub-pasos: F17.1 dep `parking_lot`; F17.2 `Shared<T>` y `EnvRef` migran a `Arc<parking_lot::Mutex<T>>` (~284 sitios mecánicos `.borrow()/.borrow_mut()` → `.lock()`, `Rc::ptr_eq` → `Arc::ptr_eq`); F17.3 quitar `?Send` del `#[async_recursion]` en evaluator (13 sitios) + `FitzFuture: Pin<Box<dyn Future + Send>>` (fix colateral: `for` sobre List/Range materializa a `Vec<Value>` en vez de `Box<dyn Iterator>`); F17.4a `serve()` tokio `rt-multi-thread`; F17.5 eliminar bridge HTTP (`InterpTask`, `TaskTx`, `run_interpreter_loop`, `dispatch_request` viejo — ~269 LoC netas menos en `http.rs`, handlers axum invocan `handle_task(&registry, ...).await` directo sobre `Arc<HttpRegistry>` compartido, test helpers `run_oneshot_*` sin `LocalSet`/`select!`/canal); F17.4b codegen output paralela (`Rc<RefCell<>>` → `Arc<Mutex<>>` con std::sync, F12 closures `Arc<dyn Fn + Send + Sync>`, state HTTP `thread_local!` → `LazyLock<Arc<Mutex<T>>>`, runtime emitido `#[tokio::main]` default multi-thread, field access en bloque acotado `{ let __obj = ...; let __g = __obj.lock().unwrap(); __g.<f> }` para evitar deadlock por re-lock en `format!`, `PartialEq` custom por tipo nominal con helper recursivo `field_eq_expr`); F17.6 guía cap 19 sub-sección "Paralelismo HTTP real" + ejemplo `examples/guide/19b-paralelismo.fitz` validado a mano (5 reqs concurrentes en **1.2s** vs 5 en serie **5.3s**; pre-F17 ambos ~5s). Decisiones técnicas: `parking_lot::Mutex` para el intérprete, `std::sync::Mutex` para el codegen output (sin deps extras al Cargo.toml generado); política de re-entrancia "lock scope mínimo + clone-out" (auditoría manual en eval_call/EnvRef::get). **Deudas residuales que NO bloquean Fase 8**: benchmarks de `MutexGuard` vs `Ref<T>` (sin medir); lint o test que detecte patrones de re-lock potencial; LOADER del intérprete sigue como `thread_local! { RefCell<...> }` (re-carga módulos por worker, wasteful pero correcto). Ver detalle en `docs/roadmap.md` → "Fase F17". | — | — |
 
 ### Docs
 

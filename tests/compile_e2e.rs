@@ -1677,6 +1677,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "17b-middleware.fitz",
     "18-docs.fitz",
     "19-async.fitz",
+    "19b-paralelismo.fitz",
     "20-build.fitz",
 ];
 

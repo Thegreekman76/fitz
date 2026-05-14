@@ -1,0 +1,48 @@
+// 19b-paralelismo.fitz — Ejemplo del capítulo 19, sección
+// "Paralelismo HTTP real (post-F17)".
+//
+// Demuestra que post-F17 el server HTTP corre sobre tokio multi-thread:
+// N workers procesan handlers en paralelo. Un handler que duerme 1
+// segundo y se invoca 5 veces concurrentemente termina las 5 requests
+// en ~1 segundo, no en ~5.
+//
+// Antes de F17, los Value y EnvRef del intérprete arrastraban
+// `Rc<RefCell<>>` (no-Send), así que el runtime estaba forzado a
+// `current_thread`. Las 5 requests se serializaban — ~5s totales.
+// Post-F17 los containers son `Arc<Mutex<>>` (Send + Sync), el bridge
+// HTTP mpsc/oneshot desapareció y axum invoca el evaluator directo
+// sobre N workers tokio.
+//
+// Probarlo:
+//
+//   fitz run examples/guide/19b-paralelismo.fitz &
+//
+// En otra terminal (necesita curl + GNU parallel o xargs):
+//
+//   time seq 5 | xargs -P 5 -I _ curl -s http://127.0.0.1:3000/lento
+//
+// Resultado esperado: ~1.0s real (5 requests, paralelas, cada una
+// duerme 1s). Pre-F17 hubiera sido ~5.0s.
+//
+// `fitz build` produce un binario standalone con el mismo
+// comportamiento — `#[tokio::main]` default (multi-thread, N workers
+// según cores).
+
+@server(3000)
+fn main() => 0
+
+// Handler async: duerme 1s y devuelve la timestamp como Int. El
+// `sleep(1000).await` cede CPU mientras espera, así que durante ese
+// segundo el worker queda libre para que otros workers procesen otras
+// requests sin esperar a este.
+@get("/lento")
+async fn lento() -> Str {
+    let _ = sleep(1000).await
+    return "ok"
+}
+
+// Handler sync de referencia: respuesta inmediata. Sirve para confirmar
+// que las requests rápidas no se bloquean detrás de las lentas (cada
+// una en su worker).
+@get("/rapido")
+fn rapido() -> Str => "ya"
