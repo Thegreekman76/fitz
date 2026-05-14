@@ -912,6 +912,16 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
                 "CorsConfig no es serializable — se usa como argumento de `@middleware(cors(...))`, no como valor".to_string(),
             );
         }
+        // PyObject (Fase 8.1+, feature `python`): opaco. El handler
+        // debería extraer primitivos (8.1) o usar marshaling explícito
+        // (8.2+) antes de devolver. Si llega un PyObject crudo, el
+        // usuario olvidó coercionar.
+        #[cfg(feature = "python")]
+        Value::PyObject(_) => {
+            return Err(
+                "PyObject no es serializable a JSON — convertí el valor Python a un tipo Fitz antes de devolverlo".to_string(),
+            );
+        }
     })
 }
 

@@ -105,6 +105,53 @@ pub fn shared<T>(value: T) -> Shared<T> {
     Arc::new(Mutex::new(value))
 }
 
+/// Handle opaco a un objeto Python (módulo, función, instancia, etc.) —
+/// solo existe cuando el binario `fitz` se compila con la feature
+/// `python` (Fase 8.1+). Envuelve `Py<PyAny>` de PyO3 en un `Arc` para
+/// que `Value::clone()` quede O(1) sin tomar el GIL: el `Arc` cuenta
+/// las copias del handle a nivel Rust, y solo cuando el último handle
+/// se dropea PyO3 toma el GIL para decrementar el refcount Python.
+///
+/// La igualdad es por identidad del objeto Python (`Py::as_ptr()`),
+/// igual que para `Value::Module` y `Value::Function`. Dos handles
+/// distintos al mismo módulo importado son iguales.
+///
+/// Debug manual (Py<PyAny> no implementa Debug) — produce
+/// `PyObjectHandle(<python object>)` sin tocar Python.
+#[cfg(feature = "python")]
+pub struct PyObjectHandle(pub Arc<pyo3::Py<pyo3::PyAny>>);
+
+#[cfg(feature = "python")]
+impl Clone for PyObjectHandle {
+    fn clone(&self) -> Self {
+        PyObjectHandle(Arc::clone(&self.0))
+    }
+}
+
+#[cfg(feature = "python")]
+impl std::fmt::Debug for PyObjectHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "PyObjectHandle(<python object>)")
+    }
+}
+
+#[cfg(feature = "python")]
+impl PyObjectHandle {
+    /// Construye un handle a partir de un `Py<PyAny>` ya adquirido
+    /// (por ejemplo, el retorno de `PyModule::import` adentro de un
+    /// `Python::with_gil`). El caller mantiene la responsabilidad de
+    /// haber tomado el GIL para obtener el `Py<PyAny>` original; este
+    /// constructor solo envuelve.
+    ///
+    /// `dead_code` allow: la variante `Value::PyObject` y este
+    /// constructor aún no se usan en 8.1.1 (solo placeholder); el
+    /// loader Python en `evaluator::load_module` los consume en 8.1.2.
+    #[allow(dead_code)]
+    pub fn new(obj: pyo3::Py<pyo3::PyAny>) -> Self {
+        PyObjectHandle(Arc::new(obj))
+    }
+}
+
 /// Un valor en runtime.
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -271,6 +318,22 @@ pub enum Value {
     /// sin clonar (mover con `.take()`), preservando la regla
     /// "un future se await una sola vez".
     Future(FutureCell),
+
+    /// Objeto Python opaco — solo existe con la feature `python`.
+    /// Producido por el loader `from python import <mod>` (Fase 8.1.2)
+    /// y por accesos a atributos / llamadas que devuelven objetos
+    /// no-primitivos (8.1.3+). En 8.1 los primitivos (Int/Float/Str/
+    /// Bool/None) se auto-coercionan a `Value` nativos en el cruce,
+    /// así que `Value::PyObject` envuelve módulos, funciones, clases,
+    /// instancias y demás callables/contenedores opacos. El
+    /// marshaling de tipos compuestos (List/Map/Instance) llega en 8.2.
+    ///
+    /// `dead_code` allow: en 8.1.1 la variante existe como placeholder
+    /// (Display/PartialEq/type_name preparados); el constructor real
+    /// llega en 8.1.2 cuando `evaluator::load_module` rutea a Python.
+    #[cfg(feature = "python")]
+    #[allow(dead_code)]
+    PyObject(PyObjectHandle),
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -334,6 +397,8 @@ impl Value {
             Value::Module { .. } => "Module",
             Value::CorsConfig(_) => "CorsConfig",
             Value::Future(_) => "Future",
+            #[cfg(feature = "python")]
+            Value::PyObject(_) => "PyObject",
         }
     }
 }
@@ -426,6 +491,8 @@ impl std::fmt::Display for Value {
             },
             Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
+            #[cfg(feature = "python")]
+            Value::PyObject(_) => write!(f, "<python object>"),
         }
     }
 }
@@ -495,6 +562,16 @@ impl PartialEq for Value {
                 Value::Module { env: e1, .. },
                 Value::Module { env: e2, .. },
             ) => Arc::ptr_eq(e1, e2),
+            // PyObject se compara por identidad del objeto Python
+            // (`Py::as_ptr()` da el `*mut PyObject` subyacente, que es
+            // único por objeto vivo). Dos handles a `math` importado dos
+            // veces son iguales — Python cachea los imports igual que
+            // nuestro `Value::Module` cachea por path canonicalizado.
+            // No hace falta tomar el GIL para leer el puntero.
+            #[cfg(feature = "python")]
+            (Value::PyObject(a), Value::PyObject(b)) => {
+                a.0.as_ptr() == b.0.as_ptr()
+            }
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }

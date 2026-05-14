@@ -58,6 +58,31 @@ async-recursion = "1"
 # F17.1 para mantener commits verdes intermedios.
 parking_lot = "0.12"
 
+# Fase 8.1 — interop Python via PyO3. Dep OPCIONAL detrás de la
+# feature `python`: el binario `fitz` default sigue siendo
+# standalone, sin link a CPython. Para usar `from python import ...`
+# en el intérprete, el usuario compila con `cargo install --features
+# python` (o `cargo build --features python`); sin la feature, los
+# imports Python disparan error claro en runtime.
+#
+# Features elegidas:
+#  - `abi3-py310`: ABI estable de CPython 3.10+. Un solo binario
+#    corre contra cualquier Python 3.10/3.11/3.12/3.13 instalado en
+#    la máquina. Trade-off: APIs introducidas post-3.10 quedan
+#    fuera, pero ninguna importa para 8.1 (primitivos).
+#  - `auto-initialize`: PyO3 boota CPython en el primer
+#    `Python::with_gil`. Habilita el patrón lazy del 8.1 — programas
+#    sin imports Python no pagan el costo de boot.
+pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optional = true }
+
+[features]
+# Activa la interop con Python (Fase 8.1+). Opt-in: el binario
+# `fitz` default no lincado a libpython, sin requerir Python en el
+# sistema. `cargo build --features python` activa la variante
+# `Value::PyObject` y (en sub-pasos siguientes) el loader Python en
+# `evaluator::load_module` + el módulo `py_interop` que envuelve PyO3.
+python = ["dep:pyo3"]
+
 [dev-dependencies]
 # Directorios temporales para tests del loader de módulos (3.5):
 # permite armar fixtures en disco y limpiarlos automáticamente.
