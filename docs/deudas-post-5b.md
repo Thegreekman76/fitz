@@ -57,6 +57,31 @@
 > Ver matriz para ítems pendientes (Pattern/TypeExpr sin span,
 > T1 sucesivos batches). **1043 tests pasando** (+17 dedicados:
 > http path 5, codegen 7, E2E 5).
+>
+> **Cierre de Fase 7 (2026-05-13)**: DX HTTP cerrada con 1150
+> tests. OpenAPI 3.1 + UI Scalar + `@header(name="X")` +
+> `@server(docs=false)` + `fitz openapi archivo.fitz` + paridad
+> bit-a-bit `fitz run` ↔ `fitz build`. Deuda residual abierta:
+>
+> - **Middleware + CORS (comprometido como mini-fase post-F7
+>   antes de F8)**. El server real necesita interceptar requests
+>   para logging, auth, CORS, rate limiting, etc. Decisión de
+>   sintaxis pendiente al arrancar. CORS típicamente entrega con
+>   un built-in `cors(...)` configurable. **Esta es la próxima
+>   ventana de trabajo HTTP antes de salir a interop con Python**.
+> - Doc-strings sobre handlers (descripciones OpenAPI) — el
+>   parser hoy descarta comentarios; retenerlos es refactor
+>   lexer+parser+AST. Sub-paso candidato post-middleware.
+> - Status codes custom en el schema (`return 404 { ... }` no
+>   aparece en `responses`, solo `200` y `500` derivados de
+>   `Result<T>`). Cazarlos requiere análisis del body del handler.
+> - Aliases en `@header`: hoy el nombre del param Fitz se deriva
+>   por convención lowercase + `-` → `_`. Permitir
+>   `@header(name="X-Auth", into="token")` con alias explícito
+>   es deuda menor.
+> - Bundle Scalar embebido offline. Hoy la UI carga desde CDN
+>   jsdelivr.
+> - `info.version` override (hoy fijo en `"0.1.0"`).
 
 ## Resumen ejecutivo
 

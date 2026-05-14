@@ -1,4 +1,4 @@
-// 18-async.fitz — Ejemplo del capítulo 18 "Async y concurrencia".
+// 19-async.fitz — Ejemplo del capítulo 19 "Async y concurrencia".
 //
 // `async fn` declara una función concurrente: al llamarla devuelve un
 // `Future<T>` pendiente, y `.await` (postfix) lo desempaca al `T`. El
@@ -10,12 +10,12 @@
 // async) — el checker lo rechaza con error explícito.
 //
 // Correr:
-//   fitz run examples/guide/18-async.fitz
+//   fitz run examples/guide/19-async.fitz
 //
 // Compilar:
-//   fitz build examples/guide/18-async.fitz
-//   ./examples/guide/18-async         # Linux / macOS
-//   .\examples\guide\18-async.exe     # Windows
+//   fitz build examples/guide/19-async.fitz
+//   ./examples/guide/19-async         # Linux / macOS
+//   .\examples\guide\19-async.exe     # Windows
 
 // `pausa_corta` espera N ms y devuelve la cantidad pasada como input.
 // `sleep(n)` produce `Future<Null>`; `.await` lo dispara y obtenemos

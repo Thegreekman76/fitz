@@ -18,9 +18,11 @@ Para ver un ejemplo **que corre hoy end-to-end con `fitz run`**,
 mirá [`examples/server.fitz`](examples/server.fitz) — un CRUD
 completo con `Result + ?`, body JSON y `@server(...)`. Para un
 ejemplo **compilado a binario nativo con `fitz build`**, mirá
-[`examples/guide/19-build.fitz`](examples/guide/19-build.fitz) —
+[`examples/guide/20-build.fitz`](examples/guide/20-build.fitz) —
 server HTTP sin state compartido, compilable end-to-end. Para
-async, [`examples/guide/18-async.fitz`](examples/guide/18-async.fitz).
+async, [`examples/guide/19-async.fitz`](examples/guide/19-async.fitz).
+Para **docs autogeneradas** (OpenAPI 3.1 + UI Scalar en `/docs`),
+[`examples/guide/18-docs.fitz`](examples/guide/18-docs.fitz).
 
 ## Por qué Fitz
 
@@ -40,6 +42,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 | Compilado nativo     | ❌     | ❌         | ✅  | ✅ † |
 | HTTP en el core      | ❌     | ❌         | ❌  | ✅   |
 | Async nativo         | ⚠️     | ✅         | ✅  | ✅ ‡ |
+| Docs HTTP automáticas | ⚠️    | ❌         | ❌  | ✅ ◊ |
 | Interop Python       | ✅     | ❌         | ❌  | 🚧 § |
 
 \* **Tipado gradual con chequeo estático** — Fase 5a completada.
@@ -50,18 +53,26 @@ sin anotación, se infiere o se trata como `Any`.
 transpile-a-Rust + Cargo. `fitz build` compila primitivos,
 tipos custom, listas/mapas, `Result`/`?`/`match`, módulos,
 HTTP y async a binario standalone. Ver
-[cap 19 de la guía](docs/guide.md#19-fitz-build--compilar-a-binario-nativo)
+[cap 20 de la guía](docs/guide.md#20-fitz-build--compilar-a-binario-nativo)
 para el detalle del subset soportado y de la deuda residual.
 
 ‡ **Async nativo** — Fase 6 completada. `async fn` y `.await`
 postfix reales en el lenguaje. `Future<T>` como tipo built-in,
 builtin `sleep`, evaluator async sobre tokio current_thread,
 handlers HTTP async, codegen `async fn` Rust. Ver
-[cap 18 de la guía](docs/guide.md#18-async-y-concurrencia).
+[cap 19 de la guía](docs/guide.md#19-async-y-concurrencia).
 Deuda visible: el server HTTP sigue single-threaded
 (`current_thread` runtime) — el paralelismo real entre
 handlers requiere F17 (Send completo, comprometida en
 `docs/deudas-post-5b.md`).
+
+◊ **Docs HTTP automáticas** — Fase 7 completada. OpenAPI 3.1
+autogenerado desde los decoradores (path/query/body/headers
+y `Result<T>` en return), UI Scalar embebida en `/docs`,
+`@header(name="X")` para headers como params, opt-out con
+`@server(docs=false)`. Schema bit-a-bit idéntico entre `fitz
+run`, `fitz openapi archivo.fitz` y `fitz build`. Ver
+[cap 18 de la guía](docs/guide.md#18-docs-automáticas).
 
 § **Interop Python via PyO3** — planificado para Fase 8,
 todavía no implementado.
@@ -96,39 +107,42 @@ async fn get_user(id: Int) -> User {
 ```
 
 Hoy mismo, todo lo de arriba funciona — incluyendo `async fn` con
-`.await` (cap 18 de la guía) y status codes custom
+`.await` (cap 19 de la guía) y status codes custom
 (`return 404 { ... }`, cap 17). Lo único que falta es el driver
 de DB:
 
 ```bash
 fitz run examples/server.fitz
 # Servidor en http://127.0.0.1:3000 (CRUD completo)
+# Además: /openapi.json (schema 3.1) y /docs (UI Scalar) gratis.
 ```
 
 Un server HTTP **compilado a binario nativo**:
 
 ```bash
-fitz build examples/guide/19-build.fitz
-./examples/guide/19-build      # Linux/macOS
+fitz build examples/guide/20-build.fitz
+./examples/guide/20-build      # Linux/macOS
 # o:
-.\examples\guide\19-build.exe  # Windows
+.\examples\guide\20-build.exe  # Windows
 ```
 
 Y un programa CLI con `async fn` + `.await`:
 
 ```bash
-fitz build examples/guide/18-async.fitz
-./examples/guide/18-async      # Linux/macOS
+fitz build examples/guide/19-async.fitz
+./examples/guide/19-async      # Linux/macOS
 ```
 
 ## Estado del proyecto
 
-🏔️ **Fase 6 completada — Fitz tiene async nativo.** `async fn`,
-`.await` postfix, `Future<T>` como tipo built-in, builtin
-`sleep`, evaluator async sobre tokio, handlers HTTP async,
-codegen `async fn` Rust. El lenguaje cumple la promesa de
-"HTTP nativo" tanto a nivel ergonómico (cap 17) como a nivel de
-ejecución (cap 18).
+🏔️ **Fase 7 completada — Fitz tiene docs HTTP autogeneradas.**
+OpenAPI 3.1 + UI Scalar gratis en `/docs` y `/openapi.json` desde
+los decoradores existentes. `@header(name="X")` para headers como
+params. Opt-out con `@server(docs=false)`. Subcomando `fitz
+openapi archivo.fitz` para CI. Paridad bit-a-bit entre `fitz run`
+y `fitz build`. El lenguaje cumple la promesa de "HTTP nativo" a
+tres niveles: ergonómico (cap 17), de ejecución (cap 19) y de
+developer experience (cap 18).
 
 Las fases cerradas:
 
@@ -162,15 +176,22 @@ Las fases cerradas:
   async sobre tokio `current_thread`, handlers HTTP async y
   codegen `async fn` Rust + `tokio::time::sleep` para `fitz
   build`. Cumple la promesa de "HTTP nativo" a nivel de ejecución.
+- **Fase 7 — DX HTTP**: schema OpenAPI 3.1 autogenerado desde
+  los decoradores (path/query/body/headers y `Result<T>` en
+  return); UI Scalar embebida en `/docs`; `@header(name="X")`
+  como decorator stackable para headers como params del handler;
+  subcomando `fitz openapi archivo.fitz`; opt-out con
+  `@server(docs=false)`; paridad bit-a-bit entre `fitz run`,
+  `fitz openapi` y `fitz build` (el binario nativo embebe el
+  schema en build-time).
 
-**1085+ tests pasando** (1018 unit + 67 E2E que compilan binarios
-con `fitz build` y validan output).
+**1150+ tests pasando** (1080+ unit + 70 E2E que compilan
+binarios con `fitz build` o validan el subcomando `fitz openapi`).
 
-Próximo norte: **Fase 7 — DX HTTP** (OpenAPI + Scalar),
-**Fase 8 — Interop Python**, **Fase 9 — Ecosistema**. Ver el
-[roadmap](docs/roadmap.md) para detalle. **Deuda comprometida
-post-Fase 6**: F17 (Send completo) habilita paralelismo real
-entre handlers HTTP y elimina el bridge mpsc interno del server.
+Próximo norte: **Fase 8 — Interop Python**, **Fase 9 — Ecosistema**.
+Ver el [roadmap](docs/roadmap.md) para detalle. **Deuda comprometida
+post-Fase 7**: middleware y CORS, F17 (Send completo) para
+paralelismo real entre handlers, descripciones via doc-strings.
 
 ## Qué funciona hoy
 
@@ -189,11 +210,16 @@ entre handlers HTTP y elimina el bridge mpsc interno del server.
   sobre built-ins, índices con tipo de clave incompatible, y más.
 - **Compilación a binario nativo** (Fase 5b): `fitz build` compila
   CLI y servidores HTTP a ejecutables standalone. Ver el
-  [cap 19 de la guía](docs/guide.md#19-fitz-build--compilar-a-binario-nativo)
+  [cap 20 de la guía](docs/guide.md#20-fitz-build--compilar-a-binario-nativo)
   para el subset cubierto y las limitaciones residuales.
 - **Async nativo** (Fase 6): `async fn`, `.await` postfix,
   `Future<T>`, builtin `sleep`. Compatible con CLI y handlers
-  HTTP. Ver [cap 18 de la guía](docs/guide.md#18-async-y-concurrencia).
+  HTTP. Ver [cap 19 de la guía](docs/guide.md#19-async-y-concurrencia).
+- **Docs HTTP automáticas** (Fase 7): OpenAPI 3.1 + UI Scalar
+  autogenerados desde los decoradores. `/openapi.json`, `/docs` y
+  `fitz openapi archivo.fitz` gratis. `@header(name="X")` para
+  headers como params, opt-out con `@server(docs=false)`. Ver
+  [cap 18 de la guía](docs/guide.md#18-docs-automáticas).
 
 ### CLI
 
@@ -210,6 +236,9 @@ fitz run --no-typecheck programa.fitz
 # Compilar a binario nativo (Fase 5b)
 fitz build programa.fitz
 ./programa
+
+# Emitir el schema OpenAPI 3.1 a stdout (Fase 7 — útil para CI)
+fitz openapi programa.fitz > schema.json
 ```
 
 ## Estabilidad

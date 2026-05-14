@@ -1,4 +1,4 @@
-// 19-build.fitz — Ejemplo del capítulo 19 "fitz build" (compilar a
+// 20-build.fitz — Ejemplo del capítulo 20 "fitz build" (compilar a
 // binario nativo).
 //
 // Este server **no usa state compartido**: cada handler procesa sus
@@ -7,9 +7,9 @@
 // 17, que usa una `List<User>` que todos los handlers comparten).
 //
 // Compilar y correr:
-//   fitz build examples/guide/19-build.fitz
-//   ./examples/guide/19-build         # Linux / macOS
-//   .\examples\guide\19-build.exe     # Windows
+//   fitz build examples/guide/20-build.fitz
+//   ./examples/guide/20-build         # Linux / macOS
+//   .\examples\guide\20-build.exe     # Windows
 //
 // Probar:
 //   curl http://127.0.0.1:3000/

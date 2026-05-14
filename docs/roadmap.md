@@ -3131,9 +3131,8 @@ lleguemos".
 
 ---
 
-## Fase 7 — DX HTTP 📋
-**Estado: PROPUESTA — siguiente comprometida (Fase 6 cerrada
-2026-05-13)**
+## Fase 7 — DX HTTP ✓
+**Estado: COMPLETADA (2026-05-13)** — 1150 tests pasando al cerrar.
 
 Con async nativo cerrado (Fase 6), Fitz cumple la promesa de
 HTTP de primera clase a nivel de ejecución. Falta la otra mitad
@@ -3182,8 +3181,8 @@ OpenAPI 3.1 + UI embebida.
 
 ### Pasos
 
-#### 7.0 — Kwargs en decoradores
-**Pendiente** — pre-requisito para `@server(docs=false)` y para
+#### 7.0 — Kwargs en decoradores ✓
+**Cerrado** — pre-requisito para `@server(docs=false)` y para
 cualquier decorator futuro con configuración no-posicional.
 
 - Parser: `@deco(pos1, pos2, key1=value1, key2=value2)` — los
@@ -3207,8 +3206,8 @@ docs=false)` parsea, chequea, y evalúa correctamente — con
 `docs=false` aún no haciendo nada (lo cierra 7.4 cuando el
 campo se exponga en `ServerConfig`).
 
-#### 7.1 — Generador de schema OpenAPI + subcomando `fitz openapi`
-**Pendiente** — base de la fase.
+#### 7.1 — Generador de schema OpenAPI + subcomando `fitz openapi` ✓
+**Cerrado** — base de la fase.
 
 - Nuevo módulo `src/openapi.rs` con
   `generate_openapi(registry: &HttpRegistry, type_env: &TypeEnv)
@@ -3229,8 +3228,8 @@ campo se exponga en `ServerConfig`).
   body tipado, schema con `Result<T>`, schema con nullables y
   defaults.
 
-#### 7.2 — Endpoint `/openapi.json` autoregistrado en `fitz run`
-**Pendiente** — runtime HTTP sirve el schema.
+#### 7.2 — Endpoint `/openapi.json` autoregistrado en `fitz run` ✓
+**Cerrado** — runtime HTTP sirve el schema.
 
 - El runtime axum suma la ruta `/openapi.json` automáticamente
   cuando hay decorators HTTP en el programa.
@@ -3239,8 +3238,8 @@ campo se exponga en `ServerConfig`).
 - Tests: `curl localhost:3000/openapi.json` devuelve un schema
   válido para `examples/server.fitz`.
 
-#### 7.3 — UI embebida `/docs` con Scalar
-**Pendiente** — la pieza visible.
+#### 7.3 — UI embebida `/docs` con Scalar ✓
+**Cerrado** — la pieza visible.
 
 - HTML estático embebido con `include_str!("templates/scalar.html")`
   apuntando al CDN de Scalar (o al bundle si se decide
@@ -3250,8 +3249,8 @@ campo se exponga en `ServerConfig`).
   smoke E2E que abre el server, hace GET a `/docs`, y verifica
   que el HTML referencia `/openapi.json`.
 
-#### 7.4 — Flag `@server(docs=false)` para opt-out
-**Pendiente** — control de superficie.
+#### 7.4 — Flag `@server(docs=false)` para opt-out ✓
+**Cerrado** — control de superficie.
 
 - `ServerConfig` suma campo `enable_docs: bool` (default `true`).
 - Aprovecha los kwargs de 7.0: `@server(...)` acepta el kwarg
@@ -3264,8 +3263,8 @@ campo se exponga en `ServerConfig`).
 - Tests: `@server(3000)` levanta con docs, `@server(3000,
   docs=false)` levanta sin docs (404 en `/docs`).
 
-#### 7.5 — Paridad en `fitz build`
-**Pendiente** — el binario nativo también sirve docs.
+#### 7.5 — Paridad en `fitz build` ✓
+**Cerrado** — el binario nativo también sirve docs.
 
 - Codegen detecta presencia de handlers HTTP y emite las rutas
   `/openapi.json` y `/docs` adentro del `Router` generado.
@@ -3279,35 +3278,40 @@ campo se exponga en `ServerConfig`).
   sirve `/docs` y `/openapi.json` con el mismo schema que
   `fitz run`.
 
-#### 7.6 — Headers como params del handler (query params YA CERRADOS)
-**Parcialmente cerrado** — query params ya implementados en una
-mini-fase post-5b (sintaxis `@get("/items?key={name}")`); falta:
+#### 7.6 — Headers como params del handler ✓
+**Cerrado** — sintaxis confirmada: **Opción A — decorator
+dedicado** `@header(name="HTTP-Name")` apilado antes del decorator
+de ruta. Aprovecha kwargs de 7.0; sin cambios al parser.
 
-- **Headers**: anotación explícita necesaria para desambiguar.
-  Convención a decidir en 7.x:
-  - Opción A — decorator dedicado: `@header(name="Authorization")
-    fn protected(auth: Str) -> ...`.
-  - Opción B — convención del nombre: `header_<name>: Str` se
-    interpreta como header.
-  - Opción C — kwargs explícitos en `@get(...)`: `@get("/x",
-    headers=["Authorization"])`.
-- OpenAPI schema (7.1) refleja query/header params en
-  `parameters` con `in: query` (ya disponible) o `in: header`
-  (depende del approach).
-- Tests: handler con header obligatorio rechaza request sin él
-  con 400; con valor coercionado a `Str` (siempre); schema
-  declara el header en `parameters`.
+Convención de mapping: lowercase + `-` → `_` deriva el nombre del
+param Fitz (`Authorization` → `authorization`, `X-Auth-Token` →
+`x_auth_token`). Solo `Str` o `Str?`. Lookup case-insensitive en
+HTTP.
 
-#### 7.7 — Guía + ejemplo + cierre formal de Fase 7
-**Pendiente** — documentación viva.
+Runtime: `HeaderSpec` en `RouteSpec`; `HeaderMap` extractor en
+cada case de `build_method_router`; `handle_task` bindea con 400
+si obligatorio falta. Codegen del wrapper paralelo. OpenAPI emite
+parameters con `in:"header"`.
 
-- Cap nuevo en `docs/guide.md` titulado "Docs automáticas",
-  probablemente entre el cap 17 (HTTP) y el 18 (`fitz build`)
-  — o reorganizado según donde haya quedado el cap async de 6.6.
-- Ejemplo ejecutable `examples/guide/NN-docs.fitz` con un CRUD
-  chiquito y la URL `/docs` resaltada.
-- Cap 19 ("Qué sigue") actualizado.
-- README + roadmap.
+15 tests dedicados (eval 6, runtime E2E 4, openapi 2, codegen 3).
+Smoke manual: paridad bit-a-bit fitz run ↔ fitz build.
+
+#### 7.7 — Guía + ejemplo + cierre formal de Fase 7 ✓
+**Cerrado** — documentación viva al día.
+
+- Cap 18 nuevo "Docs automáticas" en `docs/guide.md` (entre cap
+  17 HTTP y cap 19 Async). Renumeración: 18-async → 19, 19-build
+  → 20, 20-qué-sigue → 21.
+- Ejemplo ejecutable `examples/guide/18-docs.fitz` (CRUD chico
+  sin state compartido — compila con `fitz build`). Renombrados
+  `18-async.fitz` → `19-async.fitz` y `19-build.fitz` →
+  `20-build.fitz`. Smoke `GUIDE_EXAMPLES_COMPILE` actualizado.
+- Cap 17 (HTTP) menciona el cap 18 al cierre. Cap 21 (Qué sigue)
+  marca Fase 7 cerrada y apunta a Fase 8 como próximo norte.
+- README y `docs/roadmap.md` actualizados.
+- `docs/deudas-post-5b.md` suma párrafo de cierre F7 con deuda
+  residual (middleware/CORS comprometido, doc-strings, status
+  codes custom en schema, aliases @header, bundle Scalar offline).
 
 ### Decisiones cross-cutting
 
@@ -3323,14 +3327,70 @@ mini-fase post-5b (sintaxis `@get("/items?key={name}")`); falta:
    `@server(api_version="...")` es deuda chica, pospuesta.
 
 ### Features de la fase entera
-- [ ] Kwargs en decoradores (7.0) — pre-req
-- [ ] Generador de schema OpenAPI + `fitz openapi` (7.1)
-- [ ] `/openapi.json` autoregistrado en `fitz run` (7.2)
-- [ ] `/docs` con Scalar via CDN (7.3)
-- [ ] `@server(docs=false)` opt-out (7.4)
-- [ ] Paridad en `fitz build` (7.5)
-- [ ] Headers como params del handler (7.6) — query params ya cerrados
-- [ ] Guía + ejemplo + cierre formal (7.7)
+- [x] Kwargs en decoradores (7.0) — pre-req
+- [x] Generador de schema OpenAPI + `fitz openapi` (7.1)
+- [x] `/openapi.json` autoregistrado en `fitz run` (7.2)
+- [x] `/docs` con Scalar via CDN (7.3)
+- [x] `@server(docs=false)` opt-out (7.4)
+- [x] Paridad en `fitz build` (7.5)
+- [x] Headers como params del handler con `@header(name="X")` (7.6)
+- [x] Guía + ejemplo + cierre formal (7.7)
+
+### Cierre formal de Fase 7
+
+Criterio de éxito original: `examples/server.fitz` corriendo con
+`fitz run` expone `/openapi.json` con schema válido y `/docs`
+con UI Scalar interactiva. El mismo programa compilado con `fitz
+build` sirve ambas rutas con el mismo schema bit-a-bit.
+`@server(3000, docs=false)` apaga ambas.
+
+Cumplido al 100%:
+
+- ✓ `/openapi.json` y `/docs` autoregistrados en `fitz run` y
+  en el binario nativo de `fitz build`.
+- ✓ Schema bit-a-bit idéntico entre los 3 caminos (`fitz run`,
+  `fitz openapi`, `fitz build`).
+- ✓ `@server(docs=false)` apaga ambas rutas (404).
+- ✓ `@header(name="X")` para headers como params del handler.
+- ✓ Subcomando `fitz openapi archivo.fitz` (CI / generación de
+  SDKs / snapshot testing).
+- ✓ Cap 18 nuevo en la guía + ejemplo `18-docs.fitz` compilable
+  end-to-end.
+
+Tests al cerrar: **1150 totales** (1080 unit + 67 codegen E2E +
+3 openapi E2E). Distribución de tests nuevos en Fase 7: 7.0 (+8),
+7.1 (+23), 7.2 (+4), 7.3 (+3), 7.4 (+4 netos), 7.5 (+7), 7.6
+(+15), 7.7 (smoke +1 implícito en `GUIDE_EXAMPLES_COMPILE`).
+
+### Deuda residual de Fase 7 (post-7.7)
+
+Visible y comprometida — algunas con prioridad alta porque la
+promesa "HTTP nativo" todavía cojea sin ellas:
+
+- **Middleware y CORS** (comprometido — siguiente mini-fase
+  post-F7 antes de F8). Server web real necesita interceptar
+  requests para logging, auth, CORS, rate limiting, etc. Decisión
+  de sintaxis pendiente: decorator `@middleware(fn)` apilable,
+  callbacks en `@server(...)`, o convención de fns top-level
+  llamadas en orden. CORS típicamente entrega con un built-in
+  `cors(...)` configurable.
+- **Doc-strings sobre handlers** (descripciones OpenAPI): el
+  parser hoy descarta comentarios. Retenerlos como doc-strings
+  es refactor mediano (lexer + parser + AST + tests). F7 sale
+  con `summary`/`description` ausentes en el schema.
+- **Status codes custom en el schema**: handlers que hacen
+  `return 404 { ... }` (cap 17) no aparecen en `responses` del
+  schema — solo `200` y `500`. Cazarlos requiere análisis del
+  body del handler.
+- **Aliases en `@header`**: hoy el nombre del param Fitz se
+  deriva por convención (lowercase + `-` → `_`). Permitir
+  `@header(name="X-Auth", into="token")` con alias explícito
+  sería útil para nombres no convencionales.
+- **Bundle Scalar embebido offline**: hoy la UI carga desde CDN
+  jsdelivr. Embebir el bundle en `SCALAR_HTML` haría que la UI
+  funcione sin red (deuda menor, depende de presión real).
+- **`info.version` override**: hoy fijo en `"0.1.0"`. Habilitar
+  via `@server(api_version="...")` o similar.
 
 ### Pre-reqs / contexto al arrancar Fase 7
 

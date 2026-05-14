@@ -1,0 +1,63 @@
+// 18-docs.fitz — Ejemplo del capítulo 18 "Docs automáticas".
+//
+// Mini API SIN state compartido (compilable con `fitz build`) que
+// muestra cómo Fitz expone OpenAPI 3.1 y UI Scalar gratis:
+//
+//   - GET /openapi.json   → schema autogenerado
+//   - GET /docs           → UI Scalar interactiva (HTML embebido)
+//
+// Ambas rutas se registran automáticamente cuando hay decoradores
+// HTTP. Opt-out: `@server(3000, docs=false)`.
+//
+// Levantalo:
+//   fitz run examples/guide/18-docs.fitz
+//
+// O compílalo a binario nativo (el schema queda embebido en el .exe):
+//   fitz build examples/guide/18-docs.fitz
+//   ./examples/guide/18-docs        # Linux / macOS
+//   .\examples\guide\18-docs.exe    # Windows
+//
+// Probalo:
+//   curl http://127.0.0.1:3000/openapi.json | head -20
+//   open  http://127.0.0.1:3000/docs                  # abrí la UI en el browser
+//   curl  http://127.0.0.1:3000/items/1
+//   curl  http://127.0.0.1:3000/items/99               # 500 (Result<Item> con Err)
+//   curl "http://127.0.0.1:3000/items?name=foo"        # query Str
+//   curl  http://127.0.0.1:3000/items                  # query Str? falta
+//   curl -i -H "X-Api-Key: secreta" http://127.0.0.1:3000/private
+//   curl -i http://127.0.0.1:3000/private              # 400 sin header
+//
+// Para generar el schema sin levantar el server (útil para CI):
+//   fitz openapi examples/guide/18-docs.fitz > schema.json
+
+@server(3000)
+fn main() => 0
+
+type Item {
+    id: Int
+    name: Str
+}
+
+type ItemInput {
+    name: Str
+}
+
+@get("/items/{id}")
+fn get_item(id: Int) -> Result<Item> {
+    if (id == 1) { return Ok(Item { id: 1, name: "alfa" }) }
+    if (id == 2) { return Ok(Item { id: 2, name: "beta" }) }
+    return Err("item no encontrado")
+}
+
+@post("/items")
+fn create_item(body: ItemInput) -> Item => Item { id: 99, name: body.name }
+
+@get("/items?name={name}")
+fn search_items(name: Str?) -> Str {
+    if (name == null) { return "sin filtro" }
+    return "filtrando por nombre"
+}
+
+@header(name="X-Api-Key")
+@get("/private")
+fn private(x_api_key: Str) -> Str => x_api_key

@@ -48,13 +48,14 @@ abrí un issue.
 
 **Parte 7 — HTTP nativo y concurrencia**
 17. [HTTP nativo](#17-http-nativo)
-18. [Async y concurrencia](#18-async-y-concurrencia)
+18. [Docs automáticas](#18-docs-automáticas)
+19. [Async y concurrencia](#19-async-y-concurrencia)
 
 **Parte 8 — Compilar**
-19. [`fitz build` — compilar a binario nativo](#19-fitz-build--compilar-a-binario-nativo)
+20. [`fitz build` — compilar a binario nativo](#20-fitz-build--compilar-a-binario-nativo)
 
 **Parte 9 — Cerrando**
-20. [Qué sigue](#20-qué-sigue)
+21. [Qué sigue](#21-qué-sigue)
 
 ---
 
@@ -4358,12 +4359,148 @@ fn update_item(id: Int, dry_run: Bool, body: Patch) -> Str {
 Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
 escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
 errores propagable, configuración del server, status codes
-custom, query params. El próximo capítulo cubre la **otra mitad
-de "HTTP nativo"**: concurrencia con `async fn` y `.await`.
+custom, query params. El próximo capítulo cubre la **paridad con
+FastAPI en developer experience**: documentación de la API
+autogenerada (`/openapi.json` + UI Scalar en `/docs`). Después,
+el cap 19 cubre la otra mitad de "HTTP nativo": concurrencia con
+`async fn` y `.await`.
 
 ---
 
-## 18. Async y concurrencia
+## 18. Docs automáticas
+
+Fitz expone dos rutas más cuando hay handlers HTTP en el
+programa, sin que tengas que hacer nada:
+
+| Ruta | Qué sirve |
+|------|-----------|
+| `GET /openapi.json` | Schema OpenAPI 3.1 autogenerado del programa |
+| `GET /docs` | UI [Scalar](https://scalar.com/) interactiva (carga el schema en el browser) |
+
+Cualquier herramienta del ecosistema OpenAPI (Postman, Insomnia,
+`openapi-generator` para SDKs en otros lenguajes, etc.) se enchufa
+directo contra `/openapi.json`.
+
+### Cómo funciona
+
+El runtime HTTP recorre los decoradores que ya escribiste (`@get`,
+`@post`, `@header`, los tipos custom anotados como body, las
+anotaciones de return type) y arma el schema en memoria al
+arrancar el server. El subcomando `fitz openapi archivo.fitz`
+escupe el mismo schema a stdout, útil para CI o snapshot testing
+del contrato sin tener que levantar el server.
+
+```bash
+fitz openapi mi_api.fitz > schema.json
+```
+
+### Mapping `TypeExpr` → JSON Schema
+
+| Fitz | JSON Schema emitido |
+|------|---------------------|
+| `Int` | `{"type":"integer","format":"int64"}` |
+| `Float` | `{"type":"number"}` |
+| `Str` | `{"type":"string"}` |
+| `Bool` | `{"type":"boolean"}` |
+| `T?` | schema de `T` + `"nullable": true` |
+| `List<T>` | `{"type":"array","items":<T>}` |
+| `Map<Str, V>` | `{"type":"object","additionalProperties":<V>}` |
+| `Result<T>` (en return) | `200` con schema de `T` + `500` con `{error: string}` |
+| `User` (nominal) | `{"$ref":"#/components/schemas/User"}` |
+
+Cada `type Foo { ... }` del programa entra a
+`components.schemas.Foo` con sus campos como properties.
+`required` incluye los campos sin default y no nullables; el
+resto queda como opcional.
+
+### Headers como params del handler
+
+`@header(name="HTTP-Name")` apilado antes del decorator de ruta
+declara que un param del handler viene de un header HTTP. El
+nombre del param Fitz se deriva por convención:
+**lowercase + `-` → `_`**.
+
+```fitz
+@header(name="Authorization")
+@get("/private")
+fn private(authorization: Str) -> Str => authorization
+
+@header(name="X-Trace-Id")
+@get("/traced")
+fn traced(x_trace_id: Str?) -> Str => "ok"
+```
+
+Reglas:
+
+- Tipos soportados: `Str` (obligatorio) y `Str?` (opcional). Si
+  declarás otro tipo, el evaluador rechaza con error claro.
+- Falta header obligatorio → respuesta `400` con
+  `{"error":"header 'Foo': falta — es obligatorio"}`.
+- Lookup case-insensitive en HTTP: `authorization` matchea
+  contra `@header(name="Authorization")`.
+- En el schema OpenAPI, los headers aparecen como `parameters`
+  con `in: "header"` y `required` derivado del tipo.
+
+### Opt-out: `@server(docs=false)`
+
+Default: docs habilitados. Si querés apagarlos (servidor más
+chico, schema no público, etc.):
+
+```fitz
+@server(3000, docs=false)
+fn main() => 0
+```
+
+Con `docs=false`, ni `/openapi.json` ni `/docs` se registran
+(ambas devuelven `404`). El opt-out funciona idéntico en `fitz
+run` y `fitz build`.
+
+### Paridad `fitz run` ↔ `fitz build`
+
+El schema generado es **bit-a-bit idéntico** entre `fitz openapi
+archivo.fitz`, `fitz run archivo.fitz` (sirviendo `/openapi.json`)
+y `fitz build archivo.fitz` (el binario nativo embebe el schema
+como `&'static str` al compilar). Una sola fuente de verdad para
+el contrato.
+
+### Si el usuario declara `/openapi.json` o `/docs` propio
+
+`@get("/openapi.json") fn miyo() -> ...` se respeta — el
+auto-register cede. Mismo comportamiento para `/docs`. Útil si
+querés servir un schema custom o una UI distinta.
+
+### Ejemplo ejecutable
+
+[examples/guide/18-docs.fitz](../examples/guide/18-docs.fitz)
+muestra un CRUD chiquito con path params, query params, body
+tipado, return `Result<T>` (status `200`/`500`), header
+obligatorio. Compila con `fitz build` end-to-end.
+
+```bash
+fitz run examples/guide/18-docs.fitz
+# en otra terminal:
+curl http://127.0.0.1:3000/openapi.json | head -20
+open http://127.0.0.1:3000/docs        # macOS — abrí la UI en el browser
+```
+
+### Limitaciones conocidas
+
+- **Descripciones vacías**: `info.description` y
+  `paths.*.*.description` no se llenan todavía. El lexer hoy
+  descarta comentarios; doc-strings sobre handlers son deuda
+  post-F7.
+- **Status codes custom no aparecen en el schema**: si un handler
+  hace `return 404 { ... }` (cap 17), el schema sigue declarando
+  solo `200` y `500`. Cazarlos requiere análisis de los `return`
+  del handler — deuda menor.
+- **`info.version` fijo en `"0.1.0"`**: override via
+  `@server(api_version=...)` o similar no implementado.
+- **`@header` solo acepta `Str`/`Str?`**: si querés un header
+  numérico, parsealo adentro del handler.
+
+---
+
+## 19. Async y concurrencia
 
 Hasta acá las funciones de Fitz son sincrónicas: corren, devuelven,
 fin. `async fn` agrega una segunda forma: la función devuelve un
@@ -4500,15 +4637,15 @@ sola tarea a la vez.
 
 ### Ejemplo del capítulo
 
-Ver [examples/guide/18-async.fitz](../examples/guide/18-async.fitz).
+Ver [examples/guide/19-async.fitz](../examples/guide/19-async.fitz).
 Declara tres `async fn` que se componen, y desde el top-level las
 await-ea para imprimir los resultados.
 
 ```sh
-fitz run examples/guide/18-async.fitz
-fitz build examples/guide/18-async.fitz
-./examples/guide/18-async                # Linux/macOS
-.\examples\guide\18-async.exe            # Windows
+fitz run examples/guide/19-async.fitz
+fitz build examples/guide/19-async.fitz
+./examples/guide/19-async                # Linux/macOS
+.\examples\guide\19-async.exe            # Windows
 ```
 
 Salida esperada:
@@ -4527,7 +4664,7 @@ binario nativo standalone** con `fitz build`.
 
 ---
 
-## 19. `fitz build` — compilar a binario nativo
+## 20. `fitz build` — compilar a binario nativo
 
 Hasta acá usamos siempre `fitz run`: el intérprete lee el archivo,
 lo lexea, parsea, chequea y ejecuta en proceso. Es rápido para
@@ -4676,7 +4813,7 @@ Hola, Fitz, x es 15
 
 ### Ejemplo: server HTTP compilado
 
-[examples/guide/19-build.fitz](../examples/guide/19-build.fitz)
+[examples/guide/20-build.fitz](../examples/guide/20-build.fitz)
 es un server HTTP simple que cubre endpoints estáticos, path params,
 Result con Err → 500, y un POST con body deserializado a un `type`
 custom:
@@ -4707,10 +4844,10 @@ fn echo(body: Echo) -> Echo => body
 ```
 
 ```
-$ fitz build examples/guide/19-build.fitz
-✓ binario: examples/guide/19-build.exe
+$ fitz build examples/guide/20-build.fitz
+✓ binario: examples/guide/20-build.exe
 
-$ ./examples/guide/19-build.exe &
+$ ./examples/guide/20-build.exe &
 Fitz HTTP escuchando en http://127.0.0.1:3000
 
 $ curl http://127.0.0.1:3000/
@@ -4764,14 +4901,14 @@ y un compilador que genera binarios nativos para CLI y HTTP. El
 
 ---
 
-## 20. Qué sigue
+## 21. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 19 podés:
+Con los capítulos 1 a 20 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -4796,8 +4933,12 @@ Con los capítulos 1 a 19 podés:
   `from foo import a, b`.
 - Escribir **APIs HTTP** con `@get`/`@post`/`@put`/`@delete`,
   path params tipados, body deserializado contra `type`,
-  serialización JSON automática, y `@server(port, host)` para
-  configurar.
+  serialización JSON automática, headers con
+  `@header(name="X")`, y `@server(port, host)` para configurar.
+- Obtener **OpenAPI 3.1 + UI Scalar gratis** en `/openapi.json`
+  y `/docs`, generados desde los decoradores. Opt-out con
+  `@server(docs=false)`. Schema idéntico bit-a-bit entre
+  `fitz run` y `fitz build` (Fase 7).
 - Leer un mensaje de error del intérprete y ubicar de qué fase vino.
 - Validar tipos en compile time con **`fitz check`**, y dejar que
   `fitz run` aborte en modo strict cuando encuentra errores (Fase
@@ -4810,24 +4951,26 @@ Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
 ejecuten y un compilador que produce binarios standalone.
 
-### Lo que viene — más allá de Fase 6
+### Lo que viene — más allá de Fase 7
 
 Fase 5 cerró el **type checker estático** (5a) y el **codegen a
 binario nativo** (5b). Fase 6 cerró el **async nativo**:
 `async fn`, `.await`, `Future<T>`, builtin `sleep` y handlers HTTP
-async corriendo end-to-end con tokio. Con eso, la promesa "HTTP
-nativo" queda cumplida tanto a nivel ergonómico (cap 17) como a
-nivel de ejecución (cap 18).
+async. Fase 7 cerró la **DX HTTP**: OpenAPI 3.1 autogenerado, UI
+Scalar embebida, `@header(name="X")` para headers como params,
+opt-out con `@server(docs=false)`, paridad bit-a-bit entre `fitz
+run` y `fitz build`.
 
-Lo que sigue post-6:
+Con eso, la promesa "HTTP nativo" queda cumplida a tres niveles:
+ergonómico (cap 17), de ejecución (cap 19) y de developer
+experience (cap 18).
 
-- **Fase 7 — DX HTTP** (siguiente comprometida): OpenAPI 3.1
-  autogenerado desde los decoradores + UI Scalar embebida en
-  `/docs`. Paridad con FastAPI en developer experience.
-- **Fase 8 — Interop Python** (propuesta): poder llamar código
-  Python desde Fitz. El stack inicial de FastAPI/SQLAlchemy del
-  autor vive ahí; abrir el camino sin pedir que se reescriba
-  todo es lo que justifica la fase.
+Lo que sigue post-7:
+
+- **Fase 8 — Interop Python** (siguiente comprometida): poder
+  llamar código Python desde Fitz. El stack inicial de
+  FastAPI/SQLAlchemy del autor vive ahí; abrir el camino sin
+  pedir que se reescriba todo es lo que justifica la fase.
 - **Fase 9 — Ecosistema**: package manager, registry, LSP,
   formatter, linter, plugin de editores.
 - **Deuda residual comprometida**:
@@ -4843,6 +4986,10 @@ Lo que sigue post-6:
   - **Listas/mapas heterogéneos** compilados (`[1, "dos"]`) — el
     intérprete los acepta, el compilador necesita un `FitzValue`
     tagged en runtime.
+  - **Deuda menor de F7** (post-fase): doc-strings sobre
+    handlers (para descripciones OpenAPI), status codes custom
+    en el schema, `@header(into=...)` con alias del param Fitz,
+    bundle Scalar embebido offline.
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
 deuda explícita acumulada por fase.
