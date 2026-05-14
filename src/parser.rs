@@ -440,6 +440,26 @@ impl Parser {
     fn postfix(&mut self) -> FitzResult<Expr> {
         let mut expr = self.primary()?;
         loop {
+            // PreF8.2: method chain multi-línea. Si peek() es Newline,
+            // miramos adelante saltando newlines: si el próximo token
+            // significativo es `.`, consumimos los newlines y dejamos
+            // que la iteración siguiente del loop matchee el `Dot`.
+            // Solo `.` continúa — `(`, `[`, `?` rompen como hoy para
+            // no cambiar la semántica de expression statements
+            // separados ambiguamente por newlines.
+            if matches!(self.peek(), Token::Newline) {
+                let mut i = 1;
+                while matches!(self.peek_at(i), Token::Newline) {
+                    i += 1;
+                }
+                if matches!(self.peek_at(i), Token::Dot) {
+                    for _ in 0..i {
+                        self.advance();
+                    }
+                    continue;
+                }
+                break;
+            }
             match self.peek() {
                 Token::Dot => {
                     let span = self.cur_span();
@@ -2669,6 +2689,89 @@ mod tests {
                 }), span: Span::ZERO,
             }
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // PreF8.2: method chain multi-línea
+    // -----------------------------------------------------------------------
+    //
+    // El postfix loop tolera Newline antes de `.` y continúa la expresión.
+    // El AST resultante es idéntico al de la versión one-liner equivalente.
+
+    #[test]
+    fn method_chain_multilinea_parsea_igual_que_oneliner() {
+        let one = parse_expr("xs.filter(f).map(g)").unwrap();
+        let many = parse_expr("xs\n    .filter(f)\n    .map(g)").unwrap();
+        assert_eq!(one, many);
+    }
+
+    #[test]
+    fn method_chain_de_3_lineas_anida_correctamente() {
+        // xs\n.a()\n.b()\n.c() → Call(Field(Call(Field(Call(Field(xs, a)), b)), c))
+        let e = parse_expr("xs\n  .a()\n  .b()\n  .c()").unwrap();
+        let Expr::Call { callee, .. } = e else { panic!("se esperaba Call externo") };
+        let Expr::Field { object, field, .. } = *callee else { panic!("callee externo debía ser Field") };
+        assert_eq!(field, "c");
+        let Expr::Call { callee, .. } = *object else { panic!("nivel 2 debía ser Call") };
+        let Expr::Field { object, field, .. } = *callee else { panic!("callee nivel 2 debía ser Field") };
+        assert_eq!(field, "b");
+        let Expr::Call { callee, .. } = *object else { panic!("nivel 3 debía ser Call") };
+        let Expr::Field { object: receptor, field, .. } = *callee else { panic!("callee nivel 3 debía ser Field") };
+        assert_eq!(field, "a");
+        assert_eq!(*receptor, Expr::Ident("xs".into(), Span::ZERO));
+    }
+
+    #[test]
+    fn field_access_multilinea_parsea_igual_que_oneliner() {
+        // Sin paréntesis: solo field access encadenado.
+        let one = parse_expr("user.profile.email").unwrap();
+        let many = parse_expr("user\n  .profile\n  .email").unwrap();
+        assert_eq!(one, many);
+    }
+
+    #[test]
+    fn await_multilinea_se_encadena_al_receptor() {
+        // `fut\n  .await` → Await(fut)
+        let one = parse_expr("fut.await").unwrap();
+        let many = parse_expr("fut\n  .await").unwrap();
+        assert_eq!(one, many);
+    }
+
+    #[test]
+    fn method_chain_multilinea_con_newlines_en_blanco_funciona() {
+        // Más de un newline entre eslabones: siguen consumiéndose todos.
+        let one = parse_expr("xs.a().b()").unwrap();
+        let many = parse_expr("xs\n\n\n    .a()\n\n    .b()").unwrap();
+        assert_eq!(one, many);
+    }
+
+    #[test]
+    fn method_chain_multilinea_no_consume_newline_si_no_sigue_dot() {
+        // `let x = foo` seguido de `bar()` en línea siguiente: dos
+        // statements, NO una llamada `foo()` que se "continúa". El
+        // lookahead solo dispara cuando lo que sigue es `.`.
+        let program = parse_program_str("let x = foo\nbar()").unwrap();
+        assert_eq!(program.len(), 2, "se esperaban 2 stmts separados");
+    }
+
+    #[test]
+    fn method_chain_multilinea_funciona_en_rhs_de_let() {
+        // Caso de uso canónico: chain como RHS de un `let`.
+        let program = parse_program_str("let nombres = users\n  .filter(activo)\n  .map(nombre)").unwrap();
+        assert_eq!(program.len(), 1);
+        let Stmt::Assign { value, .. } = &program[0] else { panic!("se esperaba Assign") };
+        // El value debe ser una Call con callee Field.
+        let Expr::Call { callee, .. } = value else { panic!("se esperaba Call en RHS") };
+        let Expr::Field { field, .. } = callee.as_ref() else { panic!("callee debía ser Field") };
+        assert_eq!(field, "map");
+    }
+
+    #[test]
+    fn dot_a_inicio_de_statement_sin_receptor_sigue_siendo_error() {
+        // No debería convertirse en continuación de nada: `.foo()` solo
+        // arrancando una línea sigue siendo error (Dot no es primary).
+        let result = parse_program_str(".foo()");
+        assert!(result.is_err(), "se esperaba error de parseo");
     }
 
     // -----------------------------------------------------------------------

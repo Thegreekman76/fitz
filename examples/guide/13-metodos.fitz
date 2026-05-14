@@ -19,6 +19,14 @@ print(nombres)
 let con_o = usuarios.filter(fn(u) => u.name.lower() == "roy")
 print(con_o)
 
+// Method chain multi-línea: el parser tolera Newline antes de `.`,
+// así que un chain largo se puede partir y queda más legible.
+// Bit-a-bit equivalente al one-liner `usuarios.filter(...).map(...)`.
+let nombres_largos = usuarios
+    .filter(fn(u) => u.name.len() > 3)
+    .map(fn(u) => u.name)
+print(nombres_largos)
+
 // `.find` devuelve Ok(elemento) o Err si no encuentra.
 let buscado = usuarios.find(fn(u) => u.id == 1)
 print(buscado)

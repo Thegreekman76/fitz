@@ -2843,10 +2843,18 @@ let pares_al_cuadrado = [1, 2, 3, 4, 5]
 print(pares_al_cuadrado)           // [4, 16]
 ```
 
-> Limitación de hoy: el parser corta en el newline, así que el
-> ejemplo de arriba **no** anda partido en líneas múltiples
-> empezando con `.`. Hay que mantener la cadena en una sola línea
-> (o asignar a variables intermedias). Es deuda chica.
+El parser tolera el salto de línea antes de cada `.`, así que un
+chain largo se puede partir en varias líneas — la forma idiomática
+cuando el callback de cada paso ocupa lugar:
+
+```fitz
+let activos = usuarios
+    .filter(fn(u) => u.activo)
+    .map(fn(u) => u.nombre)
+```
+
+Es exactamente equivalente a `usuarios.filter(...).map(...)` en
+una sola línea — el AST resultante es idéntico.
 
 ### Mutación de campos
 
