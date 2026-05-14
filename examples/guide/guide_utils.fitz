@@ -8,10 +8,16 @@
 // `guide_utils.greet(...)`.
 
 let PREFIX = "saludos, "
+let DEFAULT_NAME = "anon"
 
 fn greet(name: Str) -> Str => "{PREFIX}{name}"
 
+// PreF8.3: el default `name: Str = DEFAULT_NAME` referencia una
+// const del módulo. El importer no necesita re-importar
+// `DEFAULT_NAME` — el loader pre-evalúa los defaults en el env
+// del módulo, así `User {}` desde el importer aplica `"anon"`
+// transparentemente.
 type User {
-    id: Int
-    name: Str
+    id: Int = 0
+    name: Str = DEFAULT_NAME
 }

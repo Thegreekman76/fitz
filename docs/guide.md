@@ -2526,6 +2526,26 @@ let c = Cfg {}
 print(c.port)     // 4001
 ```
 
+**Defaults de tipos importados.** Cuando un tipo se exporta a otro
+archivo vía `from foo import T`, sus defaults pueden referenciar
+consts u otros símbolos del módulo de origen sin que el importer los
+tenga que re-importar. El loader los pre-evalúa en el env del módulo
+de origen al cargarlo, así `T {}` desde el importer ya tiene los
+valores resueltos.
+
+```fitz
+// foo.fitz
+let MAX = 99
+type User { id: Int = MAX }
+```
+
+```fitz
+// main.fitz
+from foo import User    // no hace falta `from foo import MAX`
+let u = User {}
+print(u.id)             // 99
+```
+
 ### Campos nullables
 
 Un campo declarado con `Tipo?` puede valer `null`. Si lo omitís al

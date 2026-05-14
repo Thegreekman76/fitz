@@ -16,3 +16,9 @@ from guide_utils import User
 let u = User { id: 7, name: "Fitz" }
 print(guide_utils.greet(u.name))
 print(u)
+
+// Default importado: `User {}` aplica los defaults `id = 0` y
+// `name = DEFAULT_NAME` definidos en guide_utils — incluso aunque
+// `DEFAULT_NAME` no se importe acá.
+let anon = User {}
+print(anon)

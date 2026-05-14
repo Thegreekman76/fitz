@@ -984,7 +984,7 @@ pub fn json_to_value(json: &serde_json::Value) -> Value {
 pub fn json_to_instance(json: &serde_json::Value, type_value: &Value) -> Result<Value, String> {
     // 1. El segundo arg tiene que ser un Value::Type.
     let (type_name, fields) = match type_value {
-        Value::Type { name, fields } => (name.clone(), fields.clone()),
+        Value::Type { name, fields, .. } => (name.clone(), fields.clone()),
         other => {
             return Err(format!(
                 "json_to_instance recibió un {} en lugar de un Type",
@@ -3031,6 +3031,7 @@ mod tests {
                     }
                 })
                 .collect(),
+            resolved_defaults: vec![],
         }
     }
 

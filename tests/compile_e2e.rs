@@ -1282,6 +1282,35 @@ print(utils.greet(\"Patagonia\"))
 }
 
 #[test]
+fn from_import_type_con_default_referencia_const_del_modulo() {
+    // PreF8.3: el `type User` del módulo tiene un default
+    // `id: Int = MAX` donde `MAX` es una const del propio módulo.
+    // El importer NO importa `MAX`, solo `User`. Pre-PreF8.3 el
+    // codegen del struct lit fallaba "variable desconocida en
+    // codegen: MAX" porque resolvía el default_expr en el ctx del
+    // importer. Post-fix, el módulo emite `pub fn __default_User_id()
+    // -> i64 { MAX }` y el importer llama a `utils::__default_User_id()`.
+    let main = "\
+from utils import User
+let u = User {}
+print(u.id)
+print(u.name)
+";
+    let utils = "\
+let MAX = 99
+let HELLO = \"saludos\"
+type User { id: Int = MAX, name: Str = HELLO }
+";
+    let (stdout, exit) = build_and_run_multi(
+        "module-default-with-const",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["99", "saludos"]);
+}
+
+#[test]
 fn modulo_inexistente_aborta_build() {
     let stderr = build_expect_fail_multi(
         "module-not-found",

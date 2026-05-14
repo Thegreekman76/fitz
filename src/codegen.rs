@@ -966,6 +966,13 @@ fn generate_module_rs(program: &Program, env: &TypeEnv) -> Result<String, FitzEr
     for stmt in top_lets {
         ctx.gen_module_top_let(stmt)?;
     }
+    // PreF8.3: las helpers `__default_<T>_<F>()` se emiten DESPUÉS de
+    // los `top_lets` para que sus bodies (que pueden referenciar las
+    // consts) las tengan en scope. Los `top_fns` también van antes
+    // por consistencia con el patrón de declaración del módulo.
+    for stmt in &type_defs {
+        ctx.gen_type_default_helpers(stmt)?;
+    }
 
     Ok(ctx.output)
 }
@@ -2346,6 +2353,41 @@ impl<'a> CodegenCtx<'a> {
             }
             self.emit("        write!(__f, \" }}\")\n");
             self.emit("    }\n}\n\n");
+        }
+        Ok(())
+    }
+
+    /// PreF8.3: por cada field con default, emite una helper
+    /// `pub fn __default_<TypeName>_<FieldName>() -> T { <code del
+    /// default> }`. Se invoca solo en modo Module — el `main.rs`
+    /// generado para el importer llama a estas helpers en lugar de
+    /// inline-ar el `default_expr` (que referenciaría símbolos del
+    /// módulo de origen que el importer no tiene visibles).
+    ///
+    /// Si el tipo no tiene defaults, no emite nada.
+    fn gen_type_default_helpers(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let Stmt::TypeDef { name, .. } = stmt else {
+            unreachable!("gen_type_default_helpers solo se llama sobre Stmt::TypeDef");
+        };
+        let sig = self
+            .type_sigs
+            .get(name)
+            .cloned()
+            .ok_or_else(|| self.err(format!("tipo `{}` no pre-registrado", name)))?;
+        for f in &sig.fields {
+            let Some(default_expr) = &f.default else { continue };
+            let rust_ty = rust_type_for(&f.type_, self.env)?;
+            let (code, ty) = self.gen_expr(default_expr)?;
+            let coerced = coerce(&code, &ty, &f.type_);
+            writeln!(
+                &mut self.output,
+                "pub fn __default_{}_{}() -> {} {{ {} }}",
+                name, f.name, rust_ty, coerced
+            )
+            .unwrap();
+        }
+        if sig.fields.iter().any(|f| f.default.is_some()) {
+            self.emit("\n");
         }
         Ok(())
     }
@@ -4504,6 +4546,21 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
+        // PreF8.3: si el tipo viene de un `from foo import T`, los
+        // defaults se materializan vía helper fns del módulo
+        // (`foo::__default_T_<field>()`). Eso evita resolver Idents del
+        // default en el scope del importer, donde tipos referenciados
+        // por el default (consts, otros types del módulo de origen) no
+        // están visibles.
+        let imported_mod_name = match self.module_bindings.get(type_name) {
+            Some(ResolvedBinding::Named {
+                module_index,
+                kind: NamedKind::Type,
+                ..
+            }) => Some(self.loaded_modules[*module_index].mod_name.clone()),
+            _ => None,
+        };
+
         // Construimos los pares (campo, código Rust) en orden de
         // declaración del `type`. Esto importa para Display y para
         // futuras igualdades.
@@ -4514,8 +4571,14 @@ impl<'a> CodegenCtx<'a> {
                 let (code, ty) = self.gen_expr(expr)?;
                 coerce(&code, &ty, &f.type_)
             } else if let Some(default_expr) = &f.default {
-                let (code, ty) = self.gen_expr(default_expr)?;
-                coerce(&code, &ty, &f.type_)
+                if let Some(mod_name) = &imported_mod_name {
+                    // Llamada a la helper fn del módulo de origen. Su
+                    // body ya retorna el tipo correcto, sin coerce extra.
+                    format!("{}::__default_{}_{}()", mod_name, type_name, f.name)
+                } else {
+                    let (code, ty) = self.gen_expr(default_expr)?;
+                    coerce(&code, &ty, &f.type_)
+                }
             } else if matches!(f.type_, Type::Nullable(_)) {
                 "None".to_string()
             } else {

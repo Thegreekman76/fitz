@@ -988,6 +988,37 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
 
     eval_result?;
 
+    // PreF8.3: pre-evaluar los defaults de cada `Value::Type` del módulo
+    // en el env del módulo, para que un struct lit sobre un tipo
+    // importado pueda usar defaults que referencien símbolos del módulo
+    // (consts, otros types) sin que el importer los tenga que
+    // re-importar. Tipos definidos en el archivo principal NO pasan
+    // por acá; sus defaults se siguen evaluando lazy.
+    let typedef_names: Vec<String> = module_program
+        .iter()
+        .filter_map(|s| match s {
+            Stmt::TypeDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect();
+    for type_name in typedef_names {
+        let existing = module_env.lock().get(&type_name);
+        let Some(Value::Type { name, fields, .. }) = existing else { continue };
+        let mut resolved_defaults: Vec<(String, Value)> = Vec::new();
+        for f in &fields {
+            if let Some(expr) = &f.default {
+                let v = eval_expr(expr, module_env.clone()).await?;
+                resolved_defaults.push((f.name.clone(), v));
+            }
+        }
+        let new_type = Value::Type {
+            name,
+            fields,
+            resolved_defaults,
+        };
+        module_env.lock().define(type_name, new_type);
+    }
+
     // Construir el `Value::Module`. El nombre visible es el último
     // segmento del path (el `binding name`).
     let name = segments.last().cloned().unwrap_or_default();
@@ -1289,9 +1320,17 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // tipo en el env como un valor inerte. La instanciación (`User { id: 1 }`)
         // y el field access requieren extensiones del AST (Fase 3).
         Stmt::TypeDef { name, fields, span: _ } => {
+            // PreF8.3: tipos locales arrancan con `resolved_defaults` vacío.
+            // Sus `Field.default` se siguen evaluando lazy en cada struct
+            // lit con el env del call site. Solo los tipos cargados desde
+            // un módulo (vía `load_module`) tienen los defaults pre-
+            // evaluados — esa pre-evaluación se hace en un post-pass al
+            // terminar de ejecutar las stmts del módulo, ahí ya están
+            // disponibles todos los símbolos del módulo en su env.
             let t = Value::Type {
                 name: name.clone(),
                 fields: fields.clone(),
+                resolved_defaults: Vec::new(),
             };
             env.lock().define(name.clone(), t);
             Ok(Value::Null)
@@ -1637,8 +1676,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     format!("tipo `{}` no definido", type_name),
                 ))
             })?;
-            let declared = match ty {
-                Value::Type { fields, .. } => fields,
+            let (declared, resolved_defaults) = match ty {
+                Value::Type { fields, resolved_defaults, .. } => (fields, resolved_defaults),
                 other => {
                     return Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::TypeMismatch {
@@ -1676,12 +1715,22 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             // Armar la instancia en orden de declaración. Para cada
             // campo declarado: usar el del literal si está; si no,
             // default; si no, null si es nullable; si no, error.
+            //
+            // PreF8.3: el default puede venir pre-evaluado (tipos
+            // importados — el loader ya los materializó en el env del
+            // módulo de origen) o como Expr (tipos locales — evaluación
+            // lazy en cada struct lit con el env del call site).
             let mut instance_fields: Vec<(String, Value)> =
                 Vec::with_capacity(declared.len());
             for f in &declared {
                 let provided = fields.iter().find(|(n, _)| n == &f.name);
                 let value = if let Some((_, expr)) = provided {
                     eval_expr(expr, env.clone()).await?
+                } else if let Some((_, v)) = resolved_defaults
+                    .iter()
+                    .find(|(n, _)| n == &f.name)
+                {
+                    v.clone()
                 } else if let Some(default_expr) = &f.default {
                     eval_expr(default_expr, env.clone()).await?
                 } else if f.type_.is_nullable() {
@@ -4640,7 +4689,7 @@ print(_)\n";
 
         let v = env.lock().get("User").expect("User no quedó en el env");
         match v {
-            Value::Type { name, fields } => {
+            Value::Type { name, fields, .. } => {
                 assert_eq!(name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].name, "id");
@@ -4655,6 +4704,7 @@ print(_)\n";
         let t = Value::Type {
             name: "Foo".into(),
             fields: vec![],
+            resolved_defaults: vec![],
         };
         assert_eq!(t.type_name(), "Type");
     }
@@ -6281,6 +6331,49 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("foo.fitz", foo)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("nm"), Some(Value::Str("Fitz".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_import_default_referencia_const_del_modulo() {
+        // PreF8.3: el `type User` del módulo tiene defaults que
+        // referencian consts del propio módulo (`MAX`, `HELLO`). El
+        // importer no las trae al scope. El loader pre-evalúa los
+        // defaults en el env del módulo, así `User {}` aplica `99` y
+        // `"saludos"` transparentemente. Pre-fix daba
+        // "variable `MAX` no definida" en runtime.
+        let foo = "\
+            let MAX = 99\n\
+            let HELLO = \"saludos\"\n\
+            type User { id: Int = MAX, name: Str = HELLO }\n\
+        ";
+        let main = "\
+            from foo import User\n\
+            let u = User {}\n\
+            let id = u.id\n\
+            let nm = u.name\n\
+        ";
+        let (env, res) = eval_with_modules(&[("foo.fitz", foo)], main).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("id"), Some(Value::Int(99)));
+        assert_eq!(env.lock().get("nm"), Some(Value::Str("saludos".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_import_default_se_puede_sobrescribir_con_struct_lit() {
+        // Aunque el módulo defina defaults, el importer puede
+        // sobrescribirlos al construir.
+        let foo = "\
+            let MAX = 99\n\
+            type User { id: Int = MAX }\n\
+        ";
+        let main = "\
+            from foo import User\n\
+            let u = User { id: 1 }\n\
+            let id = u.id\n\
+        ";
+        let (env, res) = eval_with_modules(&[("foo.fitz", foo)], main).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("id"), Some(Value::Int(1)));
     }
 
     #[tokio::test(flavor = "current_thread")]

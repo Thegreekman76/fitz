@@ -142,9 +142,20 @@ pub enum Value {
     /// Por ahora es un marcador inerte: existe en el env para que el nombre
     /// del tipo pueda resolverse, pero sin struct literals no se puede
     /// instanciar. Se vuelve útil en Fase 3 (instanciación, field access).
+    ///
+    /// PreF8.3: `resolved_defaults` queda vacío para tipos definidos en el
+    /// archivo actual (sus defaults se evalúan lazy cada vez que se
+    /// instancia, con el env del call site). Para tipos importados desde
+    /// otro módulo, el loader pre-evalúa los `Field.default` en el env de
+    /// origen y los materializa acá. El struct lit prefiere
+    /// `resolved_defaults` antes de caer al `Field.default` como Expr,
+    /// para que un default importado pueda referenciar consts u otros
+    /// símbolos del módulo de origen sin que el importer los tenga que
+    /// re-importar.
     Type {
         name: String,
         fields: Vec<Field>,
+        resolved_defaults: Vec<(String, Value)>,
     },
 
     /// Lista en runtime. Compartida por referencia (`Shared<T>` =
