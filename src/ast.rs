@@ -343,6 +343,9 @@ pub enum Stmt {
     Import {
         /// Segmentos del path en orden. Siempre tiene al menos un elemento.
         path: Vec<String>,
+        /// PreF8.4: `import foo as f` — el namespace se bindea como `f`
+        /// en lugar del último segmento del path. `None` si no hay alias.
+        alias: Option<String>,
         span: Span,
     },
 
@@ -351,9 +354,14 @@ pub enum Stmt {
     /// no queda expuesto como tal.
     ///
     /// El parser garantiza que `names` no esté vacío.
+    ///
+    /// PreF8.4: cada entry de `names` es `(nombre_original, alias_opcional)`.
+    /// `from foo import bar as b` → `[("bar", Some("b"))]`. Sin alias,
+    /// la segunda componente es `None` y el binding usa el nombre
+    /// original.
     FromImport {
         path: Vec<String>,
-        names: Vec<String>,
+        names: Vec<(String, Option<String>)>,
         span: Span,
     },
 }
@@ -899,11 +907,12 @@ mod tests {
 
     #[test]
     fn import_simple_guarda_path_de_un_segmento() {
-        // `import utils` → Stmt::Import { path: ["utils"] , span: Span::ZERO }
-        let s = Stmt::Import { path: vec!["utils".into()] , span: Span::ZERO };
+        // `import utils` → Stmt::Import { path: ["utils"], alias: None }
+        let s = Stmt::Import { path: vec!["utils".into()], alias: None, span: Span::ZERO };
         match s {
-            Stmt::Import { path, .. } => {
+            Stmt::Import { path, alias, .. } => {
                 assert_eq!(path, vec!["utils".to_string()]);
+                assert!(alias.is_none());
             }
             _ => panic!("se esperaba Import"),
         }
@@ -911,8 +920,8 @@ mod tests {
 
     #[test]
     fn import_punteado_guarda_segmentos_en_orden() {
-        // `import sub.foo` → Stmt::Import { path: ["sub", "foo"] , span: Span::ZERO }
-        let s = Stmt::Import { path: vec!["sub".into(), "foo".into()] , span: Span::ZERO };
+        // `import sub.foo` → Stmt::Import { path: ["sub", "foo"], alias: None }
+        let s = Stmt::Import { path: vec!["sub".into(), "foo".into()], alias: None, span: Span::ZERO };
         match s {
             Stmt::Import { path, .. } => {
                 assert_eq!(path.len(), 2);
@@ -925,15 +934,18 @@ mod tests {
 
     #[test]
     fn from_import_guarda_path_y_nombres() {
-        // `from utils import slugify, parse`
+        // `from utils import slugify, parse` — sin aliases.
         let s = Stmt::FromImport {
             path: vec!["utils".into()],
-            names: vec!["slugify".into(), "parse".into()],
+            names: vec![("slugify".into(), None), ("parse".into(), None)],
          span: Span::ZERO };
         match s {
             Stmt::FromImport { path, names, .. } => {
                 assert_eq!(path, vec!["utils".to_string()]);
-                assert_eq!(names, vec!["slugify".to_string(), "parse".to_string()]);
+                assert_eq!(names.len(), 2);
+                assert_eq!(names[0].0, "slugify");
+                assert!(names[0].1.is_none());
+                assert_eq!(names[1].0, "parse");
             }
             _ => panic!("se esperaba FromImport"),
         }

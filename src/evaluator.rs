@@ -1446,12 +1446,15 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // bajo el ÚLTIMO segmento del path (`sub.foo` → binding `foo`).
         // Para field access (`foo.bar`) ver `eval_expr` sobre `Expr::Field`;
         // para method calls (`foo.bar()`) ver `dispatch_method`.
-        Stmt::Import { path, span: _ } => {
+        Stmt::Import { path, alias, span: _ } => {
             let module = load_module(path).await?;
-            let binding_name = path
-                .last()
-                .cloned()
-                .expect("parser garantiza al menos un segmento");
+            // PreF8.4: si hay alias (`import foo as f`), bindeamos
+            // bajo el alias. Sin alias, bajo el último segmento del path.
+            let binding_name = alias.clone().unwrap_or_else(|| {
+                path.last()
+                    .cloned()
+                    .expect("parser garantiza al menos un segmento")
+            });
             env.lock().define(binding_name, module);
             Ok(Value::Null)
         }
@@ -1460,6 +1463,10 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // nombre directo al scope actual. Si el módulo no expone
         // alguno de los nombres pedidos, error explícito citando cuál
         // falta y desde qué módulo.
+        //
+        // PreF8.4: cada entry es `(name, alias?)`. El lookup en el
+        // módulo se hace por `name`; el binding en el scope local
+        // usa `alias` si está, si no `name`.
         Stmt::FromImport { path, names, span: _ } => {
             let module = load_module(path).await?;
             let module_env = match &module {
@@ -1470,7 +1477,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 .last()
                 .cloned()
                 .unwrap_or_else(|| "<sin nombre>".to_string());
-            for name in names {
+            for (name, alias) in names {
                 let v = module_env.lock().get(name).ok_or_else(|| {
                     EvalSignal::Error(FitzError::new(
                         ErrorKind::UndefinedVariable(name.clone()),
@@ -1481,7 +1488,8 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                         ),
                     ))
                 })?;
-                env.lock().define(name.clone(), v);
+                let binding = alias.clone().unwrap_or_else(|| name.clone());
+                env.lock().define(binding, v);
             }
             Ok(Value::Null)
         }
@@ -1676,8 +1684,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     format!("tipo `{}` no definido", type_name),
                 ))
             })?;
-            let (declared, resolved_defaults) = match ty {
-                Value::Type { fields, resolved_defaults, .. } => (fields, resolved_defaults),
+            let (declared_type_name, declared, resolved_defaults) = match ty {
+                Value::Type { name, fields, resolved_defaults } => (name, fields, resolved_defaults),
                 other => {
                     return Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::TypeMismatch {
@@ -1748,7 +1756,14 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 };
                 instance_fields.push((f.name.clone(), value));
             }
-            Ok(Value::new_instance(type_name.clone(), instance_fields))
+            // PreF8.4: usamos el nombre canónico del Value::Type (el
+            // del archivo donde el `type` se declaró), NO el `type_name`
+            // del literal sintáctico. Con `from foo import User as P`,
+            // `P { ... }` produce una instancia cuyo Display dice
+            // "User { ... }" — paridad con `fitz build` (donde
+            // `P` es un alias de `User` en Rust y el `Display` está
+            // implementado sobre `UserData` con el nombre original).
+            Ok(Value::new_instance(declared_type_name, instance_fields))
         }
 
         // `[e1, e2, ...]` — evaluamos los elementos en orden.
@@ -6356,6 +6371,62 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("id"), Some(Value::Int(99)));
         assert_eq!(env.lock().get("nm"), Some(Value::Str("saludos".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn import_con_alias_bindea_bajo_alias() {
+        // PreF8.4: `import utils as u` → binding `u`, no `utils`.
+        let utils = "fn greet(n) => \"hola, {n}\"\n";
+        let main = "\
+            import utils as u\n\
+            let g = u.greet(\"Fitz\")\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("g"), Some(Value::Str("hola, Fitz".into())));
+        // El nombre original NO queda bindeado.
+        assert!(env.lock().get("utils").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_import_alias_bindea_bajo_alias() {
+        // PreF8.4: `from utils import greet as g, PREFIX as P`.
+        let utils = "\
+            let PREFIX = \"saludos, \"\n\
+            fn greet(n) => \"hola, {n}\"\n\
+        ";
+        let main = "\
+            from utils import greet as g, PREFIX as P\n\
+            let r = g(\"Fitz\")\n\
+            let p = P\n\
+        ";
+        let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("hola, Fitz".into())));
+        assert_eq!(env.lock().get("p"), Some(Value::Str("saludos, ".into())));
+        // Los nombres originales NO quedan bindeados.
+        assert!(env.lock().get("greet").is_none());
+        assert!(env.lock().get("PREFIX").is_none());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_import_alias_de_tipo_struct_lit_usa_alias_pero_display_nombre_original() {
+        // PreF8.4: `from foo import User as Person` + `Person { ... }`.
+        // El struct lit usa el alias para mirar el binding, pero el
+        // Display de la instancia usa el nombre canónico del tipo
+        // (`User`) para mantener paridad con `fitz build`.
+        let foo = "type User { id: Int, name: Str }\n";
+        let main = "\
+            from foo import User as Person\n\
+            let p = Person { id: 7, name: \"Fitz\" }\n\
+            let rendered = \"{p}\"\n\
+        ";
+        let (env, res) = eval_with_modules(&[("foo.fitz", foo)], main).await;
+        res.unwrap();
+        assert_eq!(
+            env.lock().get("rendered"),
+            Some(Value::Str("User { id: 7, name: \"Fitz\" }".into()))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

@@ -412,11 +412,14 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
     // value, no un type. Se registra como var en `check_stmt`.
     for stmt in program {
         if let Stmt::FromImport { names, .. } = stmt {
-            for n in names {
-                if env.lookup(n).is_none() {
+            for (n, alias) in names {
+                // PreF8.4: con alias, el binding local en el TypeEnv
+                // usa el alias. Sin alias, el nombre original.
+                let binding = alias.clone().unwrap_or_else(|| n.clone());
+                if env.lookup(&binding).is_none() {
                     // declare_nominal puede fallar solo si el nombre
                     // ya estaba; ya chequeamos así que es seguro.
-                    let _ = env.declare_nominal(n.clone());
+                    let _ = env.declare_nominal(binding);
                 }
             }
         }
@@ -2163,10 +2166,12 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
 
         Stmt::Break(_) | Stmt::Continue(_) => {}
 
-        Stmt::Import { path, .. } => {
-            // `import a.b.c` bindea `c` como Module (Any en el checker).
-            if let Some(last) = path.last() {
-                ctx.declare_var(last.clone(), Type::Any);
+        Stmt::Import { path, alias, .. } => {
+            // `import a.b.c` bindea `c` (o `alias` si está) como Module
+            // (Any en el checker).
+            let binding = alias.clone().or_else(|| path.last().cloned());
+            if let Some(name) = binding {
+                ctx.declare_var(name, Type::Any);
             }
         }
 
@@ -2175,9 +2180,11 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // ser tipos (los chequea StructLit vía TypeEnv, ya
             // registrados en resolve_program), otros funciones o
             // values — sin info del módulo importado, `Any` es lo
-            // mejor que tenemos en 5.3.1.
-            for n in names {
-                ctx.declare_var(n.clone(), Type::Any);
+            // mejor que tenemos en 5.3.1. Con alias, el binding local
+            // usa el alias en lugar del nombre original.
+            for (n, alias) in names {
+                let binding = alias.clone().unwrap_or_else(|| n.clone());
+                ctx.declare_var(binding, Type::Any);
             }
         }
     }

@@ -3587,6 +3587,37 @@ coma final se ignora). La forma multi-línea con paréntesis
 (`from utils import (\ngreet,\nPREFIX\n)`) todavía no se soporta;
 si la lista se hace larga, mantenela en una línea.
 
+### Alias con `as`
+
+Tanto `import` como `from import` aceptan `as <ident>` para
+renombrar el binding local. Útil cuando:
+
+- el nombre original es largo o choca con un símbolo del archivo
+  actual (`from foo import PREFIX as REMOTE` mientras tenés tu
+  propia `let PREFIX = ...`);
+- querés usar un alias corto para un namespace
+  (`import muy_largo_paquete as p`);
+- el código se lee mejor con el alias (`from db import Connection
+  as Conn`).
+
+```fitz
+import utils as u
+from utils import greet as saludar, PREFIX as REMOTE
+
+print(saludar("Fitz"))   // saludos, Fitz
+print(REMOTE)            // saludos,
+print(u.PREFIX)          // saludos,
+```
+
+Una entry de `from import` puede tener alias o no — se pueden
+mezclar: `from foo import a as x, b, c as z`.
+
+Para un tipo importado con alias, los struct literals se escriben
+con el alias (`Person { id: 1 }`), pero el `Display` mantiene el
+nombre original del tipo (`User { id: 1 }`) — el alias es local
+al archivo importer, no parte de la identidad del tipo. Esto da
+paridad bit-a-bit entre `fitz run` y `fitz build`.
+
 ### Paths con puntos — subdirectorios
 
 Los segmentos separados por `.` mapean a subdirectorios:

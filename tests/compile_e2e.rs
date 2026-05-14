@@ -1311,6 +1311,85 @@ type User { id: Int = MAX, name: Str = HELLO }
 }
 
 #[test]
+fn import_namespace_con_alias_compila() {
+    // PreF8.4: `import utils as u` y luego `u.greet(...)`. El alias
+    // queda como binding local; el módulo se carga normalmente.
+    let main = "\
+import utils as u
+print(u.greet(\"Fitz\"))
+";
+    let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"";
+    let (stdout, exit) = build_and_run_multi(
+        "module-import-alias-ns",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hola, Fitz"]);
+}
+
+#[test]
+fn from_import_con_alias_simple_compila() {
+    // PreF8.4: `from utils import greet as g` y `g(...)`.
+    let main = "\
+from utils import greet as g
+print(g(\"Fitz\"))
+";
+    let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"";
+    let (stdout, exit) = build_and_run_multi(
+        "module-import-alias-fn",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hola, Fitz"]);
+}
+
+#[test]
+fn from_import_alias_de_tipo_y_struct_lit() {
+    // PreF8.4: `from utils import User as Person`. El struct lit
+    // `Person { ... }` instancia el tipo del módulo. El Display
+    // muestra el nombre original `User` (paridad con fitz run, que
+    // usa el name canónico del Value::Type del módulo).
+    let main = "\
+from utils import User as Person
+let p = Person { id: 7, name: \"Fitz\" }
+print(p)
+";
+    let utils = "type User { id: Int, name: Str }";
+    let (stdout, exit) = build_and_run_multi(
+        "module-import-alias-type",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["User { id: 7, name: \"Fitz\" }"]);
+}
+
+#[test]
+fn from_import_alias_de_const_no_choca_con_let_local() {
+    // PreF8.4 — caso para el que el alias es útil: el importer
+    // tiene una `let PREFIX = "local"` y necesita la `PREFIX` del
+    // módulo bajo otro nombre. Sin alias chocarían en el codegen
+    // (el `use utils::PREFIX` colisionaría con el `static PREFIX`
+    // del importer). Con alias funciona.
+    let main = "\
+from utils import PREFIX as REMOTE
+let PREFIX = \"local\"
+print(PREFIX)
+print(REMOTE)
+";
+    let utils = "let PREFIX = \"remoto\"";
+    let (stdout, exit) = build_and_run_multi(
+        "module-import-alias-const",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["local", "remoto"]);
+}
+
+#[test]
 fn modulo_inexistente_aborta_build() {
     let stderr = build_expect_fail_multi(
         "module-not-found",

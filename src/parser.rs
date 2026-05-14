@@ -714,17 +714,28 @@ impl Parser {
     }
 
     /// `import foo` o `import foo.bar.baz`. El path se acumula como
-    /// `Ident ( '.' Ident )*`. No admite `as` (sin aliases en esta
-    /// iteración). No anida — corta en el siguiente terminador.
+    /// `Ident ( '.' Ident )*`. PreF8.4: acepta `as <ident>` al final
+    /// para alias del namespace (`import foo as f` → binding `f` en
+    /// lugar del último segmento).
     fn parse_import(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Import, "se esperaba 'import'")?;
         let path = self.parse_module_path()?;
-        Ok(Stmt::Import { path, span })
+        let alias = if matches!(self.peek(), Token::As) {
+            self.advance();
+            Some(self.expect_ident(
+                "se esperaba un identificador después de 'as' en 'import ... as ...'",
+            )?)
+        } else {
+            None
+        };
+        Ok(Stmt::Import { path, alias, span })
     }
 
     /// `from foo import a, b, c` — el path puede tener puntos (`from
     /// sub.foo import bar`). La lista de nombres tiene que tener al
-    /// menos uno. Acepta trailing comma.
+    /// menos uno. Acepta trailing comma. PreF8.4: cada nombre puede
+    /// llevar `as <ident>` para alias (`from foo import bar as b,
+    /// baz as z`).
     fn parse_from_import(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::From, "se esperaba 'from'")?;
         let path = self.parse_module_path()?;
@@ -732,21 +743,39 @@ impl Parser {
             &Token::Import,
             "se esperaba 'import' después del path en 'from ... import ...'",
         )?;
-        let mut names: Vec<String> = Vec::new();
-        names.push(self.expect_ident(
-            "se esperaba al menos un identificador después de 'import'",
-        )?);
+        let mut names: Vec<(String, Option<String>)> = Vec::new();
+        names.push(self.parse_from_import_name(/*is_first=*/ true)?);
         while matches!(self.peek(), Token::Comma) {
             self.advance();
             // Trailing comma: `from foo import a,` — paramos sin error.
             if matches!(self.peek(), Token::Newline | Token::EOF | Token::RBrace) {
                 break;
             }
-            names.push(self.expect_ident(
-                "se esperaba identificador después de ',' en 'from ... import'",
-            )?);
+            names.push(self.parse_from_import_name(/*is_first=*/ false)?);
         }
         Ok(Stmt::FromImport { path, names, span })
+    }
+
+    /// Helper: parsea un binding de `from ... import`: `Ident [as Ident]`.
+    /// `is_first` solo cambia el mensaje de error del primer ident.
+    fn parse_from_import_name(
+        &mut self,
+        is_first: bool,
+    ) -> FitzResult<(String, Option<String>)> {
+        let name = self.expect_ident(if is_first {
+            "se esperaba al menos un identificador después de 'import'"
+        } else {
+            "se esperaba identificador después de ',' en 'from ... import'"
+        })?;
+        let alias = if matches!(self.peek(), Token::As) {
+            self.advance();
+            Some(self.expect_ident(
+                "se esperaba un identificador después de 'as' en 'from ... import ... as ...'",
+            )?)
+        } else {
+            None
+        };
+        Ok((name, alias))
     }
 
     /// Path de módulo: `Ident ( '.' Ident )*`. Devuelve los segmentos.
@@ -4900,20 +4929,20 @@ mod tests {
 
     #[test]
     fn import_simple_se_parsea() {
-        // `import utils` → Stmt::Import { path: ["utils"] , span: Span::ZERO }
+        // `import utils` → Stmt::Import con alias None.
         assert_eq!(
             parse_one_stmt("import utils"),
-            Stmt::Import { path: vec!["utils".into()] , span: Span::ZERO },
+            Stmt::Import { path: vec!["utils".into()], alias: None, span: Span::ZERO },
         );
     }
 
     #[test]
     fn import_punteado_acumula_segmentos() {
-        // `import sub.foo.bar` → Stmt::Import { path: ["sub", "foo", "bar"] , span: Span::ZERO }
         assert_eq!(
             parse_one_stmt("import sub.foo.bar"),
             Stmt::Import {
                 path: vec!["sub".into(), "foo".into(), "bar".into()],
+                alias: None,
              span: Span::ZERO },
         );
     }
@@ -4938,7 +4967,7 @@ mod tests {
             parse_one_stmt("from utils import slugify"),
             Stmt::FromImport {
                 path: vec!["utils".into()],
-                names: vec!["slugify".into()],
+                names: vec![("slugify".into(), None)],
              span: Span::ZERO },
         );
     }
@@ -4950,7 +4979,11 @@ mod tests {
             parse_one_stmt("from utils import a, b, c"),
             Stmt::FromImport {
                 path: vec!["utils".into()],
-                names: vec!["a".into(), "b".into(), "c".into()],
+                names: vec![
+                    ("a".into(), None),
+                    ("b".into(), None),
+                    ("c".into(), None),
+                ],
              span: Span::ZERO },
         );
     }
@@ -4962,7 +4995,7 @@ mod tests {
             parse_one_stmt("from sub.foo import bar"),
             Stmt::FromImport {
                 path: vec!["sub".into(), "foo".into()],
-                names: vec!["bar".into()],
+                names: vec![("bar".into(), None)],
              span: Span::ZERO },
         );
     }
@@ -4974,7 +5007,7 @@ mod tests {
             parse_one_stmt("from utils import a, b,"),
             Stmt::FromImport {
                 path: vec!["utils".into()],
-                names: vec!["a".into(), "b".into()],
+                names: vec![("a".into(), None), ("b".into(), None)],
              span: Span::ZERO },
         );
     }
@@ -4990,6 +5023,78 @@ mod tests {
     fn from_import_sin_nombres_es_error() {
         // `from utils import` — al menos un nombre obligatorio.
         let err = parse_program_str("from utils import").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    // PreF8.4: tests de aliases.
+
+    #[test]
+    fn import_con_alias_parsea_el_alias() {
+        // `import utils as u`
+        assert_eq!(
+            parse_one_stmt("import utils as u"),
+            Stmt::Import {
+                path: vec!["utils".into()],
+                alias: Some("u".into()),
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn import_punteado_con_alias() {
+        // `import sub.foo as f` — alias se aplica al binding completo.
+        assert_eq!(
+            parse_one_stmt("import sub.foo as f"),
+            Stmt::Import {
+                path: vec!["sub".into(), "foo".into()],
+                alias: Some("f".into()),
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn from_import_con_alias_simple() {
+        // `from utils import slugify as s`
+        assert_eq!(
+            parse_one_stmt("from utils import slugify as s"),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec![("slugify".into(), Some("s".into()))],
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn from_import_alias_mixto_con_y_sin() {
+        // `from foo import a as x, b, c as z`
+        assert_eq!(
+            parse_one_stmt("from foo import a as x, b, c as z"),
+            Stmt::FromImport {
+                path: vec!["foo".into()],
+                names: vec![
+                    ("a".into(), Some("x".into())),
+                    ("b".into(), None),
+                    ("c".into(), Some("z".into())),
+                ],
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn import_as_sin_ident_es_error() {
+        // `import foo as` — falta el ident después de `as`.
+        let err = parse_program_str("import foo as").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    #[test]
+    fn from_import_as_sin_ident_es_error() {
+        // `from foo import bar as` — falta el ident después de `as`.
+        let err = parse_program_str("from foo import bar as").unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 

@@ -22,3 +22,10 @@ print(u)
 // `DEFAULT_NAME` no se importe acá.
 let anon = User {}
 print(anon)
+
+// Alias en imports: `import foo as f`, `from foo import bar as b`.
+// El alias es local; el módulo se carga con su path real.
+import guide_utils as gu
+from guide_utils import greet as saludar
+print(saludar("Patagonia"))
+print(gu.PREFIX)

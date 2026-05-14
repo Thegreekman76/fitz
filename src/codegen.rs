@@ -668,9 +668,12 @@ impl ModuleLoader {
     fn collect_imports(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
             match stmt {
-                Stmt::Import { path, .. } => {
+                Stmt::Import { path, alias, .. } => {
                     let idx = self.load_module(path)?;
-                    let binding_name = path.last().cloned().unwrap_or_default();
+                    // PreF8.4: alias gana sobre el último segmento.
+                    let binding_name = alias.clone().unwrap_or_else(|| {
+                        path.last().cloned().unwrap_or_default()
+                    });
                     self.bindings.insert(
                         binding_name,
                         ResolvedBinding::Namespace { module_index: idx },
@@ -678,10 +681,14 @@ impl ModuleLoader {
                 }
                 Stmt::FromImport { path, names, .. } => {
                     let idx = self.load_module(path)?;
-                    for name in names {
+                    // PreF8.4: cada entry es `(name, alias?)`. El lookup
+                    // y `item` siguen usando `name` (el nombre dentro
+                    // del módulo); el binding local usa `alias` si está.
+                    for (name, alias) in names {
                         let kind = self.classify_named(idx, name)?;
+                        let local = alias.clone().unwrap_or_else(|| name.clone());
                         self.bindings.insert(
-                            name.clone(),
+                            local,
                             ResolvedBinding::Named {
                                 module_index: idx,
                                 item: name.clone(),
@@ -822,7 +829,7 @@ impl ModuleLoader {
         // determinista (HashMap no garantiza orden).
         let mut entries: Vec<(&String, &ResolvedBinding)> = self.bindings.iter().collect();
         entries.sort_by(|a, b| a.0.cmp(b.0));
-        for (_, binding) in entries {
+        for (local, binding) in entries {
             if let ResolvedBinding::Named {
                 module_index,
                 item,
@@ -830,19 +837,41 @@ impl ModuleLoader {
             } = binding
             {
                 let mod_name = &self.modules[*module_index].mod_name;
+                // PreF8.4: si el local (key del HashMap) difiere del
+                // item (nombre dentro del módulo), emitimos `as` para
+                // que el Rust generado pueda referenciar el local
+                // directamente (sin chocar con consts/types del
+                // importer que tengan el mismo nombre que el item).
+                let needs_alias = local != item;
                 match kind {
                     NamedKind::Type => {
-                        output.push_str(&format!(
-                            "use {mod}::{{{item}, {item}Data}};\n",
-                            mod = mod_name,
-                            item = item,
-                        ));
+                        if needs_alias {
+                            output.push_str(&format!(
+                                "use {mod}::{{{item} as {local}, {item}Data as {local}Data}};\n",
+                                mod = mod_name,
+                                item = item,
+                                local = local,
+                            ));
+                        } else {
+                            output.push_str(&format!(
+                                "use {mod}::{{{item}, {item}Data}};\n",
+                                mod = mod_name,
+                                item = item,
+                            ));
+                        }
                     }
                     NamedKind::Fn | NamedKind::Const => {
-                        output.push_str(&format!(
-                            "use {}::{};\n",
-                            mod_name, item
-                        ));
+                        if needs_alias {
+                            output.push_str(&format!(
+                                "use {}::{} as {};\n",
+                                mod_name, item, local
+                            ));
+                        } else {
+                            output.push_str(&format!(
+                                "use {}::{};\n",
+                                mod_name, item
+                            ));
+                        }
                     }
                 }
             }
@@ -3059,9 +3088,14 @@ impl<'a> CodegenCtx<'a> {
                     if matches!(kind, NamedKind::Const) {
                         if let Some(m) = self.loaded_modules.get(module_index) {
                             if let Some(ty) = m.const_sigs.get(&item).cloned() {
+                                // PreF8.4: el `use foo::PREFIX [as P];`
+                                // ya bindeó el const al local `name`
+                                // (que es la key del HashMap, no `item`).
+                                // Emitimos por `name` para que `as`
+                                // funcione transparente.
                                 let code = match &ty {
-                                    Type::Str => format!("String::from({})", item),
-                                    _ => item.clone(),
+                                    Type::Str => format!("String::from({})", name),
+                                    _ => name.to_string(),
                                 };
                                 return Ok((code, ty));
                             }
@@ -4552,12 +4586,19 @@ impl<'a> CodegenCtx<'a> {
         // default en el scope del importer, donde tipos referenciados
         // por el default (consts, otros types del módulo de origen) no
         // están visibles.
-        let imported_mod_name = match self.module_bindings.get(type_name) {
+        // PreF8.4: si el tipo es importado con alias (`from foo import
+        // User as MyUser`), `type_name` acá es el alias local; necesitamos
+        // el `item` (nombre dentro del módulo) para nombrar la helper
+        // `foo::__default_User_<field>()` correctamente.
+        let imported_mod_and_item = match self.module_bindings.get(type_name) {
             Some(ResolvedBinding::Named {
                 module_index,
+                item,
                 kind: NamedKind::Type,
-                ..
-            }) => Some(self.loaded_modules[*module_index].mod_name.clone()),
+            }) => Some((
+                self.loaded_modules[*module_index].mod_name.clone(),
+                item.clone(),
+            )),
             _ => None,
         };
 
@@ -4571,10 +4612,12 @@ impl<'a> CodegenCtx<'a> {
                 let (code, ty) = self.gen_expr(expr)?;
                 coerce(&code, &ty, &f.type_)
             } else if let Some(default_expr) = &f.default {
-                if let Some(mod_name) = &imported_mod_name {
+                if let Some((mod_name, item)) = &imported_mod_and_item {
                     // Llamada a la helper fn del módulo de origen. Su
                     // body ya retorna el tipo correcto, sin coerce extra.
-                    format!("{}::__default_{}_{}()", mod_name, type_name, f.name)
+                    // Usamos `item` (nombre dentro del módulo), no
+                    // `type_name` (alias local).
+                    format!("{}::__default_{}_{}()", mod_name, item, f.name)
                 } else {
                     let (code, ty) = self.gen_expr(default_expr)?;
                     coerce(&code, &ty, &f.type_)
