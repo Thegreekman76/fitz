@@ -710,7 +710,7 @@ fn register_http_route(
         // `None` y el runtime deserializa como `Value` libre
         // (Map/List/primitivos).
         let declared_type = p.type_.as_ref().and_then(|t| {
-            match env.borrow().get(t.head_name()) {
+            match env.lock().get(t.head_name()) {
                 Some(v @ Value::Type { .. }) => Some(v),
                 _ => None,
             }
@@ -884,7 +884,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     };
 
     // Cache hit: el mismo archivo importado de nuevo devuelve el mismo
-    // `Value::Module` (mismo `Rc<RefCell<Environment>>` adentro). No
+    // `Value::Module` (mismo `Arc<Mutex<Environment>>` adentro). No
     // re-evalúa el body.
     if let Some(cached) = LOADER.with(|cell| {
         cell.borrow()
@@ -1079,20 +1079,20 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //    reasignar ahí; si no, crear local (ver env.rs).
         //  - `Field`: evaluamos el objeto receptor (tiene que ser
         //    `Value::Instance`), validamos que el campo exista, y mutamos
-        //    la celda compartida `Rc<RefCell<...>>` de `fields`.
+        //    la celda compartida `Arc<Mutex<...>>` de `fields`.
         Stmt::Assign { target, type_: _, value, span: _ } => {
             let v = eval_expr(value, env.clone()).await?;
             match target {
                 AssignTarget::Ident(name) => {
                     // Borrows separados: `has` toma borrow inmutable, lo
                     // soltamos antes de pedir un borrow mutable.
-                    let already_defined = env.borrow().has(name);
+                    let already_defined = env.lock().has(name);
                     if already_defined {
-                        env.borrow_mut()
+                        env.lock()
                             .assign(name, v)
                             .expect("la variable existe — acabamos de chequear con has()");
                     } else {
-                        env.borrow_mut().define(name.clone(), v);
+                        env.lock().define(name.clone(), v);
                     }
                 }
                 AssignTarget::Field { object, field } => {
@@ -1113,7 +1113,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                             )));
                         }
                     };
-                    let mut borrowed = fields.borrow_mut();
+                    let mut borrowed = fields.lock();
                     let slot = borrowed.iter_mut().find(|(name, _)| name == field);
                     match slot {
                         Some((_, slot_value)) => {
@@ -1281,7 +1281,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 )?;
             }
 
-            env.borrow_mut().define(name.clone(), func);
+            env.lock().define(name.clone(), func);
             Ok(Value::Null)
         }
 
@@ -1293,7 +1293,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 name: name.clone(),
                 fields: fields.clone(),
             };
-            env.borrow_mut().define(name.clone(), t);
+            env.lock().define(name.clone(), t);
             Ok(Value::Null)
         }
         Stmt::Break(_) => Err(EvalSignal::Break),
@@ -1312,14 +1312,14 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         Stmt::For { var, iter, body, span: _ } => {
             let iter_v = eval_expr(iter, env.clone()).await?;
             let items_iter: Box<dyn Iterator<Item = Value>> = match iter_v {
-                // La lista va por referencia compartida (`Rc<RefCell<>>`).
+                // La lista va por referencia compartida (`Arc<Mutex<>>`).
                 // Para iterar tomamos un snapshot del Vec (cloneando los
                 // valores): si el body muta la lista misma, el iterator
                 // ya tiene su copia y no se altera a mitad de iteración.
                 // Eso evita problemas estilo "modifying a list while
                 // iterating" sin renunciar a mutación.
                 Value::List(items) => {
-                    let snapshot: Vec<Value> = items.borrow().clone();
+                    let snapshot: Vec<Value> = items.lock().clone();
                     Box::new(snapshot.into_iter())
                 }
                 Value::Range { start, end } => Box::new((start..end).map(Value::Int)),
@@ -1341,7 +1341,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 ))),
             };
             for item in items_iter {
-                env.borrow_mut().define(var.clone(), item);
+                env.lock().define(var.clone(), item);
                 match run_loop_body(body, env.clone()).await {
                     LoopControl::Continue => continue,
                     LoopControl::Break => break,
@@ -1410,7 +1410,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 .last()
                 .cloned()
                 .expect("parser garantiza al menos un segmento");
-            env.borrow_mut().define(binding_name, module);
+            env.lock().define(binding_name, module);
             Ok(Value::Null)
         }
 
@@ -1429,7 +1429,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 .cloned()
                 .unwrap_or_else(|| "<sin nombre>".to_string());
             for name in names {
-                let v = module_env.borrow().get(name).ok_or_else(|| {
+                let v = module_env.lock().get(name).ok_or_else(|| {
                     EvalSignal::Error(FitzError::new(
                         ErrorKind::UndefinedVariable(name.clone()),
                         0, 0,
@@ -1439,7 +1439,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                         ),
                     ))
                 })?;
-                env.borrow_mut().define(name.clone(), v);
+                env.lock().define(name.clone(), v);
             }
             Ok(Value::Null)
         }
@@ -1486,7 +1486,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         Expr::Null(_) => Ok(Value::Null),
 
         // Identificador — lookup encadenado en la cadena de scopes.
-        Expr::Ident(name, _) => env.borrow().get(name).ok_or_else(|| {
+        Expr::Ident(name, _) => env.lock().get(name).ok_or_else(|| {
             EvalSignal::Error(FitzError::new(
                 ErrorKind::UndefinedVariable(name.clone()),
                 span.line, span.column,
@@ -1561,7 +1561,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             match obj {
                 Value::Instance { type_name, fields } => {
                     fields
-                        .borrow()
+                        .lock()
                         .iter()
                         .find(|(k, _)| k == field)
                         .map(|(_, v)| v.clone())
@@ -1577,7 +1577,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         })
                 }
                 Value::Module { name, env: module_env } => {
-                    module_env.borrow().get(field).ok_or_else(|| {
+                    module_env.lock().get(field).ok_or_else(|| {
                         EvalSignal::Error(FitzError::new(
                             ErrorKind::UndefinedVariable(field.clone()),
                             span.line, span.column,
@@ -1627,7 +1627,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // del `type`, no el del literal — eso garantiza un `Display`
         // estable y comparaciones estructurales consistentes.
         Expr::StructLit { type_name, fields, .. } => {
-            let ty = env.borrow().get(type_name).ok_or_else(|| {
+            let ty = env.lock().get(type_name).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(type_name.clone()),
                     span.line, span.column,
@@ -1828,7 +1828,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
                 if let Some((name, bound)) = binding {
                     let arm_env = Environment::new_child(env.clone());
-                    arm_env.borrow_mut().define(name, bound);
+                    arm_env.lock().define(name, bound);
                     return eval_expr(&arm.body, arm_env).await;
                 }
                 return eval_expr(&arm.body, env.clone()).await;
@@ -1882,7 +1882,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             let v = eval_expr(inner, env).await?;
             match v {
                 Value::Future(cell) => {
-                    let fut = cell.0.borrow_mut().take();
+                    let fut = cell.0.lock().take();
                     match fut {
                         Some(f) => f.await.map_err(EvalSignal::Error),
                         None => Err(EvalSignal::Error(FitzError::new(
@@ -2016,7 +2016,7 @@ async fn invoke_value(
             // Nuevo scope hijo del CLOSURE, no del caller. Lexical scoping.
             let call_env = Environment::new_child(closure);
             for (param, value) in params.iter().zip(arg_values) {
-                call_env.borrow_mut().define(param.name.clone(), value);
+                call_env.lock().define(param.name.clone(), value);
             }
 
             // Fase 6.4: si la fn es async, en vez de evaluar el body
@@ -2070,7 +2070,7 @@ async fn invoke_value(
 /// Dispatch de método built-in. Lookup por `(tipo del receptor, nombre
 /// del método)` en una tabla estática. Las implementaciones reciben el
 /// receptor (por valor, pero las colecciones internas son
-/// `Rc<RefCell<...>>`, así que las mutaciones se propagan a los aliases)
+/// `Arc<Mutex<...>>`, así que las mutaciones se propagan a los aliases)
 /// y los args ya evaluados.
 ///
 /// Si no hay un método registrado para `(tipo, nombre)`, devuelve error
@@ -2106,7 +2106,7 @@ async fn dispatch_method(
         // dispatch real — el módulo no es "el receptor", solo el lugar
         // donde vive la función.
         (Value::Module { name, env: module_env }, _) => {
-            let value = module_env.borrow().get(method).ok_or_else(|| {
+            let value = module_env.lock().get(method).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(method.into()),
                     span.line, span.column,
@@ -2132,7 +2132,7 @@ async fn dispatch_method(
 // ---------------------------------------------------------------------------
 //
 // Cada función toma el receptor (consumido por valor — pero como las
-// colecciones internas son `Rc<RefCell<>>`, lo que importa es el Rc, no
+// colecciones internas son `Arc<Mutex<>>`, lo que importa es el Arc, no
 // el clone) y los args ya evaluados. Devuelve un `EvalResult<Value>`.
 //
 // Convenciones:
@@ -2185,7 +2185,7 @@ fn list_push(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     };
     let mut v = args.into_iter().next().unwrap();
     // Si quien empuja se pasó a sí mismo, evitamos un re-borrow doble.
-    items.borrow_mut().push(std::mem::replace(&mut v, Value::Null));
+    items.lock().push(std::mem::replace(&mut v, Value::Null));
     Ok(Value::Null)
 }
 
@@ -2195,7 +2195,7 @@ fn list_pop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
         Value::List(items) => items,
         _ => unreachable!(),
     };
-    let popped = items.borrow_mut().pop();
+    let popped = items.lock().pop();
     match popped {
         Some(v) => Ok(v),
         None => Err(EvalSignal::Error(FitzError::new(
@@ -2216,7 +2216,7 @@ async fn list_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     let callback = &args[0];
     // Snapshot del Vec para evitar re-entrancia al RefCell si la callback
     // mutase la lista original.
-    let snapshot: Vec<Value> = items.borrow().clone();
+    let snapshot: Vec<Value> = items.lock().clone();
     let mut out = Vec::with_capacity(snapshot.len());
     for item in snapshot {
         out.push(invoke_callback(callback, item, "map", span).await?);
@@ -2232,7 +2232,7 @@ async fn list_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
         _ => unreachable!(),
     };
     let callback = &args[0];
-    let snapshot: Vec<Value> = items.borrow().clone();
+    let snapshot: Vec<Value> = items.lock().clone();
     let mut out = Vec::new();
     for item in snapshot {
         let keep = invoke_callback(callback, item.clone(), "filter", span).await?;
@@ -2265,7 +2265,7 @@ async fn list_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
         _ => unreachable!(),
     };
     let callback = &args[0];
-    let snapshot: Vec<Value> = items.borrow().clone();
+    let snapshot: Vec<Value> = items.lock().clone();
     for item in snapshot {
         let keep = invoke_callback(callback, item.clone(), "find", span).await?;
         match keep {
@@ -2299,7 +2299,7 @@ fn list_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
         Value::List(items) => items,
         _ => unreachable!(),
     };
-    let n = items.borrow().len() as i64;
+    let n = items.lock().len() as i64;
     Ok(Value::Int(n))
 }
 
@@ -2312,7 +2312,7 @@ fn map_get(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
         _ => unreachable!(),
     };
     let key = &args[0];
-    for (k, v) in pairs.borrow().iter() {
+    for (k, v) in pairs.lock().iter() {
         if k == key {
             return Ok(Value::Result(ResultVariant::Ok(Box::new(v.clone()))));
         }
@@ -2329,7 +2329,7 @@ fn map_has(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
         _ => unreachable!(),
     };
     let key = &args[0];
-    let found = pairs.borrow().iter().any(|(k, _)| k == key);
+    let found = pairs.lock().iter().any(|(k, _)| k == key);
     Ok(Value::Bool(found))
 }
 
@@ -2339,7 +2339,7 @@ fn map_keys(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
     };
-    let ks: Vec<Value> = pairs.borrow().iter().map(|(k, _)| k.clone()).collect();
+    let ks: Vec<Value> = pairs.lock().iter().map(|(k, _)| k.clone()).collect();
     Ok(Value::new_list(ks))
 }
 
@@ -2349,7 +2349,7 @@ fn map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
     };
-    let vs: Vec<Value> = pairs.borrow().iter().map(|(_, v)| v.clone()).collect();
+    let vs: Vec<Value> = pairs.lock().iter().map(|(_, v)| v.clone()).collect();
     Ok(Value::new_list(vs))
 }
 
@@ -2359,7 +2359,7 @@ fn map_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
         Value::Map(pairs) => pairs,
         _ => unreachable!(),
     };
-    let n = pairs.borrow().len() as i64;
+    let n = pairs.lock().len() as i64;
     Ok(Value::Int(n))
 }
 
@@ -2640,7 +2640,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                 )));
             }
             let i_usize = i as usize;
-            let borrowed = items.borrow();
+            let borrowed = items.lock();
             borrowed.get(i_usize).cloned().ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -2656,7 +2656,7 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
         Value::Map(pairs) => {
             // Búsqueda lineal por igualdad. Esto va a ser O(n) hasta que
             // promovamos Map a una estructura indexada de verdad.
-            for (k, v) in pairs.borrow().iter() {
+            for (k, v) in pairs.lock().iter() {
                 if k == idx {
                     return Ok(v.clone());
                 }
@@ -2713,14 +2713,14 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
 /// Registra todas las funciones builtin en el environment. Llamar una sola
 /// vez al inicio del programa.
 fn register_builtins(env: &EnvRef) {
-    env.borrow_mut().define(
+    env.lock().define(
         "print",
         Value::Builtin {
             name: "print",
             func: builtin_print,
         },
     );
-    env.borrow_mut().define(
+    env.lock().define(
         "len",
         Value::Builtin {
             name: "len",
@@ -2739,7 +2739,7 @@ fn register_builtins(env: &EnvRef) {
     //   - Keys soportadas: `allow_origin` (Str), `allow_methods`
     //     (List<Str>), `allow_headers` (List<Str>), `max_age` (Int).
     //   - Cualquier otra key, o un tipo distinto al esperado, da error.
-    env.borrow_mut().define(
+    env.lock().define(
         "cors",
         Value::Builtin {
             name: "cors",
@@ -2754,7 +2754,7 @@ fn register_builtins(env: &EnvRef) {
     // un `Value::Future`. La barrera del evaluator sobre `Expr::Await`
     // suele cortar antes; este builtin es para el caso de llamar a
     // `sleep(100)` sin `.await` (guardar el Future suelto).
-    env.borrow_mut().define(
+    env.lock().define(
         "sleep",
         Value::Builtin {
             name: "sleep",
@@ -2871,7 +2871,7 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
                 ));
             }
         };
-        for (key, value) in pairs.borrow().iter() {
+        for (key, value) in pairs.lock().iter() {
             let key_str = match key {
                 Value::Str(s) => s.clone(),
                 other => {
@@ -2901,8 +2901,8 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
                     // rechaza la response — CORS estricto). Útil con
                     // credenciales (`Allow-Origin: *` incompatible).
                     Value::List(items) => {
-                        let mut set = Vec::with_capacity(items.borrow().len());
-                        for it in items.borrow().iter() {
+                        let mut set = Vec::with_capacity(items.lock().len());
+                        for it in items.lock().iter() {
                             match it {
                                 Value::Str(s) => set.push(s.clone()),
                                 other => {
@@ -2974,8 +2974,8 @@ fn list_of_strings(value: &Value, key: &str) -> FitzResult<Vec<String>> {
             return Err(cors_type_err(key, "List<Str>", other.type_name()));
         }
     };
-    let mut out = Vec::with_capacity(items.borrow().len());
-    for item in items.borrow().iter() {
+    let mut out = Vec::with_capacity(items.lock().len());
+    for item in items.lock().iter() {
         match item {
             Value::Str(s) => out.push(s.clone()),
             other => {
@@ -3004,8 +3004,8 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
         ));
     }
     let n: i64 = match &args[0] {
-        Value::List(items) => items.borrow().len() as i64,
-        Value::Map(pairs) => pairs.borrow().len() as i64,
+        Value::List(items) => items.lock().len() as i64,
+        Value::Map(pairs) => pairs.lock().len() as i64,
         Value::Str(s) => s.chars().count() as i64,
         Value::Range { start, end } => (end - start).max(0),
         other => {
@@ -3095,7 +3095,7 @@ mod tests {
              let x = f().await",
         ).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("x"), Some(Value::Int(42)));
+        assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3107,7 +3107,7 @@ mod tests {
              let pending = f()",
         ).await;
         res.unwrap();
-        let v = env.borrow().get("pending").expect("pending definida");
+        let v = env.lock().get("pending").expect("pending definida");
         assert!(matches!(v, Value::Future(_)), "esperaba Value::Future, fue {:?}", v);
     }
 
@@ -3122,7 +3122,7 @@ mod tests {
              let r = pausa().await",
         ).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Null));
+        assert_eq!(env.lock().get("r"), Some(Value::Null));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3131,7 +3131,7 @@ mod tests {
         // El builtin `sleep` construye el future pero no lo espera.
         let (env, res) = parse_eval_into_env("let f = sleep(100)").await;
         res.unwrap();
-        let v = env.borrow().get("f").expect("f definida");
+        let v = env.lock().get("f").expect("f definida");
         assert!(matches!(v, Value::Future(_)), "esperaba Value::Future, fue {:?}", v);
     }
 
@@ -3141,12 +3141,14 @@ mod tests {
         // intenta hacerlo dos veces sobre el mismo Value::Future,
         // emite error explícito.
         let f: crate::value::FitzFuture = Box::pin(async { Ok(Value::Int(1)) });
-        let cell = crate::value::FutureCell(std::rc::Rc::new(std::cell::RefCell::new(Some(f))));
+        // Allow arc_with_non_send_sync: ver doc-comment de `Value::new_future`.
+        #[allow(clippy::arc_with_non_send_sync)]
+        let cell = crate::value::FutureCell(std::sync::Arc::new(parking_lot::Mutex::new(Some(f))));
         let v = Value::Future(cell);
 
         // Primer .await: éxito.
         let env = Environment::new();
-        env.borrow_mut().define("p", v.clone());
+        env.lock().define("p", v.clone());
         let first = eval_expr(
             &Expr::Await(Box::new(Expr::Ident("p".into(), Span::ZERO)), Span::ZERO),
             env.clone(),
@@ -3202,7 +3204,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn ident_resuelve_variable_del_env() {
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(99));
+        env.lock().define("x", Value::Int(99));
 
         let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), env).await.unwrap();
         assert_eq!(result, Value::Int(99));
@@ -3224,7 +3226,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn ident_busca_en_scope_padre() {
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Str("from_global".into()));
+        global.lock().define("x", Value::Str("from_global".into()));
 
         let child = Environment::new_child(global);
         let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), child).await.unwrap();
@@ -3254,7 +3256,7 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let print = env.borrow().get("print");
+        let print = env.lock().get("print");
         assert!(print.is_some());
         match print.unwrap() {
             Value::Builtin { name, .. } => assert_eq!(name, "print"),
@@ -3578,13 +3580,13 @@ mod tests {
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
-        assert_eq!(env.borrow().get("x"), Some(Value::Int(42)));
+        assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_reasigna_variable_existente_en_el_mismo_scope() {
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(1));
+        env.lock().define("x", Value::Int(1));
 
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
             type_: None,
@@ -3592,13 +3594,13 @@ mod tests {
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
-        assert_eq!(env.borrow().get("x"), Some(Value::Int(99)));
+        assert_eq!(env.lock().get("x"), Some(Value::Int(99)));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_desde_child_reasigna_en_el_padre_si_existe() {
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Int(1));
+        global.lock().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
         let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
@@ -3608,7 +3610,7 @@ mod tests {
         eval_stmt(&stmt, child).await.unwrap();
 
         // El cambio se ve en el global.
-        assert_eq!(global.borrow().get("x"), Some(Value::Int(42)));
+        assert_eq!(global.lock().get("x"), Some(Value::Int(42)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3623,8 +3625,8 @@ mod tests {
         eval_stmt(&stmt, child.clone()).await.unwrap();
 
         // Solo existe en child, no se propagó al padre.
-        assert_eq!(child.borrow().get("nueva"), Some(Value::Int(7)));
-        assert_eq!(global.borrow().get("nueva"), None);
+        assert_eq!(child.lock().get("nueva"), Some(Value::Int(7)));
+        assert_eq!(global.lock().get("nueva"), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -3637,7 +3639,7 @@ mod tests {
             value: Expr::Str("soy un string".into(), Span::ZERO),
          span: Span::ZERO };
         assert!(eval_stmt(&stmt, env.clone()).await.is_ok());
-        assert_eq!(env.borrow().get("x"), Some(Value::Str("soy un string".into())));
+        assert_eq!(env.lock().get("x"), Some(Value::Str("soy un string".into())));
     }
 
     // ---- Expr::Call (builtins) ----
@@ -3674,7 +3676,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn call_a_no_funcion_es_type_error() {
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(5));
+        env.lock().define("x", Value::Int(5));
 
         let call = Expr::Call { callee: Box::new(Expr::Ident("x".into(), Span::ZERO)), args: vec![], span: Span::ZERO,
         };
@@ -3715,7 +3717,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn str_interp_interpola_ident() {
         let env = Environment::new();
-        env.borrow_mut().define("name", Value::Str("Fitz".into()));
+        env.lock().define("name", Value::Str("Fitz".into()));
 
         let e = Expr::StrInterp(vec![
             StrPart::Lit("Hola, ".into()),
@@ -3731,7 +3733,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn str_interp_convierte_int_a_string() {
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(42));
+        env.lock().define("x", Value::Int(42));
 
         let e = Expr::StrInterp(vec![
             StrPart::Lit("x es ".into()),
@@ -3836,7 +3838,7 @@ mod tests {
         //   fn get_x() => x
         //   get_x()  → 10
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(10));
+        env.lock().define("x", Value::Int(10));
 
         let body = vec![Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO)];
         eval_stmt(&fn_def("get_x", vec![], body), env.clone()).await.unwrap();
@@ -3849,7 +3851,7 @@ mod tests {
     async fn fn_param_sombrea_variable_externa() {
         // x = 100; fn f(x) => x ; f(7) → 7 (no 100)
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(100));
+        env.lock().define("x", Value::Int(100));
 
         let body = vec![Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO)];
         eval_stmt(&fn_def("f", vec!["x"], body), env.clone()).await.unwrap();
@@ -4011,7 +4013,7 @@ mod tests {
         // if x == 1 { y = 99 }
         // print(y)  → "99"
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(1));
+        env.lock().define("x", Value::Int(1));
 
         let if_stmt = Stmt::Expr(if_expr(
             Expr::BinOp {
@@ -4027,7 +4029,7 @@ mod tests {
         ), Span::ZERO);
         eval_stmt(&if_stmt, env.clone()).await.unwrap();
 
-        assert_eq!(env.borrow().get("y"), Some(Value::Int(99)));
+        assert_eq!(env.lock().get("y"), Some(Value::Int(99)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4061,7 +4063,7 @@ mod tests {
             ),
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Int(42)));
+        assert_eq!(env.lock().get("r"), Some(Value::Int(42)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4173,7 +4175,7 @@ mod tests {
         eval_expr(&e, env.clone()).await.unwrap();
 
         // `n` no quedó definida en el scope de afuera.
-        assert_eq!(env.borrow().get("n"), None);
+        assert_eq!(env.lock().get("n"), None);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4410,8 +4412,8 @@ print(_)\n";
         // while i < 5 { total = total + i; i = i + 1 }
         // total → 0+1+2+3+4 = 10
         let env = Environment::new();
-        env.borrow_mut().define("i", Value::Int(0));
-        env.borrow_mut().define("total", Value::Int(0));
+        env.lock().define("i", Value::Int(0));
+        env.lock().define("total", Value::Int(0));
 
         let stmt = Stmt::While {
             condition: Expr::BinOp {
@@ -4439,13 +4441,13 @@ print(_)\n";
             ],
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
-        assert_eq!(env.borrow().get("total"), Some(Value::Int(10)));
+        assert_eq!(env.lock().get("total"), Some(Value::Int(10)));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn while_con_cond_inicialmente_falsa_no_itera() {
         let env = Environment::new();
-        env.borrow_mut().define("counter", Value::Int(0));
+        env.lock().define("counter", Value::Int(0));
 
         let stmt = Stmt::While {
             condition: Expr::Bool(false, Span::ZERO),
@@ -4455,13 +4457,13 @@ print(_)\n";
              span: Span::ZERO }],
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
-        assert_eq!(env.borrow().get("counter"), Some(Value::Int(0)));
+        assert_eq!(env.lock().get("counter"), Some(Value::Int(0)));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn while_break_termina_loop() {
         let env = Environment::new();
-        env.borrow_mut().define("i", Value::Int(0));
+        env.lock().define("i", Value::Int(0));
 
         // while true { i = i + 1; if i == 3 { break } }
         let stmt = Stmt::While {
@@ -4487,14 +4489,14 @@ print(_)\n";
             ],
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
-        assert_eq!(env.borrow().get("i"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("i"), Some(Value::Int(3)));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn while_continue_salta_a_la_siguiente_iteracion() {
         let env = Environment::new();
-        env.borrow_mut().define("i", Value::Int(0));
-        env.borrow_mut().define("total", Value::Int(0));
+        env.lock().define("i", Value::Int(0));
+        env.lock().define("total", Value::Int(0));
 
         // while i < 5 {
         //   i = i + 1
@@ -4537,7 +4539,7 @@ print(_)\n";
             ],
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
-        assert_eq!(env.borrow().get("total"), Some(Value::Int(12)));
+        assert_eq!(env.lock().get("total"), Some(Value::Int(12)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4556,7 +4558,7 @@ print(_)\n";
     #[tokio::test(flavor = "current_thread")]
     async fn loop_infinito_se_corta_con_break() {
         let env = Environment::new();
-        env.borrow_mut().define("count", Value::Int(0));
+        env.lock().define("count", Value::Int(0));
 
         // loop {
         //   count = count + 1
@@ -4584,7 +4586,7 @@ print(_)\n";
             ],
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
-        assert_eq!(env.borrow().get("count"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("count"), Some(Value::Int(5)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4635,7 +4637,7 @@ print(_)\n";
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
-        let v = env.borrow().get("User").expect("User no quedó en el env");
+        let v = env.lock().get("User").expect("User no quedó en el env");
         match v {
             Value::Type { name, fields } => {
                 assert_eq!(name, "User");
@@ -5047,7 +5049,7 @@ for x in [1, 2, 3, 4] {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("total"), Some(Value::Int(10)));
+        assert_eq!(env.lock().get("total"), Some(Value::Int(10)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5061,7 +5063,7 @@ for i in 0..3 {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("total"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("total"), Some(Value::Int(3)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5074,7 +5076,7 @@ for x in [] {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("ran"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("ran"), Some(Value::Bool(false)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5091,7 +5093,7 @@ for i in 0..10 {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("last"), Some(Value::Int(2)));
+        assert_eq!(env.lock().get("last"), Some(Value::Int(2)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5108,7 +5110,7 @@ for i in 0..5 {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("total"), Some(Value::Int(8)));
+        assert_eq!(env.lock().get("total"), Some(Value::Int(8)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5147,8 +5149,8 @@ for i in 0..3 {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("i"), Some(Value::Int(2)));
-        assert_eq!(env.borrow().get("last"), Some(Value::Int(2)));
+        assert_eq!(env.lock().get("i"), Some(Value::Int(2)));
+        assert_eq!(env.lock().get("last"), Some(Value::Int(2)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5164,7 +5166,7 @@ for i in 0..3 {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("total"), Some(Value::Int(9)));
+        assert_eq!(env.lock().get("total"), Some(Value::Int(9)));
     }
 
     // ---- Pattern::Range ----
@@ -5180,7 +5182,7 @@ let r = match n {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Str("in".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("in".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5194,7 +5196,7 @@ let r = match n {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Str("out".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("out".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5210,7 +5212,7 @@ let r = match n {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Str("diez_o_mas".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("diez_o_mas".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5225,7 +5227,7 @@ let r = match n {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Str("negativo".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("negativo".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5240,7 +5242,7 @@ let r = match n {
 "#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Str("no_int".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("no_int".into())));
     }
 
     // ---- builtin len ----
@@ -5250,7 +5252,7 @@ let r = match n {
         let src = "n = len([1, 2, 3, 4, 5])";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(5)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5258,7 +5260,7 @@ let r = match n {
         let src = "n = len([])";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(0)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(0)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5266,7 +5268,7 @@ let r = match n {
         let src = r#"n = len({"a": 1, "b": 2, "c": 3})"#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(3)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5275,7 +5277,7 @@ let r = match n {
         let src = r#"n = len("ñandú")"#;
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(5)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5283,7 +5285,7 @@ let r = match n {
         let src = "n = len(0..10)";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(10)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(10)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5292,7 +5294,7 @@ let r = match n {
         let src = "n = len(10..0)";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(0)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(0)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5327,11 +5329,11 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let u = env.borrow().get("u").unwrap();
+        let u = env.lock().get("u").unwrap();
         match u {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0], ("id".into(), Value::Int(1)));
                 assert_eq!(fields[1], ("name".into(), Value::Str("Fitz".into())));
@@ -5350,10 +5352,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let u = env.borrow().get("u").unwrap();
+        let u = env.lock().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[0].0, "id");
                 assert_eq!(fields[1].0, "name");
             }
@@ -5369,10 +5371,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[0], ("host".into(), Value::Str("localhost".into())));
                 assert_eq!(fields[1], ("port".into(), Value::Int(3000)));
             }
@@ -5392,10 +5394,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[0], ("port".into(), Value::Int(4001)));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -5410,10 +5412,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let u = env.borrow().get("u").unwrap();
+        let u = env.lock().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[1], ("email".into(), Value::Null));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -5428,10 +5430,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let u = env.borrow().get("u").unwrap();
+        let u = env.lock().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[1], ("email".into(), Value::Null));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -5496,8 +5498,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Str("Fitz".into())));
-        assert_eq!(env.borrow().get("i"), Some(Value::Int(1)));
+        assert_eq!(env.lock().get("n"), Some(Value::Str("Fitz".into())));
+        assert_eq!(env.lock().get("i"), Some(Value::Int(1)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5540,7 +5542,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Str("Fitz".into())));
+        assert_eq!(env.lock().get("n"), Some(Value::Str("Fitz".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5553,7 +5555,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let u = env.borrow().get("u").unwrap();
+        let u = env.lock().get("u").unwrap();
         assert_eq!(u.to_string(), "User { id: 1, name: \"Fitz\" }");
     }
 
@@ -5703,11 +5705,11 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("hit"),
+            env.lock().get("hit"),
             Some(ok_value(Value::Str("Fitz".into()))),
         );
         assert_eq!(
-            env.borrow().get("miss"),
+            env.lock().get("miss"),
             Some(err_value(Value::Str("no encontrado".into()))),
         );
     }
@@ -5733,9 +5735,9 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("ok_msg"), Some(Value::Str("ok: 5".into())));
+        assert_eq!(env.lock().get("ok_msg"), Some(Value::Str("ok: 5".into())));
         assert_eq!(
-            env.borrow().get("err_msg"),
+            env.lock().get("err_msg"),
             Some(Value::Str("err: divisi\u{00f3}n por cero".into())),
         );
     }
@@ -5778,7 +5780,7 @@ let r = match n {
         let src = "let y = (fn(x) => x + 1)(2)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("y"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("y"), Some(Value::Int(3)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5791,7 +5793,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Int(15)));
+        assert_eq!(env.lock().get("r"), Some(Value::Int(15)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5804,7 +5806,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Int(36)));
+        assert_eq!(env.lock().get("r"), Some(Value::Int(36)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5818,10 +5820,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let u = env.borrow().get("u").unwrap();
+        let u = env.lock().get("u").unwrap();
         match u {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[1], ("name".into(), Value::Str("Otro".into())));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -5840,10 +5842,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let b = env.borrow().get("b").unwrap();
+        let b = env.lock().get("b").unwrap();
         match b {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[0], ("value".into(), Value::Int(42)));
             }
             other => panic!("se esperaba Instance, se obtuvo {:?}", other),
@@ -5898,7 +5900,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let xs = env.borrow().get("xs").unwrap();
+        let xs = env.lock().get("xs").unwrap();
         assert_eq!(
             xs,
             Value::new_list(vec![
@@ -5920,7 +5922,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let b = env.borrow().get("b").unwrap();
+        let b = env.lock().get("b").unwrap();
         assert_eq!(b, Value::new_list(vec![Value::Int(1), Value::Int(2)]));
     }
 
@@ -5932,9 +5934,9 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("last"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("last"), Some(Value::Int(3)));
         assert_eq!(
-            env.borrow().get("xs"),
+            env.lock().get("xs"),
             Some(Value::new_list(vec![Value::Int(1), Value::Int(2)])),
         );
     }
@@ -5952,7 +5954,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("r"),
+            env.lock().get("r"),
             Some(Value::new_list(vec![
                 Value::Int(10),
                 Value::Int(20),
@@ -5967,7 +5969,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("r"),
+            env.lock().get("r"),
             Some(Value::new_list(vec![Value::Int(2), Value::Int(4)])),
         );
     }
@@ -5985,7 +5987,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("r"),
+            env.lock().get("r"),
             Some(ok_value(Value::Int(2))),
         );
     }
@@ -5996,7 +5998,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("r"),
+            env.lock().get("r"),
             Some(err_value(Value::Str("no encontrado".into()))),
         );
     }
@@ -6006,7 +6008,7 @@ let r = match n {
         let src = "let n = [1, 2, 3, 4].len()\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(4)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(4)));
     }
 
     // -----------------------------------------------------------------------
@@ -6018,7 +6020,7 @@ let r = match n {
         let src = "let r = {\"a\": 1}.get(\"a\")\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(ok_value(Value::Int(1))));
+        assert_eq!(env.lock().get("r"), Some(ok_value(Value::Int(1))));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6027,7 +6029,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         // El mensaje del Err lleva la clave.
-        let r = env.borrow().get("r").unwrap();
+        let r = env.lock().get("r").unwrap();
         match r {
             Value::Result(ResultVariant::Err(inner)) => match *inner {
                 Value::Str(s) => assert!(s.contains("nope")),
@@ -6046,8 +6048,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("yes"), Some(Value::Bool(true)));
-        assert_eq!(env.borrow().get("no"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("yes"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("no"), Some(Value::Bool(false)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6060,14 +6062,14 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("ks"),
+            env.lock().get("ks"),
             Some(Value::new_list(vec![
                 Value::Str("b".into()),
                 Value::Str("a".into()),
             ])),
         );
         assert_eq!(
-            env.borrow().get("vs"),
+            env.lock().get("vs"),
             Some(Value::new_list(vec![Value::Int(2), Value::Int(1)])),
         );
     }
@@ -6081,7 +6083,7 @@ let r = match n {
         let src = "let n = \"hola\".len()\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("n"), Some(Value::Int(4)));
+        assert_eq!(env.lock().get("n"), Some(Value::Int(4)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6092,8 +6094,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("a"), Some(Value::Str("HOLA".into())));
-        assert_eq!(env.borrow().get("b"), Some(Value::Str("mundo".into())));
+        assert_eq!(env.lock().get("a"), Some(Value::Str("HOLA".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("mundo".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6117,7 +6119,7 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(
-            env.borrow().get("r"),
+            env.lock().get("r"),
             Some(Value::new_list(vec![Value::Int(9), Value::Int(16)])),
         );
     }
@@ -6152,12 +6154,12 @@ let r = match n {
         res.unwrap();
 
         // hit es Ok(User { id: 1, name: "Fitz" })
-        let hit = env.borrow().get("hit").unwrap();
+        let hit = env.lock().get("hit").unwrap();
         match hit {
             Value::Result(ResultVariant::Ok(inner)) => match *inner {
                 Value::Instance { ref type_name, ref fields } => {
                     assert_eq!(type_name, "User");
-                    let f = fields.borrow();
+                    let f = fields.lock();
                     assert_eq!(f[0], ("id".into(), Value::Int(1)));
                     assert_eq!(f[1], ("name".into(), Value::Str("Fitz".into())));
                 }
@@ -6167,7 +6169,7 @@ let r = match n {
         }
 
         // miss es Err("no encontrado") — el mensaje viene de list_find.
-        let miss = env.borrow().get("miss").unwrap();
+        let miss = env.lock().get("miss").unwrap();
         assert_eq!(miss, err_value(Value::Str("no encontrado".into())));
     }
 
@@ -6226,7 +6228,7 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("g"), Some(Value::Str("hola, Fitz".into())));
+        assert_eq!(env.lock().get("g"), Some(Value::Str("hola, Fitz".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6240,9 +6242,9 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("sub/foo.fitz", foo)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Int(1)));
+        assert_eq!(env.lock().get("r"), Some(Value::Int(1)));
         // `sub` NO se bindea — solo el último segmento.
-        assert!(env.borrow().get("sub").is_none());
+        assert!(env.lock().get("sub").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6259,9 +6261,9 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("g"), Some(Value::Str("hola, Fitz".into())));
+        assert_eq!(env.lock().get("g"), Some(Value::Str("hola, Fitz".into())));
         // `utils` NO se bindea cuando se usa `from import`.
-        assert!(env.borrow().get("utils").is_none());
+        assert!(env.lock().get("utils").is_none());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6277,7 +6279,7 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("foo.fitz", foo)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("nm"), Some(Value::Str("Fitz".into())));
+        assert_eq!(env.lock().get("nm"), Some(Value::Str("Fitz".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6337,12 +6339,12 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("counter_mod.fitz", counter_mod)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("v"), Some(Value::Int(42)));
+        assert_eq!(env.lock().get("v"), Some(Value::Int(42)));
         // Como no podemos detectar re-ejecución desde el lado del
         // lenguaje, validamos al menos que ambos `import` no rompan
         // ni dupliquen estado: el binding `counter_mod` queda accesible
         // y consistente.
-        let m = env.borrow().get("counter_mod").unwrap();
+        let m = env.lock().get("counter_mod").unwrap();
         assert!(matches!(m, Value::Module { .. }));
     }
 
@@ -6350,7 +6352,7 @@ let r = match n {
     async fn modulo_cacheado_devuelve_misma_identidad_de_env() {
         // Cargar un módulo dos veces desde paths distintos pero al
         // mismo archivo (acá igual path) devuelve `Value::Module` con
-        // el MISMO `Rc<RefCell<Environment>>` adentro. Eso lo testea
+        // el MISMO `Arc<Mutex<Environment>>` adentro. Eso lo testea
         // el `PartialEq` de Module (por identidad del env).
         //
         // En este test, dos `from utils import x` (que requieren cargar
@@ -6365,8 +6367,8 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
-        let u1 = env.borrow().get("u1").unwrap();
-        let u2 = env.borrow().get("u2").unwrap();
+        let u1 = env.lock().get("u1").unwrap();
+        let u2 = env.lock().get("u2").unwrap();
         assert_eq!(u1, u2, "el segundo import debe devolver el mismo módulo cacheado");
     }
 
@@ -6410,7 +6412,7 @@ let r = match n {
             ("sub/bar.fitz", bar),
         ], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Str("desde bar".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("desde bar".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6445,7 +6447,7 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("r"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("r"), Some(Value::Int(5)));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6467,7 +6469,7 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
-        assert_eq!(env.borrow().get("g"), Some(Value::Str("saludos, Fitz".into())));
+        assert_eq!(env.lock().get("g"), Some(Value::Str("saludos, Fitz".into())));
     }
 
     // -----------------------------------------------------------------------
@@ -7335,7 +7337,7 @@ let r = match n {
         let src = "let c = cors({\"allow_origin\": [\"https://a.com\", \"https://b.com\"]})";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => match &cfg.allow_origin {
                 crate::http::AllowOrigin::Set(items) => {
@@ -7386,7 +7388,7 @@ let r = match n {
         let src = "let c = cors()";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
                 assert_eq!(
@@ -7407,7 +7409,7 @@ let r = match n {
         let src = "let c = cors({})";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
                 assert_eq!(
@@ -7432,7 +7434,7 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
                 assert_eq!(
@@ -7452,7 +7454,7 @@ let r = match n {
         let src = "let c = cors({\"max_age\": 600})";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        let c = env.borrow().get("c").unwrap();
+        let c = env.lock().get("c").unwrap();
         match c {
             Value::CorsConfig(cfg) => {
                 assert_eq!(

@@ -1,4 +1,4 @@
-// env.rs — Fase 2.4
+// env.rs — Fase 2.4 (EnvRef migrado a Arc<Mutex<>> en F17.2)
 //
 // Environment: el almacén de variables del intérprete. Es una cadena de
 // scopes encadenados, cada uno con un mapa nombre→valor y un puntero a su
@@ -9,17 +9,23 @@
 // Lookups van hacia arriba en la cadena hasta encontrar la variable o
 // llegar al global.
 //
-// Por qué `Rc<RefCell<Environment>>`:
-//  - `Rc` (Reference Counted) permite compartir el mismo environment desde
-//    múltiples lugares — clave para closures: la función "captura" un
-//    handle al env donde fue definida, y ese mismo env puede seguir vivo
-//    en el caller después.
-//  - `RefCell` da mutabilidad interior — necesario porque Rust no nos deja
-//    tener múltiples referencias `&mut` al mismo dato, pero nosotros sí
-//    queremos mutar el env desde adentro de funciones que lo comparten.
-//    `RefCell` mueve el chequeo de borrows del compile-time al runtime.
-//  - El precio: cada acceso es `env.borrow()` o `env.borrow_mut()`. Y si
-//    pedimos dos `borrow_mut` simultáneos del mismo `RefCell`, panic.
+// Por qué `Arc<parking_lot::Mutex<Environment>>` (F17.2):
+//  - `Arc` permite compartir el mismo environment desde múltiples lugares
+//    y entre threads — clave para closures (la función "captura" un handle
+//    al env donde fue definida) y para destrabar `Send` en `Value::Function`
+//    (handlers HTTP axum exigen `Send + 'static`).
+//  - `parking_lot::Mutex` da mutabilidad interior thread-safe. Elegido sobre
+//    `std::sync::Mutex` porque es más rápido sin contención (~10ns vs ~30ns)
+//    y no envenena en panic. No distingue lecturas/escrituras (un solo
+//    `.lock()` para ambos casos), mismo modelo que el RefCell que reemplaza.
+//  - El precio: cada acceso es `env.lock()` y libera el guard al salir del
+//    scope. Doble `.lock()` en el mismo thread → deadlock (parking_lot::Mutex
+//    NO es reentrante). Política: tomar el lock para el menor scope posible
+//    y soltarlo antes de cualquier llamada recursiva o `.await`.
+//  - Antes de F17.2: `Rc<RefCell<>>` — single-threaded, runtime-checked.
+//    El doble borrow_mut panic-ueaba en runtime; ahora deadlock-ea (riesgo
+//    equivalente, distinto síntoma). El audit de re-entrancia se hizo en
+//    F17.2 sobre `eval_call` y `Environment::assign/get/has`.
 //
 // Política de Assign (la decide el evaluador, no env):
 //  - Si la variable existe en algún scope visible → reasignar ahí (`assign`).
@@ -28,9 +34,10 @@
 //  pero crear locales nuevos cuando hace falta. Si más adelante esto trae
 //  confusión (ej: closures que mutan accidentalmente al padre) lo revisamos.
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::value::Value;
 
@@ -38,24 +45,32 @@ use crate::value::Value;
 #[derive(Debug)]
 pub struct Environment {
     vars: HashMap<String, Value>,
-    parent: Option<Rc<RefCell<Environment>>>,
+    parent: Option<Arc<Mutex<Environment>>>,
 }
 
 /// Alias para abreviar las firmas: un handle compartido y mutable al env.
-pub type EnvRef = Rc<RefCell<Environment>>;
+pub type EnvRef = Arc<Mutex<Environment>>;
 
 impl Environment {
     /// Crea un environment raíz, sin padre. Típicamente uno solo por programa.
+    ///
+    /// Allow `arc_with_non_send_sync`: `Environment` contiene `Value` y
+    /// `Value::Future` lleva un `FitzFuture: !Send` hasta F17.3. El lint
+    /// será correcto-y-redundante recién cuando quitemos `?Send` del
+    /// `#[async_recursion]` del evaluator y el future cierre la promesa
+    /// de Send. Por ahora silenciamos para no bloquear F17.2.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> EnvRef {
-        Rc::new(RefCell::new(Environment {
+        Arc::new(Mutex::new(Environment {
             vars: HashMap::new(),
             parent: None,
         }))
     }
 
     /// Crea un scope hijo de `parent`. Usado al entrar a una función o bloque.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_child(parent: EnvRef) -> EnvRef {
-        Rc::new(RefCell::new(Environment {
+        Arc::new(Mutex::new(Environment {
             vars: HashMap::new(),
             parent: Some(parent),
         }))
@@ -74,7 +89,7 @@ impl Environment {
         if let Some(v) = self.vars.get(name) {
             return Some(v.clone());
         }
-        self.parent.as_ref().and_then(|p| p.borrow().get(name))
+        self.parent.as_ref().and_then(|p| p.lock().get(name))
     }
 
     /// `true` si la variable existe en este scope o en cualquier ancestro.
@@ -82,7 +97,7 @@ impl Environment {
         if self.vars.contains_key(name) {
             return true;
         }
-        self.parent.as_ref().is_some_and(|p| p.borrow().has(name))
+        self.parent.as_ref().is_some_and(|p| p.lock().has(name))
     }
 
     /// Reasigna una variable existente. Busca en la cadena de scopes y la
@@ -95,7 +110,7 @@ impl Environment {
             return Ok(());
         }
         match &self.parent {
-            Some(parent) => parent.borrow_mut().assign(name, value),
+            Some(parent) => parent.lock().assign(name, value),
             None => Err(()),
         }
     }
@@ -112,72 +127,72 @@ mod tests {
     #[test]
     fn define_y_get_en_scope_simple() {
         let env = Environment::new();
-        env.borrow_mut().define("x", Value::Int(42));
+        env.lock().define("x", Value::Int(42));
 
-        assert_eq!(env.borrow().get("x"), Some(Value::Int(42)));
+        assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
     }
 
     #[test]
     fn get_devuelve_none_si_no_existe() {
         let env = Environment::new();
-        assert_eq!(env.borrow().get("inexistente"), None);
+        assert_eq!(env.lock().get("inexistente"), None);
     }
 
     #[test]
     fn child_ve_variables_del_padre() {
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Int(1));
+        global.lock().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
-        assert_eq!(child.borrow().get("x"), Some(Value::Int(1)));
+        assert_eq!(child.lock().get("x"), Some(Value::Int(1)));
     }
 
     #[test]
     fn child_puede_sombrear_al_padre_con_define() {
         // define() siempre escribe local — sombrea al padre.
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Int(1));
+        global.lock().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
-        child.borrow_mut().define("x", Value::Int(99));
+        child.lock().define("x", Value::Int(99));
 
-        assert_eq!(child.borrow().get("x"), Some(Value::Int(99)));
+        assert_eq!(child.lock().get("x"), Some(Value::Int(99)));
         // El padre sigue intacto.
-        assert_eq!(global.borrow().get("x"), Some(Value::Int(1)));
+        assert_eq!(global.lock().get("x"), Some(Value::Int(1)));
     }
 
     #[test]
     fn assign_desde_child_reasigna_en_el_padre() {
         // assign() busca en la cadena. Reescribe donde la variable existe.
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Int(1));
+        global.lock().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
-        child.borrow_mut().assign("x", Value::Int(2)).unwrap();
+        child.lock().assign("x", Value::Int(2)).unwrap();
 
         // El cambio se ve tanto en el child como en el padre.
-        assert_eq!(child.borrow().get("x"), Some(Value::Int(2)));
-        assert_eq!(global.borrow().get("x"), Some(Value::Int(2)));
+        assert_eq!(child.lock().get("x"), Some(Value::Int(2)));
+        assert_eq!(global.lock().get("x"), Some(Value::Int(2)));
     }
 
     #[test]
     fn assign_a_variable_no_definida_devuelve_err() {
         let env = Environment::new();
-        assert!(env.borrow_mut().assign("x", Value::Int(1)).is_err());
+        assert!(env.lock().assign("x", Value::Int(1)).is_err());
     }
 
     #[test]
     fn has_busca_en_cadena_de_scopes() {
         let global = Environment::new();
-        global.borrow_mut().define("global_var", Value::Int(1));
+        global.lock().define("global_var", Value::Int(1));
 
         let middle = Environment::new_child(global.clone());
-        middle.borrow_mut().define("middle_var", Value::Int(2));
+        middle.lock().define("middle_var", Value::Int(2));
 
         let leaf = Environment::new_child(middle.clone());
-        leaf.borrow_mut().define("leaf_var", Value::Int(3));
+        leaf.lock().define("leaf_var", Value::Int(3));
 
-        let leaf_ref = leaf.borrow();
+        let leaf_ref = leaf.lock();
         assert!(leaf_ref.has("global_var"));
         assert!(leaf_ref.has("middle_var"));
         assert!(leaf_ref.has("leaf_var"));
@@ -188,20 +203,20 @@ mod tests {
     fn assign_actualiza_solo_el_scope_correcto() {
         // global.x existe, middle.y existe. Desde leaf, reasigno ambas.
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Int(10));
+        global.lock().define("x", Value::Int(10));
 
         let middle = Environment::new_child(global.clone());
-        middle.borrow_mut().define("y", Value::Int(20));
+        middle.lock().define("y", Value::Int(20));
 
         let leaf = Environment::new_child(middle.clone());
 
-        leaf.borrow_mut().assign("x", Value::Int(100)).unwrap();
-        leaf.borrow_mut().assign("y", Value::Int(200)).unwrap();
+        leaf.lock().assign("x", Value::Int(100)).unwrap();
+        leaf.lock().assign("y", Value::Int(200)).unwrap();
 
-        assert_eq!(global.borrow().get("x"), Some(Value::Int(100)));
-        assert_eq!(middle.borrow().get("y"), Some(Value::Int(200)));
+        assert_eq!(global.lock().get("x"), Some(Value::Int(100)));
+        assert_eq!(middle.lock().get("y"), Some(Value::Int(200)));
         // No hay variables locales en leaf.
-        assert_eq!(leaf.borrow().vars.len(), 0);
+        assert_eq!(leaf.lock().vars.len(), 0);
     }
 
     #[test]
@@ -209,13 +224,13 @@ mod tests {
         // Si child sombrea x, el padre no se ve afectado al hacer get desde
         // un hermano del child.
         let global = Environment::new();
-        global.borrow_mut().define("x", Value::Int(1));
+        global.lock().define("x", Value::Int(1));
 
         let child_a = Environment::new_child(global.clone());
-        child_a.borrow_mut().define("x", Value::Int(99));
+        child_a.lock().define("x", Value::Int(99));
 
         let child_b = Environment::new_child(global.clone());
         // child_b no sombrea — ve el x del global.
-        assert_eq!(child_b.borrow().get("x"), Some(Value::Int(1)));
+        assert_eq!(child_b.lock().get("x"), Some(Value::Int(1)));
     }
 }

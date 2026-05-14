@@ -1,4 +1,4 @@
-// value.rs — Fase 2.4
+// value.rs — Fase 2.4 (Shared migrado a Arc<Mutex<>> en F17.2)
 //
 // Representación de valores en runtime. Un programa Fitz se evalúa a un árbol
 // de `Value`s. Esta es la moneda con la que opera el evaluador.
@@ -15,13 +15,22 @@
 //    daría false.
 //  - `Value::Function` guarda un handle (`EnvRef`) al environment donde la
 //    función fue definida. Esto crea una dependencia mutua value↔env, pero
-//    Rust la acepta porque `Rc<RefCell<>>` es una indirección: el tamaño
+//    Rust la acepta porque `Arc<Mutex<>>` es una indirección: el tamaño
 //    de `Value` no depende del tamaño de `Environment`.
+//  - **F17.2**: `Shared<T>` migrado de `Rc<RefCell<T>>` a
+//    `Arc<parking_lot::Mutex<T>>`. El cambio es transparente para los call
+//    sites que usaban `.borrow()`/`.borrow_mut()` → ambos pasan a `.lock()`
+//    (parking_lot::Mutex no distingue lectura de escritura). El objetivo
+//    final es destrabar `Send` para Value y EnvRef y eliminar el bridge
+//    HTTP mpsc/oneshot (F17.5). Hasta F17.3 el evaluator sigue con
+//    `#[async_recursion(?Send)]` y el runtime tokio sigue en
+//    `current_thread`; nada del comportamiento observable cambia acá.
 
-use std::cell::RefCell;
 use std::future::Future;
 use std::pin::Pin;
-use std::rc::Rc;
+use std::sync::Arc;
+
+use parking_lot::Mutex;
 
 use crate::ast::{Field, Param, Stmt};
 use crate::env::EnvRef;
@@ -31,11 +40,12 @@ use crate::error::FitzResult;
 /// Fitz sin `.await` (guardar el future suelto) o desde builtins async
 /// como `sleep`. `.await` lo desempaca al `FitzResult<Value>` interno.
 ///
-/// **Send NO se exige** (`?Send`): los containers de `Value` y `EnvRef`
-/// siguen detrás de `Rc<RefCell<>>` (no thread-safe). Eso obliga al
-/// runtime tokio a `current_thread`. La migración a `Arc<Mutex<>>`
-/// está comprometida como deuda F17 (post-Fase 6.4) — habilita
-/// paralelismo real entre tareas Fitz cuando aparezca demanda.
+/// **Send todavía NO se exige acá**: el evaluator sigue con
+/// `#[async_recursion(?Send)]` hasta F17.3, así que los futures que
+/// construye siguen siendo `!Send` (capturan locals con `EnvRef`,
+/// pero los locales `Arc<Mutex<...>>` no cruzan `.await` directamente;
+/// la barrera real es el macro). Cuando F17.3 quite `?Send` esta
+/// definición pasará a `dyn Future<...> + Send` sin romper call sites.
 pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>>>>;
 
 /// Wrapper sobre el future pendiente que aporta `Debug` manual. El
@@ -43,17 +53,23 @@ pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>>>>;
 /// en `Value`. La celda envuelve `Option<...>` para que `.take()`
 /// extraiga el future al hacer `.await` sin clonar (los futures se
 /// consumen una sola vez).
-pub struct FutureCell(pub Rc<RefCell<Option<FitzFuture>>>);
+///
+/// **F17.2**: usa `Arc<Mutex<>>` igual que el resto de `Shared<T>`.
+/// Mientras el inner `FitzFuture` siga siendo `!Send` (hasta F17.3),
+/// `Mutex<Option<FitzFuture>>` también es `!Send` (Mutex<T> es Send
+/// solo si T es Send). Eso está bien — F17.2 no requiere Send todavía,
+/// solo prepara la representación.
+pub struct FutureCell(pub Arc<Mutex<Option<FitzFuture>>>);
 
 impl Clone for FutureCell {
     fn clone(&self) -> Self {
-        FutureCell(Rc::clone(&self.0))
+        FutureCell(Arc::clone(&self.0))
     }
 }
 
 impl std::fmt::Debug for FutureCell {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        let occupied = self.0.borrow().is_some();
+        let occupied = self.0.lock().is_some();
         if occupied {
             write!(f, "FutureCell(pending)")
         } else {
@@ -63,20 +79,27 @@ impl std::fmt::Debug for FutureCell {
 }
 
 /// Alias para colecciones compartidas por referencia. Las listas, los
-/// mapas y los campos de una instancia viven detrás de `Rc<RefCell<>>`:
-/// `Rc` permite alias (la misma colección visible desde múltiples
-/// variables/campos/argumentos), `RefCell` permite mutar a través del
-/// alias. Es la misma semántica que objetos en Python y JS.
+/// mapas y los campos de una instancia viven detrás de
+/// `Arc<parking_lot::Mutex<>>`: `Arc` permite alias (la misma colección
+/// visible desde múltiples variables/campos/argumentos) y `Mutex` permite
+/// mutar a través del alias. Es la misma semántica que objetos en Python
+/// y JS pero ya thread-safe — habilitará paralelismo real entre tareas
+/// Fitz una vez que F17.3 cierre y quitemos `(?Send)` del async_recursion.
 ///
-/// `Value::clone()` clona el `Rc` (barato), no el contenido — todas las
+/// `Value::clone()` clona el `Arc` (barato), no el contenido — todas las
 /// copias miran el mismo dato. Eso es lo que destraba `xs.push(...)`,
 /// `user.name = "x"` y demás formas de mutación.
-pub type Shared<T> = Rc<RefCell<T>>;
+///
+/// **F17.2**: migrado de `Rc<RefCell<T>>` a `Arc<parking_lot::Mutex<T>>`.
+/// `.borrow()` y `.borrow_mut()` se mapean ambos a `.lock()` —
+/// parking_lot no distingue lectura de escritura (si en algún hot path
+/// las lecturas concurrentes ganan el costo extra, evaluamos `RwLock`).
+pub type Shared<T> = Arc<Mutex<T>>;
 
 /// Constructor del wrapper compartido. Usar siempre `shared(x)` en lugar
-/// de `Rc::new(RefCell::new(x))` directo, para que el patrón quede uniforme.
+/// de `Arc::new(Mutex::new(x))` directo, para que el patrón quede uniforme.
 pub fn shared<T>(value: T) -> Shared<T> {
-    Rc::new(RefCell::new(value))
+    Arc::new(Mutex::new(value))
 }
 
 /// Un valor en runtime.
@@ -121,10 +144,10 @@ pub enum Value {
         fields: Vec<Field>,
     },
 
-    /// Lista en runtime. Compartida por referencia (`Rc<RefCell<>>`)
-    /// para que `xs.push(...)`, pasar la lista a una función, o
-    /// guardarla en un campo de instancia hablen del mismo dato.
-    /// Construir con `Value::new_list(vec)`.
+    /// Lista en runtime. Compartida por referencia (`Shared<T>` =
+    /// `Arc<Mutex<>>` post-F17.2) para que `xs.push(...)`, pasar la lista
+    /// a una función, o guardarla en un campo de instancia hablen del
+    /// mismo dato. Construir con `Value::new_list(vec)`.
     List(Shared<Vec<Value>>),
 
     /// Mapa en runtime. `Vec<(K, V)>` en vez de `HashMap` por dos razones:
@@ -150,9 +173,10 @@ pub enum Value {
     /// que dos instancias del mismo tipo se imprimen igual aunque el
     /// usuario haya tipeado los campos en otro orden.
     ///
-    /// `fields` va compartido (`Rc<RefCell<>>`) para destrabar
-    /// `user.name = "x"`: la mutación se ve a través de cualquier
-    /// alias a esta instancia. Construir con `Value::new_instance(...)`.
+    /// `fields` va compartido (`Shared<T>` = `Arc<Mutex<>>` post-F17.2)
+    /// para destrabar `user.name = "x"`: la mutación se ve a través de
+    /// cualquier alias a esta instancia. Construir con
+    /// `Value::new_instance(...)`.
     Instance {
         type_name: String,
         fields: Shared<Vec<(String, Value)>>,
@@ -213,10 +237,12 @@ pub enum Value {
     /// serializar — usar `cors(...)` como expresión suelta no tiene
     /// sentido y el código que lo intenta recibe error claro.
     ///
-    /// `Arc` y no `Rc`: el config viaja al thread tokio para configurar
-    /// el preflight handler de axum, así que tiene que ser `Send + Sync`.
-    /// El payload (`String`s y `Vec<String>`) ya cumple eso.
-    CorsConfig(std::sync::Arc<crate::http::CorsConfig>),
+    /// `Arc<CorsConfig>` (inmutable post-build): el config viaja al thread
+    /// tokio para configurar el preflight handler de axum, así que tiene
+    /// que ser `Send + Sync`. El payload (`String`s y `Vec<String>`) ya
+    /// cumple eso. Post-F17 el resto de `Shared<T>` también es `Arc<Mutex>`
+    /// — este caso sigue sin `Mutex` porque el config es read-only.
+    CorsConfig(Arc<crate::http::CorsConfig>),
 
     /// Future pendiente introducido en Fase 6.4. Se construye cuando
     /// se llama una `async fn` Fitz sin `.await` (guardar el future
@@ -224,9 +250,9 @@ pub enum Value {
     /// `Expr::Await` lo desempaca; consumirlo dos veces es un panic
     /// del intérprete (futures se await-ean una sola vez).
     ///
-    /// Envuelto en `FutureCell` (`Rc<RefCell<Option<...>>>`) por dos
+    /// Envuelto en `FutureCell` (`Arc<Mutex<Option<...>>>`) por dos
     /// razones: (a) `Value: Clone` y los `Pin<Box<dyn Future>>` no
-    /// son Clone — el `Rc` da clone barato y comparte la celda;
+    /// son Clone — el `Arc` da clone barato y comparte la celda;
     /// (b) el `Option` permite extraer el future al hacer `.await`
     /// sin clonar (mover con `.take()`), preservando la regla
     /// "un future se await una sola vez".
@@ -243,8 +269,9 @@ pub enum ResultVariant {
 
 impl Value {
     /// Crea un `Value::List` a partir de un `Vec<Value>`. Envolvé siempre
-    /// con este constructor para mantener el wrapping `Rc<RefCell<>>`
-    /// uniforme y no esparcir `Rc::new(RefCell::new(...))` por todos lados.
+    /// con este constructor para mantener el wrapping `Shared<T>` =
+    /// `Arc<Mutex<>>` (post-F17.2) uniforme y no esparcir
+    /// `Arc::new(Mutex::new(...))` por todos lados.
     pub fn new_list(items: Vec<Value>) -> Value {
         Value::List(shared(items))
     }
@@ -269,8 +296,15 @@ impl Value {
     /// al llamar sin `.await`. El future se ejecuta una sola vez:
     /// cuando `Expr::Await` lo desempaca, el `Option` queda en `None`
     /// y un segundo `.await` paniquea.
+    ///
+    /// Allow `arc_with_non_send_sync`: en F17.2 `FitzFuture` sigue siendo
+    /// `!Send` (el evaluator todavía lleva `#[async_recursion(?Send)]`).
+    /// Cuando F17.3 quite `?Send`, el lint pasa solo y el `allow` se
+    /// puede eliminar — junto con los gemelos en `env.rs:new` y
+    /// `env.rs:new_child`.
+    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new_future(fut: FitzFuture) -> Value {
-        Value::Future(FutureCell(Rc::new(RefCell::new(Some(fut)))))
+        Value::Future(FutureCell(Arc::new(Mutex::new(Some(fut)))))
     }
 
     /// Nombre del tipo, para mensajes de error.
@@ -322,7 +356,7 @@ impl std::fmt::Display for Value {
                 // Ej: `[1, "hola", 2]`. Distinto del Display de `Str`
                 // suelto, que va sin comillas porque ese caso es para
                 // salida final.
-                let items = items.borrow();
+                let items = items.lock();
                 write!(f, "[")?;
                 for (i, v) in items.iter().enumerate() {
                     if i > 0 {
@@ -333,7 +367,7 @@ impl std::fmt::Display for Value {
                 write!(f, "]")
             }
             Value::Map(pairs) => {
-                let pairs = pairs.borrow();
+                let pairs = pairs.lock();
                 write!(f, "{{")?;
                 for (i, (k, v)) in pairs.iter().enumerate() {
                     if i > 0 {
@@ -350,7 +384,7 @@ impl std::fmt::Display for Value {
                 // Formato: `User { id: 1, name: "x" }`. Strings con
                 // comillas adentro (mismo criterio que List/Map), para
                 // distinguir `42` de `"42"` a simple vista.
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 write!(f, "{} {{", type_name)?;
                 for (i, (k, v)) in fields.iter().enumerate() {
                     if i > 0 {
@@ -414,14 +448,14 @@ impl PartialEq for Value {
             (Value::Null, Value::Null) => true,
             // List y Map se comparan estructuralmente, elemento a elemento.
             // La igualdad recursiva delega en esta misma impl, así que Int↔Float
-            // coerciona también adentro de listas y mapas. Si los dos `Rc`
-            // apuntan al mismo dato (alias del mismo origen), `Rc::ptr_eq`
-            // es shortcut barato; si no, comparamos el contenido borroweando.
+            // coerciona también adentro de listas y mapas. Si los dos `Arc`
+            // apuntan al mismo dato (alias del mismo origen), `Arc::ptr_eq`
+            // es shortcut barato; si no, comparamos el contenido lockeando.
             (Value::List(a), Value::List(b)) => {
-                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
+                Arc::ptr_eq(a, b) || *a.lock() == *b.lock()
             }
             (Value::Map(a), Value::Map(b)) => {
-                Rc::ptr_eq(a, b) || *a.borrow() == *b.borrow()
+                Arc::ptr_eq(a, b) || *a.lock() == *b.lock()
             }
             (
                 Value::Range { start: s1, end: e1 },
@@ -435,7 +469,7 @@ impl PartialEq for Value {
                 Value::Instance { type_name: t1, fields: f1 },
                 Value::Instance { type_name: t2, fields: f2 },
             ) => {
-                t1 == t2 && (Rc::ptr_eq(f1, f2) || *f1.borrow() == *f2.borrow())
+                t1 == t2 && (Arc::ptr_eq(f1, f2) || *f1.lock() == *f2.lock())
             }
             // Result se compara variante por variante, recursivamente.
             // Misma coerción Int↔Float adentro vía esta misma impl.
@@ -444,16 +478,16 @@ impl PartialEq for Value {
                 (ResultVariant::Err(va), ResultVariant::Err(vb)) => va == vb,
                 _ => false,
             },
-            // Módulos se comparan por identidad del env (mismo Rc). El
+            // Módulos se comparan por identidad del env (mismo Arc). El
             // loader cachea por path canonicalizado, así que dos
             // imports del mismo archivo dan dos `Value::Module` con el
-            // mismo `Rc<RefCell<Environment>>`. Estructural no tiene
+            // mismo `Arc<Mutex<Environment>>`. Estructural no tiene
             // sentido — el env puede contener funciones y otros
             // valores no-comparables.
             (
                 Value::Module { env: e1, .. },
                 Value::Module { env: e2, .. },
-            ) => Rc::ptr_eq(e1, e2),
+            ) => Arc::ptr_eq(e1, e2),
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }

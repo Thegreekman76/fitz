@@ -8,10 +8,12 @@
 //   2. Al terminar `eval`, si el registry quedó no vacío, `serve()`
 //      arranca un runtime tokio + axum y bloquea hasta Ctrl-C.
 //
-// Threading model (tomado en 4.2):
+// Threading model (tomado en 4.2, en migración por F17):
 //
-//   `Value` y `EnvRef` usan `Rc<RefCell<>>`, que NO es `Send`. No los
-//   podemos pasar a un thread de tokio. Entonces:
+//   `Value` y `EnvRef` se migraron a `Arc<parking_lot::Mutex<>>` en F17.2,
+//   pero el evaluator sigue con `#[async_recursion(?Send)]` hasta F17.3,
+//   así que los futures todavía no son Send. Mientras tanto el bridge
+//   mpsc/oneshot sigue activo:
 //
 //     - El intérprete vive en un thread `std::thread` propio (el
 //       mismo que corrió `eval`, ahora reutilizado para servir
@@ -22,11 +24,13 @@
 //       `mpsc::UnboundedSender`, espera el resultado vía
 //       `oneshot::Receiver`.
 //     - El thread intérprete loopea: recibe task → ejecuta el handler
-//       Fitz síncronamente → manda `HandlerOutcome` por el oneshot.
+//       Fitz async (sobre tokio current_thread) → manda
+//       `HandlerOutcome` por el oneshot.
 //
-// Async real adentro del lenguaje sigue siendo deuda; `is_async` se
-// sigue ignorando (es decoración sintáctica). En 4.x o Fase 5
-// llevamos await/futures al lenguaje.
+// El bridge cae como deuda comprometida en F17.5 cuando el future del
+// handler ya sea Send y axum pueda invocar `eval_call(...).await`
+// directo. F17.4 switcheará el tokio runtime a `rt-multi-thread` para
+// habilitar paralelismo real entre tareas Fitz.
 
 use std::cell::RefCell;
 
@@ -835,8 +839,8 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         Value::Null => J::Null,
 
         Value::List(items) => {
-            let mut out = Vec::with_capacity(items.borrow().len());
-            for v in items.borrow().iter() {
+            let mut out = Vec::with_capacity(items.lock().len());
+            for v in items.lock().iter() {
                 out.push(value_to_json(v)?);
             }
             J::Array(out)
@@ -844,7 +848,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
 
         Value::Map(pairs) => {
             let mut out = serde_json::Map::new();
-            for (k, v) in pairs.borrow().iter() {
+            for (k, v) in pairs.lock().iter() {
                 let key = match k {
                     Value::Str(s) => s.clone(),
                     other => {
@@ -861,7 +865,7 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
 
         Value::Instance { fields, .. } => {
             let mut out = serde_json::Map::new();
-            for (name, v) in fields.borrow().iter() {
+            for (name, v) in fields.lock().iter() {
                 out.insert(name.clone(), value_to_json(v)?);
             }
             J::Object(out)
@@ -1156,9 +1160,10 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 //   └──────────────────┘              └──────────────────────┘
 //
 // El intérprete vive en el thread main (el mismo que corrió `eval`).
-// Eso evita mover los `Rc<RefCell<>>` de `Value`/`EnvRef`, que no son
-// `Send`. tokio corre en un std::thread spawneado, con su propio
-// runtime current_thread. Lo que cruza el canal:
+// Aunque post-F17.2 `Value`/`EnvRef` ya usan `Arc<Mutex<>>`, los futures
+// del evaluator siguen siendo `!Send` (`#[async_recursion(?Send)]` se
+// quita recién en F17.3). tokio corre en un std::thread spawneado,
+// con su propio runtime current_thread. Lo que cruza el canal:
 //
 //   - tokio → main: `InterpTask` con índice de ruta + path params
 //     crudos (`HashMap<String,String>`).
@@ -1895,9 +1900,13 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
 
 /// Arranca el servidor HTTP y bloquea el thread llamador hasta Ctrl-C.
 ///
-/// Modelo de threading (revertido respecto del borrador inicial):
+/// Modelo de threading (revertido respecto del borrador inicial; en
+/// transición hacia F17 — async puro sin bridge en F17.5):
 ///   - El thread llamador (main, donde corrió `eval`) NO se mueve —
-///     contiene los `Rc<RefCell<>>` de los handlers y no es `Send`.
+///     contiene los handlers con `EnvRef` cuyo future ejecutor sigue
+///     siendo `!Send` hasta F17.3 (post-F17.2 los contenedores ya son
+///     `Arc<Mutex<>>` pero el macro `?Send` mantiene los futures
+///     locales al thread).
 ///   - Spawneamos un std::thread separado para tokio + axum. Recibe
 ///     solo `Vec<RouteMeta>` (estructural, `Send + Clone`) y el `tx`
 ///     del canal.
@@ -3052,7 +3061,7 @@ mod tests {
         let v = json_to_value(&serde_json::json!([1, 2, "tres"]));
         match v {
             Value::List(items) => {
-                let items = items.borrow();
+                let items = items.lock();
                 assert_eq!(items.len(), 3);
                 assert_eq!(items[0], Value::Int(1));
                 assert_eq!(items[2], Value::Str("tres".into()));
@@ -3066,7 +3075,7 @@ mod tests {
         let v = json_to_value(&serde_json::json!({ "a": 1, "b": "x" }));
         match v {
             Value::Map(pairs) => {
-                let pairs = pairs.borrow();
+                let pairs = pairs.lock();
                 assert_eq!(pairs.len(), 2);
                 // El orden de serde_json::Map depende de la feature
                 // `preserve_order`. No la asumimos: convertimos a un
@@ -3127,7 +3136,7 @@ mod tests {
         match v {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[0].0, "id");
                 assert_eq!(fields[0].1, Value::Int(1));
                 assert_eq!(fields[1].0, "name");
@@ -3168,7 +3177,7 @@ mod tests {
         let v = json_to_instance(&json, &t).unwrap();
         match v {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[1].0, "email");
                 assert_eq!(fields[1].1, Value::Null);
             }
@@ -3186,7 +3195,7 @@ mod tests {
         let v = json_to_instance(&json, &t).unwrap();
         match v {
             Value::Instance { fields, .. } => {
-                let fields = fields.borrow();
+                let fields = fields.lock();
                 assert_eq!(fields[1].0, "active");
                 assert_eq!(fields[1].1, Value::Bool(true));
             }
@@ -3289,14 +3298,15 @@ mod tests {
     // abrir socket TCP, vía `tower::ServiceExt::oneshot`.
     //
     // Threading: en `serve()` real, el intérprete vive en el thread
-    // main y tokio en un std::thread spawneado. Pero los handlers
-    // tienen `Rc<RefCell<>>` (no Send), así que no podemos mover el
-    // registry a un thread spawneado — eso mismo es lo que `serve()`
-    // evita. En los tests usamos `tokio::task::LocalSet` para correr
-    // tanto el router como el loop del intérprete adentro del mismo
-    // thread del test, eludiendo el bound `Send`. Es el patrón
-    // estándar de tokio para coexistencia de futures `!Send` con
-    // futures async.
+    // main y tokio en un std::thread spawneado. Aunque post-F17.2 los
+    // contenedores de `Value`/`EnvRef` ya son `Arc<Mutex<>>`, el future
+    // del evaluator sigue siendo `!Send` por el `#[async_recursion(?Send)]`
+    // (se quita en F17.3), así que no podemos mover el registry a un
+    // thread spawneado todavía — eso mismo es lo que `serve()` evita.
+    // En los tests usamos `tokio::task::LocalSet` para correr tanto el
+    // router como el loop del intérprete adentro del mismo thread del
+    // test, eludiendo el bound `Send`. Es el patrón estándar de tokio
+    // para coexistencia de futures `!Send` con futures async.
 
     /// Helper: corre un request contra el router usando LocalSet. El
     /// loop del intérprete y el `oneshot` del router viven juntos en
