@@ -8,31 +8,22 @@
 //   2. Al terminar `eval`, si el registry quedó no vacío, `serve()`
 //      arranca un runtime tokio + axum y bloquea hasta Ctrl-C.
 //
-// Threading model (tomado en 4.2, en migración por F17):
+// Threading model (post-F17.5):
 //
-//   Post-F17.3 `Value` y `EnvRef` son `Send` (contenedores
-//   `Arc<parking_lot::Mutex<>>`) y el evaluator emite futures `Send`
-//   (`#[async_recursion]` sin `?Send`). Eso destraba la futura
-//   eliminación del bridge (F17.5), pero por ahora el bridge sigue
-//   armado mientras F17.4 cambia el runtime tokio a `rt-multi-thread`
-//   y F17.5 reescribe los handlers axum para llamar al evaluator
-//   directo:
+//   Un único runtime tokio `rt-multi-thread` (F17.4a) corre en el
+//   thread que llamó `eval` (`block_on` en `serve()`). Cada request
+//   axum dispatchea un handler async en alguno de los workers, que
+//   invoca `handle_task(&registry, ...).await` directo sobre el
+//   evaluator. `HttpRegistry` se comparte por `Arc` (Send + Sync
+//   post-F17.2-3). El paralelismo entre requests es real: N workers
+//   procesando handlers simultáneos.
 //
-//     - El intérprete vive en un thread `std::thread` propio (el
-//       mismo que corrió `eval`, ahora reutilizado para servir
-//       handlers).
-//     - tokio corre en otro `std::thread`, dueño del runtime async
-//       y del server axum.
-//     - Cada request async manda un `InterpreterTask` por un
-//       `mpsc::UnboundedSender`, espera el resultado vía
-//       `oneshot::Receiver`.
-//     - El thread intérprete loopea: recibe task → ejecuta el handler
-//       Fitz async (sobre tokio current_thread) → manda
-//       `HandlerOutcome` por el oneshot.
-//
-// El bridge cae como deuda comprometida en F17.5: una vez que axum
-// pueda invocar `eval_call(...).await` directo, `InterpTask` y
-// `run_interpreter_loop` desaparecen.
+// Antes de F17.5 había un bridge mpsc/oneshot + un std::thread aparte
+// para tokio. Lo introdujo Fase 4 cuando `Value`/`EnvRef` eran
+// `Rc<RefCell<>>` no-Send y los handlers no podían invocarse desde
+// axum directo. F17.2 (Arc/Mutex), F17.3 (Send completo) y F17.4a
+// (multi-thread) destrabaron la eliminación. Resultado: ~300 LoC
+// menos acá y paralelismo HTTP real entre requests.
 
 use std::cell::RefCell;
 
@@ -1147,37 +1138,33 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 }
 
 // ---------------------------------------------------------------------------
-// Runtime async — bridge entre axum/tokio y el intérprete síncrono
+// Runtime async — axum + tokio multi-thread, evaluator directo
 // ---------------------------------------------------------------------------
 //
-// Diseño:
+// Diseño post-F17.5 (sin bridge):
 //
-//   std::thread "tokio"                main thread (intérprete)
-//   ┌──────────────────┐              ┌──────────────────────┐
-//   │  axum::serve     │   InterpTask │  loop {              │
-//   │  ┌─────────────┐ │ ───────────► │    rx.blocking_recv()│
-//   │  │ async fn    │ │              │    call_handler(...).await │
-//   │  │ dispatch    │ │ ◄─────────── │    send outcome      │
-//   │  └─────────────┘ │   outcome    │  }                   │
-//   └──────────────────┘              └──────────────────────┘
+//   thread main = runtime tokio rt-multi-thread (block_on en `serve`)
+//   ┌─────────────────────────────────────────────────────────────┐
+//   │  axum::serve  →  handler async  →  handle_task(&registry,…) │
+//   │                       │                                     │
+//   │                       │  Arc<HttpRegistry> compartido        │
+//   │                       ▼                                     │
+//   │                  call_handler(...).await  (evaluator)        │
+//   └─────────────────────────────────────────────────────────────┘
 //
-// El intérprete vive en el thread main (el mismo que corrió `eval`).
-// Post-F17.3 los futures del evaluator ya son `Send` (los contenedores
-// son `Arc<Mutex<>>` y el macro perdió `?Send`), pero el bridge sigue
-// activo hasta F17.5. tokio corre en un std::thread spawneado, ahora
-// con runtime `rt-multi-thread` (F17.4a): N workers dispatcheando
-// requests en paralelo, todos embotellándose en el loop main hasta
-// que F17.5 elimine el bridge. Lo que cruza el canal:
+// Cada request axum se dispatchea en uno de los N workers tokio. El
+// `Arc<HttpRegistry>` se clona barato a cada handler (es solo el
+// refcount del Arc); los `Value::Function` adentro se invocan vía
+// `handle_task` directo sobre el evaluator async. Paralelismo HTTP
+// real: dos requests concurrentes corren simultáneo en workers
+// distintos sobre el mismo registry. Lo que cruzaba entre threads
+// en el bridge previo (path params, query, body, headers crudos)
+// ahora viaja por la stack del handler.
 //
-//   - tokio → main: `InterpTask` con índice de ruta + path params
-//     crudos (`HashMap<String,String>`).
-//   - main → tokio: `HandlerOutcome` (status + body String).
-//
-// La metadata de las rutas que axum necesita para configurar el router
-// (verbo, path, lista de nombres de path params) se separa en
-// `RouteMeta` — un struct que sí es `Send + Clone`. Los handlers Fitz
-// nunca cruzan al thread tokio; el dispatch los busca por índice del
-// lado del intérprete.
+// `RouteMeta` se mantiene como vista estructural (`Send + Clone`) de
+// `RouteSpec` para que `build_router` arme las routes sin
+// quedarse con borrows del registry — los closures de cada handler
+// cierran sobre el `Arc<HttpRegistry>` por separado.
 
 use std::collections::HashMap;
 
@@ -1189,8 +1176,6 @@ use axum::{
     routing::MethodRouter,
     Router,
 };
-use tokio::sync::{mpsc, oneshot};
-
 use crate::evaluator::call_handler;
 
 /// Metadata estructural de una ruta que el thread tokio necesita
@@ -1236,46 +1221,17 @@ impl HttpRegistry {
     }
 }
 
-/// Trabajo enviado desde tokio al thread intérprete. Lleva un `reply`
-/// `oneshot::Sender` por el que el thread devuelve el outcome ya
-/// listo para mandar como respuesta HTTP.
-pub struct InterpTask {
-    pub route_idx: usize,
-    /// Path params crudos extraídos por axum (siempre llegan como
-    /// strings; la coerción al tipo declarado la hace el intérprete).
-    pub path_params: HashMap<String, String>,
-    /// Query params crudos extraídos por axum desde la query string
-    /// (`?limit=10&offset=20`). Siempre strings; coerción al tipo
-    /// declarado del param Fitz la hace el intérprete. Si la ruta no
-    /// declara query params en su template, este HashMap queda vacío
-    /// (cualquier query string del request se descarta).
-    pub query_params: HashMap<String, String>,
-    /// Body crudo de la request. Vacío cuando el handler no declara
-    /// body — axum no lo extrae en ese caso, pero igual mandamos
-    /// `Vec` para uniformidad. Bytes para no forzar UTF-8 acá; la
-    /// validación de que sea JSON parseable la hace el intérprete.
-    pub body: Vec<u8>,
-    /// Headers HTTP de la request, en lowercase (Fase 7.6). Solo se
-    /// popula cuando la ruta declara `@header(...)`. La normalización
-    /// a lowercase la hace `build_method_router` antes de mandar la
-    /// task. El dispatch hace lookup case-insensitive contra esta
-    /// HashMap.
-    pub headers: HashMap<String, String>,
-    pub reply: oneshot::Sender<HandlerOutcome>,
-}
-
-/// Sender lado tokio. `Clone` cheap (es un `Arc<...>` adentro). Cada
-/// handler de axum clona uno para mandar su task.
-pub type TaskTx = mpsc::UnboundedSender<InterpTask>;
-
 /// Construye un `axum::Router` a partir de la metadata de rutas.
-/// Cada handler async cierra sobre el sender y el índice de su ruta,
-/// manda un task al intérprete y await el reply.
+/// Cada handler async cierra sobre un `Arc<HttpRegistry>` clonado y
+/// el índice de su ruta, e invoca `handle_task(...).await` directo
+/// sobre el registry compartido.
 ///
 /// La metadata (`Vec<RouteMeta>`) basta para configurar todo el
-/// routing: verbo + path + si hay path params (para decidir el
-/// shape del handler). Los handlers Fitz quedan del lado del
-/// intérprete y se buscan por índice cuando llega un task.
+/// routing: verbo + path + flags estructurales (has_path_params /
+/// has_query_params / expects_body) que deciden el shape del handler
+/// axum (cuáles extractors usar). El `RouteSpec` correspondiente (con
+/// el `Value::Function` Fitz) vive dentro del registry y se busca por
+/// índice cuando entra una request.
 ///
 /// `openapi_schema` (Fase 7.2): si es `Some`, registra una ruta
 /// `GET /openapi.json` que sirve el schema cacheado (precomputado al
@@ -1283,9 +1239,18 @@ pub type TaskTx = mpsc::UnboundedSender<InterpTask>;
 /// path en sus rutas, el auto-register cede — la del usuario gana.
 /// `None` para programas donde no querramos servir el schema (tests
 /// internos, server arrancado en modo opt-out cuando 7.4 cierre).
+///
+/// **F17.5**: el viejo bridge `mpsc/oneshot` (`InterpTask` + un
+/// std::thread aparte para el intérprete, con `run_interpreter_loop`
+/// del lado main) desapareció. Post-F17.3 los futures del evaluator
+/// son `Send` y `HttpRegistry` también — los handlers axum llaman al
+/// evaluator directo y `tokio::spawn` (vía `rt-multi-thread` desde
+/// F17.4a) los corre en paralelo entre workers. Eso destraba el
+/// paralelismo HTTP real, sin perder ninguna funcionalidad que tenía
+/// el bridge.
 pub fn build_router(
     metas: &[RouteMeta],
-    tx: TaskTx,
+    registry: std::sync::Arc<HttpRegistry>,
     openapi_schema: Option<serde_json::Value>,
 ) -> Router {
     let mut router = Router::new();
@@ -1303,7 +1268,7 @@ pub fn build_router(
         let route_handler = build_method_router(
             meta.method,
             idx,
-            tx.clone(),
+            registry.clone(),
             meta.has_path_params,
             meta.has_query_params,
             meta.expects_body,
@@ -1370,10 +1335,17 @@ fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
 /// `HeaderMap` se extrae **siempre** como argumento extra (Fase 7.6):
 /// es zero-cost cuando el handler no declara headers (pasa HashMap
 /// vacío y `handle_task` lo ignora).
+///
+/// **F17.5**: cada closure clona el `Arc<HttpRegistry>` y llama a
+/// `handle_task(&registry, ...).await` directo. Antes mandaba un
+/// `InterpTask` por mpsc y await-eaba un `oneshot`. La eliminación
+/// del bridge destraba el paralelismo HTTP real: con runtime
+/// `rt-multi-thread` (F17.4a), N workers procesan handlers en
+/// simultáneo sobre el mismo registry compartido (Send + Sync).
 fn build_method_router(
     method: HttpMethod,
     route_idx: usize,
-    tx: TaskTx,
+    registry: std::sync::Arc<HttpRegistry>,
     has_path_params: bool,
     has_query_params: bool,
     expects_body: bool,
@@ -1384,30 +1356,30 @@ fn build_method_router(
     match (has_path_params, has_query_params, expects_body) {
         (false, false, false) => {
             let h = move |headers: HeaderMap| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, Map::new(), Map::new(), Vec::new(), hm, tx).await
+                    dispatch_request(&registry, route_idx, Map::new(), Map::new(), Vec::new(), hm).await
                 }
             };
             wrap(method, h)
         }
         (true, false, false) => {
             let h = move |AxumPath(p): AxumPath<Map>, headers: HeaderMap| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, p, Map::new(), Vec::new(), hm, tx).await
+                    dispatch_request(&registry, route_idx, p, Map::new(), Vec::new(), hm).await
                 }
             };
             wrap(method, h)
         }
         (false, true, false) => {
             let h = move |AxumQuery(q): AxumQuery<Map>, headers: HeaderMap| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, Map::new(), q, Vec::new(), hm, tx).await
+                    dispatch_request(&registry, route_idx, Map::new(), q, Vec::new(), hm).await
                 }
             };
             wrap(method, h)
@@ -1416,20 +1388,20 @@ fn build_method_router(
             let h = move |AxumPath(p): AxumPath<Map>,
                           AxumQuery(q): AxumQuery<Map>,
                           headers: HeaderMap| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, p, q, Vec::new(), hm, tx).await
+                    dispatch_request(&registry, route_idx, p, q, Vec::new(), hm).await
                 }
             };
             wrap(method, h)
         }
         (false, false, true) => {
             let h = move |headers: HeaderMap, body: axum::body::Bytes| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, Map::new(), Map::new(), body.to_vec(), hm, tx).await
+                    dispatch_request(&registry, route_idx, Map::new(), Map::new(), body.to_vec(), hm).await
                 }
             };
             wrap(method, h)
@@ -1438,10 +1410,10 @@ fn build_method_router(
             let h = move |AxumPath(p): AxumPath<Map>,
                           headers: HeaderMap,
                           body: axum::body::Bytes| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, p, Map::new(), body.to_vec(), hm, tx).await
+                    dispatch_request(&registry, route_idx, p, Map::new(), body.to_vec(), hm).await
                 }
             };
             wrap(method, h)
@@ -1450,10 +1422,10 @@ fn build_method_router(
             let h = move |AxumQuery(q): AxumQuery<Map>,
                           headers: HeaderMap,
                           body: axum::body::Bytes| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, Map::new(), q, body.to_vec(), hm, tx).await
+                    dispatch_request(&registry, route_idx, Map::new(), q, body.to_vec(), hm).await
                 }
             };
             wrap(method, h)
@@ -1463,10 +1435,10 @@ fn build_method_router(
                           AxumQuery(q): AxumQuery<Map>,
                           headers: HeaderMap,
                           body: axum::body::Bytes| {
-                let tx = tx.clone();
+                let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(route_idx, p, q, body.to_vec(), hm, tx).await
+                    dispatch_request(&registry, route_idx, p, q, body.to_vec(), hm).await
                 }
             };
             wrap(method, h)
@@ -1523,37 +1495,29 @@ fn attach_preflight(
     })
 }
 
-/// Punto único donde el lado async manda un task al intérprete y
-/// espera la respuesta. Si algo falla en el canal (intérprete
-/// muerto, oneshot dropped), respondemos 500 con un mensaje claro.
+/// Punto único donde el handler axum invoca al evaluator y devuelve
+/// la `Response`. Post-F17.5: llamada directa a `handle_task` —
+/// el bridge mpsc/oneshot que existía en F4.x quedó eliminado al
+/// volver `Value`/`EnvRef` `Send` (F17.2-3) y `HttpRegistry`
+/// `Send + Sync`.
 async fn dispatch_request(
+    registry: &HttpRegistry,
     route_idx: usize,
     path_params: HashMap<String, String>,
     query_params: HashMap<String, String>,
     body: Vec<u8>,
     headers: HashMap<String, String>,
-    tx: TaskTx,
 ) -> Response {
-    let (reply_tx, reply_rx) = oneshot::channel();
-    let task = InterpTask {
+    let outcome = handle_task(
+        registry,
         route_idx,
         path_params,
         query_params,
         body,
         headers,
-        reply: reply_tx,
-    };
-    if tx.send(task).is_err() {
-        return outcome_to_response(HandlerOutcome::internal_error(
-            "intérprete cerrado — no se puede atender la request",
-        ));
-    }
-    match reply_rx.await {
-        Ok(outcome) => outcome_to_response(outcome),
-        Err(_) => outcome_to_response(HandlerOutcome::internal_error(
-            "handler no devolvió respuesta (canal interno cerrado)",
-        )),
-    }
+    )
+    .await;
+    outcome_to_response(outcome)
 }
 
 /// Convierte un `HandlerOutcome` a la `Response` de axum. Status,
@@ -1580,47 +1544,6 @@ fn outcome_to_response(outcome: HandlerOutcome) -> Response {
         }
     }
     resp
-}
-
-/// Loop síncrono del intérprete. Owns el `HttpRegistry` (con los
-/// `Value::Function` y sus closures). Por cada task recibido del
-/// canal:
-///
-///   1. Busca la `RouteSpec` por índice.
-///   2. Coerciona cada path param crudo al tipo declarado del
-///      parámetro del handler (Int/Float/Str/Bool). Si falla, 400.
-///   3. Construye `args` en el orden de los parámetros del handler.
-///   4. Invoca el handler vía `call_handler` y traduce el resultado
-///      a `HandlerOutcome` (Result → status, otros → 200).
-///   5. Envía el outcome por el `oneshot::Sender`.
-///
-/// El loop termina cuando el sender se cierra (todos los Tx
-/// droppearon), que ocurre cuando el server async termina.
-pub fn run_interpreter_loop(
-    registry: HttpRegistry,
-    mut rx: mpsc::UnboundedReceiver<InterpTask>,
-) {
-    // Fase 6.4: el evaluator es ahora async (`eval_call`/`eval_stmt`/
-    // etc. devuelven futures). Para mantener el bridge mpsc/oneshot
-    // intacto en 6.4 (eliminación en 6.5), armamos un runtime
-    // tokio `current_thread` propio del loop y bloqueamos sobre
-    // cada `handle_task(...).await`. Cuando 6.5 elimine el bridge,
-    // los handlers axum llaman a `eval_call(...).await` directo y
-    // este loop entero desaparece.
-    let runtime = crate::evaluator::build_runtime();
-    while let Some(task) = rx.blocking_recv() {
-        let outcome = runtime.block_on(handle_task(
-            &registry,
-            task.route_idx,
-            task.path_params,
-            task.query_params,
-            task.body,
-            task.headers,
-        ));
-        // Si el oneshot del lado axum se cerró (cliente desconectado,
-        // timeout), no hay nada que hacer con el outcome — descartar.
-        let _ = task.reply.send(outcome);
-    }
 }
 
 /// Construye el `Value::Instance` de tipo `Request` que el runtime
@@ -1904,29 +1827,27 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
 
 /// Arranca el servidor HTTP y bloquea el thread llamador hasta Ctrl-C.
 ///
-/// Modelo de threading (revertido respecto del borrador inicial; en
-/// transición hacia F17 — bridge cae en F17.5):
-///   - El thread llamador (main, donde corrió `eval`) NO se mueve —
-///     mantiene el handler dispatch del bridge. Post-F17.3 sus
-///     futures son `Send` y podrían invocarse directo desde axum,
-///     pero la reescritura ocurre en F17.5.
-///   - Spawneamos un std::thread separado para tokio + axum. Recibe
-///     solo `Vec<RouteMeta>` (estructural, `Send + Clone`) y el `tx`
-///     del canal.
-///   - El thread main, después de spawnear tokio, entra al loop del
-///     intérprete: `rx.blocking_recv()`, procesa, manda outcome.
+/// **F17.5**: modelo simplificado, sin bridge:
+///   - Un único runtime tokio `rt-multi-thread` corre acá mismo
+///     (`block_on`), N workers según cores.
+///   - El `HttpRegistry` se envuelve en `Arc` y se comparte con cada
+///     handler axum. Cada worker que recibe una request invoca
+///     `handle_task(&registry, ...).await` directo sobre el
+///     evaluator — `Send + Sync` lo destrabó F17.2-3.
+///   - El thread main bloquea sobre el runtime hasta que axum baja
+///     por Ctrl-C (graceful shutdown sigue intacto).
 ///
-/// Cuando axum baja por Ctrl-C, su thread termina, todos los `tx`
-/// vivos en handlers se dropean, el `rx` del main loop devuelve
-/// `None` y la función retorna.
+/// Antes (Fase 4 → F17.4a) había un std::thread separado para tokio
+/// más un loop síncrono en main que recibía `InterpTask`s por mpsc
+/// y respondía por `oneshot`s. La eliminación del bridge fue la deuda
+/// más grande de F17 — destraba paralelismo HTTP real (~300 LoC
+/// menos en este archivo) y deja al evaluator alcanzable desde
+/// axum sin glue.
 pub fn serve(
     registry: HttpRegistry,
     program: crate::ast::Program,
     addr: std::net::SocketAddr,
 ) -> std::io::Result<()> {
-    use std::thread;
-
-    let (tx, rx) = mpsc::unbounded_channel::<InterpTask>();
     let metas = registry.metas();
     let enable_docs = registry.resolved_config().enable_docs;
 
@@ -1955,53 +1876,30 @@ pub fn serve(
         None
     };
 
-    // Thread tokio: owns el runtime async y el server axum. Solo
-    // recibe metadata + tx (todos `Send`).
-    //
-    // F17.4a: runtime `rt-multi-thread` (auto-detección de cores).
-    // Post-F17.3 los futures del evaluator son `Send`, así que axum
-    // puede schedulear los wrappers del dispatch en N workers
-    // simultáneos. Hasta que F17.5 elimine el bridge, los workers
-    // siguen embotellándose en el `run_interpreter_loop` single-thread
-    // del main — esto deja la plomería lista, el paralelismo real
-    // aterriza en F17.5.
-    let tokio_handle = thread::Builder::new()
-        .name("fitz-http".into())
-        .spawn(move || -> std::io::Result<()> {
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()?;
-            runtime.block_on(async move {
-                let router = build_router(&metas, tx, openapi_schema);
-                let listener = tokio::net::TcpListener::bind(addr).await?;
-                eprintln!("🏔️  Fitz HTTP escuchando en http://{}", addr);
-                for meta in &metas {
-                    eprintln!("   {} {}", meta.method.as_str(), meta.path);
-                }
-                if enable_docs {
-                    eprintln!("   GET /openapi.json  (schema autogenerado)");
-                    eprintln!("   GET /docs          (UI Scalar)");
-                } else {
-                    eprintln!("   (docs apagadas por @server(docs=false))");
-                }
-                axum::serve(listener, router)
-                    .with_graceful_shutdown(shutdown_signal())
-                    .await
-            })?;
-            Ok(())
-        })?;
+    let registry = std::sync::Arc::new(registry);
 
-    // Main thread: loop del intérprete. Bloquea hasta que el canal
-    // se cierra (cuando el thread tokio termina y dropea su tx).
-    run_interpreter_loop(registry, rx);
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    runtime.block_on(async move {
+        let router = build_router(&metas, registry, openapi_schema);
+        let listener = tokio::net::TcpListener::bind(addr).await?;
+        eprintln!("🏔️  Fitz HTTP escuchando en http://{}", addr);
+        for meta in &metas {
+            eprintln!("   {} {}", meta.method.as_str(), meta.path);
+        }
+        if enable_docs {
+            eprintln!("   GET /openapi.json  (schema autogenerado)");
+            eprintln!("   GET /docs          (UI Scalar)");
+        } else {
+            eprintln!("   (docs apagadas por @server(docs=false))");
+        }
+        axum::serve(listener, router)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    })?;
 
-    // Esperar a que el thread tokio termine de bajar limpio.
-    match tokio_handle.join() {
-        Ok(res) => res,
-        Err(_) => Err(std::io::Error::other(
-            "thread del servidor HTTP panickeó",
-        )),
-    }
+    Ok(())
 }
 
 /// Escucha SIGINT (Ctrl-C) para graceful shutdown.
@@ -3308,16 +3206,13 @@ mod tests {
     // Estos tests arman un router de axum y le mandan requests sin
     // abrir socket TCP, vía `tower::ServiceExt::oneshot`.
     //
-    // Threading: en `serve()` real, el intérprete vive en el thread
-    // main y tokio en un std::thread spawneado. Post-F17.3 los futures
-    // del evaluator son `Send`, pero seguimos usando el bridge mpsc/
-    // oneshot por consistencia con `serve()` real hasta que F17.5 lo
-    // elimine. Los tests usan `tokio::task::LocalSet` solo para coexistir
-    // con futures del axum extractor que no exigen Send.
+    // Post-F17.5: cero glue. El registry se envuelve en `Arc` y se
+    // pasa a `build_router`; cada handler axum invoca al evaluator
+    // directo. Antes hacía falta un `LocalSet` + un loop tokio::select!
+    // sobre `mpsc::recv` para coexistir con el bridge — eso desapareció.
 
-    /// Helper: corre un request contra el router usando LocalSet. El
-    /// loop del intérprete y el `oneshot` del router viven juntos en
-    /// el mismo thread. Devuelve (status, body string).
+    /// Helper: corre un request contra el router y devuelve
+    /// (status, body string). Sin body, sin headers extra.
     async fn run_oneshot(
         src: &str,
         method: axum::http::Method,
@@ -3326,9 +3221,6 @@ mod tests {
         run_oneshot_with_body(src, method, path, None).await
     }
 
-    /// Como `run_oneshot` pero con body opcional. Si `body` es
-    /// `Some(s)`, se manda como `application/json` (aunque el runtime
-    /// hoy no valida content-type).
     /// Como `run_oneshot_with_body` pero acepta también una lista de
     /// headers `(name, value)` que se agregan a la request. Útil para
     /// los tests de `@header(...)` (Fase 7.6).
@@ -3343,47 +3235,22 @@ mod tests {
 
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
-        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, None);
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
 
-        let local = tokio::task::LocalSet::new();
-        let headers_owned: Vec<(String, String)> = headers
-            .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        local
-            .run_until(async move {
-                let mut builder = axum::http::Request::builder().method(method).uri(path);
-                for (k, v) in &headers_owned {
-                    builder = builder.header(k.as_str(), v.as_str());
-                }
-                let req = builder.body(Body::empty()).unwrap();
-                let mut resp_fut = Box::pin(router.oneshot(req));
-                loop {
-                    tokio::select! {
-                        resp = &mut resp_fut => {
-                            let resp = resp.unwrap();
-                            let status = resp.status().as_u16();
-                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                            return (status, String::from_utf8(bytes.to_vec()).unwrap());
-                        }
-                        Some(task) = rx.recv() => {
-                            let outcome = handle_task(
-                                &registry,
-                                task.route_idx,
-                                task.path_params,
-                                task.query_params,
-                                task.body,
-                                task.headers,
-                            ).await;
-                            let _ = task.reply.send(outcome);
-                        }
-                    }
-                }
-            })
-            .await
+        let mut builder = axum::http::Request::builder().method(method).uri(path);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let req = builder.body(Body::empty()).unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
+    /// Como `run_oneshot` pero con body opcional. Si `body` es
+    /// `Some(s)`, se manda como `application/json` (aunque el runtime
+    /// hoy no valida content-type).
     async fn run_oneshot_with_body(
         src: &str,
         method: axum::http::Method,
@@ -3395,55 +3262,24 @@ mod tests {
 
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
-        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
         // Tests existentes de routing: schema = None para no contaminar
         // los path lookups con la ruta auto-registrada de 7.2.
-        let router = build_router(&metas, tx, None);
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
 
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async move {
-                let req_body = match body {
-                    Some(s) => Body::from(s),
-                    None => Body::empty(),
-                };
-                let req = axum::http::Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .header("content-type", "application/json")
-                    .body(req_body)
-                    .unwrap();
-                let mut resp_fut = Box::pin(router.oneshot(req));
-
-                // `tokio::select!`: avanzamos en paralelo el future del
-                // request y el loop de procesación de tasks. Cuando
-                // llega una task la procesamos con `handle_task` (sync)
-                // y mandamos el outcome. Cuando el request termina,
-                // salimos del loop.
-                loop {
-                    tokio::select! {
-                        resp = &mut resp_fut => {
-                            let resp = resp.unwrap();
-                            let status = resp.status().as_u16();
-                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                            let body = String::from_utf8(bytes.to_vec()).unwrap();
-                            return (status, body);
-                        }
-                        Some(task) = rx.recv() => {
-                            let outcome = handle_task(
-                                &registry,
-                                task.route_idx,
-                                task.path_params,
-                                task.query_params,
-                                task.body,
-                                task.headers,
-                            ).await;
-                            let _ = task.reply.send(outcome);
-                        }
-                    }
-                }
-            })
-            .await
+        let req_body = match body {
+            Some(s) => Body::from(s),
+            None => Body::empty(),
+        };
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(req_body)
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
     /// Como `run_oneshot` pero devuelve además los headers de la
@@ -3459,51 +3295,27 @@ mod tests {
 
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
-        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, None);
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
 
-        let local = tokio::task::LocalSet::new();
-        local
-            .run_until(async move {
-                let req = axum::http::Request::builder()
-                    .method(method)
-                    .uri(path)
-                    .body(Body::empty())
-                    .unwrap();
-                let mut resp_fut = Box::pin(router.oneshot(req));
-                loop {
-                    tokio::select! {
-                        resp = &mut resp_fut => {
-                            let resp = resp.unwrap();
-                            let status = resp.status().as_u16();
-                            let headers: Vec<(String, String)> = resp
-                                .headers()
-                                .iter()
-                                .map(|(n, v)| {
-                                    (
-                                        n.as_str().to_lowercase(),
-                                        v.to_str().unwrap_or_default().to_string(),
-                                    )
-                                })
-                                .collect();
-                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                            return (status, headers, String::from_utf8(bytes.to_vec()).unwrap());
-                        }
-                        Some(task) = rx.recv() => {
-                            let outcome = handle_task(
-                                &registry,
-                                task.route_idx,
-                                task.path_params,
-                                task.query_params,
-                                task.body,
-                                task.headers,
-                            ).await;
-                            let _ = task.reply.send(outcome);
-                        }
-                    }
-                }
+        let req = axum::http::Request::builder()
+            .method(method)
+            .uri(path)
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let headers: Vec<(String, String)> = resp
+            .headers()
+            .iter()
+            .map(|(n, v)| {
+                (
+                    n.as_str().to_lowercase(),
+                    v.to_str().unwrap_or_default().to_string(),
+                )
             })
-            .await
+            .collect();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, headers, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
     #[tokio::test]
@@ -3613,57 +3425,27 @@ mod tests {
 
         let registry = registry_from_source(src).await;
         let metas = registry.metas();
-        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, None);
+        let router = build_router(&metas, std::sync::Arc::new(registry), None);
 
-        let local = tokio::task::LocalSet::new();
-        let headers_owned: Vec<(String, String)> = headers
+        let mut builder = axum::http::Request::builder().method(method).uri(path);
+        for (k, v) in headers {
+            builder = builder.header(*k, *v);
+        }
+        let req = builder.body(Body::empty()).unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let response_headers: Vec<(String, String)> = resp
+            .headers()
             .iter()
-            .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
-            .collect();
-        local
-            .run_until(async move {
-                let mut builder = axum::http::Request::builder()
-                    .method(method)
-                    .uri(path);
-                for (k, v) in &headers_owned {
-                    builder = builder.header(k.as_str(), v.as_str());
-                }
-                let req = builder.body(Body::empty()).unwrap();
-                let mut resp_fut = Box::pin(router.oneshot(req));
-                loop {
-                    tokio::select! {
-                        resp = &mut resp_fut => {
-                            let resp = resp.unwrap();
-                            let status = resp.status().as_u16();
-                            let response_headers: Vec<(String, String)> = resp
-                                .headers()
-                                .iter()
-                                .map(|(n, v)| {
-                                    (
-                                        n.as_str().to_lowercase(),
-                                        v.to_str().unwrap_or_default().to_string(),
-                                    )
-                                })
-                                .collect();
-                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                            return (status, response_headers, String::from_utf8(bytes.to_vec()).unwrap());
-                        }
-                        Some(task) = rx.recv() => {
-                            let outcome = handle_task(
-                                &registry,
-                                task.route_idx,
-                                task.path_params,
-                                task.query_params,
-                                task.body,
-                                task.headers,
-                            ).await;
-                            let _ = task.reply.send(outcome);
-                        }
-                    }
-                }
+            .map(|(n, v)| {
+                (
+                    n.as_str().to_lowercase(),
+                    v.to_str().unwrap_or_default().to_string(),
+                )
             })
-            .await
+            .collect();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        (status, response_headers, String::from_utf8(bytes.to_vec()).unwrap())
     }
 
     #[tokio::test]
@@ -3898,20 +3680,20 @@ mod tests {
 
     // ---- 7.2 auto-register de /openapi.json ----
     //
-    // Helper local: clona el patrón de `run_oneshot` pero acepta un
-    // `openapi_schema: Option<serde_json::Value>` y devuelve solo el
-    // (status, body) sin loop de tasks (la ruta /openapi.json no
-    // necesita el bridge — es 100% async axum-side).
+    // Helper local: arma router desde un `HttpRegistry` (Arc-wrapped) +
+    // schema y le manda GET /openapi.json. Para los casos sin rutas
+    // de usuario se pasa `HttpRegistry::new()`. Post-F17.5: cero glue,
+    // el router responde directo (no necesita ningún bridge).
 
     async fn oneshot_get_openapi(
-        metas: Vec<RouteMeta>,
+        registry: HttpRegistry,
         openapi_schema: Option<serde_json::Value>,
     ) -> (u16, String) {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        let (tx, _rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, openapi_schema);
+        let metas = registry.metas();
+        let router = build_router(&metas, std::sync::Arc::new(registry), openapi_schema);
         let req = axum::http::Request::builder()
             .method(axum::http::Method::GET)
             .uri("/openapi.json")
@@ -3931,7 +3713,7 @@ mod tests {
             "info": { "title": "Fitz API", "version": "0.1.0" },
             "paths": {},
         });
-        let (status, body) = oneshot_get_openapi(vec![], Some(schema)).await;
+        let (status, body) = oneshot_get_openapi(HttpRegistry::new(), Some(schema)).await;
         assert_eq!(status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["openapi"], serde_json::json!("3.1.0"));
@@ -3939,29 +3721,27 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_schema_none_no_registra_openapi_json() {
-        let (status, _body) = oneshot_get_openapi(vec![], None).await;
+        let (status, _body) = oneshot_get_openapi(HttpRegistry::new(), None).await;
         assert_eq!(status, 404);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_auto_register_convive_con_rutas_del_usuario() {
         // Si el usuario tiene `@get("/")` y el auto-register suma
-        // `/openapi.json`, ambas funcionan. Verificamos que la ruta
-        // del usuario sigue accesible (no se pisa) y que el schema
-        // está disponible.
+        // `/openapi.json`, ambas funcionan. Verificamos que el schema
+        // sigue disponible aún con rutas declaradas.
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src).await;
-        let metas = registry.metas();
         let schema = serde_json::json!({
             "openapi": "3.1.0",
             "paths": { "/": {} },
         });
-        let (status, body) = oneshot_get_openapi(metas, Some(schema)).await;
+        let (status, body) = oneshot_get_openapi(registry, Some(schema)).await;
         assert_eq!(status, 200);
         assert!(body.contains("openapi"));
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test]
     async fn usuario_declara_openapi_json_propio_y_gana_sobre_auto_register() {
         // El usuario declaró su propio `@get("/openapi.json")`. El
         // auto-register debe ceder — la ruta del usuario es la que
@@ -3978,44 +3758,18 @@ mod tests {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, Some(auto_schema));
+        let router = build_router(&metas, std::sync::Arc::new(registry), Some(auto_schema));
         let req = axum::http::Request::builder()
             .method(axum::http::Method::GET)
             .uri("/openapi.json")
             .body(Body::empty())
             .unwrap();
 
-        // Mismo patrón que run_oneshot: avanzar el response + procesar
-        // tasks. La ruta del usuario sí dispara una task (es un handler
-        // Fitz normal).
-        let local = tokio::task::LocalSet::new();
-        let (status, body) = local
-            .run_until(async move {
-                let mut resp_fut = Box::pin(router.oneshot(req));
-                loop {
-                    tokio::select! {
-                        resp = &mut resp_fut => {
-                            let resp = resp.unwrap();
-                            let status = resp.status().as_u16();
-                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                            return (status, String::from_utf8(bytes.to_vec()).unwrap());
-                        }
-                        Some(task) = rx.recv() => {
-                            let outcome = handle_task(
-                                &registry,
-                                task.route_idx,
-                                task.path_params,
-                                task.query_params,
-                                task.body,
-                                task.headers,
-                            ).await;
-                            let _ = task.reply.send(outcome);
-                        }
-                    }
-                }
-            })
-            .await;
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
         assert_eq!(status, 200);
         // El body es el del handler del usuario: `"mio"` (JSON string).
         // NO contiene "_marker" del schema auto-register.
@@ -4027,14 +3781,14 @@ mod tests {
 
     /// Helper local: GET /docs sobre un router armado con o sin schema.
     async fn oneshot_get_docs(
-        metas: Vec<RouteMeta>,
+        registry: HttpRegistry,
         openapi_schema: Option<serde_json::Value>,
     ) -> (u16, String) {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        let (tx, _rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, openapi_schema);
+        let metas = registry.metas();
+        let router = build_router(&metas, std::sync::Arc::new(registry), openapi_schema);
         let req = axum::http::Request::builder()
             .method(axum::http::Method::GET)
             .uri("/docs")
@@ -4053,7 +3807,7 @@ mod tests {
         // Scalar) — eso garantiza que el HTML está conectado al
         // schema autogenerado.
         let schema = serde_json::json!({ "openapi": "3.1.0", "paths": {} });
-        let (status, body) = oneshot_get_docs(vec![], Some(schema)).await;
+        let (status, body) = oneshot_get_docs(HttpRegistry::new(), Some(schema)).await;
         assert_eq!(status, 200);
         assert!(
             body.contains("data-url=\"/openapi.json\""),
@@ -4070,11 +3824,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_schema_none_no_registra_docs() {
         // Sin schema no se registra /docs (paridad con /openapi.json).
-        let (status, _body) = oneshot_get_docs(vec![], None).await;
+        let (status, _body) = oneshot_get_docs(HttpRegistry::new(), None).await;
         assert_eq!(status, 404);
     }
 
-    #[tokio::test(flavor = "current_thread")]
+    #[tokio::test]
     async fn usuario_declara_docs_propio_y_gana_sobre_auto_register() {
         // El usuario declaró su propio `@get("/docs")`. El auto-register
         // de la UI Scalar cede — la ruta del usuario es la que responde.
@@ -4086,41 +3840,18 @@ mod tests {
         use http_body_util::BodyExt;
         use tower::ServiceExt;
 
-        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
-        let router = build_router(&metas, tx, Some(auto_schema));
+        let router = build_router(&metas, std::sync::Arc::new(registry), Some(auto_schema));
         let req = axum::http::Request::builder()
             .method(axum::http::Method::GET)
             .uri("/docs")
             .body(Body::empty())
             .unwrap();
 
-        let local = tokio::task::LocalSet::new();
-        let (status, body) = local
-            .run_until(async move {
-                let mut resp_fut = Box::pin(router.oneshot(req));
-                loop {
-                    tokio::select! {
-                        resp = &mut resp_fut => {
-                            let resp = resp.unwrap();
-                            let status = resp.status().as_u16();
-                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-                            return (status, String::from_utf8(bytes.to_vec()).unwrap());
-                        }
-                        Some(task) = rx.recv() => {
-                            let outcome = handle_task(
-                                &registry,
-                                task.route_idx,
-                                task.path_params,
-                                task.query_params,
-                                task.body,
-                                task.headers,
-                            ).await;
-                            let _ = task.reply.send(outcome);
-                        }
-                    }
-                }
-            })
-            .await;
+        let resp = router.oneshot(req).await.unwrap();
+        let status = resp.status().as_u16();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+
         assert_eq!(status, 200);
         // Body del usuario, no el HTML de Scalar.
         assert_eq!(body, "\"docs-personalizada\"");
