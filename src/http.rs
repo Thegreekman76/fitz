@@ -137,6 +137,16 @@ pub struct RouteSpec {
     /// short-circuit con ese status code. Cualquier otro tipo → 500
     /// con mensaje claro. Vacío si la ruta no tiene middlewares.
     pub middlewares: Vec<MiddlewareSpec>,
+    /// Configuración CORS aplicada con `@middleware(cors(...))`
+    /// (mini-fase MW.2). Vive en un slot dedicado, NO entra a la chain
+    /// de `middlewares`: CORS necesita inyectar headers en la response
+    /// real (no es gate-only) y registrar un handler de preflight
+    /// adicional (`OPTIONS`), cosas que el modelo de middleware gate
+    /// no expresa. Máximo uno por ruta — dos `cors(...)` aplicados al
+    /// mismo handler es un error de registro. `Arc` para evitar clonar
+    /// el config por request y para cruzar threads (preflight corre en
+    /// el thread tokio).
+    pub cors: Option<std::sync::Arc<CorsConfig>>,
 }
 
 /// Una entrada del stack de middlewares de una ruta (mini-fase MW.1).
@@ -149,6 +159,74 @@ pub struct RouteSpec {
 pub struct MiddlewareSpec {
     pub name: String,
     pub handler: Value,
+}
+
+/// Configuración de un `cors(...)` aplicado a una ruta vía
+/// `@middleware(cors(...))` (mini-fase MW.2). Es `Send + Sync + Clone`
+/// trivialmente — los valores son strings y vectores de strings. Vive
+/// detrás de `Arc<>` en `RouteSpec.cors` (para no clonar por request)
+/// y se copia idéntica al `RouteMeta.cors` que viaja al thread tokio
+/// (preflight `OPTIONS`).
+///
+/// Defaults aplicados cuando un kwarg no se especifica:
+///   - `allow_origin`: `"*"` (permissive total).
+///   - `allow_methods`: `["GET", "POST", "PUT", "DELETE", "OPTIONS"]`
+///     — los métodos típicos de un browser preflight; `OPTIONS` adentro
+///     habilita el preflight mismo.
+///   - `allow_headers`: `["content-type", "authorization"]` — los
+///     headers que un browser normalmente manda con `fetch` y los más
+///     pedidos en preflight.
+///   - `max_age`: `None` → no se emite header (browser decide su
+///     cache default, típicamente 5s).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CorsConfig {
+    pub allow_origin: String,
+    pub allow_methods: Vec<String>,
+    pub allow_headers: Vec<String>,
+    pub max_age: Option<i64>,
+}
+
+impl CorsConfig {
+    /// Construye un CorsConfig "default" pensado para uso de browser
+    /// frontend SPA: origin "*", métodos comunes, headers `content-type`
+    /// + `authorization`. Casos más restrictivos exigen kwargs explícitos.
+    pub fn permissive_default() -> Self {
+        CorsConfig {
+            allow_origin: "*".to_string(),
+            allow_methods: vec![
+                "GET".into(),
+                "POST".into(),
+                "PUT".into(),
+                "DELETE".into(),
+                "OPTIONS".into(),
+            ],
+            allow_headers: vec!["content-type".into(), "authorization".into()],
+            max_age: None,
+        }
+    }
+
+    /// Lista de headers HTTP que el server emite con cada response
+    /// CORS (real o preflight). Se computa una vez al registrar la
+    /// ruta y se reutiliza por request — sin allocs en hot path.
+    /// El header `Access-Control-Max-Age` solo se emite si el usuario
+    /// pasó `max_age=<int>`.
+    pub fn response_headers(&self) -> Vec<(String, String)> {
+        let mut out = vec![
+            ("access-control-allow-origin".into(), self.allow_origin.clone()),
+            (
+                "access-control-allow-methods".into(),
+                self.allow_methods.join(", "),
+            ),
+            (
+                "access-control-allow-headers".into(),
+                self.allow_headers.join(", "),
+            ),
+        ];
+        if let Some(age) = self.max_age {
+            out.push(("access-control-max-age".into(), age.to_string()));
+        }
+        out
+    }
 }
 
 /// Especificación de un header declarado con `@header(name="X")`
@@ -622,6 +700,11 @@ pub struct HandlerOutcome {
     /// Content-type del body. Hoy siempre `application/json`; queda
     /// preparado para `text/plain` u otros cuando los necesitemos.
     pub content_type: &'static str,
+    /// Headers extra a emitir junto con la response (mini-fase MW.2).
+    /// Se popula al final de `handle_task` cuando la ruta tiene
+    /// `RouteSpec.cors`: la inyección de `Access-Control-Allow-*`
+    /// vive acá. Vacío para responses normales sin CORS.
+    pub extra_headers: Vec<(String, String)>,
 }
 
 impl HandlerOutcome {
@@ -630,6 +713,7 @@ impl HandlerOutcome {
             status,
             body: body.to_string(),
             content_type: "application/json",
+            extra_headers: Vec::new(),
         }
     }
 
@@ -786,6 +870,15 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         Value::Future(_) => {
             return Err(
                 "Future pendiente no es serializable — falta `.await` en algún lado del handler".to_string(),
+            );
+        }
+        // CorsConfig (MW.2): opaco, no se serializa. Si llega acá,
+        // es un bug del registro: el evaluator debió usarlo como
+        // arg de `@middleware(cors(...))` y guardarlo en el slot
+        // `RouteSpec.cors`, no como valor de retorno del handler.
+        Value::CorsConfig(_) => {
+            return Err(
+                "CorsConfig no es serializable — se usa como argumento de `@middleware(cors(...))`, no como valor".to_string(),
             );
         }
     })
@@ -1075,6 +1168,11 @@ pub struct RouteMeta {
     /// y mandarlo al intérprete. Cuando es `false`, ignoramos
     /// cualquier body recibido.
     pub expects_body: bool,
+    /// Configuración CORS clonada de `RouteSpec.cors` (mini-fase MW.2).
+    /// Si es `Some`, `build_router` registra un handler de preflight
+    /// `OPTIONS` para el mismo path. `Arc` se clona barato y atraviesa
+    /// la frontera de threads sin moverse del config compartido.
+    pub cors: Option<std::sync::Arc<CorsConfig>>,
 }
 
 impl HttpRegistry {
@@ -1089,6 +1187,7 @@ impl HttpRegistry {
                 has_path_params: !r.path_params.is_empty(),
                 has_query_params: !r.query_params.is_empty(),
                 expects_body: r.body_param.is_some(),
+                cors: r.cors.clone(),
             })
             .collect()
     }
@@ -1147,6 +1246,16 @@ pub fn build_router(
     openapi_schema: Option<serde_json::Value>,
 ) -> Router {
     let mut router = Router::new();
+    // Agrupar rutas por path para sumar el `OPTIONS` de preflight al
+    // mismo MethodRouter en caso de que varios verbos del mismo path
+    // tengan CORS. Hoy `@get`/`@post`/... por path son únicos (no
+    // soportamos múltiples handlers por (path, method)), pero pueden
+    // existir handlers distintos con métodos distintos sobre el mismo
+    // path. axum permite encadenar `.get(...).post(...)` en un mismo
+    // MethodRouter, lo cual chocaría con `router.route` dos veces. Por
+    // ahora cada (path, method) registra su MethodRouter directo —
+    // si hay dos métodos sobre el mismo path con CORS, el preflight
+    // termina sumado a la segunda ruta. Aceptable para MW.2; revisitable.
     for (idx, meta) in metas.iter().enumerate() {
         let route_handler = build_method_router(
             meta.method,
@@ -1156,6 +1265,10 @@ pub fn build_router(
             meta.has_query_params,
             meta.expects_body,
         );
+        let route_handler = match &meta.cors {
+            Some(cors) => attach_preflight(route_handler, cors.clone()),
+            None => route_handler,
+        };
         router = router.route(&meta.path, route_handler);
     }
 
@@ -1334,6 +1447,32 @@ where
     }
 }
 
+/// Suma un handler `OPTIONS` al MethodRouter dado para responder
+/// preflight CORS (mini-fase MW.2). El handler devuelve 204 con los
+/// headers `Access-Control-Allow-*` precomputados — no toca el
+/// intérprete, así que es rápido y no usa el bridge mpsc.
+fn attach_preflight(
+    mr: MethodRouter,
+    cors: std::sync::Arc<CorsConfig>,
+) -> MethodRouter {
+    let headers = cors.response_headers();
+    mr.options(move || {
+        let headers = headers.clone();
+        async move {
+            let mut resp = Response::new(Body::empty());
+            *resp.status_mut() = StatusCode::NO_CONTENT;
+            for (name, value) in headers {
+                let parsed_name = axum::http::HeaderName::try_from(name);
+                let parsed_value = HeaderValue::try_from(value);
+                if let (Ok(n), Ok(v)) = (parsed_name, parsed_value) {
+                    resp.headers_mut().insert(n, v);
+                }
+            }
+            resp
+        }
+    })
+}
+
 /// Punto único donde el lado async manda un task al intérprete y
 /// espera la respuesta. Si algo falla en el canal (intérprete
 /// muerto, oneshot dropped), respondemos 500 con un mensaje claro.
@@ -1368,7 +1507,13 @@ async fn dispatch_request(
 }
 
 /// Convierte un `HandlerOutcome` a la `Response` de axum. Status,
-/// header `content-type`, body como bytes.
+/// header `content-type`, body como bytes, y los `extra_headers` que
+/// hayan inyectado los middlewares (mini-fase MW.2: headers CORS).
+///
+/// Si un extra_header trae un nombre o un valor no parseable como
+/// header HTTP, se omite silenciosamente — preferimos perder un
+/// header malformado a hacer panic en una request. En la práctica los
+/// CORS headers que emitimos son válidos por construcción.
 fn outcome_to_response(outcome: HandlerOutcome) -> Response {
     let mut resp = Response::new(Body::from(outcome.body));
     *resp.status_mut() = StatusCode::from_u16(outcome.status)
@@ -1377,6 +1522,13 @@ fn outcome_to_response(outcome: HandlerOutcome) -> Response {
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static(outcome.content_type),
     );
+    for (name, value) in outcome.extra_headers {
+        let parsed_name = axum::http::HeaderName::try_from(name);
+        let parsed_value = HeaderValue::try_from(value);
+        if let (Ok(n), Ok(v)) = (parsed_name, parsed_value) {
+            resp.headers_mut().insert(n, v);
+        }
+    }
     resp
 }
 
@@ -1652,10 +1804,21 @@ async fn handle_task(
 
     // Invocar el handler. Errores del handler (return propio, error
     // de runtime) se traducen a 500 con el mensaje.
-    match call_handler(route.handler.clone(), args, &route.handler_name).await {
+    let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await {
         Ok(value) => value_to_outcome(&value),
         Err(err) => HandlerOutcome::internal_error(err.message),
+    };
+
+    // MW.2: si la ruta declara CORS, agregar los headers
+    // `Access-Control-Allow-*` a la response real. Incluido en
+    // responses de error (500/400) — el browser lee CORS antes de
+    // parsear el body, así que sin estos headers cualquier error
+    // sale como un "CORS error" en consola en vez del 500/400 que
+    // de verdad ocurrió.
+    if let Some(cors) = &route.cors {
+        outcome.extra_headers.extend(cors.response_headers());
     }
+    outcome
 }
 
 /// Parsea los bytes del body en un `Value` Fitz según la convención
@@ -2459,6 +2622,128 @@ mod tests {
         assert!(outcome.body.contains("valor inesperado") || outcome.body.contains("cortocircuitar"));
     }
 
+    // ---- Mini-fase MW.2: cors built-in + inyección de headers ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_response_headers_emite_los_tres_headers_basicos() {
+        let cfg = CorsConfig::permissive_default();
+        let headers = cfg.response_headers();
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"access-control-allow-origin"));
+        assert!(names.contains(&"access-control-allow-methods"));
+        assert!(names.contains(&"access-control-allow-headers"));
+        // max_age default es None → no se emite ese header.
+        assert!(!names.contains(&"access-control-max-age"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_response_headers_emite_max_age_cuando_esta_seteado() {
+        let cfg = CorsConfig {
+            max_age: Some(3600),
+            ..CorsConfig::permissive_default()
+        };
+        let headers = cfg.response_headers();
+        let max_age = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-max-age")
+            .map(|(_, v)| v.clone());
+        assert_eq!(max_age, Some("3600".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_inyecta_headers_cors_en_response_real() {
+        // Handler normal + @middleware(cors()) → la response 200 carga
+        // los headers Access-Control-Allow-*.
+        let src = "\
+            @middleware(cors())\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 200);
+        let names: Vec<&str> = outcome.extra_headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"access-control-allow-origin"));
+        assert!(names.contains(&"access-control-allow-methods"));
+        assert!(names.contains(&"access-control-allow-headers"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_inyecta_headers_cors_incluso_en_500_de_error() {
+        // Si el handler devuelve Err(...), la response es 500 PERO igual
+        // lleva los headers CORS. Sin esto el browser ve "CORS error" en
+        // lugar del 500 que de verdad pasó.
+        let src = "\
+            @middleware(cors())\n\
+            @get(\"/\")\n\
+            fn h() => Err(\"boom\")\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 500);
+        let names: Vec<&str> = outcome.extra_headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"access-control-allow-origin"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_custom_origin_se_propaga_a_headers() {
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"https://app.x.com\"}))\n\
+            @get(\"/\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        let origin = outcome
+            .extra_headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-origin")
+            .map(|(_, v)| v.clone());
+        assert_eq!(origin, Some("https://app.x.com".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_sin_cors_no_emite_headers_extras() {
+        // Sanity: handler sin @middleware(cors(...)) no debe traer
+        // headers extras (no contaminación).
+        let src = "@get(\"/\")\nfn h() => \"ok\"";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert!(outcome.extra_headers.is_empty());
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn handle_task_middleware_corta_antes_de_parsear_body() {
         // Si el middleware short-circuita, el body NO se parsea (el
@@ -2951,6 +3236,133 @@ mod tests {
             .await
     }
 
+    /// Como `run_oneshot` pero devuelve además los headers de la
+    /// response (un Vec<(name, value)> en lowercase). Usado por los
+    /// tests CORS de MW.2 para verificar `Access-Control-Allow-*`.
+    async fn run_oneshot_full(
+        src: &str,
+        method: axum::http::Method,
+        path: &str,
+    ) -> (u16, Vec<(String, String)>, String) {
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let registry = registry_from_source(src).await;
+        let metas = registry.metas();
+        let (tx, mut rx) = mpsc::unbounded_channel::<InterpTask>();
+        let router = build_router(&metas, tx, None);
+
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async move {
+                let req = axum::http::Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .body(Body::empty())
+                    .unwrap();
+                let mut resp_fut = Box::pin(router.oneshot(req));
+                loop {
+                    tokio::select! {
+                        resp = &mut resp_fut => {
+                            let resp = resp.unwrap();
+                            let status = resp.status().as_u16();
+                            let headers: Vec<(String, String)> = resp
+                                .headers()
+                                .iter()
+                                .map(|(n, v)| {
+                                    (
+                                        n.as_str().to_lowercase(),
+                                        v.to_str().unwrap_or_default().to_string(),
+                                    )
+                                })
+                                .collect();
+                            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+                            return (status, headers, String::from_utf8(bytes.to_vec()).unwrap());
+                        }
+                        Some(task) = rx.recv() => {
+                            let outcome = handle_task(
+                                &registry,
+                                task.route_idx,
+                                task.path_params,
+                                task.query_params,
+                                task.body,
+                                task.headers,
+                            ).await;
+                            let _ = task.reply.send(outcome);
+                        }
+                    }
+                }
+            })
+            .await
+    }
+
+    #[tokio::test]
+    async fn e2e_preflight_options_responde_204_con_headers_cors() {
+        // OPTIONS sobre una ruta con @middleware(cors(...)) devuelve 204
+        // y los headers Access-Control-Allow-*. El handler real (GET) NO
+        // se invoca — axum routea OPTIONS al preflight handler dedicado.
+        let src = "\
+            @middleware(cors())\n\
+            @get(\"/api\")\n\
+            fn h() => \"nope\"\n\
+        ";
+        let (status, headers, body) =
+            run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
+        assert_eq!(status, 204);
+        assert!(body.is_empty());
+        let names: Vec<&str> = headers.iter().map(|(n, _)| n.as_str()).collect();
+        assert!(names.contains(&"access-control-allow-origin"));
+        assert!(names.contains(&"access-control-allow-methods"));
+        assert!(names.contains(&"access-control-allow-headers"));
+    }
+
+    #[tokio::test]
+    async fn e2e_options_sin_cors_es_405_method_not_allowed() {
+        // Si la ruta NO tiene @middleware(cors(...)), un OPTIONS responde
+        // 405 (axum default — el método no está registrado para ese path).
+        // Sanity: sin CORS, no creamos preflight handler.
+        let src = "@get(\"/api\")\nfn h() => \"ok\"";
+        let (status, _, _) =
+            run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
+        assert_eq!(status, 405);
+    }
+
+    #[tokio::test]
+    async fn e2e_response_real_con_cors_lleva_headers_inyectados() {
+        // GET normal sobre ruta con cors → 200 + headers Access-Control-Allow-*.
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"https://x.com\"}))\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (status, headers, body) =
+            run_oneshot_full(src, axum::http::Method::GET, "/api").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"ok\"");
+        let origin = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-origin")
+            .map(|(_, v)| v.clone());
+        assert_eq!(origin, Some("https://x.com".to_string()));
+    }
+
+    #[tokio::test]
+    async fn e2e_preflight_max_age_se_emite_solo_si_fue_seteado() {
+        let src = "\
+            @middleware(cors({\"max_age\": 3600}))\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (status, headers, _) =
+            run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
+        assert_eq!(status, 204);
+        let max_age = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-max-age")
+            .map(|(_, v)| v.clone());
+        assert_eq!(max_age, Some("3600".to_string()));
+    }
+
     #[tokio::test]
     async fn e2e_get_simple_responde_200_con_json() {
         let (status, body) = run_oneshot(
@@ -3418,6 +3830,7 @@ mod tests {
                 param_type_exprs: vec![],
                 return_type_expr: None,
                 middlewares: vec![],
+                cors: None,
             });
         });
         assert_eq!(reg.routes.len(), 1);

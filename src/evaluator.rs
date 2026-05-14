@@ -163,6 +163,7 @@ fn process_decorator(
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
+    cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -176,6 +177,7 @@ fn process_decorator(
             return_type,
             headers,
             middlewares,
+            cors_config,
             handler,
             env,
         );
@@ -427,28 +429,43 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
     Ok(())
 }
 
-/// Recolecta los `@middleware(fn)` declarados sobre un handler
-/// (mini-fase MW.1). Valida:
-///   - El primer arg es un `Expr::Ident` que resuelve en el env actual
-///     a un `Value::Function`. Otras formas (lambdas inline, calls
-///     anidados, paths) se rechazan con mensaje listo para guiar al
-///     usuario.
-///   - Aridad: exactamente un arg. Sin kwargs.
-///   - El decorator `@middleware` debe aparecer ANTES del decorator
-///     de ruta. La validación de orden y de "solo aplica sobre
-///     handlers HTTP" la hace el caller (cerca de `collect_headers`).
+/// Recolecta los `@middleware(...)` declarados sobre un handler. La
+/// pasada distingue dos kinds de middleware:
 ///
-/// Si la fn no tiene decoradores `@middleware`, devuelve `vec![]`.
-fn collect_middlewares(
+///   - **User-fn (MW.1)**: la expresión evalúa a `Value::Function`.
+///     Se acumula en la chain `Vec<MiddlewareSpec>` que corre en
+///     orden top-down antes del handler. Gate-only: el retorno
+///     determina si se continúa la cadena o se cortocircuita.
+///
+///   - **CORS (MW.2)**: la expresión evalúa a `Value::CorsConfig`,
+///     producto del built-in `cors(...)`. Se guarda en un slot
+///     dedicado `Option<Arc<CorsConfig>>` que `RouteSpec.cors`
+///     consume — no entra a la chain. Máximo uno por ruta;
+///     declararlo dos veces es error claro.
+///
+/// Otros valores (Int, Str, Instance, etc.) → error con mensaje
+/// listo para guiar al usuario.
+///
+/// Validaciones adicionales:
+///   - `@middleware` solo antes del decorator de ruta.
+///   - Exactamente un arg posicional. Sin kwargs.
+///   - El caller chequea que aplique solo sobre handlers HTTP
+///     (paralelo a `collect_headers`).
+///
+/// Async porque ahora evalúa la expresión del arg con `eval_expr`
+/// (necesario para que `cors(allow_origin="*")` y cualquier factoría
+/// que devuelva Function tipen).
+async fn collect_middlewares(
     decorators: &[Decorator],
     fn_name: &str,
     env: &EnvRef,
-) -> Result<Vec<MiddlewareSpec>, EvalSignal> {
+) -> Result<(Vec<MiddlewareSpec>, Option<std::sync::Arc<crate::http::CorsConfig>>), EvalSignal> {
     let err = |msg: String| {
         EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
     };
 
-    let mut out: Vec<MiddlewareSpec> = Vec::new();
+    let mut middlewares: Vec<MiddlewareSpec> = Vec::new();
+    let mut cors: Option<std::sync::Arc<crate::http::CorsConfig>> = None;
     let mut saw_route_decorator = false;
 
     for deco in decorators {
@@ -481,46 +498,49 @@ fn collect_middlewares(
                 deco.args.len(),
             )));
         }
-        // Hoy el arg debe ser un `Ident` que el env conoce como fn.
-        // Lambdas inline (`@middleware(fn(req) => ...)`) y exprs
-        // (`@middleware(cors(...))`) llegan en MW.2.
-        let name = match &deco.args[0] {
+        // Evaluar la expresión: puede ser un Ident (fn previa), un
+        // Call (`cors(...)`, o una factoría user-fn), una field
+        // expression, etc.
+        let value = eval_expr(&deco.args[0], env.clone()).await?;
+        // Para nombre legible en mensajes: si fue un Ident, usar el
+        // nombre tal cual; si fue un Call de cors, "cors"; cualquier
+        // otra cosa, una etiqueta de fallback.
+        let label = match &deco.args[0] {
             Expr::Ident(n, _) => n.clone(),
+            Expr::Call { callee, .. } => match callee.as_ref() {
+                Expr::Ident(n, _) => n.clone(),
+                _ => "<expr>".to_string(),
+            },
+            _ => "<expr>".to_string(),
+        };
+        match value {
+            Value::Function { .. } => {
+                middlewares.push(MiddlewareSpec {
+                    name: label,
+                    handler: value,
+                });
+            }
+            Value::CorsConfig(config) => {
+                if cors.is_some() {
+                    return Err(err(format!(
+                        "@middleware sobre fn '{}': el handler ya tiene un `cors(...)` aplicado, \
+                         solo se admite uno por ruta",
+                        fn_name,
+                    )));
+                }
+                cors = Some(config);
+            }
             other => {
                 return Err(err(format!(
-                    "@middleware sobre fn '{}': el argumento debe ser el nombre de una \
-                     fn ya definida (`@middleware(mi_fn)`), recibió {:?}",
-                    fn_name, other,
-                )));
-            }
-        };
-        let value = match env.borrow().get(&name) {
-            Some(v) => v,
-            None => {
-                return Err(err(format!(
-                    "@middleware sobre fn '{}': la fn '{}' no está definida en este scope",
-                    fn_name, name,
-                )));
-            }
-        };
-        match &value {
-            Value::Function { .. } => {}
-            other => {
-                return Err(err(format!(
-                    "@middleware sobre fn '{}': '{}' no es una fn ({}), no puede usarse \
-                     como middleware",
+                    "@middleware sobre fn '{}': el argumento debe ser una fn o un \
+                     `cors(...)`, recibió {}",
                     fn_name,
-                    name,
                     other.type_name(),
                 )));
             }
         }
-        out.push(MiddlewareSpec {
-            name,
-            handler: value,
-        });
     }
-    Ok(out)
+    Ok((middlewares, cors))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -532,6 +552,7 @@ fn register_http_route(
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
+    cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -676,6 +697,12 @@ fn register_http_route(
         .map(|p| (p.name.clone(), p.type_.clone()))
         .collect();
 
+    // MW.2: separar `cors(...)` del resto de middlewares. El
+    // `collect_middlewares` ya distinguió kinds y nos pasa la cors
+    // (opcional, máximo una por ruta) por afuera. Para mantener
+    // compat con el llamador, lo extraemos acá vía un slot Option.
+    // (La separación efectiva en `collect_middlewares` se hace en
+    // ese mismo lugar — acá solo recibimos middlewares.)
     push_route(RouteSpec {
         method,
         path: template.path,
@@ -689,6 +716,7 @@ fn register_http_route(
         param_type_exprs,
         return_type_expr: return_type.clone(),
         middlewares: middlewares.to_vec(),
+        cors: cors_config.clone(),
     });
 
     Ok(())
@@ -1165,11 +1193,13 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 )));
             }
-            // Mini-fase MW.1: recolectar `@middleware(fn)` igual que
-            // headers — validar orden + resolución en el env. Como
-            // headers, solo aplica sobre handlers HTTP de ruta.
-            let collected_middlewares = collect_middlewares(decorators, name, &env)?;
-            if !collected_middlewares.is_empty()
+            // Mini-fase MW.1/MW.2: recolectar `@middleware(...)`. Una
+            // sola pasada distingue user-fns (chain gate-only, MW.1) de
+            // `cors(...)` (slot dedicado, MW.2). Como headers, solo
+            // aplica sobre handlers HTTP de ruta.
+            let (collected_middlewares, collected_cors) =
+                collect_middlewares(decorators, name, &env).await?;
+            if (!collected_middlewares.is_empty() || collected_cors.is_some())
                 && !decorators
                     .iter()
                     .any(|d| HttpMethod::from_decorator_name(&d.name).is_some())
@@ -1196,6 +1226,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     return_type,
                     &collected_headers,
                     &collected_middlewares,
+                    &collected_cors,
                     &func,
                     &env,
                 )?;
@@ -2647,6 +2678,25 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_len,
         },
     );
+    // `cors(config: Map?)` — built-in MW.2. Construye un
+    // `Value::CorsConfig` con los kwargs efectivos. El config es un
+    // `Map<Str, ...>` (no kwargs runtime — el parser de calls no los
+    // soporta y un refactor del AST queda fuera de scope de MW.2).
+    // Llamadas válidas:
+    //   - `cors()` o `cors({})` → defaults permisivos (origin "*",
+    //     métodos comunes, headers content-type+authorization).
+    //   - `cors({"allow_origin": "https://x.com"})` → override de un
+    //     subset; el resto queda en defaults.
+    //   - Keys soportadas: `allow_origin` (Str), `allow_methods`
+    //     (List<Str>), `allow_headers` (List<Str>), `max_age` (Int).
+    //   - Cualquier otra key, o un tipo distinto al esperado, da error.
+    env.borrow_mut().define(
+        "cors",
+        Value::Builtin {
+            name: "cors",
+            func: builtin_cors,
+        },
+    );
     // `sleep(ms: Int)` — async primitive introducido en Fase 6.3. El
     // checker lo tipa como `Function { ret: Future<Null> }`. Acá
     // registramos un stub que emite error claro: el evaluator async
@@ -2721,6 +2771,146 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
         Ok(Value::Null)
     });
     Ok(Value::new_future(fut))
+}
+
+/// `cors(config: Map?)` — construye un `Value::CorsConfig` parametrizado
+/// por las keys del Map (mini-fase MW.2). Sin args (o con `{}`) emite
+/// el default permisivo (origin "*", métodos comunes, headers usuales).
+/// Keys reconocidas:
+///       - `allow_origin: Str`
+///       - `allow_methods: List<Str>`
+///       - `allow_headers: List<Str>`
+///       - `max_age: Int`
+///
+/// Cualquier otra key o tipo distinto al esperado → error claro.
+fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
+    use crate::http::CorsConfig;
+    use std::sync::Arc;
+
+    if args.len() > 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`cors` espera 0 o 1 argumento (un Map de configuración), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+
+    let mut config = CorsConfig::permissive_default();
+
+    if let Some(arg) = args.first() {
+        let pairs = match arg {
+            Value::Map(p) => p.clone(),
+            other => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Map".into(),
+                        found: other.type_name().into(),
+                    },
+                    0,
+                    0,
+                    format!(
+                        "`cors` espera un Map de configuración, recibió `{}`",
+                        other.type_name()
+                    ),
+                ));
+            }
+        };
+        for (key, value) in pairs.borrow().iter() {
+            let key_str = match key {
+                Value::Str(s) => s.clone(),
+                other => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Str".into(),
+                            found: other.type_name().into(),
+                        },
+                        0,
+                        0,
+                        format!(
+                            "`cors`: las keys del Map de configuración deben ser Str, recibió `{}`",
+                            other.type_name()
+                        ),
+                    ));
+                }
+            };
+            match key_str.as_str() {
+                "allow_origin" => match value {
+                    Value::Str(s) => config.allow_origin = s.clone(),
+                    other => {
+                        return Err(cors_type_err(
+                            "allow_origin",
+                            "Str",
+                            other.type_name(),
+                        ));
+                    }
+                },
+                "allow_methods" => {
+                    config.allow_methods = list_of_strings(value, "allow_methods")?;
+                }
+                "allow_headers" => {
+                    config.allow_headers = list_of_strings(value, "allow_headers")?;
+                }
+                "max_age" => match value {
+                    Value::Int(n) => config.max_age = Some(*n),
+                    other => {
+                        return Err(cors_type_err("max_age", "Int", other.type_name()));
+                    }
+                },
+                other => {
+                    return Err(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        0,
+                        0,
+                        format!(
+                            "`cors`: key '{}' no reconocida. Soportadas: \
+                             allow_origin, allow_methods, allow_headers, max_age.",
+                            other
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+
+    Ok(Value::CorsConfig(Arc::new(config)))
+}
+
+fn cors_type_err(key: &str, expected: &str, found: &str) -> FitzError {
+    FitzError::new(
+        ErrorKind::TypeMismatch {
+            expected: expected.into(),
+            found: found.into(),
+        },
+        0,
+        0,
+        format!("`cors`: la key '{}' espera {}, recibió `{}`", key, expected, found),
+    )
+}
+
+fn list_of_strings(value: &Value, key: &str) -> FitzResult<Vec<String>> {
+    let items = match value {
+        Value::List(items) => items.clone(),
+        other => {
+            return Err(cors_type_err(key, "List<Str>", other.type_name()));
+        }
+    };
+    let mut out = Vec::with_capacity(items.borrow().len());
+    for item in items.borrow().iter() {
+        match item {
+            Value::Str(s) => out.push(s.clone()),
+            other => {
+                return Err(cors_type_err(key, "List<Str>", other.type_name()));
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// `len(x)` — longitud de listas, mapas, strings y rangos.
@@ -6753,6 +6943,10 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn middleware_referenciando_fn_inexistente_es_error_claro() {
+        // En MW.2, collect_middlewares evalúa la expresión completa
+        // del arg, así que el error de "no existe" viene del evaluator
+        // de identificadores (mensaje consistente con cualquier otro
+        // uso de variable sin definir).
         let src = "\
             @middleware(no_existe)\n\
             @get(\"/x\")\n\
@@ -6762,9 +6956,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("@middleware")
-                && err.message.contains("no_existe")
-                && err.message.contains("no está definida"),
+            err.message.contains("no_existe") && err.message.contains("no definida"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -6782,7 +6974,9 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("'x'") && err.message.contains("no es una fn"),
+            err.message.contains("@middleware")
+                && err.message.contains("debe ser una fn")
+                && err.message.contains("Int"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -6857,6 +7051,174 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("@middleware") && err.message.contains("exactamente un"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — mini-fase MW.2: built-in cors(...)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_sin_args_emite_value_corsconfig_con_defaults() {
+        let src = "let c = cors()";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::CorsConfig(cfg) => {
+                assert_eq!(cfg.allow_origin, "*");
+                assert!(cfg.allow_methods.contains(&"GET".to_string()));
+                assert!(cfg.allow_methods.contains(&"OPTIONS".to_string()));
+                assert!(cfg.allow_headers.contains(&"content-type".to_string()));
+                assert_eq!(cfg.max_age, None);
+            }
+            other => panic!("se esperaba CorsConfig, fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_con_map_vacio_emite_defaults_iguales_a_sin_args() {
+        let src = "let c = cors({})";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::CorsConfig(cfg) => {
+                assert_eq!(cfg.allow_origin, "*");
+                assert_eq!(cfg.max_age, None);
+            }
+            other => panic!("se esperaba CorsConfig, fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_override_completo_funciona_y_solo_pisa_los_keys_pasados() {
+        let src = "\
+            let c = cors({\
+                \"allow_origin\": \"https://app.example.com\",\
+                \"allow_methods\": [\"GET\", \"POST\"],\
+                \"allow_headers\": [\"x-custom\"],\
+                \"max_age\": 3600\
+            })\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::CorsConfig(cfg) => {
+                assert_eq!(cfg.allow_origin, "https://app.example.com");
+                assert_eq!(cfg.allow_methods, vec!["GET".to_string(), "POST".into()]);
+                assert_eq!(cfg.allow_headers, vec!["x-custom".to_string()]);
+                assert_eq!(cfg.max_age, Some(3600));
+            }
+            other => panic!("se esperaba CorsConfig, fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_override_parcial_mantiene_defaults_para_no_pasados() {
+        let src = "let c = cors({\"max_age\": 600})";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let c = env.borrow().get("c").unwrap();
+        match c {
+            Value::CorsConfig(cfg) => {
+                assert_eq!(cfg.allow_origin, "*"); // default
+                assert!(cfg.allow_methods.contains(&"POST".to_string())); // default
+                assert_eq!(cfg.max_age, Some(600));
+            }
+            other => panic!("se esperaba CorsConfig, fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_key_desconocida_es_error() {
+        let src = "let c = cors({\"foo\": 1})";
+        let err = parse_and_eval(src).await.unwrap_err();
+        assert!(
+            err.message.contains("`cors`")
+                && err.message.contains("foo")
+                && err.message.contains("no reconocida"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_tipo_incorrecto_en_value_es_error_con_contexto_de_key() {
+        let src = "let c = cors({\"max_age\": \"forever\"})";
+        let err = parse_and_eval(src).await.unwrap_err();
+        assert!(
+            err.message.contains("`cors`")
+                && err.message.contains("max_age")
+                && err.message.contains("Int"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cors_dos_args_es_error_de_aridad() {
+        let src = "let c = cors({}, {})";
+        let err = parse_and_eval(src).await.unwrap_err();
+        assert!(
+            err.message.contains("`cors`") && err.message.contains("0 o 1"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_cors_carga_slot_cors_de_la_ruta() {
+        // @middleware(cors(...)) sobre un handler debe cargar
+        // route.cors (no entra a la chain de middlewares).
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"https://x.com\"}))\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let r = &reg.routes[0];
+        assert!(r.middlewares.is_empty(), "cors NO debe entrar a middlewares chain");
+        let cors = r.cors.as_ref().expect("se esperaba RouteSpec.cors");
+        assert_eq!(cors.allow_origin, "https://x.com");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_cors_mas_user_fn_carga_ambos_slots() {
+        let src = "\
+            fn logger(req) {}\n\
+            @middleware(logger)\n\
+            @middleware(cors())\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let r = &reg.routes[0];
+        assert_eq!(r.middlewares.len(), 1);
+        assert_eq!(r.middlewares[0].name, "logger");
+        assert!(r.cors.is_some());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_dos_cors_es_error_uno_por_ruta() {
+        let src = "\
+            @middleware(cors())\n\
+            @middleware(cors({\"max_age\": 100}))\n\
+            @get(\"/api\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("cors") && err.message.contains("uno por ruta"),
             "mensaje inesperado: {}",
             err.message,
         );

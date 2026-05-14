@@ -693,6 +693,16 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
             },
         );
+        // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
+        // Hoy lo tipamos como `Any` (variádico de facto: 0 o 1 arg, y
+        // el Map adentro tiene tipos heterogéneos por key). Una firma
+        // más precisa requiere union types o un tipo dedicado para
+        // CorsConfig en el `Type` enum — out of scope para MW.2.
+        // El evaluator hace la validación completa en runtime.
+        self.scopes[0].insert(
+            "cors".into(),
+            VarBinding { ty: Type::Any, annotated: false },
+        );
         // `sleep(ms: Int) -> Future<Null>` — primer async primitive.
         // Introducido en Fase 6.3. La firma envuelve `Null` en
         // `Future<Null>` (paralelo a cualquier `async fn` del usuario):

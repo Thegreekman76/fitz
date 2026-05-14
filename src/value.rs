@@ -205,6 +205,19 @@ pub enum Value {
         body: Option<Box<Value>>,
     },
 
+    /// Configuración CORS opaca, producto del built-in `cors(...)`
+    /// (mini-fase MW.2). Se usa como argumento de `@middleware(cors(...))`
+    /// sobre un handler HTTP; el evaluador la detecta y la guarda en el
+    /// slot `RouteSpec.cors` (no entra a la chain de middlewares user-fn).
+    /// Fuera de ese context es opaca: no se puede imprimir ni
+    /// serializar — usar `cors(...)` como expresión suelta no tiene
+    /// sentido y el código que lo intenta recibe error claro.
+    ///
+    /// `Arc` y no `Rc`: el config viaja al thread tokio para configurar
+    /// el preflight handler de axum, así que tiene que ser `Send + Sync`.
+    /// El payload (`String`s y `Vec<String>`) ya cumple eso.
+    CorsConfig(std::sync::Arc<crate::http::CorsConfig>),
+
     /// Future pendiente introducido en Fase 6.4. Se construye cuando
     /// se llama una `async fn` Fitz sin `.await` (guardar el future
     /// suelto en una variable) o desde builtins async (`sleep`).
@@ -278,6 +291,7 @@ impl Value {
             Value::Result(_) => "Result",
             Value::HttpResponse { .. } => "HttpResponse",
             Value::Module { .. } => "Module",
+            Value::CorsConfig(_) => "CorsConfig",
             Value::Future(_) => "Future",
         }
     }
@@ -369,6 +383,7 @@ impl std::fmt::Display for Value {
                 }
                 None => write!(f, "<response {}>", status),
             },
+            Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
         }
     }
