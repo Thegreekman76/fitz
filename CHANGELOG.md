@@ -15,6 +15,51 @@ En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
 hito comprometido es **Fase 8 — Interop Python** (embedding CPython
 via PyO3, importar SQLAlchemy/NumPy/etc. desde handlers Fitz).
 
+## [v0.8.1] — 2026-05-14 — Mini-tanda PreF8: cleanup antes de Interop Python
+
+Cuatro sub-pasos chicos antes del salto a Fase 8 para no entremezclar
+deuda existente con la parte real de Python interop.
+
+- **PreF8.1 — Refactor M1+M2 codegen**: `generate_main_rs` (232 LoC)
+  → orquestador de ~18 LoC + 3 helpers libres (`partition_program_stmts`,
+  `resolve_state_var_types`, `emit_main_rs_body`). `gen_http_handler_wrapper`
+  (532 LoC) → orquestador de ~9 LoC + 6 métodos del `impl CodegenCtx`
+  (`resolve_handler_signature` que devuelve `HandlerSig`,
+  `emit_axum_extractors`, `emit_middleware_chain`,
+  `emit_param_coercions`, `emit_handler_dispatch_and_response`,
+  `emit_cors_helpers`). Cero cambio funcional: AST del Rust generado
+  bit-a-bit idéntico pre/post sobre los 19 ejemplos del smoke
+  `GUIDE_EXAMPLES_COMPILE`. F8 va a hacer crecer ambas fns con Python
+  imports + wrappers; mejor partirlas antes.
+- **PreF8.2 — Method chain multi-línea en parser**: el `postfix()`
+  loop tolera `Token::Newline` antes de `.`. Habilita el patrón
+  idiomático de chains largos partidos por línea
+  (`users\n.filter(...)\n.map(...)`); AST resultante idéntico al
+  one-liner. Caso de uso central: chains de SQLAlchemy/pandas en F8.
+- **PreF8.3 — Defaults de tipos importados**: auditoría de 6 casos
+  de `Field.default` detectó un único bug — defaults que referencian
+  consts del módulo de origen fallaban en `fitz run` y `fitz build`.
+  Fix con estrategia eager-at-import: `Value::Type` suma
+  `resolved_defaults`, el loader pre-evalúa los defaults en el env
+  del módulo; codegen emite `pub fn __default_<T>_<F>()` en el
+  módulo. Habilita el patrón `from foo import User` con
+  `type User { name: Str = DEFAULT_NAME }` sin re-importar
+  `DEFAULT_NAME`.
+- **PreF8.4 — Import aliasing**: `import foo as f`, `from foo import
+  bar as b`, alias mixto. Sub-paso adelantado de F8.1. Lexer suma
+  `Token::As`; AST suma `Stmt::Import.alias` y cambia
+  `Stmt::FromImport.names` a `Vec<(String, Option<String>)>`.
+  Evaluator usa el `Value::Type.name` canónico al instanciar
+  (`Person { ... }` con alias produce instancia cuyo Display dice
+  `User`, paridad bit-a-bit). Codegen emite `use foo::bar as b;`.
+
+**Tests**: 1172 unit (baseline 1153 + 19 nuevos) + 79 compile_e2e
+(baseline 74 + 5 nuevos) + 3 openapi_e2e verdes. Clippy
+`-D warnings` limpio. Paridad bit-a-bit `fitz run` ↔ `fitz build`
+validada en todos los sub-pasos.
+
+Detalle completo: `docs/roadmap.md` → "Mini-tanda PreF8".
+
 ## [v0.8.0] — 2026-05-14 — Fase F17: Send completo + paralelismo HTTP real
 
 - **Paralelismo HTTP real**: el server (tanto `fitz run` como el

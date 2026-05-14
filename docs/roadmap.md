@@ -2507,15 +2507,32 @@ paso fácil después del refactor.
 ---
 
 ## Mini-tanda PreF8 — Cleanup antes de Interop Python
-**Estado: COMPROMETIDA (2026-05-14), no arrancada todavía**
+**Estado: CERRADA (2026-05-14, 1172 unit + 79 E2E + 3 openapi)**
 
 Sale del cierre de F17. Survey honesto de la matriz de deudas
-identificó 4 items que F8 va a estresar fuerte; mejor cerrar antes
-para no entremezclar deuda existente con la parte real de Python
-interop. Estimado total: 4-6 sesiones.
+identificó 4 items que F8 iba a estresar fuerte; se cerraron en
+4 sub-pasos antes del salto a Fase 8 para no entremezclar deuda
+existente con la parte real de Python interop. Cinco commits
+(uno por sub-paso + cierre formal).
+
+Resumen de sub-pasos cerrados:
+
+- **PreF8.1** — refactor M1+M2 del codegen (`generate_main_rs` 232 LoC
+  → 18 LoC + 3 helpers; `gen_http_handler_wrapper` 532 LoC → 9 LoC
+  + 6 métodos). Cero cambio funcional, AST bit-a-bit idéntico.
+- **PreF8.2** — method chain multi-línea en parser. `postfix()` loop
+  tolera Newline antes de `.`. Cap 13 documenta como forma idiomática.
+- **PreF8.3** — auditoría F4 de field defaults. 5/6 casos andaban;
+  el bug era defaults de tipos importados que referencian símbolos
+  del módulo de origen. Fix con eager-at-import en evaluator +
+  `__default_<T>_<F>()` helpers en codegen.
+- **PreF8.4** — import aliasing con `as`. Lexer `Token::As`, AST
+  cambia `Stmt::Import.alias` y `Stmt::FromImport.names`. Evaluator
+  + codegen + checker actualizados. Display canónico para paridad
+  bit-a-bit.
 
 ### PreF8.1 — Refactor M1 + M2 codegen
-**Pendiente** — extraer sub-fns de las dos funciones más grandes de
+**CERRADO** — extraer sub-fns de las dos funciones más grandes de
 `codegen.rs`.
 
 - **M1 — `generate_main_rs`** (~140 LoC, líneas 779-920 aprox).
@@ -2545,7 +2562,7 @@ no-trivial entre los pasos. Recomendado (b) con extracción
 selectiva de sub-helpers donde la lógica se repita.
 
 ### PreF8.2 — F10 method chain multi-línea en parser
-**Pendiente** — el parser hoy corta el statement al ver newline
+**CERRADO** — el parser hoy corta el statement al ver newline
 después de un `Ident`/llamada cuando el siguiente token es `.` en
 la línea siguiente. Eso rompe el patrón idiomático de chains
 largas que Python/JS/Rust permiten:
@@ -2577,7 +2594,7 @@ chain de 3+ líneas que parsea y ejecuta igual que la versión
 de una línea. Tests parser dedicados.
 
 ### PreF8.3 — F4 field default audit
-**Pendiente** — auditar que `Field.default` se popule en todos
+**CERRADO** — auditar que `Field.default` se popule en todos
 los contextos donde un `type` aparece, y que el evaluator +
 codegen los apliquen consistente.
 
@@ -2603,7 +2620,7 @@ struct_lit en el evaluator.
 verdes + ejemplo en cap 12 que demuestre default importado.
 
 ### PreF8.4 — Import aliasing
-**Pendiente** — sintaxis ya en `syntax-spec.md`, falta
+**CERRADO** — sintaxis ya en `syntax-spec.md`, falta
 implementación. Sub-paso adelantado de F8.1 (que lo promete
 adentro). Adelantarlo deja F8.1 con solo Python interop puro y
 cierra una deuda independiente.
@@ -2632,19 +2649,22 @@ from foo import bar as b, baz as z  // múltiples aliases
 as b` funcionan en `fitz run` y `fitz build` bit-a-bit.
 
 ### PreF8.5 — Cierre formal
-**Pendiente** — housekeeping al final de la mini-tanda.
+**CERRADO** — housekeeping al final de la mini-tanda.
 
-- Marcar M1, M2, F4, F10, "import aliasing" como CERRADOS en
-  `docs/deudas-post-5b.md`.
-- Sumar entrada `v0.8.1 — Mini-tanda PreF8` al `CHANGELOG.md`.
-- Actualizar `CLAUDE.md` con el cierre (entrada paralela al
-  cierre de F17).
-- Smoke completo + clippy + E2E + verificar working tree limpio.
-- Si alguno de F4/F10 afectó ejemplos de la guía, validar
-  bit-a-bit.
+- M1, M2, F4, F10, "import aliasing" marcados como CERRADOS en
+  `docs/deudas-post-5b.md` (M1/M2 + F4 + F10 + nuevo F18 para
+  aliasing).
+- Entrada `v0.8.1 — Mini-tanda PreF8` sumada a `CHANGELOG.md`.
+- `CLAUDE.md` actualizado con el cierre (entrada paralela al
+  cierre de F17, sub-sección "Mini-tanda PreF8").
+- Smoke completo verde: 1172 unit + 79 compile_e2e + 3 openapi_e2e.
+  Clippy `-D warnings` limpio. Working tree limpio post-commits.
+- Bit-a-bit `fitz run` ↔ `fitz build` validado sobre los ejemplos
+  modificados (cap 13 `13-metodos.fitz` con chain multi-línea,
+  cap 16 `16-modulos.fitz` con defaults importados + aliases).
 
-**Total de la mini-tanda**: 4-6 sesiones, 5 commits. Después
-de cerrar, arranca **Fase 8.1**.
+**Total de la mini-tanda**: 5 commits (1 por sub-paso + 1 de
+cierre formal). Después de cerrar, arranca **Fase 8.1**.
 
 ---
 
