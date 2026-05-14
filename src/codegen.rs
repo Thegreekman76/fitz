@@ -1231,13 +1231,33 @@ fn generate_main_rs(
                             // separado vía `headers_from_decorators`.
                             // Acá solo lo aceptamos como decorator válido.
                             "header" => {}
+                            // Mini-fase MW.1: `@middleware(fn)` está
+                            // soportado solo por el intérprete por ahora.
+                            // El codegen aborta con error claro citando
+                            // MW.3 como la mini-fase que aterriza la
+                            // paridad para `fitz build`.
+                            "middleware" => {
+                                return Err(FitzError::new(
+                                    ErrorKind::TypeError,
+                                    0,
+                                    0,
+                                    format!(
+                                        "decorator `@middleware` sobre fn `{}` todavía no \
+                                         está soportado en `fitz build` (mini-fase MW.1 \
+                                         lo aterriza en el intérprete; MW.3 lo trae al \
+                                         compilador). Workaround: usá `fitz run` mientras \
+                                         tanto, o sacá el `@middleware(...)` del programa.",
+                                        name
+                                    ),
+                                ));
+                            }
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (7.6 cubre @get/@post/@put/@delete/@server/@header)",
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@server/@header)",
                                         other, name
                                     ),
                                 ));

@@ -128,6 +128,27 @@ pub struct RouteSpec {
     /// Sin anotación → `None` y el generador trata el response como
     /// "any" (`200` con schema vacío).
     pub return_type_expr: Option<TypeExpr>,
+    /// Middlewares declarados con `@middleware(fn)` apilados antes del
+    /// decorator de ruta (mini-fase MW.1). El orden del Vec es el de
+    /// aplicación: el primero corre primero, el último justo antes del
+    /// handler. Cada uno se invoca con un único arg `Request`. Retornos
+    /// soportados (gate-only): `Null`/sin return → continúa la cadena;
+    /// `Value::HttpResponse` (vía `return <status> { ... }`) →
+    /// short-circuit con ese status code. Cualquier otro tipo → 500
+    /// con mensaje claro. Vacío si la ruta no tiene middlewares.
+    pub middlewares: Vec<MiddlewareSpec>,
+}
+
+/// Una entrada del stack de middlewares de una ruta (mini-fase MW.1).
+/// El `handler` viene resuelto a `Value::Function` desde el env del
+/// importer durante el registro de la ruta; el evaluator garantiza
+/// que el value sea callable (clon barato del `Rc` adentro). El
+/// `name` es el identificador con el que el usuario lo referenció
+/// en `@middleware(...)`, solo para mensajes de error/log.
+#[derive(Debug, Clone)]
+pub struct MiddlewareSpec {
+    pub name: String,
+    pub handler: Value,
 }
 
 /// Especificación de un header declarado con `@header(name="X")`
@@ -1400,6 +1421,99 @@ pub fn run_interpreter_loop(
     }
 }
 
+/// Construye el `Value::Instance` de tipo `Request` que el runtime
+/// pasa a cada middleware (mini-fase MW.1). El path lleva los path
+/// params sustituidos (`/users/{id}` con `id=42` se ve como
+/// `/users/42`); la query string del request original NO se concatena
+/// para evitar dependencia del orden de `HashMap`. Si aparece presión
+/// real por exponer la query string completa, se suma como deuda
+/// menor. Los headers se exponen con sus keys en lowercase (consistente
+/// con el dispatch case-insensitive de `@header`).
+fn build_request_value(
+    method: HttpMethod,
+    path_template: &str,
+    raw_path_params: &HashMap<String, String>,
+    headers: &HashMap<String, String>,
+) -> Value {
+    use crate::value::shared;
+
+    // Sustituir cada `{name}` por su valor real. O(n*m) pero n y m
+    // son chicos (un handler típico tiene 0-3 path params); evitable
+    // con un parser fino, no vale el costo de mantenimiento.
+    let mut path = path_template.to_string();
+    for (k, v) in raw_path_params {
+        path = path.replace(&format!("{{{}}}", k), v);
+    }
+
+    let headers_pairs: Vec<(Value, Value)> = headers
+        .iter()
+        .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+        .collect();
+
+    Value::new_instance(
+        "Request".to_string(),
+        vec![
+            ("method".to_string(), Value::Str(method.as_str().to_string())),
+            ("path".to_string(), Value::Str(path)),
+            ("headers".to_string(), Value::Map(shared(headers_pairs))),
+        ],
+    )
+}
+
+/// Ejecuta la cadena de middlewares de una ruta en orden (mini-fase
+/// MW.1). Cada middleware recibe un único arg `Request` y se espera
+/// que devuelva:
+///
+///   - `Value::Null` (o nada) → la cadena continúa con el siguiente
+///     middleware o el handler.
+///   - `Value::HttpResponse` (construido con `return <status> { ... }`)
+///     → short-circuit: la cadena corta acá y el outcome se devuelve
+///     al cliente.
+///   - Cualquier otro valor → 500 con mensaje claro (el middleware
+///     tiene que ser gate-only).
+///
+/// Devuelve `Some(outcome)` si un middleware short-circuita o si algo
+/// falló; `None` si la cadena llegó al final y hay que invocar el
+/// handler.
+async fn run_middleware_chain(
+    middlewares: &[MiddlewareSpec],
+    request: &Value,
+) -> Option<HandlerOutcome> {
+    for mw in middlewares {
+        let args = vec![request.clone()];
+        let label = format!("middleware {}", mw.name);
+        match call_handler(mw.handler.clone(), args, &label).await {
+            Ok(Value::Null) => continue,
+            Ok(Value::HttpResponse { status, body }) => {
+                let payload_json = match body {
+                    Some(b) => match value_to_json(b.as_ref()) {
+                        Ok(j) => j,
+                        Err(msg) => return Some(HandlerOutcome::internal_error(msg)),
+                    },
+                    None => serde_json::Value::Null,
+                };
+                return Some(HandlerOutcome::json(status, payload_json));
+            }
+            Ok(other) => {
+                return Some(HandlerOutcome::internal_error(format!(
+                    "middleware '{}' devolvió un valor inesperado ({}); \
+                     debe devolver `null` para continuar o `return <status> {{ ... }}` \
+                     para cortocircuitar",
+                    mw.name,
+                    other.type_name(),
+                )));
+            }
+            Err(err) => {
+                return Some(HandlerOutcome::internal_error(format!(
+                    "middleware '{}' falló: {}",
+                    mw.name, err.message,
+                )));
+            }
+        }
+    }
+    None
+}
+
 /// Procesa un único task. Aislado del loop para testearlo sin canal.
 async fn handle_task(
     registry: &HttpRegistry,
@@ -1415,6 +1529,23 @@ async fn handle_task(
             route_idx,
         ));
     };
+
+    // MW.1: middlewares apilados sobre la ruta. Corren ANTES de parsear
+    // body o coercionar params: si un middleware de auth/CORS cortocircuita,
+    // ahorramos el trabajo de validar el resto del request. La cadena
+    // recibe un único arg `Request` con method/path/headers; body y
+    // query params no se exponen al middleware (deuda explícita).
+    if !route.middlewares.is_empty() {
+        let request = build_request_value(
+            route.method,
+            &route.path,
+            &raw_path_params,
+            &raw_headers,
+        );
+        if let Some(outcome) = run_middleware_chain(&route.middlewares, &request).await {
+            return outcome;
+        }
+    }
 
     // Si el handler espera body, parsearlo y prepararlo. Lo hacemos
     // antes de armar args para fallar temprano si el JSON está roto.
@@ -2158,6 +2289,203 @@ mod tests {
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
+    }
+
+    // ---- Mini-fase MW.1: middleware chain en handle_task ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_middleware_que_retorna_null_continua_al_handler() {
+        // Middleware "passthrough": no devuelve nada → la cadena sigue
+        // y el handler corre normal.
+        let src = "\
+            fn pass(req) {}\n\
+            @middleware(pass)\n\
+            @get(\"/\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, "\"ok\"");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_middleware_que_short_circuita_con_401() {
+        // Middleware corta la cadena con `return 401 { ... }`. El handler
+        // NO se invoca y la response es la del middleware.
+        let src = "\
+            fn auth(req) {\n\
+                return 401 {\"error\": \"no autorizado\"}\n\
+            }\n\
+            @middleware(auth)\n\
+            @get(\"/\")\n\
+            fn h() => \"NO DEBERIA APARECER\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 401);
+        assert!(outcome.body.contains("no autorizado"));
+        assert!(!outcome.body.contains("NO DEBERIA APARECER"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_dos_middlewares_short_circuita_el_primero_que_corte() {
+        // Primero `logger` (pass), después `auth` (corta). El handler
+        // no debería correr. Si invertimos el orden y el corte aterriza
+        // primero, lo verificamos abajo.
+        let src = "\
+            fn logger(req) {}\n\
+            fn auth(req) {\n\
+                return 403 {\"error\": \"forbidden\"}\n\
+            }\n\
+            @middleware(logger)\n\
+            @middleware(auth)\n\
+            @get(\"/\")\n\
+            fn h() => \"nope\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 403);
+        assert!(outcome.body.contains("forbidden"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_middleware_lee_method_y_path_del_request() {
+        // El middleware inspecciona req.method y req.path. Verifica
+        // que el path lleva los path params SUSTITUIDOS, no la
+        // template (mini-fase MW.1: `/users/{id}` → `/users/42`).
+        let src = "\
+            fn debug_mw(req) {\n\
+                return 200 {\"method\": req.method, \"path\": req.path}\n\
+            }\n\
+            @middleware(debug_mw)\n\
+            @get(\"/users/{id}\")\n\
+            fn h(id: Int) => \"nope\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let mut params = HashMap::new();
+        params.insert("id".into(), "42".into());
+        let outcome = handle_task(
+            &registry,
+            0,
+            params,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
+        assert_eq!(parsed["method"], "GET");
+        assert_eq!(parsed["path"], "/users/42");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_middleware_lee_headers_lowercase() {
+        // Headers expuestos al middleware con keys en lowercase (mismo
+        // criterio que el dispatch de @header).
+        let src = "\
+            fn auth(req) {\n\
+                return 200 {\"token\": req.headers[\"authorization\"]}\n\
+            }\n\
+            @middleware(auth)\n\
+            @get(\"/\")\n\
+            fn h() => \"nope\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let mut headers = HashMap::new();
+        headers.insert("authorization".into(), "bearer-xyz".into());
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            headers,
+        )
+        .await;
+        assert_eq!(outcome.status, 200);
+        let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
+        assert_eq!(parsed["token"], "bearer-xyz");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_middleware_que_retorna_valor_invalido_es_500() {
+        // Si el middleware devuelve cualquier cosa que no sea Null ni
+        // HttpResponse (Int, Str, Instance, ...), el runtime emite 500
+        // con mensaje claro citando "gate-only".
+        let src = "\
+            fn loco(req) => 42\n\
+            @middleware(loco)\n\
+            @get(\"/\")\n\
+            fn h() => \"nope\"\n\
+        ";
+        let registry = registry_from_source(src).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 500);
+        assert!(outcome.body.contains("loco"));
+        assert!(outcome.body.contains("valor inesperado") || outcome.body.contains("cortocircuitar"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn handle_task_middleware_corta_antes_de_parsear_body() {
+        // Si el middleware short-circuita, el body NO se parsea (el
+        // 400 por body inválido que normalmente saldría no aparece).
+        // Esto chequea que el orden es middlewares → parse body → handler.
+        let src = "\
+            type Input { x: Int }\n\
+            fn deny(req) {\n\
+                return 401 {\"error\": \"nope\"}\n\
+            }\n\
+            @middleware(deny)\n\
+            @post(\"/\")\n\
+            fn h(body: Input) => body\n\
+        ";
+        let registry = registry_from_source(src).await;
+        // Body inválido (no es JSON) — si llegara al parser, daría 400.
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            b"esto-no-es-json".to_vec(),
+            HashMap::new(),
+        )
+        .await;
+        assert_eq!(outcome.status, 401);
+        assert!(outcome.body.contains("nope"));
     }
 
     // ---- ServerConfig (Fase 4.4) ----
@@ -3089,6 +3417,7 @@ mod tests {
                 headers: vec![],
                 param_type_exprs: vec![],
                 return_type_expr: None,
+                middlewares: vec![],
             });
         });
         assert_eq!(reg.routes.len(), 1);

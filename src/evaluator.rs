@@ -33,7 +33,7 @@ use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::http::{
     has_active_registry, parse_path_template, push_route, set_server_config, BodyParam,
-    HeaderSpec, HttpMethod, RouteSpec, ServerConfig,
+    HeaderSpec, HttpMethod, MiddlewareSpec, RouteSpec, ServerConfig,
 };
 use crate::lexer::tokenize;
 use crate::parser::parse;
@@ -155,19 +155,29 @@ pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
 // baratos; el `closure: EnvRef` mantiene viva el env del módulo).
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn process_decorator(
     deco: &Decorator,
     fn_name: &str,
     params: &[Param],
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
+    middlewares: &[MiddlewareSpec],
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
     // ¿Es un decorator HTTP conocido?
     if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
         return register_http_route(
-            method, deco, fn_name, params, return_type, headers, handler, env,
+            method,
+            deco,
+            fn_name,
+            params,
+            return_type,
+            headers,
+            middlewares,
+            handler,
+            env,
         );
     }
 
@@ -185,7 +195,7 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware.",
             deco.name, fn_name,
         ),
     )))
@@ -417,6 +427,102 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
     Ok(())
 }
 
+/// Recolecta los `@middleware(fn)` declarados sobre un handler
+/// (mini-fase MW.1). Valida:
+///   - El primer arg es un `Expr::Ident` que resuelve en el env actual
+///     a un `Value::Function`. Otras formas (lambdas inline, calls
+///     anidados, paths) se rechazan con mensaje listo para guiar al
+///     usuario.
+///   - Aridad: exactamente un arg. Sin kwargs.
+///   - El decorator `@middleware` debe aparecer ANTES del decorator
+///     de ruta. La validación de orden y de "solo aplica sobre
+///     handlers HTTP" la hace el caller (cerca de `collect_headers`).
+///
+/// Si la fn no tiene decoradores `@middleware`, devuelve `vec![]`.
+fn collect_middlewares(
+    decorators: &[Decorator],
+    fn_name: &str,
+    env: &EnvRef,
+) -> Result<Vec<MiddlewareSpec>, EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
+    };
+
+    let mut out: Vec<MiddlewareSpec> = Vec::new();
+    let mut saw_route_decorator = false;
+
+    for deco in decorators {
+        if HttpMethod::from_decorator_name(&deco.name).is_some() {
+            saw_route_decorator = true;
+            continue;
+        }
+        if deco.name != "middleware" {
+            continue;
+        }
+        // Orden: `@middleware` solo antes del decorator de ruta.
+        if saw_route_decorator {
+            return Err(err(format!(
+                "@middleware sobre fn '{}': debe apilarse ANTES del decorator de ruta \
+                 (`@middleware(...)` arriba de `@get`/`@post`/`@put`/`@delete`)",
+                fn_name,
+            )));
+        }
+        if !deco.kwargs.is_empty() {
+            return Err(err(format!(
+                "@middleware sobre fn '{}': no admite argumentos por nombre (kwargs)",
+                fn_name,
+            )));
+        }
+        if deco.args.len() != 1 {
+            return Err(err(format!(
+                "@middleware sobre fn '{}': espera exactamente un argumento \
+                 (la fn a aplicar), recibió {}",
+                fn_name,
+                deco.args.len(),
+            )));
+        }
+        // Hoy el arg debe ser un `Ident` que el env conoce como fn.
+        // Lambdas inline (`@middleware(fn(req) => ...)`) y exprs
+        // (`@middleware(cors(...))`) llegan en MW.2.
+        let name = match &deco.args[0] {
+            Expr::Ident(n, _) => n.clone(),
+            other => {
+                return Err(err(format!(
+                    "@middleware sobre fn '{}': el argumento debe ser el nombre de una \
+                     fn ya definida (`@middleware(mi_fn)`), recibió {:?}",
+                    fn_name, other,
+                )));
+            }
+        };
+        let value = match env.borrow().get(&name) {
+            Some(v) => v,
+            None => {
+                return Err(err(format!(
+                    "@middleware sobre fn '{}': la fn '{}' no está definida en este scope",
+                    fn_name, name,
+                )));
+            }
+        };
+        match &value {
+            Value::Function { .. } => {}
+            other => {
+                return Err(err(format!(
+                    "@middleware sobre fn '{}': '{}' no es una fn ({}), no puede usarse \
+                     como middleware",
+                    fn_name,
+                    name,
+                    other.type_name(),
+                )));
+            }
+        }
+        out.push(MiddlewareSpec {
+            name,
+            handler: value,
+        });
+    }
+    Ok(out)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn register_http_route(
     method: HttpMethod,
@@ -425,6 +531,7 @@ fn register_http_route(
     params: &[Param],
     return_type: &Option<TypeExpr>,
     headers: &[HeaderSpec],
+    middlewares: &[MiddlewareSpec],
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -581,6 +688,7 @@ fn register_http_route(
         headers: headers.to_vec(),
         param_type_exprs,
         return_type_expr: return_type.clone(),
+        middlewares: middlewares.to_vec(),
     });
 
     Ok(())
@@ -1057,9 +1165,29 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 )));
             }
+            // Mini-fase MW.1: recolectar `@middleware(fn)` igual que
+            // headers — validar orden + resolución en el env. Como
+            // headers, solo aplica sobre handlers HTTP de ruta.
+            let collected_middlewares = collect_middlewares(decorators, name, &env)?;
+            if !collected_middlewares.is_empty()
+                && !decorators
+                    .iter()
+                    .any(|d| HttpMethod::from_decorator_name(&d.name).is_some())
+            {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!(
+                        "@middleware sobre fn '{}': solo aplica sobre handlers HTTP \
+                         (apilar junto a `@get`/`@post`/`@put`/`@delete`).",
+                        name,
+                    ),
+                )));
+            }
             for deco in decorators {
-                if deco.name == "header" {
-                    continue; // ya procesado por `collect_headers`
+                if deco.name == "header" || deco.name == "middleware" {
+                    continue; // ya procesado por sus `collect_*`
                 }
                 process_decorator(
                     deco,
@@ -1067,6 +1195,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     params,
                     return_type,
                     &collected_headers,
+                    &collected_middlewares,
                     &func,
                     &env,
                 )?;
@@ -6578,5 +6707,158 @@ let r = match n {
         assert_eq!(e.line, 2);
         assert_eq!(e.column, 10);
         assert!(e.message.contains("espera 1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — mini-fase MW.1: @middleware en el intérprete
+    // -----------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_un_solo_decorator_se_registra_con_la_ruta() {
+        let src = "\
+            fn logger(req) {}\n\
+            @middleware(logger)\n\
+            @get(\"/x\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        assert_eq!(reg.routes.len(), 1);
+        let r = &reg.routes[0];
+        assert_eq!(r.middlewares.len(), 1);
+        assert_eq!(r.middlewares[0].name, "logger");
+        assert!(matches!(&r.middlewares[0].handler, Value::Function { .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_dos_apilados_preservan_orden_top_down() {
+        let src = "\
+            fn logger(req) {}\n\
+            fn auth(req) {}\n\
+            @middleware(logger)\n\
+            @middleware(auth)\n\
+            @get(\"/x\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let r = &reg.routes[0];
+        assert_eq!(r.middlewares.len(), 2);
+        // Orden top-down: logger primero, auth segundo.
+        assert_eq!(r.middlewares[0].name, "logger");
+        assert_eq!(r.middlewares[1].name, "auth");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_referenciando_fn_inexistente_es_error_claro() {
+        let src = "\
+            @middleware(no_existe)\n\
+            @get(\"/x\")\n\
+            fn h() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@middleware")
+                && err.message.contains("no_existe")
+                && err.message.contains("no está definida"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_arg_que_no_es_fn_es_error_claro() {
+        let src = "\
+            let x = 42\n\
+            @middleware(x)\n\
+            @get(\"/x\")\n\
+            fn h() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("'x'") && err.message.contains("no es una fn"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_despues_del_route_decorator_es_error_de_orden() {
+        let src = "\
+            fn logger(req) {}\n\
+            @get(\"/x\")\n\
+            @middleware(logger)\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@middleware")
+                && err.message.contains("ANTES")
+                && err.message.contains("@get"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_sin_handler_http_es_error_claro() {
+        let src = "\
+            fn logger(req) {}\n\
+            @middleware(logger)\n\
+            fn no_es_handler() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@middleware") && err.message.contains("handlers HTTP"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_con_kwargs_es_error() {
+        let src = "\
+            fn logger(req) {}\n\
+            @middleware(logger, level=\"debug\")\n\
+            @get(\"/x\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@middleware") && err.message.contains("kwargs"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn middleware_con_aridad_distinta_de_uno_es_error() {
+        let src = "\
+            fn logger(req) {}\n\
+            fn auth(req) {}\n\
+            @middleware(logger, auth)\n\
+            @get(\"/x\")\n\
+            fn h() => \"ok\"\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@middleware") && err.message.contains("exactamente un"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
     }
 }

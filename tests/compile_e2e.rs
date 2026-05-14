@@ -621,6 +621,25 @@ fn build_aborta_si_codegen_no_soporta_feature() {
     );
 }
 
+#[test]
+fn build_aborta_sobre_middleware_decorator_mw1() {
+    // Mini-fase MW.1: `@middleware(fn)` está soportado solo en el
+    // intérprete. El codegen aborta con error explícito que cita
+    // MW.3 como la mini-fase que aterriza paridad para `fitz build`.
+    let stderr = build_expect_fail(
+        "unsupported-middleware-codegen",
+        "fn logger(req: Request) {}\n\
+         @middleware(logger)\n\
+         @get(\"/x\")\n\
+         fn h() => \"ok\"\n",
+    );
+    assert!(
+        stderr.contains("@middleware") && stderr.contains("MW.3"),
+        "esperaba mensaje sobre @middleware no soportado + MW.3, fue: {}",
+        stderr
+    );
+}
+
 // ---------------------------------------------------------------------------
 // Fase 5b.4 — Result, `?`, match
 // ---------------------------------------------------------------------------

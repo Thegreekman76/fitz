@@ -315,6 +315,47 @@ fn expect_arity(name: &str, expected: usize, args: &[TypeExpr]) -> Result<(), Fi
     }
 }
 
+/// Pre-registra los tipos built-in que aporta el runtime HTTP de Fitz.
+/// Hoy: `Request` (lo construye el dispatcher antes de cada handler/
+/// middleware; expone `method`, `path`, `headers`) y `Response` (marker
+/// opaco para anotar el retorno de middlewares — el valor real lo
+/// produce `return <status> { ... }`).
+///
+/// Se llama desde `resolve_program` antes de la vuelta 1, así que un
+/// `type Request { ... }` declarado por el usuario dispara el error de
+/// redeclaración existente. El precio: dos nominales fijos en el env
+/// aún en programas que no usan HTTP. Trade-off aceptable — los costos
+/// de chequeo se mantienen O(1) y la superficie semántica del lenguaje
+/// queda consistente.
+fn register_http_builtin_types(env: &mut TypeEnv) {
+    // `Request`: el id que queda asignado es estable porque corremos
+    // antes que cualquier otra registración. Sus fields se completan
+    // explícito (no derivados de un Stmt::TypeDef).
+    let req_id = env
+        .declare_nominal("Request".to_string())
+        .expect("Request es el primer nominal — no puede colisionar");
+    env.set_fields(
+        req_id,
+        vec![
+            ResolvedField { name: "method".into(), type_: Type::Str },
+            ResolvedField { name: "path".into(), type_: Type::Str },
+            ResolvedField {
+                name: "headers".into(),
+                type_: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
+            },
+        ],
+    );
+
+    // `Response`: nominal opaco sin fields. El usuario no lo instancia
+    // con struct lit (`Response { ... }` daría error: falta cualquier
+    // field — pero como no tiene, struct lit con `{}` pasa; documentado).
+    // El uso esperado es como marker en firmas: `fn auth(req) -> Response?`.
+    let resp_id = env
+        .declare_nominal("Response".to_string())
+        .expect("Response es el segundo nominal — no puede colisionar");
+    env.set_fields(resp_id, vec![]);
+}
+
 fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
     FitzError::new(
         ErrorKind::TypeError,
@@ -338,6 +379,16 @@ fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
 pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
     let mut env = TypeEnv::new();
     let mut errors = Vec::new();
+
+    // Vuelta 0 (mini-fase MW.1): registrar tipos built-in del runtime HTTP.
+    // `Request` lo construye el dispatcher antes de invocar middlewares
+    // y handlers; el usuario lo lee adentro de sus middlewares con
+    // `req.method`, `req.path`, `req.headers`. `Response` queda como
+    // marker opaco para anotar `-> Response?` en middlewares; el usuario
+    // no lo instancia (el valor lo produce `return <status> { ... }`).
+    // Si el usuario declara `type Request`/`type Response`, la vuelta 1
+    // emite el error de redeclaración existente.
+    register_http_builtin_types(&mut env);
 
     // Vuelta 1: registrar los nombres de los `type` declarados localmente.
     // Forward refs entre nominales locales.
@@ -592,6 +643,12 @@ struct CheckCtx<'a> {
     /// (el parser no lo admite); siempre pushea `false`. Introducido
     /// en Fase 6.2.
     await_stack: Vec<bool>,
+    /// Nombres de fns que aparecen como argumento de un `@middleware(...)`
+    /// en algún FnDef del programa. Pre-scaneado en `check_program`. Lo
+    /// usamos para tratar a esas fns como "contexto HTTP" a efectos de
+    /// `Stmt::ReturnStatus` (un middleware puede hacer `return 401 { ... }`
+    /// para short-circuitear el handler). Introducido en mini-fase MW.1.
+    middleware_fn_names: std::collections::HashSet<String>,
     errors: Vec<FitzError>,
 }
 
@@ -604,6 +661,7 @@ impl<'a> CheckCtx<'a> {
             inferred_returns: Vec::new(),
             in_http_handler: Vec::new(),
             await_stack: Vec::new(),
+            middleware_fn_names: std::collections::HashSet::new(),
             errors: Vec::new(),
         };
         ctx.register_builtins();
@@ -1979,7 +2037,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let in_handler = ctx.in_http_handler.last().copied().unwrap_or(false);
             if !in_handler {
                 ctx.error_at(*span,
-                    "`return <status> { ... }` solo se admite adentro de un handler HTTP (`@get`/`@post`/`@put`/`@delete`)".to_string()
+                    "`return <status> { ... }` solo se admite adentro de un handler HTTP (`@get`/`@post`/`@put`/`@delete`) o una fn aplicada como `@middleware(...)`".to_string()
                 );
             }
             // Status debe ser Int (rango 100-599 se valida en runtime).
@@ -1998,6 +2056,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::FnDef {
+            name: fn_name,
             params,
             return_type,
             body,
@@ -2025,9 +2084,13 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
                 None => Type::Any,
             };
+            // "Contexto HTTP" para el chequeo de `Stmt::ReturnStatus`:
+            // handlers HTTP (`@get`/`@post`/`@put`/`@delete`) y fns
+            // referenciadas por `@middleware(name)` en otro FnDef.
+            // El pre-scan llena `ctx.middleware_fn_names` antes del walk.
             let is_http_handler = decorators.iter().any(|d| {
                 matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
-            });
+            }) || ctx.middleware_fn_names.contains(fn_name);
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
@@ -2163,9 +2226,35 @@ pub fn check_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
     let (env, mut errors) = resolve_program(program);
     let mut ctx = CheckCtx::new(&env);
     preregister_fn_signatures(&mut ctx, program);
+    collect_middleware_fn_names(&mut ctx, program);
     check_block(&mut ctx, program);
     errors.append(&mut ctx.errors);
     (env, errors)
+}
+
+/// Mini-fase MW.1: pre-scan del programa para recolectar nombres de fns
+/// que aparecen como argumento de un `@middleware(name)` en cualquier
+/// FnDef. Esos nombres se marcan en `ctx.middleware_fn_names` para que
+/// el chequeo de `Stmt::ReturnStatus` los acepte como "contexto HTTP"
+/// (un middleware puede hacer `return 401 { ... }`). Solo capturamos
+/// referencias por `Expr::Ident` (la forma documentada); cualquier otra
+/// forma (call, lambda, etc.) la captura el evaluator en runtime con su
+/// propio error claro.
+fn collect_middleware_fn_names(ctx: &mut CheckCtx, program: &Program) {
+    for stmt in program {
+        if let Stmt::FnDef { decorators, .. } = stmt {
+            for deco in decorators {
+                if deco.name != "middleware" {
+                    continue;
+                }
+                for arg in &deco.args {
+                    if let Expr::Ident(n, _) = arg {
+                        ctx.middleware_fn_names.insert(n.clone());
+                    }
+                }
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2537,6 +2626,55 @@ mod tests {
         assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
+    // ---- Mini-fase MW.1: middleware ----
+
+    #[test]
+    fn request_y_response_son_built_in_referenciables() {
+        // Un middleware referencia `Request` y `Response` sin declararlos
+        // — los registra `register_http_builtin_types`. Sin ese pre-registro,
+        // el checker se quejaría con "tipo desconocido `Request`".
+        let errors = errors_of(
+            "fn auth(req: Request) -> Response? {\n\
+                 return null\n\
+             }",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn return_status_dentro_de_middleware_pasa_checker() {
+        // Una fn aplicada como `@middleware(fn)` puede hacer
+        // `return <int> { ... }` — el pre-scan de MW.1 la marca como
+        // contexto HTTP y el checker no se queja.
+        let errors = errors_of(
+            "fn auth(req: Request) {\n\
+                 return 401 {\"error\": \"no autorizado\"}\n\
+             }\n\
+             @middleware(auth)\n\
+             @get(\"/admin\")\n\
+             fn admin() -> Str => \"ok\"",
+        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
+    }
+
+    #[test]
+    fn return_status_en_fn_no_referenciada_como_middleware_es_error() {
+        // Solo las fns que aparecen en `@middleware(name)` se marcan
+        // como contexto HTTP. Una fn random con `return <int>` sigue
+        // disparando el error existente.
+        let errors = errors_of(
+            "fn helper() {\n\
+                 return 401 {\"x\": 1}\n\
+             }",
+        );
+        assert!(!errors.is_empty(), "esperaba error");
+        assert!(
+            errors[0].message.contains("middleware") || errors[0].message.contains("handler HTTP"),
+            "esperaba mensaje sobre handler/middleware, fue: {}",
+            errors[0].message
+        );
+    }
+
     #[test]
     fn field_assign_a_campo_inexistente_es_error() {
         let errors = errors_of(
@@ -2816,7 +2954,12 @@ mod tests {
     fn programa_vacio_no_da_errores() {
         let (env, errors) = resolve_str("");
         assert!(errors.is_empty());
-        assert_eq!(env.nominal_count(), 0);
+        // Mini-fase MW.1: `Request` y `Response` se pre-registran como
+        // nominales built-in del runtime HTTP, incluso en programas
+        // vacíos. El usuario los puede referenciar sin declararlos.
+        assert_eq!(env.nominal_count(), 2);
+        assert!(env.lookup("Request").is_some());
+        assert!(env.lookup("Response").is_some());
     }
 
     #[test]
