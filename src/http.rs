@@ -1164,9 +1164,10 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 // El intérprete vive en el thread main (el mismo que corrió `eval`).
 // Post-F17.3 los futures del evaluator ya son `Send` (los contenedores
 // son `Arc<Mutex<>>` y el macro perdió `?Send`), pero el bridge sigue
-// activo hasta F17.5. tokio corre en un std::thread spawneado, con su
-// propio runtime current_thread (cambia a `rt-multi-thread` en F17.4).
-// Lo que cruza el canal:
+// activo hasta F17.5. tokio corre en un std::thread spawneado, ahora
+// con runtime `rt-multi-thread` (F17.4a): N workers dispatcheando
+// requests en paralelo, todos embotellándose en el loop main hasta
+// que F17.5 elimine el bridge. Lo que cruza el canal:
 //
 //   - tokio → main: `InterpTask` con índice de ruta + path params
 //     crudos (`HashMap<String,String>`).
@@ -1956,10 +1957,18 @@ pub fn serve(
 
     // Thread tokio: owns el runtime async y el server axum. Solo
     // recibe metadata + tx (todos `Send`).
+    //
+    // F17.4a: runtime `rt-multi-thread` (auto-detección de cores).
+    // Post-F17.3 los futures del evaluator son `Send`, así que axum
+    // puede schedulear los wrappers del dispatch en N workers
+    // simultáneos. Hasta que F17.5 elimine el bridge, los workers
+    // siguen embotellándose en el `run_interpreter_loop` single-thread
+    // del main — esto deja la plomería lista, el paralelismo real
+    // aterriza en F17.5.
     let tokio_handle = thread::Builder::new()
         .name("fitz-http".into())
         .spawn(move || -> std::io::Result<()> {
-            let runtime = tokio::runtime::Builder::new_current_thread()
+            let runtime = tokio::runtime::Builder::new_multi_thread()
                 .enable_all()
                 .build()?;
             runtime.block_on(async move {
