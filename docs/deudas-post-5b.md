@@ -89,17 +89,49 @@
 >     circuit.
 > - Doc-strings sobre handlers (descripciones OpenAPI) — el
 >   parser hoy descarta comentarios; retenerlos es refactor
->   lexer+parser+AST. Sub-paso candidato post-middleware.
-> - Status codes custom en el schema (`return 404 { ... }` no
->   aparece en `responses`, solo `200` y `500` derivados de
->   `Result<T>`). Cazarlos requiere análisis del body del handler.
-> - Aliases en `@header`: hoy el nombre del param Fitz se deriva
->   por convención lowercase + `-` → `_`. Permitir
->   `@header(name="X-Auth", into="token")` con alias explícito
->   es deuda menor.
-> - Bundle Scalar embebido offline. Hoy la UI carga desde CDN
->   jsdelivr.
-> - `info.version` override (hoy fijo en `"0.1.0"`).
+>   lexer+parser+AST. **Postergado a post-F17** (es refactor
+>   invasivo del lexer/parser/AST; conviene hacerlo cuando el
+>   bridge HTTP mpsc/oneshot ya no exista para minimizar
+>   merge pain).
+> - ~~Status codes custom en el schema~~ — **CERRADO en Q.4
+>   (2026-05-14)**. `collect_status_codes(body)` escanea
+>   recursivamente los `Stmt::ReturnStatus`; cada code custom
+>   aparece como entry en `responses` del schema con
+>   description vía `http_status_phrase`. Schema del body
+>   queda `{}` (any) por polimorfismo del spec. Status codes
+>   colisionando con derivados del return type (200/500 de
+>   Result) ceden al schema fuerte.
+> - ~~Aliases en `@header`~~ — **CERRADO en Q.1 (2026-05-14)**.
+>   `@header(name="X-Auth", into="token")` mapea explícito a
+>   un param Fitz con nombre arbitrario. Sin `into` se mantiene
+>   la convención previa (`lowercase + '-' → '_'`).
+> - **Bundle Scalar embebido offline** — **POSTERGADO post-F17**
+>   tras evaluar trade-off (Q.5, 2026-05-14). Bundle de Scalar
+>   pesa ~3.7 MB minificado y no hay variante liviana. Embeberlo
+>   por default rompe la promesa "binario nativo mínimo" (~10-15%
+>   de overhead típico). Opt-in via `@server(offline_docs=true)`
+>   queda comprometido si aparece presión real (deploys air-gapped,
+>   requisitos de auditoría). Hoy CDN jsdelivr cubre el 99% de
+>   casos — el browser cachea tras el primer load.
+> - ~~`info.version` override~~ — **CERRADO en Q.2 (2026-05-14)**.
+>   `@server(api_version="X.Y.Z")` se refleja en `info.version`
+>   del schema; default sigue `"0.1.0"`. Cableado por los 3
+>   caminos (`fitz run`, `fitz openapi`, `fitz build`).
+> - ~~CORS request-aware~~ — **CERRADO en Q.3 (2026-05-14)**.
+>   `cors({"allow_origin": ["a.com", "b.com"]})` con `List<Str>`
+>   activa modo Set: el server hace echo del `Origin` del
+>   request si está en la lista permitida; si no, OMITE el
+>   header `Access-Control-Allow-Origin` (browser rechaza,
+>   comportamiento CORS estricto). Útil con credenciales
+>   (`Allow-Origin: *` incompatible con `Allow-Credentials`).
+>
+> **Mini-tanda Q (2026-05-14)**: cerró 4 deudas chicas (Q.1
+> aliases @header, Q.2 api_version, Q.3 CORS Set, Q.4 status
+> codes en schema). Q.5 (bundle offline) postergado por
+> trade-off de tamaño. Q.6 (docs refresh) cerrado en este mismo
+> bloque. Total al cierre de la tanda: **1153 unit + 74 E2E**.
+> Próximo norte: F17 (Send + paralelismo + bridge HTTP off),
+> después Fase 8 (Python interop).
 
 ## Resumen ejecutivo
 

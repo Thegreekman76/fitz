@@ -1,14 +1,51 @@
 # Especificación de Sintaxis — Fitz
 
-> Estado: BORRADOR v0.1 — sujeto a cambios durante la implementación.
+> Estado: BORRADOR v0.2 (actualización 2026-05-14, post mini-fase
+> MW + tanda Q). La mayoría del diseño original ya está implementado;
+> lo pendiente queda señalado abajo.
 >
-> **Importante**: este documento describe el **diseño completo** del
-> lenguaje, incluidas features que todavía no están implementadas
-> (HTTP, async, listas, tipos custom instanciables, Result, etc.).
-> Tomalo como dirección, no como contrato.
+> Este documento describe el **diseño completo** del lenguaje. Para
+> ver solo lo que el intérprete ejecuta hoy, con ejemplos que corren,
+> leé [docs/guide.md](guide.md).
 >
-> Para ver solo lo que el intérprete ejecuta hoy, con ejemplos que
-> corren, leé [docs/guide.md](guide.md).
+> ## Matriz rápida de estado
+>
+> **Implementado y estable**:
+> - Variables, primitivos, strings con interpolación, operadores (cap
+>   3-6 de la guía).
+> - Control de flujo: `if`/`while`/`for`/`loop`/`match` (caps 7-10).
+> - Funciones, closures, higher-order (cap 11).
+> - Tipos custom (`type`), structs, field access, defaults, nullables
+>   (cap 12-13).
+> - Listas, mapas, rangos, métodos built-in (`push`, `map`, `filter`,
+>   `find`, `get`, etc.) — cap 9, 13.
+> - `Result<T>` + `Ok`/`Err` + `?` + `match` exhaustivo (cap 14).
+> - Módulos: `import foo`, `from foo import bar as baz` — cap 16.
+> - Type checker estático: `fitz check` valida tipos en todo el
+>   programa (Fase 5a). `fitz run` corre en modo strict por default.
+> - HTTP nativo (cap 17): `@get`/`@post`/`@put`/`@delete`, path
+>   params tipados, body JSON, query params, status codes custom
+>   (`return <int> { ... }`), `@server(port, host, docs=Bool,
+>   api_version="X")`, `@header(name="X", into="alias")`,
+>   `@middleware(fn | cors(...))`.
+> - OpenAPI 3.1 autogenerado + UI Scalar en `/docs` (cap 18).
+>   Subcomando `fitz openapi archivo.fitz`. Status codes custom
+>   reflejados en `responses` del schema.
+> - Async nativo (cap 19): `async fn`, `.await`, `Future<T>` como
+>   tipo built-in, builtin `sleep(ms)`.
+> - Codegen a binario nativo via `fitz build` (cap 20).
+> - Middleware + CORS con preflight automático y echo del Origin
+>   recibido (`cors({"allow_origin": ["a.com", "b.com"]})`).
+>
+> **Diseñado pero no implementado**:
+> - Interop con Python (`from python import sqlalchemy`) — Fase 8.
+> - Package manager, LSP, formatter — Fase 9.
+> - Paralelismo HTTP real (handlers concurrentes) — F17.
+> - Bundle Scalar offline embebido (hoy CDN) — deuda menor.
+> - Doc-strings sobre handlers retenidos por el parser — post-F17.
+>
+> Cuando esta especificación y la guía discrepan, **gana la guía**
+> (que solo documenta lo implementado).
 
 ---
 

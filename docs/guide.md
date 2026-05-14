@@ -2,8 +2,8 @@
 
 > Estado: viva — cubre lo que el intérprete ejecuta hoy y lo que el
 > compilador (`fitz build`) produce como binario nativo.
-> Última actualización: 2026-05-12 (Fase 5b cerrada — codegen a
-> binario nativo + HTTP, 949 tests pasando).
+> Última actualización: 2026-05-14 (Mini-fase MW cerrada — Middleware
+> + CORS + tanda Q de quick wins, 1153 unit + 74 E2E pasando).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -4592,15 +4592,23 @@ open http://127.0.0.1:3000/docs        # macOS — abrí la UI en el browser
 - **Descripciones vacías**: `info.description` y
   `paths.*.*.description` no se llenan todavía. El lexer hoy
   descarta comentarios; doc-strings sobre handlers son deuda
-  post-F7.
-- **Status codes custom no aparecen en el schema**: si un handler
-  hace `return 404 { ... }` (cap 17), el schema sigue declarando
-  solo `200` y `500`. Cazarlos requiere análisis de los `return`
-  del handler — deuda menor.
-- **`info.version` fijo en `"0.1.0"`**: override via
-  `@server(api_version=...)` o similar no implementado.
+  post-F17 (refactor invasivo del lexer/parser/AST).
 - **`@header` solo acepta `Str`/`Str?`**: si querés un header
   numérico, parsealo adentro del handler.
+- **Bundle Scalar offline**: la UI `/docs` carga el bundle JS
+  desde `cdn.jsdelivr.net`. El browser cachea tras el primer
+  load, pero hace falta red la primera vez. Embeber offline
+  cuesta ~3.7 MB extra al binario; quedó como deuda menor.
+
+**Cerradas en la tanda Q (2026-05-14)**:
+
+- **`info.version` override**: `@server(api_version="X.Y.Z")` lo
+  refleja en el schema.
+- **Aliases en `@header`**: `@header(name="X-Auth", into="token")`
+  mapea explícito a un param Fitz.
+- **Status codes custom en el schema**: un handler con
+  `return 404 { ... }` produce ahora un entry `"404"` en
+  `responses`, con description vía reason phrase HTTP.
 
 ---
 
