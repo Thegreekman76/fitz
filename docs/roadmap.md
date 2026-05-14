@@ -2506,6 +2506,148 @@ paso fácil después del refactor.
 
 ---
 
+## Mini-tanda PreF8 — Cleanup antes de Interop Python
+**Estado: COMPROMETIDA (2026-05-14), no arrancada todavía**
+
+Sale del cierre de F17. Survey honesto de la matriz de deudas
+identificó 4 items que F8 va a estresar fuerte; mejor cerrar antes
+para no entremezclar deuda existente con la parte real de Python
+interop. Estimado total: 4-6 sesiones.
+
+### PreF8.1 — Refactor M1 + M2 codegen
+**Pendiente** — extraer sub-fns de las dos funciones más grandes de
+`codegen.rs`.
+
+- **M1 — `generate_main_rs`** (~140 LoC, líneas 779-920 aprox).
+  Mezcla particionado de stmts (HTTP fns vs CLI fns vs main_stmts),
+  validaciones (cf. R1 cerrado: `fn main` solo con `@server`), y
+  emisión (preamble + types + state HTTP + fns + main). Extraer a
+  helpers: `partition_program(program) -> (http_fns, main_stmts)`,
+  `validate_program_structure(program) -> Result<()>`,
+  `emit_modules_recursive(...)`.
+- **M2 — `gen_http_handler_wrapper`** (~160 LoC, líneas 3529-3688
+  aprox). Resuelve params (path/query/body/headers/middlewares),
+  los categoriza, emite el wrapper async con los extractors axum y
+  el dispatch al handler Fitz. Extraer: `resolve_handler_params`,
+  `categorize_handler_params`, `emit_axum_extractors`,
+  `emit_dispatch_call`.
+
+**Criterio de éxito**: AST del Rust generado bit-a-bit idéntico
+pre/post refactor sobre los ejemplos compilables (smoke
+`GUIDE_EXAMPLES_COMPILE` + suite T1). Cero cambio funcional.
+
+**Decisión técnica a presentar al arrancar**: granularidad de la
+extracción. Opciones: (a) muchas fns chicas con nombres
+descriptivos (más jumps, más navegable); (b) pocas fns medianas
+agrupando pasos relacionados (menos navegable, menos cognitive
+overhead); (c) helper struct con métodos si hay estado compartido
+no-trivial entre los pasos. Recomendado (b) con extracción
+selectiva de sub-helpers donde la lógica se repita.
+
+### PreF8.2 — F10 method chain multi-línea en parser
+**Pendiente** — el parser hoy corta el statement al ver newline
+después de un `Ident`/llamada cuando el siguiente token es `.` en
+la línea siguiente. Eso rompe el patrón idiomático de chains
+largas que Python/JS/Rust permiten:
+
+```fitz
+let activos = users
+    .filter(fn(u) => u.active)
+    .map(fn(u) => u.name)
+    .find(fn(n) => n != "")
+```
+
+Hoy esto sería 3 statements rotos. F8 (interop Python con
+SQLAlchemy `session.query(M).filter(...).order_by(...).first()`)
+lo va a usar muchísimo; necesario antes del salto.
+
+**Implementación tentativa**: lookahead en el parser después de
+un newline cuando el último token significativo fue una expresión
+"chainable" (ident, llamada, field access, indexing) — si el
+siguiente token no-whitespace es `.`, suprimir el statement
+terminator implícito y continuar la expresión.
+
+**Decisión técnica**: ¿el parser solo se vuelve tolerante a
+newlines en method chains, o también en operadores binarios
+(`a +\n  b`)? Recomendado: solo method chains por ahora; binops
+multi-línea es deuda separada con menos pago.
+
+**Criterio de éxito**: ejemplo nuevo en cap 13 de la guía con
+chain de 3+ líneas que parsea y ejecuta igual que la versión
+de una línea. Tests parser dedicados.
+
+### PreF8.3 — F4 field default audit
+**Pendiente** — auditar que `Field.default` se popule en todos
+los contextos donde un `type` aparece, y que el evaluator +
+codegen los apliquen consistente.
+
+**Casos a verificar**:
+- Root del archivo: `type User { id: Int = 0 }` — sabemos que
+  funciona (cap 12 de la guía lo cubre).
+- Importado: `from foo import User` donde el `User` definido en
+  `foo.fitz` tiene defaults — ¿se preservan?
+- Field nullable + default: `type C { x: Int? = null }` — ¿el
+  default `null` es válido?
+- Struct lit anidado: `Outer { inner: Inner { ... } }` donde
+  `Inner` tiene defaults — ¿se aplican correctamente?
+- Reasignación: `u.x = ...` después de struct lit con defaults
+  — ¿el field tiene el tipo correcto?
+- Default que es expresión, no literal — ¿el parser lo acepta?
+  ¿El evaluator lo evalúa en el contexto correcto?
+
+**Implementación**: tests focales por cada combinación, fix de lo
+que esté roto. Probablemente refactor menor del parser y/o
+struct_lit en el evaluator.
+
+**Criterio de éxito**: tests cubriendo todas las combinaciones
+verdes + ejemplo en cap 12 que demuestre default importado.
+
+### PreF8.4 — Import aliasing
+**Pendiente** — sintaxis ya en `syntax-spec.md`, falta
+implementación. Sub-paso adelantado de F8.1 (que lo promete
+adentro). Adelantarlo deja F8.1 con solo Python interop puro y
+cierra una deuda independiente.
+
+**Sintaxis**:
+```fitz
+import foo as f                  // namespace alias
+from foo import bar as b         // single binding alias
+from foo import bar as b, baz as z  // múltiples aliases
+```
+
+**Capas a tocar**:
+- **Parser**: lookahead `as` después de `import name` o de cada
+  binding en `from foo import ...`. AST: `Stmt::Import { path,
+  alias: Option<String> }`, `Stmt::FromImport { path, names:
+  Vec<(String, Option<String>)> }` (name, optional alias).
+- **Evaluator**: bindea el alias en lugar del nombre original.
+  Sin alias, sigue funcionando idéntico (alias = None).
+- **Codegen**: emite `use foo::bar as b;` cuando hay alias;
+  módulos via `mod foo;` + `use foo as f;` para namespace.
+- **Tests**: parser dedicados + ejemplo en cap 16 de la guía
+  con alias real (caso típico: alias para librería con nombre
+  largo).
+
+**Criterio de éxito**: `import foo as f` y `from foo import bar
+as b` funcionan en `fitz run` y `fitz build` bit-a-bit.
+
+### PreF8.5 — Cierre formal
+**Pendiente** — housekeeping al final de la mini-tanda.
+
+- Marcar M1, M2, F4, F10, "import aliasing" como CERRADOS en
+  `docs/deudas-post-5b.md`.
+- Sumar entrada `v0.8.1 — Mini-tanda PreF8` al `CHANGELOG.md`.
+- Actualizar `CLAUDE.md` con el cierre (entrada paralela al
+  cierre de F17).
+- Smoke completo + clippy + E2E + verificar working tree limpio.
+- Si alguno de F4/F10 afectó ejemplos de la guía, validar
+  bit-a-bit.
+
+**Total de la mini-tanda**: 4-6 sesiones, 5 commits. Después
+de cerrar, arranca **Fase 8.1**.
+
+---
+
 ## Fase 8 — Interop Python 🐍
 **Estado: PROPUESTA — no comprometida**
 
