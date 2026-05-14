@@ -15,6 +15,14 @@ mod types;      // Fase 5.2 — sistema de tipos resuelto + checker base
 mod codegen;    // Fase 5b.1 — transpile AST → Rust → binario
 mod openapi;    // Fase 7.1 — generador OpenAPI 3.1
 
+// Fase 8.1.2 — interop Python via PyO3 (feature opt-in `python`).
+// El módulo envuelve `Python::with_gil` + `py.import(...)` y produce
+// `Value::PyObject` para que el evaluator rutee `from python import X`
+// al runtime CPython embebido. Sin la feature el módulo no existe;
+// `evaluator::load_module` emite error claro citando el flag de build.
+#[cfg(feature = "python")]
+mod py_interop;
+
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;

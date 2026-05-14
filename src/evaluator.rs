@@ -1446,7 +1446,19 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // bajo el ÚLTIMO segmento del path (`sub.foo` → binding `foo`).
         // Para field access (`foo.bar`) ver `eval_expr` sobre `Expr::Field`;
         // para method calls (`foo.bar()`) ver `dispatch_method`.
+        //
+        // Fase 8.1.2: si el path arranca con `python`, ruteamos al loader
+        // Python. Hoy `import python.X` no se soporta — la forma canónica
+        // es `from python import X`. Cerramos esta rama con error claro.
         Stmt::Import { path, alias, span: _ } => {
+            if path.first().map(|s| s.as_str()) == Some("python") {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "`import python...` no se soporta en Fase 8.1; \
+                     usá `from python import <módulo>` para traer librerías Python al scope".to_string(),
+                )));
+            }
             let module = load_module(path).await?;
             // PreF8.4: si hay alias (`import foo as f`), bindeamos
             // bajo el alias. Sin alias, bajo el último segmento del path.
@@ -1467,7 +1479,15 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // PreF8.4: cada entry es `(name, alias?)`. El lookup en el
         // módulo se hace por `name`; el binding en el scope local
         // usa `alias` si está, si no `name`.
+        //
+        // Fase 8.1.2: si el path es `python`, ruteamos al loader CPython
+        // embebido. Cada `name` se importa como módulo top-level Python
+        // independiente. Sin la feature `python`, el helper emite error
+        // claro citando el flag de build.
         Stmt::FromImport { path, names, span: _ } => {
+            if path.first().map(|s| s.as_str()) == Some("python") {
+                return eval_python_from_import(path, names, env).await;
+            }
             let module = load_module(path).await?;
             let module_env = match &module {
                 Value::Module { env, .. } => env.clone(),
@@ -1494,6 +1514,65 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::Null)
         }
     }
+}
+
+/// Fase 8.1.2 — handler para `from python import X[, Y as z]`. Vive
+/// fuera de `eval_stmt` para que el `#[cfg]` switching de la feature
+/// `python` quede acotado a una sola fn.
+///
+/// Reglas en 8.1.2:
+/// - El path tiene que ser exactamente `["python"]`. `from python.X
+///   import Y` se rechaza con mensaje claro (deuda menor: importar
+///   submódulos directamente; workaround actual: `from python import
+///   X` y acceder a `Y` via field access, lo cual llega en 8.1.3).
+/// - Cada `name` se importa como módulo Python top-level via
+///   `py_interop::import_module(name)`.
+/// - El binding local respeta el alias `as` si está, sino usa el nombre
+///   original (mismo criterio que `Stmt::FromImport` Fitz).
+#[cfg(feature = "python")]
+async fn eval_python_from_import(
+    path: &[String],
+    names: &[(String, Option<String>)],
+    env: EnvRef,
+) -> EvalResult<Value> {
+    if path.len() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            format!(
+                "`from python.{} import ...` no se soporta en Fase 8.1; \
+                 usá `from python import {}` y accedé a sub-atributos con `.` (8.1.3)",
+                path[1..].join("."),
+                path[1],
+            ),
+        )));
+    }
+    for (name, alias) in names {
+        let module = crate::py_interop::import_module(name)
+            .map_err(EvalSignal::Error)?;
+        let binding = alias.clone().unwrap_or_else(|| name.clone());
+        env.lock().define(binding, module);
+    }
+    Ok(Value::Null)
+}
+
+/// Stub sin-feature: `from python import ...` aborta con mensaje que
+/// cita exactamente cómo recompilar para habilitar la interop. La
+/// promesa "binario `fitz` default standalone" exige que este path
+/// devuelva error claro en lugar de panic o fallback silencioso.
+#[cfg(not(feature = "python"))]
+async fn eval_python_from_import(
+    _path: &[String],
+    _names: &[(String, Option<String>)],
+    _env: EnvRef,
+) -> EvalResult<Value> {
+    Err(EvalSignal::Error(FitzError::new(
+        ErrorKind::UndefinedVariable("python".to_string()),
+        0, 0,
+        "`from python import ...` requiere recompilar `fitz` con interop Python habilitada. \
+         Este binario se compiló sin la feature `python`. \
+         Recompilá con `cargo install --features python` (o `cargo build --features python`).".to_string(),
+    )))
 }
 
 /// Resultado de correr el cuerpo de un loop una vez. Convierte signals de
@@ -6635,6 +6714,103 @@ let r = match n {
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("g"), Some(Value::Str("saludos, Fitz".into())));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Fase 8.1.2: ruteo de `from python import X` al loader CPython
+    // -----------------------------------------------------------------------
+    //
+    // Estos tests verifican el comportamiento del evaluator. La lógica
+    // de import per se (resolver módulos Python, traducir excepciones)
+    // vive en `py_interop.rs` y tiene sus propios unit tests adentro.
+    // Acá solo chequeamos: bindings, alias, errores de path inválido,
+    // y el fallback sin feature.
+
+    // Con feature `python`: el binario lincado a libpython carga
+    // módulos reales (math, json, etc.) y produce `Value::PyObject`.
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_python_import_math_bindea_pyobject() {
+        let (env, res) = parse_eval_into_env("from python import math\n").await;
+        res.unwrap();
+        let v = env.lock().get("math").expect("math debería estar bindeado");
+        assert!(matches!(v, Value::PyObject(_)), "se esperaba PyObject, fue: {:?}", v);
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_python_import_con_alias_bindea_bajo_alias() {
+        let (env, res) = parse_eval_into_env("from python import math as m\n").await;
+        res.unwrap();
+        assert!(matches!(env.lock().get("m"), Some(Value::PyObject(_))));
+        assert!(env.lock().get("math").is_none(), "el nombre original no debe quedar bindeado");
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_python_import_multiples_modulos() {
+        let (env, res) = parse_eval_into_env("from python import math, json\n").await;
+        res.unwrap();
+        assert!(matches!(env.lock().get("math"), Some(Value::PyObject(_))));
+        assert!(matches!(env.lock().get("json"), Some(Value::PyObject(_))));
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_python_import_modulo_inexistente_emite_modulenotfounderror() {
+        let (_env, res) =
+            parse_eval_into_env("from python import este_modulo_no_existe_xyz_812\n").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("ModuleNotFoundError"),
+            "mensaje debería citar ModuleNotFoundError, fue: {}",
+            err.message,
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_python_path_con_submodulos_no_se_soporta_en_8_1() {
+        // `from python.sqlalchemy.orm import Session` queda como deuda
+        // menor — para 8.1 hay que importar `sqlalchemy` y bajar con
+        // field access (8.1.3+). Mensaje debe ser claro citando 8.1.
+        let (_env, res) =
+            parse_eval_into_env("from python.sqlalchemy.orm import Session\n").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("python.sqlalchemy.orm")
+                && err.message.contains("8.1"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn import_python_punteado_no_se_soporta() {
+        // `import python.math` también queda fuera del scope de 8.1.
+        // Forma canónica: `from python import math`.
+        let (_env, res) = parse_eval_into_env("import python.math\n").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("from python import"),
+            "el error debería sugerir la forma canónica, fue: {}",
+            err.message,
+        );
+    }
+
+    // Sin feature `python`: el binario default produce error claro
+    // citando el flag de build para recompilar.
+    #[cfg(not(feature = "python"))]
+    #[tokio::test(flavor = "current_thread")]
+    async fn from_python_sin_feature_da_error_de_build() {
+        let (_env, res) = parse_eval_into_env("from python import math\n").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("--features python"),
+            "mensaje debería citar el flag de build, fue: {}",
+            err.message,
+        );
     }
 
     // -----------------------------------------------------------------------
