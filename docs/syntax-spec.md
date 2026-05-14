@@ -1,8 +1,8 @@
 # Especificación de Sintaxis — Fitz
 
-> Estado: BORRADOR v0.2 (actualización 2026-05-14, post mini-fase
-> MW + tanda Q). La mayoría del diseño original ya está implementado;
-> lo pendiente queda señalado abajo.
+> Estado: BORRADOR v0.3 (actualización 2026-05-14, post Fase F17).
+> La mayoría del diseño original ya está implementado; lo pendiente
+> queda señalado abajo.
 >
 > Este documento describe el **diseño completo** del lenguaje. Para
 > ver solo lo que el intérprete ejecuta hoy, con ejemplos que corren,
@@ -33,16 +33,28 @@
 >   reflejados en `responses` del schema.
 > - Async nativo (cap 19): `async fn`, `.await`, `Future<T>` como
 >   tipo built-in, builtin `sleep(ms)`.
+> - **Paralelismo HTTP real (post-F17)**: el server (tanto `fitz run`
+>   como el binario producido por `fitz build`) corre tokio
+>   `rt-multi-thread` con N workers según cores. Containers de Value
+>   y EnvRef migrados a `Arc<Mutex<>>` (Send + Sync). Bridge HTTP
+>   `mpsc/oneshot` eliminado. 5 requests concurrentes a un handler
+>   `sleep(1000).await` responden en ~1.2s (no ~5s como pre-F17).
 > - Codegen a binario nativo via `fitz build` (cap 20).
 > - Middleware + CORS con preflight automático y echo del Origin
 >   recibido (`cors({"allow_origin": ["a.com", "b.com"]})`).
 >
 > **Diseñado pero no implementado**:
 > - Interop con Python (`from python import sqlalchemy`) — Fase 8.
-> - Package manager, LSP, formatter — Fase 9.
-> - Paralelismo HTTP real (handlers concurrentes) — F17.
-> - Bundle Scalar offline embebido (hoy CDN) — deuda menor.
-> - Doc-strings sobre handlers retenidos por el parser — post-F17.
+> - Package manager, LSP (autocomplete + hover + go-to-def en VSCode/
+>   Neovim/etc.), formatter — Fase 9. Pre-reqs habilitantes: F15
+>   (parser error recovery) + F16 (IR tipado persistido por nodo).
+> - Bundle Scalar offline embebido (hoy CDN) — deuda menor (Q.5,
+>   postergada por trade-off de tamaño).
+> - Doc-strings sobre handlers retenidos por el parser — refactor
+>   invasive lexer/parser/AST; pendiente post-F17.
+> - Aliasing en imports `from python import sqlalchemy as sa` y
+>   `import foo as f` — comprometido como sub-paso adelantado de
+>   Fase 8.1.
 >
 > Cuando esta especificación y la guía discrepan, **gana la guía**
 > (que solo documenta lo implementado).

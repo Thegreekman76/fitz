@@ -3769,19 +3769,20 @@ impl<'a> CodegenCtx<'a> {
         self.response_mode = false;
         self.push_scope();
         self.declare_var(param_name.clone(), param_ty.clone());
-        let saved = std::mem::take(&mut self.output);
         let saved_indent = self.indent;
         self.indent = 0;
-        let mut body_str = String::new();
-        for s in body {
-            self.gen_stmt_in_fn(s, &ret_ty)?;
-            body_str.push_str(&std::mem::take(&mut self.output));
-        }
-        self.output = saved;
+        let ret_ty_for_body = ret_ty.clone();
+        let (body_str, result) = self.with_temp_output(|ctx| {
+            for s in body {
+                ctx.gen_stmt_in_fn(s, &ret_ty_for_body)?;
+            }
+            Ok::<(), FitzError>(())
+        });
         self.indent = saved_indent;
         self.pop_scope();
         self.response_mode = saved_response_mode;
         self.ret_stack.pop();
+        result?;
 
         let code = format!(
             "|{}: {}| -> {} {{ {} }}",
@@ -3871,19 +3872,20 @@ impl<'a> CodegenCtx<'a> {
         for (name, ty) in &captures {
             self.declare_var(name.clone(), ty.clone());
         }
-        let saved = std::mem::take(&mut self.output);
         let saved_indent = self.indent;
         self.indent = 0;
-        let mut body_str = String::new();
-        for s in body {
-            self.gen_stmt_in_fn(s, &ret_ty)?;
-            body_str.push_str(&std::mem::take(&mut self.output));
-        }
-        self.output = saved;
+        let ret_ty_for_body = ret_ty.clone();
+        let (body_str, result) = self.with_temp_output(|ctx| {
+            for s in body {
+                ctx.gen_stmt_in_fn(s, &ret_ty_for_body)?;
+            }
+            Ok::<(), FitzError>(())
+        });
         self.indent = saved_indent;
         self.pop_scope();
         self.response_mode = saved_response_mode;
         self.ret_stack.pop();
+        result?;
 
         // Firma del closure: `|p1: T1, p2: T2| -> R { ... }`.
         let params_sig = params

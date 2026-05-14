@@ -241,7 +241,7 @@ estado real).
 
 | ID | Ubicación | Descripción | Prio | Comp |
 |----|-----------|-------------|------|------|
-| L2 | `codegen.rs` ~13 sitios | Patrón `mem::take(&mut self.output)` + restore repetido (el conteo creció post-5b con los sub-pasos de codegen). Helper `with_temp_output(f)` lo abstrae. | Baja | Baja |
+| L2 | ~~`codegen.rs`~~ **CERRADO (2026-05-14)** — el helper `with_temp_output(|ctx| ...)` ya existía (lo usaba `gen_block_to_string`) y los 2 sitios manuales restantes (`gen_callback_inline` y `gen_fn_expr_as_value`) se migraron a él. El conteo "~13 sitios" del análisis original quedó obsoleto — la mayoría de los usos se habían consolidado a lo largo de los sub-pasos post-5b. Reducción menor de líneas; el valor real es que ahora hay una sola convención para "emitir a buffer temp". | — | — |
 | M1 | `codegen.rs:779-920` | `generate_main_rs` (~140 líneas) mezcla particionado + validaciones + emisión. Partir en `partition_stmts`, `validate_http`, etc. | Media | Media |
 | M2 | `codegen.rs:3529-3688` | `gen_http_handler_wrapper` (~160 líneas) hace todo: resuelve params, categoriza, emite. Extraer sub-fns. | Media | Media |
 | M3 | `types.rs:664-1110` | `infer_expr` 446 líneas con mega-match de 30+ branches. Extraer branches grandes. | Baja | Media |
@@ -288,8 +288,8 @@ estado real).
 |----|-----------|-------------|------|------|
 | D1 | `guide.md:4-5` | **PARCIALMENTE CERRADO** — el header ya cita "Fase 5b cerrada / 949 tests" (vs el original "Fase 5a / 784"). Sigue stale al estado actual (1043 tests, mini-fases post-5b cerradas). Mejor refresh recurrente cada vez que se mueve el contador, no deuda permanente. | Baja | Baja |
 | D2 | `guide.md:881-883` | Cita métodos de Str y reenvía a cap 13, pero cap 13 no los desarrolla. Verificar. | Baja | Baja |
-| D3 | `syntax-spec.md:1-8` | Header dice "BORRADOR v0.1" sin actualizar a Fase 5 cerrada. Falta marcar features ya implementadas. | Media | Media |
-| D4 | Repo root | Sin `CHANGELOG.md`. Con 5 fases cerradas, vale un registro histórico. | Baja | Media |
+| D3 | ~~`syntax-spec.md:1-8`~~ **CERRADO (2026-05-14)** — header pasó a "BORRADOR v0.3 (post-F17)" con matriz rápida de estado actualizada: implementado/diseñado-no-implementado con referencias a capítulos de la guía y fases del roadmap. Refresh recurrente cada vez que se cierra una mini-fase o fase. | — | — |
+| D4 | ~~Repo root~~ **CERRADO (2026-05-14)** — `CHANGELOG.md` creado con 9 entradas retroactivas: v0.1.0 (Fase 2) → v0.8.0 (Fase F17). Formato [Keep a Changelog](https://keepachangelog.com). Detalle técnico vive en `docs/roadmap.md`; el CHANGELOG es la vista condensada "qué cambió y cuándo". | — | — |
 | D5 | ~~`guide.md:225-226`~~ | **CERRADO** — status codes custom implementados end-to-end en su mini-fase dedicada (ver bullet en "Próximos pasos"); cap 17 de la guía documenta la sintaxis con ejemplos. README puede quedar stale (cita "deuda residual post-5") — refresh menor cuando se mueva. | — | — |
 | D6 | `guide.md:2725-2738` vs `:4305-4310` | Deudas residuales duplicadas en cap 13 y cap 18 (asignación a índice, state HTTP). Centralizar. | Baja | Baja |
 | D7 | `README.md:38` | **CERRADO** (suficiente) — la nota actual ("la sintaxis `async fn` se parsea, pero el runtime sigue siendo síncrono") es clara. Re-evaluar cuando aterrice Fase 6 (Async nativo). | — | — |
