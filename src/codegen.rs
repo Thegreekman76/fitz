@@ -1170,18 +1170,36 @@ fn generate_main_rs(
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
 
-    // Particionar stmts top-level. Categorías:
-    //   * `type Foo { ... }`              → structs + alias + impl Display.
-    //   * `fn ...` con decorators HTTP    → handler: emitirla como pub fn
-    //                                       + generar wrapper async.
-    //   * `fn main` con decorators        → solo procesar decorators
-    //                                       (típicamente `@server`); NO
-    //                                       emitir como Rust fn (colisión
-    //                                       con `fn main` del crate).
-    //   * `fn ...` normal                 → pub fn top-level.
-    //   * `Stmt::Import` / `FromImport`   → mod/use decls del loader.
-    //   * el resto                        → cuerpo de `fn main()` (modo
-    //                                       CLI) o se ignora (modo HTTP).
+    let partitioned = partition_program_stmts(program)?;
+    resolve_state_var_types(&mut ctx, program, &partitioned.main_stmts, env, has_http)?;
+    emit_main_rs_body(&mut ctx, program, loader, &partitioned, has_http)?;
+
+    Ok(ctx.output)
+}
+
+/// Resultado de `partition_program_stmts`: cada stmt top-level cae en
+/// una categoría, y los decoradores `@server(...)` quedan parseados a
+/// la espera de la emisión del `fn main` HTTP.
+struct PartitionedProgram<'a> {
+    type_defs: Vec<&'a Stmt>,
+    http_fns: Vec<&'a Stmt>,
+    top_fns: Vec<&'a Stmt>,
+    main_stmts: Vec<&'a Stmt>,
+    server_config: Option<ServerConfigArgs>,
+}
+
+/// Particiona los stmts top-level del programa por categoría:
+/// `type Foo {...}` (structs+alias+Display), `fn ...` con decorator
+/// HTTP (handler + wrapper async), `fn ...` normal (pub fn top-level),
+/// `Stmt::Import`/`FromImport` (mod/use decls del loader), y el resto
+/// (cuerpo de `fn main()` CLI, o se ignora en modo HTTP). `fn main`
+/// con decorators es especial: solo procesa decorators (típicamente
+/// `@server`); NO se emite como Rust fn (colisiona con `fn main` del
+/// crate generado).
+///
+/// Además valida que los decoradores sobre fns sean los soportados por
+/// el codegen y extrae el `@server(...)` config (a lo sumo uno).
+fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, FitzError> {
     let mut type_defs: Vec<&Stmt> = Vec::new();
     let mut http_fns: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
@@ -1284,22 +1302,27 @@ fn generate_main_rs(
             _ => main_stmts.push(s),
         }
     }
+    Ok(PartitionedProgram {
+        type_defs,
+        http_fns,
+        top_fns,
+        main_stmts,
+        server_config,
+    })
+}
 
-    // F11 (post-5b): state HTTP compartido vía `thread_local!`.
-    // Detectamos las vars top-level `let X = ...` referenciadas por las
-    // fns del programa. Cada una se materializa como un `thread_local!`
-    // estático y las fns que las usan emiten al inicio del body
-    // `let X = __FITZ_STATE_X.with(|s| s.clone());` — un Rc clone que
-    // preserva aliasing. El tokio runtime se configura como
-    // `flavor = "current_thread"` para que el thread_local actúe como
-    // global (caso contrario, cada worker thread tendría su propia
-    // copia y los handlers no compartirían state).
-    //
-    // Trade-off: el server HTTP queda single-threaded. Para el subset
-    // de Fitz HTTP de hoy (handlers sync, sin async externo, sin
-    // workloads CPU-bound) es irrelevante. Cuando Fitz sume async/await
-    // reales, este approach se reemplaza por `Arc<Mutex<...>>` con
-    // `State` extractor (deuda residual documentada).
+/// F11 + F17.4b: state HTTP compartido vía `static LazyLock<Arc<Mutex<T>>>`.
+/// Detecta las vars top-level referenciadas por handlers HTTP y resuelve
+/// el tipo de cada una (anotación si la tiene; si no, inferencia via
+/// `gen_expr` sobre buffer temporal). Llenamos `ctx.fn_state_deps` y
+/// `ctx.state_var_types` para que la emisión posterior los consulte.
+fn resolve_state_var_types(
+    ctx: &mut CodegenCtx,
+    program: &Program,
+    main_stmts: &[&Stmt],
+    env: &TypeEnv,
+    has_http: bool,
+) -> Result<(), FitzError> {
     let (shared_state_order, fn_deps) = if has_http {
         detect_shared_state(program)
     } else {
@@ -1310,7 +1333,7 @@ fn generate_main_rs(
     // los `Stmt::Assign` correspondientes (necesitamos el `Type` para
     // emitir el alias del thread_local con tipo concreto). Lo hacemos
     // acá porque el ctx ya tiene los tipos custom pre-registrados.
-    for s in &main_stmts {
+    for s in main_stmts {
         if let Stmt::Assign {
             target: AssignTarget::Ident(name),
             type_,
@@ -1348,7 +1371,19 @@ fn generate_main_rs(
             }
         }
     }
+    Ok(())
+}
 
+/// Emite el cuerpo del `main.rs`: preludio, mod/use decls del loader,
+/// runtime HTTP (si aplica), type defs (+ http impls), fns top-level y
+/// handlers HTTP, y finalmente el `fn main()` (CLI o HTTP).
+fn emit_main_rs_body(
+    ctx: &mut CodegenCtx,
+    program: &Program,
+    loader: &ModuleLoader,
+    p: &PartitionedProgram<'_>,
+    has_http: bool,
+) -> Result<(), FitzError> {
     ctx.emit_prelude();
     loader.emit_mod_decls(&mut ctx.output);
     loader.emit_use_decls(&mut ctx.output);
@@ -1360,34 +1395,33 @@ fn generate_main_rs(
         ctx.emit_http_runtime_prelude();
     }
 
-    for stmt in &type_defs {
+    for stmt in &p.type_defs {
         ctx.gen_type_def(stmt)?;
         if has_http {
             ctx.gen_type_http_impls(stmt)?;
         }
     }
-    for stmt in &http_fns {
+    for stmt in &p.http_fns {
         ctx.gen_top_fn(stmt)?;
     }
-    for stmt in top_fns {
+    for stmt in &p.top_fns {
         ctx.gen_top_fn(stmt)?;
     }
 
     if has_http {
         // Emitir un wrapper `async fn __handler_<name>` por cada handler.
-        for stmt in &http_fns {
+        for stmt in &p.http_fns {
             ctx.gen_http_handler_wrapper(stmt)?;
         }
         // `#[tokio::main] async fn main` con Router + serve.
         // Fase 7.5: pasamos `program` para que adentro pueda
         // pre-computar el schema OpenAPI desde el AST.
-        ctx.gen_http_main(&http_fns, &server_config, &main_stmts, program)?;
+        ctx.gen_http_main(&p.http_fns, &p.server_config, &p.main_stmts, program)?;
     } else {
         // Modo CLI: cuerpo de `fn main()` con el resto de stmts.
-        ctx.gen_main(&main_stmts)?;
+        ctx.gen_main(&p.main_stmts)?;
     }
-
-    Ok(ctx.output)
+    Ok(())
 }
 
 /// Valores parseados de `@server(port?, host?)`. Defaults aplicados
@@ -1692,6 +1726,40 @@ struct TypeSigField {
     /// Default expr del campo, tomado del AST de `Stmt::TypeDef`.
     /// `None` si el campo no tenía default declarado.
     default: Option<Expr>,
+}
+
+/// Info resuelta de un handler HTTP. La produce
+/// `resolve_handler_signature` y la consumen los `emit_*` helpers del
+/// codegen del wrapper async. Captura todo el estado intermedio que
+/// antes vivía como vars locales adentro de `gen_http_handler_wrapper`.
+struct HandlerSig {
+    name: String,
+    is_async: bool,
+    /// "GET" / "POST" / "PUT" / "DELETE" — derivado del decorator HTTP.
+    http_method: &'static str,
+    /// Path template normalizado tal como llega al runtime axum (con
+    /// `{name}` para los path params).
+    path: String,
+    /// Params categorizados: nombre Fitz + tipo resuelto.
+    path_params: Vec<(String, Type)>,
+    query_params: Vec<(String, Type)>,
+    /// Headers: `(http_name, fitz_param_name, is_nullable)`.
+    header_params: Vec<(String, String, bool)>,
+    /// Body: `Some(nombre, tipo)` si el handler declara body.
+    body_param: Option<(String, Type)>,
+    /// Todos los params resueltos en orden original (para la llamada
+    /// final `handler(args...)`).
+    resolved_params: Vec<(String, Type)>,
+    /// `true` si el return type del handler es `Result<T>` — afecta el
+    /// dispatch en `emit_handler_dispatch_and_response`.
+    returns_result: bool,
+    /// MW.3: nombres de las fns user-middleware encadenadas en orden de
+    /// declaración. Vacío si no hay `@middleware(fn)`.
+    mw_user_fns: Vec<String>,
+    /// MW.2/Q.3: config CORS si la ruta declara `@middleware(cors(...))`.
+    mw_cors: Option<BuildCorsConfig>,
+    has_middleware: bool,
+    has_cors: bool,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -4900,6 +4968,22 @@ impl<'a> CodegenCtx<'a> {
     /// params + body (si corresponde), llama a la fn original, y
     /// convierte el resultado en una `axum::response::Response`.
     fn gen_http_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let sig = self.resolve_handler_signature(stmt)?;
+        self.emit_axum_extractors(&sig)?;
+        self.emit_middleware_chain(&sig);
+        self.emit_param_coercions(&sig)?;
+        self.emit_handler_dispatch_and_response(&sig);
+        self.emit_cors_helpers(&sig);
+        Ok(())
+    }
+
+    /// Resuelve toda la info del handler que `gen_http_handler_wrapper`
+    /// necesita para emitir el wrapper async. Pasos: ubicar el decorator
+    /// HTTP, parsear el path template, recolectar middlewares (chain +
+    /// CORS), resolver tipos de cada param, validar query params del
+    /// template, validar header params, categorizar params en
+    /// path/query/header/body, resolver el return type.
+    fn resolve_handler_signature(&self, stmt: &Stmt) -> Result<HandlerSig, FitzError> {
         let fn_span = stmt.span();
         let Stmt::FnDef {
             name,
@@ -4910,7 +4994,7 @@ impl<'a> CodegenCtx<'a> {
             ..
         } = stmt
         else {
-            return Ok(());
+            return Err(self.err("se esperaba Stmt::FnDef en resolve_handler_signature"));
         };
 
         // Encontrar el decorator HTTP de esta fn (puede haber otros, los
@@ -4930,8 +5014,19 @@ impl<'a> CodegenCtx<'a> {
             ))
         })?;
         let (path, query_template_params) = parse_http_path(path_arg)?;
-
         let template_params = extract_path_template_names(&path);
+        let http_method = match http_deco.name.as_str() {
+            "get" => "GET",
+            "post" => "POST",
+            "put" => "PUT",
+            "delete" => "DELETE",
+            other => {
+                return Err(self.err_at(
+                    fn_span,
+                    format!("método HTTP no soportado en wrapper: {}", other),
+                ));
+            }
+        };
 
         // MW.3: recolectar middlewares apilados sobre esta ruta. Separamos
         // user-fn middlewares (chain a invocar en orden) y CorsConfig
@@ -5028,12 +5123,33 @@ impl<'a> CodegenCtx<'a> {
         };
         let returns_result = matches!(resolved_ret, Type::Result(_));
 
-        // Firma del wrapper. Construimos los extractores axum en orden
-        // declarado por el usuario: path tuple primero, body al final.
-        writeln!(&mut self.output, "async fn __handler_{}(", name).unwrap();
-        if !path_params.is_empty() {
-            if path_params.len() == 1 {
-                let (pn, pt) = &path_params[0];
+        Ok(HandlerSig {
+            name: name.clone(),
+            is_async: *is_async,
+            http_method,
+            path,
+            path_params,
+            query_params,
+            header_params,
+            body_param,
+            resolved_params,
+            returns_result,
+            mw_user_fns,
+            mw_cors,
+            has_middleware,
+            has_cors,
+        })
+    }
+
+    /// Firma del wrapper: `async fn __handler_<name>(...) -> Response`.
+    /// Los extractores axum se emiten en el orden declarado por el
+    /// usuario: path tuple primero, body al final. HeaderMap se extrae
+    /// solo cuando hace falta (headers declarados, middlewares, o CORS).
+    fn emit_axum_extractors(&mut self, sig: &HandlerSig) -> Result<(), FitzError> {
+        writeln!(&mut self.output, "async fn __handler_{}(", sig.name).unwrap();
+        if !sig.path_params.is_empty() {
+            if sig.path_params.len() == 1 {
+                let (pn, pt) = &sig.path_params[0];
                 writeln!(
                     &mut self.output,
                     "    axum::extract::Path({}): axum::extract::Path<{}>,",
@@ -5043,8 +5159,9 @@ impl<'a> CodegenCtx<'a> {
                 .unwrap();
             } else {
                 // Path<(T1, T2, ...)> con nombres tupleados.
-                let names: Vec<String> = path_params.iter().map(|(n, _)| n.clone()).collect();
-                let types: Vec<String> = path_params
+                let names: Vec<String> = sig.path_params.iter().map(|(n, _)| n.clone()).collect();
+                let types: Vec<String> = sig
+                    .path_params
                     .iter()
                     .map(|(_, t)| rust_type_for(t, self.env))
                     .collect::<Result<_, _>>()?;
@@ -5057,7 +5174,7 @@ impl<'a> CodegenCtx<'a> {
                 .unwrap();
             }
         }
-        if !query_params.is_empty() {
+        if !sig.query_params.is_empty() {
             self.emit(
                 "    axum::extract::Query(__qmap): axum::extract::Query<std::collections::HashMap<String, String>>,\n",
             );
@@ -5067,10 +5184,10 @@ impl<'a> CodegenCtx<'a> {
         // CORS (Q.3) que necesita leer el `Origin` del request para
         // resolver los headers `Access-Control-Allow-*`. Sin ninguno,
         // axum NO extrae el HeaderMap (zero-overhead en handlers simples).
-        if !header_params.is_empty() || has_middleware || has_cors {
+        if !sig.header_params.is_empty() || sig.has_middleware || sig.has_cors {
             self.emit("    __hmap: axum::http::HeaderMap,\n");
         }
-        if let Some((bn, _bt)) = &body_param {
+        if let Some((bn, _bt)) = &sig.body_param {
             writeln!(
                 &mut self.output,
                 "    axum::Json({}_raw): axum::Json<serde_json::Value>,",
@@ -5080,118 +5197,116 @@ impl<'a> CodegenCtx<'a> {
         }
         self.emit(") -> axum::response::Response {\n");
         self.emit("    use axum::response::IntoResponse;\n");
+        Ok(())
+    }
 
-        // MW.3: si hay middlewares, construir el Request y ejecutar la
-        // chain ANTES de parsear body o coercionar params. Si algún
-        // middleware corta, devolvemos la response (con headers CORS
-        // si la ruta declara `cors(...)`).
-        if has_middleware {
-            let http_method = match http_deco.name.as_str() {
-                "get" => "GET",
-                "post" => "POST",
-                "put" => "PUT",
-                "delete" => "DELETE",
-                other => {
-                    return Err(self.err_at(
-                        fn_span,
-                        format!("método HTTP no soportado en wrapper: {}", other),
-                    ));
-                }
-            };
-            // Reconstruir el path con los path params sustituidos.
-            // Usamos `format!` con los bindings que axum::extract::Path
-            // ya bindeó arriba. Si la ruta no tiene path params, el
-            // template está libre de `{...}`.
-            let mut fmt_template = String::new();
-            let mut fmt_args: Vec<String> = Vec::new();
-            for ch in path.chars() {
-                if ch == '{' {
-                    // tomar hasta '}'.
-                    fmt_template.push_str("{}");
-                } else if ch == '}' {
-                    // skip
-                } else {
-                    fmt_template.push(ch);
-                }
+    /// MW.3: si hay middlewares, construir el Request y ejecutar la
+    /// chain ANTES de parsear body o coercionar params. Si algún
+    /// middleware corta, devolvemos la response (con headers CORS
+    /// si la ruta declara `cors(...)`). Sin middlewares, no emite nada.
+    fn emit_middleware_chain(&mut self, sig: &HandlerSig) {
+        if !sig.has_middleware {
+            return;
+        }
+        // Reconstruir el path con los path params sustituidos.
+        // Usamos `format!` con los bindings que axum::extract::Path
+        // ya bindeó arriba. Si la ruta no tiene path params, el
+        // template está libre de `{...}`.
+        let mut fmt_template = String::new();
+        let mut fmt_args: Vec<String> = Vec::new();
+        for ch in sig.path.chars() {
+            if ch == '{' {
+                // tomar hasta '}'.
+                fmt_template.push_str("{}");
+            } else if ch == '}' {
+                // skip
+            } else {
+                fmt_template.push(ch);
             }
-            for (pn, _) in &path_params {
-                fmt_args.push(pn.clone());
-            }
-            self.emit("    let __req_headers_vec: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = std::sync::Arc::new(std::sync::Mutex::new(\n");
-            self.emit("        __hmap.iter()\n");
-            self.emit("            .filter_map(|(n, v)| v.to_str().ok().map(|s| (n.as_str().to_lowercase(), s.to_string())))\n");
-            self.emit("            .collect()\n");
-            self.emit("    ));\n");
-            if fmt_args.is_empty() {
+        }
+        for (pn, _) in &sig.path_params {
+            fmt_args.push(pn.clone());
+        }
+        self.emit("    let __req_headers_vec: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = std::sync::Arc::new(std::sync::Mutex::new(\n");
+        self.emit("        __hmap.iter()\n");
+        self.emit("            .filter_map(|(n, v)| v.to_str().ok().map(|s| (n.as_str().to_lowercase(), s.to_string())))\n");
+        self.emit("            .collect()\n");
+        self.emit("    ));\n");
+        if fmt_args.is_empty() {
+            writeln!(
+                &mut self.output,
+                "    let __req_path = String::from(\"{}\");",
+                sig.path,
+            )
+            .unwrap();
+        } else {
+            writeln!(
+                &mut self.output,
+                "    let __req_path = format!(\"{}\", {});",
+                fmt_template,
+                fmt_args.join(", "),
+            )
+            .unwrap();
+        }
+        self.emit("    let __req: Request = std::sync::Arc::new(std::sync::Mutex::new(RequestData {\n");
+        writeln!(
+            &mut self.output,
+            "        method: \"{}\".to_string(),",
+            sig.http_method,
+        )
+        .unwrap();
+        self.emit("        path: __req_path,\n");
+        self.emit("        headers: __req_headers_vec,\n");
+        self.emit("    }));\n");
+        // Chain de middlewares.
+        for mw_name in &sig.mw_user_fns {
+            writeln!(
+                &mut self.output,
+                "    if let Some(__resp) = {}(__req.clone()) {{",
+                mw_name,
+            )
+            .unwrap();
+            self.emit("        return __apply_cors_and_respond(\n");
+            self.emit("            (\n");
+            self.emit("                axum::http::StatusCode::from_u16(__resp.status)\n");
+            self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+            self.emit("                axum::Json(__resp.body),\n");
+            self.emit("            ).into_response(),\n");
+            if sig.has_cors {
+                // Q.3: resolver headers CORS contra el Origin del
+                // request actual. `__cors_resolve_<NAME>(origin)`
+                // devuelve un Vec<(&'static str, String)>.
                 writeln!(
                     &mut self.output,
-                    "    let __req_path = String::from(\"{}\");",
-                    path,
+                    "            Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok()))),",
+                    cors_resolve_fn_name(&sig.name),
                 )
                 .unwrap();
             } else {
-                writeln!(
-                    &mut self.output,
-                    "    let __req_path = format!(\"{}\", {});",
-                    fmt_template,
-                    fmt_args.join(", "),
-                )
-                .unwrap();
+                self.emit("            None,\n");
             }
-            self.emit("    let __req: Request = std::sync::Arc::new(std::sync::Mutex::new(RequestData {\n");
-            writeln!(
-                &mut self.output,
-                "        method: \"{}\".to_string(),",
-                http_method,
-            )
-            .unwrap();
-            self.emit("        path: __req_path,\n");
-            self.emit("        headers: __req_headers_vec,\n");
-            self.emit("    }));\n");
-            // Chain de middlewares.
-            for mw_name in &mw_user_fns {
-                writeln!(
-                    &mut self.output,
-                    "    if let Some(__resp) = {}(__req.clone()) {{",
-                    mw_name,
-                )
-                .unwrap();
-                self.emit("        return __apply_cors_and_respond(\n");
-                self.emit("            (\n");
-                self.emit("                axum::http::StatusCode::from_u16(__resp.status)\n");
-                self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
-                self.emit("                axum::Json(__resp.body),\n");
-                self.emit("            ).into_response(),\n");
-                if has_cors {
-                    // Q.3: resolver headers CORS contra el Origin del
-                    // request actual. `__cors_resolve_<NAME>(origin)`
-                    // devuelve un Vec<(&'static str, String)>.
-                    writeln!(
-                        &mut self.output,
-                        "            Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok()))),",
-                        cors_resolve_fn_name(name),
-                    )
-                    .unwrap();
-                } else {
-                    self.emit("            None,\n");
-                }
-                self.emit("        );\n");
-                self.emit("    }\n");
-            }
+            self.emit("        );\n");
+            self.emit("    }\n");
         }
+    }
 
+    /// Pre-call setup: emite las coerciones de query params, lookup de
+    /// headers desde HeaderMap, y deserialización del body. Cada bloque
+    /// es un "setup pre-llamada" que solo se emite si el handler lo
+    /// declara.
+    fn emit_param_coercions(&mut self, sig: &HandlerSig) -> Result<(), FitzError> {
         // Query params: para cada uno emitir el binding con coerción
         // desde el HashMap. Si el tipo es nullable (`Int?`), missing →
         // None; si es obligatorio, missing → 400. Tipos soportados en
         // query: Int, Float, Str, Bool (los primitivos que coerciona
         // `coerce_path_param` del intérprete).
-        for (qn, qt) in &query_params {
+        for (qn, qt) in &sig.query_params {
             emit_query_param_coerce(&mut self.output, qn, qt, self.env)?;
         }
 
         // Headers (Fase 7.6): lookup case-insensitive contra el
         // HeaderMap. Nullable → Option<String>; obligatorio falta → 400.
-        for (http_name, fitz_name, is_nullable) in &header_params {
+        for (http_name, fitz_name, is_nullable) in &sig.header_params {
             // Generamos un binding `let <fitz_name>: <ty> = ...`.
             // Para nullable: Option<String>. Para obligatorio: String
             // (con early return 400 si falta).
@@ -5228,7 +5343,7 @@ impl<'a> CodegenCtx<'a> {
         // `__from_fitz_json` genérico para `Arc<Mutex<T>>` ya envuelve
         // el resultado, así que para tipos Nominal el binding queda en
         // la representación correcta (`Foo = Arc<Mutex<FooData>>`).
-        if let Some((bn, bt)) = &body_param {
+        if let Some((bn, bt)) = &sig.body_param {
             let rust_ty = rust_type_for(bt, self.env)?;
             writeln!(
                 &mut self.output,
@@ -5243,42 +5358,43 @@ impl<'a> CodegenCtx<'a> {
             self.emit("        ).into_response(),\n");
             self.emit("    };\n");
         }
+        Ok(())
+    }
 
+    /// Llamada al handler Fitz original y conversión del resultado a
+    /// response. Tres caminos: (1) la fn retorna `__FitzResponse`
+    /// (status codes custom); (2) la fn retorna `Result<T, String>`:
+    /// Ok→200, Err→500; (3) cualquier otro tipo: 200 con el body
+    /// serializado. Cierra el cuerpo del wrapper con `}\n\n`.
+    fn emit_handler_dispatch_and_response(&mut self, sig: &HandlerSig) {
         // Llamada a la fn original. Si el handler Fitz es `async fn`,
         // su firma Rust (`pub async fn`) devuelve un `Future`; el
         // wrapper await-ea sobre la marcha para obtener el `T` interno
         // y procesarlo igual que un handler sync.
-        let call_args: Vec<String> = resolved_params
+        let call_args: Vec<String> = sig
+            .resolved_params
             .iter()
             .map(|(n, _)| n.clone())
             .collect();
-        let await_suffix = if *is_async { ".await" } else { "" };
+        let await_suffix = if sig.is_async { ".await" } else { "" };
         writeln!(
             &mut self.output,
             "    let __result = {}({}){};",
-            name,
+            sig.name,
             call_args.join(", "),
             await_suffix,
         )
         .unwrap();
 
-        // Convertir a response. Tres caminos:
-        //  1. La fn retorna `__FitzResponse` (status codes custom):
-        //     destructuramos directo y emitimos `(StatusCode::from_u16,
-        //     Json(body))`. Si el status no es válido (rango 100-599
-        //     ya validado en runtime al construirlo, pero from_u16
-        //     puede fallar para valores extraños), cae a 500.
-        //  2. La fn retorna `Result<T, String>`: Ok→200, Err→500.
-        //  3. Cualquier otro tipo: 200 con el body serializado.
         // MW.3: si la ruta declara cors, envolvemos el resultado en
         // `__apply_cors_and_respond(...)` para inyectar headers.
-        let returns_response = self.http_handlers_returning_response.contains(name);
+        let returns_response = self.http_handlers_returning_response.contains(&sig.name);
         // Q.3: resolver headers CORS contra el Origin del request actual.
         // `__hmap` se extrajo arriba (la condición incluye `has_cors`).
-        let cors_arg = if has_cors {
+        let cors_arg = if sig.has_cors {
             format!(
                 "Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok())))",
-                cors_resolve_fn_name(name)
+                cors_resolve_fn_name(&sig.name)
             )
         } else {
             "None".to_string()
@@ -5297,7 +5413,7 @@ impl<'a> CodegenCtx<'a> {
             )
             .unwrap();
             self.emit("\n");
-        } else if returns_result {
+        } else if sig.returns_result {
             self.emit("    let __built = match __result {\n");
             self.emit("        Ok(__v) => (\n");
             self.emit("            axum::http::StatusCode::OK,\n");
@@ -5329,108 +5445,106 @@ impl<'a> CodegenCtx<'a> {
             self.emit("\n");
         }
         self.emit("}\n\n");
+    }
 
-        // Q.3: en lugar de un static con los headers precomputados,
-        // emitir una `fn __cors_resolve_<NAME>(origin: Option<&str>)`
-        // que devuelve el Vec de headers resuelto para una request
-        // (con su Origin). Esto permite el modo `Set` (echo del Origin
-        // si está en la lista permitida). El wrapper del handler y el
-        // preflight la llaman.
-        if let Some(cors) = &mw_cors {
-            let resolve_fn = cors_resolve_fn_name(name);
-            let methods = cors.methods_joined();
-            let headers_csv = cors.headers_joined();
-            let origin = cors.origin_resolved();
+    /// Q.3: si la ruta declara `cors(...)`, emite la fn
+    /// `__cors_resolve_<NAME>(origin: Option<&str>)` (devuelve el Vec
+    /// de headers resuelto contra el Origin actual) y el handler
+    /// `__preflight_<NAME>` que responde 204 + headers a la request
+    /// OPTIONS automática. Sin CORS, no emite nada.
+    fn emit_cors_helpers(&mut self, sig: &HandlerSig) {
+        let Some(cors) = &sig.mw_cors else { return };
+        let resolve_fn = cors_resolve_fn_name(&sig.name);
+        let methods = cors.methods_joined();
+        let headers_csv = cors.headers_joined();
+        let origin = cors.origin_resolved();
 
-            writeln!(
-                &mut self.output,
-                "fn {}(origin: Option<&str>) -> Vec<(&'static str, String)> {{",
-                resolve_fn
-            )
-            .unwrap();
-            self.emit("    let mut __out: Vec<(&'static str, String)> = Vec::with_capacity(4);\n");
-            match &origin {
-                BuildAllowOrigin::Literal(s) => {
-                    writeln!(
-                        &mut self.output,
-                        "    __out.push((\"access-control-allow-origin\", \"{}\".to_string()));",
-                        s.replace('\\', "\\\\").replace('"', "\\\"")
-                    )
-                    .unwrap();
-                    // `origin` no se usa en este caso — silenciar warning.
-                    self.emit("    let _ = origin;\n");
-                }
-                BuildAllowOrigin::Set(set) => {
-                    self.emit("    let __set: &[&'static str] = &[");
-                    for (i, s) in set.iter().enumerate() {
-                        if i > 0 {
-                            self.emit(", ");
-                        }
-                        self.emit(&format!(
-                            "\"{}\"",
-                            s.replace('\\', "\\\\").replace('"', "\\\"")
-                        ));
-                    }
-                    self.emit("];\n");
-                    self.emit("    if let Some(__req) = origin {\n");
-                    self.emit("        if __set.iter().any(|s| *s == __req) {\n");
-                    self.emit("            __out.push((\"access-control-allow-origin\", __req.to_string()));\n");
-                    self.emit("        }\n");
-                    self.emit("    }\n");
-                }
-            }
-            writeln!(
-                &mut self.output,
-                "    __out.push((\"access-control-allow-methods\", \"{}\".to_string()));",
-                methods.replace('\\', "\\\\").replace('"', "\\\"")
-            )
-            .unwrap();
-            writeln!(
-                &mut self.output,
-                "    __out.push((\"access-control-allow-headers\", \"{}\".to_string()));",
-                headers_csv.replace('\\', "\\\\").replace('"', "\\\"")
-            )
-            .unwrap();
-            if let Some(age) = cors.max_age {
+        writeln!(
+            &mut self.output,
+            "fn {}(origin: Option<&str>) -> Vec<(&'static str, String)> {{",
+            resolve_fn
+        )
+        .unwrap();
+        self.emit("    let mut __out: Vec<(&'static str, String)> = Vec::with_capacity(4);\n");
+        match &origin {
+            BuildAllowOrigin::Literal(s) => {
                 writeln!(
                     &mut self.output,
-                    "    __out.push((\"access-control-max-age\", \"{}\".to_string()));",
-                    age
+                    "    __out.push((\"access-control-allow-origin\", \"{}\".to_string()));",
+                    s.replace('\\', "\\\\").replace('"', "\\\"")
                 )
                 .unwrap();
+                // `origin` no se usa en este caso — silenciar warning.
+                self.emit("    let _ = origin;\n");
             }
-            self.emit("    __out\n");
-            self.emit("}\n\n");
-
-            // Handler preflight: lee el Origin del request OPTIONS y
-            // emite 204 con los headers resueltos.
-            writeln!(
-                &mut self.output,
-                "async fn __preflight_{}(headers: axum::http::HeaderMap) -> axum::response::Response {{",
-                name
-            )
-            .unwrap();
-            self.emit("    use axum::response::IntoResponse;\n");
-            self.emit("    let __origin = headers.get(\"origin\").and_then(|v| v.to_str().ok()).map(|s| s.to_string());\n");
-            writeln!(
-                &mut self.output,
-                "    let __headers = {}(__origin.as_deref());",
-                resolve_fn
-            )
-            .unwrap();
-            self.emit("    let mut resp = axum::http::StatusCode::NO_CONTENT.into_response();\n");
-            self.emit("    for (n, v) in __headers {\n");
-            self.emit("        let parsed_n = axum::http::HeaderName::try_from(n);\n");
-            self.emit("        let parsed_v = axum::http::HeaderValue::try_from(v);\n");
-            self.emit("        if let (Ok(n), Ok(v)) = (parsed_n, parsed_v) {\n");
-            self.emit("            resp.headers_mut().insert(n, v);\n");
-            self.emit("        }\n");
-            self.emit("    }\n");
-            self.emit("    resp\n");
-            self.emit("}\n\n");
+            BuildAllowOrigin::Set(set) => {
+                self.emit("    let __set: &[&'static str] = &[");
+                for (i, s) in set.iter().enumerate() {
+                    if i > 0 {
+                        self.emit(", ");
+                    }
+                    self.emit(&format!(
+                        "\"{}\"",
+                        s.replace('\\', "\\\\").replace('"', "\\\"")
+                    ));
+                }
+                self.emit("];\n");
+                self.emit("    if let Some(__req) = origin {\n");
+                self.emit("        if __set.iter().any(|s| *s == __req) {\n");
+                self.emit("            __out.push((\"access-control-allow-origin\", __req.to_string()));\n");
+                self.emit("        }\n");
+                self.emit("    }\n");
+            }
         }
+        writeln!(
+            &mut self.output,
+            "    __out.push((\"access-control-allow-methods\", \"{}\".to_string()));",
+            methods.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+        .unwrap();
+        writeln!(
+            &mut self.output,
+            "    __out.push((\"access-control-allow-headers\", \"{}\".to_string()));",
+            headers_csv.replace('\\', "\\\\").replace('"', "\\\"")
+        )
+        .unwrap();
+        if let Some(age) = cors.max_age {
+            writeln!(
+                &mut self.output,
+                "    __out.push((\"access-control-max-age\", \"{}\".to_string()));",
+                age
+            )
+            .unwrap();
+        }
+        self.emit("    __out\n");
+        self.emit("}\n\n");
 
-        Ok(())
+        // Handler preflight: lee el Origin del request OPTIONS y
+        // emite 204 con los headers resueltos.
+        writeln!(
+            &mut self.output,
+            "async fn __preflight_{}(headers: axum::http::HeaderMap) -> axum::response::Response {{",
+            sig.name
+        )
+        .unwrap();
+        self.emit("    use axum::response::IntoResponse;\n");
+        self.emit("    let __origin = headers.get(\"origin\").and_then(|v| v.to_str().ok()).map(|s| s.to_string());\n");
+        writeln!(
+            &mut self.output,
+            "    let __headers = {}(__origin.as_deref());",
+            resolve_fn
+        )
+        .unwrap();
+        self.emit("    let mut resp = axum::http::StatusCode::NO_CONTENT.into_response();\n");
+        self.emit("    for (n, v) in __headers {\n");
+        self.emit("        let parsed_n = axum::http::HeaderName::try_from(n);\n");
+        self.emit("        let parsed_v = axum::http::HeaderValue::try_from(v);\n");
+        self.emit("        if let (Ok(n), Ok(v)) = (parsed_n, parsed_v) {\n");
+        self.emit("            resp.headers_mut().insert(n, v);\n");
+        self.emit("        }\n");
+        self.emit("    }\n");
+        self.emit("    resp\n");
+        self.emit("}\n\n");
     }
 
     /// Genera el `#[tokio::main] async fn main()` que construye el
