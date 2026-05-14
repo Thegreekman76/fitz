@@ -422,8 +422,9 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
         }
     }
 
-    // 7.4: kwargs aceptados por @server. Hoy solo `docs: Bool` (opt-out
-    // de /openapi.json y /docs). Cualquier otro kwarg es error claro.
+    // 7.4: kwargs aceptados por @server. `docs: Bool` (opt-out de
+    // /openapi.json y /docs). Q.2: `api_version: Str` (override del
+    // info.version del schema OpenAPI). Cualquier otro kwarg es error.
     for (key, value_expr) in &deco.kwargs {
         match key.as_str() {
             "docs" => match value_expr {
@@ -438,10 +439,28 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
+            "api_version" => match value_expr {
+                Expr::Str(s, _) if !s.is_empty() => {
+                    config.api_version = Some(s.clone());
+                }
+                Expr::Str(_, _) => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'api_version' no puede ser un string vacío",
+                        fn_name,
+                    )));
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'api_version' debe ser Str literal, \
+                         recibió {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
             other => {
                 return Err(err(format!(
                     "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: docs.",
+                     Soportados: docs, api_version.",
                     fn_name, other,
                 )));
             }
@@ -6925,6 +6944,88 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("into") && err.message.contains("Str literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---- Q.2: @server(api_version="X.Y.Z") ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_api_version_kwarg_carga_en_registry() {
+        let src = "\
+            @server(3000, api_version=\"2.5.0\")\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => 0\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.expect("server_config presente");
+        assert_eq!(cfg.api_version, Some("2.5.0".to_string()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_sin_api_version_kwarg_queda_none() {
+        let src = "\
+            @server(3000)\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => 0\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.expect("server_config presente");
+        assert_eq!(cfg.api_version, None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_api_version_vacio_es_error() {
+        let src = "\
+            @server(api_version=\"\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("api_version") && err.message.contains("vacío"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_api_version_no_str_es_error() {
+        let src = "\
+            @server(api_version=42)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("api_version") && err.message.contains("Str literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_kwarg_desconocido_lista_docs_y_api_version() {
+        let src = "\
+            @server(foo=\"bar\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("foo")
+                && err.message.contains("docs")
+                && err.message.contains("api_version"),
             "mensaje inesperado: {}",
             err.message,
         );

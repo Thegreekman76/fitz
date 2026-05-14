@@ -224,12 +224,26 @@ pub const SCALAR_HTML: &str = include_str!("templates/scalar.html");
 ///
 /// Salida: un `Value` que serializado con `serde_json::to_string_pretty`
 /// es un OpenAPI 3.1 válido.
+#[allow(dead_code)]
 pub fn generate_openapi(routes: &[OpenApiRouteInfo], program: &Program) -> Value {
+    generate_openapi_with_version(routes, program, None)
+}
+
+/// Variante de `generate_openapi` que acepta un `info.version` override
+/// (mini-fase Q.2). Si `version` es `Some(v)`, el schema emite ese valor;
+/// si es `None`, default `"0.1.0"` (compat con uso pre-Q.2). El runtime
+/// lo lee de `HttpRegistry.server_config.api_version`; el codegen lo
+/// lee del `Stmt::FnDef` decorado con `@server(api_version=...)`.
+pub fn generate_openapi_with_version(
+    routes: &[OpenApiRouteInfo],
+    program: &Program,
+    version: Option<&str>,
+) -> Value {
     json!({
         "openapi": "3.1.0",
         "info": {
             "title": "Fitz API",
-            "version": "0.1.0",
+            "version": version.unwrap_or("0.1.0"),
         },
         "paths": build_paths(routes),
         "components": {
@@ -737,7 +751,18 @@ mod tests {
             crate::evaluator::eval_with_base_sync(program.clone(), std::env::current_dir().unwrap())
         });
         res.expect("eval OK");
-        generate_openapi(&routes_from_registry(&registry), &program)
+        // Q.2: replica el cableado real de main.rs / http.rs — si el
+        // programa declara `@server(api_version=...)`, el schema lo
+        // refleja. Sin el override, default "0.1.0".
+        let api_version = registry
+            .server_config
+            .as_ref()
+            .and_then(|c| c.api_version.clone());
+        generate_openapi_with_version(
+            &routes_from_registry(&registry),
+            &program,
+            api_version.as_deref(),
+        )
     }
 
     #[test]
@@ -749,6 +774,43 @@ mod tests {
         assert_eq!(schema["info"]["version"], json!("0.1.0"));
         assert!(schema["paths"].is_object());
         assert!(schema["components"]["schemas"].is_object());
+    }
+
+    // ---- Q.2: @server(api_version="X.Y.Z") ----
+
+    #[test]
+    fn api_version_override_se_refleja_en_info_version() {
+        let src = "\
+            @server(api_version=\"1.2.3\")\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => \"hola\"\n\
+        ";
+        let schema = schema_for(src);
+        assert_eq!(schema["info"]["version"], json!("1.2.3"));
+    }
+
+    #[test]
+    fn sin_api_version_kwarg_default_sigue_siendo_0_1_0() {
+        let src = "\
+            @server(3000)\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => \"hola\"\n\
+        ";
+        let schema = schema_for(src);
+        assert_eq!(schema["info"]["version"], json!("0.1.0"));
+    }
+
+    #[test]
+    fn generate_openapi_with_version_some_y_none() {
+        // Test directo del generador: con override y sin override.
+        use crate::ast::Stmt;
+        let program: Vec<Stmt> = vec![];
+        let s1 = generate_openapi_with_version(&[], &program, Some("9.9.9"));
+        assert_eq!(s1["info"]["version"], json!("9.9.9"));
+        let s2 = generate_openapi_with_version(&[], &program, None);
+        assert_eq!(s2["info"]["version"], json!("0.1.0"));
     }
 
     #[test]

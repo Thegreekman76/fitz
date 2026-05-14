@@ -1401,6 +1401,10 @@ struct ServerConfigArgs {
     /// `/docs` en el binario nativo. Default `true`, opt-out con
     /// `@server(docs=false)`.
     enable_docs: bool,
+    /// Mini-fase Q.2: override del `info.version` del schema OpenAPI
+    /// generado en build-time. None → "0.1.0". Seteado con
+    /// `@server(api_version="X.Y.Z")`.
+    api_version: Option<String>,
 }
 
 impl Default for ServerConfigArgs {
@@ -1409,6 +1413,7 @@ impl Default for ServerConfigArgs {
             port: 3000,
             host: "127.0.0.1".to_string(),
             enable_docs: true,
+            api_version: None,
         }
     }
 }
@@ -1469,7 +1474,7 @@ fn parse_server_decorator(
         // El parse se hace en runtime; si falla, axum/tokio reportarán.
         cfg.host = s.clone();
     }
-    // Fase 7.5: kwargs. Hoy solo `docs: Bool`.
+    // Fase 7.5: kwargs `docs: Bool`. Mini-fase Q.2: `api_version: Str`.
     for (key, value_expr) in kwargs {
         match key.as_str() {
             "docs" => {
@@ -1486,13 +1491,37 @@ fn parse_server_decorator(
                 };
                 cfg.enable_docs = *b;
             }
+            "api_version" => match value_expr {
+                Expr::Str(s, _) if !s.is_empty() => {
+                    cfg.api_version = Some(s.clone());
+                }
+                Expr::Str(_, _) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        "@server: el kwarg 'api_version' no puede ser un string vacío".to_string(),
+                    ));
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'api_version' debe ser Str literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
             other => {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: docs.",
+                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version.",
                         other
                     ),
                 ));
@@ -5400,7 +5429,12 @@ impl<'a> CodegenCtx<'a> {
         if auto_openapi || auto_docs {
             // Schema: armamos las rutas desde AST y serializamos a JSON.
             let routes = crate::openapi::pseudo_routes_from_ast(program)?;
-            let schema = crate::openapi::generate_openapi(&routes, program);
+            // Q.2: `@server(api_version=...)` override del info.version.
+            let schema = crate::openapi::generate_openapi_with_version(
+                &routes,
+                program,
+                cfg.api_version.as_deref(),
+            );
             let schema_str = serde_json::to_string(&schema).map_err(|e| {
                 FitzError::new(
                     ErrorKind::InvalidSyntax,

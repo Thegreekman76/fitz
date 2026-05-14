@@ -139,7 +139,16 @@ fn openapi_file(path: &PathBuf) {
     }
 
     let routes = openapi::routes_from_registry(&registry);
-    let schema = openapi::generate_openapi(&routes, &program);
+    // Q.2: `@server(api_version=...)` override.
+    let api_version = registry
+        .server_config
+        .as_ref()
+        .and_then(|c| c.api_version.clone());
+    let schema = openapi::generate_openapi_with_version(
+        &routes,
+        &program,
+        api_version.as_deref(),
+    );
     match serde_json::to_string_pretty(&schema) {
         Ok(s) => println!("{}", s),
         Err(e) => {

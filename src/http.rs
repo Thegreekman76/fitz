@@ -278,6 +278,11 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub enable_docs: bool,
+    /// Mini-fase Q.2: override de `info.version` del schema OpenAPI
+    /// vía `@server(api_version="1.2.3")`. `None` → el schema usa el
+    /// default `"0.1.0"`. Cuando se setea, lo lee `serve()` al
+    /// pre-computar el schema y lo pasa a `generate_openapi_with_version`.
+    pub api_version: Option<String>,
 }
 
 impl ServerConfig {
@@ -287,6 +292,7 @@ impl ServerConfig {
             host: "127.0.0.1".into(),
             port: 3000,
             enable_docs: true,
+            api_version: None,
         }
     }
 
@@ -1879,9 +1885,19 @@ pub fn serve(
     // Fase 7.4: si `@server(docs=false)`, ni computamos el schema ni
     // lo pasamos al router — ambas rutas auto-registradas quedan en
     // 404. Trade-off: zero overhead cuando el usuario apaga los docs.
+    // Q.2: leer `api_version` del config si se seteó vía
+    // `@server(api_version="X.Y.Z")`. None → schema usa default "0.1.0".
+    let api_version = registry
+        .server_config
+        .as_ref()
+        .and_then(|c| c.api_version.clone());
     let openapi_schema = if enable_docs {
         let routes = crate::openapi::routes_from_registry(&registry);
-        Some(crate::openapi::generate_openapi(&routes, &program))
+        Some(crate::openapi::generate_openapi_with_version(
+            &routes,
+            &program,
+            api_version.as_deref(),
+        ))
     } else {
         None
     };
@@ -2788,6 +2804,7 @@ mod tests {
             host: "0.0.0.0".into(),
             port: 8080,
             enable_docs: true,
+            api_version: None,
         };
         let addr = c.to_socket_addr().unwrap();
         assert_eq!(addr.to_string(), "0.0.0.0:8080");
@@ -2799,6 +2816,7 @@ mod tests {
             host: "no-es-ip".into(),
             port: 80,
             enable_docs: true,
+            api_version: None,
         };
         let err = c.to_socket_addr().unwrap_err();
         assert!(err.contains("no-es-ip"));
@@ -2811,12 +2829,14 @@ mod tests {
                 host: "127.0.0.1".into(),
                 port: 8080,
                 enable_docs: true,
+                api_version: None,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
                 host: "0.0.0.0".into(),
                 port: 9090,
                 enable_docs: true,
+                api_version: None,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -2834,6 +2854,7 @@ mod tests {
             host: "0.0.0.0".into(),
             port: 80,
             enable_docs: true,
+            api_version: None,
         });
         let resolved = reg.resolved_config();
         assert_eq!(resolved.port, 80);
