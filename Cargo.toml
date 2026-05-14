@@ -46,6 +46,18 @@ tokio = { version = "1", features = ["full"] }
 # queda como mini-fase post-6 si entra demanda real de paralelismo.
 async-recursion = "1"
 
+# Fase F17 — primitiva de sincronización Send para destrabar paralelismo
+# real entre tareas Fitz. Reemplaza `Rc<RefCell<T>>` por
+# `Arc<parking_lot::Mutex<T>>` en `Value::List`/`Map`/`Instance.fields`
+# y en `EnvRef`. Elegido sobre `std::sync::Mutex` porque:
+#  - Es más rápido (~10ns vs ~30ns sin contención).
+#  - No envenena en panic (sin `.unwrap()` en cada lock).
+#  - FIFO (más justo que std en alta contención).
+#  - Pequeño (5 bytes vs ~40 bytes de std::sync::Mutex en Linux).
+# La migración se hace en F17.2 (atómica). Esta dep entra ahora en
+# F17.1 para mantener commits verdes intermedios.
+parking_lot = "0.12"
+
 [dev-dependencies]
 # Directorios temporales para tests del loader de módulos (3.5):
 # permite armar fixtures en disco y limpiarlos automáticamente.
