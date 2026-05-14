@@ -52,6 +52,13 @@ pub struct OpenApiRouteInfo {
     pub header_params: Vec<(String, String, bool)>,
     pub param_type_exprs: Vec<(String, Option<TypeExpr>)>,
     pub return_type_expr: Option<TypeExpr>,
+    /// Mini-fase Q.4: status codes custom (`return <Int> { ... }`)
+    /// detectados en el body del handler. Cada uno genera un entry en
+    /// `responses` del schema OpenAPI además de los derivados del
+    /// return type. Vec ordenado ascendente y deduplicado para schema
+    /// determinista. Status no literales (variable, expr) se omiten —
+    /// no son inferibles estáticamente.
+    pub custom_status_codes: Vec<u16>,
 }
 
 /// Adapter: del registry runtime a vistas livianas.
@@ -74,6 +81,82 @@ fn route_info_from_spec(s: &RouteSpec) -> OpenApiRouteInfo {
             .collect(),
         param_type_exprs: s.param_type_exprs.clone(),
         return_type_expr: s.return_type_expr.clone(),
+        // Q.4: extraer los status codes custom del body del handler.
+        // El handler runtime es un `Value::Function { body, ... }`; si
+        // por alguna razón no lo es (registro inconsistente), tratamos
+        // como sin status codes (defensivo).
+        custom_status_codes: match &s.handler {
+            crate::value::Value::Function { body, .. } => collect_status_codes(body),
+            _ => Vec::new(),
+        },
+    }
+}
+
+/// Mini-fase Q.4: recorre un body de fn y devuelve los `Stmt::ReturnStatus`
+/// con status literal Int encontrados. Status no literales (variables,
+/// expresiones) se omiten — no podemos saberlos estáticamente. Recurse
+/// adentro de loops, if/match, etc.; FnExpr inline NO se sigue (otro
+/// scope, otra fn). El Vec devuelto está deduplicado y en orden
+/// ascendente para que el schema sea determinista.
+pub fn collect_status_codes(body: &[crate::ast::Stmt]) -> Vec<u16> {
+    let mut out: Vec<u16> = Vec::new();
+    for s in body {
+        collect_status_codes_stmt(s, &mut out);
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+fn collect_status_codes_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<u16>) {
+    use crate::ast::Stmt;
+    match stmt {
+        Stmt::ReturnStatus { status, body, .. } => {
+            if let crate::ast::Expr::Int(n, _) = status {
+                // Status fuera de rango HTTP válido (100-599) lo
+                // skipeamos también — el runtime/parser lo cazaría.
+                if (100..=599).contains(n) {
+                    out.push(*n as u16);
+                }
+            }
+            // El body puede contener otro ReturnStatus anidado vía
+            // if/match — recorremos.
+            if let Some(b) = body {
+                collect_status_codes_expr(b, out);
+            }
+        }
+        Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
+            for s in body {
+                collect_status_codes_stmt(s, out);
+            }
+        }
+        Stmt::Assign { value, .. } => collect_status_codes_expr(value, out),
+        Stmt::Return(e, _) | Stmt::Expr(e, _) => collect_status_codes_expr(e, out),
+        _ => {}
+    }
+}
+
+fn collect_status_codes_expr(expr: &crate::ast::Expr, out: &mut Vec<u16>) {
+    use crate::ast::Expr;
+    match expr {
+        Expr::If { then, else_, .. } => {
+            for s in then {
+                collect_status_codes_stmt(s, out);
+            }
+            if let Some(els) = else_ {
+                for s in els {
+                    collect_status_codes_stmt(s, out);
+                }
+            }
+        }
+        Expr::Match { arms, .. } => {
+            for a in arms {
+                collect_status_codes_expr(&a.body, out);
+            }
+        }
+        // Los demás Expr no tienen bodies anidados con stmts (calls,
+        // literales, binops, etc.).
+        _ => {}
     }
 }
 
@@ -143,6 +226,7 @@ pub fn pseudo_routes_from_ast(
             params,
             return_type,
             decorators,
+            body,
             ..
         } = s
         else {
@@ -194,6 +278,8 @@ pub fn pseudo_routes_from_ast(
                 header_params,
                 param_type_exprs,
                 return_type_expr: return_type.clone(),
+                // Q.4: escanear el body del FnDef por ReturnStatus.
+                custom_status_codes: collect_status_codes(body),
             });
         }
     }
@@ -293,7 +379,10 @@ fn build_operation(route: &OpenApiRouteInfo) -> Value {
         op.insert("requestBody".into(), build_request_body(body_type));
     }
 
-    op.insert("responses".into(), build_responses(&route.return_type_expr));
+    op.insert(
+        "responses".into(),
+        build_responses(&route.return_type_expr, &route.custom_status_codes),
+    );
     Value::Object(op)
 }
 
@@ -356,7 +445,7 @@ fn build_request_body(t: Option<&TypeExpr>) -> Value {
     })
 }
 
-fn build_responses(return_type: &Option<TypeExpr>) -> Value {
+fn build_responses(return_type: &Option<TypeExpr>, custom_status_codes: &[u16]) -> Value {
     let mut resp: Map<String, Value> = Map::new();
     match return_type {
         Some(TypeExpr::Generic { name, args }) if name == "Result" && args.len() == 1 => {
@@ -370,7 +459,62 @@ fn build_responses(return_type: &Option<TypeExpr>) -> Value {
             resp.insert("200".into(), success_response(None));
         }
     }
+    // Q.4: sumar entries por cada status code custom detectado en el
+    // body. El body de un ReturnStatus es polimórfico (un handler
+    // `-> User` puede mandar `return 404 { "error": "..." }` con un
+    // shape distinto), así que el schema de cada response custom queda
+    // como "any" (`{}`). Si ya hay un entry con el mismo status (caso
+    // raro: `return 200 { ... }`), gana el del return type (no se
+    // sobreescribe). Los codes vienen ordenados ascendente y deduplicados.
+    for code in custom_status_codes {
+        let key = code.to_string();
+        if resp.contains_key(&key) {
+            continue;
+        }
+        resp.insert(key, custom_status_response(*code));
+    }
     Value::Object(resp)
+}
+
+fn custom_status_response(code: u16) -> Value {
+    json!({
+        "description": http_status_phrase(code),
+        "content": {
+            "application/json": {
+                // Body polimórfico: no fijamos schema. El usuario lo
+                // describe en docs externas si lo necesita.
+                "schema": {},
+            },
+        },
+    })
+}
+
+/// Mapeo mínimo de status code → reason phrase para la `description`
+/// del schema. Cubre los codes comunes; los demás caen a "Response".
+/// El schema sigue siendo válido sin importar el texto.
+fn http_status_phrase(code: u16) -> &'static str {
+    match code {
+        200 => "OK",
+        201 => "Created",
+        202 => "Accepted",
+        204 => "No Content",
+        301 => "Moved Permanently",
+        302 => "Found",
+        304 => "Not Modified",
+        400 => "Bad Request",
+        401 => "Unauthorized",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        409 => "Conflict",
+        410 => "Gone",
+        422 => "Unprocessable Entity",
+        429 => "Too Many Requests",
+        500 => "Internal Server Error",
+        502 => "Bad Gateway",
+        503 => "Service Unavailable",
+        _ => "Response",
+    }
 }
 
 fn success_response(t: Option<&TypeExpr>) -> Value {
@@ -652,7 +796,7 @@ mod tests {
 
     #[test]
     fn responses_sin_return_type_solo_emite_200_any() {
-        let r = build_responses(&None);
+        let r = build_responses(&None, &[]);
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("200"));
         assert!(!obj.contains_key("500"));
@@ -663,7 +807,7 @@ mod tests {
 
     #[test]
     fn responses_con_return_type_concreto_emite_solo_200() {
-        let r = build_responses(&Some(named("Int")));
+        let r = build_responses(&Some(named("Int")), &[]);
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("200"));
         assert!(!obj.contains_key("500"));
@@ -671,9 +815,140 @@ mod tests {
         assert_eq!(schema, json!({ "type": "integer", "format": "int64" }));
     }
 
+    // ---- Q.4: status codes custom en schema ----
+
+    #[test]
+    fn responses_suma_entries_por_status_codes_custom() {
+        let r = build_responses(&Some(named("Str")), &[401, 404]);
+        let obj = r.as_object().unwrap();
+        // 200 sigue (del return type Str).
+        assert!(obj.contains_key("200"));
+        // 401 y 404 sumados con schema vacío.
+        assert!(obj.contains_key("401"));
+        assert!(obj.contains_key("404"));
+        assert_eq!(
+            obj["401"]["content"]["application/json"]["schema"],
+            json!({})
+        );
+        // Description usa la reason phrase HTTP.
+        assert_eq!(obj["401"]["description"], json!("Unauthorized"));
+        assert_eq!(obj["404"]["description"], json!("Not Found"));
+    }
+
+    #[test]
+    fn responses_status_custom_no_pisa_200_existente() {
+        // Si un handler hace `return 200 { ... }` y además tiene
+        // return type `Str`, el entry 200 del return type gana —
+        // mantenemos el schema fuerte sobre el polimórfico.
+        let r = build_responses(&Some(named("Str")), &[200]);
+        let schema = r["200"]["content"]["application/json"]["schema"].clone();
+        assert_eq!(schema, json!({ "type": "string" }));
+    }
+
+    #[test]
+    fn responses_status_custom_no_pisa_500_de_result() {
+        // Result<T> genera 200+500. Un `return 500 { ... }` custom no
+        // debe duplicarlos.
+        let r = build_responses(&Some(generic("Result", vec![named("Int")])), &[500]);
+        let obj = r.as_object().unwrap();
+        // El 500 sigue siendo el "error" del Result, no el custom any.
+        let schema = obj["500"]["content"]["application/json"]["schema"].clone();
+        assert_eq!(schema["type"], json!("object"));
+    }
+
+    #[test]
+    fn responses_status_custom_desconocido_usa_response_phrase_default() {
+        let r = build_responses(&None, &[418]);
+        assert_eq!(r["418"]["description"], json!("Response"));
+    }
+
+    #[test]
+    fn collect_status_codes_simple_extraccion_y_orden() {
+        use crate::ast::Span;
+        // body: `return 404 { ... }; return 401 { ... }; return 404 { ... }`
+        let body = vec![
+            crate::ast::Stmt::ReturnStatus {
+                status: crate::ast::Expr::Int(404, Span::ZERO),
+                body: None,
+                span: Span::ZERO,
+            },
+            crate::ast::Stmt::ReturnStatus {
+                status: crate::ast::Expr::Int(401, Span::ZERO),
+                body: None,
+                span: Span::ZERO,
+            },
+            crate::ast::Stmt::ReturnStatus {
+                status: crate::ast::Expr::Int(404, Span::ZERO),
+                body: None,
+                span: Span::ZERO,
+            },
+        ];
+        // Ordenado ascendente + dedup.
+        assert_eq!(collect_status_codes(&body), vec![401u16, 404u16]);
+    }
+
+    #[test]
+    fn collect_status_codes_status_no_literal_se_omite() {
+        use crate::ast::Span;
+        // `return <ident> { ... }` no es inferible — se skipea.
+        let body = vec![crate::ast::Stmt::ReturnStatus {
+            status: crate::ast::Expr::Ident("code".into(), Span::ZERO),
+            body: None,
+            span: Span::ZERO,
+        }];
+        assert!(collect_status_codes(&body).is_empty());
+    }
+
+    #[test]
+    fn collect_status_codes_status_fuera_de_rango_se_omite() {
+        use crate::ast::Span;
+        // 1000 no es un status HTTP válido → skipear (parser/runtime
+        // lo cazarían pero el schema no debería emitir códigos que no
+        // pueden aparecer).
+        let body = vec![crate::ast::Stmt::ReturnStatus {
+            status: crate::ast::Expr::Int(1000, Span::ZERO),
+            body: None,
+            span: Span::ZERO,
+        }];
+        assert!(collect_status_codes(&body).is_empty());
+    }
+
+    #[test]
+    fn schema_para_handler_con_returnstatus_emite_codes() {
+        let src = "\
+            @get(\"/p\")\n\
+            fn protected() -> Str {\n\
+                return 401 {\"msg\": \"no autorizado\"}\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = &schema["paths"]["/p"]["get"]["responses"];
+        assert!(responses.get("200").is_some()); // del return type Str
+        assert!(responses.get("401").is_some()); // del ReturnStatus custom
+        assert_eq!(responses["401"]["description"], json!("Unauthorized"));
+    }
+
+    #[test]
+    fn schema_codes_dentro_de_if_else_se_detectan() {
+        // `Stmt::ReturnStatus` adentro de un `if`/`else` se detecta
+        // recursivamente. El walker baja por el branch then/else.
+        let src = "\
+            @get(\"/u/{id}\")\n\
+            fn h(id: Int) -> Str {\n\
+                if (id == 0) {\n\
+                    return 404 {\"msg\": \"no encontrado\"}\n\
+                }\n\
+                return \"ok\"\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = &schema["paths"]["/u/{id}"]["get"]["responses"];
+        assert!(responses.get("404").is_some());
+    }
+
     #[test]
     fn responses_con_result_emite_200_y_500() {
-        let r = build_responses(&Some(generic("Result", vec![named("User")])));
+        let r = build_responses(&Some(generic("Result", vec![named("User")])), &[]);
         let obj = r.as_object().unwrap();
         assert!(obj.contains_key("200"));
         assert!(obj.contains_key("500"));
