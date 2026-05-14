@@ -63,12 +63,30 @@
 > `@server(docs=false)` + `fitz openapi archivo.fitz` + paridad
 > bit-a-bit `fitz run` ↔ `fitz build`. Deuda residual abierta:
 >
-> - **Middleware + CORS (comprometido como mini-fase post-F7
->   antes de F8)**. El server real necesita interceptar requests
->   para logging, auth, CORS, rate limiting, etc. Decisión de
->   sintaxis pendiente al arrancar. CORS típicamente entrega con
->   un built-in `cors(...)` configurable. **Esta es la próxima
->   ventana de trabajo HTTP antes de salir a interop con Python**.
+> - ~~**Middleware + CORS**~~ — **CERRADA en mini-fase MW
+>   (2026-05-14, 1189 tests)**. Decorator `@middleware(fn)`
+>   apilable + built-in `cors(...)` configurable. Modelo
+>   gate-only para middleware genérico (`return null` / `return
+>   <status> { ... }`); CORS como slot dedicado con preflight
+>   OPTIONS y headers inyectados en response real (incluso
+>   500/400). `Request` y `Response` pre-registrados como
+>   nominales built-in. Sub-pasos: MW.1 intérprete; MW.2 cors
+>   built-in + preflight; MW.3 codegen completo; MW.4 guía cap
+>   17 sub-sección + ejemplo `17b-middleware.fitz` + cierre.
+>   Validación E2E bit-a-bit `fitz run` ↔ `fitz build` via
+>   build + spawn + raw TCP. Deudas que quedan:
+>   - **Modelo wrap (post-process)** para timing/tracing — el
+>     gate-only no expresa "after". Mini-fase dedicada post-F8
+>     si aparece presión real.
+>   - **CORS request-aware** (echo del Origin recibido cuando
+>     se admite un set acotado de orígenes). Deuda menor.
+>   - **OpenAPI schema con CORS/middleware** — el schema no
+>     refleja los middlewares aplicados. Útil para docs UI;
+>     irrelevante para SDKs generados (server-side concern).
+>   - **Body en `Request`** — hoy el Request expone method/
+>     path/headers; body queda en el handler post-middleware.
+>     Para HMAC/signing habría que parsear antes del short-
+>     circuit.
 > - Doc-strings sobre handlers (descripciones OpenAPI) — el
 >   parser hoy descarta comentarios; retenerlos es refactor
 >   lexer+parser+AST. Sub-paso candidato post-middleware.

@@ -3367,13 +3367,10 @@ Tests al cerrar: **1150 totales** (1080 unit + 67 codegen E2E +
 Visible y comprometida — algunas con prioridad alta porque la
 promesa "HTTP nativo" todavía cojea sin ellas:
 
-- **Middleware y CORS** (comprometido — siguiente mini-fase
-  post-F7 antes de F8). Server web real necesita interceptar
-  requests para logging, auth, CORS, rate limiting, etc. Decisión
-  de sintaxis pendiente: decorator `@middleware(fn)` apilable,
-  callbacks en `@server(...)`, o convención de fns top-level
-  llamadas en orden. CORS típicamente entrega con un built-in
-  `cors(...)` configurable.
+- **Middleware y CORS** — **CERRADO en mini-fase MW** (ver
+  sección abajo). Decorator `@middleware(fn)` apilable +
+  built-in `cors(...)`. Sub-pasos MW.1 (intérprete) → MW.4
+  (guía + cierre). Total 1189 tests al cerrar.
 - **Doc-strings sobre handlers** (descripciones OpenAPI): el
   parser hoy descarta comentarios. Retenerlos como doc-strings
   es refactor mediano (lexer + parser + AST + tests). F7 sale
@@ -3412,6 +3409,99 @@ promesa "HTTP nativo" todavía cojea sin ellas:
 - **F17 sigue pendiente** y no bloquea F7. La fase trabaja
   sobre la superficie del lenguaje (schema + UI), no sobre la
   mecánica interna del runtime.
+
+---
+
+## Mini-fase MW — Middleware + CORS 🛡️
+**Estado: CERRADA (1189 tests)**
+
+Sub-paso comprometido post-Fase 7. Server web real necesita
+interceptar requests para logging, auth, CORS, rate limiting,
+etc. Sintaxis final: decorator `@middleware(fn)` apilable sobre
+handlers HTTP + built-in `cors(...)` configurable como un
+middleware especial.
+
+### Decisiones cross-cutting
+
+1. **Modelo gate-only para middleware genérico**: el middleware
+   retorna `null`/sin valor → la chain continúa; retorna un
+   response (`return <status> { ... }`) → short-circuit. Sin
+   modelo "wrap" con `next` callable. Pros: simple, sin overhead
+   de wrap cuando no se necesita, encaja con `Stmt::ReturnStatus`
+   existente. Contras: no permite post-process (medir tiempo
+   real, agregar headers custom desde un middleware). CORS lo
+   evita con tratamiento especial (slot dedicado + preflight).
+   Si aparece presión real por timing/tracing, mini-fase
+   dedicada post-F8.
+2. **CORS como slot dedicado, no parte de la chain**: aplicar
+   `@middleware(cors(...))` carga `RouteSpec.cors` (vs
+   `RouteSpec.middlewares` que vive aparte). Razón: CORS
+   necesita preflight OPTIONS automático e inyección de
+   headers en response real — ambos no expresables con
+   gate-only. Trade-off: un caso especial documentado a cambio
+   de una API user-facing uniforme (`@middleware(cors(...))`).
+3. **`Request` y `Response` como nominales built-in**: pre-
+   registrados en `TypeEnv` desde la fase MW. El usuario los
+   puede anotar sin `import`. Si declara `type Request {...}`
+   propio, gana el error de redeclaración existente. Costo
+   semántico: dos nominales fijos en cualquier programa, aún
+   sin HTTP. Aceptable.
+4. **CORS config en build-time**: `cors({...})` parsea su
+   Map literal en codegen (no eval runtime para el bin). El
+   resultado se emite como `static __FITZ_CORS_<NAME>` —
+   cero allocs por request. El intérprete sí lo evalúa runtime
+   (built-in registrado).
+
+### Features de la fase entera
+
+- [x] Decorator `@middleware(fn)` apilable + chain gate-only (MW.1)
+- [x] `Request` built-in (method/path/headers) + `Response`
+      opaco (MW.1)
+- [x] `Stmt::ReturnStatus` adentro de fns referenciadas como
+      middleware (MW.1 checker relax)
+- [x] Built-in `cors(...)` configurable + slot `RouteSpec.cors` (MW.2)
+- [x] Preflight OPTIONS automático + inyección de headers en
+      response real (MW.2)
+- [x] Codegen completo: chain en wrapper async + cors build-time
+      + preflight (MW.3)
+- [x] Sub-sección "Middleware y CORS" en cap 17 de la guía +
+      `examples/guide/17b-middleware.fitz` (MW.4)
+
+### Cierre formal mini-fase MW
+
+Criterio de éxito: un programa con `@middleware(auth)` y
+`@middleware(cors())` aplicados a un handler HTTP responde
+identico bit-a-bit entre `fitz run` y `fitz build && ./bin`.
+Validado por E2E que arma un programa, lo compila, lo spawnea,
+y manda requests crudos por TCP (passthrough 200, short-circuit
+401, preflight OPTIONS 204, response real con headers).
+
+Tests al cerrar: **1189 totales** (1118 unit + 71 E2E).
+Reparto del aporte de la fase: MW.1 +18 unit + 1 E2E neto; MW.2
++20 unit + 4 E2E router; MW.3 0 unit + 3 E2E netos (un E2E viejo
+reemplazado); MW.4 sin tests nuevos (smoke +1 implícito en
+`GUIDE_EXAMPLES_COMPILE`).
+
+### Deuda residual de la mini-fase MW
+
+- **Modelo wrap (post-process)** — middleware genérico hoy es
+  gate-only. Para timing/tracing/headers post-call hace falta
+  un middleware con `next` callable. CORS lo evita con
+  tratamiento especial. Mini-fase dedicada post-F8 si aparece
+  presión real.
+- **CORS request-aware** — `allow_origin` hoy es valor fijo.
+  Para echo del Origin recibido (cuando se admite un set
+  acotado de orígenes), hace falta inspección de la request
+  en build-time del response. Deuda menor.
+- **OpenAPI schema con middleware/CORS** — el schema no
+  refleja los middlewares aplicados. Para SDKs generados está
+  bien (server-side concern), pero docs UI podrían mencionar
+  las reglas CORS en `info.description` o un campo custom.
+- **Body en `Request`** — hoy el Request expone method/path/
+  headers. Body queda en el handler (parseado contra el `type`
+  declarado, post-middleware). Para autenticación basada en
+  body (HMAC, signing) habría que exponerlo al middleware,
+  con el costo de parsear antes del short-circuit. Deuda menor.
 
 ---
 

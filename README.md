@@ -184,14 +184,25 @@ Las fases cerradas:
   `@server(docs=false)`; paridad bit-a-bit entre `fitz run`,
   `fitz openapi` y `fitz build` (el binario nativo embebe el
   schema en build-time).
+- **Mini-fase MW — Middleware y CORS**: decorator
+  `@middleware(fn)` apilable sobre handlers HTTP (modelo gate-only:
+  `return null` o sin return → continúa la chain; `return <status>
+  { ... }` → short-circuit). Built-in `Request` (method/path/headers)
+  y `Response` opaco. Built-in `cors(...)` configurable con kwargs
+  via Map literal — preflight OPTIONS automático y headers
+  `Access-Control-Allow-*` inyectados en la response real
+  (incluso 500/400). Paridad bit-a-bit `fitz run` ↔ `fitz build`.
 
-**1150+ tests pasando** (1080+ unit + 70 E2E que compilan
-binarios con `fitz build` o validan el subcomando `fitz openapi`).
+**1189+ tests pasando** (1118+ unit + 71 E2E que compilan
+binarios con `fitz build`, levantan el server y validan responses
+crudas via TCP).
 
 Próximo norte: **Fase 8 — Interop Python**, **Fase 9 — Ecosistema**.
-Ver el [roadmap](docs/roadmap.md) para detalle. **Deuda comprometida
-post-Fase 7**: middleware y CORS, F17 (Send completo) para
-paralelismo real entre handlers, descripciones via doc-strings.
+Ver el [roadmap](docs/roadmap.md) para detalle. **Deudas
+comprometidas que siguen**: F17 (Send completo) para paralelismo
+real entre handlers; descripciones via doc-strings sobre handlers
+(para enriquecer OpenAPI); modelo wrap de middleware (post-process)
+si aparece presión real.
 
 ## Qué funciona hoy
 

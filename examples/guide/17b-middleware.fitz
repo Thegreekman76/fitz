@@ -1,0 +1,79 @@
+// 17b-middleware.fitz — Ejemplo de la sub-sección "Middleware y CORS"
+// del capítulo 17.
+//
+// Levantalo:
+//   cargo run -- run examples/guide/17b-middleware.fitz
+// O compilá:
+//   cargo run -- build examples/guide/17b-middleware.fitz
+//
+// Probalo:
+//   curl -i http://127.0.0.1:3000/health
+//      → 200 (passthrough — el logger no corta)
+//
+//   curl -i http://127.0.0.1:3000/admin
+//      → 401 (auth corta sin Authorization)
+//
+//   curl -i -H "Authorization: bearer-token" http://127.0.0.1:3000/admin
+//      → 200 (auth deja pasar con header)
+//
+//   curl -i -X OPTIONS http://127.0.0.1:3000/api
+//      → 204 + headers Access-Control-Allow-*
+//
+//   curl -i http://127.0.0.1:3000/api
+//      → 200 + headers Access-Control-Allow-*
+
+@server(3000)
+fn main() => 0
+
+// --- Middleware passthrough ---
+//
+// `logger` no corta — no devuelve nada. La cadena continúa al handler.
+// Recibe un `Request` built-in con method/path/headers.
+
+fn logger(req: Request) {
+    // Sin efectos visibles para el cliente — solo log local.
+}
+
+// --- Middleware que cortocircuita ---
+//
+// `auth` corta con 401 cuando falta el header Authorization.
+// `return <status> { ... }` produce un Response que el runtime
+// devuelve al cliente sin invocar el handler. Si el header está,
+// la fn termina sin return explícito → null implícito = continúa.
+
+fn auth(req: Request) {
+    if (req.headers.has("authorization")) {
+        return null
+    }
+    return 401 {"error": "falta header Authorization"}
+}
+
+@middleware(logger)
+@get("/health")
+fn health() -> Str => "ok"
+
+@middleware(logger)
+@middleware(auth)
+@get("/admin")
+fn admin() -> Str => "datos administrativos"
+
+// --- CORS ---
+//
+// El built-in `cors(...)` configura preflight OPTIONS y los headers
+// `Access-Control-Allow-*` que se inyectan en cada response real.
+// `cors()` sin args usa defaults permisivos (`*`, métodos comunes,
+// headers content-type/authorization).
+//
+// Para overrides: un Map literal con keys conocidas:
+//   - "allow_origin": Str
+//   - "allow_methods": List<Str>
+//   - "allow_headers": List<Str>
+//   - "max_age": Int
+
+@middleware(cors())
+@get("/api")
+fn api_root() -> Str => "API con CORS"
+
+@middleware(cors({"allow_origin": "https://app.example.com", "max_age": 3600}))
+@get("/api/strict")
+fn api_strict() -> Str => "CORS solo desde app.example.com"

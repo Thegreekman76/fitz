@@ -4354,16 +4354,120 @@ fn update_item(id: Int, dry_run: Bool, body: Patch) -> Str {
 }
 ```
 
+### Middleware y CORS
+
+Hasta acá los handlers responden directamente. Para todo lo que pasa
+**antes** del handler — logging, autenticación, rate limiting, CORS —
+Fitz tiene **middleware**: funciones que se apilan sobre un handler
+con `@middleware(fn)` y se ejecutan en orden top-down.
+
+**Sintaxis**:
+
+```fitz
+fn logger(req: Request) {
+    // no devuelve nada → la cadena continúa
+}
+
+fn auth(req: Request) {
+    if (req.headers.has("authorization")) {
+        return null
+    }
+    return 401 {"error": "falta header Authorization"}
+}
+
+@middleware(logger)
+@middleware(auth)
+@get("/admin")
+fn admin() -> Str => "datos administrativos"
+```
+
+**Reglas**:
+
+1. Los `@middleware(...)` deben apilarse **antes** del decorator de
+   ruta (`@get`/`@post`/`@put`/`@delete`).
+2. Cada middleware recibe un único arg `Request` (built-in con
+   fields `method: Str`, `path: Str`, `headers: Map<Str, Str>`).
+   Los headers llegan con las keys en lowercase.
+3. **Modelo gate-only**: el middleware puede *cortar la cadena* con
+   `return <status> { ... }`, o *dejarla seguir* devolviendo `null`
+   (o sin return explícito al cierre del body). Cualquier otro valor
+   de retorno es error.
+4. El orden de ejecución es **top-down**: el `@middleware(...)` más
+   arriba corre primero. El último corre justo antes del handler.
+
+**CORS**:
+
+Para servir APIs a un frontend (Vue, React, etc.) que vive en otro
+dominio hace falta CORS. Fitz trae un built-in `cors(...)` que se
+aplica como un middleware más:
+
+```fitz
+@middleware(cors())
+@get("/api/items")
+fn list_items() -> List<Item> => items
+```
+
+`cors()` sin args usa defaults permisivos: `allow_origin: "*"`,
+métodos `GET/POST/PUT/DELETE/OPTIONS`, headers `content-type` y
+`authorization`. Para overrides, pasale un Map con las keys que
+quieras pisar:
+
+```fitz
+@middleware(cors({
+    "allow_origin": "https://app.example.com",
+    "allow_methods": ["GET", "POST"],
+    "max_age": 3600
+}))
+@get("/api/items")
+fn list_items() -> List<Item> => items
+```
+
+Keys soportadas:
+
+- `allow_origin: Str` (default `"*"`).
+- `allow_methods: List<Str>` (default métodos comunes).
+- `allow_headers: List<Str>` (default `["content-type", "authorization"]`).
+- `max_age: Int` (default ausente — el browser usa su cache default).
+
+Cuando aplicás `cors(...)`:
+
+- El runtime registra un handler **OPTIONS** automático para el
+  mismo path. Una request preflight `OPTIONS /api/items` responde
+  **204 No Content** con los headers `Access-Control-Allow-*` ya
+  configurados, sin tocar tu handler.
+- Las responses reales del handler (`GET /api/items`, `POST ...`)
+  llevan los headers `Access-Control-Allow-Origin` etc. inyectados.
+  Esto vale también para responses de error (500/400/etc.) — sin
+  eso, el browser tapa el error real con un "CORS error" en
+  consola.
+
+**Restricciones**:
+
+- Máximo **un** `cors(...)` por ruta. Apilar dos da error.
+- `cors(...)` y user-fn middlewares conviven sin problema:
+  ```fitz
+  @middleware(logger)
+  @middleware(cors())
+  @get("/api")
+  fn endpoint() => ...
+  ```
+- En `fitz build`, `cors(...)` se evalúa en build-time: el codegen
+  emite un `static __FITZ_CORS_*` con los headers precomputados y
+  un handler de preflight dedicado. Cero overhead por request.
+
+**Ejemplo completo**: `examples/guide/17b-middleware.fitz`.
+
 ---
 
-Con HTTP cerramos la Fase 4. Tenés ahora todas las piezas para
-escribir APIs reales en Fitz: rutas, JSON tipado, manejo de
-errores propagable, configuración del server, status codes
-custom, query params. El próximo capítulo cubre la **paridad con
-FastAPI en developer experience**: documentación de la API
-autogenerada (`/openapi.json` + UI Scalar en `/docs`). Después,
-el cap 19 cubre la otra mitad de "HTTP nativo": concurrencia con
-`async fn` y `.await`.
+Con HTTP cerramos la Fase 4 y la mini-fase de Middleware + CORS
+post-Fase 7. Tenés ahora todas las piezas para escribir APIs reales
+en Fitz: rutas, JSON tipado, manejo de errores propagable,
+configuración del server, status codes custom, query params,
+middleware apilable y CORS configurable. El próximo capítulo cubre
+la **paridad con FastAPI en developer experience**: documentación
+de la API autogenerada (`/openapi.json` + UI Scalar en `/docs`).
+Después, el cap 19 cubre la otra mitad de "HTTP nativo":
+concurrencia con `async fn` y `.await`.
 
 ---
 
