@@ -7167,6 +7167,112 @@ let r = match n {
         assert_eq!(back, original);
     }
 
+    // -------------------------------------------------------------------
+    // Fase 8.2.3 — Criterio de éxito de la fase 8.2 end-to-end:
+    // una función Python que recibe `List<User>` y devuelve un mapping
+    // string→int (count_by_email). Round-trip completo sin perder data.
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_2_count_by_email_con_counter() {
+        // `collections.Counter` es subclass de `dict` y cuenta
+        // ocurrencias de elementos en un iterable. Cuando Fitz le pasa
+        // `List<Str>` (los emails extraídos de las instancias), Counter
+        // devuelve un dict-like con (email → cantidad). Como Counter
+        // hereda de dict, `is_instance_of::<PyDict>()` en
+        // `py_to_value` matchea y lo coerce a `Value::Map`.
+        let src = "\
+            type User { id: Int, email: Str }\n\
+            from python import collections\n\
+            let users = [\n\
+                User { id: 1, email: \"alice@x.com\" },\n\
+                User { id: 2, email: \"bob@x.com\" },\n\
+                User { id: 3, email: \"alice@x.com\" },\n\
+            ]\n\
+            let emails = users.map(fn(u) => u.email)\n\
+            let counts = collections.Counter(emails)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        // Python 3.7+: Counter preserva orden de inserción.
+        // `alice` aparece primero en `users` así que entra primero al
+        // Counter; `bob` después.
+        assert_eq!(
+            env.lock().get("counts"),
+            Some(Value::new_map(vec![
+                (Value::Str("alice@x.com".into()), Value::Int(2)),
+                (Value::Str("bob@x.com".into()), Value::Int(1)),
+            ])),
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_2_round_trip_no_muta_list_original() {
+        // Decisión cross-cutting #4: copia eager bidireccional. La
+        // List<User> Fitz que va a Python no comparte estado con la
+        // list Python; ninguna mutación del lado Python se debería
+        // ver en la List Fitz original.
+        let src = "\
+            type User { id: Int, email: Str }\n\
+            from python import collections\n\
+            let users = [\n\
+                User { id: 1, email: \"x\" },\n\
+                User { id: 2, email: \"y\" },\n\
+            ]\n\
+            let snap = users.len()\n\
+            let _ = collections.Counter([1, 2, 2])\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("snap"), Some(Value::Int(2)));
+        // La List<User> original sigue accesible como Fitz nativa:
+        // 2 elementos, field access funciona.
+        let users = env.lock().get("users").unwrap();
+        match users {
+            Value::List(items) => {
+                let guard = items.lock();
+                assert_eq!(guard.len(), 2);
+                // Los elementos siguen siendo Instance Fitz, no
+                // PyObject (no se "contaminaron" por el round-trip).
+                match &guard[0] {
+                    Value::Instance { type_name, .. } => {
+                        assert_eq!(type_name, "User");
+                    }
+                    other => panic!("esperaba Instance, fue {:?}", other),
+                }
+            }
+            other => panic!("esperaba List, fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_2_pipeline_completo() {
+        // Pipeline end-to-end del caso canónico:
+        //   List<User> Fitz → emails List<Str>
+        //                    → Counter Python (Map<Str, Int>)
+        //                    → ordenar las keys con builtins
+        //                    → resultado iterable desde Fitz.
+        let src = "\
+            type User { id: Int, email: Str }\n\
+            from python import collections\n\
+            from python import builtins\n\
+            let users = [\n\
+                User { id: 1, email: \"a@x.com\" },\n\
+                User { id: 2, email: \"b@x.com\" },\n\
+                User { id: 3, email: \"a@x.com\" },\n\
+                User { id: 4, email: \"c@x.com\" },\n\
+            ]\n\
+            let counts = collections.Counter(users.map(fn(u) => u.email))\n\
+            let total = counts[\"a@x.com\"] + counts[\"b@x.com\"] + counts[\"c@x.com\"]\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(4)));
+    }
+
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_iterar_map_devuelto_por_python() {

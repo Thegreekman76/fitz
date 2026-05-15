@@ -1,0 +1,132 @@
+// examples/python-interop-8.2.fitz — Marshaling bidireccional de tipos
+// compuestos (Fase 8.2).
+//
+//   cargo run --features python -- run examples/python-interop-8.2.fitz
+//
+// Necesita Python 3.10+. Política "copia eager bidireccional": una
+// `List<T>` Fitz que va a Python se convierte en una `list` Python
+// independiente; mutaciones del lado Python no se propagan a la
+// List original Fitz (y viceversa). El round-trip preserva
+// estructura pero no identidad.
+//
+// Lo que 8.2 destraba sobre 8.1:
+//   - List/Map/Instance como args a funciones Python.
+//   - list/dict que vuelven de Python como List/Map nativos Fitz.
+//   - Pipeline end-to-end Fitz → Python → Fitz sin perder data.
+
+from python import json
+from python import collections
+from python import builtins
+
+// ---------------------------------------------------------------------
+// 1. Fitz → Python: List/Map/Instance como args (json.dumps)
+// ---------------------------------------------------------------------
+
+print("== Fitz → Python (json.dumps) ==")
+
+let s_ints = json.dumps([1, 2, 3])
+print("List<Int>       → {s_ints}")
+
+let s_strs = json.dumps(["a", "b", "c"])
+print("List<Str>       → {s_strs}")
+
+let s_bools = json.dumps([true, false, true])
+print("List<Bool>      → {s_bools}")
+
+let s_nested = json.dumps([[1, 2], [3, 4]])
+print("List anidada    → {s_nested}")
+
+let s_map = json.dumps({"a": 1, "b": 2})
+print("Map<Str, Int>   → {s_map}")
+
+type User { id: Int, email: Str }
+
+let user = User { id: 1, email: "alice@x.com" }
+let s_user = json.dumps(user)
+print("Instance        → {s_user}")
+
+let users = [
+    User { id: 1, email: "alice@x.com" },
+    User { id: 2, email: "bob@x.com" },
+]
+let s_users = json.dumps(users)
+print("List<Instance>  → {s_users}")
+
+// ---------------------------------------------------------------------
+// 2. Python → Fitz: list/dict como returns (json.loads)
+// ---------------------------------------------------------------------
+
+print("")
+print("== Python → Fitz (json.loads) ==")
+
+let parsed = json.loads("[1, 2, 3]")
+let parsed_len = parsed.len()
+print("loads(array)    → {parsed}, len = {parsed_len}")
+
+let m = json.loads("\{\"a\": 10, \"b\": 20\}")
+let a_val = m["a"]
+let b_val = m["b"]
+let total = a_val + b_val
+print("loads(object)   → {m}, a + b = {total}")
+
+let nested = json.loads("\{\"user\": \{\"id\": 1, \"name\": \"x\"\}\}")
+print("loads(anidado)  → {nested}")
+
+// ---------------------------------------------------------------------
+// 3. Round-trip: dumps + loads preserva estructura (no identidad)
+// ---------------------------------------------------------------------
+
+print("")
+print("== Round-trip Fitz → Python → Fitz ==")
+let original = [{"k": 1}, {"k": 2}, {"k": 3}]
+let serialized = json.dumps(original)
+let back = json.loads(serialized)
+let preserva = original == back
+print("original   = {original}")
+print("ida        = {serialized}")
+print("vuelta     = {back}")
+print("preserva?  = {preserva}")
+
+// ---------------------------------------------------------------------
+// 4. Criterio de éxito de Fase 8.2 (roadmap):
+//    List<User> Fitz → Python counter → Map<Str, Int>
+// ---------------------------------------------------------------------
+
+print("")
+print("== Criterio canónico (count_by_email) ==")
+
+let mas_users = [
+    User { id: 1, email: "alice@x.com" },
+    User { id: 2, email: "bob@x.com" },
+    User { id: 3, email: "alice@x.com" },
+    User { id: 4, email: "carol@x.com" },
+    User { id: 5, email: "bob@x.com" },
+    User { id: 6, email: "alice@x.com" },
+]
+
+let emails = mas_users.map(fn(u) => u.email)
+let counts = collections.Counter(emails)
+
+// `Counter` es subclass de `dict` en Python, así que `py_to_value`
+// lo coerce a `Value::Map` directo — `counts` llega a Fitz como
+// Map nativo con (email → Int) en orden de primera aparición.
+print("counts = {counts}")
+let alice = counts["alice@x.com"]
+let bob = counts["bob@x.com"]
+let carol = counts["carol@x.com"]
+print("alice  = {alice}")
+print("bob    = {bob}")
+print("carol  = {carol}")
+
+// ---------------------------------------------------------------------
+// 5. Copia eager — la List original Fitz no se ve afectada
+// ---------------------------------------------------------------------
+
+print("")
+print("== Copia eager bidireccional ==")
+let nums = [1, 2, 3]
+let _ = builtins.list(nums)  // construye una list Python paralela
+let nums_len = nums.len()
+let nums_first = nums[0]
+print("nums sigue siendo List<Int> Fitz nativa: len = {nums_len}")
+print("primer elemento: {nums_first}")
