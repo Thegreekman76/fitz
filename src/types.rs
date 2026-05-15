@@ -1362,6 +1362,15 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
             }
         }
+
+        // Fase 9.0.1 (F15): `Expr::Error` solo lo produce
+        // `parse_with_recovery`. El checker lo trata como `Type::Any`
+        // y NO emite errores derivados — el error real ya está en la
+        // lista de `recovered_errors` del parser. Silencioso es la
+        // política correcta: si el LSP corre el checker sobre un AST
+        // con Error nodes, no queremos cascada de errores derivados
+        // sobre el mismo punto.
+        Expr::Error(_) => Type::Any,
     }
 }
 
@@ -2261,6 +2270,12 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 ctx.declare_var(binding, ty);
             }
         }
+
+        // Fase 9.0.1 (F15): paralelo a `Expr::Error`. `Stmt::Error`
+        // se ignora silenciosamente — el error real ya está en
+        // `recovered_errors` del parser. No queremos emitir errores
+        // derivados desde el checker sobre el mismo punto.
+        Stmt::Error(_) => {}
     }
 }
 

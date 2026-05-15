@@ -40,7 +40,28 @@ struct Parser {
     /// literal (`{ Ident : ...`), el parser corta con un error
     /// explícito sugiriendo envolver en paréntesis.
     no_struct_literal: bool,
+
+    /// Fase 9.0.1 (F15): si es `true`, los loops top-level de stmts
+    /// (`parse_program` + `parse_block`) capturan errores de
+    /// `parse_stmt`, los acumulan en `recovered_errors`, sincronizan
+    /// hasta el próximo stmt-boundary (Newline/Semicolon/RBrace/EOF) y
+    /// continúan con un `Stmt::Error(span)` en lugar del stmt original.
+    /// Sirve para tooling externo (LSP) que necesita un AST parcial
+    /// sobre buffers en construcción. `parse()` strict lo deja en
+    /// `false`; `parse_with_recovery()` lo prende.
+    recovery_mode: bool,
+
+    /// Errores acumulados durante `parse_with_recovery`. En modo strict
+    /// queda siempre vacío. Cota: ver `MAX_RECOVERED_ERRORS`.
+    recovered_errors: Vec<FitzError>,
 }
+
+/// Cota dura de errores acumulados en `parse_with_recovery`. Cuando se
+/// alcanza, el parser se rinde: descarta el resto del input y devuelve
+/// lo que tiene. Protege contra cascadas runaway en buffers grandes
+/// muy rotos. 100 cubre el caso 90% (~5-20 errores en un buffer LSP
+/// real) con margen amplio.
+const MAX_RECOVERED_ERRORS: usize = 100;
 
 impl Parser {
     fn new(tokens: Vec<TokenWithPos>) -> Self {
@@ -48,6 +69,8 @@ impl Parser {
             tokens,
             pos: 0,
             no_struct_literal: false,
+            recovery_mode: false,
+            recovered_errors: Vec::new(),
         }
     }
 
@@ -654,6 +677,12 @@ impl Parser {
 
     /// Punto de entrada para parsear un programa completo (top-level).
     /// Consume todo hasta `EOF`.
+    ///
+    /// Si `recovery_mode` está activo (modo `parse_with_recovery`), un
+    /// error de `parse_stmt` no se propaga: se acumula en
+    /// `recovered_errors`, se sincroniza hasta el próximo stmt-boundary
+    /// y se inserta un `Stmt::Error(span)` en el lugar. El loop sigue
+    /// hasta EOF o hasta alcanzar `MAX_RECOVERED_ERRORS`.
     fn parse_program(&mut self) -> FitzResult<Program> {
         let mut stmts = Vec::new();
         loop {
@@ -661,10 +690,93 @@ impl Parser {
             if self.is_at_end() {
                 break;
             }
-            stmts.push(self.parse_stmt()?);
-            self.consume_stmt_terminator()?;
+            if self.recovery_mode && self.recovered_errors.len() >= MAX_RECOVERED_ERRORS {
+                break;
+            }
+            let stmt_span = self.cur_span();
+            match self.parse_stmt() {
+                Ok(s) => stmts.push(s),
+                Err(e) => {
+                    if !self.recovery_mode {
+                        return Err(e);
+                    }
+                    self.push_recovered(e);
+                    self.synchronize();
+                    stmts.push(Stmt::Error(stmt_span));
+                    continue;
+                }
+            }
+            if let Err(e) = self.consume_stmt_terminator() {
+                if !self.recovery_mode {
+                    return Err(e);
+                }
+                self.push_recovered(e);
+                self.synchronize();
+            }
         }
         Ok(stmts)
+    }
+
+    /// Push de un error recuperado, con respeto a la cota. Si ya
+    /// llegamos al máximo, el error se descarta silenciosamente — el
+    /// caller verá en el `Vec` final que estamos en el límite.
+    fn push_recovered(&mut self, e: FitzError) {
+        if self.recovered_errors.len() < MAX_RECOVERED_ERRORS {
+            self.recovered_errors.push(e);
+        }
+    }
+
+    /// Avanza el cursor hasta un sync point stmt-level. Los sync points
+    /// son:
+    ///  - `Newline` — terminador natural de stmt en Fitz (se consume).
+    ///  - `RBrace` — cierre de bloque (NO se consume; el caller lo
+    ///    maneja para cerrar el bloque actual).
+    ///  - `EOF` — fin del archivo (NO se consume).
+    ///  - Keywords que típicamente arrancan un stmt: `Let`, `Fn`,
+    ///    `Async`, `Type`, `Return`, `Break`, `Continue`, `While`,
+    ///    `Loop`, `For`, `If`, `Import`, `From`, `At` (decorador). Si
+    ///    el cursor está parado en uno, NO se consume — paramos justo
+    ///    antes para que el próximo `parse_stmt` lo agarre.
+    ///
+    /// Por qué parar en keywords: `primary()` consume el token actual
+    /// antes de validarlo. Si una expresión se rompe encontrando un
+    /// `Newline` u otro token raro, el cursor puede haber avanzado más
+    /// allá del newline hasta el `Let` del próximo stmt. Sin la regla
+    /// de keywords, `synchronize` se comería el próximo stmt entero
+    /// buscando un newline.
+    ///
+    /// Fitz no tiene `;` como separador — Newline es el único
+    /// terminador explícito.
+    fn synchronize(&mut self) {
+        loop {
+            match self.peek() {
+                Token::Newline => {
+                    self.advance();
+                    return;
+                }
+                Token::RBrace | Token::EOF => return,
+                // Keywords que típicamente arrancan un stmt. No
+                // consumimos — paramos justo antes para que el próximo
+                // `parse_stmt` los procese desde cero.
+                Token::Let
+                | Token::Fn
+                | Token::Async
+                | Token::Type
+                | Token::Return
+                | Token::Break
+                | Token::Continue
+                | Token::While
+                | Token::Loop
+                | Token::For
+                | Token::If
+                | Token::Import
+                | Token::From
+                | Token::At => return,
+                _ => {
+                    self.advance();
+                }
+            }
+        }
     }
 
     /// Después de una sentencia, consumimos su terminador. `Newline`
@@ -1149,6 +1261,15 @@ impl Parser {
 
     /// Bloque `{ stmt; stmt; ... }`. Consume llaves de apertura y cierre.
     /// Acepta líneas en blanco entre sentencias y bloques vacíos.
+    ///
+    /// Recovery (9.0.1, F15): si `recovery_mode` está activo, errores
+    /// de `parse_stmt` adentro del bloque se capturan paralelamente al
+    /// loop top-level — `Stmt::Error(span)` en lugar del stmt fallido,
+    /// `synchronize()` hasta `Newline`/`RBrace`/`EOF`, y se sigue. Si
+    /// el `{` de apertura nunca apareció o el `}` de cierre falta, el
+    /// error sí se propaga: arreglar la estructura de un bloque es muy
+    /// costoso adentro de recovery; preferimos abortar el bloque entero
+    /// y dejar que el loop padre se reacomode en el próximo sync point.
     fn parse_block(&mut self) -> FitzResult<Vec<Stmt>> {
         self.expect(&Token::LBrace, "se esperaba '{'")?;
         let mut stmts = Vec::new();
@@ -1164,8 +1285,37 @@ impl Parser {
                     "se esperaba '}' para cerrar el bloque",
                 ));
             }
-            stmts.push(self.parse_stmt()?);
-            self.consume_stmt_terminator()?;
+            if self.recovery_mode && self.recovered_errors.len() >= MAX_RECOVERED_ERRORS {
+                // Saltamos al cierre del bloque (si hay) para no dejar
+                // un `{` colgado en el AST padre.
+                while !matches!(self.peek(), Token::RBrace | Token::EOF) {
+                    self.advance();
+                }
+                if matches!(self.peek(), Token::RBrace) {
+                    self.advance();
+                }
+                return Ok(stmts);
+            }
+            let stmt_span = self.cur_span();
+            match self.parse_stmt() {
+                Ok(s) => stmts.push(s),
+                Err(e) => {
+                    if !self.recovery_mode {
+                        return Err(e);
+                    }
+                    self.push_recovered(e);
+                    self.synchronize();
+                    stmts.push(Stmt::Error(stmt_span));
+                    continue;
+                }
+            }
+            if let Err(e) = self.consume_stmt_terminator() {
+                if !self.recovery_mode {
+                    return Err(e);
+                }
+                self.push_recovered(e);
+                self.synchronize();
+            }
         }
     }
 
@@ -1844,6 +1994,51 @@ impl Parser {
 pub fn parse(tokens: Vec<TokenWithPos>) -> FitzResult<Program> {
     let mut parser = Parser::new(tokens);
     parser.parse_program()
+}
+
+/// Variante recovering del parser. Pensada para tooling externo (LSP,
+/// formatter, futuras herramientas de análisis) que necesita un AST
+/// parcial sobre buffers en construcción o con errores tipográficos
+/// transitorios. **No** la usa la CLI strict (`fitz run`, `fitz build`,
+/// `fitz check`): esos siguen llamando a `parse()` y abortan al primer
+/// error. Fase 9.0.1 (F15).
+///
+/// Reglas:
+///  - Captura errores stmt-level y los acumula en el `Vec<FitzError>`
+///    devuelto. El AST devuelto siempre es estructuralmente válido (un
+///    `Vec<Stmt>` posiblemente con `Stmt::Error(span)` en lugares
+///    rotos).
+///  - Sync points: `Newline`, `RBrace` (no consumido), `EOF`.
+///  - Cota dura: `MAX_RECOVERED_ERRORS` (100). Al alcanzarla, el parser
+///    abandona el resto del input y devuelve lo que tiene.
+///  - Errores DENTRO de un stmt (paréntesis sin cerrar, expresión
+///    incompleta, etc.) descartan el stmt entero — el cursor avanza
+///    hasta el próximo sync point. Recovery sub-stmt queda como deuda
+///    explícita para más adelante.
+///
+/// Garantiza que **nunca** retorna `Err`: cualquier error queda
+/// acumulado en la lista paralela. El caller decide qué hacer.
+///
+/// `#[allow(dead_code)]`: en Fase 9.0.1 esta API solo se ejercita
+/// desde tests. Los consumidores reales (LSP, formatter, futuras
+/// herramientas) aterrizan en sub-pasos siguientes de Fase 9. El
+/// allow se quita cuando aparezca el primer caller fuera de tests.
+#[allow(dead_code)]
+pub fn parse_with_recovery(tokens: Vec<TokenWithPos>) -> (Program, Vec<FitzError>) {
+    let mut parser = Parser::new(tokens);
+    parser.recovery_mode = true;
+    // En recovery, `parse_program` no devuelve `Err` (los errores van a
+    // `recovered_errors`); pero el tipo de retorno sigue siendo
+    // `FitzResult` para no duplicar código. `unwrap_or_else` es defensa
+    // por si alguna ruta strict-residual se cuela — en ese caso, el
+    // error se acumula como parte de la lista.
+    let stmts = parser
+        .parse_program()
+        .unwrap_or_else(|e| {
+            parser.recovered_errors.push(e);
+            Vec::new()
+        });
+    (stmts, parser.recovered_errors)
 }
 
 /// Toma el contenido crudo de un `Token::Str` y construye la
@@ -5355,5 +5550,174 @@ mod tests {
         // El display debe reproducir la forma escrita en el fuente.
         let t = parse_assign_type("let m: Map<Str, Result<List<User>?>> = {}");
         assert_eq!(t.display_name(), "Map<Str, Result<List<User>?>>");
+    }
+
+    // ---------------------------------------------------------------------
+    // Fase 9.0.1 — parse_with_recovery
+    // ---------------------------------------------------------------------
+
+    /// Helper que tokeniza y corre `parse_with_recovery`. Devuelve
+    /// `(stmts, errors)`.
+    fn parse_recovering(src: &str) -> (Program, Vec<FitzError>) {
+        let tokens = tokenize(src).expect("la fuente debe tokenizar sin error");
+        parse_with_recovery(tokens)
+    }
+
+    #[test]
+    fn recovery_programa_valido_no_acumula_errores() {
+        // Smoke: la API recovering produce el mismo AST que strict
+        // sobre código sin errores, con `Vec<FitzError>` vacío.
+        let src = "let x = 1\nlet y = 2\nprint(x + y)";
+        let (stmts_rec, errors) = parse_recovering(src);
+        assert!(errors.is_empty(), "no se esperaban errores: {:?}", errors);
+        let stmts_strict = parse(tokenize(src).unwrap()).unwrap();
+        assert_eq!(stmts_rec, stmts_strict);
+    }
+
+    #[test]
+    fn recovery_stmt_roto_a_top_level_inserta_error_y_continua() {
+        // El `1 +` deja un binop pendiente — falla. El parser sincroniza
+        // hasta el próximo Newline y continúa con `let y = 2`, que debe
+        // parsear OK.
+        let src = "let x = 1 +\nlet y = 2";
+        let (stmts, errors) = parse_recovering(src);
+        assert_eq!(errors.len(), 1, "exactamente un error: {:?}", errors);
+        assert_eq!(stmts.len(), 2);
+        assert!(matches!(stmts[0], Stmt::Error(_)));
+        assert!(matches!(
+            stmts[1],
+            Stmt::Assign {
+                target: AssignTarget::Ident(ref n), ..
+            } if n == "y"
+        ));
+    }
+
+    #[test]
+    fn recovery_dos_stmts_rotos_consecutivos_emiten_dos_errores() {
+        // Dos líneas rotas: el parser debe acumular dos errores, no
+        // perderse.
+        let src = "let a = 1 +\nlet b = *\nlet c = 3";
+        let (stmts, errors) = parse_recovering(src);
+        assert_eq!(errors.len(), 2);
+        assert_eq!(stmts.len(), 3);
+        assert!(matches!(stmts[0], Stmt::Error(_)));
+        assert!(matches!(stmts[1], Stmt::Error(_)));
+        assert!(matches!(
+            stmts[2],
+            Stmt::Assign {
+                target: AssignTarget::Ident(ref n), ..
+            } if n == "c"
+        ));
+    }
+
+    #[test]
+    fn recovery_stmt_roto_dentro_de_bloque_inserta_error_y_sigue() {
+        // El body del `if` tiene un stmt roto seguido de uno válido.
+        let src = "if (x) {\n  let a = 1 +\n  let b = 2\n}";
+        let (stmts, errors) = parse_recovering(src);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(stmts.len(), 1);
+        // El `if` es Stmt::Expr(Expr::If { ... }, _). Inspeccionamos su body.
+        match &stmts[0] {
+            Stmt::Expr(Expr::If { then, .. }, _) => {
+                assert_eq!(then.len(), 2);
+                assert!(matches!(then[0], Stmt::Error(_)));
+                assert!(matches!(
+                    then[1],
+                    Stmt::Assign {
+                        target: AssignTarget::Ident(ref n), ..
+                    } if n == "b"
+                ));
+            }
+            other => panic!("se esperaba Stmt::Expr(Expr::If), recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn recovery_error_span_apunta_al_token_donde_empezo_el_stmt() {
+        // El stmt roto arranca en la línea 1, col 1 (el `let`). El span
+        // del `Stmt::Error` lo refleja para que el LSP lo subraye desde
+        // el inicio del stmt y no desde el caracter raro.
+        let src = "let x = +\nlet y = 2";
+        let (stmts, _errors) = parse_recovering(src);
+        match &stmts[0] {
+            Stmt::Error(span) => {
+                assert_eq!(span.line, 1);
+                assert_eq!(span.column, 1);
+            }
+            other => panic!("se esperaba Stmt::Error, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn recovery_error_lleva_linea_y_columna_del_token_problematico() {
+        // El error reportado debe apuntar al token donde se detectó el
+        // problema (el `+` suelto), no al inicio del stmt — útil para
+        // el LSP que subraya el squiggly.
+        let src = "let x = +\nlet y = 2";
+        let (_stmts, errors) = parse_recovering(src);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(errors[0].line, 1);
+        // El `+` está en la columna 9.
+        assert_eq!(errors[0].column, 9);
+    }
+
+    #[test]
+    fn recovery_eof_inesperado_se_acumula_como_error() {
+        // `let x =` deja una expresión pendiente al final del archivo.
+        // El parser debe acumular el error y devolver lo que pudo
+        // construir.
+        let src = "let x =";
+        let (stmts, errors) = parse_recovering(src);
+        assert_eq!(errors.len(), 1);
+        // El stmt roto va como Error.
+        assert!(matches!(stmts.last(), Some(Stmt::Error(_))));
+    }
+
+    #[test]
+    fn recovery_cota_de_errores_corta_la_acumulacion() {
+        // Generamos un programa con más de MAX_RECOVERED_ERRORS líneas
+        // rotas. Verificamos que la cota se respeta.
+        let n = MAX_RECOVERED_ERRORS + 50;
+        let lines: Vec<String> = (0..n).map(|_| "let a = +".to_string()).collect();
+        let src = lines.join("\n");
+        let (_stmts, errors) = parse_recovering(&src);
+        assert_eq!(errors.len(), MAX_RECOVERED_ERRORS);
+    }
+
+    #[test]
+    fn recovery_fn_con_body_roto_preserva_estructura() {
+        // El body de `fn foo` tiene un stmt roto. Lo importante: el
+        // FnDef sigue siendo FnDef (con body que contiene Stmt::Error),
+        // no se descarta entero. El stmt que sigue al cierre del fn
+        // también parsea OK.
+        let src = "fn foo() {\n  let a = +\n}\nlet b = 1";
+        let (stmts, errors) = parse_recovering(src);
+        assert_eq!(errors.len(), 1);
+        assert_eq!(stmts.len(), 2);
+        match &stmts[0] {
+            Stmt::FnDef { name, body, .. } => {
+                assert_eq!(name, "foo");
+                assert_eq!(body.len(), 1);
+                assert!(matches!(body[0], Stmt::Error(_)));
+            }
+            other => panic!("se esperaba Stmt::FnDef, recibió {:?}", other),
+        }
+        assert!(matches!(
+            stmts[1],
+            Stmt::Assign {
+                target: AssignTarget::Ident(ref n), ..
+            } if n == "b"
+        ));
+    }
+
+    #[test]
+    fn recovery_parse_strict_sigue_abortando_al_primer_error() {
+        // Garantía clave: `parse()` strict NO cambia su comportamiento.
+        // Sigue devolviendo `Err` al primer error. La CLI strict
+        // (`fitz run`/`build`/`check`) sigue funcionando igual.
+        let src = "let x = +\nlet y = 2";
+        let err = parse(tokenize(src).unwrap()).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 }

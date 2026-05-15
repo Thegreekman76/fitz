@@ -499,6 +499,10 @@ fn walk_stmt_for_state_refs(
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
+        // Fase 9.0.1 (F15): walkers estáticos del codegen ignoran
+        // Error nodes — la API strict que llama al codegen nunca los
+        // produce, pero defendemos contra panic si entran.
+        Stmt::Error(_) => {}
     }
 }
 
@@ -599,6 +603,8 @@ fn walk_expr_for_state_refs(
                 walk_stmt_for_state_refs(s, candidates, locals, refs);
             }
         }
+        // Fase 9.0.1 (F15): walker estático no-op para Error nodes.
+        Expr::Error(_) => {}
     }
 }
 
@@ -1156,6 +1162,9 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         Stmt::FnDef { .. } => "fn",
         Stmt::TypeDef { .. } => "type",
         Stmt::Import { .. } | Stmt::FromImport { .. } => "import",
+        // Fase 9.0.1 (F15): defensa contra Error nodes — no debería
+        // llegar acá porque `fitz build` usa `parse()` strict.
+        Stmt::Error(_) => "nodo error",
     }
 }
 
@@ -3384,6 +3393,13 @@ impl<'a> CodegenCtx<'a> {
             Stmt::Import { .. } | Stmt::FromImport { .. } => Err(self.err_at(stmt.span(),
                 "`import`: solo se admite a nivel top del programa, no adentro de fns u otros bloques",
             )),
+            // Fase 9.0.1 (F15): defensa contra Error nodes — `fitz
+            // build` usa `parse()` strict; este nodo solo aparece bajo
+            // `parse_with_recovery`. Si llegamos acá es un bug del
+            // compilador.
+            Stmt::Error(span) => Err(self.err_at(*span,
+                "nodo `Stmt::Error` en el AST — `fitz build` usa el parser strict, no debería verlo (bug del compilador, Fase 9.0.1)",
+            )),
         }
     }
 
@@ -3958,6 +3974,11 @@ impl<'a> CodegenCtx<'a> {
             // valor: `let f = fn(n) => ...`, `apply(fn(n) => ..., 7)`,
             // `return fn(y) => x + y`.
             Expr::FnExpr { params, body, span } => self.gen_fn_expr_as_value(params, body, *span),
+            // Fase 9.0.1 (F15): defensa — `fitz build` no debería ver
+            // `Expr::Error` (strict parser nunca lo produce).
+            Expr::Error(span) => Err(self.err_at(*span,
+                "nodo `Expr::Error` en el AST — `fitz build` usa el parser strict, no debería verlo (bug del compilador, Fase 9.0.1)",
+            )),
         }
     }
 
@@ -7360,6 +7381,8 @@ fn collect_captures_stmt(
         }
         Stmt::Break(_) | Stmt::Continue(_) => {}
         Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
+        // Fase 9.0.1 (F15): walker estático no-op.
+        Stmt::Error(_) => {}
     }
 }
 
@@ -7483,6 +7506,8 @@ fn collect_captures_expr(
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             collect_captures_expr(inner, params, locals, ctx, seen, out);
         }
+        // Fase 9.0.1 (F15): walker estático no-op.
+        Expr::Error(_) => {}
     }
 }
 

@@ -127,6 +127,26 @@ pub enum Expr {
     /// (checker). En 6.1 el evaluator y el codegen emiten un error
     /// explícito apuntando al sub-paso que lo completará.
     Await(Box<Expr>, Span),
+
+    /// Marcador de "acá había una expresión que no pudo parsearse".
+    /// Solo lo produce `parse_with_recovery` (Fase 9.0.1, F15); la API
+    /// strict `parse` nunca lo emite. El span apunta al token donde se
+    /// detectó el problema. Los errores reales van en la lista paralela
+    /// `Vec<FitzError>` que retorna `parse_with_recovery`; este nodo
+    /// existe solo para que el AST mantenga su forma estructural (un
+    /// cuerpo de fn con un stmt roto sigue siendo un `Vec<Stmt>` válido,
+    /// una llamada con un arg roto sigue siendo un `Call` con la
+    /// cantidad esperada de args). Checker, evaluator y codegen tratan
+    /// este nodo como silenciado: el checker no emite errores derivados
+    /// (sintetiza `Type::Any`), evaluator y codegen abortan con
+    /// `FitzError` defensivo (no panic) porque la CLI strict nunca
+    /// debería verlos.
+    ///
+    /// `#[allow(dead_code)]` porque en 9.0.1 solo se construye desde el
+    /// parser (a través de `Stmt::Error`); `Expr::Error` sub-stmt llega
+    /// con recovery sub-expression más adelante.
+    #[allow(dead_code)]
+    Error(Span),
 }
 
 impl Expr {
@@ -157,6 +177,7 @@ impl Expr {
             Expr::Err(_, s) => *s,
             Expr::Try(_, s) => *s,
             Expr::Await(_, s) => *s,
+            Expr::Error(s) => *s,
         }
     }
 }
@@ -364,6 +385,15 @@ pub enum Stmt {
         names: Vec<(String, Option<String>)>,
         span: Span,
     },
+
+    /// Marcador de "acá había una sentencia que no pudo parsearse".
+    /// Paralelo a `Expr::Error`: solo lo produce `parse_with_recovery`
+    /// (Fase 9.0.1, F15). El span apunta al token donde se detectó el
+    /// problema. Los detalles del error viven en la lista paralela
+    /// `Vec<FitzError>` que retorna `parse_with_recovery`. Esta variante
+    /// mantiene la forma del `Program`/cuerpo de bloque cuando hay
+    /// errores recuperados.
+    Error(Span),
 }
 
 impl Stmt {
@@ -386,6 +416,7 @@ impl Stmt {
             Stmt::For { span, .. } => *span,
             Stmt::Import { span, .. } => *span,
             Stmt::FromImport { span, .. } => *span,
+            Stmt::Error(span) => *span,
         }
     }
 }

@@ -1532,6 +1532,18 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             }
             Ok(Value::Null)
         }
+        // Fase 9.0.1 (F15): `Stmt::Error` solo lo produce
+        // `parse_with_recovery` (modo recovery del parser para tooling
+        // externo). La CLI strict (`fitz run`/`build`/`check`) usa
+        // `parse()`, que aborta al primer error de parser — nunca
+        // produce `Stmt::Error`. Defensa en profundidad: si llegamos
+        // acá es un bug del compilador, no del programa del usuario.
+        Stmt::Error(span) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            "nodo `Stmt::Error` en el AST — la CLI strict no debería producirlo (bug del compilador, Fase 9.0.1)",
+        ))),
     }
 }
 
@@ -2111,6 +2123,16 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 ))),
             }
         }
+
+        // Fase 9.0.1 (F15): paralelo a `Stmt::Error` — defensa contra
+        // un bug del compilador. La CLI strict nunca debería ver este
+        // nodo; solo `parse_with_recovery` lo produce.
+        Expr::Error(_) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            "nodo `Expr::Error` en el AST — la CLI strict no debería producirlo (bug del compilador, Fase 9.0.1)",
+        ))),
     }
 }
 
