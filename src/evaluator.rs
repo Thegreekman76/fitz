@@ -6918,6 +6918,20 @@ let r = match n {
     // Fase 8.1.4 — Expr::Call sobre Value::PyObject (criterio de éxito 8.1)
     // -------------------------------------------------------------------
 
+    // 8.3: helper para tests Python — un `call` exitoso ahora devuelve
+    // `Value::Result(Ok(v))`. Para asserts mecánicos, desempaquetamos
+    // el Ok aquí. Si el binding tiene Err o no es Result, el test falla.
+    #[cfg(feature = "python")]
+    fn ok_inner(v: Value) -> Value {
+        match v {
+            Value::Result(crate::value::ResultVariant::Ok(inner)) => *inner,
+            Value::Result(crate::value::ResultVariant::Err(msg)) => {
+                panic!("esperaba Ok(...), llegó Err({:?})", msg)
+            }
+            other => panic!("esperaba Value::Result, fue {:?}", other),
+        }
+    }
+
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn criterio_de_exito_8_1_math_sqrt_y_math_pi() {
@@ -6925,8 +6939,11 @@ let r = match n {
         //   from python import math
         //   print(math.sqrt(16.0))   // 4
         //   print(math.pi)           // 3.141592653589793
-        // En el test no podemos capturar stdout, pero validamos los
-        // valores intermedios en variables.
+        //
+        // 8.3: `math.sqrt(16.0)` ahora devuelve `Result<Float>`, así que
+        // el binding `r` es `Ok(4.0)` — el test desempaqueta con el
+        // helper. `math.pi` es field access (no llamada), sigue
+        // devolviendo Float directo.
         let src = "\
             from python import math\n\
             let r = math.sqrt(16.0)\n\
@@ -6934,7 +6951,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.lock().get("r"), Some(Value::Float(4.0)));
+        let r = env.lock().get("r").unwrap();
+        assert_eq!(ok_inner(r), Value::Float(4.0));
         let p = env.lock().get("p").unwrap();
         match p {
             Value::Float(f) => {
@@ -6951,12 +6969,13 @@ let r = match n {
         // El parser genera `Expr::Call { callee: Expr::Field {...} }`
         // que cae al dispatch de método, que para PyObject hace
         // getattr + invoke_value (rama nueva de 8.1.4).
+        // 8.3: el resultado viene envuelto en `Ok(Float)`.
         let src = "let x = 4 + 5\nfrom python import math\nlet r = math.sqrt(x * x + 7 * 7)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         // sqrt(81 + 49) = sqrt(130) ≈ 11.4018
         let r = env.lock().get("r").unwrap();
-        match r {
+        match ok_inner(r) {
             Value::Float(f) => {
                 assert!((f - 130_f64.sqrt()).abs() < 1e-12, "got {}", f);
             }
@@ -6970,6 +6989,7 @@ let r = match n {
         // `let f = math.sqrt; f(25.0)` — el callable se extrae primero
         // (field access) y se invoca via Ident. Esto pega en
         // `invoke_value` directo, no en `dispatch_method`.
+        // 8.3: el call vía Ident también envuelve en Result.
         let src = "\
             from python import math\n\
             let f = math.sqrt\n\
@@ -6977,46 +6997,59 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.lock().get("r"), Some(Value::Float(5.0)));
+        let r = env.lock().get("r").unwrap();
+        assert_eq!(ok_inner(r), Value::Float(5.0));
     }
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_con_excepcion_emite_fitz_error() {
-        // `math.sqrt(-1)` lanza ValueError en Python. En 8.1 abortamos
-        // con FitzError; el wrap a Result<T> llega en 8.3.
+    async fn call_python_con_excepcion_se_envuelve_en_err() {
+        // 8.3: `math.sqrt(-1)` lanza ValueError en Python. El call NO
+        // aborta — devuelve `Result<Float>::Err("ValueError: ...")` que
+        // el usuario tiene que manejar con `match` o `?`.
         let src = "from python import math\nlet r = math.sqrt(-1.0)\n";
-        let (_env, res) = parse_eval_into_env(src).await;
-        let err = res.unwrap_err();
-        assert!(
-            err.message.contains("ValueError"),
-            "mensaje: {}",
-            err.message,
-        );
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
+                Value::Str(s) => assert!(
+                    s.contains("ValueError"),
+                    "mensaje del Err debería citar ValueError, fue: {}",
+                    s,
+                ),
+                other => panic!("Err debería envolver Str, fue {:?}", other),
+            },
+            other => panic!("esperaba Err(...), fue {:?}", other),
+        }
     }
 
     // 8.2.1: List ahora SÍ se marshalla. El test reapunta a `math.sqrt`
     // recibiendo una `List<Int>` — Python lanza TypeError porque
-    // `sqrt` espera un número, no una lista. Validamos que el error
-    // que llega a Fitz es la excepción Python (no el guard de
-    // marshaling).
+    // `sqrt` espera un número. 8.3: el TypeError llega como
+    // `Result::Err`, no como abort del programa.
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_con_list_como_arg_pasa_y_python_lo_rechaza() {
+    async fn call_python_con_list_como_arg_envuelve_typeerror_en_err() {
         let src = "\
             from python import math\n\
             let xs = [1, 2, 3]\n\
             let r = math.sqrt(xs)\n\
         ";
-        let (_env, res) = parse_eval_into_env(src).await;
-        let err = res.unwrap_err();
-        // Python rechaza con TypeError (sqrt no acepta una list).
-        // El marshaling Fitz→Python sí completó; el error es del lado
-        // Python. En 8.3 esto se va a envolver en `Result<T>`.
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        let msg = match r {
+            Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
+                Value::Str(s) => s,
+                other => panic!("Err debería envolver Str, fue {:?}", other),
+            },
+            other => panic!("esperaba Err(...), fue {:?}", other),
+        };
         assert!(
-            err.message.contains("TypeError"),
+            msg.contains("TypeError"),
             "mensaje debería ser TypeError de Python, fue: {}",
-            err.message,
+            msg,
         );
     }
 
@@ -7030,12 +7063,14 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.lock().get("v"), Some(Value::Int(7)));
+        let v = env.lock().get("v").unwrap();
+        assert_eq!(ok_inner(v), Value::Int(7));
     }
 
     // -------------------------------------------------------------------
     // Fase 8.2.1 — Fitz → Python: List/Map/Instance se marshallan a
     // list/dict/dict end-to-end via json.dumps.
+    // 8.3: cada call envuelve en Result, los asserts desempaquetan Ok.
     // -------------------------------------------------------------------
 
     #[cfg(feature = "python")]
@@ -7048,7 +7083,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.lock().get("s"), Some(Value::Str("[1, 2, 3]".into())));
+        let s = env.lock().get("s").unwrap();
+        assert_eq!(ok_inner(s), Value::Str("[1, 2, 3]".into()));
     }
 
     #[cfg(feature = "python")]
@@ -7061,10 +7097,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(
-            env.lock().get("s"),
-            Some(Value::Str("{\"a\": 1, \"b\": 2}".into())),
-        );
+        let s = env.lock().get("s").unwrap();
+        assert_eq!(ok_inner(s), Value::Str("{\"a\": 1, \"b\": 2}".into()));
     }
 
     #[cfg(feature = "python")]
@@ -7079,10 +7113,8 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(
-            env.lock().get("s"),
-            Some(Value::Str("{\"id\": 1, \"name\": \"x\"}".into())),
-        );
+        let s = env.lock().get("s").unwrap();
+        assert_eq!(ok_inner(s), Value::Str("{\"id\": 1, \"name\": \"x\"}".into()));
     }
 
     #[cfg(feature = "python")]
@@ -7099,12 +7131,13 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
+        let s = env.lock().get("s").unwrap();
         assert_eq!(
-            env.lock().get("s"),
-            Some(Value::Str(
+            ok_inner(s),
+            Value::Str(
                 "[{\"id\": 1, \"email\": \"a@x.com\"}, \
                   {\"id\": 2, \"email\": \"b@x.com\"}]".into()
-            )),
+            ),
         );
     }
 
@@ -7122,9 +7155,10 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
+        let xs = env.lock().get("xs").unwrap();
         assert_eq!(
-            env.lock().get("xs"),
-            Some(Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])),
+            ok_inner(xs),
+            Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
         );
     }
 
@@ -7141,12 +7175,13 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
+        let m = env.lock().get("m").unwrap();
         assert_eq!(
-            env.lock().get("m"),
-            Some(Value::new_map(vec![
+            ok_inner(m),
+            Value::new_map(vec![
                 (Value::Str("a".into()), Value::Int(1)),
                 (Value::Str("b".into()), Value::Int(2)),
-            ])),
+            ]),
         );
     }
 
@@ -7154,11 +7189,16 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_round_trip_via_json_preserva_estructura() {
         // dumps + loads sobre una List anidada con Map adentro.
+        // 8.3: el round-trip natural ahora pasa el `Result` adentro.
+        // Para validar que vuelve la misma estructura, usamos `match`
+        // para desempaquetar ambos lados.
         let src = "\
             from python import json\n\
             let original = [{\"k\": 1}, {\"k\": 2}]\n\
-            let s = json.dumps(original)\n\
-            let back = json.loads(s)\n\
+            let s_res = json.dumps(original)\n\
+            let s = match s_res { Ok(v) => v, Err(_) => \"\" }\n\
+            let back_res = json.loads(s)\n\
+            let back = match back_res { Ok(v) => v, Err(_) => [] }\n\
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -7195,15 +7235,17 @@ let r = match n {
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        // Python 3.7+: Counter preserva orden de inserción.
+        // 8.3: `counts` ahora es `Ok(Map)` (call envuelto). Desempaquetamos
+        // y validamos el orden de inserción del Counter (CPython 3.7+).
         // `alice` aparece primero en `users` así que entra primero al
         // Counter; `bob` después.
+        let counts = env.lock().get("counts").unwrap();
         assert_eq!(
-            env.lock().get("counts"),
-            Some(Value::new_map(vec![
+            ok_inner(counts),
+            Value::new_map(vec![
                 (Value::Str("alice@x.com".into()), Value::Int(2)),
                 (Value::Str("bob@x.com".into()), Value::Int(1)),
-            ])),
+            ]),
         );
     }
 
@@ -7255,6 +7297,8 @@ let r = match n {
         //                    → Counter Python (Map<Str, Int>)
         //                    → ordenar las keys con builtins
         //                    → resultado iterable desde Fitz.
+        // 8.3: usamos `match` para desempaquetar el Counter antes de
+        // indexar. Es el patrón canónico que el usuario va a escribir.
         let src = "\
             type User { id: Int, email: Str }\n\
             from python import collections\n\
@@ -7265,7 +7309,8 @@ let r = match n {
                 User { id: 3, email: \"a@x.com\" },\n\
                 User { id: 4, email: \"c@x.com\" },\n\
             ]\n\
-            let counts = collections.Counter(users.map(fn(u) => u.email))\n\
+            let counts_res = collections.Counter(users.map(fn(u) => u.email))\n\
+            let counts = match counts_res { Ok(v) => v, Err(_) => {} }\n\
             let total = counts[\"a@x.com\"] + counts[\"b@x.com\"] + counts[\"c@x.com\"]\n\
         ";
         let (env, res) = parse_eval_into_env(src).await;
@@ -7279,10 +7324,11 @@ let r = match n {
         // Devuelve un dict de Python y lo accede con indexing Fitz —
         // exactamente el patrón de uso típico. Llaves del JSON escapadas
         // con `\{` / `\}` para que el lexer Fitz no las trate como
-        // interpolación.
+        // interpolación. 8.3: desempaquetamos con `match` antes de indexar.
         let src = "\
             from python import json\n\
-            let m = json.loads(\"\\{\\\"a\\\": 10, \\\"b\\\": 20\\}\")\n\
+            let m_res = json.loads(\"\\{\\\"a\\\": 10, \\\"b\\\": 20\\}\")\n\
+            let m = match m_res { Ok(v) => v, Err(_) => {} }\n\
             let total = m[\"a\"] + m[\"b\"]\n\
         ";
         let (env, res) = parse_eval_into_env(src).await;
@@ -7292,34 +7338,136 @@ let r = match n {
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn marshalling_arg_no_marshalleable_cita_path() {
-        // Range adentro de List → error con path "arg0[1]".
+    async fn marshalling_arg_no_marshalleable_se_envuelve_en_err_con_path() {
+        // 8.3: Range adentro de List ahora produce `Result::Err(Str)`
+        // con path "arg0[1]" en el mensaje, no FitzError que aborta.
         let src = "\
             from python import json\n\
             let xs = [1, 0..5, 3]\n\
             let s = json.dumps(xs)\n\
         ";
-        let (_env, res) = parse_eval_into_env(src).await;
-        let err = res.unwrap_err();
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let s = env.lock().get("s").unwrap();
+        let msg = match s {
+            Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
+                Value::Str(s) => s,
+                other => panic!("Err debería envolver Str, fue {:?}", other),
+            },
+            other => panic!("esperaba Err(...), fue {:?}", other),
+        };
         assert!(
-            err.message.contains("arg0[1]") && err.message.contains("Range"),
+            msg.contains("arg0[1]") && msg.contains("Range"),
             "msg: {}",
-            err.message,
+            msg,
         );
     }
 
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn call_python_chained_field_y_call() {
-        // `json.dumps` con string vacío como input → '""'. Esto valida
-        // chaining completo: field access + call + return como Str.
+        // `json.dumps` con string Fitz → JSON con comillas dobles
+        // adentro. 8.3: el return ahora viene envuelto en Ok.
         let src = "\
             from python import json\n\
             let s = json.dumps(\"hola\")\n\
         ";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(env.lock().get("s"), Some(Value::Str("\"hola\"".into())));
+        let s = env.lock().get("s").unwrap();
+        assert_eq!(ok_inner(s), Value::Str("\"hola\"".into()));
+    }
+
+    // -------------------------------------------------------------------
+    // Fase 8.3 — Excepciones Python → Result<T>: criterio del roadmap
+    // y patrones canónicos (match, `?`).
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_3_json_loads_malformado_con_match() {
+        // Reproduce textualmente el ejemplo del roadmap:
+        //   match parse("{ malformado") {
+        //     Ok(m)  => ...,
+        //     Err(e) => "error: <ClassName>: <message>",
+        //   }
+        // El `{` del JSON malformado se escapa con `\{` para que el
+        // lexer Fitz no lo trate como inicio de interpolación.
+        let src = "\
+            from python import json\n\
+            let r = json.loads(\"\\{ malformado\")\n\
+            let outcome = match r {\n\
+                Ok(_) => \"ok\",\n\
+                Err(e) => e,\n\
+            }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let outcome = env.lock().get("outcome").unwrap();
+        match outcome {
+            Value::Str(s) => {
+                assert!(
+                    s.contains("JSONDecodeError"),
+                    "mensaje del Err debería citar JSONDecodeError, fue: {}",
+                    s,
+                );
+            }
+            other => panic!("esperaba Str, fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_3_propagacion_con_try_operator() {
+        // Operador `?` adentro de una fn que retorna `Result<T>`
+        // propaga el Err Python al caller con el mismo mensaje.
+        // En éxito desempaqueta el Ok.
+        let src = "\
+            from python import math\n\
+            fn root(x: Float) -> Result<Float> {\n\
+                return Ok(math.sqrt(x)?)\n\
+            }\n\
+            let r = root(16.0)\n\
+            let bad = root(-1.0)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        assert_eq!(ok_inner(r), Value::Float(4.0));
+        let bad = env.lock().get("bad").unwrap();
+        match bad {
+            Value::Result(crate::value::ResultVariant::Err(inner)) => match *inner {
+                Value::Str(s) => assert!(
+                    s.contains("ValueError"),
+                    "propagación con `?` debería preservar el mensaje, fue: {}",
+                    s,
+                ),
+                other => panic!("Err debería envolver Str, fue {:?}", other),
+            },
+            other => panic!("esperaba Err(...) propagado por `?`, fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_3_field_access_no_se_envuelve() {
+        // Decisión interna: solo `call` envuelve en `Result`; field
+        // access (`math.pi`, `obj.attr`) sigue devolviendo el valor
+        // coercionado directo. Eso preserva la ergonomía de leer
+        // constantes y submódulos sin `match` por cada acceso.
+        let src = "\
+            from python import math\n\
+            let p = math.pi\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let p = env.lock().get("p").unwrap();
+        // `p` es Float directo, NO Result<Float>.
+        assert!(
+            matches!(p, Value::Float(_)),
+            "field access NO debería envolver en Result, fue {:?}",
+            p,
+        );
     }
 
     #[cfg(feature = "python")]

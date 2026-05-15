@@ -24,7 +24,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
-use crate::value::{PyObjectHandle, Value};
+use crate::value::{PyObjectHandle, ResultVariant, Value};
 
 /// Importa un módulo Python dado su path "punteado" (`"math"`,
 /// `"sqlalchemy.orm"`, etc.) y lo devuelve envuelto en `Value::PyObject`.
@@ -85,37 +85,75 @@ pub fn get_attr(handle: &PyObjectHandle, name: &str) -> FitzResult<Value> {
     })
 }
 
-/// Fase 8.1.4 — invocar un PyObject callable (función, método, clase)
-/// con args ya evaluados a `Value` Fitz. Toma el GIL una sola vez,
-/// convierte los args via `value_to_py`, invoca, y baja el return a
-/// `Value` via `py_to_value`. Sobre la convención de errores: cualquier
-/// excepción Python (TypeError, ValueError, etc.) se traduce al
-/// `FitzError` con "<ClassName>: <message>" como mensaje — el wrap a
-/// `Result<T>` llega en 8.3.
+/// Fase 8.3 — invocar un PyObject callable (función, método, clase)
+/// con args ya evaluados a `Value` Fitz. **Toda llamada Python desde
+/// Fitz se envuelve automáticamente en `Result<T>`**: éxito produce
+/// `Value::Result(Ok(v))` con el valor coercionado adentro; cualquier
+/// falla del path Python (excepción Python, marshaling de args
+/// imposible, etc.) produce `Value::Result(Err(Str("<ClassName>:
+/// <message>")))` sin abortar el programa.
+///
+/// Esta convención preserva el modelo de errores de Fitz (sin
+/// excepciones): el usuario es forzado a manejar la falla con
+/// `match` o el operador `?`, igual que con `find`/`get`/`json.loads`
+/// nativos. Excepciones Python ya no se cuelan como panics opacos.
+///
+/// El path de la firma `FitzResult<Value>` se mantiene solo para
+/// errores catastróficos del propio runtime de Fitz (que no han
+/// aparecido en la práctica); en el flujo normal devolvemos
+/// `Ok(Value::Result(...))` siempre.
+///
+/// **Errores cubiertos por el `Result::Err`**:
+///   - Excepción Python lanzada por el callable (ValueError,
+///     TypeError, etc.) — incluyendo KeyboardInterrupt/SystemExit
+///     según roadmap (no hay forma de matar el runtime Fitz desde
+///     una excepción Python).
+///   - Marshaling de args fallido (tipo Fitz no representable en
+///     Python — Range/Function/Type/Module/etc. con breadcrumb
+///     informativo via `path`).
+///   - Marshaling del return fallido (raro: int Python > i64).
+///   - Construcción de la tupla de args (defensive — debería ser
+///     infalible en práctica).
 pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
     Python::attach(|py| {
         let bound = handle.0.bind(py);
-        // Convertir cada arg Fitz → PyObject. Si alguno no es
-        // marshallable, cortamos con error explícito antes de tocar
-        // Python. El `path` arranca como `arg<i>` para que errores
-        // adentro de tipos compuestos (List/Map/Instance) lleven
-        // breadcrumb informativo: ej. `arg0.users[2].email` apunta
-        // al campo concreto donde algo no se pudo marshallar.
-        let py_args: Vec<Py<PyAny>> = args
+        // Convertir cada arg Fitz → PyObject. Errores de marshaling
+        // (Range/Function/etc., o keys no hashables) se envuelven en
+        // `Result::Err` con el mensaje del FitzError. Esto unifica
+        // todo el path: el usuario ve UN solo punto de error
+        // (`?` o `match`) independiente de qué falló.
+        let py_args_result: FitzResult<Vec<Py<PyAny>>> = args
             .iter()
             .enumerate()
             .map(|(i, v)| value_to_py(py, v, &format!("arg{}", i)))
-            .collect::<FitzResult<Vec<_>>>()?;
+            .collect();
+        let py_args = match py_args_result {
+            Ok(v) => v,
+            Err(e) => return Ok(err_value_from_message(e.message)),
+        };
         // `call1` toma una tupla posicional sin kwargs. Es el caso típico
         // de `math.sqrt(16.0)` y `os.path.join("a", "b")`. Kwargs llega
         // como deuda menor cuando entre demanda real.
-        let args_tuple = pyo3::types::PyTuple::new(py, py_args)
-            .map_err(|e| py_err_to_fitz(py, e))?;
+        let args_tuple = match pyo3::types::PyTuple::new(py, py_args) {
+            Ok(t) => t,
+            Err(e) => return Ok(err_value_from_message(py_err_to_fitz(py, e).message)),
+        };
         match bound.call1(args_tuple) {
-            Ok(ret) => py_to_value(py, &ret),
-            Err(err) => Err(py_err_to_fitz(py, err)),
+            Ok(ret) => match py_to_value(py, &ret) {
+                Ok(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v)))),
+                Err(e) => Ok(err_value_from_message(e.message)),
+            },
+            Err(err) => Ok(err_value_from_message(py_err_to_fitz(py, err).message)),
         }
     })
+}
+
+/// Helper para construir el `Value::Result(Err(Str(msg)))` que envuelve
+/// los errores de una llamada Python. El `msg` ya viene con formato
+/// `"<ClassName>: <message>"` desde `py_err_to_fitz` (excepciones
+/// Python) o desde el `FitzError.message` de los marshaling fallos.
+fn err_value_from_message(msg: String) -> Value {
+    Value::Result(ResultVariant::Err(Box::new(Value::Str(msg))))
 }
 
 /// Convierte un `Value` Fitz a un `Py<PyAny>` para pasarlo a Python.
@@ -474,6 +512,37 @@ mod tests {
         }
     }
 
+    /// Helper post-8.3: el `call` ahora envuelve siempre en `Result`.
+    /// Para tests del happy path, desempaquetamos `Ok(inner)` y devolvemos
+    /// el `Value` adentro. Si llega `Err(...)`, el test falla con el
+    /// mensaje (útil para debugging cuando algo cambia inesperadamente).
+    fn ok_inner(v: Value) -> Value {
+        match v {
+            Value::Result(ResultVariant::Ok(inner)) => *inner,
+            Value::Result(ResultVariant::Err(msg)) => {
+                panic!("esperaba Ok(...), llegó Err({:?})", msg)
+            }
+            other => panic!("esperaba Value::Result, fue {:?}", other),
+        }
+    }
+
+    /// Helper post-8.3: extrae el mensaje de `Err(Str(...))` que produce
+    /// un call Python fallido. Si el `Value` no es `Result::Err(Str)`,
+    /// el test falla — útil para chequear el formato `"<Class>: <msg>"`
+    /// sin asumir el shape.
+    fn err_message(v: Value) -> String {
+        match v {
+            Value::Result(ResultVariant::Err(inner)) => match *inner {
+                Value::Str(s) => s,
+                other => panic!("Err debería envolver Str, fue {:?}", other),
+            },
+            Value::Result(ResultVariant::Ok(inner)) => {
+                panic!("esperaba Err(...), llegó Ok({:?})", inner)
+            }
+            other => panic!("esperaba Value::Result, fue {:?}", other),
+        }
+    }
+
     #[test]
     fn get_attr_math_pi_es_float() {
         let math = handle_of(import_module("math").unwrap());
@@ -557,7 +626,7 @@ mod tests {
     fn call_math_sqrt_16_da_float_4() {
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
-        let v = call(&sqrt, &[Value::Float(16.0)]).expect("sqrt(16.0) ok");
+        let v = ok_inner(call(&sqrt, &[Value::Float(16.0)]).unwrap());
         assert_eq!(v, Value::Float(4.0));
     }
 
@@ -565,7 +634,7 @@ mod tests {
     fn call_math_floor_arg_float_da_int() {
         let math = handle_of(import_module("math").unwrap());
         let floor = handle_of(get_attr(&math, "floor").unwrap());
-        let v = call(&floor, &[Value::Float(3.7)]).expect("floor ok");
+        let v = ok_inner(call(&floor, &[Value::Float(3.7)]).unwrap());
         assert_eq!(v, Value::Int(3));
     }
 
@@ -576,7 +645,7 @@ mod tests {
         let builtins = handle_of(import_module("builtins").unwrap());
         let str_cls = handle_of(get_attr(&builtins, "str").unwrap());
         let upper = handle_of(get_attr(&str_cls, "upper").unwrap());
-        let v = call(&upper, &[Value::Str("hola".into())]).expect("str.upper ok");
+        let v = ok_inner(call(&upper, &[Value::Str("hola".into())]).unwrap());
         assert_eq!(v, Value::Str("HOLA".into()));
     }
 
@@ -585,7 +654,7 @@ mod tests {
         // `abs(-7)` debería darnos `7`. Validamos que Int → int Python.
         let builtins = handle_of(import_module("builtins").unwrap());
         let abs_fn = handle_of(get_attr(&builtins, "abs").unwrap());
-        let v = call(&abs_fn, &[Value::Int(-7)]).expect("abs(-7) ok");
+        let v = ok_inner(call(&abs_fn, &[Value::Int(-7)]).unwrap());
         assert_eq!(v, Value::Int(7));
     }
 
@@ -595,7 +664,7 @@ mod tests {
         // → 1. Confirmamos que el Bool va como Python bool, no como int.
         let builtins = handle_of(import_module("builtins").unwrap());
         let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
-        let v = call(&int_cls, &[Value::Bool(true)]).expect("int(True) ok");
+        let v = ok_inner(call(&int_cls, &[Value::Bool(true)]).unwrap());
         assert_eq!(v, Value::Int(1));
     }
 
@@ -604,40 +673,40 @@ mod tests {
         // `str(None)` da "None". Verifica que Null → Python None.
         let builtins = handle_of(import_module("builtins").unwrap());
         let str_cls = handle_of(get_attr(&builtins, "str").unwrap());
-        let v = call(&str_cls, &[Value::Null]).expect("str(None) ok");
+        let v = ok_inner(call(&str_cls, &[Value::Null]).unwrap());
         assert_eq!(v, Value::Str("None".into()));
     }
 
     #[test]
-    fn call_excepcion_python_se_traduce_a_fitz_error() {
-        // `math.sqrt(-1)` lanza ValueError en Python. Verificamos que el
-        // mensaje del FitzError tiene formato "<ClassName>: <message>".
+    fn call_excepcion_python_envuelve_en_result_err() {
+        // 8.3: `math.sqrt(-1)` lanza ValueError en Python. El call no
+        // aborta — devuelve `Value::Result(Err(Str("ValueError: ...")))`.
+        // El usuario tiene que manejarlo con `match` o `?`.
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
-        let err = call(&sqrt, &[Value::Float(-1.0)]).expect_err("sqrt(-1) debería fallar");
+        let v = call(&sqrt, &[Value::Float(-1.0)]).unwrap();
+        let msg = err_message(v);
         assert!(
-            err.message.contains("ValueError"),
+            msg.contains("ValueError"),
             "mensaje debería citar ValueError, fue: {}",
-            err.message,
+            msg,
         );
     }
 
     #[test]
-    fn call_arg_no_marshalleable_es_error_con_path() {
-        // Range no es marshalleable (no tiene contraparte natural en
-        // Python — Python `range` no es lo mismo semánticamente, y el
-        // roadmap lo lista explícitamente como no marshalleable).
-        // 8.2.1: List/Map/Instance ahora SÍ se marshallan; este test
-        // se reapuntó a Range. El mensaje cita el path "arg0" para
-        // que el usuario sepa qué arg falló.
+    fn call_arg_no_marshalleable_envuelve_en_result_err() {
+        // 8.3: Range no es marshalleable. En vez de abortar con
+        // FitzError, el error se envuelve en `Result::Err(Str(...))`
+        // — uniformidad: TODO error del path call se ve como `Err` para
+        // el usuario, sea excepción Python o marshaling fail.
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
-        let err = call(&sqrt, &[Value::Range { start: 0, end: 10 }])
-            .expect_err("Range no debería marshallarse");
+        let v = call(&sqrt, &[Value::Range { start: 0, end: 10 }]).unwrap();
+        let msg = err_message(v);
         assert!(
-            err.message.contains("Range") && err.message.contains("arg0"),
+            msg.contains("Range") && msg.contains("arg0"),
             "mensaje debería citar Range + arg0, fue: {}",
-            err.message,
+            msg,
         );
     }
 
@@ -649,8 +718,8 @@ mod tests {
         let id_fn = handle_of(get_attr(&builtins, "id").unwrap());
         let math = import_module("math").unwrap();
         // Mismo objeto pasado dos veces: `id` debe devolver el mismo Int.
-        let id1 = call(&id_fn, std::slice::from_ref(&math)).unwrap();
-        let id2 = call(&id_fn, &[math]).unwrap();
+        let id1 = ok_inner(call(&id_fn, std::slice::from_ref(&math)).unwrap());
+        let id2 = ok_inner(call(&id_fn, &[math]).unwrap());
         assert_eq!(id1, id2);
     }
 
@@ -666,7 +735,7 @@ mod tests {
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
-        let v = call(&dumps, &[list]).expect("dumps([1,2,3]) ok");
+        let v = ok_inner(call(&dumps, &[list]).unwrap());
         assert_eq!(v, Value::Str("[1, 2, 3]".into()));
     }
 
@@ -675,7 +744,7 @@ mod tests {
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![]);
-        let v = call(&dumps, &[list]).unwrap();
+        let v = ok_inner(call(&dumps, &[list]).unwrap());
         assert_eq!(v, Value::Str("[]".into()));
     }
 
@@ -689,7 +758,7 @@ mod tests {
             Value::Str("dos".into()),
             Value::Bool(true),
         ]);
-        let v = call(&dumps, &[list]).unwrap();
+        let v = ok_inner(call(&dumps, &[list]).unwrap());
         // JSON serializa true como `true`. Confirma que Bool Fitz
         // cruza como bool Python (no como int).
         assert_eq!(v, Value::Str("[1, \"dos\", true]".into()));
@@ -701,7 +770,7 @@ mod tests {
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let inner = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
         let outer = Value::new_list(vec![inner, Value::new_list(vec![Value::Int(3)])]);
-        let v = call(&dumps, &[outer]).unwrap();
+        let v = ok_inner(call(&dumps, &[outer]).unwrap());
         assert_eq!(v, Value::Str("[[1, 2], [3]]".into()));
     }
 
@@ -717,25 +786,24 @@ mod tests {
             (Value::Str("a".into()), Value::Int(1)),
             (Value::Str("b".into()), Value::Int(2)),
         ]);
-        let v = call(&dumps, &[map]).unwrap();
+        let v = ok_inner(call(&dumps, &[map]).unwrap());
         assert_eq!(v, Value::Str("{\"a\": 1, \"b\": 2}".into()));
     }
 
     #[test]
     fn map_con_keys_no_hashables_es_error_con_path() {
-        // List como key → error claro citando que solo primitivos
-        // son hashables en Python.
+        // 8.3: List como key → `Result::Err(Str)` con mensaje que cita
+        // el path "arg0" y la restricción "hashable".
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let bad_key = Value::new_list(vec![Value::Int(1)]);
         let map = Value::new_map(vec![(bad_key, Value::Int(42))]);
-        let err = call(&dumps, &[map]).expect_err("List como key debe fallar");
+        let v = call(&dumps, &[map]).unwrap();
+        let msg = err_message(v);
         assert!(
-            err.message.contains("hashable")
-                && err.message.contains("List")
-                && err.message.contains("arg0"),
+            msg.contains("hashable") && msg.contains("List") && msg.contains("arg0"),
             "msg: {}",
-            err.message,
+            msg,
         );
     }
 
@@ -754,7 +822,7 @@ mod tests {
                 ("name".to_string(), Value::Str("x".into())),
             ],
         );
-        let v = call(&dumps, &[user]).unwrap();
+        let v = ok_inner(call(&dumps, &[user]).unwrap());
         assert_eq!(v, Value::Str("{\"id\": 1, \"name\": \"x\"}".into()));
     }
 
@@ -780,7 +848,7 @@ mod tests {
                 ],
             ),
         ]);
-        let v = call(&dumps, &[users]).unwrap();
+        let v = ok_inner(call(&dumps, &[users]).unwrap());
         assert_eq!(
             v,
             Value::Str(
@@ -795,13 +863,14 @@ mod tests {
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![Value::Int(1), Value::Null, Value::Int(3)]);
-        let v = call(&dumps, &[list]).unwrap();
+        let v = ok_inner(call(&dumps, &[list]).unwrap());
         assert_eq!(v, Value::Str("[1, null, 3]".into()));
     }
 
     #[test]
     fn elemento_no_marshalleable_en_list_es_error_con_path() {
-        // Range adentro de una list → error con path "arg0[1]".
+        // 8.3: Range adentro de list → `Result::Err(Str)` con path
+        // "arg0[1]" en el mensaje.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let list = Value::new_list(vec![
@@ -809,11 +878,12 @@ mod tests {
             Value::Range { start: 0, end: 10 },
             Value::Int(3),
         ]);
-        let err = call(&dumps, &[list]).expect_err("Range adentro debe fallar");
+        let v = call(&dumps, &[list]).unwrap();
+        let msg = err_message(v);
         assert!(
-            err.message.contains("arg0[1]") && err.message.contains("Range"),
+            msg.contains("arg0[1]") && msg.contains("Range"),
             "msg: {}",
-            err.message,
+            msg,
         );
     }
 
@@ -825,7 +895,7 @@ mod tests {
     fn json_loads_de_array_devuelve_list() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = call(&loads, &[Value::Str("[1, 2, 3]".into())]).unwrap();
+        let v = ok_inner(call(&loads, &[Value::Str("[1, 2, 3]".into())]).unwrap());
         assert_eq!(
             v,
             Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
@@ -836,7 +906,7 @@ mod tests {
     fn json_loads_de_array_vacio_devuelve_list_vacia() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = call(&loads, &[Value::Str("[]".into())]).unwrap();
+        let v = ok_inner(call(&loads, &[Value::Str("[]".into())]).unwrap());
         assert_eq!(v, Value::new_list(vec![]));
     }
 
@@ -844,7 +914,9 @@ mod tests {
     fn json_loads_de_objeto_devuelve_map_con_orden_de_insercion() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap();
+        let v = ok_inner(
+            call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap()
+        );
         // Python 3.7+ garantiza orden de inserción para dict;
         // verificamos que llega en el orden serializado del JSON.
         assert_eq!(
@@ -860,7 +932,9 @@ mod tests {
     fn json_loads_de_array_heterogeneo() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = call(&loads, &[Value::Str("[1, \"dos\", true, null]".into())]).unwrap();
+        let v = ok_inner(
+            call(&loads, &[Value::Str("[1, \"dos\", true, null]".into())]).unwrap()
+        );
         assert_eq!(
             v,
             Value::new_list(vec![
@@ -876,7 +950,9 @@ mod tests {
     fn json_loads_de_array_anidado() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = call(&loads, &[Value::Str("[[1, 2], [3, 4]]".into())]).unwrap();
+        let v = ok_inner(
+            call(&loads, &[Value::Str("[[1, 2], [3, 4]]".into())]).unwrap()
+        );
         assert_eq!(
             v,
             Value::new_list(vec![
@@ -890,9 +966,9 @@ mod tests {
     fn json_loads_de_dict_de_dict() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = call(&loads, &[Value::Str(
+        let v = ok_inner(call(&loads, &[Value::Str(
             "{\"user\": {\"id\": 1, \"name\": \"x\"}}".into()
-        )]).unwrap();
+        )]).unwrap());
         assert_eq!(
             v,
             Value::new_map(vec![(
@@ -908,6 +984,8 @@ mod tests {
     #[test]
     fn round_trip_list_via_json() {
         // dumps + loads → la lista debería volver igual.
+        // 8.3: cada call envuelve en Ok, así que tenemos que
+        // desempaquetar el `s` antes de pasarlo al siguiente call.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
@@ -917,8 +995,8 @@ mod tests {
             Value::Bool(false),
             Value::Null,
         ]);
-        let s = call(&dumps, std::slice::from_ref(&original)).unwrap();
-        let back = call(&loads, std::slice::from_ref(&s)).unwrap();
+        let s = ok_inner(call(&dumps, std::slice::from_ref(&original)).unwrap());
+        let back = ok_inner(call(&loads, std::slice::from_ref(&s)).unwrap());
         assert_eq!(back, original);
     }
 
@@ -929,7 +1007,7 @@ mod tests {
         // dispatch sobre PyList funciona aunque venga de cualquier API.
         let builtins = handle_of(import_module("builtins").unwrap());
         let list_cls = handle_of(get_attr(&builtins, "list").unwrap());
-        let v = call(&list_cls, &[Value::Str("abc".into())]).unwrap();
+        let v = ok_inner(call(&list_cls, &[Value::Str("abc".into())]).unwrap());
         assert_eq!(
             v,
             Value::new_list(vec![
@@ -949,8 +1027,8 @@ mod tests {
         let zip_fn = handle_of(get_attr(&builtins, "zip").unwrap());
         let keys = Value::new_list(vec![Value::Str("a".into()), Value::Str("b".into())]);
         let vals = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
-        let zipped = call(&zip_fn, &[keys, vals]).unwrap();
-        let v = call(&dict_cls, &[zipped]).unwrap();
+        let zipped = ok_inner(call(&zip_fn, &[keys, vals]).unwrap());
+        let v = ok_inner(call(&dict_cls, &[zipped]).unwrap());
         assert_eq!(
             v,
             Value::new_map(vec![
@@ -962,8 +1040,8 @@ mod tests {
 
     #[test]
     fn campo_no_marshalleable_en_instance_es_error_con_path() {
-        // Range como valor de un field → error con path
-        // "arg0.User.<field>" o similar.
+        // 8.3: Range como valor de un field → `Result::Err(Str)` con
+        // path "arg0.User.<field>" o similar.
         let json = handle_of(import_module("json").unwrap());
         let dumps = handle_of(get_attr(&json, "dumps").unwrap());
         let user = Value::new_instance(
@@ -973,13 +1051,84 @@ mod tests {
                 ("range".to_string(), Value::Range { start: 0, end: 5 }),
             ],
         );
-        let err = call(&dumps, &[user]).expect_err("Range como field debe fallar");
+        let v = call(&dumps, &[user]).unwrap();
+        let msg = err_message(v);
         assert!(
-            err.message.contains("Range")
-                && err.message.contains("range")  // el field se llama "range"
-                && err.message.contains("arg0"),
+            msg.contains("Range")
+                && msg.contains("range")  // el field se llama "range"
+                && msg.contains("arg0"),
             "msg: {}",
-            err.message,
+            msg,
         );
+    }
+
+    // -------------------------------------------------------------------
+    // 8.3 — Wrap automático en Result<T> + formato de error
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn call_exitoso_devuelve_value_result_ok() {
+        // Validación explícita del shape: el `Value` que devuelve `call`
+        // siempre es `Value::Result(Ok(...))` para éxito (no
+        // `Value::Float` directo). Confirma el invariante del 8.3.
+        let math = handle_of(import_module("math").unwrap());
+        let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
+        let v = call(&sqrt, &[Value::Float(16.0)]).unwrap();
+        assert!(
+            matches!(v, Value::Result(ResultVariant::Ok(_))),
+            "esperaba Value::Result(Ok(...)), fue {:?}",
+            v,
+        );
+    }
+
+    #[test]
+    fn call_jsonloads_malformado_es_err_con_jsondecodeerror() {
+        // Criterio textual del roadmap 8.3:
+        //   match parse("{ malformado") {
+        //     Ok(m)  => print("ok: {m}"),
+        //     Err(e) => print("error: {e}")
+        //   }
+        // → "error: JSONDecodeError: Expecting ..."
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str("{ malformado".into())]).unwrap();
+        let msg = err_message(v);
+        assert!(
+            msg.contains("JSONDecodeError"),
+            "mensaje del Err debería citar JSONDecodeError, fue: {}",
+            msg,
+        );
+    }
+
+    #[test]
+    fn call_typeerror_python_se_envuelve_no_aborta() {
+        // `int("no es un número")` lanza ValueError. El call no
+        // aborta — el Err contiene el mensaje legible.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
+        let v = call(&int_cls, &[Value::Str("no es un número".into())]).unwrap();
+        let msg = err_message(v);
+        assert!(
+            msg.starts_with("ValueError:"),
+            "mensaje debería empezar con `ValueError:`, fue: {}",
+            msg,
+        );
+    }
+
+    #[test]
+    fn call_formato_err_es_classname_dos_puntos_message() {
+        // El formato canónico `<ClassName>: <message>` queda estable
+        // bit-a-bit entre 8.1 y 8.3 (solo cambia el envoltorio:
+        // FitzError → Value::Result(Err(Str))). Tests futuros que
+        // dependan del formato exacto se apoyan en esto.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
+        let v = call(&int_cls, &[Value::Str("zz".into())]).unwrap();
+        let msg = err_message(v);
+        // Forma esperada: "ValueError: invalid literal for int() with base 10: 'zz'"
+        let parts: Vec<&str> = msg.splitn(2, ": ").collect();
+        assert_eq!(parts.len(), 2, "esperaba `<ClassName>: <message>`, fue: {}", msg);
+        assert_eq!(parts[0], "ValueError");
+        assert!(!parts[1].is_empty(), "message body vacío");
     }
 }
