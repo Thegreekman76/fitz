@@ -604,24 +604,12 @@ fn async_fn_con_sleep_compilable_y_correcta() {
     assert_eq!(stdout.trim(), "async ok");
 }
 
-#[test]
-fn build_aborta_sobre_from_python_import_con_mensaje_claro() {
-    // Fase 8.1.5 — el codegen rechaza `from python import` con sugerencia
-    // explícita de usar `fitz run --features python` mientras la versión
-    // build no esté lista (deuda comprometida para sub-paso posterior).
-    // Este test corre con o sin la feature: `fitz build` siempre rechaza
-    // hoy, independiente de cómo se compiló el binario `fitz` mismo.
-    let stderr = build_expect_fail(
-        "py-import-aborta-build",
-        "from python import math\nlet r = 1\n",
-    );
-    assert!(
-        stderr.contains("from python import")
-            && stderr.contains("fitz run"),
-        "esperaba mensaje sobre `from python import` + sugerencia `fitz run`, fue: {}",
-        stderr
-    );
-}
+// Fase 8.7.1 — el viejo test `build_aborta_sobre_from_python_import`
+// (8.1.5) quedó obsoleto: `fitz build` ahora acepta `from python
+// import` y emite código Rust con pyo3 linkeado. El test nuevo
+// (`build_python_import_math_extrae_pi`) vive bajo
+// `#[cfg(feature = "python")]` más abajo, validando el caso real con
+// ejecución del binario.
 
 #[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
@@ -2342,4 +2330,45 @@ fn http_query_param_parse_error_es_400() {
         "body debería mencionar el query param, fue: {}",
         body
     );
+}
+
+// ---------------------------------------------------------------------
+// Fase 8.7.1 — codegen interop Python (F19 parcial)
+// ---------------------------------------------------------------------
+//
+// Gated por `#[cfg(feature = "python")]` porque el binario generado
+// linkea pyo3, lo cual exige Python disponible al build time +
+// runtime. Para correr: `cargo test --features python --test
+// compile_e2e fase_8_7_1`.
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_1_build_python_import_math_extrae_pi() {
+    // Criterio mínimo 8.7.1: el codegen acepta `from python import
+    // math`, compila a binario nativo standalone (con pyo3 linkeado),
+    // el binario corre y produce el output esperado bit-a-bit con
+    // `fitz run`. Validamos extracción primitiva PyAny → Float via
+    // anotación destino en el `let pi: Float = math.pi`.
+    let src = "from python import math\n\
+               let pi: Float = math.pi\n\
+               print(\"pi = {pi}\")\n";
+    let (stdout, exit) = build_and_run("fase_8_7_1_math_pi", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    // `print` con Float usa __fitz_fmt_float que matchea el repr
+    // canónico de Python para floats con fracción no trivial.
+    assert_eq!(stdout.trim(), "pi = 3.141592653589793");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_1_build_python_import_sin_anotacion_es_opaco() {
+    // Sin anotación destino, `let m = math.pi` queda como
+    // `__FitzPyObject` opaco. `print(m)` delega al Display del newtype
+    // que invoca `__str__` Python — paridad bit-a-bit con `fitz run`.
+    let src = "from python import math\n\
+               let pi = math.pi\n\
+               print(\"pi = {pi}\")\n";
+    let (stdout, exit) = build_and_run("fase_8_7_1_math_pi_opaco", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "pi = 3.141592653589793");
 }

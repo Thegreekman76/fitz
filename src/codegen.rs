@@ -110,15 +110,19 @@ pub fn generate_project(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
-    // Fase 8.1.5 — guarda dura sobre imports Python ANTES de tocar el
-    // filesystem. Sin esto, el loader Fitz intenta leer `./python.fitz`
-    // y reporta un error confuso de "módulo no encontrado". La misma
-    // verificación corre en `generate_main_rs` para cubrir los tests
-    // unit que usan `generate_rust` directo (sin loader real).
-    check_no_python_imports(program)?;
+    // Fase 8.7.1 — detectar imports Python ANTES del ModuleLoader.
+    // El loader resuelve módulos Fitz (`./foo.fitz`); los imports
+    // Python (`from python import X`) no tienen archivo en disk, los
+    // procesamos por separado. Si hay un caso que 8.7.1 no soporta
+    // todavía, `validate_python_imports_for_codegen` aborta con un
+    // mensaje claro citando el sub-paso futuro.
+    let python_imports = collect_python_imports(program);
+    validate_python_imports_for_codegen(program)?;
 
-    // PASS 1 — Cargar recursivamente todos los módulos importados desde
-    // el main, generar su código Rust y registrarlos.
+    // PASS 1 — Cargar recursivamente todos los módulos Fitz importados
+    // desde el main, generar su código Rust y registrarlos. Los
+    // imports Python ya están separados en `python_imports`; el loader
+    // los ignora (skip por path[0] == "python").
     let mut loader = ModuleLoader::new(base_dir.clone());
     loader.collect_imports(program)?;
 
@@ -132,51 +136,116 @@ pub fn generate_project(
     // sobre CLI, feature `time` en Cargo.toml.
     let uses_async = program_uses_async(program);
 
+    // Fase 8.7.1: idem para interop Python. Habilita preludio
+    // `__FitzPyObject` + helpers, suma `pyo3` con `abi3-py310` +
+    // `auto-initialize` al Cargo.toml. Los programas sin
+    // `from python import` no pagan el costo de bajar/linkear pyo3.
+    let uses_python = !python_imports.is_empty();
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
     // importados con sus fields completos.
-    let main_rs = generate_main_rs(program, env, &loader)?;
+    let main_rs = generate_main_rs(program, env, &loader, &python_imports)?;
 
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
         output_basename: raw_stem,
-        cargo_toml: cargo_toml_for(&stem, has_http, uses_async),
+        cargo_toml: cargo_toml_for(&stem, has_http, uses_async, uses_python),
         main_rs,
         mod_files: loader.into_mod_files(),
     })
 }
 
-/// Fase 8.1.5 — guard que protege a `fitz build` de tropezar con
-/// imports Python. Detecta el primer `Stmt::Import` o `Stmt::FromImport`
-/// con `path[0] == "python"` y devuelve un error de codegen claro
-/// citando exactamente cómo correr el programa (vía `fitz run` con la
-/// feature `python`) y por qué `fitz build` aún no soporta interop.
-///
-/// La verificación es lineal sobre el top-level del AST — no recurseamos
-/// adentro de fns ni de bodies de control porque `Stmt::Import` solo
-/// aparece a top-level (el parser lo enforcea).
-fn check_no_python_imports(program: &Program) -> Result<(), FitzError> {
+/// Fase 8.7.1 — un binding Python detectado en el AST. Cada
+/// `from python import math` produce un `PythonImport { binding_name:
+/// "math", dotted_path: "math" }`; `from python import math as m`
+/// produce `{ binding_name: "m", dotted_path: "math" }`;
+/// `import python.os.path` produce `{ binding_name: "path",
+/// dotted_path: "os.path" }`.
+#[derive(Debug, Clone)]
+struct PythonImport {
+    /// Nombre visible en el scope Fitz/Rust generado. Es el `as`
+    /// si está, o el último segmento del path Python por default.
+    binding_name: String,
+    /// Path Python "punteado" que `import` consume tal cual (igual
+    /// que `import_module(dotted)` en `py_interop`).
+    dotted_path: String,
+}
+
+/// Recolecta los imports Python del top-level del programa. Top-level
+/// es la única posición sintácticamente válida para `Stmt::Import` /
+/// `Stmt::FromImport` (el parser lo enforce), así que no recurseamos
+/// adentro de fns ni de bodies.
+fn collect_python_imports(program: &Program) -> Vec<PythonImport> {
+    let mut out: Vec<PythonImport> = Vec::new();
     for stmt in program {
         match stmt {
-            Stmt::Import { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
+            Stmt::Import { path, alias, .. }
+                if path.first().map(|s| s.as_str()) == Some("python") =>
+            {
+                // `import python.<dotted>` — el dotted Python son los
+                // segmentos del 2do en adelante. El binding default es
+                // el último segmento (PreF8.4: alias gana si está).
+                let dotted: String = path[1..].join(".");
+                let binding_name = alias
+                    .clone()
+                    .or_else(|| path.last().cloned())
+                    .unwrap_or_else(|| "python".to_string());
+                out.push(PythonImport { binding_name, dotted_path: dotted });
+            }
+            Stmt::FromImport { path, names, .. }
+                if path.first().map(|s| s.as_str()) == Some("python") =>
+            {
+                // `from python import a, b as c, ...`. El "módulo
+                // base" del lado Python es `path[1..]` (puede ser
+                // vacío si es `from python import math` directo —
+                // ese caso trata cada `name` como módulo top-level
+                // Python, paralelo al evaluator).
+                let base_segments = &path[1..];
+                for (name, alias) in names {
+                    let dotted = if base_segments.is_empty() {
+                        name.clone()
+                    } else {
+                        format!("{}.{}", base_segments.join("."), name)
+                    };
+                    let binding_name = alias.clone().unwrap_or_else(|| name.clone());
+                    out.push(PythonImport { binding_name, dotted_path: dotted });
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// Fase 8.7.1 — valida que los imports Python presentes en el programa
+/// caen dentro del alcance soportado por el codegen del sub-paso. Por
+/// ahora soportamos solo `from python import X[.Y] [as Z]` e
+/// `import python.X[.Y] [as Z]`. Reservamos espacio para sub-pasos
+/// futuros que cubran patrones que hoy no andan (typically nada — el
+/// shape ya es completo).
+fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzError> {
+    for stmt in program {
+        match stmt {
+            Stmt::Import { path, .. }
+                if path.first().map(|s| s.as_str()) == Some("python") && path.len() < 2 =>
+            {
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     0, 0,
-                    "interop Python en `fitz build` llega como sub-paso futuro \
-                     (8.1 cubre solo `fitz run`); por ahora ejecutá el programa con \
-                     `fitz run` (binario compilado con `--features python`) y postergá \
-                     `fitz build` hasta que cierre el sub-paso del codegen Python.",
+                    "`import python` por sí solo no es un import válido — \
+                     usá `import python.<modulo>` o `from python import <modulo>`."
+                        .to_string(),
                 ));
             }
-            Stmt::FromImport { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
+            Stmt::FromImport { path, names, .. }
+                if path.first().map(|s| s.as_str()) == Some("python") && names.is_empty() =>
+            {
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     0, 0,
-                    "`from python import ...` no se compila a binario nativo en Fase 8.1; \
-                     usá `fitz run` (binario compilado con `--features python`) por ahora. \
-                     El soporte en `fitz build` queda como deuda comprometida (probable \
-                     sub-paso de 8.7 cuando cierre distribución con CPython bundled).",
+                    "`from python import ...`: falta especificar al menos un módulo".to_string(),
                 ));
             }
             _ => {}
@@ -568,7 +637,7 @@ fn sanitize_crate_name(raw: &str) -> String {
 /// Cargo.toml para el project generado. Si `has_http` es true,
 /// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
 /// Si no, queda sin `[dependencies]` y la compilación es rápida.
-fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool) -> String {
+fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool, uses_python: bool) -> String {
     let header = format!(
         "[package]\n\
          name = \"{stem}\"\n\
@@ -589,36 +658,43 @@ fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool) -> String {
         (false, true) => &["macros", "rt-multi-thread", "time"],
         (false, false) => &[],
     };
-    if has_http {
+    // Fase 8.7.1: pyo3 con `abi3-py310` (un binario corre contra
+    // cualquier CPython 3.10+) + `auto-initialize` (boot lazy de
+    // CPython en el primer `Python::attach`). Sin feature gate
+    // condicional — si el programa usa interop, pyo3 es dep no-opcional
+    // del binario generado.
+    let pyo3_line = if uses_python {
+        "pyo3 = { version = \"0.28\", features = [\"abi3-py310\", \"auto-initialize\"] }\n"
+    } else {
+        ""
+    };
+    let needs_deps_section = has_http || uses_async || uses_python;
+    if !needs_deps_section {
+        return header;
+    }
+    let tokio_line = if has_http || uses_async {
         format!(
-            "{}\n\
-             [dependencies]\n\
-             axum = \"0.8\"\n\
-             tokio = {{ version = \"1\", features = [{}] }}\n\
-             serde = {{ version = \"1\", features = [\"derive\"] }}\n\
-             serde_json = {{ version = \"1\", features = [\"preserve_order\"] }}\n",
-            header,
+            "tokio = {{ version = \"1\", features = [{}] }}\n",
             tokio_features
                 .iter()
                 .map(|f| format!("\"{}\"", f))
                 .collect::<Vec<_>>()
-                .join(", "),
-        )
-    } else if uses_async {
-        format!(
-            "{}\n\
-             [dependencies]\n\
-             tokio = {{ version = \"1\", features = [{}] }}\n",
-            header,
-            tokio_features
-                .iter()
-                .map(|f| format!("\"{}\"", f))
-                .collect::<Vec<_>>()
-                .join(", "),
+                .join(", ")
         )
     } else {
-        header
-    }
+        String::new()
+    };
+    let http_lines = if has_http {
+        "axum = \"0.8\"\n\
+         serde = { version = \"1\", features = [\"derive\"] }\n\
+         serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
+    } else {
+        ""
+    };
+    format!(
+        "{}\n[dependencies]\n{}{}{}",
+        header, http_lines, tokio_line, pyo3_line
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -710,9 +786,24 @@ impl ModuleLoader {
 
     /// Recorre el AST del programa principal y carga cada módulo
     /// referenciado por `Stmt::Import` / `Stmt::FromImport`.
+    ///
+    /// Fase 8.7.1: skip los imports Python (`path[0] == "python"`).
+    /// Esos no tienen archivo `.fitz` en disk — los procesa
+    /// `collect_python_imports` por separado y `generate_main_rs`
+    /// los emite como bindings PyO3 directamente.
     fn collect_imports(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
             match stmt {
+                Stmt::Import { path, .. }
+                    if path.first().map(|s| s.as_str()) == Some("python") =>
+                {
+                    continue;
+                }
+                Stmt::FromImport { path, .. }
+                    if path.first().map(|s| s.as_str()) == Some("python") =>
+                {
+                    continue;
+                }
                 Stmt::Import { path, alias, .. } => {
                     let idx = self.load_module(path)?;
                     // PreF8.4: alias gana sobre el último segmento.
@@ -1229,7 +1320,8 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
 #[allow(dead_code)]
 pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzError> {
     let loader = ModuleLoader::new(PathBuf::from("."));
-    generate_main_rs(program, env, &loader)
+    let python_imports = collect_python_imports(program);
+    generate_main_rs(program, env, &loader, &python_imports)
 }
 
 /// Genera el `src/main.rs` del Cargo project. Si hay módulos cargados,
@@ -1241,19 +1333,21 @@ fn generate_main_rs(
     program: &Program,
     env: &TypeEnv,
     loader: &ModuleLoader,
+    python_imports: &[PythonImport],
 ) -> Result<String, FitzError> {
-    // Fase 8.1.5 — guarda dura: `from python import X` / `import python.X`
-    // no se compilan a binario nativo en 8.1. El intérprete (`fitz run`)
-    // los acepta con la feature `python`; el codegen los rechaza con un
-    // mensaje claro que sugiere el camino válido. Esta verificación va
-    // ANTES del loader/checker para que `fitz build` con un programa
-    // Python falle rápido y sin tocar el filesystem.
-    check_no_python_imports(program)?;
+    // Fase 8.7.1 — los imports Python se separan acá y se procesan
+    // como bindings PyO3 (NO van al loader). El validador ya corrió
+    // en `generate_project`; los llamados directos a `generate_main_rs`
+    // (tests unit) lo reinvocan para no perder cobertura.
+    validate_python_imports_for_codegen(program)?;
     let has_http = has_http_routes(program);
     let uses_async = program_uses_async(program);
+    let uses_python = !python_imports.is_empty();
 
     let mut ctx = CodegenCtx::new(env);
     ctx.uses_async = uses_async;
+    ctx.uses_python = uses_python;
+    ctx.install_python_bindings(python_imports);
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
@@ -1473,6 +1567,12 @@ fn emit_main_rs_body(
     has_http: bool,
 ) -> Result<(), FitzError> {
     ctx.emit_prelude();
+    // Fase 8.7.1: el preludio Python va DESPUÉS del preludio base
+    // (que ya emitió `use std::sync::{Arc, Mutex};`) y ANTES de los
+    // mod decls / use decls de módulos Fitz. El struct
+    // `__FitzPyObject` queda en scope global del main.rs para
+    // referenciarse desde cualquier `rust_type_for(Type::PyAny)`.
+    ctx.emit_python_prelude();
     loader.emit_mod_decls(&mut ctx.output);
     loader.emit_use_decls(&mut ctx.output);
 
@@ -1788,6 +1888,24 @@ struct CodegenCtx<'a> {
     /// sobre `fn main()` CLI, y el feature `time` en el Cargo.toml.
     /// Se setea en `generate_main_rs` antes de emit_prelude.
     uses_async: bool,
+    /// Fase 8.7.1: `true` si el programa tiene al menos un import
+    /// Python (`from python import X` / `import python.X`). Habilita
+    /// el preludio Python (`__FitzPyObject` + helpers PyO3) y la
+    /// emisión de bindings como vars locales del main body.
+    uses_python: bool,
+    /// Fase 8.7.1: bindings Python detectados en el programa. Cada
+    /// entry mapea `binding_name` → `dotted_path` Python. Se consulta
+    /// desde `gen_expr` (Ident) para tipar el ident como
+    /// `Type::PyAny` y desde `emit_python_bindings` para emitir
+    /// `let <name> = __fitz_py_import("<dotted>");` al inicio del
+    /// main body.
+    python_bindings: HashMap<String, String>,
+    /// Fase 8.7.1: orden de declaración de los imports Python. El
+    /// HashMap `python_bindings` no preserva orden; este Vec sí, para
+    /// que `emit_python_bindings` los emita en el mismo orden que el
+    /// usuario los escribió (matchea posibles side-effects al import
+    /// de un módulo Python que registra hooks globales).
+    python_imports_ordered: Vec<PythonImport>,
 }
 
 #[derive(Debug, Clone)]
@@ -1872,6 +1990,9 @@ impl<'a> CodegenCtx<'a> {
             http_handlers_returning_response: std::collections::HashSet::new(),
             middleware_fn_names: std::collections::HashSet::new(),
             uses_async: false,
+            uses_python: false,
+            python_bindings: HashMap::new(),
+            python_imports_ordered: Vec::new(),
         }
     }
 
@@ -1983,6 +2104,154 @@ impl<'a> CodegenCtx<'a> {
         self.scopes.iter().any(|s| s.contains_key(name))
     }
 
+    /// Fase 8.7.1 — registra los bindings Python detectados por
+    /// `collect_python_imports`. Guarda el mapeo `binding_name →
+    /// dotted_path` para que `emit_python_bindings` lo consuma al
+    /// inicio del main body. Los nombres se registran en el scope
+    /// global del CodegenCtx con `Type::PyAny` para que `gen_expr`
+    /// los trate como opacos PyAny (la auto-coerción primitiva
+    /// dispara cuando el contexto destino es concreto).
+    fn install_python_bindings(&mut self, imports: &[PythonImport]) {
+        for imp in imports {
+            self.python_bindings
+                .insert(imp.binding_name.clone(), imp.dotted_path.clone());
+            self.python_imports_ordered.push(imp.clone());
+            // Registrar como var en el scope raíz para que el lookup
+            // en `gen_expr::Ident` la encuentre con tipo PyAny.
+            if let Some(top) = self.scopes.first_mut() {
+                top.insert(imp.binding_name.clone(), Type::PyAny);
+            }
+        }
+    }
+
+    /// Fase 8.7.1 — emite el preludio Python: `use pyo3::prelude::*;`,
+    /// `struct __FitzPyObject(Arc<Py<PyAny>>)` con Clone/Display/Debug/
+    /// PartialEq, y helpers `__fitz_py_import`, `__fitz_py_get_attr_*`,
+    /// `__fitz_py_err_to_string`. Display delega a `__str__` Python
+    /// para paridad bit-a-bit con el intérprete cuando se imprime un
+    /// PyObject opaco (ej. `print(math.pi)` sin anotación destino
+    /// imprime "3.141592653589793" en ambos paths).
+    ///
+    /// Solo se emite cuando `self.uses_python = true`. Programas sin
+    /// imports Python no pagan el costo de incluirlo.
+    fn emit_python_prelude(&mut self) {
+        if !self.uses_python {
+            return;
+        }
+        self.emit(
+            "// Fase 8.7.1 — preludio interop Python (PyO3)\n\
+             use pyo3::prelude::*;\n\
+             use pyo3::types::{PyBool, PyFloat, PyInt, PyString};\n\n\
+             #[derive(Clone)]\n\
+             pub struct __FitzPyObject(pub Arc<pyo3::Py<pyo3::PyAny>>);\n\n\
+             impl std::fmt::Display for __FitzPyObject {\n    \
+             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        \
+             let s = Python::attach(|py| {\n            \
+             self.0.bind(py).str().map(|v| v.to_string()).unwrap_or_else(|_| \"<python object>\".to_string())\n        \
+             });\n        \
+             write!(f, \"{}\", s)\n    \
+             }\n\
+             }\n\n\
+             impl std::fmt::Debug for __FitzPyObject {\n    \
+             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {\n        \
+             write!(f, \"<python object>\")\n    \
+             }\n\
+             }\n\n\
+             impl PartialEq for __FitzPyObject {\n    \
+             fn eq(&self, other: &Self) -> bool {\n        \
+             self.0.as_ptr() == other.0.as_ptr()\n    \
+             }\n\
+             }\n\n\
+             fn __fitz_py_err_to_string(py: Python<'_>, err: PyErr) -> String {\n    \
+             let class = err.get_type(py).qualname().ok().map(|s| s.to_string()).unwrap_or_else(|| \"PyError\".to_string());\n    \
+             let value = err.value(py).to_string();\n    \
+             if value.is_empty() { class } else { format!(\"{}: {}\", class, value) }\n\
+             }\n\n\
+             fn __fitz_py_import(dotted: &str) -> __FitzPyObject {\n    \
+             Python::attach(|py| match py.import(dotted) {\n        \
+             Ok(module) => __FitzPyObject(Arc::new(module.into_any().unbind())),\n        \
+             Err(err) => panic!(\"error importando módulo Python `{}`: {}\", dotted, __fitz_py_err_to_string(py, err)),\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_get_attr_obj(obj: &__FitzPyObject, name: &str) -> __FitzPyObject {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             match bound.getattr(name) {\n            \
+             Ok(attr) => __FitzPyObject(Arc::new(attr.unbind())),\n            \
+             Err(err) => panic!(\"error accediendo a `.{}` sobre objeto Python: {}\", name, __fitz_py_err_to_string(py, err)),\n        \
+             }\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_extract_i64(obj: &__FitzPyObject) -> i64 {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             if bound.is_instance_of::<PyBool>() {\n            \
+             return if bound.extract::<bool>().unwrap_or(false) { 1 } else { 0 };\n        \
+             }\n        \
+             if !bound.is_instance_of::<PyInt>() {\n            \
+             panic!(\"se esperaba un int Python para coercer a Int, llegó otro tipo\");\n        \
+             }\n        \
+             bound.extract::<i64>().unwrap_or_else(|_| panic!(\"el int Python excede el rango de Int (i64) en Fitz\"))\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_extract_f64(obj: &__FitzPyObject) -> f64 {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             if bound.is_instance_of::<PyFloat>() {\n            \
+             return bound.extract::<f64>().unwrap_or(0.0);\n        \
+             }\n        \
+             if bound.is_instance_of::<PyInt>() {\n            \
+             return bound.extract::<i64>().map(|n| n as f64).unwrap_or(0.0);\n        \
+             }\n        \
+             panic!(\"se esperaba un float Python para coercer a Float, llegó otro tipo\")\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_extract_string(obj: &__FitzPyObject) -> String {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             if !bound.is_instance_of::<PyString>() {\n            \
+             panic!(\"se esperaba un str Python para coercer a Str, llegó otro tipo\");\n        \
+             }\n        \
+             bound.extract::<String>().unwrap_or_default()\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_extract_bool(obj: &__FitzPyObject) -> bool {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             if !bound.is_instance_of::<PyBool>() {\n            \
+             panic!(\"se esperaba un bool Python para coercer a Bool, llegó otro tipo\");\n        \
+             }\n        \
+             bound.extract::<bool>().unwrap_or(false)\n    \
+             })\n\
+             }\n\n",
+        );
+    }
+
+    /// Fase 8.7.1 — emite las inicializaciones de los bindings Python
+    /// al inicio del main body. Cada `from python import math` produce
+    /// `let math = __fitz_py_import(\"math\");`. Las llamadas a
+    /// `__fitz_py_import` se serializan al boot del programa; CPython
+    /// se inicializa lazy en el primer `Python::attach`.
+    ///
+    /// El orden de emisión sigue el orden de aparición en el AST
+    /// (collect_python_imports recorre top-level lineal).
+    fn emit_python_bindings(&mut self, imports: &[PythonImport]) {
+        if imports.is_empty() {
+            return;
+        }
+        for imp in imports {
+            self.emit_indent();
+            self.emit(&format!(
+                "let {name} = __fitz_py_import(\"{dotted}\");\n",
+                name = imp.binding_name,
+                dotted = imp.dotted_path,
+            ));
+            // Registrar como var local del scope main para que
+            // `gen_expr::Ident` lo encuentre con tipo PyAny.
+            self.declare_var(imp.binding_name.clone(), Type::PyAny);
+        }
+    }
+
     // --- error helpers ----------------------------------------------------
 
     /// Error sin posición. Reservado para errores **defensivos**: bugs
@@ -2066,6 +2335,13 @@ impl<'a> CodegenCtx<'a> {
         }
         self.indent += 1;
         self.push_scope();
+        // Fase 8.7.1: los bindings Python (`from python import X`) se
+        // emiten como vars locales del main ANTES del cuerpo del
+        // programa. Cada uno hace `let X = __fitz_py_import("X");`
+        // y queda visible para el resto del main body.
+        let imports = std::mem::take(&mut self.python_imports_ordered);
+        self.emit_python_bindings(&imports);
+        self.python_imports_ordered = imports;
         for stmt in stmts {
             self.gen_stmt(stmt)?;
         }
@@ -3528,6 +3804,17 @@ impl<'a> CodegenCtx<'a> {
                 "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
             ));
         };
+        // Fase 8.7.1: si el callee es un binding Python (ident con
+        // tipo PyAny), el call llega en 8.7.2 (marshaling de args +
+        // wrap en Result). Por ahora abortamos con mensaje claro.
+        if matches!(self.lookup_var(name), Some(Type::PyAny)) {
+            return Err(self.err_at(call_span, format!(
+                "llamadas sobre objetos Python (`{}(...)`): llegan en Fase 8.7.2. \
+                 Por ahora, accedé al atributo sin invocarlo o usá `fitz run` para \
+                 ejecutar el programa.",
+                name
+            )));
+        }
         if name == "print" {
             return Err(self.err_at(call_span,
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
@@ -3644,6 +3931,19 @@ impl<'a> CodegenCtx<'a> {
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
+        // Fase 8.7.1: method call sobre PyAny es realmente un call
+        // Python (`math.sqrt(16.0)` = `math.sqrt` getattr + invocación).
+        // El sub-paso 8.7.1 cubre solo getattr opaco; el call con
+        // marshaling de args + Result wrap llega en 8.7.2. Mensaje
+        // explícito para que el usuario sepa el plan.
+        if matches!(obj_ty, Type::PyAny) {
+            let _ = args; // consumido en 8.7.2
+            return Err(self.err_at(call_span, format!(
+                "llamada Python `<obj>.{method}(...)` sobre `PyAny`: \
+                 llega en Fase 8.7.2 (marshaling de args + wrap en Result). \
+                 Por ahora, usá `fitz run` para programas que invocan funciones Python."
+            )));
+        }
         match (&obj_ty, method) {
             // ---- Str ----
             (Type::Str, "len") => {
@@ -4721,6 +5021,21 @@ impl<'a> CodegenCtx<'a> {
         }
 
         let (obj_code, obj_ty) = self.gen_expr(object)?;
+        // Fase 8.7.1: field access sobre objeto Python (`math.pi`,
+        // `obj.attr`). Emite `__fitz_py_get_attr_obj(&obj, "name")`
+        // que devuelve un `__FitzPyObject` opaco. La auto-coerción a
+        // tipos primitivos pasa después, en el sitio donde se usa el
+        // resultado (vía `coerce(..., PyAny → T)`).
+        if matches!(obj_ty, Type::PyAny) {
+            return Ok((
+                format!(
+                    "__fitz_py_get_attr_obj(&{}, {})",
+                    obj_code,
+                    rust_str_literal(field)
+                ),
+                Type::PyAny,
+            ));
+        }
         let Type::Nominal(id) = &obj_ty else {
             return Err(self.err_at(object.span(), format!(
                 "field access `.{}` sobre `{}`: solo se soporta sobre instancias de tipos custom",
@@ -6883,10 +7198,12 @@ fn field_eq_expr(
                 inner_eq = inner_eq,
             ))
         }
-        // 8.4: `PyAny` no aparece nunca en codegen (interop Python solo
-        // corre en `fitz run`, el guard `check_no_python_imports` aborta
-        // `fitz build` antes). Lo dejamos en el catch-all junto con los
-        // otros tipos no-comparables como defensa.
+        // Function/Future/Any: no comparables estructuralmente. PyAny
+        // (post-8.7.1): tampoco — comparar dos PyObjects por field
+        // requiere lock + Python::attach y la semántica "iguales si
+        // son el mismo objeto" es lo que ya hace `PartialEq` del
+        // newtype (por puntero). Dentro de un field eq derivado, dos
+        // PyObjects distintos siempre dan `false`.
         Type::Function { .. } | Type::Future(_) | Type::Any | Type::PyAny => {
             Ok("false".to_string())
         }
@@ -6904,6 +7221,12 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         Type::Str => Ok("String".to_string()),
         Type::Bool => Ok("bool".to_string()),
         Type::Null => Ok("()".to_string()),
+        // Fase 8.7.1: `PyAny` Fitz → `__FitzPyObject` Rust (newtype
+        // sobre `Arc<Py<PyAny>>`). El preludio Python ya define el
+        // tipo si `uses_python = true`; programas sin imports Python
+        // no llegan acá (el checker no produce `Type::PyAny` sin
+        // imports Python).
+        Type::PyAny => Ok("__FitzPyObject".to_string()),
         Type::Nominal(id) => Ok(env.info(*id).name.clone()),
         Type::Nullable(inner) => Ok(format!("Option<{}>", rust_type_for(inner, env)?)),
         // List<T> y Map<K, V> se modelan con `Arc<Mutex<>>` para
@@ -7100,6 +7423,16 @@ fn coerce(code: &str, from: &Type, to: &Type) -> String {
             let coerced = coerce(code, from, inner);
             format!("Some({})", coerced)
         }
+        // Fase 8.7.1: auto-coerción primitiva desde PyAny. Replica la
+        // política `py_to_value` del intérprete (8.1.3): bool → bool,
+        // int → i64 (con check de rango), float → f64, str → String.
+        // Para tipos no primitivos (List, Map, Nominal), el codegen
+        // deja la coerción para sub-pasos futuros (8.7.2 marshaling
+        // compuesto, 8.7.3 async).
+        (Type::PyAny, Type::Int) => format!("__fitz_py_extract_i64(&{})", code),
+        (Type::PyAny, Type::Float) => format!("__fitz_py_extract_f64(&{})", code),
+        (Type::PyAny, Type::Str) => format!("__fitz_py_extract_string(&{})", code),
+        (Type::PyAny, Type::Bool) => format!("__fitz_py_extract_bool(&{})", code),
         _ => code.to_string(),
     }
 }
@@ -7130,6 +7463,12 @@ fn show_expr(code: &str, ty: &Type) -> String {
         Type::Float => format!("__fitz_fmt_float({})", code),
         Type::Str => format!("({}).clone()", code),
         Type::Null => "String::from(\"null\")".to_string(),
+        // Fase 8.7.1: `PyAny` opaco → delegar al `Display` del newtype
+        // `__FitzPyObject`, que adentro hace `Python::attach` + `__str__`.
+        // Paridad bit-a-bit con `fitz run`: `print(math.pi)` produce
+        // "3.141592653589793" en ambos paths cuando el lado Python
+        // tiene un float (su `__str__` coincide con `__fitz_fmt_float`).
+        Type::PyAny => format!("format!(\"{{}}\", {})", code),
         Type::Nominal(_) => format!("format!(\"{{}}\", &*({}).lock().unwrap())", code),
         Type::Nullable(inner) => {
             // Capturamos el valor por referencia para no consumirlo.
@@ -7420,7 +7759,7 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/true);
+        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/true, /*uses_python=*/false);
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -7428,7 +7767,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", /*has_http=*/true, /*uses_async=*/true);
+        let toml = cargo_toml_for("foo", /*has_http=*/true, /*uses_async=*/true, /*uses_python=*/false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -7436,9 +7775,44 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
-        let toml = cargo_toml_for("foo", false, false);
+        let toml = cargo_toml_for("foo", false, false, /*uses_python=*/false);
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
+    }
+
+    // ---------------------------------------------------------------
+    // Fase 8.7.1 — Cargo.toml condicional con pyo3
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cargo_toml_con_python_incluye_pyo3() {
+        // Programa CLI con `from python import` → Cargo.toml suma pyo3
+        // con `abi3-py310` + `auto-initialize`.
+        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/false, /*uses_python=*/true);
+        assert!(toml.contains("[dependencies]"), "esperaba sección deps");
+        assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
+        assert!(toml.contains("\"abi3-py310\""), "esperaba feature abi3-py310");
+        assert!(
+            toml.contains("\"auto-initialize\""),
+            "esperaba feature auto-initialize"
+        );
+        assert!(!toml.contains("axum"), "no debería incluir axum");
+        assert!(!toml.contains("tokio"), "no debería incluir tokio");
+    }
+
+    #[test]
+    fn cargo_toml_python_y_http_incluyen_ambos() {
+        let toml = cargo_toml_for("foo", true, false, true);
+        assert!(toml.contains("axum"));
+        assert!(toml.contains("pyo3"));
+        assert!(toml.contains("tokio"));
+    }
+
+    #[test]
+    fn cargo_toml_sin_python_no_incluye_pyo3() {
+        let toml = cargo_toml_for("foo", true, false, false);
+        assert!(toml.contains("axum"));
+        assert!(!toml.contains("pyo3"));
     }
 
     #[test]
@@ -11104,30 +11478,116 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // Fase 8.1.5 — codegen rechaza imports Python con mensaje claro
+    // Fase 8.7.1 — codegen acepta imports Python y emite preludio +
+    // bindings + helpers. Tests reapuntados desde 8.1.5 (que rechazaba
+    // con mensaje claro) — el shape "emitir + linkear pyo3" reemplaza
+    // al guard duro.
     // -----------------------------------------------------------------
 
     #[test]
-    fn build_rechaza_from_python_import_con_mensaje_claro() {
-        let err = gen("from python import math\n")
-            .expect_err("`from python import` no debe compilar en 8.1");
+    fn build_acepta_from_python_import_emite_preludio() {
+        let code = gen("from python import math\n").expect("8.7.1: from python import compila");
         assert!(
-            err.message.contains("from python import")
-                && err.message.contains("fitz run")
-                && err.message.contains("8.1"),
-            "mensaje inesperado: {}",
-            err.message,
+            code.contains("use pyo3::prelude::*;"),
+            "esperaba `use pyo3::prelude::*;` en el preludio Python"
+        );
+        assert!(
+            code.contains("__FitzPyObject"),
+            "esperaba struct __FitzPyObject en preludio"
+        );
+        assert!(
+            code.contains("__fitz_py_import"),
+            "esperaba helper __fitz_py_import en preludio"
+        );
+        assert!(
+            code.contains("let math = __fitz_py_import(\"math\");"),
+            "esperaba binding `let math = __fitz_py_import(\"math\");`, got:\n{}",
+            code
         );
     }
 
     #[test]
-    fn build_rechaza_import_python_punteado_con_mensaje_claro() {
-        let err = gen("import python.math\n")
-            .expect_err("`import python.X` no debe compilar en 8.1");
+    fn build_acepta_import_python_punteado_emite_binding_con_ultimo_segmento() {
+        let code = gen("import python.os.path\n").expect("8.7.1: import python.X compila");
+        // Convención: `import python.os.path` → binding `path` (último
+        // segmento), dotted Python `os.path`.
         assert!(
-            err.message.contains("Python")
-                && err.message.contains("fitz run"),
-            "mensaje inesperado: {}",
+            code.contains("let path = __fitz_py_import(\"os.path\");"),
+            "esperaba `let path = __fitz_py_import(\"os.path\");`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_alias_python_emite_binding_con_alias() {
+        // `from python import math as m` → binding `m`, dotted `math`.
+        let code = gen("from python import math as m\n").expect("8.7.1: alias compila");
+        assert!(
+            code.contains("let m = __fitz_py_import(\"math\");"),
+            "esperaba `let m = __fitz_py_import(\"math\");`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_sin_python_no_emite_preludio() {
+        let code = gen("let x = 1\nprint(x)\n").expect("CLI básico compila");
+        assert!(
+            !code.contains("__FitzPyObject"),
+            "no debería emitir preludio Python para programas sin imports Python"
+        );
+        assert!(
+            !code.contains("use pyo3"),
+            "no debería emitir `use pyo3` para programas sin imports Python"
+        );
+    }
+
+    #[test]
+    fn build_python_field_access_emite_get_attr_obj() {
+        // `let pi = math.pi` (sin annot) → `__fitz_py_get_attr_obj`
+        // opaco. Tipo de `pi` queda como `__FitzPyObject`.
+        let code = gen("from python import math\nlet pi = math.pi\n")
+            .expect("8.7.1: field access opaco compila");
+        assert!(
+            code.contains("__fitz_py_get_attr_obj(&math") && code.contains("\"pi\""),
+            "esperaba `__fitz_py_get_attr_obj(&math.clone(), \"pi\")`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_python_field_access_con_annotacion_float_emite_extract() {
+        // `let pi: Float = math.pi` → coerción PyAny→Float aplica
+        // `__fitz_py_extract_f64`.
+        let code = gen("from python import math\nlet pi: Float = math.pi\n")
+            .expect("8.7.1: extracción a Float compila");
+        assert!(
+            code.contains("__fitz_py_extract_f64"),
+            "esperaba __fitz_py_extract_f64 al asignar a Float, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_python_field_access_con_annotacion_int_emite_extract() {
+        let code = gen("from python import sys\nlet m: Int = sys.maxsize\n")
+            .expect("8.7.1: extracción a Int compila");
+        assert!(
+            code.contains("__fitz_py_extract_i64"),
+            "esperaba __fitz_py_extract_i64 al asignar a Int, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_rechaza_call_python_con_mensaje_8_7_2() {
+        // 8.7.1 NO soporta call sobre PyAny — eso llega en 8.7.2.
+        // Error de codegen claro citando el sub-paso.
+        let err = gen("from python import math\nlet x = math.sqrt(16.0)\n")
+            .expect_err("call sobre PyAny no debe compilar en 8.7.1");
+        assert!(
+            err.message.contains("8.7.2"),
+            "mensaje debería citar 8.7.2, fue: {}",
             err.message,
         );
     }
