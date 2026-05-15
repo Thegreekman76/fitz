@@ -605,6 +605,25 @@ fn async_fn_con_sleep_compilable_y_correcta() {
 }
 
 #[test]
+fn build_aborta_sobre_from_python_import_con_mensaje_claro() {
+    // Fase 8.1.5 — el codegen rechaza `from python import` con sugerencia
+    // explícita de usar `fitz run --features python` mientras la versión
+    // build no esté lista (deuda comprometida para sub-paso posterior).
+    // Este test corre con o sin la feature: `fitz build` siempre rechaza
+    // hoy, independiente de cómo se compiló el binario `fitz` mismo.
+    let stderr = build_expect_fail(
+        "py-import-aborta-build",
+        "from python import math\nlet r = 1\n",
+    );
+    assert!(
+        stderr.contains("from python import")
+            && stderr.contains("fitz run"),
+        "esperaba mensaje sobre `from python import` + sugerencia `fitz run`, fue: {}",
+        stderr
+    );
+}
+
+#[test]
 fn build_aborta_si_codegen_no_soporta_feature() {
     // 5b.6 abrió @get/@post/etc., F11 abrió state HTTP compartido.
     // La feature que apuntamos acá pasa a ser **decorator HTTP custom

@@ -110,6 +110,13 @@ pub fn generate_project(
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
 
+    // Fase 8.1.5 — guarda dura sobre imports Python ANTES de tocar el
+    // filesystem. Sin esto, el loader Fitz intenta leer `./python.fitz`
+    // y reporta un error confuso de "módulo no encontrado". La misma
+    // verificación corre en `generate_main_rs` para cubrir los tests
+    // unit que usan `generate_rust` directo (sin loader real).
+    check_no_python_imports(program)?;
+
     // PASS 1 — Cargar recursivamente todos los módulos importados desde
     // el main, generar su código Rust y registrarlos.
     let mut loader = ModuleLoader::new(base_dir.clone());
@@ -138,6 +145,44 @@ pub fn generate_project(
         main_rs,
         mod_files: loader.into_mod_files(),
     })
+}
+
+/// Fase 8.1.5 — guard que protege a `fitz build` de tropezar con
+/// imports Python. Detecta el primer `Stmt::Import` o `Stmt::FromImport`
+/// con `path[0] == "python"` y devuelve un error de codegen claro
+/// citando exactamente cómo correr el programa (vía `fitz run` con la
+/// feature `python`) y por qué `fitz build` aún no soporta interop.
+///
+/// La verificación es lineal sobre el top-level del AST — no recurseamos
+/// adentro de fns ni de bodies de control porque `Stmt::Import` solo
+/// aparece a top-level (el parser lo enforcea).
+fn check_no_python_imports(program: &Program) -> Result<(), FitzError> {
+    for stmt in program {
+        match stmt {
+            Stmt::Import { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
+                return Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "interop Python en `fitz build` llega como sub-paso futuro \
+                     (8.1 cubre solo `fitz run`); por ahora ejecutá el programa con \
+                     `fitz run` (binario compilado con `--features python`) y postergá \
+                     `fitz build` hasta que cierre el sub-paso del codegen Python.",
+                ));
+            }
+            Stmt::FromImport { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
+                return Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "`from python import ...` no se compila a binario nativo en Fase 8.1; \
+                     usá `fitz run` (binario compilado con `--features python`) por ahora. \
+                     El soporte en `fitz build` queda como deuda comprometida (probable \
+                     sub-paso de 8.7 cuando cierre distribución con CPython bundled).",
+                ));
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 /// True si el programa tiene al menos una `Stmt::FnDef` con un
@@ -1197,6 +1242,13 @@ fn generate_main_rs(
     env: &TypeEnv,
     loader: &ModuleLoader,
 ) -> Result<String, FitzError> {
+    // Fase 8.1.5 — guarda dura: `from python import X` / `import python.X`
+    // no se compilan a binario nativo en 8.1. El intérprete (`fitz run`)
+    // los acepta con la feature `python`; el codegen los rechaza con un
+    // mensaje claro que sugiere el camino válido. Esta verificación va
+    // ANTES del loader/checker para que `fitz build` con un programa
+    // Python falle rápido y sin tocar el filesystem.
+    check_no_python_imports(program)?;
     let has_http = has_http_routes(program);
     let uses_async = program_uses_async(program);
 
@@ -11040,6 +11092,35 @@ mod tests {
             body.contains("String :: from (PREFIX)"),
             "esperaba `String::from(PREFIX)` en el body, got:\n{}",
             body
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Fase 8.1.5 — codegen rechaza imports Python con mensaje claro
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn build_rechaza_from_python_import_con_mensaje_claro() {
+        let err = gen("from python import math\n")
+            .expect_err("`from python import` no debe compilar en 8.1");
+        assert!(
+            err.message.contains("from python import")
+                && err.message.contains("fitz run")
+                && err.message.contains("8.1"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn build_rechaza_import_python_punteado_con_mensaje_claro() {
+        let err = gen("import python.math\n")
+            .expect_err("`import python.X` no debe compilar en 8.1");
+        assert!(
+            err.message.contains("Python")
+                && err.message.contains("fitz run"),
+            "mensaje inesperado: {}",
+            err.message,
         );
     }
 
