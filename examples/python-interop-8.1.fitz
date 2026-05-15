@@ -10,31 +10,58 @@
 //
 // Alcance 8.1: primitivos (Int/Float/Str/Bool/Null) y PyObject opacos
 // para funciones, submódulos, clases e instancias. Marshaling de tipos
-// compuestos (List/Map/Instance) llega en 8.2. Excepciones Python
-// automáticas a Result<T> llegan en 8.3.
-
-// ---------------------------------------------------------------------
-// 1. Criterio explícito del roadmap
-// ---------------------------------------------------------------------
+// compuestos (List/Map/Instance) llega en 8.2.
+//
+// 8.3: TODA llamada a una función Python desde Fitz se envuelve en
+// `Result<T>`. `math.sqrt(16.0)` devuelve `Result<Float>::Ok(4.0)`,
+// no `Float(4.0)` directo. El usuario tiene que desempaquetar con
+// `match` o `?`. Field access (`math.pi`) NO se envuelve — sigue
+// devolviendo el valor coercionado directo. Preserva la ergonomía
+// de constantes y submódulos.
 
 from python import math
 
+// ---------------------------------------------------------------------
+// 1. Criterio explícito del roadmap — con match para desempaquetar
+// ---------------------------------------------------------------------
+
 print("== Criterio de éxito (roadmap) ==")
-print("math.sqrt(16.0) = {math.sqrt(16.0)}")     // 4
-print("math.pi         = {math.pi}")             // 3.141592653589793
+
+let sqrt16 = match math.sqrt(16.0) {
+    Ok(v)  => v,
+    Err(e) => -1.0,
+}
+print("math.sqrt(16.0) = {sqrt16}")              // 4
+print("math.pi         = {math.pi}")             // field access, sin wrap
 
 // ---------------------------------------------------------------------
-// 2. Más constantes y funciones con args primitivos
+// 2. Más constantes (field access) y funciones (call con `?` adentro
+//    de una fn que retorna Result)
 // ---------------------------------------------------------------------
 
 print("")
-print("== Constantes + funciones primitivas ==")
-print("math.e            = {math.e}")
-print("math.tau          = {math.tau}")
-print("math.floor(3.7)   = {math.floor(3.7)}")
-print("math.ceil(3.2)    = {math.ceil(3.2)}")
-print("math.factorial(5) = {math.factorial(5)}")
-print("math.gcd(12, 18)  = {math.gcd(12, 18)}")
+print("== Constantes (field access, sin wrap) ==")
+print("math.e          = {math.e}")
+print("math.tau        = {math.tau}")
+
+print("")
+print("== Funciones primitivas (call, con wrap en Result) ==")
+
+// Propagamos errores con `?` adentro de una fn que retorna Result.
+fn floor_x(x: Float) -> Result<Int> { return Ok(math.floor(x)?) }
+fn ceil_x(x: Float)  -> Result<Int> { return Ok(math.ceil(x)?) }
+fn fact(n: Int)      -> Result<Int> { return Ok(math.factorial(n)?) }
+fn gcd(a: Int, b: Int) -> Result<Int> { return Ok(math.gcd(a, b)?) }
+
+let f = match floor_x(3.7)  { Ok(v) => v, Err(_) => 0 }
+let c = match ceil_x(3.2)   { Ok(v) => v, Err(_) => 0 }
+let fa = match fact(5)      { Ok(v) => v, Err(_) => 0 }
+let g  = match gcd(12, 18)  { Ok(v) => v, Err(_) => 0 }
+
+print("math.floor(3.7)   = {f}")
+print("math.ceil(3.2)    = {c}")
+print("math.factorial(5) = {fa}")
+print("math.gcd(12, 18)  = {g}")
 
 // ---------------------------------------------------------------------
 // 3. Callable guardado en variable, después invocado
@@ -43,11 +70,13 @@ print("math.gcd(12, 18)  = {math.gcd(12, 18)}")
 print("")
 print("== Callable como valor ==")
 let sqrt = math.sqrt
-print("sqrt(25.0) = {sqrt(25.0)}")
-print("sqrt(2.0)  = {sqrt(2.0)}")
+let s25 = match sqrt(25.0) { Ok(v) => v, Err(_) => -1.0 }
+let s2  = match sqrt(2.0)  { Ok(v) => v, Err(_) => -1.0 }
+print("sqrt(25.0) = {s25}")
+print("sqrt(2.0)  = {s2}")
 
 // ---------------------------------------------------------------------
-// 4. Submódulos opacos + field access anidado
+// 4. Submódulos opacos + field access anidado (sin wrap)
 // ---------------------------------------------------------------------
 
 print("")
@@ -57,22 +86,41 @@ let p = os.path
 print("os.path.__name__ = {p.__name__}")    // "ntpath" en Windows, "posixpath" en Unix
 
 // ---------------------------------------------------------------------
-// 5. Chained call sobre PyObject opaco con returns primitivos
+// 5. Excepción Python → Err — patrón canónico del nuevo modelo
+// ---------------------------------------------------------------------
+
+print("")
+print("== Errores Python como Result::Err ==")
+
+// `math.sqrt(-1)` lanza ValueError en Python. El call no aborta — el
+// Err lleva el mensaje "<ClassName>: <message>".
+let bad = match math.sqrt(-1.0) {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("math.sqrt(-1.0) → {bad}")
+// → err: ValueError: math domain error
+
+// ---------------------------------------------------------------------
+// 6. Chained call sobre PyObject opaco
 // ---------------------------------------------------------------------
 
 print("")
 print("== Chained call ==")
 from python import json
-let s = json.dumps("hola")
+let s = match json.dumps("hola") { Ok(v) => v, Err(_) => "" }
 print("json.dumps(\"hola\") = {s}")          // "\"hola\""
 
 // ---------------------------------------------------------------------
-// 6. builtins como módulo virtual de Python
+// 7. builtins como módulo virtual de Python
 // ---------------------------------------------------------------------
 
 print("")
 print("== builtins ==")
 from python import builtins
-print("abs(-7)         = {builtins.abs(-7)}")
-print("int(True)       = {builtins.int(true)}")
-print("len(\"patagonia\") = {builtins.len(\"patagonia\")}")
+let abs7 = match builtins.abs(-7)              { Ok(v) => v, Err(_) => 0 }
+let int_true = match builtins.int(true)        { Ok(v) => v, Err(_) => 0 }
+let len_pat = match builtins.len("patagonia")  { Ok(v) => v, Err(_) => 0 }
+print("abs(-7)         = {abs7}")
+print("int(True)       = {int_true}")
+print("len(\"patagonia\") = {len_pat}")

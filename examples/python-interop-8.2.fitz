@@ -1,5 +1,5 @@
 // examples/python-interop-8.2.fitz — Marshaling bidireccional de tipos
-// compuestos (Fase 8.2).
+// compuestos (Fase 8.2) + modelo de errores con Result<T> (Fase 8.3).
 //
 //   cargo run --features python -- run examples/python-interop-8.2.fitz
 //
@@ -8,6 +8,12 @@
 // independiente; mutaciones del lado Python no se propagan a la
 // List original Fitz (y viceversa). El round-trip preserva
 // estructura pero no identidad.
+//
+// 8.3: todas las llamadas a funciones Python (`json.dumps(...)`,
+// `json.loads(...)`, `Counter(...)`, etc.) devuelven `Result<T>`. Los
+// happy paths se desempaquetan con `match { Ok(v) => v, Err(_) => ... }`
+// o con `?` adentro de una fn que retorne Result. Field access
+// (`obj.attr`) NO se envuelve.
 //
 // Lo que 8.2 destraba sobre 8.1:
 //   - List/Map/Instance como args a funciones Python.
@@ -20,57 +26,78 @@ from python import builtins
 
 // ---------------------------------------------------------------------
 // 1. Fitz → Python: List/Map/Instance como args (json.dumps)
+//    Todas las llamadas devuelven Result<Str>; usamos match para
+//    extraer el string serializado.
 // ---------------------------------------------------------------------
+
+fn unwrap_str(r: Result<Str>) -> Str {
+    return match r {
+        Ok(s)  => s,
+        Err(_) => "<err>",
+    }
+}
 
 print("== Fitz → Python (json.dumps) ==")
 
-let s_ints = json.dumps([1, 2, 3])
-print("List<Int>       → {s_ints}")
+// Las llamadas Python ahora devuelven Result; usamos `unwrap_str` para
+// extraer el JSON string del Ok. Sacamos los literales compuestos a
+// variables porque el parser de interpolación no acepta `{` adentro
+// (toma `{...}` como una sub-interpolación).
+let xs_int = [1, 2, 3]
+let xs_str = ["a", "b", "c"]
+let xs_bool = [true, false, true]
+let xs_nest = [[1, 2], [3, 4]]
+let kv = {"a": 1, "b": 2}
 
-let s_strs = json.dumps(["a", "b", "c"])
-print("List<Str>       → {s_strs}")
-
-let s_bools = json.dumps([true, false, true])
-print("List<Bool>      → {s_bools}")
-
-let s_nested = json.dumps([[1, 2], [3, 4]])
-print("List anidada    → {s_nested}")
-
-let s_map = json.dumps({"a": 1, "b": 2})
-print("Map<Str, Int>   → {s_map}")
+print("List<Int>       → {unwrap_str(json.dumps(xs_int))}")
+print("List<Str>       → {unwrap_str(json.dumps(xs_str))}")
+print("List<Bool>      → {unwrap_str(json.dumps(xs_bool))}")
+print("List anidada    → {unwrap_str(json.dumps(xs_nest))}")
+print("Map<Str, Int>   → {unwrap_str(json.dumps(kv))}")
 
 type User { id: Int, email: Str }
 
 let user = User { id: 1, email: "alice@x.com" }
-let s_user = json.dumps(user)
-print("Instance        → {s_user}")
+print("Instance        → {unwrap_str(json.dumps(user))}")
 
 let users = [
     User { id: 1, email: "alice@x.com" },
     User { id: 2, email: "bob@x.com" },
 ]
-let s_users = json.dumps(users)
-print("List<Instance>  → {s_users}")
+print("List<Instance>  → {unwrap_str(json.dumps(users))}")
 
 // ---------------------------------------------------------------------
 // 2. Python → Fitz: list/dict como returns (json.loads)
+//    json.loads devuelve Result<List|Map>; usamos match para
+//    extraer.
 // ---------------------------------------------------------------------
 
 print("")
 print("== Python → Fitz (json.loads) ==")
 
-let parsed = json.loads("[1, 2, 3]")
+let parsed_res = json.loads("[1, 2, 3]")
+let parsed = match parsed_res { Ok(v) => v, Err(_) => [] }
 let parsed_len = parsed.len()
 print("loads(array)    → {parsed}, len = {parsed_len}")
 
-let m = json.loads("\{\"a\": 10, \"b\": 20\}")
+let m_res = json.loads("\{\"a\": 10, \"b\": 20\}")
+let m = match m_res { Ok(v) => v, Err(_) => {} }
 let a_val = m["a"]
 let b_val = m["b"]
 let total = a_val + b_val
 print("loads(object)   → {m}, a + b = {total}")
 
-let nested = json.loads("\{\"user\": \{\"id\": 1, \"name\": \"x\"\}\}")
+let nested_res = json.loads("\{\"user\": \{\"id\": 1, \"name\": \"x\"\}\}")
+let nested = match nested_res { Ok(v) => v, Err(_) => {} }
 print("loads(anidado)  → {nested}")
+
+// JSON malformado → Err con el mensaje "<ClassName>: <message>".
+let bad_res = json.loads("\{ malformado")
+let bad = match bad_res {
+    Ok(_)  => "ok",
+    Err(e) => e,
+}
+print("loads(malformado) → {bad}")
 
 // ---------------------------------------------------------------------
 // 3. Round-trip: dumps + loads preserva estructura (no identidad)
@@ -79,8 +106,8 @@ print("loads(anidado)  → {nested}")
 print("")
 print("== Round-trip Fitz → Python → Fitz ==")
 let original = [{"k": 1}, {"k": 2}, {"k": 3}]
-let serialized = json.dumps(original)
-let back = json.loads(serialized)
+let serialized = match json.dumps(original) { Ok(s) => s, Err(_) => "" }
+let back = match json.loads(serialized) { Ok(v) => v, Err(_) => [] }
 let preserva = original == back
 print("original   = {original}")
 print("ida        = {serialized}")
@@ -105,7 +132,8 @@ let mas_users = [
 ]
 
 let emails = mas_users.map(fn(u) => u.email)
-let counts = collections.Counter(emails)
+let counts_res = collections.Counter(emails)
+let counts = match counts_res { Ok(v) => v, Err(_) => {} }
 
 // `Counter` es subclass de `dict` en Python, así que `py_to_value`
 // lo coerce a `Value::Map` directo — `counts` llega a Fitz como
