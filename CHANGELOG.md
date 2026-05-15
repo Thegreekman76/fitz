@@ -12,10 +12,100 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
-hito comprometido es **Fase 8.3 — Excepciones Python → `Result<T>`**
-(wrap automático de toda llamada Python en `Result<T>`; el mensaje
-`"<ClassName>: <message>"` que 8.1.2 ya emite queda estable, solo
-cambia el envoltorio).
+hito comprometido es **Fase 8.4 — Tipos del lado del checker
+(anotaciones y opacidad)**: refinar el tipo de un call Python de
+`Any` a `Result<Any>` en el checker estático y permitir
+anotaciones explícitas (`let row: User = py_call(...)?`) que el
+runtime valida contra el tipo declarado.
+
+## [v0.8.4] — 2026-05-15 — Fase 8.3: Excepciones Python → Result<T>
+
+Tercer sub-paso de la Fase 8 (Interop Python). Cambia la semántica
+de las llamadas a funciones Python desde Fitz: **TODA llamada se
+envuelve automáticamente en `Result<T>`**. Si Python lanza una
+excepción (`ValueError`, `JSONDecodeError`, etc.) o si el marshaling
+de args falla (tipo Fitz no representable en Python), el call no
+aborta el programa — devuelve `Result::Err(Str("<ClassName>:
+<message>"))` que el usuario tiene que manejar con `match` o `?`,
+igual que cualquier otra operación que puede fallar (`find`/`get`/
+`json.loads` nativos). Preserva la decisión de diseño "sin
+excepciones" del lenguaje y evita que excepciones Python escapen
+como panics opacos.
+
+- **8.3.1 — `call` envuelve return en Result + tests viejos
+  actualizados**: `py_interop::call(handle, args)` ahora SIEMPRE
+  devuelve `Ok(Value::Result(...))`. Éxito produce
+  `Value::Result(Ok(v))` con el valor coercionado adentro;
+  cualquier falla (excepción Python, marshaling de args, marshaling
+  del return) produce `Value::Result(Err(Str("<ClassName>:
+  <message>")))`. Helper privado `err_value_from_message(msg)`
+  construye el wrap. Los ~16 tests viejos del call path (8.1.4 +
+  8.2.1 + 8.2.2 + 8.2.3) actualizados con helper `ok_inner(v)` que
+  desempaqueta el Ok; los tests que esperaban error
+  (`call_excepcion_python_*`, `call_arg_no_marshalleable_*`)
+  reescritos con `err_message(v)` que extrae el mensaje del Err.
+  4 tests py_interop nuevos sobre el shape: shape `Ok(...)`,
+  criterio textual del roadmap (`json.loads("{ malformado")` →
+  `JSONDecodeError`), TypeError envuelto, formato `"<Class>:
+  <msg>"` estable.
+- **8.3.2 — Ejemplos 8.1 y 8.2 actualizados al modelo Result**:
+  `examples/python-interop-8.1.fitz` reescrito con
+  `match { Ok(v) => v, Err(_) => ... }` para desempaquetar y fns
+  helper (`fn floor_x(x: Float) -> Result<Int> { return Ok(math.floor(x)?) }`)
+  que propagan con `?`. Sección nueva "Errores Python como
+  Result::Err" con caso `math.sqrt(-1.0) → err: ValueError: ...`.
+  Idem para `examples/python-interop-8.2.fitz`: helper
+  `fn unwrap_str(r: Result<Str>) -> Str`, caso nuevo
+  `loads(malformado) → JSONDecodeError: ...`, literales compuestos
+  extraídos a variables porque el parser de interpolación no
+  acepta `{...}` adentro de strings (caveat documentado en el
+  ejemplo).
+- **8.3.3 — Ejemplo dedicado + cierre formal**: nuevo
+  `examples/python-interop-8.3.fitz` con 6 secciones — criterio
+  textual del roadmap, distintas excepciones Python como Err,
+  propagación con `?`, marshaling fallido como Err (uniformidad),
+  field access sin wrap (decisión interna), chaining con
+  desempaquetado intermedio. Validado bit-a-bit. CHANGELOG v0.8.4,
+  roadmap actualiza Fase 8.3 a CERRADA, deudas nota de cierre,
+  CLAUDE/README refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **`call` envuelve siempre, `get_attr` NO envuelve**. Solo
+  llamadas pasan por Result; field access (`math.pi`,
+  `obj.attr`) sigue devolviendo el valor coercionado directo.
+  Matchea la letra del roadmap ("toda **llamada** a una función
+  Python") y preserva la ergonomía de leer constantes y submódulos
+  sin `match` por cada acceso. AttributeError fallido sigue siendo
+  `FitzError` que aborta (es típicamente un error de programación,
+  no de runtime esperable).
+- **Marshaling de args también va en Err** (uniformidad): el
+  usuario ve UN solo punto de error en el path call, independiente
+  de qué falló — excepción Python o tipo Fitz no marshalleable.
+- **`Err` lleva `Value::Str` con el mensaje** plano. `Value::
+  Instance(PyException)` con inspección estructurada (type,
+  traceback) queda como deuda menor — si entra demanda real.
+- **KeyboardInterrupt/SystemExit también van como `Err`** según
+  el roadmap. No hay forma de matar el runtime Fitz desde una
+  excepción Python.
+- **El checker NO cambia en 8.3**. Sigue tipando call Python como
+  `Any`. El refinamiento a `Result<Any>` llega en 8.4.
+
+**Cambio de comportamiento**: técnicamente esto rompe los
+ejemplos viejos de 8.1/8.2 que asumían call sin wrap. Se
+reescribieron en 8.3.2 (no se publicaron antes de este release,
+así que no afecta a usuarios externos).
+
+**Tests al cierre**:
+  - Sin feature: **1175 unit** (sin cambios — tests Python son
+    `#[cfg(feature = "python")]`) + 80 compile_e2e + 3 openapi_e2e.
+  - Con feature: **1252 unit** (1245 baseline 8.2 + 4 py_interop
+    + 3 evaluator del criterio canónico/propagación con `?`/field
+    access sin wrap) + 80 + 3.
+  - Clippy `cargo clippy --all-targets --features python -- -D warnings`
+    limpio. Idem sin feature.
+
+Detalle completo: `docs/roadmap.md` → "Fase 8.3".
 
 ## [v0.8.3] — 2026-05-15 — Fase 8.2: Marshaling de tipos compuestos
 

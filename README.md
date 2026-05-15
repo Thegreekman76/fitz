@@ -136,17 +136,19 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.2 cerrada — Fitz pasa estructuras compuestas entre
-los dos runtimes.** `List<T>` ↔ `list`, `Map<K, V>` ↔ `dict`, e
-`Instance` → `dict` (por field name) cruzan la frontera Fitz ↔
-Python con copia eager bidireccional. Cumple el criterio canónico
-del roadmap: una función Python que recibe `List<User>` y devuelve
-`Map<Str, Int>` (vía `collections.Counter`) funciona sin glue
-extra y sin perder data. Los errores con tipos no marshalleables
-llevan breadcrumb informativo (`arg0[2].email`). La interop completa
-(excepciones → Result, anotaciones de tipo Python, SQLAlchemy/NumPy
-ergonómico) llega en los sub-pasos siguientes (8.3 a 8.8). Ver el
-[roadmap](docs/roadmap.md) para el plan completo.
+🏔️ **Fase 8.3 cerrada — Fitz convierte excepciones Python a
+`Result<T>` automáticamente.** Toda llamada a una función Python
+desde Fitz se envuelve: éxito → `Ok(v)`, excepción Python o
+marshaling fallido → `Err("<ClassName>: <message>")`. El programa
+no aborta — el usuario maneja la falla con `match` o `?`, igual
+que cualquier otra operación que puede fallar (`find`/`get`/
+`json.loads` nativos). Preserva la decisión de diseño "sin
+excepciones" del lenguaje y evita que excepciones Python escapen
+como panics opacos. Field access (`math.pi`, `obj.attr`) sigue
+sin wrap — ergonomía de constantes y submódulos. La interop
+completa (anotaciones del checker, SQLAlchemy/NumPy ergonómico,
+async + GIL) llega en los sub-pasos siguientes (8.4 a 8.8). Ver
+el [roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
 
@@ -234,23 +236,42 @@ Las fases cerradas:
   8.2.3 criterio canónico end-to-end (`List<User>` →
   `collections.Counter` → `Map<Str, Int>`) + ejemplo runnable
   `examples/python-interop-8.2.fitz`.
+- **Fase 8.3 — Excepciones Python → `Result<T>`**: toda llamada
+  a una función Python desde Fitz se envuelve automáticamente. El
+  programa Fitz no aborta — el usuario maneja la falla con `match`
+  o `?`, igual que `find`/`get`/`json.loads` nativos. Preserva el
+  modelo "sin excepciones" del lenguaje. Decisión asimétrica:
+  `call` envuelve y `get_attr` no (`math.pi` sigue siendo Float
+  directo, `math.sqrt(16.0)` es `Ok(4.0)`). Marshaling de args
+  fallido también va en `Err` (uniformidad). Mensaje canónico
+  `"<ClassName>: <message>"` estable desde 8.1.2. Sub-pasos:
+  8.3.1 `py_interop::call` envuelve siempre + tests viejos
+  actualizados con helpers `ok_inner`/`err_message` + 7 tests
+  nuevos del shape y criterio; 8.3.2 ejemplos 8.1/8.2 reescritos
+  al nuevo modelo (con caveat del parser de interpolación con
+  `{...}` documentado); 8.3.3 ejemplo dedicado
+  `examples/python-interop-8.3.fitz` con 6 secciones (criterio
+  textual del roadmap, excepciones como Err, propagación con `?`,
+  marshaling fallido con breadcrumb, field access sin wrap,
+  chaining con desempaquetado intermedio).
 
-**1245 tests pasando con `--features python`** (1245 unit + 80 E2E
+**1252 tests pasando con `--features python`** (1252 unit + 80 E2E
 con `fitz build` + 3 openapi_e2e). **1175 + 80 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.3 — Excepciones Python → `Result<T>`**
-(wrap automático de toda llamada Python; el mensaje
-`"<ClassName>: <message>"` que 8.1.2 ya emite queda estable —
-solo cambia el envoltorio. Preserva la decisión de diseño "sin
-excepciones" del lenguaje). Después: 8.4 (anotaciones del lado
-Fitz para `let user: User = py_call(...)?`), 8.5 (`fitz py-types`
-auto-mapeo SQLAlchemy), 8.6 (async + GIL), 8.7 (CPython bundled —
-candidato para cerrar F19), 8.8 (guía + ejemplo CRUD). Ver el
-[roadmap](docs/roadmap.md) para detalle. **Deudas comprometidas
-que siguen**: F19 (codegen interop Python en `fitz build`),
-descripciones via doc-strings sobre handlers (OpenAPI enrichment),
-modelo wrap de middleware (post-process) si aparece presión real.
+Próximo norte: **Fase 8.4 — Tipos del lado del checker
+(anotaciones y opacidad)** — refinar el tipo de call Python de
+`Any` a `Result<Any>` en el checker estático (hoy es `Any` por
+gradual escape) y permitir anotaciones explícitas
+(`let row: User = py_call(...)?`) que el runtime valida contra el
+tipo declarado. Stubs `.pyi` quedan pospuestos a Fase 9+. Después:
+8.5 (`fitz py-types` auto-mapeo SQLAlchemy), 8.6 (async + GIL),
+8.7 (CPython bundled — candidato para cerrar F19), 8.8 (guía +
+ejemplo CRUD). Ver el [roadmap](docs/roadmap.md) para detalle.
+**Deudas comprometidas que siguen**: F19 (codegen interop Python
+en `fitz build`), descripciones via doc-strings sobre handlers
+(OpenAPI enrichment), modelo wrap de middleware (post-process)
+si aparece presión real.
 
 ## Qué funciona hoy
 

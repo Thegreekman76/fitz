@@ -205,6 +205,38 @@
 > `examples/python-interop-8.2.fitz` (5 secciones). Detalles
 > completos en `docs/roadmap.md` → "Fase 8.2". Próximo norte:
 > **Fase 8.3 (excepciones Python → `Result<T>`)**.
+>
+> **Fase 8.3 (2026-05-15): CERRADA** — excepciones Python →
+> `Result<T>` automático. Toda llamada a una función Python desde
+> Fitz se envuelve: éxito → `Result::Ok(v)`; excepción Python o
+> marshaling fallido → `Result::Err(Str("<ClassName>: <message>"))`
+> con el formato canónico ya estable desde 8.1.2. El programa
+> Fitz no aborta — el usuario es forzado a manejar con `match` o
+> `?`. Tres sub-pasos: 8.3.1 `py_interop::call` envuelve siempre
+> (cualquier falla del path Python — excepción, marshaling de args,
+> marshaling del return — pasa por Err; helper privado
+> `err_value_from_message`) + tests viejos del call path
+> actualizados con helpers `ok_inner`/`err_message` + 4 unit nuevos
+> sobre shape + 3 evaluator nuevos del criterio canónico
+> (`match`, propagación con `?`, field access sin wrap); 8.3.2
+> ejemplos 8.1/8.2 reescritos al nuevo modelo (helper
+> `unwrap_str`, `fn` con `?`, caveat del parser de interpolación
+> con `{...}` documentado); 8.3.3 ejemplo dedicado
+> `examples/python-interop-8.3.fitz` con 6 secciones (criterio
+> textual del roadmap, distintas excepciones como Err,
+> propagación con `?`, marshaling fallido con breadcrumb, field
+> access sin wrap, chaining con desempaquetado intermedio).
+> Decisiones: `call` envuelve y `get_attr` no (ergonomía vs
+> ortogonalidad — solo llamadas pueden fallar en runtime
+> esperable); marshaling de args también va en `Err` (uniformidad
+> del path call); `Err` lleva `Str` plano (PyException
+> estructurada queda como deuda menor); checker NO cambia (refino
+> a `Result<Any>` llega en 8.4). Total al cierre: **1252 unit +
+> 80 E2E + 3 openapi_e2e** con feature; **1175 + 80 + 3** sin
+> feature. Cambio de comportamiento documentado: rompió ejemplos
+> viejos de 8.1/8.2 (reescritos en 8.3.2). Detalles completos en
+> `docs/roadmap.md` → "Fase 8.3". Próximo norte: **Fase 8.4
+> (anotaciones del lado del checker + refinar tipos opacos)**.
 
 ## Resumen ejecutivo
 

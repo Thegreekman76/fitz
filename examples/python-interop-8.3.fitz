@@ -1,0 +1,154 @@
+// examples/python-interop-8.3.fitz — Excepciones Python → Result<T>
+// (Fase 8.3).
+//
+//   cargo run --features python -- run examples/python-interop-8.3.fitz
+//
+// Necesita Python 3.10+. Demuestra el modelo de errores nuevo:
+//
+//   - TODA llamada a una función Python desde Fitz se envuelve en
+//     `Result<T>`. Éxito → `Ok(v)`; cualquier falla (excepción
+//     Python, marshaling de args fallido) → `Err(Str("<ClassName>:
+//     <message>"))`.
+//   - El programa Fitz **no aborta** por excepciones Python — el
+//     usuario es forzado a manejar la falla con `match` o `?`.
+//     Preserva la decisión de diseño "sin excepciones" del lenguaje.
+//   - Field access (`obj.attr`) NO se envuelve. Sigue devolviendo el
+//     valor coercionado directo. Preserva la ergonomía de leer
+//     constantes (`math.pi`) y submódulos (`os.path`).
+//
+// Comparado con 8.1/8.2: el shape es nuevo, los mensajes de error
+// siguen el formato canónico `"<ClassName>: <message>"` que estaba
+// estable desde 8.1.2.
+
+from python import math
+from python import json
+from python import builtins
+
+// ---------------------------------------------------------------------
+// 1. Criterio textual del roadmap: match sobre json.loads malformado
+// ---------------------------------------------------------------------
+
+print("== Criterio del roadmap: parse JSON malformado ==")
+
+let result_malo = json.loads("\{ malformado")
+let outcome_malo = match result_malo {
+    Ok(m)  => "ok: {m}",
+    Err(e) => "error: {e}",
+}
+print(outcome_malo)
+// → error: JSONDecodeError: Expecting property name enclosed in double quotes: ...
+
+// El happy path da Ok(...) con la estructura.
+let result_ok = json.loads("[1, 2, 3]")
+let outcome_ok = match result_ok {
+    Ok(m)  => "ok: {m}",
+    Err(e) => "error: {e}",
+}
+print(outcome_ok)
+// → ok: [1, 2, 3]
+
+// ---------------------------------------------------------------------
+// 2. Excepciones Python distintas — el formato es estable
+// ---------------------------------------------------------------------
+
+print("")
+print("== Distintas excepciones Python como Err ==")
+
+let domain = match math.sqrt(-1.0) {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("math.sqrt(-1.0)    → {domain}")
+// → err: ValueError: ...
+
+let div_zero = match math.log(0.0) {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("math.log(0.0)      → {div_zero}")
+// → err: ValueError: math domain error
+
+let bad_int = match builtins.int("no soy un número") {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("int(\"no...\")       → {bad_int}")
+// → err: ValueError: invalid literal for int() with base 10: ...
+
+// ---------------------------------------------------------------------
+// 3. Propagación con `?` adentro de una fn que retorna Result
+// ---------------------------------------------------------------------
+
+print("")
+print("== Propagación con `?` ==")
+
+// La fn retorna Result<Float>, así que `?` desempaca el Ok o
+// propaga el Err al caller sin envoltorios manuales.
+fn root_safe(x: Float) -> Result<Float> {
+    return Ok(math.sqrt(x)?)
+}
+
+let r_ok = match root_safe(16.0) {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("root_safe(16.0)    → {r_ok}")
+// → ok: 4.0
+
+let r_bad = match root_safe(-1.0) {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("root_safe(-1.0)    → {r_bad}")
+// → err: ValueError: ...  (propagado por `?`)
+
+// ---------------------------------------------------------------------
+// 4. Marshaling fallido también se envuelve en Err (uniformidad)
+// ---------------------------------------------------------------------
+
+print("")
+print("== Marshaling de args como Err ==")
+
+// Range no es marshalleable a Python. En 8.1 esto abortaba el
+// programa con FitzError; en 8.3 se envuelve en Result::Err con
+// el breadcrumb del path (`arg0`) preservado.
+let r_range = match math.sqrt(0..10) {
+    Ok(v)  => "ok: {v}",
+    Err(e) => "err: {e}",
+}
+print("math.sqrt(0..10)   → {r_range}")
+// → err: ...Range...arg0...
+
+// ---------------------------------------------------------------------
+// 5. Field access NO se envuelve — preserva ergonomía
+// ---------------------------------------------------------------------
+
+print("")
+print("== Field access (sin wrap) ==")
+print("math.pi  = {math.pi}")        // Float directo
+print("math.e   = {math.e}")         // Float directo
+let p = math
+print("p.tau    = {p.tau}")          // PyObject.attr → Float directo
+
+// ---------------------------------------------------------------------
+// 6. Chaining: el resultado de un call sigue siendo Result, así que
+//    para encadenar hay que desempaquetar entre pasos.
+// ---------------------------------------------------------------------
+
+print("")
+print("== Chaining con desempaquetado intermedio ==")
+
+// Pipeline: dumps(...) → loads(...) — round-trip que confirma que
+// el shape Ok/Err es estable a lo largo del pipeline.
+fn round_trip(xs: List<Int>) -> Result<List<Int>> {
+    let s = json.dumps(xs)?
+    return Ok(json.loads(s)?)
+}
+
+let original = [1, 2, 3]
+let back = match round_trip(original) {
+    Ok(v)  => v,
+    Err(_) => [],
+}
+print("round_trip([1,2,3]) → {back}")
+// → [1, 2, 3]
