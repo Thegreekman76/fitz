@@ -11,6 +11,17 @@ license = "MIT"
 name = "fitz"
 path = "src/main.rs"
 
+# Fase 9.x.1.a — Language Server Protocol. Bin separado del CLI principal
+# por convención del ecosistema (rust-analyzer, gopls, tsserver son todos
+# binarios aparte que el cliente VSCode/Neovim spawnea como proceso hijo).
+# `required-features` evita que `cargo build` sin `--features lsp` intente
+# linkear sin la dep `tower-lsp`. El bin compila solo con
+# `cargo build --features lsp` o `cargo build --bin fitz-lsp --features lsp`.
+[[bin]]
+name = "fitz-lsp"
+path = "src/bin/fitz-lsp.rs"
+required-features = ["lsp"]
+
 [dependencies]
 # CLI
 clap = { version = "4", features = ["derive"] }
@@ -75,6 +86,14 @@ parking_lot = "0.12"
 #    sin imports Python no pagan el costo de boot.
 pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optional = true }
 
+# Fase 9.x.1.a — server LSP en `src/bin/fitz-lsp.rs`. Dep OPCIONAL detrás
+# de la feature `lsp`: el `cargo build` default sigue produciendo solo el
+# bin `fitz` standalone, sin pagar el peso de tower-lsp + lsp-types en el
+# dep tree. tower-lsp 0.20 ya corre sobre tokio 1 (que ya tenemos como
+# dep no-opcional para el runtime HTTP/async), así que la feature solo
+# suma el wrapper LSP + lsp-types. Convención paralela a `python = ["dep:pyo3"]`.
+tower-lsp = { version = "0.20", optional = true }
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el
@@ -84,6 +103,13 @@ pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optiona
 # (call a `async def` Python → `Value::Future` Fitz, awaiteable
 # desde cualquier `async fn`).
 python = ["dep:pyo3"]
+
+# Fase 9.x.1.a — Activa el bin `fitz-lsp` (LSP server sobre tower-lsp).
+# Opt-in: el bin `fitz` default no se ve afectado y el dep tree base
+# queda chico. `cargo build --features lsp` produce ambos bins; el
+# bin `fitz-lsp` necesita esta feature por `required-features` (ver
+# arriba en `[[bin]]`).
+lsp = ["dep:tower-lsp"]
 
 [dev-dependencies]
 # Directorios temporales para tests del loader de módulos (3.5):
