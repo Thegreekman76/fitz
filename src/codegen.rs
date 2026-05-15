@@ -6883,7 +6883,13 @@ fn field_eq_expr(
                 inner_eq = inner_eq,
             ))
         }
-        Type::Function { .. } | Type::Future(_) | Type::Any => Ok("false".to_string()),
+        // 8.4: `PyAny` no aparece nunca en codegen (interop Python solo
+        // corre en `fitz run`, el guard `check_no_python_imports` aborta
+        // `fitz build` antes). Lo dejamos en el catch-all junto con los
+        // otros tipos no-comparables como defensa.
+        Type::Function { .. } | Type::Future(_) | Type::Any | Type::PyAny => {
+            Ok("false".to_string())
+        }
     }
 }
 
@@ -7009,6 +7015,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Null => "Null",
         Type::Range => "Range",
         Type::Any => "Any",
+        Type::PyAny => "PyAny",
         Type::List(_) => "List<...>",
         Type::Map(_, _) => "Map<...>",
         Type::Result(_) => "Result<...>",
@@ -7031,6 +7038,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::Null => "Null".into(),
         Type::Range => "Range".into(),
         Type::Any => "Any".into(),
+        Type::PyAny => "PyAny".into(),
         Type::List(inner) => format!("List<{}>", display_type(inner, env)),
         Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
         Type::Result(inner) => format!("Result<{}>", display_type(inner, env)),

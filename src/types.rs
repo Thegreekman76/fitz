@@ -86,6 +86,23 @@ pub enum Type {
     /// 5.3.2, métodos antes de 5.3.4, etc.). Cualquier comparación
     /// contra `Any` pasa: nada se rechaza por culpa de un `Any`.
     Any,
+
+    /// Fase 8.4 — "Objeto Python opaco". Aparece en los bindings de
+    /// `from python import X` y se propaga por field access
+    /// (`mod.submod`, `obj.attr` → siguen siendo `PyAny`). Existe
+    /// separado de `Any` para que el checker pueda distinguir "esto
+    /// es Python opaco" de "esto es Any general" y refinar el tipo
+    /// de las llamadas: `pyobj(args)` y `pyobj.method(args)` tipan
+    /// como `Result<Any>` (el wrap automático de 8.3), forzando al
+    /// usuario a manejar el error con `match` o `?` estáticamente.
+    ///
+    /// Compatibilidad: como `Any`, `PyAny` es bidireccionalmente
+    /// compatible con cualquier otro tipo (gradual escape).
+    /// Anotaciones explícitas (`let row: User = py_call(...)?`) son
+    /// la vía recomendada para "salir" de PyAny y entrar a tipos
+    /// Fitz concretos — el runtime hace la coerción real (deuda 8.4.3:
+    /// dict → Instance vía field name match).
+    PyAny,
 }
 
 impl Type {
@@ -124,6 +141,7 @@ impl Type {
                 format!("fn({}) -> {}", ps.join(", "), ret.display(env))
             }
             Type::Any => "Any".into(),
+            Type::PyAny => "PyAny".into(),
         }
     }
 }
@@ -1048,6 +1066,12 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     }
                     Type::Any
                 }
+                // 8.4: field access sobre `PyAny` da `PyAny`. Cubre
+                // chains como `os.path` / `os.path.sep` / `engine.url`
+                // — todos opacos hasta que el usuario anote
+                // explícitamente. El chequeo runtime via getattr ya
+                // tira AttributeError claro si el field no existe.
+                Type::PyAny => Type::PyAny,
                 // Cualquier otro receptor: 5.3.4 lo cubre con métodos
                 // built-in. Por ahora Any.
                 _ => Type::Any,
@@ -1065,6 +1089,18 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 let obj_ty = infer_expr(ctx, object);
                 let args_ty: Vec<Type> =
                     args.iter().map(|a| infer_expr(ctx, a)).collect();
+                // 8.4: receptor PyAny — el método se invoca cruzando
+                // a Python via dispatch_method (8.1.4). El runtime
+                // envuelve TODO call Python en `Result<T>` (8.3); el
+                // checker refleja eso: la llamada tipa como
+                // `Result<Any>`, no `Any`. Esto activa la regla de
+                // exhaustividad sobre Result (5.3.3) y la restricción
+                // del operador `?` (5.3.2/5.3.3) — el usuario es
+                // forzado a manejar la falla estáticamente, igual
+                // que cualquier `Result<T>` nativo.
+                if matches!(obj_ty, Type::PyAny) {
+                    return Type::Result(Box::new(Type::Any));
+                }
                 return match infer_method_call(ctx, &obj_ty, field, &args_ty, *span) {
                     Some(ret) => ret,
                     // Receptor que no entendemos (Nominal sin métodos
@@ -1081,6 +1117,11 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             match callee_ty {
                 // Gradual: callee de tipo desconocido no se chequea.
                 Type::Any => Type::Any,
+                // 8.4: callee es un PyObject opaco — el call cruza a
+                // Python y vuelve envuelto en `Result<T>` (decisión
+                // 8.3). Cubre `let f = math.sqrt; f(25.0)` (callee
+                // resuelto por Ident después del field access).
+                Type::PyAny => Type::Result(Box::new(Type::Any)),
                 Type::Function { params, ret } => {
                     let label = describe_callee(callee);
                     if args.len() != params.len() {
@@ -1871,6 +1912,13 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
     if matches!(actual, Type::Any) || matches!(expected, Type::Any) {
         return true;
     }
+    // Fase 8.4 — `PyAny` es gradual igual que `Any` pero conserva
+    // identidad propia para que el checker pueda distinguir "esto
+    // viene de Python" de "esto es Any general" (relevante en
+    // `infer_call` para tipar calls Python como `Result<Any>`).
+    if matches!(actual, Type::PyAny) || matches!(expected, Type::PyAny) {
+        return true;
+    }
     if matches!(actual, Type::Null) && expected.is_nullable() {
         return true;
     }
@@ -2167,24 +2215,37 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         Stmt::Break(_) | Stmt::Continue(_) => {}
 
         Stmt::Import { path, alias, .. } => {
-            // `import a.b.c` bindea `c` (o `alias` si está) como Module
-            // (Any en el checker).
+            // `import a.b.c` bindea `c` (o `alias` si está) como Module.
+            // 8.4: si el path arranca con `python` (prefijo reservado de
+            // interop), el binding tipa como `PyAny` para que el
+            // checker pueda refinar el tipo de los calls a
+            // `Result<Any>`. Resto sigue como `Any` (gradual estándar).
+            let from_python = path.first().map(|s| s.as_str()) == Some("python");
             let binding = alias.clone().or_else(|| path.last().cloned());
             if let Some(name) = binding {
-                ctx.declare_var(name, Type::Any);
+                let ty = if from_python { Type::PyAny } else { Type::Any };
+                ctx.declare_var(name, ty);
             }
         }
 
-        Stmt::FromImport { names, .. } => {
+        Stmt::FromImport { path, names, .. } => {
             // Cada nombre se trae al scope como var. Algunos pueden
             // ser tipos (los chequea StructLit vía TypeEnv, ya
             // registrados en resolve_program), otros funciones o
             // values — sin info del módulo importado, `Any` es lo
             // mejor que tenemos en 5.3.1. Con alias, el binding local
             // usa el alias en lugar del nombre original.
+            //
+            // 8.4: `from python import X` bindea `X` como `PyAny` para
+            // que los call sites se refinen a `Result<Any>` en
+            // `infer_call`. Submódulos `from python.X import Y` también
+            // tipan como `PyAny` — todo lo que viene de Python es
+            // opaco para el checker.
+            let from_python = path.first().map(|s| s.as_str()) == Some("python");
             for (n, alias) in names {
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
-                ctx.declare_var(binding, Type::Any);
+                let ty = if from_python { Type::PyAny } else { Type::Any };
+                ctx.declare_var(binding, ty);
             }
         }
     }
@@ -4821,5 +4882,129 @@ mod tests {
         assert_eq!(e.line, 1);
         assert_eq!(e.column, 12);
         assert!(e.message.contains("fin del rango"), "msg: {}", e.message);
+    }
+
+    // -----------------------------------------------------------------------
+    // Fase 8.4.1 — Type::PyAny + bindings de `from python import` +
+    // calls Python tipan como Result<Any> en el checker.
+    // -----------------------------------------------------------------------
+    //
+    // Estos tests funcionan SIN la feature `python` activa porque el
+    // checker solo mira el shape del AST: `path[0] == "python"` activa
+    // la rama PyAny independiente de si el binario lincó libpython.
+    // El runtime solo se invoca con la feature, pero el chequeo
+    // estático corre siempre.
+
+    #[test]
+    fn checker_from_python_import_bindea_como_pyany_no_any() {
+        // El checker acepta `from python import math` y bindea `math`
+        // con tipo PyAny. Cualquier uso pasa por las reglas asimétricas
+        // de PyAny (calls → Result<Any>, field access → PyAny).
+        let (_, errors) = check_str("from python import math\nlet x = math\n");
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
+    }
+
+    #[test]
+    fn checker_call_python_tipa_como_result_any() {
+        // 8.4.2 (entró junto con 8.4.1): la llamada `math.sqrt(16.0)`
+        // tipa como `Result<Any>` — usar el resultado como `Float`
+        // directo SIN desempaquetar dispara error de tipo.
+        assert_error_with(
+            "from python import math\nlet f: Float = math.sqrt(16.0)\n",
+            &["Float", "Result"],
+        );
+    }
+
+    #[test]
+    fn checker_call_python_con_match_compila_limpio() {
+        // El patrón canónico (match para desempaquetar) tipa OK.
+        // Cubre la regla de exhaustividad sobre Result (5.3.3) — `Ok`
+        // + `Err` exhaustivo es suficiente.
+        let (_, errors) = check_str(
+            "from python import math\n\
+             let f = match math.sqrt(16.0) { Ok(v) => v, Err(_) => -1.0 }\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
+    }
+
+    #[test]
+    fn checker_call_python_match_no_exhaustivo_es_error() {
+        // La regla de 5.3.3 ahora pega con calls Python: `match` que
+        // omite `Err` (sin catch-all) dispara error de exhaustividad
+        // porque el scrutinee tipa como Result<Any>.
+        assert_error_with(
+            "from python import math\n\
+             let f = match math.sqrt(16.0) { Ok(v) => v }\n",
+            &["exhaustivo"],
+        );
+    }
+
+    #[test]
+    fn checker_try_operator_sobre_call_python_compila_dentro_de_fn_result() {
+        // El `?` adentro de una fn que retorna `Result<T>` desempaca
+        // el `Result<Any>` Python al `Any` interno (que matchea
+        // cualquier T por gradual). En éxito devuelve el valor; en
+        // falla propaga el Err al caller.
+        let (_, errors) = check_str(
+            "from python import math\n\
+             fn root(x: Float) -> Result<Float> { return Ok(math.sqrt(x)?) }\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
+    }
+
+    #[test]
+    fn checker_try_operator_sobre_call_python_fn_no_result_es_error() {
+        // La regla de 5.3.3 sobre `?` también pega con calls Python:
+        // dentro de una fn que retorna `Int` (no `Result<...>`), `?`
+        // sobre `math.sqrt(...)` dispara error porque el contenedor
+        // no puede recibir el `Err` propagado.
+        // (`?` a nivel top no se chequea en el checker — se reporta
+        // en runtime, decisión heredada de 5.3.3.)
+        assert_error_with(
+            "from python import math\n\
+             fn bad(x: Float) -> Int { return 0 + math.sqrt(x)? }\n",
+            &["operador", "?"],
+        );
+    }
+
+    #[test]
+    fn checker_field_access_sobre_pyany_devuelve_pyany() {
+        // `os.path` es field access sobre PyAny — el tipo del binding
+        // sigue siendo PyAny. El check pasa sin errores y un call
+        // sobre el submódulo (`os.path.join(...)`) sigue tipando
+        // como Result<Any>.
+        let (_, errors) = check_str(
+            "from python import os\n\
+             let p = os.path\n\
+             let r = match p.join(\"a\", \"b\") { Ok(s) => s, Err(_) => \"\" }\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
+    }
+
+    #[test]
+    fn checker_pyany_es_compatible_con_anotacion_concreta() {
+        // El patrón canónico del roadmap: `let row: User = py_call()?`.
+        // Estáticamente, el `?` desempaca Result<Any> a Any; la
+        // anotación User pasa por gradual escape (PyAny/Any → User).
+        // El runtime hace la coerción real en 8.4.3.
+        let (_, errors) = check_str(
+            "type User { id: Int, name: Str }\n\
+             from python import json\n\
+             fn parse(s: Str) -> Result<User> { return Ok(json.loads(s)?) }\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
+    }
+
+    #[test]
+    fn checker_import_normal_no_es_pyany() {
+        // `import utils` (sin prefijo `python`) sigue siendo Any,
+        // no PyAny — la lógica de refinar calls a Result<Any> solo
+        // aplica a `from python import`. Validación: una llamada a
+        // un módulo normal sigue siendo Any, así que un binding
+        // tipado a Float pasa por gradual sin error.
+        let (_, errors) = check_str(
+            "import utils\nlet f: Float = utils.something(1)\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 }
