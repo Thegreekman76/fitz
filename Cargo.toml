@@ -79,8 +79,10 @@ pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optiona
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el
 # sistema. `cargo build --features python` activa la variante
-# `Value::PyObject` y (en sub-pasos siguientes) el loader Python en
-# `evaluator::load_module` + el módulo `py_interop` que envuelve PyO3.
+# `Value::PyObject`, el loader Python en `evaluator::load_module`,
+# el módulo `py_interop` que envuelve PyO3, y el bridge async de 8.6
+# (call a `async def` Python → `Value::Future` Fitz, awaiteable
+# desde cualquier `async fn`).
 python = ["dep:pyo3"]
 
 [dev-dependencies]

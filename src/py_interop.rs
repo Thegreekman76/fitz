@@ -24,7 +24,7 @@ use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
-use crate::value::{PyObjectHandle, ResultVariant, Value};
+use crate::value::{FitzFuture, PyObjectHandle, ResultVariant, Value};
 
 /// Importa un módulo Python dado su path "punteado" (`"math"`,
 /// `"sqlalchemy.orm"`, etc.) y lo devuelve envuelto en `Value::PyObject`.
@@ -139,13 +139,132 @@ pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
             Err(e) => return Ok(err_value_from_message(py_err_to_fitz(py, e).message)),
         };
         match bound.call1(args_tuple) {
-            Ok(ret) => match py_to_value(py, &ret) {
-                Ok(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v)))),
-                Err(e) => Ok(err_value_from_message(e.message)),
-            },
+            Ok(ret) => {
+                // Fase 8.6: si el return es una corutina Python
+                // (caso típico cuando se llama una `async def`),
+                // convertimos a `Value::Future` en lugar de `PyObject`
+                // opaco. Esto destraba `py_async_fn().await` desde
+                // Fitz sin glue manual — el `.await` postfix existente
+                // (Fase 6) desempaca el `Value::Future` y devuelve el
+                // valor coercionado.
+                if is_coroutine(py, &ret) {
+                    return match py_coro_to_fitz_future(&ret) {
+                        Ok(fut) => Ok(Value::Result(ResultVariant::Ok(Box::new(
+                            Value::new_future(fut),
+                        )))),
+                        Err(e) => Ok(err_value_from_message(
+                            py_err_to_fitz(py, e).message,
+                        )),
+                    };
+                }
+                match py_to_value(py, &ret) {
+                    Ok(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v)))),
+                    Err(e) => Ok(err_value_from_message(e.message)),
+                }
+            }
             Err(err) => Ok(err_value_from_message(py_err_to_fitz(py, err).message)),
         }
     })
+}
+
+/// Fase 8.6 — chequea si un objeto Python es awaitable (una corutina
+/// `async def`, un Task, o cualquier objeto con `__await__`). Usa
+/// `inspect.isawaitable`, que es la forma canónica en Python stdlib.
+///
+/// Tomamos el GIL implícito (el caller ya lo tiene). Devolvemos
+/// `false` si la introspección falla — es defensivo: mejor tratar el
+/// objeto como no-awaitable que producir un wrap incorrecto.
+fn is_coroutine<'py>(py: Python<'py>, obj: &Bound<'py, PyAny>) -> bool {
+    let inspect = match py.import("inspect") {
+        Ok(m) => m,
+        Err(_) => return false,
+    };
+    inspect
+        .call_method1("isawaitable", (obj,))
+        .and_then(|v| v.extract::<bool>())
+        .unwrap_or(false)
+}
+
+/// Fase 8.6 — convierte una corutina Python en un `FitzFuture` que
+/// el `Value::Future` Fitz puede envolver. El usuario escribe
+/// `py_async_fn().await` y el bridge es invisible.
+///
+/// **Implementación (8.6.1, "baseline blocking")**: usamos
+/// `tokio::task::spawn_blocking` + `asyncio.run_until_complete` adentro
+/// del worker thread. Esto:
+///
+///   - **Es Send-safe**: el `Py<PyAny>` viaja entre threads (PyO3 lo
+///     marca como Send), el `Bound<'py, PyAny>` derivado solo existe
+///     adentro del `Python::attach` del worker thread. El FitzFuture
+///     externo solo tiene el `JoinHandle` (Send).
+///   - **No deadlockea con el runtime tokio existente**: el worker es
+///     del blocking pool de tokio, no del scheduler async.
+///   - **Serializa por GIL**: 100 awaits concurrentes a corutinas
+///     Python distintas se serializan en el GIL — comportamiento
+///     esperado y documentado en el roadmap. Para APIs DB-bound
+///     (caso típico SQLAlchemy/asyncpg), la DB es el bottleneck, no
+///     el GIL.
+///
+/// **Trade-off conocido**: cada `.await` ocupa un thread del blocking
+/// pool durante toda la duración de la corutina. Para corutinas largas
+/// (segundos) en alta concurrencia, esto es subóptimo. Una versión
+/// future-based real (compartiendo un event loop asyncio persistente)
+/// queda como deuda menor — `pyo3-async-runtimes::tokio::into_future`
+/// es la API correcta, pero requiere que pyo3-async-runtimes controle
+/// el runtime tokio, lo cual choca con el setup ya establecido de
+/// Fitz (tokio current_thread CLI / rt-multi-thread HTTP).
+///
+/// **Política de GIL**: el GIL se mantiene durante todo el
+/// `run_until_complete`. PyO3 no lo suelta automáticamente entre
+/// pasos de asyncio porque toda la coordinación es de un solo thread.
+fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
+    // `Py<PyAny>` es Send — lo capturamos para mover al worker.
+    let coro_owned: Py<PyAny> = coro.clone().unbind();
+    let fitz_future: FitzFuture = Box::pin(async move {
+        // Mover el trabajo bloqueante al pool de threads tokio.
+        let join_result = tokio::task::spawn_blocking(move || {
+            Python::attach(|py| -> FitzResult<Value> {
+                let bound = coro_owned.bind(py);
+                let asyncio = py.import("asyncio").map_err(|e| {
+                    FitzError::new(
+                        ErrorKind::UndefinedVariable("PyError".to_string()),
+                        0, 0,
+                        py_err_to_fitz(py, e).message,
+                    )
+                })?;
+                // Crear un loop nuevo por call. Costo: ~ms; aceptable
+                // para 8.6.1. Optimización: pool persistente como
+                // deuda menor.
+                let event_loop = asyncio.call_method0("new_event_loop").map_err(|e| {
+                    FitzError::new(
+                        ErrorKind::UndefinedVariable("PyError".to_string()),
+                        0, 0,
+                        py_err_to_fitz(py, e).message,
+                    )
+                })?;
+                let result = event_loop.call_method1("run_until_complete", (bound,));
+                let _ = event_loop.call_method0("close"); // best-effort
+                match result {
+                    Ok(value) => py_to_value(py, &value),
+                    Err(e) => Err(FitzError::new(
+                        ErrorKind::UndefinedVariable("PyError".to_string()),
+                        0, 0,
+                        py_err_to_fitz(py, e).message,
+                    )),
+                }
+            })
+        })
+        .await;
+        match join_result {
+            Ok(inner) => inner,
+            Err(join_err) => Err(FitzError::new(
+                ErrorKind::UndefinedVariable("RuntimeError".to_string()),
+                0, 0,
+                format!("error del blocking pool al ejecutar corutina Python: {}", join_err),
+            )),
+        }
+    });
+    Ok(fitz_future)
 }
 
 /// Helper para construir el `Value::Result(Err(Str(msg)))` que envuelve

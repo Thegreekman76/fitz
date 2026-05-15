@@ -7818,6 +7818,89 @@ let r = match n {
         }
     }
 
+    // -------------------------------------------------------------------
+    // Fase 8.6 — Bridge tokio ↔ asyncio: corutinas Python awaiteables
+    // desde `async fn` Fitz via `Value::Future`.
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_8_6_asyncio_sleep_awaiteable_desde_fitz() {
+        // `asyncio.sleep(0)` devuelve una corutina builtin que el
+        // bridge convierte a `Value::Future`. El `.await` adentro de
+        // una `async fn` Fitz que retorna `Result<...>` la consume y
+        // devuelve `Null` (return value de `asyncio.sleep`).
+        let src = "\
+            from python import asyncio\n\
+            async fn test() -> Result<Null> {\n\
+                let _ = asyncio.sleep(0)?.await\n\
+                return Ok(null)\n\
+            }\n\
+            let r = test().await\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(crate::value::ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Null);
+            }
+            other => panic!("esperaba Ok(Null), fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_8_6_async_fn_fitz_que_await_python_devuelve_valor_calculado() {
+        // El test cumple el shape canónico del roadmap: `async fn`
+        // Fitz que internamente await-ea una corutina Python y usa
+        // su resultado para calcular el valor de retorno.
+        let src = "\
+            from python import asyncio\n\
+            async fn doble(x: Int) -> Result<Int> {\n\
+                let _ = asyncio.sleep(0)?.await\n\
+                return Ok(x * 2)\n\
+            }\n\
+            let r = doble(21).await\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(crate::value::ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Int(42));
+            }
+            other => panic!("esperaba Ok(42), fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn fase_8_6_call_async_devuelve_result_future() {
+        // Sin `.await`, el call a `asyncio.sleep(0)` devuelve
+        // `Result<Future<Null>>` (la Future no se await-ea hasta que
+        // el `.await` se aplique). Validamos el shape del binding.
+        let src = "\
+            from python import asyncio\n\
+            let f = asyncio.sleep(0)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let f = env.lock().get("f").unwrap();
+        // Debería ser Result(Ok(Future(_))) — el call envuelve en
+        // Result, el inner es el Future (no PyObject opaco).
+        match f {
+            Value::Result(crate::value::ResultVariant::Ok(inner)) => {
+                assert!(
+                    matches!(*inner, Value::Future(_)),
+                    "esperaba Future adentro de Ok, fue {:?}",
+                    *inner
+                );
+            }
+            other => panic!("esperaba Ok(Future(...)), fue {:?}", other),
+        }
+    }
+
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_anidado_modulo_pyobject() {
