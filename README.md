@@ -136,19 +136,27 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.3 cerrada — Fitz convierte excepciones Python a
-`Result<T>` automáticamente.** Toda llamada a una función Python
-desde Fitz se envuelve: éxito → `Ok(v)`, excepción Python o
-marshaling fallido → `Err("<ClassName>: <message>")`. El programa
-no aborta — el usuario maneja la falla con `match` o `?`, igual
-que cualquier otra operación que puede fallar (`find`/`get`/
-`json.loads` nativos). Preserva la decisión de diseño "sin
-excepciones" del lenguaje y evita que excepciones Python escapen
-como panics opacos. Field access (`math.pi`, `obj.attr`) sigue
-sin wrap — ergonomía de constantes y submódulos. La interop
-completa (anotaciones del checker, SQLAlchemy/NumPy ergonómico,
-async + GIL) llega en los sub-pasos siguientes (8.4 a 8.8). Ver
-el [roadmap](docs/roadmap.md) para el plan completo.
+🏔️ **Fase 8.4 cerrada — Fitz coerciona dicts Python a tipos
+Fitz concretos con UNA sola anotación.** El patrón canónico del
+roadmap funciona end-to-end:
+
+```fitz
+fn fetch_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+```
+
+Tres pilares cierran el ciclo: el checker distingue valores
+Python de Any genérico (`Type::PyAny`), refina los calls a
+`Result<Any>` forzando manejo estático con `match`/`?`, y el
+runtime coerciona `Value::Map` → `Value::Instance` validando
+fields contra el `type` declarado (defaults aplicados, nullables
+completados con Null, extras del dict ignorados). El usuario sale
+del "limbo Python" a tipos Fitz nativos en un solo punto. La
+interop completa (auto-mapeo SQLAlchemy, async + GIL, CPython
+bundled) llega en los sub-pasos siguientes (8.5 a 8.8). Ver el
+[roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
 
@@ -254,24 +262,43 @@ Las fases cerradas:
   textual del roadmap, excepciones como Err, propagación con `?`,
   marshaling fallido con breadcrumb, field access sin wrap,
   chaining con desempaquetado intermedio).
+- **Fase 8.4 — Tipos del checker + anotaciones del lado Fitz +
+  coerción runtime Map → Instance**: cierra el ciclo "call Python
+  → tipo Fitz concreto" con tres cambios coordinados. (a) El
+  checker distingue valores Python de Any genérico
+  (`Type::PyAny`); imports `from python import X` tipan como
+  PyAny vs Any. (b) Calls Python refinan al ret type
+  `Result<Any>`, activando estáticamente la regla de
+  exhaustividad sobre Result y la regla del operador `?` (5.3.3)
+  — el usuario es forzado a manejar el error sin gradual escape.
+  (c) En runtime, `Stmt::Assign` con anotación nominal
+  (`let row: User = ...`) coerciona `Value::Map` →
+  `Value::Instance`, iterando los fields declarados en orden
+  (provided → resolved_defaults → default Expr → nullable Null
+  → error claro). Habilita el patrón canónico
+  `let row: User = py_call(...)?` con UNA sola anotación.
+  Sub-pasos: 8.4.1+8.4.2 PyAny + call refinado + 9 tests checker;
+  8.4.3 coerción runtime + 9 tests evaluator; 8.4.4 ejemplo
+  runnable `examples/python-interop-8.4.fitz` con 5 secciones
+  (happy path, nullable faltante, extras ignorados, JSON
+  malformado propagado, default aplicado).
 
-**1252 tests pasando con `--features python`** (1252 unit + 80 E2E
-con `fitz build` + 3 openapi_e2e). **1175 + 80 + 3** sin feature.
+**1271 tests pasando con `--features python`** (1271 unit + 80 E2E
+con `fitz build` + 3 openapi_e2e). **1193 + 80 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.4 — Tipos del lado del checker
-(anotaciones y opacidad)** — refinar el tipo de call Python de
-`Any` a `Result<Any>` en el checker estático (hoy es `Any` por
-gradual escape) y permitir anotaciones explícitas
-(`let row: User = py_call(...)?`) que el runtime valida contra el
-tipo declarado. Stubs `.pyi` quedan pospuestos a Fase 9+. Después:
-8.5 (`fitz py-types` auto-mapeo SQLAlchemy), 8.6 (async + GIL),
-8.7 (CPython bundled — candidato para cerrar F19), 8.8 (guía +
-ejemplo CRUD). Ver el [roadmap](docs/roadmap.md) para detalle.
-**Deudas comprometidas que siguen**: F19 (codegen interop Python
-en `fitz build`), descripciones via doc-strings sobre handlers
-(OpenAPI enrichment), modelo wrap de middleware (post-process)
-si aparece presión real.
+Próximo norte: **Fase 8.5 — `fitz py-types` auto-mapeo
+SQLAlchemy → `type` Fitz** — herramienta separada que
+introspecciona modelos `DeclarativeBase` Python y emite un
+`.fitz` con los `type` correspondientes, listo para commitear.
+Reduce el doble-tipado en proyectos SQLAlchemy. Después: 8.6
+(async + GIL bridge tokio ↔ asyncio), 8.7 (CPython bundled —
+candidato para cerrar F19), 8.8 (guía + ejemplo CRUD). Ver el
+[roadmap](docs/roadmap.md) para detalle. **Deudas comprometidas
+que siguen**: F19 (codegen interop Python en `fitz build`),
+stubs `.pyi` parseados (pospuesto a Fase 9+), descripciones via
+doc-strings sobre handlers (OpenAPI enrichment), modelo wrap de
+middleware (post-process) si aparece presión real.
 
 ## Qué funciona hoy
 

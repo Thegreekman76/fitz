@@ -1,0 +1,128 @@
+// examples/python-interop-8.4.fitz — Anotaciones del lado Fitz +
+// coerción runtime Map → Instance (Fase 8.4).
+//
+//   cargo run --features python -- run examples/python-interop-8.4.fitz
+//
+// Necesita Python 3.10+. Demuestra el patrón canónico del roadmap:
+// usar un dict que viene de Python (de SQLAlchemy, requests, json,
+// etc.) como una Instance Fitz tipada con UN solo punto de anotación.
+//
+// Lo que 8.4 destraba sobre 8.3:
+//
+//   - El checker tipa los calls Python como `Result<Any>` (no `Any`).
+//     Eso fuerza `match` o `?` estáticamente.
+//   - `from python import X` bindea como `Type::PyAny` (vs `Any`
+//     genérico). El checker distingue "esto es Python opaco" de
+//     "esto es Any general".
+//   - **En runtime**: una anotación nominal en el binding (`let row:
+//     User = ...`) coerciona `Value::Map` a `Value::Instance`,
+//     validando que el dict tenga los campos requeridos.
+//
+// El pipeline canónico:
+//   json.loads(s) → Result<Any>     (8.3 wrap)
+//   .loads(s)?    → Any (= Map en runtime)
+//   let row: User = ...?            (8.4.3 coerciona Map → Instance)
+
+from python import json
+
+type User { id: Int, email: Str, name: Str, age: Int? }
+
+// ---------------------------------------------------------------------
+// 1. Happy path — dict Python con todos los campos
+// ---------------------------------------------------------------------
+
+print("== Happy path ==")
+
+let raw_alice = "\{\"id\": 1, \"email\": \"alice@x.com\", \"name\": \"Alice\", \"age\": 30\}"
+
+fn fetch_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+
+match fetch_user(raw_alice) {
+    Ok(u)  => print("usuario: {u}"),
+    Err(e) => print("error: {e}"),
+}
+
+// ---------------------------------------------------------------------
+// 2. Campo nullable faltante — se completa con Null silenciosamente
+// ---------------------------------------------------------------------
+
+print("")
+print("== Nullable faltante → Null ==")
+
+// El dict NO trae `age`; el type lo declara como `Int?`. La coerción
+// completa con Null sin error.
+let raw_bob = "\{\"id\": 2, \"email\": \"bob@x.com\", \"name\": \"Bob\"\}"
+
+match fetch_user(raw_bob) {
+    Ok(u)  => print("usuario sin age: {u}"),
+    Err(e) => print("error: {e}"),
+}
+
+// ---------------------------------------------------------------------
+// 3. Fields extras del dict — ignorados (Python suele devolver demás)
+// ---------------------------------------------------------------------
+
+print("")
+print("== Extras del dict → ignorados ==")
+
+// Trae `password_hash` y `created_at` que el type no declara.
+let raw_carol = "\{\"id\": 3, \"email\": \"carol@x.com\", \"name\": \"Carol\", \"age\": 25, \"password_hash\": \"...\", \"created_at\": \"2026-01-01\"\}"
+
+match fetch_user(raw_carol) {
+    Ok(u)  => print("usuario sin extras: {u}"),
+    Err(e) => print("error: {e}"),
+}
+
+// ---------------------------------------------------------------------
+// 4. JSON malformado — el error baja del Python como Err, propagado por `?`
+// ---------------------------------------------------------------------
+
+print("")
+print("== JSON malformado → JSONDecodeError propagado ==")
+
+let raw_garbage = "\{ no es JSON"
+
+match fetch_user(raw_garbage) {
+    Ok(u)  => print("usuario: {u}"),
+    Err(e) => print("error: {e}"),
+}
+
+// ---------------------------------------------------------------------
+// 5. Field con default — se aplica cuando el dict lo omite
+// ---------------------------------------------------------------------
+
+print("")
+print("== Default aplicado ==")
+
+type Article { id: Int, title: Str, status: Str = "draft" }
+
+fn fetch_article(s: Str) -> Result<Article> {
+    let row: Article = json.loads(s)?
+    return Ok(row)
+}
+
+let raw_article = "\{\"id\": 1, \"title\": \"hola\"\}"
+
+match fetch_article(raw_article) {
+    Ok(a)  => print("article: {a}"),
+    Err(e) => print("error: {e}"),
+}
+
+// ---------------------------------------------------------------------
+// Caso no demostrado en runtime: field REQUERIDO faltante.
+// Si el dict no tiene un campo del tipo que es no-nullable y sin
+// default (ej. `name` faltando en User), la coerción **aborta el
+// programa con FitzError** — error de programación, no `Result::Err`.
+//
+//   "no se puede coercer a `User`: el dict no tiene el campo `name`
+//    (requerido por el tipo, no es nullable ni tiene default)"
+//
+// Diseño: este caso indica datos malformados a nivel de fuente
+// (DB schema desalineado, API contract roto). El programador debe
+// validar el dict ANTES de coercer, o declarar el campo como
+// nullable / con default si la fuente lo omite legítimamente.
+// Verificable en los tests del evaluator
+// (`anotacion_nominal_con_field_faltante_es_error`).

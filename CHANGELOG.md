@@ -12,11 +12,102 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
-hito comprometido es **Fase 8.4 — Tipos del lado del checker
-(anotaciones y opacidad)**: refinar el tipo de un call Python de
-`Any` a `Result<Any>` en el checker estático y permitir
-anotaciones explícitas (`let row: User = py_call(...)?`) que el
-runtime valida contra el tipo declarado.
+hito comprometido es **Fase 8.5 — Auto-mapeo de modelos SQLAlchemy
+a `type` Fitz** vía herramienta `fitz py-types`: introspecciona
+un archivo Python con modelos `DeclarativeBase` y emite un
+`.fitz` con los `type` correspondientes, listo para commitear.
+Reduce el doble-tipado (Python + Fitz) en proyectos que usan
+SQLAlchemy.
+
+## [v0.8.5] — 2026-05-15 — Fase 8.4: Tipos del checker + anotaciones del lado Fitz
+
+Cuarto sub-paso de la Fase 8 (Interop Python). Cierra el ciclo
+"call Python → tipo Fitz concreto" con tres cambios coordinados:
+el checker estático ahora distingue valores Python de Any
+genérico (`Type::PyAny`), refina los calls a `Result<Any>`
+forzando manejo de errores estático, y el runtime coerciona
+`Value::Map` → `Value::Instance` cuando hay anotación nominal en
+el binding. Habilita el patrón canónico del roadmap:
+
+```fitz
+fn fetch_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+```
+
+Una sola anotación (`: User`) basta para salir del "limbo Python"
+a tipos Fitz concretos. El runtime valida que el dict tenga los
+campos requeridos.
+
+- **8.4.1+8.4.2 — `Type::PyAny` en el checker + calls Python tipan
+  `Result<Any>`** (combinados en un commit, ~5 LoC del refinamiento
+  del call ya estaban listos): nueva variante `Type::PyAny` con
+  identidad propia (vs `Any` genérico), bidireccionalmente
+  compatible con cualquier tipo igual que Any. `Stmt::Import` y
+  `Stmt::FromImport` con `path[0] == "python"` tipan los bindings
+  como `PyAny`; imports normales siguen como `Any`. Field access
+  sobre PyAny devuelve PyAny (permite chaining como `os.path`).
+  `Expr::Call` con receptor PyAny (callee o `Field.object`) refina
+  el ret type a `Type::Result(Box::new(Type::Any))` — activa
+  estáticamente la regla de exhaustividad sobre Result (5.3.3) y
+  la regla del operador `?` (5.3.3). 9 tests nuevos del checker.
+- **8.4.3 — Coerción runtime Map → Instance con anotación**:
+  `Stmt::Assign` con `target: Ident` y anotación dispara
+  `coerce_to_annotation(annot, value, env)` antes de bindear.
+  Si la anotación es `Named(T)` o `Nullable(Named(T))` con T
+  nominal, y el value es `Value::Map`, construye una `Value::
+  Instance` validando que los fields matcheen el `type` declarado.
+  Reglas: nullable + Null → passthrough; value no-Map (Instance
+  ya, primitivo, etc.) → passthrough; resuelve fields en orden
+  (`provided` → `resolved_defaults` PreF8.3 → `default` Expr →
+  nullable Null → error claro). Campos extras del Map se ignoran
+  silenciosamente (Python suele devolver dicts con más data de la
+  necesaria; ser permisivo evita fricción). Field requerido
+  faltante (no nullable, sin default) → `FitzError` que aborta
+  con mensaje citando type + field. 9 tests nuevos (8 sin feature,
+  1 con feature validando el criterio canónico end-to-end via
+  json.loads).
+- **8.4.4 — Ejemplo runnable + cierre formal**: nuevo
+  `examples/python-interop-8.4.fitz` con 5 secciones (happy path,
+  nullable faltante → Null, extras ignorados, JSON malformado
+  propagado por `?`, default aplicado) más comentario explícito
+  sobre el caso "field requerido faltante" que aborta por
+  diseño. CHANGELOG v0.8.5, roadmap actualiza Fase 8.4 a CERRADA,
+  deudas-post-5b nota de cierre, CLAUDE + README refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **`Type::PyAny` dedicado** (no `Type::Any` genérico ni
+  `Type::PyObject<"...">`). Empezar simple, refinar a fantasma si
+  entra demanda (roadmap recomienda).
+- **Coerción Map → Instance vive en el evaluator**, no en el
+  checker. El checker ya acepta el cast (gradual Any → T). El
+  runtime hace la coerción real con validación de fields.
+- **Campos extras del dict se ignoran silenciosamente**. Python
+  suele devolver más data de la necesaria; ser permisivos evita
+  fricción. Documentado en el ejemplo.
+- **Field requerido faltante → FitzError que aborta** (no
+  `Result::Err`). Diseño: este caso indica datos malformados a
+  nivel de fuente (DB schema desalineado, API contract roto), no
+  un error de runtime esperable como una excepción Python. El
+  programador debe validar el dict antes o declarar el campo
+  nullable/con default.
+- **El test `?` operator solo se chequea adentro de fn que
+  retorna `Result<...>`** (regla heredada de 5.3.3). `?` a top-
+  level se reporta en runtime, no en el checker — comportamiento
+  consistente con calls nativas Fitz.
+
+**Cierre formal**:
+
+  - Sin feature: **1193 unit** (+ 9 checker + 8 coerción + 1 fix
+    test 8.3 sin contar baseline) + 80 compile_e2e + 3 openapi_e2e.
+  - Con feature: **1271 unit** (+ 1 criterio canónico end-to-end
+    via json.loads) + 80 + 3.
+  - Clippy `cargo clippy --all-targets --features python -- -D warnings`
+    limpio. Idem sin feature.
+
+Detalle completo: `docs/roadmap.md` → "Fase 8.4".
 
 ## [v0.8.4] — 2026-05-15 — Fase 8.3: Excepciones Python → Result<T>
 

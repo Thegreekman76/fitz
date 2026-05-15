@@ -3187,52 +3187,161 @@ anotaciones explícitas del lado Fitz).
   promover a `Value::Instance(PyError)` con campos accesibles.
 
 #### 8.4 — Tipos del lado del checker (anotaciones y opacidad)
-**Pendiente** — el checker estático no puede ver dentro de
-Python. Sin estrategia explícita, todas las llamadas Python
-serían `Result<Any>` y el valor del checker se diluiría en
-proyectos que dependen mucho de interop.
+**Estado: CERRADA (2026-05-15)** — 1271 unit + 80 compile_e2e
++ 3 openapi_e2e con feature `python`; 1193 + 80 + 3 sin feature.
 
-**Estrategia escalonada**:
+Cierra el ciclo "call Python → tipo Fitz concreto" con tres
+cambios coordinados: el checker estático distingue valores Python
+de Any genérico (`Type::PyAny`), refina los calls a `Result<Any>`
+forzando manejo de errores estático, y el runtime coerciona
+`Value::Map` → `Value::Instance` cuando hay anotación nominal en
+el binding. Una sola anotación basta para salir del "limbo Python"
+a tipos Fitz concretos.
 
-1. **Default**: una llamada `python_module.func(args)` sin
-   anotación tipa como `Result<Any>`. El Result viene del 8.3
-   (automático), el Any preserva el modelo gradual de Fitz.
-2. **Anotación explícita del lado Fitz**: el usuario anota el
-   binding sitio con un tipo Fitz, y el checker valida que la
-   conversión es posible (las reglas del marshaling de 8.2).
-   ```fitz
-   let row: User = session.query(UserModel).filter_by(id: id).first()?
-   ```
-   Acá el `?` desempaca el `Result<Any>` a `Any`, y la anotación
-   `: User` coerciona Any→User. El runtime valida que el dict
-   Python tiene los campos requeridos.
-3. **Stubs `.pyi` parseados** (pospuesto a Fase 9+): leer
-   stubs PEP 561 y traducirlos automáticamente. Esto sería el
-   equivalente a `@types/...` de TypeScript. Mucho trabajo;
-   queda como upgrade futuro.
+**Decisiones técnicas tomadas al arrancar el sub-paso** (alineadas
+con el roadmap):
 
-**Criterio de éxito**: el caso de uso canónico (CRUD con
-SQLAlchemy) chequea con tipos Fitz reales (`User`, no `Any`)
-usando solo anotaciones explícitas en los puntos donde Python
-cruza a Fitz. Sin necesidad de stubs.
+- **`Type::PyAny` dedicado** (no `Type::Any` genérico ni
+  `Type::PyObject<"...">` fantasma). Empezar simple — distingue
+  "esto viene de Python" de "esto es Any general", suficiente
+  para refinar los calls. PyObject con string fantasma queda como
+  upgrade futuro si entra fricción real.
+- **Coerción Map → Instance vive en el evaluator**, no en el
+  checker. El checker ya acepta el cast (gradual Any → T) y no
+  duplicaría la lógica. El runtime hace la coerción real con
+  validación de fields, defaults, nullables.
+- **Campos extras del dict se ignoran silenciosamente**. Python
+  suele devolver más data de la necesaria (queries SQLAlchemy
+  con todos los joins, responses HTTP con campos auxiliares);
+  ser permisivos evita fricción.
+- **Field requerido faltante → `FitzError` que aborta**, no
+  `Result::Err`. Diseño: este caso indica datos malformados a
+  nivel de fuente (DB schema desalineado, API contract roto),
+  no un error de runtime esperable como una excepción Python.
+  El programador debe validar el dict antes o declarar el campo
+  nullable/con default si la fuente lo omite legítimamente.
+- **Métodos sobre objetos Python (`engine.connect()`)**: el
+  call sobre `PyAny` refina a `Result<Any>` automáticamente.
+  La cadena ya funciona sin nuevo dispatch — el checker
+  preserva el comportamiento gradual existente para argumentos
+  y receptores opacos.
+- **El operador `?` solo se chequea adentro de fn con return
+  `Result<...>`** (regla heredada de 5.3.3). `?` a top-level se
+  reporta en runtime, no en el checker — comportamiento
+  consistente con calls nativas Fitz.
+- **Stubs `.pyi` quedan pospuestos a Fase 9+** (equivalente a
+  `@types/...` de TypeScript). 8.4 cubre el caso canónico
+  (anotaciones explícitas + coerción runtime) sin necesidad de
+  stubs — el checker pasa por gradual y el runtime valida.
 
-**Decisiones técnicas a resolver**:
-- Sintaxis para tipos opacos de Python. Opciones consideradas:
-  - `Any` (gradual, sin info) — más simple, recomendado para
-    arrancar.
-  - `PyObject` (tipo dedicado, opaco) — distingue "objeto
-    Python" de "valor desconocido Fitz", útil para el checker.
-  - `PyObject<"sqlalchemy.Engine">` (string fantasma) —
-    permite distinguir engines de sessions sin saber su
-    estructura.
-  - Recomendación: empezar con `Any` opaco + anotaciones
-    explícitas en bindings. Promover a `PyObject<...>` si la
-    fricción aparece en proyectos reales.
-- Métodos sobre objetos Python (`engine.connect()`): hoy `Expr::Call`
-  con `callee: Expr::Field` sobre `Any` cae a gradual sin
-  chequear. La cadena ya funciona sin cambios al checker — los
-  imports de Python se benefician del comportamiento gradual
-  existente. No hace falta nuevo dispatch.
+**Sub-pasos**:
+
+- **8.4.1 + 8.4.2** — `Type::PyAny` + bindings Python + call
+  refina a `Result<Any>` ✓ (combinados en un commit; el
+  refinamiento del call eran ~5 LoC adicionales al cambio del
+  Type, los tests del checker validan el pipeline en bloque):
+  nueva variante `Type::PyAny` en `types.rs` con identidad propia
+  y bidireccionalmente compatible con cualquier tipo (gradual
+  escape, igual que Any). `Stmt::Import` y `Stmt::FromImport` con
+  `path[0] == "python"` tipan los bindings como `PyAny`; imports
+  normales siguen como `Any` (`import utils` sigue gradual).
+  `Expr::Field` sobre `Type::PyAny` devuelve `PyAny` (permite
+  chaining como `os.path` → submódulo opaco). `Expr::Call` con
+  receptor PyAny (callee o `Field.object`) refina el ret type a
+  `Type::Result(Box::new(Type::Any))` — activa estáticamente la
+  regla de exhaustividad sobre Result (5.3.3) y la regla del
+  operador `?` (5.3.3). `is_compatible` suma rama temprana para
+  PyAny espejo de Any. `display_type` y `type_name` en codegen.rs
+  suman el caso por exhaustividad del match (PyAny no aparece
+  nunca en codegen porque el guard `check_no_python_imports`
+  aborta `fitz build` antes). 9 tests nuevos del checker
+  (bindings PyAny, call → Result<Any>, match exhaustivo OK vs
+  no exhaustivo error, `?` adentro de fn Result OK vs fn Int
+  error, field access encadenado, anotación concreta pasa por
+  gradual, import normal NO es PyAny).
+- **8.4.3** — Coerción runtime `Value::Map` → `Value::Instance`
+  con anotación nominal ✓: `Stmt::Assign` con `target: Ident` y
+  anotación dispara `coerce_to_annotation(annot, value, env)`
+  antes de bindear. La fn nueva resuelve `Named(T)` o
+  `Nullable(Named(T))` a `(type_name, allows_null)`; si la
+  anotación no encaja, passthrough. Si el value no es `Map`
+  (Instance ya, primitivo, etc.), passthrough. Si es Map,
+  resuelve el `Value::Type` en el env (built-ins como `Int`
+  passthrough — los primitivos no se construyen desde dicts) e
+  itera los fields declarados en orden: `provided` en el Map
+  (key `Str` con nombre del field) → ese; resuelto en
+  `resolved_defaults` (PreF8.3, tipos importados con default
+  eager-evaluado) → ese; `default` Expr declarado en el field →
+  evalúa con env actual; field nullable → `Null`; else →
+  `FitzError` claro citando type + field. Campos extras del Map
+  se ignoran silenciosamente. Result: `Value::Instance` con
+  `type_name` canónico (mismo criterio de PreF8.4: nombre del
+  `Value::Type`, no la anotación sintáctica). `AssignTarget::Field
+  { ... }` (`obj.field = ...`) NO dispara la coerción — la
+  anotación del field vive en el `type` declarado, no en el
+  sitio del assign. 9 tests nuevos en evaluator: 8 sin feature
+  (coerce básica, field faltante error, default aplicado,
+  nullable faltante Null, extras ignorados, nullable con Null
+  passthrough, nullable con Map sí coerce, value que no es Map
+  passthrough, anotación a tipo no-nominal passthrough); 1 con
+  feature validando el criterio canónico end-to-end
+  (`fn parse_user(s) -> Result<User> { let row: User =
+  json.loads(s)?; return Ok(row) }`).
+- **8.4.4** — Ejemplo runnable + cierre formal ✓: nuevo
+  `examples/python-interop-8.4.fitz` con 5 secciones del patrón
+  canónico (happy path, nullable faltante → Null, extras
+  ignorados, JSON malformado propagado por `?`, default aplicado)
+  + comentario explícito sobre el caso "field requerido
+  faltante" que aborta por diseño. Validado bit-a-bit. CHANGELOG
+  v0.8.5, roadmap.md actualiza Fase 8.4 a CERRADA con sub-pasos
+  detallados, deudas-post-5b.md nota de cierre paralela, CLAUDE
+  + README refresh.
+
+**Criterio de éxito** (del roadmap, cumplido bit-a-bit):
+
+```fitz
+type User { id: Int, email: Str, name: Str, age: Int? }
+from python import json
+
+fn fetch_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+
+match fetch_user("{\"id\": 1, ...}") {
+    Ok(u)  => print("usuario: {u}"),
+    Err(e) => print("error: {e}"),
+}
+```
+
+Cumple los tres pilares del roadmap: (a) el checker tipa
+`fetch_user(...)` como `Result<User>` (refinado por PyAny en el
+call interno → `?` → anotación `User`); (b) el `?` desempaca el
+`Result<Any>` Python; (c) el runtime coerciona el dict resultante
+a `Instance` validando los campos del `User`. Sin stubs `.pyi`,
+con UN solo punto de anotación.
+
+**Cierre formal de Fase 8.4**: 1271 unit + 80 compile_e2e +
+3 openapi_e2e con feature; 1193 + 80 + 3 sin feature. Clippy
+`-D warnings` limpio en ambos modos. **Próximo norte**: Fase 8.5
+(`fitz py-types` auto-mapeo SQLAlchemy → `type` Fitz).
+
+**Deuda residual visible que se queda como sub-paso futuro**:
+- **Stubs `.pyi` parseados** (pospuesto explícitamente a Fase
+  9+ — equivalente a `@types/...` de TypeScript). 8.4 cubre el
+  caso canónico sin stubs.
+- **`PyObject<"...">` fantasma** (distinguir engines de sessions
+  sin saber su estructura). Promover si la fricción aparece en
+  proyectos reales.
+- **Validación de tipo de cada field del dict** (hoy passthrough
+  estructural — un Map con `id: "no es int"` cruza sin chequeo y
+  el uso posterior falla por type mismatch). Posible refinement:
+  coerciones primitivas Str → Int cuando el field declara Int,
+  o errores de coerción tempranos.
+- **Coerción anidada de fields complejos** (List<User> adentro
+  de un Map → List<Instance>). Hoy passthrough — el inner Map se
+  coerce solo si hay anotación explícita en el binding del lado.
+  Recursión podría agregarse con flag `--strict-coerce`.
 
 #### 8.5 — Auto-mapeo de modelos SQLAlchemy a `type` de Fitz
 **Pendiente** — caso especial pero crítico para la ergonomía

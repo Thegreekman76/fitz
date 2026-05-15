@@ -237,6 +237,40 @@
 > viejos de 8.1/8.2 (reescritos en 8.3.2). Detalles completos en
 > `docs/roadmap.md` → "Fase 8.3". Próximo norte: **Fase 8.4
 > (anotaciones del lado del checker + refinar tipos opacos)**.
+>
+> **Fase 8.4 (2026-05-15): CERRADA** — tipos del checker +
+> anotaciones del lado Fitz + coerción runtime. Cierra el ciclo
+> "call Python → tipo Fitz concreto" con tres cambios
+> coordinados: el checker distingue valores Python de Any
+> genérico (`Type::PyAny`), refina los calls a `Result<Any>`
+> forzando manejo de errores estático, y el runtime coerciona
+> `Value::Map` → `Value::Instance` cuando hay anotación nominal.
+> El patrón canónico `let row: User = py_call(...)?` funciona
+> end-to-end con UNA sola anotación. Cuatro sub-pasos (3 commits,
+> 8.4.1 y 8.4.2 combinados): 8.4.1+8.4.2 `Type::PyAny` con
+> identidad propia + bindings Python (`Stmt::Import`/`FromImport`
+> con `path[0] == "python"`) tipan PyAny + field access sobre
+> PyAny devuelve PyAny + call con receptor PyAny refina a
+> `Result<Any>` (activa exhaustividad sobre Result 5.3.3 y regla
+> de `?` 5.3.3 estáticamente) + `is_compatible` espejo de Any
+> + ramas defensivas en `codegen.rs` (PyAny no aparece en codegen
+> porque `check_no_python_imports` aborta antes); 8.4.3
+> `coerce_to_annotation` async fn nueva en evaluator que
+> resuelve `Named(T)` / `Nullable(Named(T))`, itera fields
+> declarados en orden (provided → resolved_defaults → default
+> Expr → nullable Null → error), ignora extras del Map, devuelve
+> Instance con type_name canónico (PreF8.4); 8.4.4 ejemplo
+> runnable + cierre formal. Decisiones: PyAny dedicado (no
+> PyObject<"..."> fantasma), coerción vive en evaluator no en
+> checker (el cast gradual ya pasa estático), extras del Map se
+> ignoran silenciosamente, field requerido faltante aborta con
+> `FitzError` no `Result::Err` (caso de programación, no de
+> runtime esperable). Total al cierre: **1271 unit + 80 E2E +
+> 3 openapi_e2e** con feature; **1193 + 80 + 3** sin feature.
+> Ejemplo runnable nuevo: `examples/python-interop-8.4.fitz`
+> (5 secciones validadas bit-a-bit). Detalles completos en
+> `docs/roadmap.md` → "Fase 8.4". Próximo norte: **Fase 8.5
+> (`fitz py-types` auto-mapeo SQLAlchemy → `type` Fitz)**.
 
 ## Resumen ejecutivo
 
