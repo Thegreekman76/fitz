@@ -1111,8 +1111,27 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - `Field`: evaluamos el objeto receptor (tiene que ser
         //    `Value::Instance`), validamos que el campo exista, y mutamos
         //    la celda compartida `Arc<Mutex<...>>` de `fields`.
-        Stmt::Assign { target, type_: _, value, span: _ } => {
+        Stmt::Assign { target, type_, value, span: _ } => {
             let v = eval_expr(value, env.clone()).await?;
+            // Fase 8.4.3: cuando hay anotación de tipo nominal y el RHS
+            // es un `Value::Map` (típicamente un dict Python coercionado
+            // a Map en 8.2.2), intentamos coercer Map → Instance.
+            // Habilita el patrón canónico del roadmap:
+            //   let row: User = py_call(...)?
+            // El runtime valida que el dict tiene los campos requeridos
+            // por el tipo y aplica defaults/nullables si faltan; campos
+            // extras del dict se ignoran (Python suele devolver más
+            // campos de los necesarios).
+            let v = match target {
+                AssignTarget::Ident(_) => match type_ {
+                    Some(annot) => coerce_to_annotation(annot, v, env.clone()).await?,
+                    None => v,
+                },
+                // Para `obj.field = ...` no aplicamos esta coerción
+                // (la anotación del field está en el `type` declarado,
+                // que el evaluator hoy no valida en runtime — gradual).
+                AssignTarget::Field { .. } => v,
+            };
             match target {
                 AssignTarget::Ident(name) => {
                     // Borrows separados: `has` toma borrow inmutable, lo
@@ -2878,6 +2897,113 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             ),
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Coerción Map → Instance con anotación (Fase 8.4.3)
+// ---------------------------------------------------------------------------
+//
+// Cuando un `let x: T = ...` tiene anotación nominal y el RHS evaluado es
+// un `Value::Map` (típicamente un dict Python coercionado a Map en 8.2.2),
+// intentamos construir un `Value::Instance` validando que el dict tenga
+// los campos requeridos por `T`. Habilita el patrón canónico:
+//
+//   let row: User = json.loads(s)?
+//
+// Sin coerción, `row` queda como Map y el resto del programa lo trata
+// gradualmente; con coerción, el usuario sale del "limbo Python" a tipos
+// Fitz concretos en un solo punto.
+//
+// Reglas:
+//   - Anotación `Named(T)` con T nominal + value `Map` → coerce.
+//   - Anotación `Nullable(Named(T))` con value `Map` → coerce a `T`.
+//   - Anotación `Nullable(Named(T))` con value `Null` → pasa `Null` tal cual.
+//   - Cualquier otra combinación (anotación generic, value no-Map,
+//     value ya `Instance`, etc.) → pasa el value tal cual sin tocar.
+//   - Si el dict no tiene un campo requerido (no nullable, sin default) →
+//     `FitzError` claro citando el campo y el tipo.
+//   - Campos extras del dict se ignoran (Python suele devolver más de lo
+//     necesario; ser permisivos evita fricción innecesaria).
+
+#[async_recursion]
+async fn coerce_to_annotation(
+    annot: &TypeExpr,
+    value: Value,
+    env: EnvRef,
+) -> EvalResult<Value> {
+    // Resolver: nombre del tipo + si la anotación tolera Null.
+    let (type_name, allows_null) = match annot {
+        TypeExpr::Named(name) => (name.clone(), false),
+        TypeExpr::Nullable(inner) => match inner.as_ref() {
+            TypeExpr::Named(name) => (name.clone(), true),
+            _ => return Ok(value),
+        },
+        _ => return Ok(value),
+    };
+
+    // Nullable + Null → passthrough.
+    if allows_null && matches!(value, Value::Null) {
+        return Ok(value);
+    }
+
+    // Solo intentamos coercer cuando el valor es un Map. Cualquier otro
+    // tipo (Instance ya, primitivo, Result, etc.) pasa tal cual — el
+    // gradual del checker se encarga de aceptarlo si la anotación es
+    // gradual, y los usos posteriores van a fallar claro si no encaja.
+    let map_pairs = match value {
+        Value::Map(pairs) => pairs,
+        other => return Ok(other),
+    };
+
+    // Resolver el tipo declarado en el env. Si no es un Value::Type
+    // (puede ser un built-in como `Int`, `Str`, etc.), no coercemos:
+    // los primitivos no se construyen desde dicts.
+    let ty_value = env.lock().get(&type_name);
+    let (declared_type_name, declared_fields, resolved_defaults) = match ty_value {
+        Some(Value::Type { name, fields, resolved_defaults }) => {
+            (name, fields, resolved_defaults)
+        }
+        _ => return Ok(Value::Map(map_pairs)),
+    };
+
+    // Snapshot del Map adentro del lock, después soltamos para evitar
+    // mantener el guard durante el eval de los defaults (cualquiera de
+    // los cuales podría locker otro Mutex).
+    let map_snapshot: Vec<(Value, Value)> = map_pairs.lock().clone();
+
+    let mut instance_fields: Vec<(String, Value)> =
+        Vec::with_capacity(declared_fields.len());
+    for f in &declared_fields {
+        // Buscar el campo en el map por su nombre. La key tiene que
+        // ser un `Str` con el nombre exacto del field; otros tipos
+        // de key se ignoran (no son representables como nombre de
+        // campo Fitz).
+        let provided = map_snapshot.iter().find(|(k, _)| {
+            matches!(k, Value::Str(s) if s == &f.name)
+        });
+        let value = if let Some((_, v)) = provided {
+            v.clone()
+        } else if let Some((_, v)) = resolved_defaults.iter().find(|(n, _)| n == &f.name) {
+            v.clone()
+        } else if let Some(default_expr) = &f.default {
+            eval_expr(default_expr, env.clone()).await?
+        } else if f.type_.is_nullable() {
+            Value::Null
+        } else {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0, 0,
+                format!(
+                    "no se puede coercer a `{}`: el dict no tiene el campo `{}` \
+                     (requerido por el tipo, no es nullable ni tiene default)",
+                    type_name, f.name,
+                ),
+            )));
+        };
+        instance_fields.push((f.name.clone(), value));
+    }
+
+    Ok(Value::new_instance(declared_type_name, instance_fields))
 }
 
 // ---------------------------------------------------------------------------
@@ -7468,6 +7594,228 @@ let r = match n {
             "field access NO debería envolver en Result, fue {:?}",
             p,
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Fase 8.4.3 — Coerción runtime Value::Map → Value::Instance con
+    // anotación nominal en el binding. Habilita el patrón canónico
+    // `let row: User = py_call(...)?`.
+    //
+    // Estos tests funcionan SIN feature `python` porque la coerción es
+    // del lado Fitz: arma un Map manualmente y verifica que la
+    // anotación lo transforma a Instance. La integración real con un
+    // dict Python se valida en 8.4.4 con un ejemplo runnable.
+    // -------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nominal_coerciona_map_a_instance() {
+        // El Map literal Fitz tiene los mismos campos que el `type`;
+        // la anotación nominal dispara la coerción y bindea `row`
+        // como `Value::Instance`.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let m = {\"id\": 1, \"name\": \"alice\"}\n\
+            let row: User = m\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        match row {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                let f = fields.lock().clone();
+                assert_eq!(f, vec![
+                    ("id".to_string(), Value::Int(1)),
+                    ("name".to_string(), Value::Str("alice".into())),
+                ]);
+            }
+            other => panic!("esperaba Instance, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nominal_con_field_faltante_es_error() {
+        // El Map tiene `id` pero NO `name`; `name` no es nullable ni
+        // tiene default. La coerción aborta con error claro citando
+        // el campo y el tipo.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let m = {\"id\": 1}\n\
+            let row: User = m\n\
+        ";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("User") && err.message.contains("name"),
+            "msg: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nominal_aplica_default_si_falta_el_field() {
+        // El Map omite `email`, que tiene default. La coerción usa el
+        // default y construye la Instance completa.
+        let src = "\
+            type User { id: Int, email: Str = \"unknown@x.com\" }\n\
+            let m = {\"id\": 1}\n\
+            let row: User = m\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        match row {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                let f = fields.lock().clone();
+                assert_eq!(f, vec![
+                    ("id".to_string(), Value::Int(1)),
+                    ("email".to_string(), Value::Str("unknown@x.com".into())),
+                ]);
+            }
+            other => panic!("esperaba Instance, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nominal_aplica_null_para_field_nullable_faltante() {
+        let src = "\
+            type User { id: Int, name: Str? }\n\
+            let m = {\"id\": 1}\n\
+            let row: User = m\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        match row {
+            Value::Instance { fields, .. } => {
+                let f = fields.lock().clone();
+                assert_eq!(f, vec![
+                    ("id".to_string(), Value::Int(1)),
+                    ("name".to_string(), Value::Null),
+                ]);
+            }
+            other => panic!("esperaba Instance, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nominal_ignora_fields_extras_del_map() {
+        // El Map tiene un campo `password_hash` que el `type` no
+        // declara. Lo ignoramos silenciosamente (Python suele devolver
+        // dicts con extras que el modelo Fitz no necesita).
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let m = {\"id\": 1, \"name\": \"alice\", \"password_hash\": \"xxx\"}\n\
+            let row: User = m\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        match row {
+            Value::Instance { fields, .. } => {
+                let f = fields.lock().clone();
+                // Solo los 2 declarados; password_hash no aparece.
+                assert_eq!(f.len(), 2);
+                assert_eq!(f[0].0, "id");
+                assert_eq!(f[1].0, "name");
+            }
+            other => panic!("esperaba Instance, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nullable_con_null_no_coerciona() {
+        // Si la anotación tolera null y el valor es Null, no se intenta
+        // coercer — Null pasa tal cual.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let row: User? = null\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("row"), Some(Value::Null));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_nullable_con_map_coerciona_a_instance() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let m = {\"id\": 1, \"name\": \"x\"}\n\
+            let row: User? = m\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        assert!(matches!(row, Value::Instance { .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_con_value_que_no_es_map_pasa_tal_cual() {
+        // Si el value ya es Instance, la coerción no intenta nada
+        // raro — passthrough. (El checker valida el tipo a nivel
+        // estático; el runtime no re-valida).
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let u = User { id: 1, name: \"x\" }\n\
+            let row: User = u\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        assert!(matches!(row, Value::Instance { .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn anotacion_con_tipo_no_nominal_no_coerciona() {
+        // Si la anotación es `Int` (built-in), no coercemos —
+        // los primitivos no se construyen desde dicts. El Map se
+        // bindea tal cual (gradual; uso posterior fallará claro
+        // si no es compatible).
+        let src = "\
+            let m = {\"k\": 1}\n\
+            let row: Int = m\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let row = env.lock().get("row").unwrap();
+        assert!(matches!(row, Value::Map(_)));
+    }
+
+    // Test con feature Python: el patrón canónico del roadmap.
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_8_4_dict_python_coerce_a_instance_con_anotacion() {
+        // El criterio del roadmap: `let row: User = py_call(...)?`.
+        // json.loads devuelve Result<Map>; el `?` desempaca al Map;
+        // la anotación `User` coerciona el Map a Instance.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            from python import json\n\
+            fn parse_user(s: Str) -> Result<User> {\n\
+                let row: User = json.loads(s)?\n\
+                return Ok(row)\n\
+            }\n\
+            let r = parse_user(\"\\{\\\"id\\\": 7, \\\"name\\\": \\\"alice\\\"\\}\")\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        let inner = match r {
+            Value::Result(crate::value::ResultVariant::Ok(inner)) => *inner,
+            other => panic!("esperaba Ok(Instance), fue {:?}", other),
+        };
+        match inner {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                let f = fields.lock().clone();
+                assert_eq!(f, vec![
+                    ("id".to_string(), Value::Int(7)),
+                    ("name".to_string(), Value::Str("alice".into())),
+                ]);
+            }
+            other => panic!("esperaba Instance, fue {:?}", other),
+        }
     }
 
     #[cfg(feature = "python")]
