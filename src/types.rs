@@ -223,6 +223,93 @@ impl TypeEnv {
 }
 
 // ---------------------------------------------------------------------------
+// Side-table de tipos sintetizados por nodo (Fase 9.0 — F16)
+// ---------------------------------------------------------------------------
+
+/// Clave hashable derivada de un `Span`. Existe porque `Span` tiene un
+/// `PartialEq` custom que devuelve `true` siempre (necesario para que
+/// los tests de AST comparen estructura sin re-derivar posiciones del
+/// parser; ver el comentario sobre `impl PartialEq for Span` en
+/// `src/ast.rs`). Con esa semántica, `Span` no sirve como clave de
+/// `HashMap` — todas las entradas colisionarían. `SpanKey` envuelve
+/// `(line, column)` con `Eq`/`Hash` reales para el side-table.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SpanKey(pub usize, pub usize);
+
+impl From<Span> for SpanKey {
+    fn from(s: Span) -> Self {
+        SpanKey(s.line, s.column)
+    }
+}
+
+/// Side-table que persiste el `Type` sintetizado por `infer_expr` para
+/// cada nodo `Expr` con `Span` conocido. Pre-requisito habilitante del
+/// LSP (Fase 9): `textDocument/hover` consulta el tipo del nodo bajo
+/// el cursor, y completion contextual (`u.` → fields de `User`)
+/// necesita el tipo del receptor.
+///
+/// Política de poblamiento:
+/// - El wrapper sobre `infer_expr` registra **todos** los `Expr` que
+///   pasan por el checker — granularidad amplia, simple, sin "olvidé
+///   tal caso".
+/// - Nodos con `Span::ZERO` (sintéticos del parser, nodos de tests) se
+///   omiten: no son user-visible y dos sintéticos colisionarían bajo
+///   la misma clave `(0, 0)`.
+/// - `Expr::Error` (F15) tipa como `Type::Any` y se persiste igual —
+///   el LSP decide qué mostrar.
+///
+/// Sin index espacial (rango inicio-fin). Para hover, el LSP elige el
+/// nodo cuyo span está más cerca del cursor; un futuro refinamiento
+/// con rangos completos queda como deuda menor (requiere `end_span` en
+/// `Expr`).
+#[derive(Debug, Clone, Default)]
+pub struct TypeInfo {
+    inner: HashMap<SpanKey, Type>,
+}
+
+impl TypeInfo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Persiste el `Type` asociado al `Span` del nodo. Omite silenciosa
+    /// para `Span::ZERO` (nodos sintéticos / tests): esos no aportan a
+    /// hover y colisionarían entre sí.
+    pub fn record(&mut self, span: Span, ty: Type) {
+        if !span.is_known() {
+            return;
+        }
+        self.inner.insert(SpanKey::from(span), ty);
+    }
+
+    /// Devuelve el `Type` previamente registrado para `span`, si existe.
+    /// API pública para el LSP (Fase 9.x.2 — hover). `#[allow(dead_code)]`
+    /// hasta que aterricen los consumidores, mismo patrón que
+    /// `parse_with_recovery` en F15.
+    #[allow(dead_code)]
+    pub fn type_at(&self, span: Span) -> Option<&Type> {
+        if !span.is_known() {
+            return None;
+        }
+        self.inner.get(&SpanKey::from(span))
+    }
+
+    /// Cantidad de entries en el side-table. Útil para smoke tests y
+    /// para que el LSP estime cobertura. `#[allow(dead_code)]` hasta
+    /// que aterricen los consumidores externos.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// `true` si no hay entries registradas.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Resolución de TypeExpr → Type
 // ---------------------------------------------------------------------------
 
@@ -671,6 +758,11 @@ struct CheckCtx<'a> {
     /// para short-circuitear el handler). Introducido en mini-fase MW.1.
     middleware_fn_names: std::collections::HashSet<String>,
     errors: Vec<FitzError>,
+    /// Side-table de tipos sintetizados por nodo `Expr` (Fase 9.0 — F16).
+    /// Poblado por el wrapper `infer_expr` al salir de cada llamada; se
+    /// expone vía `check_program` para que el LSP responda hover y
+    /// completion contextual.
+    type_info: TypeInfo,
 }
 
 impl<'a> CheckCtx<'a> {
@@ -684,6 +776,7 @@ impl<'a> CheckCtx<'a> {
             await_stack: Vec::new(),
             middleware_fn_names: std::collections::HashSet::new(),
             errors: Vec::new(),
+            type_info: TypeInfo::new(),
         };
         ctx.register_builtins();
         ctx
@@ -820,13 +913,30 @@ fn ann_to_type(ann: Option<&TypeExpr>, env: &TypeEnv) -> Type {
     }
 }
 
-/// Sintetiza el tipo de una expresión.
+/// Sintetiza el tipo de una expresión y lo persiste en el side-table
+/// `ctx.type_info` antes de devolverlo. La lógica de síntesis vive en
+/// `synthesize_expr`; este wrapper centraliza el `record` para que
+/// **todos** los nodos `Expr` queden registrados al pasar por el
+/// checker (incluyendo recursión: el wrapper se llama por nodo, así
+/// que `BinOp { left, right }` y sus operandos quedan los tres). Nodos
+/// con `Span::ZERO` (sintéticos / tests) se omiten — ver `TypeInfo::
+/// record`. Pre-req habilitante del LSP (Fase 9 — F16).
+fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
+    let ty = synthesize_expr(ctx, e);
+    ctx.type_info.record(e.span(), ty.clone());
+    ty
+}
+
+/// Núcleo de síntesis. NO toca `type_info` directamente — el wrapper
+/// `infer_expr` lo hace al salir. Esto centraliza la política de
+/// poblamiento del side-table en un solo punto, evitando que cada
+/// branch del match tenga que recordar el `record`.
 ///
 /// Casos no cubiertos en 5.3.1 devuelven `Type::Any` silenciosamente
 /// — no son errores, solo no chequeamos esa forma todavía. Las
 /// sub-fases siguientes (5.3.2 calls, 5.3.3 Result, 5.3.4 métodos,
 /// 5.3.5 FnExpr) los irán reemplazando.
-fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
+fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
     match e {
         Expr::Int(_, _) => Type::Int,
         Expr::Float(_, _) => Type::Float,
@@ -2327,15 +2437,27 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
 
 /// Entrada pública del checker estático completo: corre resolución
 /// de anotaciones (`resolve_program`) y luego chequeo de expresiones.
-/// Devuelve el env + lista de errores acumulados (mezcla de los dos).
-pub fn check_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
+/// Devuelve el env, el side-table de tipos por nodo (`TypeInfo`, Fase
+/// 9.0 — F16) y la lista de errores acumulados (mezcla de los dos).
+///
+/// El `TypeInfo` se llena durante el chequeo: cada nodo `Expr` con
+/// `Span` conocido queda registrado con su tipo sintetizado. La CLI
+/// (`fitz run`/`build`/`check`) ignora el side-table; el LSP (Fase
+/// 9.x) lo consume para hover y completion contextual.
+pub fn check_program(program: &Program) -> (TypeEnv, TypeInfo, Vec<FitzError>) {
     let (env, mut errors) = resolve_program(program);
-    let mut ctx = CheckCtx::new(&env);
-    preregister_fn_signatures(&mut ctx, program);
-    collect_middleware_fn_names(&mut ctx, program);
-    check_block(&mut ctx, program);
-    errors.append(&mut ctx.errors);
-    (env, errors)
+    // Encapsulamos `ctx` en un bloque para que su préstamo sobre `env`
+    // termine antes del return: queremos mover `env` y `ctx.type_info`
+    // por separado al caller.
+    let type_info = {
+        let mut ctx = CheckCtx::new(&env);
+        preregister_fn_signatures(&mut ctx, program);
+        collect_middleware_fn_names(&mut ctx, program);
+        check_block(&mut ctx, program);
+        errors.append(&mut ctx.errors);
+        ctx.type_info
+    };
+    (env, type_info, errors)
 }
 
 /// Mini-fase MW.1: pre-scan del programa para recolectar nombres de fns
@@ -2391,7 +2513,7 @@ mod tests {
     fn errors_of(src: &str) -> Vec<FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        let (_env, errors) = check_program(&program);
+        let (_env, _types, errors) = check_program(&program);
         errors
     }
 
@@ -3312,7 +3434,8 @@ mod tests {
     fn check_str(src: &str) -> (TypeEnv, Vec<FitzError>) {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        check_program(&program)
+        let (env, _types, errors) = check_program(&program);
+        (env, errors)
     }
 
     fn assert_ok(src: &str) {
@@ -5052,7 +5175,7 @@ mod tests {
     fn check_recovering(src: &str) -> Vec<FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let (program, _parser_errors) = crate::parser::parse_with_recovery(tokens);
-        let (_env, errors) = check_program(&program);
+        let (_env, _types, errors) = check_program(&program);
         errors
     }
 
@@ -5143,11 +5266,244 @@ mod tests {
             value: AstExpr::Error(Span::ZERO),
             span: Span::ZERO,
         }];
-        let (_env, errors) = check_program(&program);
+        let (_env, _types, errors) = check_program(&program);
         assert!(
             errors.is_empty(),
             "Expr::Error debe sintetizar Type::Any y no agregar errores: {:?}",
             errors
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fase 9.0 — F16: IR tipado persistido por nodo.
+    //
+    // Tests sobre el side-table `TypeInfo` que se devuelve desde
+    // `check_program`. Cubrimos: literales, Ident, BinOp, Call, Field,
+    // StructLit, Match — los nodos que el LSP va a consultar para hover
+    // y completion contextual. También validamos las dos políticas de
+    // poblamiento: Span::ZERO se omite, Expr::Error se persiste como Any.
+    // -----------------------------------------------------------------------
+
+    /// Helper: corre el pipeline completo lex → parse → check y devuelve
+    /// el `TypeInfo`. Útil para los tests de F16 que quieren mirar
+    /// directamente el side-table.
+    fn types_of(src: &str) -> TypeInfo {
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (_env, type_info, _errors) = check_program(&program);
+        type_info
+    }
+
+    #[test]
+    fn types_info_persiste_tipos_de_literales() {
+        // Programa con un literal de cada primitivo. Cada uno debe
+        // quedar en el side-table con el tipo correspondiente.
+        let info = types_of("let a = 1\nlet b = 1.5\nlet c = \"hola\"\nlet d = true\nlet e = null\n");
+        // El parser emite columnas 1-indexed; los RHS arrancan en la
+        // columna del valor literal. No matcheamos columnas exactas
+        // — buscamos por línea + tipo.
+        let by_line: std::collections::HashMap<usize, Vec<Type>> = info
+            .inner
+            .iter()
+            .map(|(k, v)| (k.0, v.clone()))
+            .fold(std::collections::HashMap::new(), |mut acc, (line, ty)| {
+                acc.entry(line).or_default().push(ty);
+                acc
+            });
+        assert!(
+            by_line[&1].iter().any(|t| matches!(t, Type::Int)),
+            "línea 1 debe tener Int: {:?}", by_line.get(&1)
+        );
+        assert!(
+            by_line[&2].iter().any(|t| matches!(t, Type::Float)),
+            "línea 2 debe tener Float: {:?}", by_line.get(&2)
+        );
+        assert!(
+            by_line[&3].iter().any(|t| matches!(t, Type::Str)),
+            "línea 3 debe tener Str: {:?}", by_line.get(&3)
+        );
+        assert!(
+            by_line[&4].iter().any(|t| matches!(t, Type::Bool)),
+            "línea 4 debe tener Bool: {:?}", by_line.get(&4)
+        );
+        assert!(
+            by_line[&5].iter().any(|t| matches!(t, Type::Null)),
+            "línea 5 debe tener Null: {:?}", by_line.get(&5)
+        );
+    }
+
+    #[test]
+    fn types_info_persiste_ident_y_binop() {
+        // `let x = 10` declara x: Int. `let y = x + 5` accede al
+        // ident `x` (debe tipar Int) y produce un BinOp (debe tipar
+        // Int también).
+        let info = types_of("let x = 10\nlet y = x + 5\n");
+        // Buscamos en la línea 2 un Int — el ident `x` y el BinOp
+        // `x + 5` ambos deben aparecer.
+        let int_count_line2 = info
+            .inner
+            .iter()
+            .filter(|(k, t)| k.0 == 2 && matches!(t, Type::Int))
+            .count();
+        assert!(
+            int_count_line2 >= 3,
+            "línea 2 debe persistir ≥3 nodos Int (ident `x`, literal `5`, BinOp): {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn types_info_persiste_call_y_field() {
+        // Programa con tipo custom + call de fn + field access. Cada
+        // nodo `Expr` debe quedar persistido con su tipo sintetizado.
+        let src = "\
+type User { id: Int, name: Str }
+fn greet(u: User) -> Str => u.name
+let u = User { id: 1, name: \"Fitz\" }
+let s = greet(u)
+";
+        let info = types_of(src);
+        // El call `greet(u)` está en la línea 4 (última línea con
+        // código) — debe tipar Str porque `greet` retorna Str.
+        let any_str_call = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 4 && matches!(t, Type::Str));
+        assert!(
+            any_str_call,
+            "línea 4 debe tener Str (resultado del call greet(u)): {:?}",
+            info.inner
+        );
+        // El struct lit `User { ... }` está en línea 3 — debe tipar
+        // Nominal(User).
+        let any_nominal_struct = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 == 3 && matches!(t, Type::Nominal(_)));
+        assert!(
+            any_nominal_struct,
+            "línea 3 debe tener Nominal(User): {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn types_info_persiste_match_arms() {
+        // Match sobre Result<Int>: cada arm tipa su body, el match
+        // entero hereda el tipo del primer arm. Verificamos que algún
+        // nodo de las ramas haya quedado persistido.
+        let src = "\
+fn divide(a: Int, b: Int) -> Result<Int> {
+  if (b == 0) { return Err(\"div0\") }
+  return Ok(a / b)
+}
+let r = divide(10, 2)
+let v = match r {
+  Ok(x) => x
+  Err(_) => 0
+}
+";
+        let info = types_of(src);
+        // El match en sí debe quedar registrado con Int (tipo del
+        // primer arm `x` que es Int).
+        let has_int_in_match = info
+            .inner
+            .iter()
+            .any(|(k, t)| k.0 >= 6 && matches!(t, Type::Int));
+        assert!(
+            has_int_in_match,
+            "el match debe haber persistido Int en alguno de sus arms o el resultado: {:?}",
+            info.inner
+        );
+    }
+
+    #[test]
+    fn types_info_omite_span_zero() {
+        // Construimos un programa con un nodo sintético (Span::ZERO)
+        // y validamos que NO aparezca en el side-table. La política
+        // documentada en `TypeInfo::record` es omitir Span::ZERO para
+        // evitar colisiones entre sintéticos.
+        use crate::ast::{AssignTarget, Span, Stmt, Expr as AstExpr};
+        let program = vec![Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
+            type_: None,
+            value: AstExpr::Int(42, Span::ZERO),
+            span: Span::ZERO,
+        }];
+        let (_env, type_info, _errors) = check_program(&program);
+        // El Int(42, Span::ZERO) NO debe quedar en el side-table —
+        // su span no es known. Cualquier otra cosa (si el parser
+        // emite algo) tampoco tiene span real porque el programa fue
+        // construido a mano. Total esperado: 0.
+        assert_eq!(
+            type_info.len(),
+            0,
+            "Span::ZERO debe omitirse del side-table: {:?}",
+            type_info.inner
+        );
+    }
+
+    #[test]
+    fn types_info_expr_error_se_persiste_como_any() {
+        // Un `Stmt::Assign` con `Expr::Error` como valor debe persistir
+        // el Error node como `Type::Any` en el side-table (siempre que
+        // su span sea known). Política documentada en `TypeInfo` —
+        // uniforme con el comportamiento del checker (synthesize_expr
+        // devuelve `Type::Any` para Error nodes).
+        use crate::ast::{AssignTarget, Span, Stmt, Expr as AstExpr};
+        let span = Span::new(7, 11); // span arbitrario "known"
+        let program = vec![Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
+            type_: None,
+            value: AstExpr::Error(span),
+            span,
+        }];
+        let (_env, type_info, _errors) = check_program(&program);
+        assert_eq!(
+            type_info.type_at(span),
+            Some(&Type::Any),
+            "Expr::Error con span known debe persistir como Any: {:?}",
+            type_info.inner
+        );
+    }
+
+    #[test]
+    fn types_info_type_at_devuelve_none_para_span_desconocido() {
+        // Lookup por un span que el checker nunca registró debe
+        // devolver None. Caso típico: el LSP pide hover sobre una
+        // posición vacía (entre tokens).
+        let info = types_of("let x = 1\n");
+        // Span en una línea que el programa no toca.
+        assert!(
+            info.type_at(Span::new(999, 999)).is_none(),
+            "span ausente debe devolver None"
+        );
+        // Span::ZERO también devuelve None por política.
+        assert!(
+            info.type_at(Span::ZERO).is_none(),
+            "Span::ZERO debe devolver None"
+        );
+    }
+
+    #[test]
+    fn types_info_smoke_programa_real() {
+        // Smoke sobre un programa con variedad de constructos. No
+        // matcheamos el N exacto (frágil contra cambios futuros del
+        // parser/checker), solo un piso conservador: al menos un
+        // puñado de nodos quedaron registrados.
+        let src = "\
+type Point { x: Int, y: Int }
+fn sum(p: Point) -> Int => p.x + p.y
+let p = Point { x: 3, y: 4 }
+let total = sum(p)
+print(total)
+";
+        let info = types_of(src);
+        assert!(
+            info.len() >= 10,
+            "programa con varios nodos debe persistir ≥10 entries; got {}: {:?}",
+            info.len(),
+            info.inner
         );
     }
 }
