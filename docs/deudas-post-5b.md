@@ -301,6 +301,42 @@
 > archivos. Detalles completos en `docs/roadmap.md` → "Fase 8.5".
 > Próximo norte: **Fase 8.6 (async + GIL: bridge tokio ↔
 > asyncio)**.
+>
+> **Fase 8.6 (2026-05-15): CERRADA** — bridge tokio ↔ asyncio.
+> Habilita `py_async_fn().await` desde cualquier `async fn`
+> Fitz: cuando un call a una función Python devuelve una corutina
+> (`async def`), Fitz la envuelve automáticamente en
+> `Value::Future` adentro del `Result::Ok`. El `.await` postfix
+> (Fase 6) la desempaca, ejecuta, y devuelve el valor coercionado.
+> Excepciones asyncio → `Result::Err` (heredado de 8.3). Bridge
+> invisible al usuario. Dos sub-pasos: 8.6.1 `py_interop::call`
+> detecta awaitable con `inspect.isawaitable`, `is_coroutine` +
+> `py_coro_to_fitz_future` helpers, FitzFuture usa
+> `tokio::task::spawn_blocking` + `asyncio.new_event_loop()
+> .run_until_complete(coro)` (baseline blocking, Send-safe, no
+> deadlockea), 3 tests bajo `#[cfg(feature = "python")]`; 8.6.2
+> ejemplo `examples/python-interop-8.6.fitz` con 3 secciones
+> (patrón canónico `doble_eventual`, awaits encadenados
+> `pipeline`, lazy sin `.await`) + cierre formal (CHANGELOG
+> v0.8.7, roadmap, deudas, CLAUDE, README). Decisiones:
+> approach baseline blocking en vez de `pyo3-async-runtimes::
+> into_future` (la crate requiere control del runtime tokio,
+> choca con el setup ya establecido — Fase 6 current_thread CLI
+> / F17 rt-multi-thread HTTP); detección automática de awaitable
+> en `call` (no `.await` manual sobre PyObject); GIL serializa
+> Python (esperado por roadmap, funcional para APIs DB-bound);
+> sin marshaling Future Fitz → corutina Python (Future no
+> marshalleable; `asyncio.gather` desde Fitz requiere helper
+> Python externo). Total al cierre: **1284 unit + 80 E2E +
+> 3 openapi_e2e** con feature; **1193 + 80 + 3** sin feature.
+> Ejemplo runnable: `examples/python-interop-8.6.fitz`. Deuda
+> residual visible: event loop asyncio persistente (paralelismo
+> I/O real), marshaling Future↔Coroutine, política de GIL
+> configurable, cancelación de Futures Python, tests
+> multi_thread con paralelismo real. Detalles completos en
+> `docs/roadmap.md` → "Fase 8.6". Próximo norte: **Fase 8.7
+> (distribución con CPython embebido — `fitz build
+> --bundle-python`)**.
 
 ## Resumen ejecutivo
 

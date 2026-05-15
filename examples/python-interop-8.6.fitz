@@ -1,0 +1,110 @@
+// examples/python-interop-8.6.fitz — Bridge tokio ↔ asyncio
+// (Fase 8.6).
+//
+//   cargo run --features python -- run examples/python-interop-8.6.fitz
+//
+// Necesita Python 3.10+. Demuestra el bridge transparente entre el
+// runtime tokio que Fitz usa para `async fn` (Fase 6) y el event loop
+// asyncio del lado Python:
+//
+//   - Cuando una llamada a una función Python devuelve una corutina
+//     (caso típico de `async def`), Fitz la envuelve automáticamente
+//     en `Value::Future` adentro del `Result::Ok`. El usuario escribe
+//     `py_async_fn().await` igual que con futures Fitz nativos.
+//   - El `.await` desempaca el Future, ejecuta la corutina, y devuelve
+//     el valor coercionado a `Value`. Excepciones asyncio bajan como
+//     `Result::Err` con el formato canónico `"<ClassName>: <message>"`.
+//
+// **Implementación "baseline blocking"** (8.6.1): el `.await` Fitz
+// usa `tokio::task::spawn_blocking` + `asyncio.run_until_complete`
+// adentro del worker. El GIL serializa las corutinas pero el thread
+// tokio principal sigue libre. Para APIs DB-bound (caso típico
+// SQLAlchemy) es funcional; para corutinas largas en alta concurrencia
+// es subóptimo (deuda comprometida para versión future-based real).
+
+from python import asyncio
+
+// ---------------------------------------------------------------------
+// 1. Patrón canónico: async fn Fitz que await-ea una corutina Python
+// ---------------------------------------------------------------------
+
+async fn doble_eventual(x: Int) -> Result<Int> {
+    // `asyncio.sleep(0)` devuelve una corutina builtin. Sin `?.await`,
+    // el binding tipa como `Result<Future<Null>>` (call envuelve en
+    // Result, return de async def es Future). Con `?.await`, se
+    // desempaca a `Null`. La asignamos a `_` (no nos importa el valor).
+    let _ = asyncio.sleep(0)?.await
+    return Ok(x * 2)
+}
+
+print("== Patrón canónico ==")
+let r = match doble_eventual(21).await {
+    Ok(v)  => v,
+    Err(_) => -1,
+}
+print("doble_eventual(21) = {r}")  // 42
+
+// ---------------------------------------------------------------------
+// 2. Múltiples awaits encadenados — cada uno es una corutina aparte
+// ---------------------------------------------------------------------
+
+print("")
+print("== Awaits encadenados ==")
+
+async fn pipeline(start: Int) -> Result<Int> {
+    let _ = asyncio.sleep(0)?.await    // primera "espera"
+    let a = start + 1
+    let _ = asyncio.sleep(0)?.await    // segunda "espera"
+    let b = a * 2
+    let _ = asyncio.sleep(0)?.await    // tercera
+    return Ok(b + 100)
+}
+
+let p = match pipeline(10).await {
+    Ok(v)  => v,
+    Err(_) => -1,
+}
+print("pipeline(10) = {p}")  // (10+1) * 2 + 100 = 122
+
+// ---------------------------------------------------------------------
+// 3. Sin `.await`, el call devuelve `Result<Future>` — la corutina
+//    no se ejecuta hasta que algo la await-ea.
+// ---------------------------------------------------------------------
+
+print("")
+print("== Lazy: sin .await la corutina no corre ==")
+
+// Nota: este patrón emite un RuntimeWarning de Python al final
+// ("coroutine 'sleep' was never awaited") porque la corutina se
+// dropea sin haber sido consumida. En código real, siempre
+// await-ar o cancelar explícitamente la corutina.
+let f = asyncio.sleep(0)
+match f {
+    Ok(_)  => print("got Future (lazy, no ejecutada todavía)"),
+    Err(_) => print("(no debería)"),
+}
+
+// ---------------------------------------------------------------------
+// Notas sobre el modelo de errores (heredado de 8.3):
+//
+// Las excepciones lanzadas POR la corutina Python (ej. una `async def`
+// custom que hace `raise ValueError(...)`) bajan al `.await` Fitz
+// como `Result::Err(Str("<ClassName>: <message>"))`, igual que
+// excepciones de calls sync. Patrón canónico:
+//
+//   match py_async_fn().await {
+//       Ok(v)  => print("ok: {v}"),
+//       Err(e) => print("error: {e}"),  // "error: TypeError: ..."
+//   }
+//
+// No incluimos un caso runnable acá porque definir una `async def`
+// custom requiere un archivo Python helper aparte (el `from python
+// import` carga módulos top-level, no archivos del usuario). En un
+// proyecto real, definís el módulo Python con tus corutinas y el
+// flow es idéntico al caso sync.
+//
+// Trade-off baseline de 8.6.1: cada `.await` sobre una corutina
+// Python ocupa un thread del blocking pool de tokio durante toda la
+// duración de la corutina. Para queries DB cortas (caso típico
+// SQLAlchemy async) está bien; para corutinas largas en alta
+// concurrencia, deuda comprometida (event loop persistente).

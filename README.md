@@ -136,26 +136,29 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.5 cerrada — `fitz py-types` auto-mapea SQLAlchemy
-a `type` Fitz.** Un comando nuevo introspecciona un archivo
-Python con modelos SQLAlchemy (o mocks equivalentes) y emite
-los `type` Fitz correspondientes, listo para commitear. Los
-modelos se definen UNA vez en Python — Fitz los importa con sus
-tipos resueltos vía `from models import User, Order`. Reduce el
-doble-tipado en el caso canónico:
+🏔️ **Fase 8.6 cerrada — Fitz puede `await` corutinas Python
+desde cualquier `async fn`.** El bridge tokio ↔ asyncio es
+invisible al usuario: cuando un call a una función Python
+devuelve una corutina (caso típico de `async def`), Fitz la
+envuelve automáticamente en `Value::Future`, y el `.await`
+postfix (Fase 6) la desempaca y ejecuta:
 
-```bash
-$ fitz py-types models.py --out models.fitz
-✓ types Fitz emitidos a models.fitz
+```fitz
+async fn doble_eventual(x: Int) -> Result<Int> {
+    let _ = asyncio.sleep(0)?.await
+    return Ok(x * 2)
+}
+let r = match doble_eventual(21).await { Ok(v) => v, Err(_) => -1 }
+// r → 42
 ```
 
-Mapeo automático: `Column(Integer)` → `Int`, `Column(String)` →
-`Str`, `nullable=True` → `T?`, `default=42` → `= 42`. Tipos
-desconocidos quedan como `Any` con comentario. Introspección por
-duck typing (`__table__.columns`) — funciona con SQLAlchemy real
-y con mocks; solo requiere el shape correcto. La interop
-completa (async + GIL, CPython bundled, guía + ejemplo CRUD)
-llega en los sub-pasos siguientes (8.6 a 8.8). Ver el
+Excepciones asyncio bajan como `Result::Err` con el formato
+canónico ya estable desde 8.1.2. Implementación "baseline
+blocking" con `tokio::spawn_blocking` + `asyncio.run_until_complete`
+— funcional para APIs DB-bound (queries SQLAlchemy/asyncpg
+cortas). La distribución bundled (binario standalone sin
+requerir Python en la máquina destino) llega en 8.7 + cierre
+formal de la fase con guía + CRUD completo en 8.8. Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
@@ -298,23 +301,39 @@ Las fases cerradas:
   runnable `examples/py-types/` con `models.py` (mock SQLA
   autosuficiente) + `models.fitz` (generado) + `usage.fitz`
   (`from models import` + coerción 8.4.3 sobre dicts JSON).
+- **Fase 8.6 — Bridge tokio ↔ asyncio**: `py_async_fn().await`
+  desde cualquier `async fn` Fitz. Cuando un call Python
+  devuelve una corutina, Fitz la detecta via
+  `inspect.isawaitable` y la envuelve automáticamente en
+  `Value::Future` adentro del `Result::Ok` — el usuario escribe
+  `.await` natural sin glue manual. Implementación "baseline
+  blocking" con `tokio::task::spawn_blocking` +
+  `asyncio.new_event_loop().run_until_complete(coro)` (Send-safe,
+  no deadlockea con el runtime tokio existing). El GIL serializa
+  Python (esperado por roadmap, funcional para APIs DB-bound).
+  Sin marshaling Future Fitz → corutina Python (Future no
+  marshalleable; `asyncio.gather` requiere helper Python externo).
+  Sub-pasos: 8.6.1 detección + bridge + 3 tests; 8.6.2 ejemplo
+  runnable `examples/python-interop-8.6.fitz` con 3 secciones
+  (patrón canónico, awaits encadenados, lazy sin .await).
 
-**1281 tests pasando con `--features python`** (1281 unit + 80 E2E
+**1284 tests pasando con `--features python`** (1284 unit + 80 E2E
 con `fitz build` + 3 openapi_e2e). **1193 + 80 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.6 — Async + GIL: bridge tokio ↔
-asyncio** — permite `py_coro().await` sobre corutinas Python
-desde cualquier `async fn` Fitz. Habilita SQLAlchemy 2.x async,
-httpx async, asyncpg, etc. Requiere `pyo3-asyncio` y política
-de GIL (soltar automático en calls async, mantener en sync).
-Después: 8.7 (CPython bundled — candidato para cerrar F19), 8.8
-(guía + ejemplo CRUD). Ver el [roadmap](docs/roadmap.md) para
-detalle. **Deudas comprometidas que siguen**: F19 (codegen
-interop Python en `fitz build`), stubs `.pyi` parseados
-(pospuesto a Fase 9+), descripciones via doc-strings sobre
-handlers (OpenAPI enrichment), modelo wrap de middleware
-(post-process) si aparece presión real.
+Próximo norte: **Fase 8.7 — Distribución del binario con CPython
+embebido** — `fitz build --bundle-python` produce un binario
+standalone que NO requiere Python en la máquina destino.
+Reemplaza el modelo actual donde el binario asume `python3.X`
+en el PATH. Candidato para cerrar la deuda F19 (codegen interop
+Python en `fitz build`). Después: 8.8 (guía + ejemplo CRUD).
+Ver el [roadmap](docs/roadmap.md) para detalle. **Deudas
+comprometidas que siguen**: F19 (codegen interop Python en
+`fitz build`), stubs `.pyi` parseados (pospuesto a Fase 9+),
+descripciones via doc-strings sobre handlers (OpenAPI enrichment),
+modelo wrap de middleware (post-process) si aparece presión real,
+event loop asyncio persistente (paralelismo I/O real en interop
+async), marshaling Future↔Coroutine.
 
 ## Qué funciona hoy
 

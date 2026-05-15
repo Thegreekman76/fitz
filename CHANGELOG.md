@@ -12,11 +12,103 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
-hito comprometido es **Fase 8.6 — Async + GIL: bridge tokio ↔
-asyncio**, que permite `py_coro().await` sobre corutinas Python
-desde cualquier `async fn` Fitz. Habilita SQLAlchemy 2.x async,
-httpx async, asyncpg, etc. Requiere `pyo3-asyncio` y política
-de GIL (soltar automático en calls async, mantener en sync).
+hito comprometido es **Fase 8.7 — Distribución del binario con
+CPython embebido**: `fitz build --bundle-python` produce un
+binario standalone que NO requiere Python en la máquina destino.
+Reemplaza el modelo actual donde el binario asume `python3.X` en
+el PATH. Candidato para cerrar la deuda F19 (codegen interop
+Python).
+
+## [v0.8.7] — 2026-05-15 — Fase 8.6: Bridge tokio ↔ asyncio
+
+Sexto sub-paso de la Fase 8 (Interop Python). Habilita
+`py_async_fn().await` desde cualquier `async fn` Fitz: cuando un
+call a una función Python devuelve una corutina (caso típico de
+`async def`), Fitz la envuelve automáticamente en `Value::Future`
+adentro del `Result::Ok`. El `.await` postfix existente (Fase 6)
+desempaca el Future, ejecuta la corutina, y devuelve el valor
+coercionado a `Value`. Excepciones asyncio bajan como
+`Result::Err` con el formato canónico ya estable desde 8.1.2.
+
+- **8.6.1 — Bridge baseline + tests**:
+  - `py_interop::call` detecta cuando el return Python es awaitable
+    (via `inspect.isawaitable`) y lo envuelve automáticamente en
+    `Value::Future` adentro del `Result::Ok`. El usuario no necesita
+    glue manual; el `.await` postfix lo desempaca naturalmente.
+  - Helpers nuevos: `is_coroutine(py, obj)` (introspección defensiva
+    con fallback a `false`) y `py_coro_to_fitz_future(coro)` que
+    construye el `FitzFuture`.
+  - **Implementación "baseline blocking"**: el FitzFuture envuelve
+    `tokio::task::spawn_blocking` + `asyncio.new_event_loop()
+    .run_until_complete(coro)`. El `Py<PyAny>` (Send-safe) viaja
+    al worker; el `Bound` derivado solo existe adentro del
+    `Python::attach` del worker. El blocking pool de tokio aísla
+    el bloqueo del scheduler async.
+  - **Tests** (3 nuevos en evaluator bajo `#[cfg(feature = "python")]`):
+    - `fase_8_6_asyncio_sleep_awaiteable_desde_fitz`:
+      `asyncio.sleep(0)?.await` adentro de async fn Fitz → Null.
+    - `fase_8_6_async_fn_fitz_que_await_python_devuelve_valor_calculado`:
+      `async fn doble(x) -> Result<Int> { sleep; return Ok(x*2) }`
+      con `doble(21).await` → 42.
+    - `fase_8_6_call_async_devuelve_result_future`: shape lazy —
+      sin `.await`, el binding es `Result::Ok(Future(_))`.
+- **8.6.2 — Ejemplo runnable + cierre formal**:
+  - `examples/python-interop-8.6.fitz` con 3 secciones: patrón
+    canónico (`doble_eventual(x)` con `sleep + return Ok(x*2)`),
+    awaits encadenados (`pipeline(start)` con 3 sleeps + cálculo),
+    lazy sin `.await` (`Result<Future>` no ejecutado). Notas
+    extensas sobre el modelo de errores asyncio (heredado de 8.3),
+    el trade-off baseline blocking y por qué no hacemos un caso
+    runnable de excepción asyncio (definir `async def` custom
+    requiere un archivo Python helper aparte). Validado bit-a-bit
+    con `cargo run --features python -- run
+    examples/python-interop-8.6.fitz`.
+  - CHANGELOG v0.8.7, roadmap a CERRADA, deudas nota de cierre,
+    CLAUDE + README refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Detección automática de awaitable en `call`** (no `.await`
+  manual sobre PyObject): el usuario escribe `py_async_fn().await`
+  natural, sin pensar "esto es coroutine". La detección usa
+  `inspect.isawaitable` (canónica en Python stdlib).
+- **Approach baseline blocking** (vs `pyo3-async-runtimes::tokio::
+  into_future`): la crate `pyo3-async-runtimes` 0.28 requiere
+  control del runtime tokio (`init_with_runtime`/`run`), lo que
+  choca con el tokio que Fitz ya tiene corriendo
+  (current_thread CLI / rt-multi-thread HTTP). `spawn_blocking` +
+  `run_until_complete` es Send-safe, no deadlockea con el runtime
+  existente, y suficiente para el criterio. La versión future-based
+  real (event loop asyncio persistente compartido) queda como
+  deuda menor — el `Value::Future` shape ya es estable, sólo
+  cambia la implementación interna.
+- **El GIL serializa Python** (esperado por roadmap): N awaits
+  concurrentes a corutinas distintas se serializan en el GIL. Para
+  APIs DB-bound (caso típico SQLAlchemy/asyncpg con queries
+  cortas), la DB es el cuello de botella, no el GIL. Para APIs
+  CPU-intensivas con NumPy o long-running asyncio.gather, deuda
+  menor.
+- **Sin marshaling Future Fitz → corutina Python**: pasar un
+  `Value::Future` Fitz como arg a una función Python no se
+  soporta (Future no es marshalleable, igual que Range/Function).
+  Caso típico afectado: `asyncio.gather(fut1, fut2)` desde Fitz no
+  funciona si los futs vienen de calls Python anteriores. Trade-off
+  documentado en el ejemplo.
+- **No incluimos caso runnable de excepción asyncio** en el
+  ejemplo: definir una `async def` Python custom desde Fitz
+  requiere un archivo helper Python aparte (el `from python
+  import` carga módulos top-level, no archivos del usuario). El
+  patrón de manejo de errores es idéntico al de calls sync (8.3) —
+  documentado en notas del ejemplo.
+
+**Cierre formal**:
+
+  - Sin feature: **1193 unit** (sin cambios — bridge async es
+    feature-gated) + 80 compile_e2e + 3 openapi_e2e.
+  - Con feature: **1284 unit** (1281 + 3 del bridge async) + 80 + 3.
+  - Clippy `-D warnings` limpio en ambos modos.
+
+Detalle completo: `docs/roadmap.md` → "Fase 8.6".
 
 ## [v0.8.6] — 2026-05-15 — Fase 8.5: `fitz py-types` auto-mapeo SQLAlchemy → type Fitz
 
