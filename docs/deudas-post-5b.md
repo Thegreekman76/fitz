@@ -150,6 +150,39 @@
 > clippy `-D warnings` limpio. Detalles completos en
 > `docs/roadmap.md` → "Fase F17". Próximo norte: **Fase 8
 > (Interop Python)**.
+>
+> **Mini-tanda PreF8 (2026-05-14): CERRADA** — cleanup pre-Fase 8.
+> Cuatro sub-pasos: PreF8.1 refactor M1+M2 codegen
+> (`generate_main_rs` y `gen_http_handler_wrapper` partidas en
+> helpers, AST output bit-a-bit idéntico); PreF8.2 method chain
+> multi-línea en parser (newlines antes de `.` toleradas);
+> PreF8.3 defaults de tipos importados (estrategia eager-at-import
+> con `resolved_defaults` + `__default_<T>_<F>()` por módulo);
+> PreF8.4 import aliasing con `as` (sub-paso adelantado de F8.1).
+> Total al cierre: **1172 unit + 79 E2E**, clippy limpio. Detalles
+> completos en `docs/roadmap.md` → "Mini-tanda PreF8".
+>
+> **Fase 8.1 (2026-05-15): CERRADA** — embedding básico de CPython
+> via PyO3. `from python import math` end-to-end en el intérprete
+> (`fitz run --features python`). Cinco sub-pasos: 8.1.1 dep PyO3
+> opcional + `Value::PyObject(Arc<Py<PyAny>>)` feature-gated;
+> 8.1.2 `import_module(dotted)` + ruteo en `eval_python_from_import`
+> + `py_err_to_fitz` con formato `"<ClassName>: <message>"`
+> compatible con el wrap a `Result<T>` que llega en 8.3;
+> 8.1.3 `Expr::Field` sobre PyObject con auto-coerción primitiva
+> (None/bool/int/float/str → primitivos Fitz, resto → PyObject
+> opaco); 8.1.4 `Expr::Call` con args primitivos + `value_to_py`
+> simétrico — cumple el criterio `math.sqrt(16.0) == 4.0`;
+> 8.1.5 guard de codegen `check_no_python_imports` con sugerencia
+> de `fitz run` (la deuda **F19** comprometida marca soporte real
+> en `fitz build` como sub-paso de 8.7). Total al cierre:
+> **1213 unit + 80 E2E + 3 openapi_e2e** con feature; **1175 + 80
+> + 3** sin feature. Decisiones tomadas al arrancar: ABI3-py310,
+> opt-in `--features python`, política de venvs "estándar Python
+> sin magia", inicialización lazy, `Python::attach` por operación.
+> Ejemplo runnable: `examples/python-interop-8.1.fitz`. Detalles
+> completos en `docs/roadmap.md` → "Fase 8.1". Próximo norte:
+> **Fase 8.2 (marshaling de tipos compuestos)**.
 
 ## Resumen ejecutivo
 
@@ -281,6 +314,7 @@ estado real).
 | F15 | `parser.rs` | **Error recovery del parser** — hoy el parser aborta al primer error. Para tooling externo (LSP/IDE) que necesita dar diagnostics y completions sobre código incompleto/roto, el parser tiene que producir un AST parcial y seguir adelante. Refactor mediano: introducir nodos `Stmt::Error`/`Expr::Error`, sync points en `{`/`}`/`;`/newline, recolectar `Vec<FitzError>` en lugar de `Result<_, FitzError>`. Pre-req habilitante para Fase 9 (LSP). | Baja | Alta |
 | F16 | `types.rs` (checker) | **IR tipado persistido por nodo** — el checker hoy sintetiza tipos en `infer_expr` y los descarta. Para hover ("¿qué tipo tiene esta expresión?") y completion contextual ("`u.` → mostrar fields de `User`"), hace falta retener `HashMap<SpanKey, Type>` (o un side-table paralelo al AST) con el tipo de cada nodo. Encaja también con el "IR tipado" que el doc ya menciona como sub-paso natural post-5b. Pre-req habilitante para Fase 9 (LSP). | Baja | Media |
 | F18 | ~~`parser.rs` + `evaluator.rs` + `codegen.rs` + `types.rs`~~ **CERRADO (2026-05-14, PreF8.4)** — import aliasing con `as` (`import foo as f`, `from foo import bar as b`, alias mixto). Sub-paso adelantado de F8.1 para dejarlo con solo Python interop puro. Lexer suma `Token::As`; AST suma `Stmt::Import.alias: Option<String>` y cambia `Stmt::FromImport.names` a `Vec<(String, Option<String>)>`. Codegen emite `use foo::bar as b;` (fn/const) o `use foo::{T as L, TData as LData};` (type). Evaluator usa el `Value::Type.name` canónico al instanciar (no el alias sintáctico) para paridad bit-a-bit `fitz run` ↔ `fitz build` del Display. 9 unit + 4 E2E nuevos. Cap 16 de la guía documenta. | — | — |
+| F19 | `codegen.rs` (`check_no_python_imports`) | **Codegen interop Python en `fitz build`** — 8.1.5 cerró el guard defensivo que rechaza `from python import` con mensaje claro sugiriendo `fitz run --features python`. El soporte **real** (emitir Rust con `pyo3` linkeado, Cargo.toml condicional con `pyo3 = "0.28"`, traducción de `getattr`/`call` a `Python::attach` en el binario generado, marshaling primitivo build-time) queda como **deuda comprometida**: probable sub-paso de **8.7** cuando cierre distribución con CPython bundled (la decisión de "binario con CPython embebido vs binario que asume Python instalado" naturalmente se acopla con el codegen). Workaround actual: usar `fitz run` para programas que importan Python. Sin esto, `fitz build` no tiene paridad bit-a-bit con `fitz run` para programas Fitz que dependen de librerías Python — pero el caso de uso primario de interop (REPL/dev rápido + handlers HTTP) está cubierto por `fitz run`. | Media | Alta |
 | F17 | ~~`evaluator.rs` + `value.rs` + `env.rs` + `http.rs` + `codegen.rs`~~ | **CERRADO (2026-05-14, 1153 unit + 74 E2E)** — Send completo + paralelismo HTTP real + bridge HTTP eliminado. Seis sub-pasos: F17.1 dep `parking_lot`; F17.2 `Shared<T>` y `EnvRef` migran a `Arc<parking_lot::Mutex<T>>` (~284 sitios mecánicos `.borrow()/.borrow_mut()` → `.lock()`, `Rc::ptr_eq` → `Arc::ptr_eq`); F17.3 quitar `?Send` del `#[async_recursion]` en evaluator (13 sitios) + `FitzFuture: Pin<Box<dyn Future + Send>>` (fix colateral: `for` sobre List/Range materializa a `Vec<Value>` en vez de `Box<dyn Iterator>`); F17.4a `serve()` tokio `rt-multi-thread`; F17.5 eliminar bridge HTTP (`InterpTask`, `TaskTx`, `run_interpreter_loop`, `dispatch_request` viejo — ~269 LoC netas menos en `http.rs`, handlers axum invocan `handle_task(&registry, ...).await` directo sobre `Arc<HttpRegistry>` compartido, test helpers `run_oneshot_*` sin `LocalSet`/`select!`/canal); F17.4b codegen output paralela (`Rc<RefCell<>>` → `Arc<Mutex<>>` con std::sync, F12 closures `Arc<dyn Fn + Send + Sync>`, state HTTP `thread_local!` → `LazyLock<Arc<Mutex<T>>>`, runtime emitido `#[tokio::main]` default multi-thread, field access en bloque acotado `{ let __obj = ...; let __g = __obj.lock().unwrap(); __g.<f> }` para evitar deadlock por re-lock en `format!`, `PartialEq` custom por tipo nominal con helper recursivo `field_eq_expr`); F17.6 guía cap 19 sub-sección "Paralelismo HTTP real" + ejemplo `examples/guide/19b-paralelismo.fitz` validado a mano (5 reqs concurrentes en **1.2s** vs 5 en serie **5.3s**; pre-F17 ambos ~5s). Decisiones técnicas: `parking_lot::Mutex` para el intérprete, `std::sync::Mutex` para el codegen output (sin deps extras al Cargo.toml generado); política de re-entrancia "lock scope mínimo + clone-out" (auditoría manual en eval_call/EnvRef::get). **Deudas residuales que NO bloquean Fase 8**: benchmarks de `MutexGuard` vs `Ref<T>` (sin medir); lint o test que detecte patrones de re-lock potencial; LOADER del intérprete sigue como `thread_local! { RefCell<...> }` (re-carga módulos por worker, wasteful pero correcto). Ver detalle en `docs/roadmap.md` → "Fase F17". | — | — |
 
 ### Docs

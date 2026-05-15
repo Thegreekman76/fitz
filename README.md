@@ -136,14 +136,17 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 7 completada — Fitz tiene docs HTTP autogeneradas.**
-OpenAPI 3.1 + UI Scalar gratis en `/docs` y `/openapi.json` desde
-los decoradores existentes. `@header(name="X")` para headers como
-params. Opt-out con `@server(docs=false)`. Subcomando `fitz
-openapi archivo.fitz` para CI. Paridad bit-a-bit entre `fitz run`
-y `fitz build`. El lenguaje cumple la promesa de "HTTP nativo" a
-tres niveles: ergonómico (cap 17), de ejecución (cap 19) y de
-developer experience (cap 18).
+🏔️ **Fase 8.1 cerrada — Fitz puede importar librerías Python.**
+`from python import math` desde el intérprete (`fitz run --features
+python`) con auto-coerción de primitivos. Cumple el criterio del
+roadmap end-to-end: `math.sqrt(16.0)` → `4.0`, `math.pi` →
+`3.141592653589793`. PyO3 0.28 con ABI3-py310 (un binario corre
+contra cualquier Python 3.10+ instalado en la máquina). Feature
+opt-in: el binario `fitz` default sigue siendo standalone sin link
+a libpython. La interop completa (marshaling de tipos compuestos,
+excepciones → Result, SQLAlchemy/NumPy ergonómico) llega en los
+sub-pasos siguientes (8.2 a 8.8). Ver el [roadmap](docs/roadmap.md)
+para el plan completo.
 
 Las fases cerradas:
 
@@ -193,17 +196,49 @@ Las fases cerradas:
   via Map literal — preflight OPTIONS automático y headers
   `Access-Control-Allow-*` inyectados en la response real
   (incluso 500/400). Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+- **Mini-tanda Q (post-MW)**: 4 quick wins menores — `@header(into=)`
+  para mapping explícito de header a param Fitz, `@server(api_version=)`
+  override del schema OpenAPI, CORS request-aware con `List<Str>`
+  haciendo echo del Origin, status codes custom apareciendo en
+  schema OpenAPI.
+- **Fase F17 — Send completo + paralelismo HTTP real**: la deuda
+  más grande del proyecto cerrada. `Value` y `EnvRef` migran a
+  `Arc<parking_lot::Mutex<T>>`, runtime tokio multi-thread, bridge
+  HTTP `mpsc/oneshot` eliminado (~269 LoC netas menos en `http.rs`).
+  Codegen output migra paralelo (`Arc<std::sync::Mutex>`, F12
+  closures con `+ Send + Sync`, state HTTP `LazyLock<Arc<Mutex<T>>>`).
+  5 requests concurrentes en 1.2s vs 5.3s en serie (validado a mano).
+- **Mini-tanda PreF8 — Cleanup pre-Fase 8**: 4 sub-pasos antes del
+  salto a Python interop. PreF8.1 refactor M1+M2 del codegen (AST
+  output bit-a-bit idéntico), PreF8.2 method chain multi-línea en
+  parser, PreF8.3 audit de defaults de tipos importados (fix de
+  eager-at-import), PreF8.4 import aliasing (`as`).
+- **Fase 8.1 — Embedding básico de CPython**: `from python import
+  X` desde el intérprete (`fitz run --features python`). PyO3 0.28
+  + ABI3-py310. Acceso a atributos, llamadas con args primitivos,
+  return primitivo coercionado a `Value` Fitz. Sub-pasos: 8.1.1
+  dep PyO3 opcional + `Value::PyObject` feature-gated, 8.1.2 loader
+  + `from python import X`, 8.1.3 `Expr::Field` + auto-coerción
+  primitiva, 8.1.4 `Expr::Call` con args primitivos (cumple el
+  criterio del roadmap end-to-end), 8.1.5 guard de codegen
+  (`fitz build` aborta con mensaje claro — deuda F19 comprometida
+  para sub-paso futuro).
 
-**1189+ tests pasando** (1118+ unit + 71 E2E que compilan
-binarios con `fitz build`, levantan el server y validan responses
-crudas via TCP).
+**1213 tests pasando con `--features python`** (1213 unit + 80 E2E
+con `fitz build` + 3 openapi_e2e). **1175 + 80 + 3** sin feature.
+Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8 — Interop Python**, **Fase 9 — Ecosistema**.
-Ver el [roadmap](docs/roadmap.md) para detalle. **Deudas
-comprometidas que siguen**: F17 (Send completo) para paralelismo
-real entre handlers; descripciones via doc-strings sobre handlers
-(para enriquecer OpenAPI); modelo wrap de middleware (post-process)
-si aparece presión real.
+Próximo norte: **Fase 8.2 — Marshaling de tipos compuestos**
+(List/Map/Instance/Null ↔ list/dict/None Python — destraba kwargs
+como Map, `np.array([...])`, `pd.DataFrame({...})`, handlers HTTP
+con returns compuestos vía Python). Después: 8.3 (excepciones →
+`Result<T>`), 8.4 (anotaciones del lado Fitz), 8.5 (`fitz
+py-types`), 8.6 (async + GIL), 8.7 (CPython bundled — candidato
+para cerrar F19), 8.8 (guía + ejemplo CRUD). Ver el
+[roadmap](docs/roadmap.md) para detalle. **Deudas comprometidas
+que siguen**: F19 (codegen interop Python en `fitz build`),
+descripciones via doc-strings sobre handlers (OpenAPI enrichment),
+modelo wrap de middleware (post-process) si aparece presión real.
 
 ## Qué funciona hoy
 
@@ -252,6 +287,30 @@ fitz build programa.fitz
 # Emitir el schema OpenAPI 3.1 a stdout (Fase 7 — útil para CI)
 fitz openapi programa.fitz > schema.json
 ```
+
+### Compilando con interop Python (Fase 8.1+)
+
+Para usar `from python import math` desde `fitz run`, el binario
+`fitz` tiene que estar compilado con la feature opt-in `python`:
+
+```bash
+# Build local
+cargo build --features python
+
+# O install global
+cargo install --path . --features python
+```
+
+Necesita Python 3.10+ instalado en la máquina. En Linux/Debian:
+`apt install python3-dev`. En macOS: `brew install python@3.10`
+(o superior). En Windows con el instalador de python.org, cero
+config extra. En Windows con instalaciones raras (Microsoft Store,
+nuget wrapper), setear `PYO3_PYTHON` al `.exe` real + prepender al
+PATH el dir con `python3.dll` — ver CLAUDE.md para detalle.
+
+El binario `fitz` default (sin la feature) sigue siendo standalone
+sin link a libpython. Programs Fitz que no usan `from python
+import` no pagan nada.
 
 ## Estabilidad
 

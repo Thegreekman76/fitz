@@ -2749,50 +2749,173 @@ La sintaxis exacta es propuesta — cada sub-paso puede afinarla.
 ### Pasos
 
 #### 8.1 — Embedding básico de CPython
-**Pendiente** — embeber CPython en el runtime de Fitz via PyO3.
-Punto de partida de toda la fase. Sólo cubre el caso más
-chiquito: importar un módulo Python y llamar funciones top-level
-con argumentos y returns primitivos (Int, Float, Str, Bool).
+**Estado: CERRADA (2026-05-15)** — 1213 unit + 80 compile_e2e
++ 3 openapi_e2e con feature `python`; 1175 + 80 + 3 sin feature.
 
-- Nueva sintaxis: `from python import <módulo>`. El parser
-  reconoce `python` como prefijo reservado para imports y
-  produce un nodo nuevo `Stmt::PyImport { path, alias }` (o
-  reutiliza `FromImport` con un flag, decisión a tomar al
-  implementar).
-- `from python import sqlalchemy as sa` — aliasing en imports.
-  Fitz hoy no lo soporta; cerrar esta sub-deuda como parte de
-  8.1 destraba nombres largos de módulos Python que serían
-  insufribles sin alias.
-- Nuevo valor en runtime: `Value::PyObject(Py<PyAny>)` que
-  envuelve un objeto Python con su referencia counted.
-- El evaluator detecta `Expr::Call` sobre un `Value::PyObject`
-  (función) y cruza al runtime Python via `Python::with_gil`.
-  Args se convierten a `PyObject` (sólo primitivos en 8.1),
-  return se convierte de vuelta a `Value` Fitz.
-- Build modes: `cargo build --features python` activa el
-  embedding. Sin la feature, los imports de Python disparan
-  error explícito mencionando que el binario no se compiló con
-  soporte de interop. Esto preserva la promesa "binario nativo
-  standalone" para proyectos que no la necesitan.
+Embebe CPython en el runtime de Fitz via PyO3. Punto de partida
+de toda la fase. Cubre lo esencial: importar un módulo Python y
+llamar funciones top-level con argumentos y returns primitivos
+(Int, Float, Str, Bool, Null). Marshaling compuesto (List/Map/
+Instance) llega en 8.2; wrap automático a `Result<T>` en 8.3.
 
-**Criterio de éxito**:
+**Decisiones técnicas tomadas al arrancar el sub-paso**
+(2026-05-14):
+
+- **Sintaxis** (cross-cutting #1 del roadmap): reuse total de
+  `Stmt::Import` y `Stmt::FromImport` con discriminante en
+  runtime `path[0] == "python"`. Sin cambios al lexer, parser, ni
+  AST — la mecánica de aliasing de PreF8.4 sirve tal cual. "python"
+  queda reservado como prefijo de path top-level; un usuario que
+  tenga un `python.fitz` local lo vería inaccesible (deuda menor,
+  documentable).
+- **ABI** (cross-cutting #6): PyO3 0.28 con feature `abi3-py310`.
+  Un solo binario `fitz` corre contra cualquier CPython 3.10+
+  instalado en la máquina (3.10/3.11/3.12/3.13/3.14).
+- **Feature gate** (cross-cutting #3): opt-in con
+  `cargo build --features python` (o `cargo install --features
+  python`). Sin la feature, el binario `fitz` default sigue
+  siendo standalone sin link a libpython — preserva la promesa
+  "binario nativo standalone" de Fase 5b. Con la feature, los
+  imports Python disparan error claro si el path no es soportado;
+  sin la feature, error claro citando el flag de build.
+- **Alcance** (decisión nueva al arrancar): 8.1 cubre solo
+  `fitz run`. `fitz build` con imports Python aborta con mensaje
+  claro citando "deuda comprometida para sub-paso futuro"
+  (F19 / probable sub-paso de 8.7). Razón: el codegen agrega
+  complejidad real (Cargo.toml con pyo3 condicional, traducción
+  de getattr/call a `Python::attach` Rust, marshaling primitivo
+  build-time), y validar el shape end-to-end en el evaluator
+  primero permite iterar el shape del marshaling sin comprometer
+  output Rust prematuramente.
+- **Política de GIL**: `Python::attach` por cada operación
+  pública del módulo `py_interop`. Para 8.1 (CLI sin async/HTTP
+  concurrente) es suficiente y simple; revisitable en 8.6 cuando
+  entre el bridge tokio↔asyncio.
+- **Política de venvs**: estándar Python sin magia. El usuario
+  activa su venv antes de `fitz run` y CPython embebido lee
+  `VIRTUAL_ENV` al boot. Cero código nuevo en Fitz. Auto-detect
+  de `./venv/` queda como deuda menor.
+- **Inicialización**: lazy. PyO3 con `auto-initialize` bootea
+  CPython solo en el primer `Python::attach`. Programas sin
+  imports Python no pagan el costo del boot.
+
+**Sub-pasos**:
+
+- **8.1.1** — Dep PyO3 opcional + variante `Value::PyObject` ✓ —
+  `Cargo.toml` suma `pyo3 = "0.28"` como dep opcional bajo la
+  feature `python`. Features de PyO3: `abi3-py310` (un binario
+  corre 3.10+) y `auto-initialize` (boot lazy en el primer
+  `Python::attach`). `Value::PyObject(PyObjectHandle)` feature-
+  gated; handle envuelve `Arc<Py<PyAny>>` para que `Value::clone()`
+  sea O(1) sin tomar el GIL. Implementaciones: PartialEq por
+  identidad via `Py::as_ptr()` (matchea la semántica de Module/
+  Function que también comparan por identidad), Display
+  `<python object>`, `type_name()` `"PyObject"`. `src/http.rs`
+  suma arm feature-gated en `value_to_json` que rechaza
+  serializar PyObject a JSON con mensaje claro — el handler debe
+  coercionar a Fitz primitivo antes de devolver. Cero impacto en
+  el binario sin la feature.
+- **8.1.2** — `from python import X` + loader CPython ✓ —
+  módulo nuevo `src/py_interop.rs` (feature-gated) con
+  `import_module(dotted: &str) -> FitzResult<Value>` envuelto en
+  `Python::attach` + `py.import(dotted)`. Helper privado
+  `py_err_to_fitz(py, err) -> FitzError` traduce excepciones
+  Python a `FitzError` con formato `"<ClassName>: <message>"` —
+  formato compatible con el wrap automático a `Result<T>` que
+  llega en 8.3 (solo cambia el envoltorio, no el string).
+  Evaluator: `Stmt::FromImport` con `path[0] == "python"` rutea
+  a `eval_python_from_import(path, names, env)`. Con feature:
+  importa cada `name` como módulo top-level Python via
+  `py_interop::import_module(name)`, bindea al scope respetando
+  `as` alias. Sin feature: error claro citando
+  `cargo build --features python`. `Stmt::Import` con prefijo
+  `python` se rechaza con sugerencia de usar
+  `from python import X` (forma canónica en 8.1). Alcance:
+  `path == ["python"]` exacto. `from python.X.Y import Z` queda
+  como deuda menor (workaround actual: `from python import X` +
+  field access cuando 8.1.3 cierre).
+- **8.1.3** — `Expr::Field` + auto-coerción primitiva ✓ —
+  `py_interop::get_attr(handle, name)` toma GIL, hace
+  `bound.getattr(name)`, y aplica `py_to_value` para coercionar
+  el resultado. Política de coerción: `None` → `Value::Null`,
+  `bool` → `Value::Bool` (chequea **antes** que `int` porque en
+  Python `bool ⊂ int`), `int` → `Value::Int` si cabe en `i64`
+  (overflow → error explícito; bignum support queda como deuda
+  menor), `float` → `Value::Float`, `str` → `Value::Str`, resto
+  (función, clase, instancia, submódulo, etc.) → `Value::PyObject`
+  opaco. Helper `py_to_value` queda reusable para `call` (8.1.4)
+  que procesa el return value igual. Evaluator: `Expr::Field`
+  despacha sobre `Value::PyObject` con feature on; el error de
+  getattr se enriquece con el span del field access (un
+  `math.no_existe` apunta al `.no_existe`, no a línea 0:0).
+  Desbloquea `math.pi` (Float), `math.__name__` (Str),
+  `os.path` (submódulo opaco listo para field access anidado).
+  `math.sqrt` queda como PyObject opaco listo para call (8.1.4).
+- **8.1.4** — `Expr::Call` con args primitivos (criterio cerrado) ✓ —
+  `py_interop::call(handle, &args)` toma GIL una vez, marshalla
+  args via `value_to_py`, invoca `bound.call1(tuple)` (positional
+  only — kwargs queda deuda menor), baja el return via
+  `py_to_value`. Helper nuevo `value_to_py(py, &Value)` con
+  política simétrica: primitivos Fitz → primitivos Python,
+  `Value::PyObject(h)` → passthrough con `clone_ref` (preserva
+  identidad), tipos compuestos (List/Map/Instance/Range/
+  Function/...) → error explícito citando 8.2. Evaluator: nueva
+  rama `Value::PyObject(handle)` en `invoke_value` (cubre
+  `let f = math.sqrt; f(25.0)` — callee opaco después de field
+  access) y en `dispatch_method` (cubre `math.sqrt(16.0)` directo
+  parseado como `Expr::Call { callee: Expr::Field {...} }`, y
+  chained calls como `json.dumps("hola")`). Excepciones Python
+  emiten `FitzError` con span del call enriquecido. Cumple el
+  criterio del roadmap end-to-end: `math.sqrt(16.0)` → `4.0`,
+  `math.pi` → `3.141592653589793`.
+- **8.1.5** — Guard de codegen + error path completo ✓ —
+  `fitz build` con `from python import` aborta con mensaje claro
+  sugiriendo `fitz run` (binario con `--features python`). Nueva
+  fn libre `check_no_python_imports(program: &Program)` escanea
+  top-level del AST buscando `Stmt::Import` o `Stmt::FromImport`
+  con `path[0] == "python"`; devuelve `FitzError` con sugerencia
+  específica para cada caso. Llamada en dos puntos:
+  `generate_project` (path real, ANTES de `loader.collect_imports`
+  para fallar rápido sin tocar disk y evitar el mensaje confuso
+  "no se encontró `python.fitz`") y `generate_main_rs` (path de
+  tests unit que usan `generate_rust` directo, sin loader).
+  Deuda residual queda como **F19** en `deudas-post-5b.md`:
+  soporte real en `fitz build` (emitir Rust con `pyo3` linkeado +
+  Cargo.toml condicional + traducción de `getattr`/`call` a Rust)
+  queda como probable sub-paso de 8.7 cuando cierre distribución
+  con CPython bundled.
+
+**Criterio de éxito** (del roadmap, cerrado bit-a-bit):
 ```fitz
 from python import math
 print(math.sqrt(16.0))  // 4
 print(math.pi)          // 3.141592653589793
 ```
 
-**Decisiones técnicas a resolver**:
-- Versión mínima de CPython: probablemente 3.10 con ABI3 para
-  amortizar versiones futuras.
-- Si Fitz embebe CPython solo en el binario generado por
-  `fitz build` o también en el binario del compilador (`fitz
-  run`). Probablemente ambos, con la feature `python` activada
-  por default y switch para desactivarla.
-- Cómo el lexer distingue `python` como prefijo de import vs
-  un nombre normal. Una opción: keyword contextual (sólo
-  especial después de `from`). Otra: reservar `python` como
-  identifier prohibido para módulos del usuario.
+Validado end-to-end en `examples/python-interop-8.1.fitz`
+(`cargo run --features python -- run examples/python-interop-8.1.fitz`).
+NO entra al smoke `GUIDE_EXAMPLES_COMPILE` porque 8.1 es
+`fitz run` only.
+
+**Cierre formal de Fase 8.1**: 1213 unit + 80 compile_e2e +
+3 openapi_e2e con feature `python`; 1175 + 80 + 3 sin feature.
+Clippy `-D warnings` limpio en ambos modos. **Próximo norte**:
+Fase 8.2 (marshaling de tipos compuestos).
+
+**Deuda residual visible que se queda como sub-paso futuro**:
+- F19 — codegen interop Python en `fitz build` (probable sub-
+  paso de 8.7 con CPython bundled).
+- `from python.X.Y import Z` con submódulos profundos
+  (workaround: `from python import X` + field access anidado).
+- `import python.X` sintaxis (deuda menor; la forma canónica es
+  `from python import X`).
+- Kwargs en llamadas Python (`obj.method(key=value)`) — `call1`
+  hoy solo positional. Para SQLAlchemy `filter_by(id=5)` necesita
+  Map → dict (8.2) + extender a `call`.
+- Bignum: `int` Python > `i64` → error. Cuando entre demanda,
+  agregar variante `Value::BigInt` o fallback a `Value::PyObject`.
+- Stubs `.pyi` para que el checker tipe llamadas Python concretas
+  (pospuesto explícitamente al menos hasta 8.4).
 
 #### 8.2 — Marshaling de tipos compuestos
 **Pendiente** — extender las conversiones bidireccionales a

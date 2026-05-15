@@ -12,8 +12,107 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
-hito comprometido es **Fase 8 — Interop Python** (embedding CPython
-via PyO3, importar SQLAlchemy/NumPy/etc. desde handlers Fitz).
+hito comprometido es **Fase 8.2 — Marshaling de tipos compuestos**
+(List/Map/Instance/Null bidireccional con list/dict/None de Python),
+que destraba casos reales como `np.array([1, 2, 3])` y
+`pd.DataFrame({"a": [...]}); para handlers HTTP que devuelven datos
+compuestos vía SQLAlchemy también.
+
+## [v0.8.2] — 2026-05-15 — Fase 8.1: Embedding básico de CPython
+
+Primer sub-paso de la Fase 8 (Interop Python). Habilita
+`from python import <módulo>` desde el intérprete (`fitz run`),
+con la feature opt-in `python`. Acceso a atributos, llamadas con
+args primitivos, return primitivo coercionado a `Value` Fitz.
+Cumple el criterio del roadmap: `math.sqrt(16.0)` → `4.0`,
+`math.pi` → `3.141592653589793`.
+
+- **8.1.1 — Dep PyO3 opcional + variante `Value::PyObject`**:
+  `Cargo.toml` suma `pyo3 = "0.28"` como dep opcional bajo la
+  feature `python`. Features de PyO3: `abi3-py310` (un binario
+  corre 3.10+) y `auto-initialize` (boot lazy en el primer
+  `Python::attach`). `Value::PyObject(PyObjectHandle)` feature-
+  gated; handle envuelve `Arc<Py<PyAny>>` para `clone()` O(1) sin
+  tomar el GIL. PartialEq por identidad via `Py::as_ptr()`,
+  Display `<python object>`, type_name `"PyObject"`. Binario
+  `fitz` default sigue siendo standalone sin link a libpython.
+- **8.1.2 — `from python import X` + loader CPython**:
+  módulo nuevo `src/py_interop.rs` (feature-gated) con
+  `import_module(dotted) -> Value::PyObject` envuelto en
+  `Python::attach`. Helper `py_err_to_fitz` traduce excepciones
+  Python a `FitzError` con formato `"<ClassName>: <message>"`
+  (compatible con el wrap a `Result<T>` que llega en 8.3).
+  Evaluator: `Stmt::FromImport` con `path[0] == "python"` rutea
+  al loader Python; sin feature, error claro citando el flag
+  `cargo build --features python`. Alcance 8.1.2:
+  `path == ["python"]` exacto (submódulos profundos quedan deuda
+  menor). `import python.X` se rechaza con sugerencia
+  `from python import X`.
+- **8.1.3 — `Expr::Field` + auto-coerción primitiva**:
+  `py_interop::get_attr(handle, name)` toma GIL, hace
+  `bound.getattr` y aplica `py_to_value`. Política:
+  `None` → `Null`, `bool`/`int`/`float`/`str` → primitivos Fitz,
+  resto → PyObject opaco. Chequeo de `bool` ANTES que `int` (en
+  Python `bool ⊂ int`). Overflow de `int > i64` → error explícito
+  (bignum support queda como deuda menor). Evaluator: `Expr::Field`
+  despacha sobre `Value::PyObject` con feature on, enriqueciendo
+  el error con el span del field access. Desbloquea `math.pi`,
+  `os.path` como submódulo opaco, `math.__name__`.
+- **8.1.4 — `Expr::Call` con args primitivos (criterio cerrado)**:
+  `py_interop::call(handle, &args)` con `bound.call1(tuple)`
+  (positional only — kwargs queda deuda menor). Helper
+  `value_to_py` con política simétrica: `Int`/`Float`/`Str`/`Bool`/
+  `Null` se marshalla a Python; PyObject passthrough preserva
+  identidad. Args compuestos (List/Map/Instance/Range/Function/...)
+  → error citando 8.2 como sub-paso futuro. Evaluator:
+  `invoke_value` (caso `let f = math.sqrt; f(25.0)`) y
+  `dispatch_method` (caso `math.sqrt(16.0)` directo, `json.dumps(
+  "hola")` chained) ambos despachan sobre `Value::PyObject`.
+  Excepciones Python emiten `FitzError`; el wrap a `Result<T>`
+  llega en 8.3.
+- **8.1.5 — Guard de codegen + error path completo**:
+  `fitz build` con `from python import` aborta con mensaje claro
+  sugiriendo `fitz run` (binario con `--features python`). Función
+  libre `check_no_python_imports(program)` corre dos veces: al
+  inicio de `generate_project` (path real, antes de tocar disk
+  para no producir el mensaje confuso "no se encontró
+  `python.fitz`") y al inicio de `generate_main_rs` (path de
+  tests unit que usan `generate_rust` directo). Deuda comprometida
+  F19: soporte real en `fitz build` (emitir Rust con `pyo3`
+  linkeado + Cargo.toml condicional) queda como probable sub-paso
+  de 8.7 cuando cierre distribución con CPython bundled.
+
+**Tests al cierre**:
+  - Sin feature: **1175 unit** (baseline 1172 + 1 fallback de
+    "feature off da error claro" + 2 codegen guards) +
+    **80 compile_e2e** (baseline 79 + 1 guard E2E) + 3 openapi_e2e.
+  - Con feature: **1213 unit** (+ 22 unit en `py_interop` + 11 en
+    evaluator + 2 codegen; el test del fallback no-aplica con la
+    feature on) + 80 + 3.
+  - Clippy `cargo clippy --all-targets --features python -- -D warnings`
+    limpio. Idem sin feature.
+
+**Política de venvs** (decisión 2026-05-14): estándar Python sin
+magia. El usuario activa su venv antes de `fitz run`
+(`source venv/bin/activate` o equivalente en Windows); CPython
+embebido lee `VIRTUAL_ENV` al boot y prepende el `site-packages`
+del venv a `sys.path`. Cero código nuevo en Fitz. Auto-detect de
+`./venv/` y similares queda como deuda menor (revisitable en 8.5
+o como flag CLI dedicado).
+
+**Política de errores Python**: en 8.1 cualquier `PyErr` aborta el
+programa con `FitzError` ("<ClassName>: <message>"); el wrap
+automático a `Result<T>` llega en 8.3 — el formato del mensaje
+queda estable, solo cambia el envoltorio.
+
+**Ejemplo runnable**: `examples/python-interop-8.1.fitz` cubre
+constantes, funciones con args primitivos, submódulos opacos y
+chained call. Se corre con
+`cargo run --features python -- run examples/python-interop-8.1.fitz`.
+NO entra al smoke `GUIDE_EXAMPLES_COMPILE` porque 8.1 es `fitz run`
+only.
+
+Detalle completo: `docs/roadmap.md` → "Fase 8.1".
 
 ## [v0.8.1] — 2026-05-14 — Mini-tanda PreF8: cleanup antes de Interop Python
 

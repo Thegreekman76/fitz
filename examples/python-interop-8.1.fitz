@@ -1,0 +1,78 @@
+// examples/python-interop-8.1.fitz — Demo del criterio de éxito de Fase 8.1.
+//
+// Requiere binario `fitz` compilado con la feature `python`:
+//
+//   cargo run --features python -- run examples/python-interop-8.1.fitz
+//
+// Necesita Python 3.10+ instalado en la máquina (CPython embebido lo
+// detecta solo via ABI3). En Windows con shims raros (Microsoft Store),
+// puede hacer falta setear PYO3_PYTHON + PATH — ver CLAUDE.md.
+//
+// Alcance 8.1: primitivos (Int/Float/Str/Bool/Null) y PyObject opacos
+// para funciones, submódulos, clases e instancias. Marshaling de tipos
+// compuestos (List/Map/Instance) llega en 8.2. Excepciones Python
+// automáticas a Result<T> llegan en 8.3.
+
+// ---------------------------------------------------------------------
+// 1. Criterio explícito del roadmap
+// ---------------------------------------------------------------------
+
+from python import math
+
+print("== Criterio de éxito (roadmap) ==")
+print("math.sqrt(16.0) = {math.sqrt(16.0)}")     // 4
+print("math.pi         = {math.pi}")             // 3.141592653589793
+
+// ---------------------------------------------------------------------
+// 2. Más constantes y funciones con args primitivos
+// ---------------------------------------------------------------------
+
+print("")
+print("== Constantes + funciones primitivas ==")
+print("math.e            = {math.e}")
+print("math.tau          = {math.tau}")
+print("math.floor(3.7)   = {math.floor(3.7)}")
+print("math.ceil(3.2)    = {math.ceil(3.2)}")
+print("math.factorial(5) = {math.factorial(5)}")
+print("math.gcd(12, 18)  = {math.gcd(12, 18)}")
+
+// ---------------------------------------------------------------------
+// 3. Callable guardado en variable, después invocado
+// ---------------------------------------------------------------------
+
+print("")
+print("== Callable como valor ==")
+let sqrt = math.sqrt
+print("sqrt(25.0) = {sqrt(25.0)}")
+print("sqrt(2.0)  = {sqrt(2.0)}")
+
+// ---------------------------------------------------------------------
+// 4. Submódulos opacos + field access anidado
+// ---------------------------------------------------------------------
+
+print("")
+print("== Submódulos opacos ==")
+from python import os
+let p = os.path
+print("os.path.__name__ = {p.__name__}")    // "ntpath" en Windows, "posixpath" en Unix
+
+// ---------------------------------------------------------------------
+// 5. Chained call sobre PyObject opaco con returns primitivos
+// ---------------------------------------------------------------------
+
+print("")
+print("== Chained call ==")
+from python import json
+let s = json.dumps("hola")
+print("json.dumps(\"hola\") = {s}")          // "\"hola\""
+
+// ---------------------------------------------------------------------
+// 6. builtins como módulo virtual de Python
+// ---------------------------------------------------------------------
+
+print("")
+print("== builtins ==")
+from python import builtins
+print("abs(-7)         = {builtins.abs(-7)}")
+print("int(True)       = {builtins.int(true)}")
+print("len(\"patagonia\") = {builtins.len(\"patagonia\")}")
