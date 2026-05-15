@@ -2372,3 +2372,111 @@ fn fase_8_7_1_build_python_import_sin_anotacion_es_opaco() {
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "pi = 3.141592653589793");
 }
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_2_build_call_math_sqrt_devuelve_result_ok() {
+    // Criterio canónico 8.7.2: `math.sqrt(16.0)` desde `fitz build`
+    // produce un binario que matchea bit-a-bit con `fitz run`.
+    //
+    // Como `call` Python devuelve `Result<PyAny>` (8.3), el binding
+    // tiene que destrancarlo con `match` o `?`. Acá usamos `match` para
+    // mantener el ejemplo top-level (sin envolver en fn `Result<...>`).
+    let src = "from python import math\n\
+               let raw = math.sqrt(16.0)\n\
+               match raw {\n\
+                 Ok(v) => print(\"sqrt(16) = {v}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_2_math_sqrt", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    assert_eq!(stdout.trim(), "sqrt(16) = 4.0");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_2_build_call_python_excepcion_es_err() {
+    // `math.sqrt(-1)` lanza ValueError. El call devuelve
+    // `Err(Str("ValueError: ..."))` que el match destrancla.
+    let src = "from python import math\n\
+               let raw = math.sqrt(-1.0)\n\
+               match raw {\n\
+                 Ok(v) => print(\"ok: {v}\"),\n\
+                 Err(e) => print(\"caught: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_2_math_sqrt_neg", src);
+    assert_eq!(exit, 0);
+    assert!(
+        stdout.contains("caught: ValueError"),
+        "output debería citar `ValueError`, fue: {}",
+        stdout
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_2_build_call_python_marshalla_list_fitz_a_list_python() {
+    // `json.dumps([1, 2, 3])` Fitz → arg de json.dumps recibe una
+    // List<Int> Fitz que se marshalla a list Python via el impl
+    // genérico `__FitzToPy for Arc<Mutex<Vec<T>>>`.
+    let src = "from python import json\n\
+               let xs: List<Int> = [1, 2, 3]\n\
+               let raw = json.dumps(xs)\n\
+               match raw {\n\
+                 Ok(s) => print(\"serializado = {s}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_2_marshal_list", src);
+    assert_eq!(exit, 0);
+    // El Ok(s) tiene `s: __FitzPyObject` (sin annot); Display delega
+    // a `__str__` Python → cita literal del JSON entre comillas.
+    assert!(
+        stdout.contains("[1, 2, 3]"),
+        "esperaba salida con [1, 2, 3], fue: {}",
+        stdout
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_2_build_marshalla_instance_fitz_a_dict_python() {
+    // Caso canónico del roadmap 8.5: una Instance Fitz (User) pasa a
+    // una función Python como dict. `json.dumps(user)` → JSON con los
+    // fields de la instancia preservando orden de declaración.
+    let src = "type User { id: Int, name: Str }\n\
+               from python import json\n\
+               let u = User { id: 1, name: \"Ada\" }\n\
+               let raw = json.dumps(u)\n\
+               match raw {\n\
+                 Ok(s) => print(\"serializado = {s}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_2_marshal_instance", src);
+    assert_eq!(exit, 0);
+    assert!(
+        stdout.contains("{\\\"id\\\": 1, \\\"name\\\": \\\"Ada\\\"}")
+            || stdout.contains("{\"id\": 1, \"name\": \"Ada\"}"),
+        "esperaba JSON con id+name preservando orden, fue: {}",
+        stdout
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_2_build_call_python_propagacion_con_try() {
+    // Operador `?` Fitz adentro de fn que retorna `Result<Float>`
+    // propaga el Err Python. La fn `root_safe` extrae el Float via
+    // anotación destino sobre el Ok.
+    let src = "from python import math\n\
+               fn root_safe(x: Float) -> Result<Float> {\n\
+                 let v: Float = math.sqrt(x)?\n\
+                 return Ok(v)\n\
+               }\n\
+               match root_safe(25.0) {\n\
+                 Ok(r) => print(\"r = {r}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_2_root_safe", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "r = 5.0");
+}

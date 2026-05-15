@@ -1573,6 +1573,11 @@ fn emit_main_rs_body(
     // `__FitzPyObject` queda en scope global del main.rs para
     // referenciarse desde cualquier `rust_type_for(Type::PyAny)`.
     ctx.emit_python_prelude();
+    // Fase 8.7.2: bindings Python globales (static + getter) emitidos
+    // al top-level del crate para que cualquier fn los pueda referenciar.
+    let py_imports = std::mem::take(&mut ctx.python_imports_ordered);
+    ctx.emit_python_bindings_top_level(&py_imports);
+    ctx.python_imports_ordered = py_imports;
     loader.emit_mod_decls(&mut ctx.output);
     loader.emit_use_decls(&mut ctx.output);
 
@@ -2104,6 +2109,32 @@ impl<'a> CodegenCtx<'a> {
         self.scopes.iter().any(|s| s.contains_key(name))
     }
 
+    /// Fase 8.7.2 — emite los args de un call Python como una lista
+    /// de expresiones `<arg_code>.__fitz_to_py(py, "arg<i>")?` separadas
+    /// por comas, listas para usarse adentro de `vec![...]`. El path
+    /// breadcrumb (`arg0`, `arg1`, ...) matchea el del intérprete
+    /// (`value_to_py` con `path: &str`).
+    ///
+    /// Cada arg pasa por `gen_expr` para obtener su código Rust + tipo
+    /// Fitz; el trait `__FitzToPy` está impl para todos los tipos
+    /// soportados (primitivos, PyObject, List, Map, Option, y los
+    /// nominales que el codegen emite con `gen_type_python_impls`).
+    fn gen_python_call_args(&mut self, args: &[Expr]) -> Result<String, FitzError> {
+        let mut pieces: Vec<String> = Vec::with_capacity(args.len());
+        for (i, a) in args.iter().enumerate() {
+            let (code, _ty) = self.gen_expr(a)?;
+            // El bind a una var local permite que el `&` de
+            // `__fitz_to_py(...)` (que es método `&self`) no requiera
+            // un temporary que sobreviva la expression statement.
+            pieces.push(format!(
+                "{{ let __a = {code}; __a.__fitz_to_py(py, {path})? }}",
+                code = code,
+                path = rust_str_literal(&format!("arg{}", i)),
+            ));
+        }
+        Ok(pieces.join(", "))
+    }
+
     /// Fase 8.7.1 — registra los bindings Python detectados por
     /// `collect_python_imports`. Guarda el mapeo `binding_name →
     /// dotted_path` para que `emit_python_bindings` lo consuma al
@@ -2139,9 +2170,10 @@ impl<'a> CodegenCtx<'a> {
             return;
         }
         self.emit(
-            "// Fase 8.7.1 — preludio interop Python (PyO3)\n\
+            "// Fase 8.7.1 + 8.7.2 — preludio interop Python (PyO3)\n\
              use pyo3::prelude::*;\n\
-             use pyo3::types::{PyBool, PyFloat, PyInt, PyString};\n\n\
+             use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};\n\
+             use pyo3::IntoPyObject;\n\n\
              #[derive(Clone)]\n\
              pub struct __FitzPyObject(pub Arc<pyo3::Py<pyo3::PyAny>>);\n\n\
              impl std::fmt::Display for __FitzPyObject {\n    \
@@ -2225,30 +2257,196 @@ impl<'a> CodegenCtx<'a> {
              })\n\
              }\n\n",
         );
+        // Fase 8.7.2 — trait `__FitzToPy` + impls para primitivos +
+        // List/Map/Option + helpers `__fitz_py_call` con wrap a Result
+        // y validación de keys hashables. Paralelo a `value_to_py` del
+        // py_interop con breadcrumb (`arg0[2].field`) preservado.
+        self.emit(
+            "// 8.7.2 — marshaling Fitz → Python (genérico) + call con Result wrap.\n\
+             pub trait __FitzToPy {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String>;\n\
+             }\n\n\
+             impl __FitzToPy for i64 {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let bound = self.into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for f64 {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let bound = self.into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for bool {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let bound = self.into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.to_owned().into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for String {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let bound = self.as_str().into_pyobject(py).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(bound.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for () {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             Ok(py.None())\n    \
+             }\n\
+             }\n\n\
+             impl __FitzToPy for __FitzPyObject {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, _path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             Ok(self.0.clone_ref(py))\n    \
+             }\n\
+             }\n\n\
+             // 8.7.2: los nominales `type Foo = Arc<Mutex<FooData>>`\n    \
+             // tienen su impl específico emitido por `gen_type_def`\n    \
+             // (impl __FitzToPy for FooData + wrapper sobre Arc<Mutex>).\n    \
+             // Eso evita conflicto con `Arc<Mutex<Vec<T>>>` (List) y\n    \
+             // `Arc<Mutex<Vec<(K,V)>>>` (Map) que son los impls\n    \
+             // genéricos abajo.\n\n\
+             impl<T: __FitzToPy> __FitzToPy for Option<T> {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             match self {\n            \
+             Some(v) => v.__fitz_to_py(py, path),\n            \
+             None => Ok(py.None()),\n        \
+             }\n    \
+             }\n\
+             }\n\n\
+             impl<T: __FitzToPy + Clone> __FitzToPy for Arc<Mutex<Vec<T>>> {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let snapshot = self.lock().unwrap().clone();\n        \
+             let mut items: Vec<pyo3::Py<pyo3::PyAny>> = Vec::with_capacity(snapshot.len());\n        \
+             for (i, v) in snapshot.iter().enumerate() {\n            \
+             let item_path = format!(\"{}[{}]\", path, i);\n            \
+             items.push(v.__fitz_to_py(py, &item_path)?);\n        \
+             }\n        \
+             let list = PyList::new(py, items).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             Ok(list.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             fn __fitz_py_marshal_map_key(py: Python<'_>, k: &(impl __FitzToPy + ?Sized), path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n    \
+             // Python `dict` exige `__hash__`. Los primitivos Fitz que pasan acá ya son hashables;\n    \
+             // tipos compuestos (List/Map/Instance) como key fueron rechazados en build-time o no\n    \
+             // se permiten en el subset Map<K,V> con K primitivo.\n    \
+             k.__fitz_to_py(py, path)\n\
+             }\n\n\
+             impl<K: __FitzToPy + Clone, V: __FitzToPy + Clone> __FitzToPy for Arc<Mutex<Vec<(K, V)>>> {\n    \
+             fn __fitz_to_py(&self, py: Python<'_>, path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n        \
+             let snapshot = self.lock().unwrap().clone();\n        \
+             let dict = PyDict::new(py);\n        \
+             for (k, v) in snapshot.iter() {\n            \
+             let key_path = format!(\"{}.<key>\", path);\n            \
+             let py_k = __fitz_py_marshal_map_key(py, k, &key_path)?;\n            \
+             let val_path = format!(\"{}[<entry>]\", path);\n            \
+             let py_v = v.__fitz_to_py(py, &val_path)?;\n            \
+             dict.set_item(py_k, py_v).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             }\n        \
+             Ok(dict.into_any().unbind())\n    \
+             }\n\
+             }\n\n\
+             /// `__fitz_py_invoke(callable, |py| args)` — paralelo a `call` del\n    \
+             /// py_interop del intérprete (8.3): excepción Python → `Err(\"<Class>: <msg>\")`,\n    \
+             /// éxito → `Ok(__FitzPyObject)` (sin coerción primitiva — eso ocurre en el\n    \
+             /// sitio destino vía `__fitz_py_extract_*` o `__fitz_py_to_*`).\n    \
+             /// El closure de args corre adentro de `Python::attach` para que el marshaling\n    \
+             /// `__fitz_to_py(py, path)` tenga el GIL disponible.\n\
+             fn __fitz_py_invoke<F>(callable: &__FitzPyObject, args_fn: F) -> Result<__FitzPyObject, String>\n\
+             where\n    \
+             F: FnOnce(Python<'_>) -> Result<Vec<pyo3::Py<pyo3::PyAny>>, String>,\n\
+             {\n    \
+             Python::attach(|py| {\n        \
+             let args = args_fn(py)?;\n        \
+             let bound = callable.0.bind(py);\n        \
+             let args_tuple = pyo3::types::PyTuple::new(py, args).map_err(|e| format!(\"{:?}\", e))?;\n        \
+             match bound.call1(args_tuple) {\n            \
+             Ok(ret) => Ok(__FitzPyObject(Arc::new(ret.unbind()))),\n            \
+             Err(err) => Err(__fitz_py_err_to_string(py, err)),\n        \
+             }\n    \
+             })\n\
+             }\n\n\
+             /// 8.7.2 — `python_list → List<T>`. Convierte un PyList a un `Vec<T>` ya\n    \
+             /// adentro de `Arc<Mutex<>>`. T es cualquier tipo Fitz primitivo o nominal:\n    \
+             /// el codegen invoca la variante apropiada (`__fitz_py_to_list_i64`, etc.) según\n    \
+             /// el tipo destino concreto del binding.\n\
+             fn __fitz_py_to_list_i64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<i64>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Int>\"));\n        \
+             let mut out: Vec<i64> = Vec::with_capacity(list.len());\n        \
+             for item in list.iter() {\n            \
+             if !item.is_instance_of::<PyInt>() { panic!(\"elemento de list Python no es int — esperado para List<Int>\"); }\n            \
+             out.push(item.extract::<i64>().unwrap_or_else(|_| panic!(\"int Python fuera de rango i64 al coercer List<Int>\")));\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_to_list_f64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<f64>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Float>\"));\n        \
+             let mut out: Vec<f64> = Vec::with_capacity(list.len());\n        \
+             for item in list.iter() {\n            \
+             let f = if item.is_instance_of::<PyFloat>() {\n                \
+             item.extract::<f64>().unwrap_or(0.0)\n            \
+             } else if item.is_instance_of::<PyInt>() {\n                \
+             item.extract::<i64>().map(|n| n as f64).unwrap_or(0.0)\n            \
+             } else {\n                \
+             panic!(\"elemento de list Python no es número — esperado para List<Float>\")\n            \
+             };\n            \
+             out.push(f);\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n\
+             fn __fitz_py_to_list_string(obj: &__FitzPyObject) -> Arc<Mutex<Vec<String>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Str>\"));\n        \
+             let mut out: Vec<String> = Vec::with_capacity(list.len());\n        \
+             for item in list.iter() {\n            \
+             if !item.is_instance_of::<PyString>() { panic!(\"elemento de list Python no es str — esperado para List<Str>\"); }\n            \
+             out.push(item.extract::<String>().unwrap_or_default());\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n",
+        );
     }
 
-    /// Fase 8.7.1 — emite las inicializaciones de los bindings Python
-    /// al inicio del main body. Cada `from python import math` produce
-    /// `let math = __fitz_py_import(\"math\");`. Las llamadas a
-    /// `__fitz_py_import` se serializan al boot del programa; CPython
-    /// se inicializa lazy en el primer `Python::attach`.
+    /// Fase 8.7.2 — emite los bindings Python como **statics globales
+    /// + getters** al top-level del crate generado. Cada `from python
+    /// import math` produce:
     ///
-    /// El orden de emisión sigue el orden de aparición en el AST
-    /// (collect_python_imports recorre top-level lineal).
-    fn emit_python_bindings(&mut self, imports: &[PythonImport]) {
+    /// ```rust
+    /// static __FITZ_PY_BIND_MATH: std::sync::OnceLock<__FitzPyObject> = std::sync::OnceLock::new();
+    /// fn __fitz_py_bind_math() -> __FitzPyObject {
+    ///     __FITZ_PY_BIND_MATH.get_or_init(|| __fitz_py_import("math")).clone()
+    /// }
+    /// ```
+    ///
+    /// Cualquier fn del programa (main, handlers HTTP, user-fns puede
+    /// referenciar `math` y el codegen lo traduce a
+    /// `__fitz_py_bind_math()`. El boot del módulo Python es lazy: la
+    /// primera invocación inicializa el OnceLock (toma el GIL, importa);
+    /// las siguientes son lecturas atómicas baratas.
+    fn emit_python_bindings_top_level(&mut self, imports: &[PythonImport]) {
         if imports.is_empty() {
             return;
         }
         for imp in imports {
-            self.emit_indent();
+            let upper = sanitize_python_binding_static(&imp.binding_name);
+            let lower = sanitize_python_binding_lower(&imp.binding_name);
             self.emit(&format!(
-                "let {name} = __fitz_py_import(\"{dotted}\");\n",
-                name = imp.binding_name,
+                "static __FITZ_PY_BIND_{upper}: std::sync::OnceLock<__FitzPyObject> = std::sync::OnceLock::new();\n\
+                 fn __fitz_py_bind_{lower}() -> __FitzPyObject {{\n    \
+                 __FITZ_PY_BIND_{upper}.get_or_init(|| __fitz_py_import(\"{dotted}\")).clone()\n\
+                 }}\n\n",
+                upper = upper,
+                lower = lower,
                 dotted = imp.dotted_path,
             ));
-            // Registrar como var local del scope main para que
-            // `gen_expr::Ident` lo encuentre con tipo PyAny.
-            self.declare_var(imp.binding_name.clone(), Type::PyAny);
         }
     }
 
@@ -2335,13 +2533,12 @@ impl<'a> CodegenCtx<'a> {
         }
         self.indent += 1;
         self.push_scope();
-        // Fase 8.7.1: los bindings Python (`from python import X`) se
-        // emiten como vars locales del main ANTES del cuerpo del
-        // programa. Cada uno hace `let X = __fitz_py_import("X");`
-        // y queda visible para el resto del main body.
-        let imports = std::mem::take(&mut self.python_imports_ordered);
-        self.emit_python_bindings(&imports);
-        self.python_imports_ordered = imports;
+        // Fase 8.7.2: los bindings Python son **globales** (static +
+        // getter emitido al top-level del crate por
+        // `emit_python_bindings_top_level`). El main body no necesita
+        // declararlos como vars locales — `gen_expr::Ident` despacha
+        // sobre `python_bindings` y emite el getter inline cuando
+        // aparece el nombre.
         for stmt in stmts {
             self.gen_stmt(stmt)?;
         }
@@ -2710,6 +2907,51 @@ impl<'a> CodegenCtx<'a> {
             }
             self.emit("        write!(__f, \" }}\")\n");
             self.emit("    }\n}\n\n");
+        }
+        // Fase 8.7.2: cuando el programa usa interop Python, emit
+        // `impl __FitzToPy for FooData` para que `<user>.__fitz_to_py(...)`
+        // funcione (paralelo a `Instance → PyDict` del intérprete en
+        // `value_to_py`). El path breadcrumb se construye con el
+        // nombre del tipo + nombre del campo. Solo en mode Main —
+        // mode Module no tiene el preludio Python disponible.
+        if self.uses_python && matches!(self.mode, GenMode::Main) {
+            write!(
+                &mut self.output,
+                "impl __FitzToPy for {data} {{\n    \
+                 fn __fitz_to_py(&self, py: Python<'_>, path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {{\n        \
+                 let dict = PyDict::new(py);\n        \
+                 let __prefix: String = if path.is_empty() {{ String::from(\"{name}\") }} else {{ path.to_string() }};\n",
+                data = data_name,
+                name = name,
+            )
+            .unwrap();
+            for f in &sig.fields {
+                writeln!(
+                    &mut self.output,
+                    "        {{ let __field_path = format!(\"{{}}.{field}\", __prefix); \
+                     let __py_v = self.{field}.__fitz_to_py(py, &__field_path)?; \
+                     dict.set_item({lit}, __py_v).map_err(|e| format!(\"{{:?}}\", e))?; }}",
+                    field = f.name,
+                    lit = rust_str_literal(&f.name),
+                )
+                .unwrap();
+            }
+            self.emit("        Ok(dict.into_any().unbind())\n    }\n}\n\n");
+            // Wrapper: el codegen pasa `Foo` (= Arc<Mutex<FooData>>) como
+            // arg de calls Python, no `FooData` directo. Impl sobre el
+            // tipo target del alias para que `<user_var>.__fitz_to_py(...)`
+            // resuelva. Delega al lock + `FooData::__fitz_to_py`.
+            write!(
+                &mut self.output,
+                "impl __FitzToPy for Arc<Mutex<{data}>> {{\n    \
+                 fn __fitz_to_py(&self, py: Python<'_>, path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {{\n        \
+                 let __g = self.lock().unwrap();\n        \
+                 __g.__fitz_to_py(py, path)\n    \
+                 }}\n\
+                 }}\n\n",
+                data = data_name,
+            )
+            .unwrap();
         }
         Ok(())
     }
@@ -3402,6 +3644,14 @@ impl<'a> CodegenCtx<'a> {
             Expr::Null(_) => Ok(("()".to_string(), Type::Null)),
 
             Expr::Ident(name, _) => {
+                // Fase 8.7.2: bindings Python son globales — `math` se
+                // traduce a `__fitz_py_bind_math()` (getter sobre
+                // `OnceLock<__FitzPyObject>` que lazy-inicializa al
+                // primer call). Tipo Fitz: `PyAny`.
+                if self.python_bindings.contains_key(name) {
+                    let lower = sanitize_python_binding_lower(name);
+                    return Ok((format!("__fitz_py_bind_{}()", lower), Type::PyAny));
+                }
                 // 5b.5: si el nombre está en `module_bindings` como
                 // `Named` y es Const, devolvemos el path directo. El
                 // `use foo::PREFIX;` ya lo trajo al scope Rust;
@@ -3804,16 +4054,22 @@ impl<'a> CodegenCtx<'a> {
                 "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
             ));
         };
-        // Fase 8.7.1: si el callee es un binding Python (ident con
-        // tipo PyAny), el call llega en 8.7.2 (marshaling de args +
-        // wrap en Result). Por ahora abortamos con mensaje claro.
-        if matches!(self.lookup_var(name), Some(Type::PyAny)) {
-            return Err(self.err_at(call_span, format!(
-                "llamadas sobre objetos Python (`{}(...)`): llegan en Fase 8.7.2. \
-                 Por ahora, accedé al atributo sin invocarlo o usá `fitz run` para \
-                 ejecutar el programa.",
-                name
-            )));
+        // Fase 8.7.2: si el callee es un binding Python (ident con
+        // tipo PyAny), emitimos `__fitz_py_invoke(&<callee>, |py| { ...args... })`
+        // con marshaling adentro del closure. El resultado tipa como
+        // `Result<PyAny>`; el `?` Fitz / la coerción primitiva al sitio
+        // destino se aplica después.
+        if self.python_bindings.contains_key(name)
+            || matches!(self.lookup_var(name), Some(Type::PyAny))
+        {
+            let (callee_code, _) = self.gen_expr(callee)?;
+            let args_code = self.gen_python_call_args(args)?;
+            let code = format!(
+                "__fitz_py_invoke(&{callee}, |py| {{ Ok(vec![{args}]) }})",
+                callee = callee_code,
+                args = args_code,
+            );
+            return Ok((code, Type::Result(Box::new(Type::PyAny))));
         }
         if name == "print" {
             return Err(self.err_at(call_span,
@@ -3931,18 +4187,22 @@ impl<'a> CodegenCtx<'a> {
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
-        // Fase 8.7.1: method call sobre PyAny es realmente un call
+        // Fase 8.7.2: method call sobre PyAny es realmente un call
         // Python (`math.sqrt(16.0)` = `math.sqrt` getattr + invocación).
-        // El sub-paso 8.7.1 cubre solo getattr opaco; el call con
-        // marshaling de args + Result wrap llega en 8.7.2. Mensaje
-        // explícito para que el usuario sepa el plan.
+        // Emitimos `__fitz_py_invoke(&__fitz_py_get_attr_obj(&obj, "name"), ...)`
+        // con marshaling de args adentro del closure. Resultado:
+        // `Result<PyAny>` que se desempaca en el sitio destino vía `?`
+        // o coerción primitiva.
+        let _ = call_span; // span queda en err_at adentro si hace falta
         if matches!(obj_ty, Type::PyAny) {
-            let _ = args; // consumido en 8.7.2
-            return Err(self.err_at(call_span, format!(
-                "llamada Python `<obj>.{method}(...)` sobre `PyAny`: \
-                 llega en Fase 8.7.2 (marshaling de args + wrap en Result). \
-                 Por ahora, usá `fitz run` para programas que invocan funciones Python."
-            )));
+            let args_code = self.gen_python_call_args(args)?;
+            let code = format!(
+                "__fitz_py_invoke(&__fitz_py_get_attr_obj(&{obj}, {name}), |py| {{ Ok(vec![{args}]) }})",
+                obj = obj_code,
+                name = rust_str_literal(method),
+                args = args_code,
+            );
+            return Ok((code, Type::Result(Box::new(Type::PyAny))));
         }
         match (&obj_ty, method) {
             // ---- Str ----
@@ -7213,6 +7473,35 @@ fn field_eq_expr(
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Fase 8.7.2 — sanitiza un nombre de binding Python para usarlo como
+/// sufijo de `static __FITZ_PY_BIND_<UPPER>`. Reemplaza caracteres
+/// no-alfanuméricos por `_` y pasa a uppercase. `os.path` (que ya está
+/// resuelto a binding `path` al llegar acá) → `PATH`.
+fn sanitize_python_binding_static(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_uppercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
+
+/// Variante lowercase para el nombre de la fn getter (`__fitz_py_bind_path`).
+fn sanitize_python_binding_lower(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    for c in name.chars() {
+        if c.is_ascii_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else {
+            out.push('_');
+        }
+    }
+    out
+}
 
 fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
     match t {
@@ -11499,9 +11788,20 @@ mod tests {
             code.contains("__fitz_py_import"),
             "esperaba helper __fitz_py_import en preludio"
         );
+        // 8.7.2: binding global = static + getter, no `let` local.
         assert!(
-            code.contains("let math = __fitz_py_import(\"math\");"),
-            "esperaba binding `let math = __fitz_py_import(\"math\");`, got:\n{}",
+            code.contains("static __FITZ_PY_BIND_MATH"),
+            "esperaba static __FITZ_PY_BIND_MATH, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("fn __fitz_py_bind_math()"),
+            "esperaba getter __fitz_py_bind_math, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_py_import(\"math\")"),
+            "esperaba `__fitz_py_import(\"math\")` en el getter, got:\n{}",
             code
         );
     }
@@ -11512,8 +11812,13 @@ mod tests {
         // Convención: `import python.os.path` → binding `path` (último
         // segmento), dotted Python `os.path`.
         assert!(
-            code.contains("let path = __fitz_py_import(\"os.path\");"),
-            "esperaba `let path = __fitz_py_import(\"os.path\");`, got:\n{}",
+            code.contains("static __FITZ_PY_BIND_PATH"),
+            "esperaba static __FITZ_PY_BIND_PATH, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_py_import(\"os.path\")"),
+            "esperaba `__fitz_py_import(\"os.path\")`, got:\n{}",
             code
         );
     }
@@ -11523,8 +11828,13 @@ mod tests {
         // `from python import math as m` → binding `m`, dotted `math`.
         let code = gen("from python import math as m\n").expect("8.7.1: alias compila");
         assert!(
-            code.contains("let m = __fitz_py_import(\"math\");"),
-            "esperaba `let m = __fitz_py_import(\"math\");`, got:\n{}",
+            code.contains("static __FITZ_PY_BIND_M"),
+            "esperaba static __FITZ_PY_BIND_M, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_py_import(\"math\")"),
+            "esperaba `__fitz_py_import(\"math\")`, got:\n{}",
             code
         );
     }
@@ -11545,12 +11855,14 @@ mod tests {
     #[test]
     fn build_python_field_access_emite_get_attr_obj() {
         // `let pi = math.pi` (sin annot) → `__fitz_py_get_attr_obj`
-        // opaco. Tipo de `pi` queda como `__FitzPyObject`.
+        // opaco. Tipo de `pi` queda como `__FitzPyObject`. 8.7.2: el
+        // receptor `math` se traduce al getter `__fitz_py_bind_math()`.
         let code = gen("from python import math\nlet pi = math.pi\n")
             .expect("8.7.1: field access opaco compila");
         assert!(
-            code.contains("__fitz_py_get_attr_obj(&math") && code.contains("\"pi\""),
-            "esperaba `__fitz_py_get_attr_obj(&math.clone(), \"pi\")`, got:\n{}",
+            code.contains("__fitz_py_get_attr_obj(&__fitz_py_bind_math()")
+                && code.contains("\"pi\""),
+            "esperaba `__fitz_py_get_attr_obj(&__fitz_py_bind_math(), \"pi\")`, got:\n{}",
             code
         );
     }
@@ -11580,15 +11892,53 @@ mod tests {
     }
 
     #[test]
-    fn build_rechaza_call_python_con_mensaje_8_7_2() {
-        // 8.7.1 NO soporta call sobre PyAny — eso llega en 8.7.2.
-        // Error de codegen claro citando el sub-paso.
-        let err = gen("from python import math\nlet x = math.sqrt(16.0)\n")
-            .expect_err("call sobre PyAny no debe compilar en 8.7.1");
+    fn build_call_python_emite_invoke_con_marshaling() {
+        // 8.7.2: `math.sqrt(16.0)` → `__fitz_py_invoke(&...,
+        // |py| Ok(vec![{ let __a = ...; __a.__fitz_to_py(py, "arg0")? }]))`.
+        // Resultado tipa como `Result<PyAny>`.
+        let code = gen("from python import math\nlet raw = math.sqrt(16.0)\n")
+            .expect("8.7.2: call Python compila");
         assert!(
-            err.message.contains("8.7.2"),
-            "mensaje debería citar 8.7.2, fue: {}",
-            err.message,
+            code.contains("__fitz_py_invoke"),
+            "esperaba __fitz_py_invoke en el call site, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_py_get_attr_obj(&__fitz_py_bind_math()"),
+            "esperaba `__fitz_py_get_attr_obj(&__fitz_py_bind_math(), \"sqrt\")`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__fitz_to_py(py, \"arg0\")"),
+            "esperaba marshaling `__fitz_to_py(py, \"arg0\")`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_call_python_devuelve_result_pyany() {
+        // El binding `let raw = math.sqrt(...)` (sin annot) sintetiza
+        // `Result<PyAny>`. El rust_type_for emite `Result<__FitzPyObject, String>`.
+        let code = gen("from python import math\nlet raw = math.sqrt(16.0)\n")
+            .expect("8.7.2: binding sin annot");
+        assert!(
+            code.contains("Result < __FitzPyObject , String >")
+                || code.contains("Result<__FitzPyObject, String>"),
+            "esperaba tipo Result<__FitzPyObject, String>, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn build_call_python_con_args_primitivos_marshallan() {
+        // Cada arg primitivo (Int, Float, Str, Bool) se marshaller via
+        // `__fitz_to_py(py, "argN")` con el path numerado.
+        let code = gen("from python import json\nlet raw = json.dumps([1, 2, 3])\n")
+            .expect("8.7.2: args primitivos compilan");
+        assert!(
+            code.contains("\"arg0\""),
+            "esperaba path \"arg0\", got:\n{}",
+            code
         );
     }
 
