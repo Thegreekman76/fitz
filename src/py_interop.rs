@@ -21,7 +21,7 @@
 // igual que un panic del intérprete.
 
 use pyo3::prelude::*;
-use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
+use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::value::{PyObjectHandle, Value};
@@ -328,9 +328,51 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
         let s: String = obj.extract().map_err(|e| py_err_to_fitz(py, e))?;
         return Ok(Value::Str(s));
     }
-    // Fallback: tipos compuestos (list, dict, función, clase, instancia,
-    // submódulo). En 8.1 los envolvemos opacos. 8.2 trae marshaling
-    // bidireccional para list/dict/Instance.
+
+    // Fase 8.2.2 — compuestos.
+    //
+    // `list` Python → `Value::List` (copia eager; cada elemento
+    // recursivo via `py_to_value`). El resultado es semánticamente
+    // `List<Any>` desde el lado Fitz porque Python no nos da tipo
+    // estático; las anotaciones del lado Fitz para refinar a
+    // `List<T>` concreto llegan en 8.4.
+    if obj.is_instance_of::<PyList>() {
+        let list = obj
+            .cast::<PyList>()
+            .map_err(|e| py_err_to_fitz(py, e.into()))?;
+        let mut items: Vec<Value> = Vec::with_capacity(list.len());
+        for item in list.iter() {
+            items.push(py_to_value(py, &item)?);
+        }
+        return Ok(Value::new_list(items));
+    }
+
+    // `dict` Python → `Value::Map`. CPython 3.7+ garantiza orden de
+    // inserción para `dict`; preservarlo nos da paridad bit-a-bit con
+    // `serde_json::preserve_order` que ya usa el resto del proyecto.
+    // Cada par (key, value) se recursa via `py_to_value` — keys
+    // típicamente son primitivos pero permitimos cualquier hashable
+    // (Python valida; si la clave es un PyObject opaco, queda como
+    // tal). No se auto-coerciona dict → Instance: eso requiere
+    // anotación destino del lado Fitz (deuda 8.4).
+    if obj.is_instance_of::<PyDict>() {
+        let dict = obj
+            .cast::<PyDict>()
+            .map_err(|e| py_err_to_fitz(py, e.into()))?;
+        let mut pairs: Vec<(Value, Value)> = Vec::with_capacity(dict.len());
+        for (k, v) in dict.iter() {
+            let k_val = py_to_value(py, &k)?;
+            let v_val = py_to_value(py, &v)?;
+            pairs.push((k_val, v_val));
+        }
+        return Ok(Value::new_map(pairs));
+    }
+
+    // Fallback: tipos restantes (función, clase, instancia, submódulo,
+    // tuple, set, bytes, etc.) los envolvemos como `Value::PyObject`
+    // opaco para que el usuario los pase a otra función Python o haga
+    // field access. Tuples/sets/bytes podrían marshallar a List/Map
+    // en una fase futura si entra demanda real.
     let owned: Py<PyAny> = obj.clone().unbind();
     Ok(Value::PyObject(PyObjectHandle::new(owned)))
 }
@@ -772,6 +814,149 @@ mod tests {
             err.message.contains("arg0[1]") && err.message.contains("Range"),
             "msg: {}",
             err.message,
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // 8.2.2 — py_to_value para list/dict (Python → Fitz)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn json_loads_de_array_devuelve_list() {
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str("[1, 2, 3]".into())]).unwrap();
+        assert_eq!(
+            v,
+            Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+        );
+    }
+
+    #[test]
+    fn json_loads_de_array_vacio_devuelve_list_vacia() {
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str("[]".into())]).unwrap();
+        assert_eq!(v, Value::new_list(vec![]));
+    }
+
+    #[test]
+    fn json_loads_de_objeto_devuelve_map_con_orden_de_insercion() {
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap();
+        // Python 3.7+ garantiza orden de inserción para dict;
+        // verificamos que llega en el orden serializado del JSON.
+        assert_eq!(
+            v,
+            Value::new_map(vec![
+                (Value::Str("a".into()), Value::Int(1)),
+                (Value::Str("b".into()), Value::Int(2)),
+            ]),
+        );
+    }
+
+    #[test]
+    fn json_loads_de_array_heterogeneo() {
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str("[1, \"dos\", true, null]".into())]).unwrap();
+        assert_eq!(
+            v,
+            Value::new_list(vec![
+                Value::Int(1),
+                Value::Str("dos".into()),
+                Value::Bool(true),
+                Value::Null,
+            ]),
+        );
+    }
+
+    #[test]
+    fn json_loads_de_array_anidado() {
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str("[[1, 2], [3, 4]]".into())]).unwrap();
+        assert_eq!(
+            v,
+            Value::new_list(vec![
+                Value::new_list(vec![Value::Int(1), Value::Int(2)]),
+                Value::new_list(vec![Value::Int(3), Value::Int(4)]),
+            ]),
+        );
+    }
+
+    #[test]
+    fn json_loads_de_dict_de_dict() {
+        let json = handle_of(import_module("json").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let v = call(&loads, &[Value::Str(
+            "{\"user\": {\"id\": 1, \"name\": \"x\"}}".into()
+        )]).unwrap();
+        assert_eq!(
+            v,
+            Value::new_map(vec![(
+                Value::Str("user".into()),
+                Value::new_map(vec![
+                    (Value::Str("id".into()), Value::Int(1)),
+                    (Value::Str("name".into()), Value::Str("x".into())),
+                ]),
+            )]),
+        );
+    }
+
+    #[test]
+    fn round_trip_list_via_json() {
+        // dumps + loads → la lista debería volver igual.
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let loads = handle_of(get_attr(&json, "loads").unwrap());
+        let original = Value::new_list(vec![
+            Value::Int(1),
+            Value::Str("dos".into()),
+            Value::Bool(false),
+            Value::Null,
+        ]);
+        let s = call(&dumps, std::slice::from_ref(&original)).unwrap();
+        let back = call(&loads, std::slice::from_ref(&s)).unwrap();
+        assert_eq!(back, original);
+    }
+
+    #[test]
+    fn pylist_directo_de_python_se_coerce_a_list() {
+        // `list("abc")` en Python da `['a', 'b', 'c']`. Cruzamos un
+        // PyList vivo, no un JSON deserializado, para validar que el
+        // dispatch sobre PyList funciona aunque venga de cualquier API.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let list_cls = handle_of(get_attr(&builtins, "list").unwrap());
+        let v = call(&list_cls, &[Value::Str("abc".into())]).unwrap();
+        assert_eq!(
+            v,
+            Value::new_list(vec![
+                Value::Str("a".into()),
+                Value::Str("b".into()),
+                Value::Str("c".into()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn pydict_directo_de_python_se_coerce_a_map() {
+        // `dict(zip(["a", "b"], [1, 2]))` en Python da `{"a": 1, "b": 2}`.
+        // Validamos un dict construido en runtime, no un JSON loads.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let dict_cls = handle_of(get_attr(&builtins, "dict").unwrap());
+        let zip_fn = handle_of(get_attr(&builtins, "zip").unwrap());
+        let keys = Value::new_list(vec![Value::Str("a".into()), Value::Str("b".into())]);
+        let vals = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
+        let zipped = call(&zip_fn, &[keys, vals]).unwrap();
+        let v = call(&dict_cls, &[zipped]).unwrap();
+        assert_eq!(
+            v,
+            Value::new_map(vec![
+                (Value::Str("a".into()), Value::Int(1)),
+                (Value::Str("b".into()), Value::Int(2)),
+            ]),
         );
     }
 

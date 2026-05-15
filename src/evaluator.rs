@@ -7108,6 +7108,82 @@ let r = match n {
         );
     }
 
+    // -------------------------------------------------------------------
+    // Fase 8.2.2 — Python → Fitz: list/dict se coercionan a List/Map
+    // end-to-end via json.loads.
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_json_loads_de_array_a_list() {
+        let src = "\
+            from python import json\n\
+            let xs = json.loads(\"[1, 2, 3]\")\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(
+            env.lock().get("xs"),
+            Some(Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])),
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_json_loads_de_objeto_a_map() {
+        // En Fitz, `{` y `}` dentro de un string indican interpolación.
+        // Para que el JSON literal `{"a": 1, ...}` pase entero al
+        // string, escapamos las llaves con `\{` y `\}` (el lexer las
+        // preserva literales). En el source Rust eso es `\\{`/`\\}`.
+        let src = "\
+            from python import json\n\
+            let m = json.loads(\"\\{\\\"a\\\": 1, \\\"b\\\": 2\\}\")\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(
+            env.lock().get("m"),
+            Some(Value::new_map(vec![
+                (Value::Str("a".into()), Value::Int(1)),
+                (Value::Str("b".into()), Value::Int(2)),
+            ])),
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_round_trip_via_json_preserva_estructura() {
+        // dumps + loads sobre una List anidada con Map adentro.
+        let src = "\
+            from python import json\n\
+            let original = [{\"k\": 1}, {\"k\": 2}]\n\
+            let s = json.dumps(original)\n\
+            let back = json.loads(s)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let back = env.lock().get("back").unwrap();
+        let original = env.lock().get("original").unwrap();
+        assert_eq!(back, original);
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_iterar_map_devuelto_por_python() {
+        // Devuelve un dict de Python y lo accede con indexing Fitz —
+        // exactamente el patrón de uso típico. Llaves del JSON escapadas
+        // con `\{` / `\}` para que el lexer Fitz no las trate como
+        // interpolación.
+        let src = "\
+            from python import json\n\
+            let m = json.loads(\"\\{\\\"a\\\": 10, \\\"b\\\": 20\\}\")\n\
+            let total = m[\"a\"] + m[\"b\"]\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(30)));
+    }
+
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn marshalling_arg_no_marshalleable_cita_path() {
