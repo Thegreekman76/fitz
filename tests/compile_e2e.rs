@@ -2480,3 +2480,51 @@ fn fase_8_7_2_build_call_python_propagacion_con_try() {
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "r = 5.0");
 }
+
+// ---------------------------------------------------------------------
+// Fase 8.7.3 — bridge async tokio ↔ asyncio
+// ---------------------------------------------------------------------
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_3_build_await_corutina_asyncio_sleep() {
+    // Criterio canónico 8.7.3: `asyncio.sleep(0.001).await` desde
+    // `fitz build` ejecuta la corutina vía `tokio::spawn_blocking` +
+    // `asyncio.run_until_complete`. La corutina devuelve `None` →
+    // `__FitzPyObject` con Display "None". Lo importante: el programa
+    // termina sin bloquearse + sin error.
+    let src = "from python import asyncio\n\
+               async fn run() -> Bool {\n\
+                 let raw = asyncio.sleep(0.001).await\n\
+                 return match raw {\n\
+                   Ok(_) => true,\n\
+                   Err(_) => false\n\
+                 }\n\
+               }\n\
+               let ok = run().await\n\
+               print(\"done = {ok}\")\n";
+    let (stdout, exit) = build_and_run("fase_8_7_3_asyncio_sleep", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    assert_eq!(stdout.trim(), "done = true");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_3_build_await_propagacion_con_try() {
+    // Operador `?` Fitz adentro de `async fn -> Result<Str>` propaga el
+    // Err Python si la corutina falla. Caso happy: la corutina termina,
+    // ignoramos el resultado None de asyncio.sleep, y devolvemos un Ok
+    // con un literal.
+    let src = "from python import asyncio\n\
+               async fn run() -> Result<Str> {\n\
+                 let _ = asyncio.sleep(0.001).await?\n\
+                 return Ok(\"done\")\n\
+               }\n\
+               match run().await {\n\
+                 Ok(v) => print(\"got = {v}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_3_propagacion", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "got = done");
+}

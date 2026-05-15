@@ -2109,6 +2109,98 @@ impl<'a> CodegenCtx<'a> {
         self.scopes.iter().any(|s| s.contains_key(name))
     }
 
+    /// Fase 8.7.3 — detecta el patrón `<py_call>.await` y emite
+    /// `__fitz_py_invoke_await(&callable, |py| Ok(vec![<args>])).await`.
+    /// Devuelve `Some(code)` si el inner del await es un call sobre
+    /// receptor `PyAny` (directo o method call); `None` si es un await
+    /// regular (Future Fitz nativo, builtin `sleep`, etc.) que sigue
+    /// el path normal del `.await` 6.6.
+    ///
+    /// Si el inner del await es `Expr::Try(<py_call>)`, también lo
+    /// despachamos: el `?` se aplica DESPUÉS del await sobre el
+    /// `Result<PyAny>` resultante. Sintaxis válida:
+    /// `let v: Float = py_async_fn(arg)?.await?`
+    fn try_gen_python_await(&mut self, inner: &Expr) -> Result<Option<String>, FitzError> {
+        // Caso A: `Await(Call con callee/method PyAny)` directo.
+        let call_match = match inner {
+            Expr::Call { callee, args, .. } => Some((callee.as_ref(), args.as_slice())),
+            _ => None,
+        };
+        if let Some((callee, args)) = call_match {
+            if let Some(code) = self.try_gen_python_call_await(callee, args)? {
+                return Ok(Some(code));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Helper: si el call `<callee>(<args>)` es sobre receptor PyAny,
+    /// emite el `__fitz_py_invoke_await(...).await`. Si no, devuelve
+    /// `None` y `gen_expr::Await` cae al path normal.
+    fn try_gen_python_call_await(
+        &mut self,
+        callee: &Expr,
+        args: &[Expr],
+    ) -> Result<Option<String>, FitzError> {
+        // Method call sobre PyAny: `<obj>.method(args)` con `obj` PyAny.
+        if let Expr::Field { object, field, .. } = callee {
+            let obj_ty = self.peek_expr_type(object)?;
+            if matches!(obj_ty, Type::PyAny) {
+                let (obj_code, _) = self.gen_expr(object)?;
+                let args_code = self.gen_python_call_args(args)?;
+                let code = format!(
+                    "__fitz_py_invoke_await(&__fitz_py_get_attr_obj(&{obj}, {name}), |py| {{ Ok(vec![{args}]) }}).await",
+                    obj = obj_code,
+                    name = rust_str_literal(field),
+                    args = args_code,
+                );
+                return Ok(Some(code));
+            }
+        }
+        // Call directo sobre Ident PyAny: `<py_callable>(args)`.
+        if let Expr::Ident(name, _) = callee {
+            if self.python_bindings.contains_key(name)
+                || matches!(self.lookup_var(name), Some(Type::PyAny))
+            {
+                let (callee_code, _) = self.gen_expr(callee)?;
+                let args_code = self.gen_python_call_args(args)?;
+                let code = format!(
+                    "__fitz_py_invoke_await(&{callee}, |py| {{ Ok(vec![{args}]) }}).await",
+                    callee = callee_code,
+                    args = args_code,
+                );
+                return Ok(Some(code));
+            }
+        }
+        Ok(None)
+    }
+
+    /// Helper read-only: sintetiza el tipo Fitz que `gen_expr` devolvería
+    /// para `e`, sin emitir código. Lo usa `try_gen_python_call_await`
+    /// para inspeccionar el tipo del receptor sin "consumirlo" (la
+    /// emisión real ocurre en `gen_expr` después).
+    fn peek_expr_type(&mut self, e: &Expr) -> Result<Type, FitzError> {
+        match e {
+            Expr::Ident(name, _) => {
+                if self.python_bindings.contains_key(name) {
+                    return Ok(Type::PyAny);
+                }
+                if let Some(t) = self.lookup_var(name).cloned() {
+                    return Ok(t);
+                }
+                Ok(Type::Any)
+            }
+            Expr::Field { object, .. } => {
+                let inner = self.peek_expr_type(object)?;
+                if matches!(inner, Type::PyAny) {
+                    return Ok(Type::PyAny);
+                }
+                Ok(Type::Any)
+            }
+            _ => Ok(Type::Any),
+        }
+    }
+
     /// Fase 8.7.2 — emite los args de un call Python como una lista
     /// de expresiones `<arg_code>.__fitz_to_py(py, "arg<i>")?` separadas
     /// por comas, listas para usarse adentro de `vec![...]`. El path
@@ -2365,6 +2457,61 @@ impl<'a> CodegenCtx<'a> {
              Err(err) => Err(__fitz_py_err_to_string(py, err)),\n        \
              }\n    \
              })\n\
+             }\n\n\
+             /// 8.7.3 — bridge async tokio ↔ asyncio (baseline blocking, paralelo a\n    \
+             /// `py_coro_to_fitz_future` del py_interop 8.6.1). El call se ejecuta\n    \
+             /// adentro del GIL; si el return es awaitable (`inspect.isawaitable`),\n    \
+             /// se evalúa con `tokio::task::spawn_blocking` + `asyncio.new_event_loop()`\n    \
+             /// + `run_until_complete`. Si no es awaitable, se devuelve directo —\n    \
+             /// permite `.await` ergonómico aún sobre fns Python sync sin error\n    \
+             /// (mismo comportamiento que un `Future` Rust ya resuelto).\n    \
+             /// \n    \
+             /// Trade-off heredado de 8.6.1: cada `.await` ocupa un thread del blocking\n    \
+             /// pool durante toda la corutina. Versión future-based real con event loop\n    \
+             /// asyncio persistente queda como deuda menor (`pyo3-async-runtimes`\n    \
+             /// requiere control del runtime tokio, choca con el setup actual de Fitz).\n\
+             async fn __fitz_py_invoke_await<F>(callable: &__FitzPyObject, args_fn: F) -> Result<__FitzPyObject, String>\n\
+             where\n    \
+             F: FnOnce(Python<'_>) -> Result<Vec<pyo3::Py<pyo3::PyAny>>, String>,\n\
+             {\n    \
+             // 1) Call Python sync — produce __FitzPyObject o Err.\n    \
+             let result_obj = __fitz_py_invoke(callable, args_fn)?;\n    \
+             // 2) ¿Es awaitable? `inspect.isawaitable` es el chequeo canónico Python.\n    \
+             let is_coro = Python::attach(|py| {\n        \
+             let bound = result_obj.0.bind(py);\n        \
+             let inspect = match py.import(\"inspect\") {\n            \
+             Ok(m) => m,\n            \
+             Err(_) => return false,\n        \
+             };\n        \
+             inspect.call_method1(\"isawaitable\", (bound,))\n            \
+             .and_then(|v| v.extract::<bool>())\n            \
+             .unwrap_or(false)\n    \
+             });\n    \
+             if !is_coro {\n        \
+             // No es corutina — devolver el value directo. `.await` sobre un\n        \
+             // Future ya resuelto es no-op equivalente; aplicamos el mismo principio acá.\n        \
+             return Ok(result_obj);\n    \
+             }\n    \
+             // 3) Es corutina — ejecutar en blocking pool con event loop nuevo.\n    \
+             let coro_owned: pyo3::Py<pyo3::PyAny> = Python::attach(|py| result_obj.0.clone_ref(py));\n    \
+             let join_result = tokio::task::spawn_blocking(move || -> Result<__FitzPyObject, String> {\n        \
+             Python::attach(|py| {\n            \
+             let bound = coro_owned.bind(py);\n            \
+             let asyncio = py.import(\"asyncio\").map_err(|e| __fitz_py_err_to_string(py, e))?;\n            \
+             let event_loop = asyncio.call_method0(\"new_event_loop\").map_err(|e| __fitz_py_err_to_string(py, e))?;\n            \
+             let r = event_loop.call_method1(\"run_until_complete\", (bound,));\n            \
+             let _ = event_loop.call_method0(\"close\");\n            \
+             match r {\n                \
+             Ok(v) => Ok(__FitzPyObject(Arc::new(v.unbind()))),\n                \
+             Err(e) => Err(__fitz_py_err_to_string(py, e)),\n            \
+             }\n        \
+             })\n    \
+             })\n    \
+             .await;\n    \
+             match join_result {\n        \
+             Ok(inner) => inner,\n        \
+             Err(join_err) => Err(format!(\"error del blocking pool al ejecutar corutina Python: {}\", join_err)),\n    \
+             }\n\
              }\n\n\
              /// 8.7.2 — `python_list → List<T>`. Convierte un PyList a un `Vec<T>` ya\n    \
              /// adentro de `Arc<Mutex<>>`. T es cualquier tipo Fitz primitivo o nominal:\n    \
@@ -3764,7 +3911,18 @@ impl<'a> CodegenCtx<'a> {
             // El tipo resultante es el inner T del `Future<T>`; para
             // operando `Type::Any` (gradual) o desconocido devolvemos
             // `Type::Any` y dejamos que rustc infiera.
-            Expr::Await(inner, _) => {
+            //
+            // Fase 8.7.3: si el inner es un call sobre receptor PyAny
+            // (`py_async_fn().await`), despachamos a
+            // `__fitz_py_invoke_await(...).await` que combina call +
+            // detección de awaitable + ejecución vía `spawn_blocking` +
+            // `asyncio.run_until_complete`. Paralelo a la detección
+            // automática del intérprete 8.6.1 en `py_interop::call`.
+            Expr::Await(inner, await_span) => {
+                if let Some(code) = self.try_gen_python_await(inner)? {
+                    return Ok((code, Type::Result(Box::new(Type::PyAny))));
+                }
+                let _ = await_span;
                 let (inner_code, inner_ty) = self.gen_expr(inner)?;
                 let result_ty = match inner_ty {
                     Type::Future(t) => *t,

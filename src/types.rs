@@ -1306,6 +1306,19 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             match &operand_ty {
                 Type::Any => Type::Any,
                 Type::Future(inner_ty) => (**inner_ty).clone(),
+                // Fase 8.7.3: `.await` sobre call Python (PyAny o
+                // `Result<Any>` — que es lo que sintetiza 8.4 para
+                // `pyobj(args)`) ejecuta la corutina vía el bridge
+                // tokio ↔ asyncio. El resultado siempre llega envuelto
+                // en `Result<Any>` — excepciones asyncio aparecen
+                // como `Err(Str("<Class>: <msg>"))` paralelo a 8.3.
+                // El usuario destransla con `?` o `match`.
+                Type::PyAny => Type::Result(Box::new(Type::Any)),
+                Type::Result(inner)
+                    if matches!(**inner, Type::PyAny | Type::Any) =>
+                {
+                    Type::Result(Box::new(Type::Any))
+                }
                 other => {
                     ctx.error_at(*span, format!(
                         "`.await` solo aplica a `Future<T>`, recibió `{}`",
