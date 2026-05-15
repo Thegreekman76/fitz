@@ -199,8 +199,17 @@ PYTHONPATH=examples/guide/21-python-crud \
 bundling CPython embebido con `fitz build --bundle-python` para
 producir un binario standalone que NO requiera Python en el
 destino. Decisión de herramienta pendiente (python-build-standalone
-vs PyOxidizer). Próximo norte: **Fase 9 — Ecosistema** (package
-manager, LSP, formatter, linter). Ver el
+vs PyOxidizer).
+
+**Fase 9 (Ecosistema) arrancada** — primer sub-paso **F15 (error
+recovery del parser) CERRADO** el 2026-05-15. Nueva API
+`parse_with_recovery(tokens) -> (Program, Vec<FitzError>)` para
+tooling externo (LSP, formatter) que necesita un AST parcial
+sobre buffers en construcción. **Sin cambio user-facing**:
+`fitz run` / `fitz build` / `fitz check` siguen usando `parse()`
+strict y abortando al primer error. Próximo sub-paso de Fase 9.0:
+**F16 (IR tipado persistido por nodo)** — segundo pre-req
+habilitante antes de las sub-fases visibles del LSP. Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
@@ -392,17 +401,19 @@ excepciones → Result (8.3), tipos del checker (8.4), `fitz
 py-types` (8.5), bridge async (8.6), codegen (8.7), y docs +
 CRUD (8.8).
 
-**1295 tests pasando con `--features python`** (1295 unit + 88 E2E
-con `fitz build` + 3 openapi_e2e). **1204 + 79 + 3** sin feature.
+**1310 tests pasando con `--features python`** (1310 unit + 88 E2E
+con `fitz build` + 3 openapi_e2e). **1219 + 79 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 9 — Ecosistema** (package manager con
-registry, LSP con autocomplete + hover + go-to-def en VSCode/Neovim,
-formatter, linter). Pre-reqs habilitantes ya identificados en
-deudas-post-5b: F15 (parser con error recovery — pre-req para
-LSP que muestra diagnostics sobre código incompleto) + F16 (IR
-tipado persistido por nodo — pre-req para hover y completion
-contextual). **Sub-paso separado pendiente sin presión**:
+**Fase 9 (Ecosistema) — F15 CERRADO (2026-05-15)**: error recovery
+del parser end-to-end (nodos `Expr::Error`/`Stmt::Error` in-band,
+API `parse_with_recovery` con sync points stmt-level + keywords,
+cota 100 errores, checker silencioso sobre Error nodes). 15 unit
+tests nuevos. CLI strict sin cambio. Próximo norte: **F16 (IR
+tipado persistido por nodo)** — segundo pre-req habilitante del
+LSP. Después: sub-fases 9.x.1 → 9.x.5 (LSP MVP →
+diagnostics/hover/go-to-def/autocomplete/distribución), formatter,
+linter, package manager. **Sub-paso separado pendiente sin presión**:
 bundling CPython embebido (`fitz build --bundle-python`) con
 dos opciones evaluadas (python-build-standalone — mantenida
 activamente por Astral; PyOxidizer — ralentizada 2024-2025).

@@ -4496,12 +4496,17 @@ reemplazado); MW.4 sin tests nuevos (smoke +1 implícito en
 ---
 
 ## Fase 9 — Ecosistema 🌍
-**Estado: VISIÓN FUTURA**
+**Estado: EN CURSO** — Fase 9.0 (pre-reqs habilitantes del LSP)
+arrancada. F15 (error recovery del parser) **CERRADO** el
+2026-05-15. Queda F16 (IR tipado persistido por nodo) antes de
+las sub-fases visibles del LSP (9.x.1 → 9.x.5).
 
-- [ ] Package manager (`fitz add`)
-- [ ] Fitz registry (repositorio de paquetes)
+- [x] **F15 — error recovery del parser** (Fase 9.0, 2026-05-15) — ver 9.0 abajo
+- [ ] F16 — IR tipado persistido por nodo (pre-req habilitante del hover/completion del LSP)
 - [ ] LSP + extensión VSCode (ver 9.x abajo)
 - [ ] Formatter (`fitz fmt`)
+- [ ] Package manager (`fitz add`)
+- [ ] Fitz registry (repositorio de paquetes)
 - [ ] Linter (`fitz check` ya cubre tipos; queda lint de estilo
   y patrones)
 - [ ] Stubs `.pyi` para interop Python (pospuesto desde Fase 8)
@@ -4509,6 +4514,136 @@ reemplazado); MW.4 sin tests nuevos (smoke +1 implícito en
 - [ ] Compilación a WebAssembly
 - [ ] Documentación oficial en español e inglés
 - [ ] Website del lenguaje
+
+### Fase 9.0 — F15: error recovery del parser ✓ (CERRADA, 2026-05-15)
+
+Primer sub-paso de Fase 9. Cierre formal de la deuda F15
+identificada post-5b. Habilita que herramientas externas (LSP,
+formatter, futuros analizadores) reciban un AST parcial sobre
+buffers en construcción.
+
+**Sin cambio user-facing**: `fitz run`/`build`/`check` siguen
+usando `parse()` strict y abortando al primer error de parser. La
+API recovering es para tooling externo.
+
+#### 9.0.1 — Nodos Error en AST + parse_with_recovery + tests del parser
+
+- **AST**: nuevas variantes `Expr::Error(Span)` y `Stmt::Error(Span)`.
+  Solo las construye `parse_with_recovery`. Mantienen la forma
+  estructural del árbol cuando hay errores recuperados.
+  Marcadas con `#[allow(dead_code)]` puntual sobre `Expr::Error`
+  hasta que aterricen sub-stmt recovery (parser produce
+  `Stmt::Error` en 9.0; nunca `Expr::Error` suelto).
+- **Parser**: flag interno `recovery_mode` + cota dura
+  `MAX_RECOVERED_ERRORS = 100` + helper `synchronize()`.
+- **Sync points**: `Newline` (consumido), `RBrace` / `EOF`
+  (preservados), keywords que típicamente arrancan stmt:
+  `Let`, `Fn`, `Async`, `Type`, `Return`, `Break`, `Continue`,
+  `While`, `Loop`, `For`, `If`, `Import`, `From`, `At`
+  (preservadas). **La regla de keywords fue necesaria** porque
+  `primary()` consume el token actual antes de validar: un
+  `Newline` inesperado se consume y el cursor termina parado en
+  el `Let` del próximo stmt; sin la parada en keywords, sync se
+  comía stmts enteros.
+- **API pública nueva**:
+  `pub fn parse_with_recovery(tokens) -> (Program, Vec<FitzError>)`.
+  Nunca retorna `Err`: los errores se acumulan en la lista
+  paralela. `#[allow(dead_code)]` justificado hasta que aterricen
+  los consumidores (LSP/formatter).
+- **Defensas en evaluator/codegen**: si llegan a ver Error nodes
+  (no deberían — strict no los produce), emiten `FitzError` claro
+  con span, no panic.
+- **Tests del parser** (10 unit nuevos en
+  `parser::tests::recovery_*`): programa válido sin errores,
+  stmt roto top-level, dos errores consecutivos, recovery dentro
+  de `if`/`fn` body, span del Error node apunta al inicio del
+  stmt, posición del error apunta al token problemático, EOF
+  inesperado se acumula, cota de 100 errores se respeta, fn con
+  body roto preserva estructura, parse strict sigue abortando al
+  primer error.
+
+#### 9.0.2 — Tolerancia del checker a Error nodes
+
+- **Checker silencioso**: `Expr::Error` sintetiza `Type::Any`,
+  `Stmt::Error` no-op. Sin emisión de errores derivados — los
+  errores reales viven en la lista del parser.
+- **Tests del checker** (5 unit nuevos en `types::tests::checker_*`):
+  helper local `check_recovering(src)` que corre el pipeline
+  LSP-style (`parse_with_recovery` → `check_program`). Tests:
+  Stmt::Error no agrega errores derivados; el silencio sobre
+  Error nodes no afecta detección de errores genuinos en stmts
+  vecinos válidos; Error nodes en fn body no abortan el check
+  del resto del programa; smoke con 3 stmts rotos no panic;
+  Expr::Error directo en AST tipa como Type::Any.
+
+#### 9.0.3 — Validación end-to-end + cierre formal
+
+- **Smoke a mano**: `fitz check` sobre un buffer con 3 stmts
+  rotos intercalados → exit 1 con un error reportado del primer
+  stmt roto (comportamiento strict idéntico a antes).
+- **Smoke `GUIDE_EXAMPLES_COMPILE`**: 13 ejemplos compilables de
+  la guía siguen verdes.
+- **Docs**: CHANGELOG v0.9.0, este roadmap, `deudas-post-5b.md`
+  con F15 marcado CERRADO, README + CLAUDE refresh.
+
+#### Decisiones técnicas tomadas
+
+- **Representación de errores**: nodos `Expr::Error(Span)` /
+  `Stmt::Error(Span)` in-band + `Vec<FitzError>` paralelo. El
+  árbol mantiene su forma estructural (mejor para LSP/formatter
+  que recorren sin chequear cada nodo); la lista paralela lleva
+  los mensajes ricos.
+- **Sync points stmt-level + keywords**: el comentario en
+  `synchronize()` documenta el porqué. La iteración con solo
+  `Newline`/`RBrace`/`EOF` se quedó corta — los tests
+  inmediatamente detectaron que `primary()` consume tokens al
+  fallar.
+- **API strict intacta**: `parse()` mantiene firma y
+  comportamiento. La CLI sigue priorizando fail-fast.
+- **Cota 100 errores**: cubre el caso 90% del LSP con margen sin
+  permitir cascadas runaway.
+- **Recovery solo stmt-level**: errores DENTRO de un stmt
+  descartan el stmt entero. Recovery sub-stmt (preservar bindings
+  parciales, args parciales) queda como sub-paso futuro
+  post-LSP MVP.
+- **Cascadas "variable no definida" del checker**: aceptables
+  como trade-off. Cuando un Stmt::Error reemplaza un `let x =
+  ...` roto, referencias posteriores a `x` pueden generar "no
+  definida"; el error real del parser apunta al lugar del
+  problema. IDEs muestran ambos diagnostics. Refinar requiere
+  preservar bindings parciales.
+
+#### Total al cierre
+
+**1219 unit + 79 E2E + 3 openapi sin feature** (1310 + 88 + 3 con
+`--features python`). Clippy `-D warnings` limpio en ambos modos.
+
+#### Deuda residual derivada de F15
+
+- **Recovery sub-stmt** — errores adentro de un stmt (paréntesis
+  sin cerrar, expresión incompleta) descartan el stmt entero.
+  Para LSP/completion fino (mostrar fields de `User` tras `user.`
+  cuando el cursor está parado ahí), eventualmente conviene
+  recovery sub-expression. Sub-paso futuro si aparece presión.
+- **Bindings parciales** — `let x = <roto>` no preserva el
+  binding `x`. Eso genera "x no definido" en referencias
+  posteriores. Refinable con un nodo "stmt incompleto" que sí
+  parsea el nombre y la anotación. Post-LSP MVP.
+- **`Expr::Error` con metadata** — el nodo es opaco hoy. Si
+  hubiera más info (qué tipo de token rompió, qué se esperaba),
+  el LSP podría sugerir fixes ("¿quisiste decir...?"). Deuda
+  baja prioridad.
+
+#### Próximo norte
+
+**Fase 9.0 — F16 (IR tipado persistido por nodo)** — segundo
+pre-req habilitante del LSP. Persistir el `Type` resuelto de cada
+nodo del AST en un side-table (`HashMap<SpanKey, Type>` o
+paralelo) para que el LSP pueda responder
+`textDocument/hover` ("¿qué tipo tiene esta expresión?") y
+completion contextual ("tras `u.`, mostrar fields de `User`").
+
+---
 
 ### 9.x — LSP + extensión VSCode (candidata)
 
@@ -4531,12 +4666,11 @@ go-to-definition.
 **Prerrequisitos habilitantes** (deuda post-5b, ver
 `deudas-post-5b.md`):
 
-- **F15** — error recovery del parser. Sin esto el LSP no puede
-  dar diagnostics ni completions mientras el usuario tipea
-  (cada caracter dispararía un parse error y el AST quedaría
-  vacío).
+- ✅ **F15** — error recovery del parser. **CERRADO 2026-05-15**
+  en Fase 9.0 (ver arriba). API pública `parse_with_recovery`
+  + nodos `Expr::Error`/`Stmt::Error` + checker silencioso.
 - **F16** — IR tipado persistido por nodo. Sin esto no hay
-  hover ni completion contextual sobre tipos.
+  hover ni completion contextual sobre tipos. **Próximo norte**.
 - **S1.Pattern/TypeExpr** — completar spans en los nodos que
   todavía no los tienen (deuda residual de S1.2).
 

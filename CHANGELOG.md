@@ -11,13 +11,138 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 8
-(Interop Python) entera CERRADA al cierre de 8.8.** Próximo norte:
-**Fase 9 — Ecosistema** (package manager, LSP, formatter, linter)
-con pre-reqs habilitantes (parser con error recovery + IR tipado
-persistido por nodo). Sub-paso separado pendiente sin presión:
-bundling CPython embebido (`fitz build --bundle-python`) con
-decisión python-build-standalone vs PyOxidizer pendiente.
+En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.0
+(pre-reqs habilitantes del LSP) avanza**: F15 (error recovery del
+parser) CERRADO; queda F16 (IR tipado persistido por nodo) antes
+de las sub-fases visibles del LSP (9.x.1 → 9.x.5). Sub-paso
+separado pendiente sin presión: bundling CPython embebido
+(`fitz build --bundle-python`).
+
+## [v0.9.0] — 2026-05-15 — Fase 9.0: F15 cierre — error recovery del parser
+
+Primer sub-paso de Fase 9 (Ecosistema). Cierra la deuda F15
+identificada post-5b: **pre-requisito habilitante del LSP** que
+permitirá que herramientas externas (LSP, formatter, futuros
+analizadores) reciban un AST parcial y la lista paralela de
+errores sobre buffers en construcción.
+
+**Sin cambio de comportamiento user-facing**: `fitz run` / `fitz
+build` / `fitz check` siguen usando `parse()` strict y abortando al
+primer error de parser, exactamente como antes. La API nueva
+(`parse_with_recovery`) está pensada para los consumidores
+internos del lenguaje que llegan en sub-fases siguientes.
+
+- **9.0.1 — AST + API recovery + tests del parser** (10 unit nuevos):
+  - Nuevas variantes `Expr::Error(Span)` y `Stmt::Error(Span)` en
+    el AST. Su único productor es `parse_with_recovery`; mantienen
+    la forma estructural del árbol cuando hay errores recuperados
+    (un body de fn con un stmt roto sigue siendo un `Vec<Stmt>`
+    válido).
+  - Parser: flag interno `recovery_mode` + cota dura
+    `MAX_RECOVERED_ERRORS = 100` + helper `synchronize()` que
+    avanza hasta sync points stmt-level. Sync points: `Newline`
+    (consumido), `RBrace`/`EOF` (preservados), y keywords que
+    típicamente arrancan stmt — `Let`, `Fn`, `Async`, `Type`,
+    `Return`, `Break`, `Continue`, `While`, `Loop`, `For`, `If`,
+    `Import`, `From`, `At` — preservadas. La regla de keywords
+    fue necesaria porque `primary()` consume el token actual antes
+    de validar: un `Newline` inesperado se consume y el cursor
+    termina parado en el `Let` del próximo stmt; sin la parada en
+    keywords, sync se comía stmts enteros.
+  - API pública nueva:
+    `pub fn parse_with_recovery(tokens) -> (Program, Vec<FitzError>)`.
+    Nunca retorna `Err`: los errores se acumulan en la lista
+    paralela. Marcada con `#[allow(dead_code)]` justificado
+    porque hasta que aterricen los consumidores (LSP / formatter)
+    solo la ejercitan los tests.
+  - Defensas en evaluator/codegen: si un nodo Error llega ahí
+    (no debería — la CLI strict nunca los produce), emiten un
+    `FitzError` claro con span, no panic.
+  - Checker silencioso (ya entró en 9.0.1, tests en 9.0.2):
+    `Expr::Error` sintetiza `Type::Any`, `Stmt::Error` no-op.
+  - Tests del parser (`parser::tests::recovery_*`): programa
+    válido sin errores, stmt roto top-level, dos errores
+    consecutivos, recovery dentro de `if`/`fn` body, span del
+    Error node apunta al inicio del stmt, posición del error
+    apunta al token problemático, EOF inesperado se acumula,
+    cota de 100 errores se respeta, fn con body roto preserva
+    estructura, parse strict sigue abortando al primer error.
+
+- **9.0.2 — Tests del checker sobre AST recuperado** (5 unit nuevos):
+  - Helper local `check_recovering(src)` que corre el pipeline
+    LSP-style (`parse_with_recovery` → `check_program`) y devuelve
+    solo los errores del checker. Es el pipeline que usará el LSP
+    MVP para producir diagnostics.
+  - Tests (`types::tests::checker_stmt_error_*` y
+    `checker_pipeline_recovering_*` y `checker_expr_error_*`):
+    Stmt::Error no agrega errores derivados; el silencio sobre
+    Error nodes no afecta detección de errores genuinos en stmts
+    vecinos válidos; Error nodes en fn body no abortan el check
+    del resto del programa; smoke con 3 stmts rotos no panic;
+    Expr::Error directo en AST tipa como Type::Any.
+
+- **9.0.3 — Validación end-to-end + cierre formal**:
+  - Smoke a mano: `fitz check d:/tmp/recovery_smoke.fitz` (buffer
+    con 3 stmts rotos intercalados con código válido) → exit 1
+    con un error reportado del primer stmt roto. Comportamiento
+    strict idéntico a antes.
+  - Smoke `GUIDE_EXAMPLES_COMPILE` sigue verde sobre los 13
+    ejemplos de la guía compilables.
+  - Docs: este CHANGELOG, `docs/roadmap.md` con Fase 9.0
+    documentada paso a paso, `docs/deudas-post-5b.md` con F15
+    marcado CERRADO, README + CLAUDE refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Representación de errores**: nodos `Expr::Error(Span)` /
+  `Stmt::Error(Span)` in-band en el AST + `Vec<FitzError>`
+  paralelo. Razón: el árbol mantiene su forma estructural (mejor
+  para LSP/formatter que recorren el AST sin chequear cada nodo),
+  y la lista paralela lleva los mensajes ricos sin tener que
+  desempaquetar wrappers en cada visita.
+- **Sync points stmt-level + keywords de inicio**: la primera
+  iteración tenía solo Newline/RBrace/EOF; los tests detectaron
+  que `primary()` consume el token al fallar y el cursor podía
+  saltar al próximo stmt. Agregar keywords como sync points cierra
+  el caso sin complicar la lógica de recovery.
+- **API strict intacta**: `parse()` no cambia su firma ni su
+  comportamiento. Razón: la CLI sigue priorizando fail-fast con
+  un error claro; recovery es feature de tooling externo.
+- **Cota 100**: cubre el caso 90% del LSP (~5-20 errores en un
+  buffer real) con margen amplio sin permitir cascadas runaway
+  sobre buffers de tests bizarros.
+- **Recovery solo stmt-level en 9.0**: errores DENTRO de un stmt
+  (paréntesis sin cerrar adentro de un arg, expresión incompleta
+  como RHS) descartan el stmt entero. Recovery sub-stmt
+  (preservar bindings parciales, args parciales) queda como
+  sub-paso futuro post-LSP MVP si aparece presión.
+- **Cascadas "variable no definida" del checker**: aceptables como
+  trade-off del LSP MVP. Cuando un Stmt::Error reemplaza un
+  `let x = ...` roto, referencias posteriores a `x` pueden
+  generar "no definida". El error real del parser apunta al lugar
+  del problema; los IDEs muestran ambos diagnostics. Refinar
+  requiere preservar bindings parciales (post-9.0).
+
+**Trade-offs reconocidos**:
+
+- `Expr::Error` solo se construye desde tests en 9.0 (el parser en
+  9.0 produce Stmt::Error pero nunca Expr::Error suelto — recovery
+  sub-stmt llega después). El nodo existe en el AST porque
+  agregarlo después rompe match exhaustivos en 11 sitios
+  (eval/checker/codegen).
+- La parada en keywords como sync points es un compromiso: en
+  expression-statements largos con keywords adentro (raros pero
+  posibles), recovery podría sub-sincronizar. Aceptable para el
+  90% del uso real; revisable si aparece presión.
+
+**Total al cierre**: 1219 unit + 79 E2E + 3 openapi sin feature
+(1310 + 88 + 3 con `--features python`). Clippy `-D warnings`
+limpio en ambos modos.
+
+**Próximo norte**: **Fase 9.0 — F16 (IR tipado persistido por
+nodo)** — segundo pre-req habilitante del LSP. Después del cierre
+de F16, las sub-fases visibles del LSP (9.x.1 → 9.x.5) pueden
+arrancar.
 
 ## [v0.8.9] — 2026-05-15 — Fase 8.8: Guía + ejemplo CRUD + cierre de Fase 8
 
