@@ -54,8 +54,11 @@ abrí un issue.
 **Parte 8 — Compilar**
 20. [`fitz build` — compilar a binario nativo](#20-fitz-build--compilar-a-binario-nativo)
 
-**Parte 9 — Cerrando**
-21. [Qué sigue](#21-qué-sigue)
+**Parte 9 — Interop**
+21. [Interop Python](#21-interop-python)
+
+**Parte 10 — Cerrando**
+22. [Qué sigue](#22-qué-sigue)
 
 ---
 
@@ -5108,14 +5111,375 @@ y un compilador que genera binarios nativos para CLI y HTTP. El
 
 ---
 
-## 21. Qué sigue
+## 21. Interop Python
+
+Fitz puede llamar código Python desde sus programas. La motivación
+es práctica: Python tiene el ecosistema más grande del mundo
+(SQLAlchemy, numpy, pandas, httpx, FastAPI...). Pedirle al usuario
+de Fitz que reescriba todo de cero es irreal. La interop con Python
+es el puente para usar Fitz hoy, sin renunciar a las librerías que
+ya tenés en tu stack.
+
+### 21.1 Setup
+
+La interop con Python es **opt-in**: el binario `fitz` default NO
+linkea libpython. Para activarla, compilá `fitz` con la feature
+`python`:
+
+```bash
+cargo build --features python
+```
+
+Eso le pide a PyO3 que linkee CPython 3.10+ al binario `fitz`.
+Los programas Fitz que **no** usan `from python import` siguen
+produciendo binarios libres como en Fase 5b (cero costo si no
+necesitás la interop).
+
+**Política de venvs**: el patrón estándar Python — activá tu venv
+con `source venv/bin/activate` (o equivalente Windows) antes de
+correr Fitz; CPython lee `VIRTUAL_ENV` automáticamente al bootear.
+Sin venv, Python busca los paquetes en el `site-packages` global.
+
+### 21.2 Sintaxis: `from python import`
+
+Fitz reusa la sintaxis de imports que ya conocés del cap 16, con
+un namespace virtual `python` reservado:
+
+```fitz
+from python import math
+from python import json
+from python import asyncio
+```
+
+También aceptamos formas alternativas:
+
+```fitz
+from python import math as m         // alias
+import python.os.path                // import punteado, binding `path`
+from python import os.path as p      // alias + path punteado
+```
+
+El último segmento del path (o el alias) es el binding visible en
+el scope Fitz.
+
+### 21.3 Constantes y atributos
+
+`math.pi`, `os.name`, etc. — el field access funciona igual que
+sobre tipos Fitz, pero del otro lado hay un objeto Python:
+
+```fitz
+from python import math
+
+print("pi = {math.pi}")                    // pi = 3.141592653589793
+print("e  = {math.e}")                     // e  = 2.718281828459045
+print("nombre = {math.__name__}")          // nombre = math
+```
+
+El intérprete coerciona automáticamente los primitivos Python
+(`int → Int`, `float → Float`, `str → Str`, `bool → Bool`,
+`None → Null`). Cualquier otro tipo (función, clase, instancia,
+submódulo) queda como **`PyObject` opaco** — podés pasarlo a otra
+fn Python o hacer field access más adentro, pero Fitz no sabe qué
+hay adentro.
+
+### 21.4 Llamadas a funciones Python
+
+Las llamadas usan la sintaxis de Fitz pero con un detalle clave: 
+**toda llamada Python devuelve un `Result<T>` automáticamente**.
+
+```fitz
+from python import math
+
+let raw = math.sqrt(16.0)
+match raw {
+    Ok(v)  => print("sqrt(16) = {v}"),     // sqrt(16) = 4.0
+    Err(e) => print("error: {e}"),
+}
+```
+
+Si la función Python lanza una excepción (`ValueError`,
+`TypeError`, etc.), Fitz la captura y la convierte en
+`Err(Str("<ClassName>: <message>"))`:
+
+```fitz
+let raw = math.sqrt(-1.0)
+match raw {
+    Ok(_)  => print("(no debería)"),
+    Err(e) => print("caught: {e}"),       // caught: ValueError: math domain error
+}
+```
+
+Esto preserva la decisión de diseño "sin excepciones" de Fitz: el
+usuario es forzado a manejar la falla con `match` o `?`, igual
+que con `find`/`get`/`json.loads` nativos. El programa Fitz **no
+aborta** por excepciones Python.
+
+### 21.5 Propagación con `?`
+
+Adentro de una fn que retorna `Result<T>`, el operador `?` propaga
+errores Python sin glue manual:
+
+```fitz
+from python import math
+
+fn root_safe(x: Float) -> Result<Float> {
+    let v: Float = math.sqrt(x)?
+    return Ok(v)
+}
+
+match root_safe(25.0) {
+    Ok(r)  => print("r = {r}"),           // r = 5.0
+    Err(e) => print("err: {e}"),
+}
+```
+
+Notá la **anotación destino** `let v: Float = ...`: como
+`math.sqrt(x)?` desempaca a `PyAny`, la anotación dispara una
+coerción automática de Python `float` a `Float` Fitz. Sin la
+anotación, `v` queda como `PyAny` opaco.
+
+### 21.6 Marshaling de tipos compuestos
+
+Listas, mapas e instancias Fitz cruzan a Python como `list`, `dict`
+y `dict` (por field name), respectivamente:
+
+```fitz
+from python import json
+
+let xs: List<Int> = [1, 2, 3]
+match json.dumps(xs) {
+    Ok(s)  => print(s),                   // [1, 2, 3]
+    Err(_) => print("err"),
+}
+
+type User { id: Int, name: Str }
+let u = User { id: 1, name: "Ada" }
+match json.dumps(u) {
+    Ok(s)  => print(s),                   // {"id": 1, "name": "Ada"}
+    Err(_) => print("err"),
+}
+```
+
+En sentido contrario, Python `list` y `dict` cruzan a Fitz como
+`List` y `Map` opacos (sin tipo concreto del lado Fitz). El próximo
+capítulo cubre cómo recuperar el tipo Fitz con anotaciones.
+
+### 21.7 Recuperando tipos Fitz desde Python
+
+Cuando una fn Python te devuelve un `dict` que querés tratar como
+una instancia Fitz, **anotá el binding destino** y el runtime hace
+la coerción automática (paralelo a Fase 8.4):
+
+```fitz
+from python import json
+
+type User {
+    id: Int,
+    name: Str,
+    email: Str? = null,
+}
+
+fn parse_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+
+match parse_user("{\"id\": 1, \"name\": \"Ada\"}") {
+    Ok(u)  => print("User: {u.name}"),    // User: Ada
+    Err(e) => print("err: {e}"),
+}
+```
+
+El runtime itera los fields declarados:
+
+- Si el `dict` tiene el field → lo usa.
+- Si no, aplica el default (si hay).
+- Si no hay default pero el field es nullable → `null`.
+- Si no hay default ni es nullable → error claro.
+
+Campos extras del `dict` se ignoran silenciosamente (Python suele
+devolver más data de la necesaria; SQLAlchemy es típico ahí).
+
+### 21.8 `fitz py-types` — auto-mapeo de modelos SQLAlchemy
+
+Si tu proyecto Python usa SQLAlchemy, podés generar los `type`
+Fitz correspondientes con un comando:
+
+```bash
+fitz py-types models.py --out models.fitz
+```
+
+El comando introspecciona las clases con `__table__.columns` y emite:
+
+```fitz
+// Generado por fitz py-types desde models.py
+type User {
+    id: Int,
+    name: Str,
+    email: Str? = null,
+    created_at: Str,
+}
+```
+
+Mapeo: `Integer/BigInteger → Int`, `Float/Numeric → Float`,
+`String/Text → Str`, `Boolean → Bool`, `DateTime/Date → Str`
+(ISO 8601), `nullable=True → ?`, default literal inline, callable
+ignorado. Tipos desconocidos quedan como `Any` con un comentario
+para refinar a mano.
+
+Después de generar, podés usar `from models import User, Order`
+en tus archivos Fitz y los tipos están listos para combinar con
+el patrón `let row: User = py_call(...)?` del cap 21.7.
+
+### 21.9 Async — `await` sobre corutinas Python
+
+Cuando una fn Python es `async def` (devuelve una corutina), el
+`.await` Fitz la ejecuta vía el bridge tokio ↔ asyncio:
+
+```fitz
+from python import asyncio
+
+async fn esperita() -> Result<Str> {
+    let _ = asyncio.sleep(0.1)?.await
+    return Ok("done")
+}
+
+match esperita().await {
+    Ok(v)  => print("got = {v}"),         // got = done
+    Err(e) => print("err: {e}"),
+}
+```
+
+El patrón canónico Fitz es `<py_call>?.await`. El `?` desempaca
+el `Result` del call (el wrap automático del cap 21.4); el `.await`
+ejecuta la corutina. Excepciones asyncio aparecen como `Err`,
+igual que con calls sync.
+
+**Implementación**: el bridge usa `tokio::task::spawn_blocking` +
+`asyncio.run_until_complete()` adentro del worker. Funcional para
+APIs DB-bound (queries SQLAlchemy/asyncpg cortas). El GIL serializa
+las corutinas — para hot paths CPU-bound, mejor reescribir en
+Fitz nativo.
+
+### 21.10 `fitz build` con interop Python
+
+`fitz build` también compila programas con `from python import`.
+El binario resultante linkea pyo3 con `abi3-py310 + auto-initialize`
+y asume Python instalado en la máquina destino (igual que el
+binario `fitz` mismo necesita CPython al boot).
+
+```bash
+cargo run --features python -- build mi_app.fitz
+./mi_app  # requiere Python 3.10+ en el PATH
+```
+
+Bit-a-bit con `fitz run` para los patrones cubiertos. Lo que
+**falta** vs `fitz run` (deuda residual de 8.7):
+
+- Coerción Python `list` → Fitz `List<T>`, `dict` → `Map<K,V>`,
+  `dict` → `Instance` (con anotaciones del 21.7). En `fitz build`
+  estos casos siguen quedando como `PyObject` opaco.
+- `.await` con binding intermedio split (`let fut = py_call()?;
+  fut.await` con el future ligado a una var antes del await). El
+  patrón inmediato `<py_call>?.await` sí anda.
+
+Para el caso canónico de CRUD con SQLAlchemy + recuperación de
+filas como instancias Fitz tipadas, usá `fitz run` por ahora.
+`fitz build` cubre handlers HTTP CRUD si no necesitás esa
+coerción (pasar dict opaco al cliente vía `serde_json` también
+funciona).
+
+**Bundling de CPython embebido** (`fitz build --bundle-python`)
+queda como sub-paso futuro separado. Hoy el binario asume Python
+instalado; bundling lo embebería para hacer el binario realmente
+standalone.
+
+### 21.11 Ejemplo CRUD ejecutable
+
+`examples/guide/21-python-crud/` arma un CRUD completo:
+
+- `models.py` — modelo SQLAlchemy (User) sobre SQLite.
+- `db.py` — helpers DB (init, add, list, get) que devuelven
+  dicts/lists nativos Python (sin instancias del modelo
+  SQLAlchemy) para que el marshaling a Fitz sea directo.
+- `models.fitz` — output de `fitz py-types models.py`.
+- `app.fitz` — handlers HTTP `@get`/`@post` que insertan y
+  listan usuarios via los helpers de `db.py`.
+
+Setup (una vez):
+
+```bash
+pip install sqlalchemy
+```
+
+Correr (`PYTHONPATH` apunta a la carpeta del ejemplo para que
+Python encuentre `db.py` y `models.py`):
+
+```bash
+# Linux/macOS:
+PYTHONPATH=examples/guide/21-python-crud \
+  cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+
+# Windows PowerShell:
+$env:PYTHONPATH = "examples\guide\21-python-crud"
+cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+```
+
+El server arranca en `127.0.0.1:3000`. Probalo con curl:
+
+```bash
+curl -X POST http://localhost:3000/users \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Ada", "email": "ada@example.com"}'
+
+curl http://localhost:3000/users
+```
+
+El ejemplo demuestra el flujo completo: bindings Python → fns
+helper Fitz que llaman SQLAlchemy → handlers HTTP que serializan
+las filas a JSON.
+
+### 21.12 Limitaciones — lo que NO anda
+
+Para mantener la honestidad del lenguaje:
+
+- **GIL de Python**: las corutinas Python compiten por el GIL
+  adentro del bridge. Para hot paths concurrentes, reescribir en
+  Fitz nativo (sin interop) es mejor.
+- **Numpy/pandas con C extensions**: funcionan si están instalados
+  en el venv. Bundlearlos standalone es notoriamente difícil
+  (deuda del ecosistema Python, no de Fitz).
+- **Herencia desde clases Python**: no soportada. Un `type` Fitz
+  no puede heredar de una clase Python (los modelos de objetos
+  son distintos — Python tiene MRO, Fitz no tiene clases). La
+  composición sí: un `type` puede tener un campo opaco que
+  envuelve un objeto Python.
+- **`asyncio.gather` con futures Fitz**: el marshaling Future Fitz
+  → corutina Python no está soportado. Workaround: definir el
+  `gather` adentro de un helper Python que toma corutinas.
+
+Si necesitás algo de la lista de arriba y no aparece como deuda
+abierta en el roadmap, abrí un issue.
+
+---
+
+> **Cierre Parte 9.** Interop Python te permite usar el
+> ecosistema más grande del mundo desde Fitz sin renunciar a
+> tipos estáticos ni a HTTP nativo. Con eso, Fitz es usable hoy
+> para proyectos que ya viven en Python — el stack nativo (ORM,
+> driver Postgres) llega como fase posterior. El último capítulo
+> es el mapa hacia adelante.
+
+---
+
+## 22. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 20 podés:
+Con los capítulos 1 a 21 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -5153,50 +5517,68 @@ Con los capítulos 1 a 20 podés:
 - **Compilar a binario nativo** con `fitz build`: programa CLI
   o server HTTP que corre sin Fitz instalado en la máquina
   destino (Fase 5b — codegen via transpile-a-Rust + Cargo).
+- **Llamar código Python** con `from python import X`:
+  importar módulos (`math`, `json`, `sqlalchemy`...), invocar
+  funciones con marshaling automático de tipos compuestos (List
+  → list, Map → dict, Instance → dict), manejar errores con
+  `Result<T>` (excepciones Python → `Err`), recuperar tipos Fitz
+  desde Python con anotaciones (`let row: User = py_call(...)?`),
+  auto-generar `type` Fitz desde SQLAlchemy con `fitz py-types`,
+  y `await` corutinas Python via bridge tokio ↔ asyncio (Fase 8).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
-ejecuten y un compilador que produce binarios standalone.
+ejecuten, un compilador que produce binarios standalone, y un
+puente al ecosistema Python para usar SQLAlchemy/numpy/asyncpg
+sin abandonar Fitz.
 
-### Lo que viene — más allá de Fase 7
+### Lo que viene — más allá de Fase 8
 
-Fase 5 cerró el **type checker estático** (5a) y el **codegen a
-binario nativo** (5b). Fase 6 cerró el **async nativo**:
-`async fn`, `.await`, `Future<T>`, builtin `sleep` y handlers HTTP
-async. Fase 7 cerró la **DX HTTP**: OpenAPI 3.1 autogenerado, UI
-Scalar embebida, `@header(name="X")` para headers como params,
-opt-out con `@server(docs=false)`, paridad bit-a-bit entre `fitz
-run` y `fitz build`.
+Las fases cerradas (al cierre de Fase 8): type checker estático
+(5a), codegen a binario nativo (5b), async nativo (6), DX HTTP
+con OpenAPI 3.1 + UI Scalar (7), middleware + CORS (mini-fase MW),
+Send completo + paralelismo HTTP real (F17), e **interop Python**
+end-to-end (Fase 8): embedding básico (8.1), marshaling compuesto
+(8.2), excepciones → `Result<T>` (8.3), tipos del checker + coerción
+runtime (8.4), `fitz py-types` SQLAlchemy (8.5), bridge tokio ↔
+asyncio (8.6), codegen interop en `fitz build` (8.7), guía + ejemplo
+CRUD + cierre formal (8.8 — este capítulo).
 
-Con eso, la promesa "HTTP nativo" queda cumplida a tres niveles:
-ergonómico (cap 17), de ejecución (cap 19) y de developer
-experience (cap 18).
+Con eso, la promesa "Fitz usable para proyectos reales hoy" queda
+cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
 
-Lo que sigue post-7:
+Lo que sigue post-8:
 
-- **Fase 8 — Interop Python** (siguiente comprometida): poder
-  llamar código Python desde Fitz. El stack inicial de
-  FastAPI/SQLAlchemy del autor vive ahí; abrir el camino sin
-  pedir que se reescriba todo es lo que justifica la fase.
-- **Fase 9 — Ecosistema**: package manager, registry, LSP,
-  formatter, linter, plugin de editores.
+- **Fase 9 — Ecosistema**: package manager, registry, LSP
+  (autocomplete + hover + go-to-def en VSCode/Neovim), formatter,
+  linter, plugin de editores. Pre-reqs habilitantes: parser con
+  error recovery + IR tipado persistido por nodo.
+- **Sub-paso futuro separado: bundling CPython embebido** —
+  `fitz build --bundle-python` produce un binario standalone que
+  NO requiere Python en el destino. Decisión de herramienta
+  pendiente (python-build-standalone vs PyOxidizer). Sin presión
+  real hoy.
+- **Stack DB nativo** (Fase 10+): driver Postgres en Fitz puro,
+  ORM nativo declarativo sobre `type` (estilo Diesel/sqlx),
+  migraciones, pool. La interop Python de Fase 8 es el puente
+  hasta llegar ahí, no el destino final.
 - **Deuda residual comprometida**:
-  - **F17 — Send + paralelismo HTTP**: migrar `Rc<RefCell<>>` →
-    `Arc<Mutex<>>` en Value/EnvRef/módulos para destrabar (a)
-    spawn paralelo desde Fitz (`tokio::join!`, `tokio::spawn`),
-    (b) eliminación del bridge mpsc interno del server HTTP,
-    (c) server multi-thread (handlers en paralelo). Cuando
-    aparezca presión real.
-  - **Inferencia de tipos de params y returns** en fns sin
-    anotar — hoy `fn greet(name)` corre en el intérprete pero
-    `fitz build` exige anotación.
-  - **Listas/mapas heterogéneos** compilados (`[1, "dos"]`) — el
+  - **Coerción Python list/dict → Fitz `List<T>`/`Map<K,V>`/
+    `Instance` en `fitz build`** (deuda de 8.7): los helpers
+    `__fitz_py_to_list_*` ya están emitidos en el preludio, falta
+    el wiring en `coerce(PyAny → List<T>)` y equivalentes. En el
+    intérprete ya funciona (Fase 8.4).
+  - **`.await` con binding intermedio** (`let fut = py_call()?;
+    fut.await`): hoy solo el patrón `<py_call>?.await` inmediato.
+  - **Inferencia de tipos de params y returns** en fns sin anotar
+    — `fn greet(name)` corre en el intérprete pero `fitz build`
+    exige anotación.
+  - **Listas/mapas heterogéneos compilados** (`[1, "dos"]`): el
     intérprete los acepta, el compilador necesita un `FitzValue`
     tagged en runtime.
-  - **Deuda menor de F7** (post-fase): doc-strings sobre
-    handlers (para descripciones OpenAPI), status codes custom
-    en el schema, `@header(into=...)` con alias del param Fitz,
-    bundle Scalar embebido offline.
+  - **Deuda menor de F7** (post-fase): doc-strings sobre handlers
+    (para descripciones OpenAPI), `@header(into=...)` con alias del
+    param Fitz, bundle Scalar embebido offline.
 
 Ver [docs/roadmap.md](roadmap.md) para el detalle completo y la
 deuda explícita acumulada por fase.

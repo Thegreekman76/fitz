@@ -1,0 +1,9 @@
+// Generado por `fitz py-types` — no editar a mano.
+// Fuente: examples/guide/21-python-crud/models.py
+
+type User {
+    id: Int,
+    name: Str,
+    email: Str
+}
+

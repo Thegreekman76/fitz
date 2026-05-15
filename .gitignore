@@ -15,3 +15,11 @@ desktop.ini
 # Editor/tooling local config
 .claude/
 CLAUDE.md
+
+# Python bytecode cache — los ejemplos de interop importan archivos
+# `.py` reales y CPython escribe `__pycache__/` adyacente.
+__pycache__/
+*.pyc
+
+# SQLite DB local del ejemplo CRUD (Fase 8.8) — se recrea al correr.
+examples/guide/21-python-crud/crud.db

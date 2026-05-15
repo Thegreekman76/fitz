@@ -1,0 +1,137 @@
+// examples/guide/21-python-crud/app.fitz — Cap 21 de la guía: CRUD
+// completo con SQLAlchemy + SQLite via interop Python.
+//
+//   # Setup (una vez):
+//   pip install sqlalchemy
+//
+//   # Correr (server HTTP en 127.0.0.1:3000) — desde la raíz del repo:
+//   #
+//   # Linux/macOS:
+//   PYTHONPATH=examples/guide/21-python-crud \
+//     cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+//   #
+//   # Windows PowerShell:
+//   $env:PYTHONPATH = "examples\guide\21-python-crud"
+//   cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+//
+//   # Probar con curl:
+//   curl -X POST http://localhost:3000/users \
+//     -H "Content-Type: application/json" \
+//     -d '{"name": "Ada", "email": "ada@example.com"}'
+//   curl http://localhost:3000/users
+//   curl http://localhost:3000/users/1
+//
+// Combina la mayoría de lo cubierto en el cap 21:
+//
+//   - `from python import` para `db` (helpers DB SQLAlchemy) y `json`
+//     (round-trip para coerción a Instance).
+//   - `from models import User` — el tipo generado por `fitz py-types`.
+//   - Result wrap automático sobre cada call Python — manejo con `?`.
+//   - Coerción `Map → Instance` con anotación destino
+//     (`let u: User = ...`, cap 21.7).
+//   - Handlers HTTP que combinan los tres mundos: HTTP nativo + tipos
+//     Fitz + interop Python.
+//
+// **Por qué PYTHONPATH**: `db.py` y `models.py` viven adyacentes a este
+// archivo `.fitz`. CPython, por default, solo busca módulos en el cwd
+// y en el `site-packages` global; PYTHONPATH es la forma estándar
+// Python de extender el lookup. Sin alternativa "magia" de Fitz para
+// agregar paths automáticos — preferimos respetar el estándar Python.
+//
+// **Modo de ejecución**: `fitz run` (intérprete). `fitz build` cubre
+// el codegen interop (Fase 8.7) pero la coerción `dict` → `Instance`
+// para retornos de calls Python sigue siendo deuda residual del
+// codegen. Para este CRUD canónico, el intérprete es el camino completo.
+
+from python import db
+from python import json
+from models import User
+
+// ---------------------------------------------------------------------
+// Inicialización idempotente de la DB.
+// ---------------------------------------------------------------------
+
+fn init() -> Result<Str> {
+    let _ = db.init_db()?
+    return Ok("ok")
+}
+
+match init() {
+    Ok(_)  => print("[boot] DB lista en examples/guide/21-python-crud/crud.db"),
+    Err(e) => print("[boot] ERROR — {e}\n[boot] ¿corriste `pip install sqlalchemy`?"),
+}
+
+// ---------------------------------------------------------------------
+// Helper: convierte un dict Python (PyAny) a un `User` Fitz via
+// round-trip por JSON. Es el patrón canónico mientras la coerción
+// recursiva directa Python `dict` → Fitz `Instance` no esté wireada
+// en el intérprete sobre datos PyAny. `json.dumps` + `json.loads`
+// produce una `Map<Str, Any>` Fitz nativa, que el `let u: User = ...`
+// coerce a `Instance` via 8.4.3.
+// ---------------------------------------------------------------------
+
+// El param `raw` queda sin anotación — el intérprete lo infiere como
+// `Any` (gradual escape). `json.dumps(raw)` lo acepta porque
+// `__FitzToPy` cubre todos los tipos via passthrough PyObject.
+fn user_from_py(raw) -> Result<User> {
+    let s = json.dumps(raw)?
+    let u: User = json.loads(s)?
+    return Ok(u)
+}
+
+// ---------------------------------------------------------------------
+// Type para el body del POST. `id` se omite — SQLite lo asigna.
+// ---------------------------------------------------------------------
+
+type NewUser {
+    name: Str = "",
+    email: Str = "",
+}
+
+// ---------------------------------------------------------------------
+// Handlers HTTP. El `?` propaga errores SQLAlchemy (excepciones del
+// commit, queries vacías, ImportError si SQLAlchemy no está
+// instalado...) hacia el cliente como 500 con JSON `{"error": "..."}`.
+// ---------------------------------------------------------------------
+
+@server(3000)
+fn main() => 0
+
+@post("/users")
+fn create_user(body: NewUser) -> Result<User> {
+    let raw = db.add_user(body.name, body.email)?
+    return Ok(user_from_py(raw)?)
+}
+
+@get("/users/{id}")
+fn get_user(id: Int) -> Result<User> {
+    let raw = db.get_user(id)?
+    return Ok(user_from_py(raw)?)
+}
+
+// Para listar, devolvemos el JSON string crudo que SQLAlchemy + json
+// arman del lado Python. Esta forma evita la iteración con coerción
+// por item (que requiere iterar una `List<Any>` opaca con anotación
+// recursiva, deuda residual). El cliente HTTP recibe el JSON tal cual.
+//
+// Si querés `List<User>` Fitz nativa adentro del handler, hoy el
+// patrón es: invocar `db.list_users()`, dumps al String, y iterar
+// con `user_from_py` adentro de un `for` o `.map(...)`. Lo dejamos
+// como ejercicio.
+@get("/users")
+fn list_users() -> Result<Str> {
+    let raw = db.list_users()?
+    return Ok(json.dumps(raw)?)
+}
+
+print("")
+print("[ready] Server arrancando en http://127.0.0.1:3000")
+print("[ready] Endpoints:")
+// Escapamos las llaves del cuerpo del body para que no se parseen
+// como interpolación adentro del literal de print.
+let curly_open = "\{"
+let curly_close = "\}"
+print("[ready]   POST /users       — crear (body JSON: {curly_open}name, email{curly_close})")
+print("[ready]   GET  /users       — listar (JSON crudo)")
+print("[ready]   GET  /users/{curly_open}id{curly_close}  — buscar por id (User Fitz)")
+print("[ready]   GET  /docs        — UI Scalar (OpenAPI 3.1)")
