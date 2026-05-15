@@ -85,10 +85,95 @@ pub fn get_attr(handle: &PyObjectHandle, name: &str) -> FitzResult<Value> {
     })
 }
 
+/// Fase 8.1.4 — invocar un PyObject callable (función, método, clase)
+/// con args ya evaluados a `Value` Fitz. Toma el GIL una sola vez,
+/// convierte los args via `value_to_py`, invoca, y baja el return a
+/// `Value` via `py_to_value`. Sobre la convención de errores: cualquier
+/// excepción Python (TypeError, ValueError, etc.) se traduce al
+/// `FitzError` con "<ClassName>: <message>" como mensaje — el wrap a
+/// `Result<T>` llega en 8.3.
+pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
+    Python::attach(|py| {
+        let bound = handle.0.bind(py);
+        // Convertir cada arg Fitz → PyObject. Si alguno no es
+        // marshallable en 8.1 (List/Map/Instance/Range/Function/etc.),
+        // cortamos con el error explícito antes de tocar Python.
+        let py_args: Vec<Py<PyAny>> = args
+            .iter()
+            .map(|v| value_to_py(py, v))
+            .collect::<FitzResult<Vec<_>>>()?;
+        // `call1` toma una tupla posicional sin kwargs. Es el caso típico
+        // de `math.sqrt(16.0)` y `os.path.join("a", "b")`. Kwargs llega
+        // como deuda menor cuando entre demanda real.
+        let args_tuple = pyo3::types::PyTuple::new(py, py_args)
+            .map_err(|e| py_err_to_fitz(py, e))?;
+        match bound.call1(args_tuple) {
+            Ok(ret) => py_to_value(py, &ret),
+            Err(err) => Err(py_err_to_fitz(py, err)),
+        }
+    })
+}
+
+/// Convierte un `Value` Fitz a un `Py<PyAny>` para pasarlo a Python.
+/// Política 8.1 (primitivos):
+///   - `Int`   → `int`
+///   - `Float` → `float`
+///   - `Str`   → `str`
+///   - `Bool`  → `bool`
+///   - `Null`  → `None`
+///   - `PyObject(h)` → passthrough (un round-trip Fitz→Python→Fitz
+///     preserva identidad porque solo bumpamos el refcount).
+///
+/// Tipos compuestos (`List`, `Map`, `Instance`, `Range`, `Function`,
+/// etc.) → error explícito citando la deuda de 8.2.
+fn value_to_py(py: Python<'_>, value: &Value) -> FitzResult<Py<PyAny>> {
+    use pyo3::IntoPyObject;
+    match value {
+        Value::Int(n) => Ok(n.into_pyobject(py)
+            .map_err(|e| py_err_to_fitz(py, e.into()))?
+            .into_any()
+            .unbind()),
+        Value::Float(f) => Ok(f.into_pyobject(py)
+            .map_err(|e| py_err_to_fitz(py, e.into()))?
+            .into_any()
+            .unbind()),
+        Value::Str(s) => Ok(s.into_pyobject(py)
+            .map_err(|e| py_err_to_fitz(py, e.into()))?
+            .into_any()
+            .unbind()),
+        Value::Bool(b) => {
+            // `bool::into_pyobject` devuelve `Borrowed<'py, PyBool>` (no
+            // un `Bound`), porque True/False son singletons compartidos.
+            // Lo convertimos a `Py<PyAny>` via `.to_owned().into_any()`.
+            let bound = b.into_pyobject(py)
+                .map_err(|e| py_err_to_fitz(py, e.into()))?;
+            Ok(bound.to_owned().into_any().unbind())
+        }
+        Value::Null => Ok(py.None()),
+        // Passthrough: un `Value::PyObject` que cruza de vuelta a Python
+        // es el mismo objeto. Clonamos el `Py<PyAny>` (refcount bump).
+        Value::PyObject(h) => Ok(h.0.clone_ref(py)),
+        // Resto: en 8.1 solo soportamos primitivos. Cuando 8.2 cierre,
+        // estas ramas pasan a marshalling real (List → list, Map → dict,
+        // Instance → dict por field name).
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "primitivo o PyObject".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!(
+                "no se puede pasar un valor de tipo `{}` a una función Python en 8.1; \
+                 marshaling de tipos compuestos (List/Map/Instance) llega en 8.2",
+                other.type_name(),
+            ),
+        )),
+    }
+}
+
 /// Convierte un `Bound<'_, PyAny>` a `Value` Fitz aplicando la política
 /// de coerción primitiva. Helper reusable: lo consumen `get_attr`
-/// (8.1.3) y va a consumirlo el dispatcher de `Expr::Call` sobre
-/// PyObject (8.1.4) para procesar el return value.
+/// (8.1.3) y `call` (8.1.4) para procesar el return value.
 ///
 /// Pre-condición: el caller ya tomó el GIL (parámetro `py` lo testifica).
 fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
@@ -306,5 +391,106 @@ mod tests {
         let builtins = handle_of(import_module("builtins").unwrap());
         let v = get_attr(&builtins, "None").unwrap();
         assert_eq!(v, Value::Null);
+    }
+
+    // -------------------------------------------------------------------
+    // 8.1.4 — call + value_to_py
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn call_math_sqrt_16_da_float_4() {
+        let math = handle_of(import_module("math").unwrap());
+        let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
+        let v = call(&sqrt, &[Value::Float(16.0)]).expect("sqrt(16.0) ok");
+        assert_eq!(v, Value::Float(4.0));
+    }
+
+    #[test]
+    fn call_math_floor_arg_float_da_int() {
+        let math = handle_of(import_module("math").unwrap());
+        let floor = handle_of(get_attr(&math, "floor").unwrap());
+        let v = call(&floor, &[Value::Float(3.7)]).expect("floor ok");
+        assert_eq!(v, Value::Int(3));
+    }
+
+    #[test]
+    fn call_str_upper_via_call_no_aplica_es_metodo() {
+        // `str.upper("hola")` es válido en Python (unbound method). Usamos
+        // este caso para verificar que un argumento Str se marshalla bien.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let str_cls = handle_of(get_attr(&builtins, "str").unwrap());
+        let upper = handle_of(get_attr(&str_cls, "upper").unwrap());
+        let v = call(&upper, &[Value::Str("hola".into())]).expect("str.upper ok");
+        assert_eq!(v, Value::Str("HOLA".into()));
+    }
+
+    #[test]
+    fn call_arg_int_coerciona_a_pyint() {
+        // `abs(-7)` debería darnos `7`. Validamos que Int → int Python.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let abs_fn = handle_of(get_attr(&builtins, "abs").unwrap());
+        let v = call(&abs_fn, &[Value::Int(-7)]).expect("abs(-7) ok");
+        assert_eq!(v, Value::Int(7));
+    }
+
+    #[test]
+    fn call_arg_bool_coerciona_a_pybool() {
+        // `bool.__class__.__name__` de True → "bool". Mejor: `int(True)`
+        // → 1. Confirmamos que el Bool va como Python bool, no como int.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let int_cls = handle_of(get_attr(&builtins, "int").unwrap());
+        let v = call(&int_cls, &[Value::Bool(true)]).expect("int(True) ok");
+        assert_eq!(v, Value::Int(1));
+    }
+
+    #[test]
+    fn call_arg_null_coerciona_a_none() {
+        // `str(None)` da "None". Verifica que Null → Python None.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let str_cls = handle_of(get_attr(&builtins, "str").unwrap());
+        let v = call(&str_cls, &[Value::Null]).expect("str(None) ok");
+        assert_eq!(v, Value::Str("None".into()));
+    }
+
+    #[test]
+    fn call_excepcion_python_se_traduce_a_fitz_error() {
+        // `math.sqrt(-1)` lanza ValueError en Python. Verificamos que el
+        // mensaje del FitzError tiene formato "<ClassName>: <message>".
+        let math = handle_of(import_module("math").unwrap());
+        let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
+        let err = call(&sqrt, &[Value::Float(-1.0)]).expect_err("sqrt(-1) debería fallar");
+        assert!(
+            err.message.contains("ValueError"),
+            "mensaje debería citar ValueError, fue: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn call_arg_compuesto_no_marshalleable_es_error() {
+        // List, Map, Instance, etc. no son marshalleables en 8.1. El
+        // mensaje debe citar 8.2 como la fase que lo cubre.
+        let math = handle_of(import_module("math").unwrap());
+        let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
+        let err = call(&sqrt, &[Value::new_list(vec![Value::Int(1)])])
+            .expect_err("List no debería marshallarse en 8.1");
+        assert!(
+            err.message.contains("8.2"),
+            "mensaje debería citar 8.2 como sub-paso futuro, fue: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn call_pyobject_passthrough_preserva_identidad() {
+        // Pasar un Value::PyObject como arg: debería llegar al callable
+        // Python sin cambios. Validamos con `id(x) == id(x)` via `is`.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let id_fn = handle_of(get_attr(&builtins, "id").unwrap());
+        let math = import_module("math").unwrap();
+        // Mismo objeto pasado dos veces: `id` debe devolver el mismo Int.
+        let id1 = call(&id_fn, std::slice::from_ref(&math)).unwrap();
+        let id2 = call(&id_fn, &[math]).unwrap();
+        assert_eq!(id1, id2);
     }
 }

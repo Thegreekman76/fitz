@@ -2222,6 +2222,22 @@ async fn invoke_value(
             Ok(Value::Null)
         }
 
+        // Fase 8.1.4 — `Value::PyObject(callable)` cruza al runtime
+        // Python via `py_interop::call`. Cubre `let f = math.sqrt; f(16.0)`,
+        // funciones top-level del módulo Python pasadas como variable,
+        // y cualquier callable opaco. El error se enriquece con el span
+        // de la llamada para que el usuario vea dónde explotó.
+        #[cfg(feature = "python")]
+        Value::PyObject(handle) => {
+            crate::py_interop::call(&handle, &arg_values).map_err(|mut e| {
+                if e.line == 0 && e.column == 0 {
+                    e.line = span.line;
+                    e.column = span.column;
+                }
+                EvalSignal::Error(e)
+            })
+        }
+
         other => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeMismatch {
                 expected: "función".into(),
@@ -2280,6 +2296,23 @@ async fn dispatch_method(
                 ))
             })?;
             invoke_value(value, args, method, span).await
+        }
+        // Fase 8.1.4 — `pyobj.method(args)`: análogo al patrón de Module.
+        // Hacemos getattr para obtener el método/atributo (que puede ser
+        // function, bound method, etc.) y delegamos a `invoke_value`,
+        // que va a ratar la nueva rama de `Value::PyObject` callable.
+        // Cubre `math.sqrt(16.0)`, `os.path.join("a", "b")`, etc.
+        #[cfg(feature = "python")]
+        (Value::PyObject(handle), _) => {
+            let attr = crate::py_interop::get_attr(handle, method)
+                .map_err(|mut e| {
+                    if e.line == 0 && e.column == 0 {
+                        e.line = span.line;
+                        e.column = span.column;
+                    }
+                    EvalSignal::Error(e)
+                })?;
+            invoke_value(attr, args, method, span).await
         }
         _ => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
@@ -6879,6 +6912,132 @@ let r = match n {
             "mensaje: {}",
             err.message,
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Fase 8.1.4 — Expr::Call sobre Value::PyObject (criterio de éxito 8.1)
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn criterio_de_exito_8_1_math_sqrt_y_math_pi() {
+        // El criterio explícito del roadmap para cerrar Fase 8.1:
+        //   from python import math
+        //   print(math.sqrt(16.0))   // 4
+        //   print(math.pi)           // 3.141592653589793
+        // En el test no podemos capturar stdout, pero validamos los
+        // valores intermedios en variables.
+        let src = "\
+            from python import math\n\
+            let r = math.sqrt(16.0)\n\
+            let p = math.pi\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Float(4.0)));
+        let p = env.lock().get("p").unwrap();
+        match p {
+            Value::Float(f) => {
+                assert!((f - std::f64::consts::PI).abs() < 1e-15, "got {}", f);
+            }
+            other => panic!("esperaba Float, fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_via_method_dispatch_sobre_modulo_python() {
+        // `math.sqrt(16.0)` directo, sin pasar por let intermedio.
+        // El parser genera `Expr::Call { callee: Expr::Field {...} }`
+        // que cae al dispatch de método, que para PyObject hace
+        // getattr + invoke_value (rama nueva de 8.1.4).
+        let src = "let x = 4 + 5\nfrom python import math\nlet r = math.sqrt(x * x + 7 * 7)\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        // sqrt(81 + 49) = sqrt(130) ≈ 11.4018
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Float(f) => {
+                assert!((f - 130_f64.sqrt()).abs() < 1e-12, "got {}", f);
+            }
+            other => panic!("esperaba Float, fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_via_pyobject_guardado_en_variable() {
+        // `let f = math.sqrt; f(25.0)` — el callable se extrae primero
+        // (field access) y se invoca via Ident. Esto pega en
+        // `invoke_value` directo, no en `dispatch_method`.
+        let src = "\
+            from python import math\n\
+            let f = math.sqrt\n\
+            let r = f(25.0)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Float(5.0)));
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_python_con_excepcion_emite_fitz_error() {
+        // `math.sqrt(-1)` lanza ValueError en Python. En 8.1 abortamos
+        // con FitzError; el wrap a Result<T> llega en 8.3.
+        let src = "from python import math\nlet r = math.sqrt(-1.0)\n";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("ValueError"),
+            "mensaje: {}",
+            err.message,
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_python_con_arg_compuesto_es_error_de_marshaling() {
+        // List todavía no se marshalla en 8.1; el mensaje debe citar 8.2.
+        let src = "\
+            from python import math\n\
+            let xs = [1, 2, 3]\n\
+            let r = math.sqrt(xs)\n\
+        ";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("8.2"),
+            "mensaje: {}",
+            err.message,
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_python_arg_int_coerciona() {
+        // `abs(-7)` con arg Int Fitz → Int 7.
+        let src = "\
+            from python import builtins\n\
+            let v = builtins.abs(-7)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("v"), Some(Value::Int(7)));
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn call_python_chained_field_y_call() {
+        // `json.dumps` con string vacío como input → '""'. Esto valida
+        // chaining completo: field access + call + return como Str.
+        let src = "\
+            from python import json\n\
+            let s = json.dumps(\"hola\")\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("s"), Some(Value::Str("\"hola\"".into())));
     }
 
     #[cfg(feature = "python")]
