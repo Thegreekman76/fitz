@@ -1,34 +1,14 @@
-// main.rs — Entry point del compilador/intérprete de Fitz
+// main.rs — Entry point del compilador/intérprete de Fitz.
 //
-// Por ahora solo estructura básica y CLI.
-// Los módulos se irán implementando en las fases siguientes.
+// Los módulos viven en `src/lib.rs` desde Fase 9.x.1.b (refactor
+// lib + bin para que `fitz-lsp` pueda reusarlos sin compilación
+// duplicada). Acá solo importamos lo que el CLI consume.
 
-mod lexer;      // Fase 2.1 — tokenización
-mod ast;        // Fase 2.2 — definición del AST
-mod parser;     // Fase 2.3 — construcción del AST
-mod value;      // Fase 2.4 — valores en runtime
-mod env;        // Fase 2.4 — entornos / scopes
-mod evaluator;  // Fase 2.4 — ejecución
-mod error;      // manejo de errores del compilador
-mod http;       // Fase 4 — HTTP nativo (registry + runtime)
-mod types;      // Fase 5.2 — sistema de tipos resuelto + checker base
-mod codegen;    // Fase 5b.1 — transpile AST → Rust → binario
-mod openapi;    // Fase 7.1 — generador OpenAPI 3.1
+use fitz::{codegen, evaluator, http, lexer, openapi, parser, types};
 
-// Fase 8.1.2 — interop Python via PyO3 (feature opt-in `python`).
-// El módulo envuelve `Python::with_gil` + `py.import(...)` y produce
-// `Value::PyObject` para que el evaluator rutee `from python import X`
-// al runtime CPython embebido. Sin la feature el módulo no existe;
-// `evaluator::load_module` emite error claro citando el flag de build.
+// Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
 #[cfg(feature = "python")]
-mod py_interop;
-
-// Fase 8.5 — `fitz py-types`: introspecciona modelos SQLAlchemy en un
-// archivo Python y emite los `type` Fitz correspondientes a stdout o
-// archivo. Comparte el runtime CPython con `py_interop` (in-process,
-// no subprocess) para reusar el GIL + dep PyO3 ya disponible.
-#[cfg(feature = "python")]
-mod py_types;
+use fitz::py_types;
 
 use clap::{Parser, Subcommand};
 use std::fs;

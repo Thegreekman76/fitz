@@ -96,6 +96,13 @@ impl Environment {
     /// reescribe en el scope donde fue definida. Devuelve `Err(())` si la
     /// variable no existe en ningún scope visible — el evaluador convierte
     /// ese error en `FitzError::UndefinedVariable`.
+    //
+    // `Result<(), ()>` es un sentinel intencional (no portamos info extra
+    // en el `Err`, el caller la enriquece con `FitzError`). El lint
+    // `clippy::result_unit_err` aparece desde clippy 1.95, expuesto por
+    // el refactor lib+bin de Fase 9.x.1.b. Refactorizar a un newtype
+    // error queda como deuda menor — sin valor inmediato.
+    #[allow(clippy::result_unit_err)]
     pub fn assign(&mut self, name: &str, value: Value) -> Result<(), ()> {
         if self.vars.contains_key(name) {
             self.vars.insert(name.to_string(), value);
