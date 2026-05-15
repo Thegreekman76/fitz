@@ -12,11 +12,83 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
-hito comprometido es **Fase 8.2 — Marshaling de tipos compuestos**
-(List/Map/Instance/Null bidireccional con list/dict/None de Python),
-que destraba casos reales como `np.array([1, 2, 3])` y
-`pd.DataFrame({"a": [...]}); para handlers HTTP que devuelven datos
-compuestos vía SQLAlchemy también.
+hito comprometido es **Fase 8.3 — Excepciones Python → `Result<T>`**
+(wrap automático de toda llamada Python en `Result<T>`; el mensaje
+`"<ClassName>: <message>"` que 8.1.2 ya emite queda estable, solo
+cambia el envoltorio).
+
+## [v0.8.3] — 2026-05-15 — Fase 8.2: Marshaling de tipos compuestos
+
+Segundo sub-paso de la Fase 8 (Interop Python). Habilita el
+marshaling bidireccional de `List<T>` ↔ `list`, `Map<K, V>` ↔ `dict`,
+e `Instance` → `dict` (por field name). Cumple el criterio del
+roadmap end-to-end: una función Python que recibe `List<User>` y
+devuelve un mapping `email → cantidad` (`collections.Counter`)
+funciona sin perder data, con la `List<User>` original Fitz
+intacta después del round-trip.
+
+- **8.2.1 — Fitz → Python (`value_to_py`)**: refactor con
+  parámetro `path: &str` para breadcrumb informativo en errores
+  (ej. `arg0[2].email` apunta al sitio exacto adentro de la
+  estructura). Nuevas ramas:
+    - `Value::List(items)` → `PyList` con elementos recursivos
+      (copia eager).
+    - `Value::Map(pairs)` → `PyDict`. Las keys deben ser
+      primitivos hashables Python (Int/Float/Str/Bool/Null);
+      compuestos como key → error claro citando la restricción.
+      Helper `marshal_map_key` valida antes de tocar `dict.__setitem__`.
+    - `Value::Instance { type_name, fields }` → `PyDict` con
+      field names como keys (traducción nominal). El tipo Fitz
+      se "olvida" del lado Python; recuperarlo en el round-trip
+      requiere anotación destino (deuda 8.4).
+  Política cross-cutting #4 del roadmap: copia eager bidireccional,
+  sin aliasing entre los dos GCs. Tipos no marshalleables
+  (Range, Function, Future, Type, Module, HttpResponse, CorsConfig,
+  Result) → error con path. Test del fallback 8.1.4 reapuntado a
+  Range (sigue sin ser marshalleable).
+- **8.2.2 — Python → Fitz (`py_to_value`)**: nuevas ramas para
+  `PyList` y `PyDict` antes del fallback opaco. Ambas con
+  recursión sobre elementos/pares. Resultado semánticamente
+  `List<Any>`/`Map<Any, Any>` desde Fitz porque Python no nos da
+  tipo estático; refinar a tipos concretos requiere anotación
+  destino del lado Fitz (deuda 8.4). CPython 3.7+ garantiza
+  orden de inserción para `dict`; preservarlo da paridad bit-a-bit
+  con `serde_json::preserve_order` que ya usa el resto del
+  proyecto. Decisión explícita: `dict` Python NO se auto-coerce
+  a `Instance` Fitz — eso es 8.4. PyO3 0.28 deprecó `downcast`
+  en favor de `cast`; usamos `cast`.
+- **8.2.3 — Criterio de éxito end-to-end + ejemplo runnable**:
+  pipeline canónico `List<User>` Fitz → `Counter` Python →
+  `Map<Str, Int>` Fitz funciona sin glue extra porque
+  `collections.Counter` es subclass de `dict` y `is_instance_of::
+  <PyDict>()` matchea subclases. Validado bit-a-bit. Nuevo
+  `examples/python-interop-8.2.fitz` con 5 secciones (Fitz →
+  Python, Python → Fitz, round-trip, criterio canónico, copia
+  eager). NO entra al smoke `GUIDE_EXAMPLES_COMPILE` (interop
+  Python es `fitz run` only — deuda F19).
+
+**Tests al cierre**:
+  - Sin feature: **1175 unit** (sin cambios — todos los nuevos
+    tests son `#[cfg(feature = "python")]`) + 80 compile_e2e + 3 openapi_e2e.
+  - Con feature: **1245 unit** (+ 20 en `py_interop` y + 12 en
+    evaluator distribuidos entre 8.2.1/8.2.2/8.2.3, más 2 ajustes
+    a tests viejos de 8.1.4 que asumían "List como arg → error
+    citando 8.2" — ahora List sí marshalla y Python rechaza con
+    TypeError) + 80 + 3.
+  - Clippy `-D warnings` limpio en ambos modos.
+
+**Detalles de implementación notables**:
+
+- Breadcrumb de errores con `path: &str` propagado recursivamente:
+  un Range adentro de `List<Map<Str, List<Range>>>` reporta
+  `arg0[2]["k"][3]` o similar.
+- Llaves JSON `{...}` en source Fitz se escapan con `\{`/`\}` para
+  evitar interpolación de strings. Documentado en el ejemplo.
+- Map keys cuando va a Python: helper `marshal_map_key` con
+  validación temprana (mensaje más útil que el `TypeError:
+  unhashable type` que Python lanzaría).
+
+Detalle completo: `docs/roadmap.md` → "Fase 8.2".
 
 ## [v0.8.2] — 2026-05-15 — Fase 8.1: Embedding básico de CPython
 

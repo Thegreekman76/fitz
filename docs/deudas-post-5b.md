@@ -183,6 +183,28 @@
 > Ejemplo runnable: `examples/python-interop-8.1.fitz`. Detalles
 > completos en `docs/roadmap.md` → "Fase 8.1". Próximo norte:
 > **Fase 8.2 (marshaling de tipos compuestos)**.
+>
+> **Fase 8.2 (2026-05-15): CERRADA** — marshaling bidireccional de
+> tipos compuestos. `List<T>` ↔ `list`, `Map<K, V>` ↔ `dict`,
+> `Instance` → `dict` (por field name; recovery a `Instance` requiere
+> anotación destino — deuda 8.4). Tres sub-pasos: 8.2.1 `value_to_py`
+> con parámetro `path: &str` para breadcrumb informativo (`arg0[2].email`)
+> + helpers `marshal_map_key` (valida keys hashables) y `fmt_map_key`
+> (cosmético para path); 8.2.2 `py_to_value` con ramas `PyList`/`PyDict`
+> antes del fallback opaco (PyO3 0.28 deprecó `downcast` en favor de
+> `cast` — migrado); 8.2.3 criterio canónico del roadmap end-to-end —
+> `List<User>` Fitz → `collections.Counter` Python → `Map<Str, Int>`
+> Fitz indexable, validado bit-a-bit (Counter es subclass de dict,
+> `is_instance_of::<PyDict>()` matchea subclases naturalmente).
+> Decisiones: copia eager bidireccional (cross-cutting #4),
+> Map keys solo primitivos hashables Python, `dict` Python NO se
+> auto-coerce a `Instance`, orden preservado vía garantía CPython
+> 3.7+, breadcrumb propagado recursivamente. Total al cierre:
+> **1245 unit + 80 E2E + 3 openapi_e2e** con feature; **1175 + 80
+> + 3** sin feature. Ejemplo runnable nuevo:
+> `examples/python-interop-8.2.fitz` (5 secciones). Detalles
+> completos en `docs/roadmap.md` → "Fase 8.2". Próximo norte:
+> **Fase 8.3 (excepciones Python → `Result<T>`)**.
 
 ## Resumen ejecutivo
 

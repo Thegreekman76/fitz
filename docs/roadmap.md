@@ -2918,44 +2918,135 @@ Fase 8.2 (marshaling de tipos compuestos).
   (pospuesto explícitamente al menos hasta 8.4).
 
 #### 8.2 — Marshaling de tipos compuestos
-**Pendiente** — extender las conversiones bidireccionales a
-List, Map, Instance y Null. Sin esto, los casos reales no son
-viables.
+**Estado: CERRADA (2026-05-15)** — 1245 unit + 80 compile_e2e
++ 3 openapi_e2e con feature `python`; 1175 + 80 + 3 sin feature.
 
-- `List<T> ↔ list`: copia eager elemento por elemento. T
-  concreto requerido del lado Fitz (`List<Any>` cae al modelo
-  gradual).
-- `Map<K, V> ↔ dict`: copia eager. K debe ser hashable en
-  Python (Str/Int/Bool/Float). K = tipo nominal → error con
-  mensaje claro.
-- `Instance ↔ dict`: traducción nominal vía nombres de campo.
-  De Fitz a Python: `User { id: 1, name: "x" }` se convierte
-  a `{"id": 1, "name": "x"}`. De Python a Fitz: dict con
-  campos compatibles con el tipo declarado del receptor. Campos
-  faltantes (nullable o con default) se completan; faltantes
-  no-nullables → error.
-- `Null ↔ None`.
-- Tipos no marshalleables (Range, Function, otros PyObject
-  anidados) → error explícito al cruzar la frontera.
+Extiende las conversiones bidireccionales a `List`, `Map` e
+`Instance` (`Null` ya estaba en 8.1.4). Cumple el criterio
+canónico del roadmap end-to-end: una función Python que recibe
+`List<User>` y devuelve un mapping `email → cantidad`
+(`collections.Counter` del módulo estándar) funciona sin perder
+data — pipeline completo `users.map(fn(u) => u.email)` → `Counter`
+→ `Map<Str, Int>` Fitz indexable nativamente.
 
-**Criterio de éxito**: una función Python que recibe
-`List<User>` y devuelve `Map<Str, Int>` (un `count_by_email`,
-por ejemplo) tipa limpio en Fitz y se ejecuta sin perder data.
+**Decisiones técnicas tomadas al arrancar el sub-paso** (todas
+alineadas con el roadmap original):
 
-**Decisiones técnicas a resolver**:
-- **Identidad vs referencia**: ¿`Rc<RefCell<List<T>>>` de Fitz
-  comparte estado con la `list` Python o se copia? El intérprete
-  Fitz tiene aliasing real entre instancias. Recomendación
-  para 8.2: **copia eager bidireccional**. Trade-off conocido
-  (caro para listas grandes), pero evita pesadillas de lifetime
-  entre dos GCs (refcount Rc + GC Python) y race conditions
-  GIL/tokio. Optimizaciones zero-copy con buffers protocolo
-  quedan para Fase 9+.
-- **Costo de marshaling**: una llamada Python con N args
-  primitivos + ret compuesto cuesta O(tamaño del ret) por la
-  copia. Cuantificable; las queries SQLAlchemy típicas
-  devuelven decenas de filas con pocos campos, entra cómodo en
-  el presupuesto de latencia de un endpoint HTTP.
+- **Copia eager bidireccional** (cross-cutting #4): los dos GCs
+  no comparten estado. Una `List<T>` Fitz que va a Python se
+  convierte en una `list` Python independiente; mutaciones del
+  lado Python no se propagan a la List original Fitz, y
+  viceversa. Trade-off conocido (caro para listas grandes),
+  evita pesadillas de lifetime entre `Arc<Mutex>` Rust y el
+  GC de CPython, y race conditions GIL/tokio. Optimizaciones
+  zero-copy con buffer protocol quedan para Fase 9+.
+- **Map keys cuando va a Python**: solo primitivos hashables
+  (Int/Float/Str/Bool/Null). Tipos compuestos (List/Map/Instance)
+  no son hashables en Python; los validamos antes de tocar
+  `dict.__setitem__` para dar mensaje específico citando la
+  restricción.
+- **Heterogéneos OK**: Python `list`/`dict` admite mezcla de
+  tipos naturalmente; no imponemos T concreto desde el lado Fitz.
+- **`dict` Python → `Map` Fitz, NO `Instance`**: la coerción a
+  `Instance` necesita anotación destino del lado Fitz y se cubre
+  en 8.4 con la regla `let user: User = py_call(...)?`. Sin
+  anotación, `dict` queda como `Map<Any, Any>` semánticamente.
+- **Orden preservado**: CPython 3.7+ garantiza orden de inserción
+  para `dict`; aprovecharlo da paridad bit-a-bit con
+  `serde_json::preserve_order` que ya usa el resto del proyecto
+  y con `Vec<(Value, Value)>` que es la representación interna
+  de `Value::Map`.
+- **Breadcrumb de errores con `path: &str`** propagado
+  recursivamente: un `Range` adentro de `List<Map<Str, List<Range>>>`
+  reporta `arg0[2]["k"][3]` o similar. Crítico para debugging de
+  estructuras compuestas grandes.
+- **Tuple/set/bytes** quedan como `Value::PyObject` opaco (no
+  marshalleados a List/Map). Si entra demanda real, se pueden
+  agregar en una fase futura sin romper la API.
+
+**Sub-pasos**:
+
+- **8.2.1** — Fitz → Python (`value_to_py`) ✓ — refactor con
+  parámetro `path: &str` para breadcrumb. Nuevas ramas:
+  `Value::List` → `PyList`, `Value::Map` → `PyDict` (con helper
+  `marshal_map_key` validando keys hashables), `Value::Instance`
+  → `PyDict` por field name. Recursión sobre elementos via la
+  misma `value_to_py`. Errores con path informativo
+  (`arg0.User.range`). Helper privado `fmt_map_key` para
+  segmentar keys en el path (`"a"` con comillas para Str, literal
+  para Int/Float/Bool/Null — cosmético). Tipos no marshalleables
+  (Range, Function, Type, Module, HttpResponse, CorsConfig,
+  Future, Result) → error con path. Test viejo de 8.1.4 que
+  asumía "List como arg → error citando 8.2" se reapunta a
+  Range (sigue sin ser marshalleable); test del evaluator
+  análogo se reapunta a "Python rechaza con TypeError" porque
+  la List ahora SÍ pasa y `math.sqrt([1,2,3])` lanza TypeError
+  de Python.
+- **8.2.2** — Python → Fitz (`py_to_value`) ✓ — nuevas ramas
+  antes del fallback opaco: `PyList` → `Value::List` (vía
+  `obj.cast::<PyList>()` — PyO3 0.28 deprecó `downcast` en favor
+  de `cast`); `PyDict` → `Value::Map` con orden de inserción
+  preservado. Recursión simétrica sobre elementos. Resultado
+  semánticamente `List<Any>`/`Map<Any, Any>` desde Fitz (Python
+  no nos da tipo estático); refinar a tipos concretos requiere
+  anotación destino (deuda 8.4). Decisión explícita: `dict` NO
+  se auto-coerce a `Instance`. El fallback `Value::PyObject`
+  ahora solo aplica a tuple/set/bytes/función/clase/instancia/
+  submódulo.
+- **8.2.3** — Criterio de éxito end-to-end + ejemplo runnable ✓ —
+  pipeline canónico `List<User>` Fitz → `users.map(fn(u) =>
+  u.email)` → `Map<Str, Int>` Python via `collections.Counter`
+  → `Map<Str, Int>` Fitz indexable. `Counter` es subclass de
+  `dict`; `is_instance_of::<PyDict>()` matchea subclases, así
+  que el round-trip funciona sin glue adicional (sin `dict()`
+  envoltorio). Test adicional valida la política "copia eager":
+  la `List<User>` Fitz original sigue accesible como Fitz nativa
+  después del round-trip, con `Value::Instance` adentro (no
+  contaminada por PyObjects). `examples/python-interop-8.2.fitz`
+  con 5 secciones (Fitz → Python, Python → Fitz, round-trip que
+  preserva estructura, criterio canónico, copia eager) validado
+  a mano bit-a-bit. NO entra al smoke `GUIDE_EXAMPLES_COMPILE`
+  porque interop Python es `fitz run` only (deuda F19).
+
+**Criterio de éxito** (del roadmap, cumplido):
+```fitz
+type User { id: Int, email: Str }
+from python import collections
+
+let users = [
+    User { id: 1, email: "alice@x.com" },
+    User { id: 2, email: "bob@x.com" },
+    User { id: 3, email: "alice@x.com" },
+]
+let emails = users.map(fn(u) => u.email)
+let counts = collections.Counter(emails)
+// counts: Map<Str, Int> indexable como cualquier Map Fitz
+// counts["alice@x.com"] == 2
+```
+
+Validado bit-a-bit en `criterio_8_2_count_by_email_con_counter`
+(test del evaluator) y en `examples/python-interop-8.2.fitz`.
+
+**Cierre formal de Fase 8.2**: 1245 unit + 80 compile_e2e +
+3 openapi_e2e con feature `python`; 1175 + 80 + 3 sin feature.
+Clippy `-D warnings` limpio en ambos modos. **Próximo norte**:
+Fase 8.3 (excepciones Python → `Result<T>`).
+
+**Deuda residual visible que se queda como sub-paso futuro**:
+- **Tuple/set/bytes** ↔ `List`/`Map`/`Value::Str(bytes hex)`
+  (deuda menor — el fallback `PyObject` los preserva opacos).
+- **Cycles** en `List`/`Map` Fitz (técnicamente posible con
+  `Arc<Mutex>`) no se manejan explícitamente: caso edge raro en
+  interop práctica.
+- **Bignum**: int Python > `i64` sigue dando error (deuda
+  arrastrada de 8.1.3). Cuando entre demanda, agregar variante
+  `Value::BigInt` o fallback a `PyObject`.
+- **Marshalling perf**: una llamada Python con N args primitivos
+  + ret compuesto cuesta O(tamaño del ret) por la copia. Las
+  queries SQLAlchemy típicas devuelven decenas de filas con
+  pocos campos, entra cómodo en el presupuesto de latencia de
+  un endpoint HTTP. Optimizar con zero-copy queda para Fase 9+
+  si entra presión real.
 
 #### 8.3 — Excepciones Python → Result<T>
 **Pendiente** — convención automática: **toda** llamada a una

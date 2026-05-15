@@ -136,17 +136,17 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.1 cerrada — Fitz puede importar librerías Python.**
-`from python import math` desde el intérprete (`fitz run --features
-python`) con auto-coerción de primitivos. Cumple el criterio del
-roadmap end-to-end: `math.sqrt(16.0)` → `4.0`, `math.pi` →
-`3.141592653589793`. PyO3 0.28 con ABI3-py310 (un binario corre
-contra cualquier Python 3.10+ instalado en la máquina). Feature
-opt-in: el binario `fitz` default sigue siendo standalone sin link
-a libpython. La interop completa (marshaling de tipos compuestos,
-excepciones → Result, SQLAlchemy/NumPy ergonómico) llega en los
-sub-pasos siguientes (8.2 a 8.8). Ver el [roadmap](docs/roadmap.md)
-para el plan completo.
+🏔️ **Fase 8.2 cerrada — Fitz pasa estructuras compuestas entre
+los dos runtimes.** `List<T>` ↔ `list`, `Map<K, V>` ↔ `dict`, e
+`Instance` → `dict` (por field name) cruzan la frontera Fitz ↔
+Python con copia eager bidireccional. Cumple el criterio canónico
+del roadmap: una función Python que recibe `List<User>` y devuelve
+`Map<Str, Int>` (vía `collections.Counter`) funciona sin glue
+extra y sin perder data. Los errores con tipos no marshalleables
+llevan breadcrumb informativo (`arg0[2].email`). La interop completa
+(excepciones → Result, anotaciones de tipo Python, SQLAlchemy/NumPy
+ergonómico) llega en los sub-pasos siguientes (8.3 a 8.8). Ver el
+[roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
 
@@ -223,18 +223,30 @@ Las fases cerradas:
   criterio del roadmap end-to-end), 8.1.5 guard de codegen
   (`fitz build` aborta con mensaje claro — deuda F19 comprometida
   para sub-paso futuro).
+- **Fase 8.2 — Marshaling de tipos compuestos**: `List<T>` ↔
+  `list`, `Map<K, V>` ↔ `dict`, e `Instance` → `dict` (por field
+  name) entre los dos runtimes. Copia eager bidireccional, sin
+  aliasing entre los dos GCs. Errores con breadcrumb informativo
+  (`arg0[2].email`) para localizar tipos no marshalleables adentro
+  de estructuras compuestas. Sub-pasos: 8.2.1 `value_to_py` con
+  parámetro `path` y nuevas ramas List/Map/Instance, 8.2.2
+  `py_to_value` con ramas PyList/PyDict antes del fallback opaco,
+  8.2.3 criterio canónico end-to-end (`List<User>` →
+  `collections.Counter` → `Map<Str, Int>`) + ejemplo runnable
+  `examples/python-interop-8.2.fitz`.
 
-**1213 tests pasando con `--features python`** (1213 unit + 80 E2E
+**1245 tests pasando con `--features python`** (1245 unit + 80 E2E
 con `fitz build` + 3 openapi_e2e). **1175 + 80 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.2 — Marshaling de tipos compuestos**
-(List/Map/Instance/Null ↔ list/dict/None Python — destraba kwargs
-como Map, `np.array([...])`, `pd.DataFrame({...})`, handlers HTTP
-con returns compuestos vía Python). Después: 8.3 (excepciones →
-`Result<T>`), 8.4 (anotaciones del lado Fitz), 8.5 (`fitz
-py-types`), 8.6 (async + GIL), 8.7 (CPython bundled — candidato
-para cerrar F19), 8.8 (guía + ejemplo CRUD). Ver el
+Próximo norte: **Fase 8.3 — Excepciones Python → `Result<T>`**
+(wrap automático de toda llamada Python; el mensaje
+`"<ClassName>: <message>"` que 8.1.2 ya emite queda estable —
+solo cambia el envoltorio. Preserva la decisión de diseño "sin
+excepciones" del lenguaje). Después: 8.4 (anotaciones del lado
+Fitz para `let user: User = py_call(...)?`), 8.5 (`fitz py-types`
+auto-mapeo SQLAlchemy), 8.6 (async + GIL), 8.7 (CPython bundled —
+candidato para cerrar F19), 8.8 (guía + ejemplo CRUD). Ver el
 [roadmap](docs/roadmap.md) para detalle. **Deudas comprometidas
 que siguen**: F19 (codegen interop Python en `fitz build`),
 descripciones via doc-strings sobre handlers (OpenAPI enrichment),
