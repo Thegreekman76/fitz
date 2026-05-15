@@ -23,6 +23,13 @@ mod openapi;    // Fase 7.1 — generador OpenAPI 3.1
 #[cfg(feature = "python")]
 mod py_interop;
 
+// Fase 8.5 — `fitz py-types`: introspecciona modelos SQLAlchemy en un
+// archivo Python y emite los `type` Fitz correspondientes a stdout o
+// archivo. Comparte el runtime CPython con `py_interop` (in-process,
+// no subprocess) para reusar el GIL + dep PyO3 ya disponible.
+#[cfg(feature = "python")]
+mod py_types;
+
 use clap::{Parser, Subcommand};
 use std::fs;
 use std::path::PathBuf;
@@ -63,6 +70,19 @@ enum Commands {
         /// Archivo a inspeccionar
         file: PathBuf,
     },
+    /// Fase 8.5 — Genera `type` Fitz a partir de modelos SQLAlchemy
+    /// definidos en un archivo Python. La introspección usa duck
+    /// typing sobre `__table__.columns`: cualquier clase con ese
+    /// shape se traduce (compatible con SQLAlchemy real y mocks
+    /// equivalentes). Requiere binario `fitz` compilado con
+    /// `--features python`.
+    PyTypes {
+        /// Archivo Python con modelos a introspeccionar
+        source: PathBuf,
+        /// Archivo destino. Si se omite, escribe a stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -81,7 +101,49 @@ fn main() {
         Commands::Openapi { file } => {
             openapi_file(&file);
         }
+        Commands::PyTypes { source, out } => {
+            py_types_file(&source, out.as_deref());
+        }
     }
+}
+
+/// `fitz py-types <archivo.py> [--out <archivo.fitz>]` — Fase 8.5.
+/// Importa el archivo Python via PyO3, introspecciona las clases con
+/// `__table__.columns` (compatible con SQLAlchemy real y mocks), y
+/// genera `type` Fitz correspondientes. Escribe a stdout o al
+/// `--out` indicado.
+///
+/// Sin feature `python`, emite error claro citando el flag de build.
+#[cfg(feature = "python")]
+fn py_types_file(source: &std::path::Path, out: Option<&std::path::Path>) {
+    let output = match py_types::generate_from_file(source) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ py-types: {}", e);
+            std::process::exit(1);
+        }
+    };
+    match out {
+        Some(path) => match fs::write(path, &output) {
+            Ok(_) => println!("✓ types Fitz emitidos a {}", path.display()),
+            Err(e) => {
+                eprintln!("✗ py-types: no se pudo escribir `{}`: {}", path.display(), e);
+                std::process::exit(1);
+            }
+        },
+        None => print!("{}", output),
+    }
+}
+
+#[cfg(not(feature = "python"))]
+fn py_types_file(_source: &std::path::Path, _out: Option<&std::path::Path>) {
+    eprintln!(
+        "✗ `fitz py-types` requiere recompilar `fitz` con interop Python habilitada. \
+         Este binario se compiló sin la feature `python`. \
+         Recompilá con `cargo install --features python` (o \
+         `cargo build --features python`)."
+    );
+    std::process::exit(1);
 }
 
 /// `fitz openapi <archivo>` — Fase 7.1. Lex + parse + check + eval
