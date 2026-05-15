@@ -96,11 +96,15 @@ pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
     Python::attach(|py| {
         let bound = handle.0.bind(py);
         // Convertir cada arg Fitz → PyObject. Si alguno no es
-        // marshallable en 8.1 (List/Map/Instance/Range/Function/etc.),
-        // cortamos con el error explícito antes de tocar Python.
+        // marshallable, cortamos con error explícito antes de tocar
+        // Python. El `path` arranca como `arg<i>` para que errores
+        // adentro de tipos compuestos (List/Map/Instance) lleven
+        // breadcrumb informativo: ej. `arg0.users[2].email` apunta
+        // al campo concreto donde algo no se pudo marshallar.
         let py_args: Vec<Py<PyAny>> = args
             .iter()
-            .map(|v| value_to_py(py, v))
+            .enumerate()
+            .map(|(i, v)| value_to_py(py, v, &format!("arg{}", i)))
             .collect::<FitzResult<Vec<_>>>()?;
         // `call1` toma una tupla posicional sin kwargs. Es el caso típico
         // de `math.sqrt(16.0)` y `os.path.join("a", "b")`. Kwargs llega
@@ -115,19 +119,36 @@ pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
 }
 
 /// Convierte un `Value` Fitz a un `Py<PyAny>` para pasarlo a Python.
-/// Política 8.1 (primitivos):
+/// Política 8.2 (primitivos + compuestos):
+///
 ///   - `Int`   → `int`
 ///   - `Float` → `float`
 ///   - `Str`   → `str`
 ///   - `Bool`  → `bool`
 ///   - `Null`  → `None`
-///   - `PyObject(h)` → passthrough (un round-trip Fitz→Python→Fitz
-///     preserva identidad porque solo bumpamos el refcount).
+///   - `PyObject(h)` → passthrough con `clone_ref` (refcount bump);
+///     un round-trip Fitz→Python→Fitz preserva identidad.
+///   - `List<T>` → `list` (copia eager elemento por elemento; cada
+///     elemento se marshalla recursivo).
+///   - `Map<K, V>` → `dict` (copia eager; las keys deben ser
+///     primitivos hashables Python — Int/Float/Str/Bool/Null —
+///     porque `dict` requiere `__hash__`).
+///   - `Instance { type_name, fields }` → `dict` con field names
+///     como keys (traducción nominal). El tipo Fitz se "olvida" del
+///     lado Python — recoverlo en el round-trip requiere anotación
+///     destino (deuda 8.4).
 ///
-/// Tipos compuestos (`List`, `Map`, `Instance`, `Range`, `Function`,
-/// etc.) → error explícito citando la deuda de 8.2.
-fn value_to_py(py: Python<'_>, value: &Value) -> FitzResult<Py<PyAny>> {
+/// Tipos no marshalleables (`Range`, `Function`, `Future`, etc.) →
+/// error con `path` que apunta al sitio exacto adentro de la
+/// estructura (ej. `arg0.users[2].email`).
+///
+/// Política "copia eager" (decisión cross-cutting #4 del roadmap):
+/// no compartimos estado entre los dos GCs. Una `List<T>` Fitz que
+/// va a Python se convierte en una `list` Python independiente; si
+/// la `list` Python se muta, la `List<T>` Fitz original no se entera.
+fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny>> {
     use pyo3::IntoPyObject;
+    use pyo3::types::{PyDict, PyList};
     match value {
         Value::Int(n) => Ok(n.into_pyobject(py)
             .map_err(|e| py_err_to_fitz(py, e.into()))?
@@ -153,21 +174,114 @@ fn value_to_py(py: Python<'_>, value: &Value) -> FitzResult<Py<PyAny>> {
         // Passthrough: un `Value::PyObject` que cruza de vuelta a Python
         // es el mismo objeto. Clonamos el `Py<PyAny>` (refcount bump).
         Value::PyObject(h) => Ok(h.0.clone_ref(py)),
-        // Resto: en 8.1 solo soportamos primitivos. Cuando 8.2 cierre,
-        // estas ramas pasan a marshalling real (List → list, Map → dict,
-        // Instance → dict por field name).
+
+        // Fase 8.2 — compuestos.
+        Value::List(items) => {
+            // Clonamos el Vec adentro del lock para no mantener el
+            // MutexGuard vivo durante la recursión: cada elemento
+            // toma su propio lock potencialmente (Lists anidadas).
+            let snapshot: Vec<Value> = items.lock().clone();
+            let mut py_items: Vec<Py<PyAny>> = Vec::with_capacity(snapshot.len());
+            for (i, v) in snapshot.iter().enumerate() {
+                let elem_path = format!("{}[{}]", path, i);
+                py_items.push(value_to_py(py, v, &elem_path)?);
+            }
+            let list = PyList::new(py, py_items)
+                .map_err(|e| py_err_to_fitz(py, e))?;
+            Ok(list.into_any().unbind())
+        }
+        Value::Map(pairs) => {
+            let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
+            let dict = PyDict::new(py);
+            for (k, v) in snapshot.iter() {
+                // Las keys deben ser primitivos hashables Python.
+                // Tipos compuestos (List/Map/Instance) no son hashables
+                // y romperían `dict.__setitem__`. Detectamos antes de
+                // tocar Python para dar mensaje específico.
+                let py_k = marshal_map_key(py, k, path)?;
+                let v_path = format!("{}[{}]", path, fmt_map_key(k));
+                let py_v = value_to_py(py, v, &v_path)?;
+                dict.set_item(py_k, py_v)
+                    .map_err(|e| py_err_to_fitz(py, e))?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+        Value::Instance { type_name, fields } => {
+            let snapshot: Vec<(String, Value)> = fields.lock().clone();
+            let dict = PyDict::new(py);
+            // Instance se traduce a dict con field names como keys.
+            // Si el path arranca vacío (caso top-level, raro porque
+            // `call` siempre setea `arg<i>`), usamos `type_name`
+            // como prefijo para que el error sea legible.
+            let prefix: String = if path.is_empty() {
+                type_name.clone()
+            } else {
+                path.to_string()
+            };
+            for (field_name, v) in snapshot.iter() {
+                let field_path = format!("{}.{}", prefix, field_name);
+                let py_v = value_to_py(py, v, &field_path)?;
+                dict.set_item(field_name.as_str(), py_v)
+                    .map_err(|e| py_err_to_fitz(py, e))?;
+            }
+            Ok(dict.into_any().unbind())
+        }
+
+        // Resto (Range, Function/Builtin, Type, Module, HttpResponse,
+        // CorsConfig, Future, Result): no son marshalleables. El
+        // `Result` se traduce mejor del lado handler HTTP (Ok→200,
+        // Err→500); cruzar a Python como objeto no tiene semántica útil.
         other => Err(FitzError::new(
             ErrorKind::TypeMismatch {
-                expected: "primitivo o PyObject".into(),
+                expected: "primitivo, compuesto (List/Map/Instance) o PyObject".into(),
                 found: other.type_name().into(),
             },
             0, 0,
             format!(
-                "no se puede pasar un valor de tipo `{}` a una función Python en 8.1; \
-                 marshaling de tipos compuestos (List/Map/Instance) llega en 8.2",
+                "no se puede pasar un valor de tipo `{}` a Python (en `{}`); \
+                 tipos no marshalleables: Range, Function, Type, Module, \
+                 HttpResponse, CorsConfig, Future, Result",
+                other.type_name(),
+                path,
+            ),
+        )),
+    }
+}
+
+/// Valida que una `key` de `Map` Fitz sea hashable en Python (Int/
+/// Float/Str/Bool/Null) y la marshalla. Compuestos como key →
+/// error claro, porque Python `dict` exige `__hash__` y List/Map/
+/// Instance no lo tienen (igual que `list`/`dict` en Python no son
+/// hashables).
+fn marshal_map_key(py: Python<'_>, k: &Value, path: &str) -> FitzResult<Py<PyAny>> {
+    match k {
+        Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bool(_) | Value::Null => {
+            value_to_py(py, k, &format!("{}.<key>", path))
+        }
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int/Float/Str/Bool/Null (hashable en Python)".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!(
+                "key de Map no es hashable en Python (en `{}`): \
+                 las keys de un dict Python deben ser primitivos \
+                 (Int/Float/Str/Bool/Null), pero llegó un `{}`",
+                path,
                 other.type_name(),
             ),
         )),
+    }
+}
+
+/// Formatea una `key` de `Map` para usarla como segmento en el
+/// breadcrumb del path. `Str("a")` → `"\"a\""`, `Int(42)` → `42`,
+/// resto → su `Display`. Solo cosmético — no afecta el marshalling.
+fn fmt_map_key(k: &Value) -> String {
+    match k {
+        Value::Str(s) => format!("\"{}\"", s),
+        other => format!("{}", other),
     }
 }
 
@@ -467,16 +581,20 @@ mod tests {
     }
 
     #[test]
-    fn call_arg_compuesto_no_marshalleable_es_error() {
-        // List, Map, Instance, etc. no son marshalleables en 8.1. El
-        // mensaje debe citar 8.2 como la fase que lo cubre.
+    fn call_arg_no_marshalleable_es_error_con_path() {
+        // Range no es marshalleable (no tiene contraparte natural en
+        // Python — Python `range` no es lo mismo semánticamente, y el
+        // roadmap lo lista explícitamente como no marshalleable).
+        // 8.2.1: List/Map/Instance ahora SÍ se marshallan; este test
+        // se reapuntó a Range. El mensaje cita el path "arg0" para
+        // que el usuario sepa qué arg falló.
         let math = handle_of(import_module("math").unwrap());
         let sqrt = handle_of(get_attr(&math, "sqrt").unwrap());
-        let err = call(&sqrt, &[Value::new_list(vec![Value::Int(1)])])
-            .expect_err("List no debería marshallarse en 8.1");
+        let err = call(&sqrt, &[Value::Range { start: 0, end: 10 }])
+            .expect_err("Range no debería marshallarse");
         assert!(
-            err.message.contains("8.2"),
-            "mensaje debería citar 8.2 como sub-paso futuro, fue: {}",
+            err.message.contains("Range") && err.message.contains("arg0"),
+            "mensaje debería citar Range + arg0, fue: {}",
             err.message,
         );
     }
@@ -492,5 +610,191 @@ mod tests {
         let id1 = call(&id_fn, std::slice::from_ref(&math)).unwrap();
         let id2 = call(&id_fn, &[math]).unwrap();
         assert_eq!(id1, id2);
+    }
+
+    // -------------------------------------------------------------------
+    // 8.2.1 — value_to_py para List/Map/Instance (Fitz → Python)
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn list_de_ints_se_marshalla_a_list_python() {
+        // `json.dumps([1, 2, 3])` → "[1, 2, 3]". El round-trip vía
+        // json valida que la list Python que produjimos tiene los
+        // elementos correctos en orden.
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let list = Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+        let v = call(&dumps, &[list]).expect("dumps([1,2,3]) ok");
+        assert_eq!(v, Value::Str("[1, 2, 3]".into()));
+    }
+
+    #[test]
+    fn list_vacia_se_marshalla_a_list_vacia() {
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let list = Value::new_list(vec![]);
+        let v = call(&dumps, &[list]).unwrap();
+        assert_eq!(v, Value::Str("[]".into()));
+    }
+
+    #[test]
+    fn list_heterogenea_se_marshalla_ok() {
+        // Python permite mezcla en una list: `[1, "dos", true]`.
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let list = Value::new_list(vec![
+            Value::Int(1),
+            Value::Str("dos".into()),
+            Value::Bool(true),
+        ]);
+        let v = call(&dumps, &[list]).unwrap();
+        // JSON serializa true como `true`. Confirma que Bool Fitz
+        // cruza como bool Python (no como int).
+        assert_eq!(v, Value::Str("[1, \"dos\", true]".into()));
+    }
+
+    #[test]
+    fn list_anidada_se_marshalla_recursivo() {
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let inner = Value::new_list(vec![Value::Int(1), Value::Int(2)]);
+        let outer = Value::new_list(vec![inner, Value::new_list(vec![Value::Int(3)])]);
+        let v = call(&dumps, &[outer]).unwrap();
+        assert_eq!(v, Value::Str("[[1, 2], [3]]".into()));
+    }
+
+    #[test]
+    fn map_de_str_a_int_se_marshalla_a_dict() {
+        // `json.dumps({"a": 1, "b": 2})` → '{"a": 1, "b": 2}'.
+        // PyDict preserva el orden de inserción (Python 3.7+), igual
+        // que `serde_json::preserve_order` que ya usa el resto del
+        // proyecto.
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let map = Value::new_map(vec![
+            (Value::Str("a".into()), Value::Int(1)),
+            (Value::Str("b".into()), Value::Int(2)),
+        ]);
+        let v = call(&dumps, &[map]).unwrap();
+        assert_eq!(v, Value::Str("{\"a\": 1, \"b\": 2}".into()));
+    }
+
+    #[test]
+    fn map_con_keys_no_hashables_es_error_con_path() {
+        // List como key → error claro citando que solo primitivos
+        // son hashables en Python.
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let bad_key = Value::new_list(vec![Value::Int(1)]);
+        let map = Value::new_map(vec![(bad_key, Value::Int(42))]);
+        let err = call(&dumps, &[map]).expect_err("List como key debe fallar");
+        assert!(
+            err.message.contains("hashable")
+                && err.message.contains("List")
+                && err.message.contains("arg0"),
+            "msg: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn instance_se_marshalla_a_dict_por_field_name() {
+        // Una `Instance` con type_name="User" y fields ordenados
+        // {id: 1, name: "x"} → `{"id": 1, "name": "x"}` después de
+        // `json.dumps`. Verifica que el orden de campos se preserva
+        // (PyDict en CPython 3.7+).
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let user = Value::new_instance(
+            "User".to_string(),
+            vec![
+                ("id".to_string(), Value::Int(1)),
+                ("name".to_string(), Value::Str("x".into())),
+            ],
+        );
+        let v = call(&dumps, &[user]).unwrap();
+        assert_eq!(v, Value::Str("{\"id\": 1, \"name\": \"x\"}".into()));
+    }
+
+    #[test]
+    fn list_de_instances_se_marshalla() {
+        // Caso pre-canónico del roadmap: `List<User>` pasado a una
+        // función Python. La lista se marshalla a list[dict].
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let users = Value::new_list(vec![
+            Value::new_instance(
+                "User".to_string(),
+                vec![
+                    ("id".to_string(), Value::Int(1)),
+                    ("email".to_string(), Value::Str("a@x.com".into())),
+                ],
+            ),
+            Value::new_instance(
+                "User".to_string(),
+                vec![
+                    ("id".to_string(), Value::Int(2)),
+                    ("email".to_string(), Value::Str("b@x.com".into())),
+                ],
+            ),
+        ]);
+        let v = call(&dumps, &[users]).unwrap();
+        assert_eq!(
+            v,
+            Value::Str(
+                "[{\"id\": 1, \"email\": \"a@x.com\"}, \
+                  {\"id\": 2, \"email\": \"b@x.com\"}]".into()
+            ),
+        );
+    }
+
+    #[test]
+    fn null_dentro_de_list_se_marshalla_a_none() {
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let list = Value::new_list(vec![Value::Int(1), Value::Null, Value::Int(3)]);
+        let v = call(&dumps, &[list]).unwrap();
+        assert_eq!(v, Value::Str("[1, null, 3]".into()));
+    }
+
+    #[test]
+    fn elemento_no_marshalleable_en_list_es_error_con_path() {
+        // Range adentro de una list → error con path "arg0[1]".
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let list = Value::new_list(vec![
+            Value::Int(1),
+            Value::Range { start: 0, end: 10 },
+            Value::Int(3),
+        ]);
+        let err = call(&dumps, &[list]).expect_err("Range adentro debe fallar");
+        assert!(
+            err.message.contains("arg0[1]") && err.message.contains("Range"),
+            "msg: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn campo_no_marshalleable_en_instance_es_error_con_path() {
+        // Range como valor de un field → error con path
+        // "arg0.User.<field>" o similar.
+        let json = handle_of(import_module("json").unwrap());
+        let dumps = handle_of(get_attr(&json, "dumps").unwrap());
+        let user = Value::new_instance(
+            "User".to_string(),
+            vec![
+                ("id".to_string(), Value::Int(1)),
+                ("range".to_string(), Value::Range { start: 0, end: 5 }),
+            ],
+        );
+        let err = call(&dumps, &[user]).expect_err("Range como field debe fallar");
+        assert!(
+            err.message.contains("Range")
+                && err.message.contains("range")  // el field se llama "range"
+                && err.message.contains("arg0"),
+            "msg: {}",
+            err.message,
+        );
     }
 }

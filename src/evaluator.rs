@@ -6995,10 +6995,14 @@ let r = match n {
         );
     }
 
+    // 8.2.1: List ahora SÍ se marshalla. El test reapunta a `math.sqrt`
+    // recibiendo una `List<Int>` — Python lanza TypeError porque
+    // `sqrt` espera un número, no una lista. Validamos que el error
+    // que llega a Fitz es la excepción Python (no el guard de
+    // marshaling).
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
-    async fn call_python_con_arg_compuesto_es_error_de_marshaling() {
-        // List todavía no se marshalla en 8.1; el mensaje debe citar 8.2.
+    async fn call_python_con_list_como_arg_pasa_y_python_lo_rechaza() {
         let src = "\
             from python import math\n\
             let xs = [1, 2, 3]\n\
@@ -7006,9 +7010,12 @@ let r = match n {
         ";
         let (_env, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
+        // Python rechaza con TypeError (sqrt no acepta una list).
+        // El marshaling Fitz→Python sí completó; el error es del lado
+        // Python. En 8.3 esto se va a envolver en `Result<T>`.
         assert!(
-            err.message.contains("8.2"),
-            "mensaje: {}",
+            err.message.contains("TypeError"),
+            "mensaje debería ser TypeError de Python, fue: {}",
             err.message,
         );
     }
@@ -7024,6 +7031,99 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(env.lock().get("v"), Some(Value::Int(7)));
+    }
+
+    // -------------------------------------------------------------------
+    // Fase 8.2.1 — Fitz → Python: List/Map/Instance se marshallan a
+    // list/dict/dict end-to-end via json.dumps.
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_list_de_ints_via_json_dumps() {
+        let src = "\
+            from python import json\n\
+            let xs = [1, 2, 3]\n\
+            let s = json.dumps(xs)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("s"), Some(Value::Str("[1, 2, 3]".into())));
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_map_str_int_via_json_dumps() {
+        let src = "\
+            from python import json\n\
+            let m = {\"a\": 1, \"b\": 2}\n\
+            let s = json.dumps(m)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(
+            env.lock().get("s"),
+            Some(Value::Str("{\"a\": 1, \"b\": 2}".into())),
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_instance_via_json_dumps() {
+        // Una Instance Fitz se marshalla a dict Python por field name.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            from python import json\n\
+            let u = User { id: 1, name: \"x\" }\n\
+            let s = json.dumps(u)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(
+            env.lock().get("s"),
+            Some(Value::Str("{\"id\": 1, \"name\": \"x\"}".into())),
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_list_de_instances_via_json_dumps() {
+        let src = "\
+            type User { id: Int, email: Str }\n\
+            from python import json\n\
+            let users = [\n\
+                User { id: 1, email: \"a@x.com\" },\n\
+                User { id: 2, email: \"b@x.com\" },\n\
+            ]\n\
+            let s = json.dumps(users)\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(
+            env.lock().get("s"),
+            Some(Value::Str(
+                "[{\"id\": 1, \"email\": \"a@x.com\"}, \
+                  {\"id\": 2, \"email\": \"b@x.com\"}]".into()
+            )),
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn marshalling_arg_no_marshalleable_cita_path() {
+        // Range adentro de List → error con path "arg0[1]".
+        let src = "\
+            from python import json\n\
+            let xs = [1, 0..5, 3]\n\
+            let s = json.dumps(xs)\n\
+        ";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("arg0[1]") && err.message.contains("Range"),
+            "msg: {}",
+            err.message,
+        );
     }
 
     #[cfg(feature = "python")]
