@@ -3344,57 +3344,157 @@ con UN solo punto de anotación.
   Recursión podría agregarse con flag `--strict-coerce`.
 
 #### 8.5 — Auto-mapeo de modelos SQLAlchemy a `type` de Fitz
-**Pendiente** — caso especial pero crítico para la ergonomía
-del caso canónico. Una clase `class User(Base): id =
-Column(Integer); ...` debería poder usarse desde Fitz como
-`type User { id: Int, ... }` sin escribir el `type` a mano
-dos veces.
+**Estado: CERRADA (2026-05-15)** — 1281 unit + 80 compile_e2e
++ 3 openapi_e2e con feature `python`; 1193 + 80 + 3 sin feature.
 
-**Estrategia**: herramienta separada `fitz py-types
-<archivo.py> [--out <archivo.fitz>]`. La herramienta:
-1. Importa el archivo Python en un subprocess.
-2. Introspecciona `Base.metadata.tables` o subclasses de
-   `DeclarativeBase`.
-3. Por cada modelo, emite un `type` Fitz con los campos
-   traducidos:
-   - `Column(Integer)` → `Int`
-   - `Column(String)` → `Str`
-   - `Column(Float)` → `Float`
-   - `Column(Boolean)` → `Bool`
-   - `Column(DateTime)` → `Str` (ISO 8601) por ahora; tipo
-     `DateTime` nativo es deuda Fase 9+
-   - `nullable=True` → `T?`
-   - `default=...` → valor por defecto del campo
-4. El archivo generado es commiteable e inspeccionable. No
-   hay magia en build time.
+Sub-comando nuevo `fitz py-types <archivo.py> [--out <archivo.fitz>]`
+que introspecciona modelos SQLAlchemy (o mocks equivalentes) en
+un archivo Python y emite los `type` Fitz correspondientes,
+listo para commitear. Reduce el doble-tipado (Python + Fitz) en
+el caso canónico — los modelos se definen UNA vez en Python y
+Fitz los importa con sus tipos resueltos vía `from models import
+User, Order`.
 
-**Criterio de éxito**:
+**Decisiones técnicas tomadas al arrancar el sub-paso**:
+
+- **In-process via PyO3** (no subprocess): reusa el GIL + dep
+  PyO3 ya disponible con `--features python`. Más simple que armar
+  subprocess management + parseo de output. Sin la feature, el
+  sub-comando aborta con error claro citando el flag de build.
+- **Duck typing sobre `__table__.columns`** (no `isinstance(cls,
+  DeclarativeBase)`). Permite tests con classes Python mock sin
+  requerir `pip install sqlalchemy`. Funciona igual con SQLAlchemy
+  real porque la introspección depende solo del shape (`name`,
+  `type`, `nullable`, `default`), no de la herencia.
+- **Solo SQLAlchemy en 8.5**. Django, Tortoise, peewee y
+  dataclasses quedan como sub-comandos futuros si entra demanda
+  real (`fitz py-types-django`, etc.). La arquitectura es
+  reusable — el dispatch va por shape del object, no por ORM
+  específico.
+- **Tipos desconocidos → `Any` con comentario** `// ? tipo
+  SQLAlchemy <Name> mapeado a Any`. Permite al usuario detectar
+  y refinar a mano (ej. `JSON` → `Map<Str, Any>` con un editor).
+- **Defaults callable ignorados** silenciosamente. SQLAlchemy
+  usa mucho `default=datetime.utcnow` y similares — emitir
+  `= func()` no es evaluable estáticamente desde Fitz y confunde
+  más que aporta. Solo literales Int/Float/Str/Bool/None se
+  emiten inline.
+- **Output a stdout por default**; `--out <archivo>` opcional.
+  El header del archivo generado dice `// Generado por
+  fitz py-types — no editar a mano` + cita la fuente. Facilita
+  el flujo "commiteás el `.fitz`, regenerás cuando cambia el
+  schema".
+- **Sin verificación de drift** entre `.py` y `.fitz` generado.
+  Regeneración manual; linter de drift queda para Fase 9+ si
+  entra demanda.
+
+**Sub-pasos**:
+
+- **8.5.1** — Sub-comando + introspección + mapping ✓:
+  `Commands::PyTypes { source, out }` en el CLI con flag
+  opcional `--out`. Nuevo módulo `src/py_types.rs` feature-gated.
+  `generate_from_file(source) -> Result<String, String>`
+  canonicaliza el path, importa el archivo Python via
+  `importlib.util.spec_from_file_location` +
+  `importlib.util.module_from_spec` + `loader.exec_module`,
+  itera el `__dict__` filtrando: clases (`isinstance type`),
+  definidas EN ese módulo (filtra re-exports SQLA), con
+  `__table__.columns`. Por cada modelo recolecta los fields
+  iterando `columns` (cada item con `name`, `type`, `nullable`,
+  `default`). El mapping va por **nombre canónico de la clase
+  Python** de `Column.type` (sin requerir `isinstance` contra
+  jerarquía SQLA): `Integer/BigInteger/SmallInteger/INTEGER/...`
+  → `Int`; `Float/Numeric/Double/REAL/FLOAT/NUMERIC` → `Float`;
+  `String/Text/Unicode/VARCHAR/TEXT/CHAR/CLOB` → `Str`;
+  `Boolean/BOOLEAN` → `Bool`; `DateTime/Date/Time/TIMESTAMP/
+  DATE/TIME` → `Str` (ISO 8601 placeholder — `DateTime` nativo
+  Fitz es Fase 9+); resto → `Any` con `// ? tipo SQLAlchemy
+  <Name> mapeado a Any` como pista para el usuario.
+  `nullable=True` agrega sufijo `?`. `default=<literal>` (Int/
+  Float/Str/Bool/None) se emite inline; callable se ignora con
+  `builtins.callable(value)`. Helpers privados: `import_file_as_module`,
+  `collect_models`, `collect_fields`, `python_type_to_fitz_type`,
+  `extract_default`, `emit_type`, `emit_literal`, `pyerr_to_string`.
+  10 tests unit (modelo simple, mapping completo, nullable,
+  default literal, default callable ignorado, tipo desconocido
+  con comentario, múltiples modelos, archivo sin modelos error
+  claro, clases sin `__table__` filtradas, header cita fuente).
+  Todos con classes Python mock sin requerir SQLAlchemy real
+  instalado.
+- **8.5.2** — Ejemplo runnable + cierre formal ✓:
+  `examples/py-types/models.py` autosuficiente con ~25 LoC de
+  mock SQLAlchemy + dos modelos (`User` con 6 fields incluyendo
+  `age: Int?` y `is_admin: Bool = false`; `Order` con 5 fields
+  incluyendo `currency: Str = "USD"` y `notes: Str?`).
+  `examples/py-types/models.fitz` (generado y commiteado): output
+  literal de `fitz py-types models.py --out models.fitz` — sirve
+  como referencia del output esperado y como módulo importable.
+  `examples/py-types/usage.fitz`: `from models import User, Order`
+  + fns `parse_user`/`parse_order` con coerción 8.4.3
+  (`let row: User = json.loads(s)?`). Cubre happy path completo,
+  default de `currency` aplicado, nullable `notes` como Null,
+  JSON malformado propagado como `Result::Err`. Validado bit-a-bit
+  con `cargo run --features python -- run examples/py-types/usage.fitz`.
+  Cierre formal (CHANGELOG v0.8.6, roadmap a CERRADA, deudas
+  nota de cierre, CLAUDE + README refresh).
+
+**Criterio de éxito** (del roadmap, cumplido bit-a-bit):
+
 ```bash
-fitz py-types models.py --out models.fitz
-# models.fitz ahora tiene:
-#   type User { id: Int, email: Str, name: Str }
-#   type Order { id: Int, user_id: Int, total: Float }
-```
-Y `from models import User, Order` adentro del proyecto Fitz
-funciona como cualquier otro import.
+$ fitz py-types examples/py-types/models.py --out models.fitz
+✓ types Fitz emitidos a models.fitz
 
-**Decisiones técnicas a resolver**:
-- Herramienta separada vs integración: la separada es más
-  simple y los archivos generados se versionan. Integración
-  (`from python.sqlalchemy import models as fitz_types`) es
-  más mágica pero introduce side effects en compile time.
-  Recomendación: arrancar con herramienta separada; promover
-  a integración si la fricción de "olvidé regenerar los
-  tipos" molesta en uso real.
-- Cobertura de otros ORMs: Django, Tortoise, Pony, peewee. Empezar
-  con SQLAlchemy (caso canónico). La arquitectura (introspección
-  + generación de `type`) se puede reusar; sub-comandos
-  específicos (`fitz py-types-django`) si hace falta.
-- Sincronía con cambios del schema: si el schema Python cambia,
-  ¿`fitz check` avisa que `models.fitz` está desactualizado?
-  Probablemente no en 8.5 — flujo manual de regeneración.
-  Verificación automática podría llegar como linter regla en
-  Fase 9+.
+$ cat models.fitz
+// Generado por `fitz py-types` — no editar a mano.
+// Fuente: examples/py-types/models.py
+
+type User {
+    id: Int,
+    email: Str,
+    name: Str,
+    age: Int?,
+    is_admin: Bool = false,
+    created_at: Str
+}
+
+type Order {
+    id: Int,
+    user_id: Int,
+    total: Float,
+    currency: Str = "USD",
+    notes: Str?
+}
+```
+
+Después, `from models import User, Order` adentro de un programa
+Fitz funciona como cualquier otro import + las anotaciones de 8.4
+coercionan dicts Python a Instance.
+
+**Cierre formal de Fase 8.5**: 1281 unit + 80 compile_e2e +
+3 openapi_e2e con feature; 1193 + 80 + 3 sin feature. Clippy
+`-D warnings` limpio en ambos modos. **Próximo norte**: Fase 8.6
+(bridge tokio ↔ asyncio para `py_coro().await`).
+
+**Deuda residual visible que se queda como sub-paso futuro**:
+
+- **Otros ORMs** (Django, Tortoise, peewee, dataclasses) →
+  sub-comandos futuros si entra demanda real.
+- **Verificación de drift** entre `.py` y `.fitz` generado.
+  Hoy regeneración manual; podría haber una regla del linter
+  Fase 9+ que detecte schema mismatch y avise.
+- **DateTime nativo Fitz** (vs string ISO 8601 hoy). Deuda más
+  general — Fase 9+ con tipos nativos de fecha/hora/duration.
+- **Defaults callable parseados** (`datetime.utcnow` →
+  `current_timestamp()` built-in Fitz). Hoy se ignoran; podría
+  agregarse mapping de callables conocidos.
+- **Foreign keys + relationships**. SQLAlchemy expone
+  `relationship(...)` que crea atributos lazy (no `Column`).
+  Hoy se ignoran porque no aparecen en `__table__.columns`.
+  Para emitir `user: User?` en `Order` haría falta dispatch
+  específico para relationships.
+- **Generación directa al `lib.fitz` del proyecto** (en vez de
+  archivo separado). Workaround actual: el usuario decide
+  dónde commitear el output.
 
 #### 8.6 — Async + GIL — bridge tokio ↔ asyncio
 **Pendiente** — Fitz ya tiene `async fn` y `.await` nativos

@@ -1,0 +1,69 @@
+// examples/py-types/usage.fitz — Cierre del ciclo 8.5.
+//
+// Demuestra el flujo end-to-end: los `type` Fitz generados por
+// `fitz py-types models.py --out models.fitz` se importan como
+// cualquier otro módulo y se usan con las anotaciones de 8.4 para
+// coercionar dicts Python a Instance.
+//
+//   cargo run --features python -- run examples/py-types/usage.fitz
+//
+// El flow completo:
+//
+//   1. `examples/py-types/models.py` define los modelos (mock de
+//      SQLAlchemy en este ejemplo; en proyectos reales sería
+//      SQLAlchemy nativo).
+//   2. `fitz py-types models.py --out models.fitz` introspecciona y
+//      genera `models.fitz` con los `type` correspondientes.
+//   3. Este archivo importa los types y los usa con la coerción
+//      runtime de 8.4.3 sobre dicts que vienen de Python.
+
+from models import User, Order
+from python import json
+
+print("== Tipos generados desde Python ==")
+
+// El JSON mock simula la fila que SQLAlchemy devolvería como dict:
+//   session.query(User).filter_by(id=1).first()
+// En SQLAlchemy 2.x con `.scalars()` o el equivalente con
+// `.__dict__`, el resultado es un dict que se coerce limpio.
+
+let raw_user = "\{\"id\": 1, \"email\": \"alice@x.com\", \"name\": \"Alice\", \"age\": 30, \"is_admin\": true, \"created_at\": \"2026-05-15T10:00:00\"\}"
+
+fn parse_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+
+match parse_user(raw_user) {
+    Ok(u)  => print("user: {u}"),
+    Err(e) => print("error: {e}"),
+}
+
+// Orden — con default de `currency` aplicado porque el dict lo omite.
+
+let raw_order = "\{\"id\": 100, \"user_id\": 1, \"total\": 49.99\}"
+
+fn parse_order(s: Str) -> Result<Order> {
+    let row: Order = json.loads(s)?
+    return Ok(row)
+}
+
+match parse_order(raw_order) {
+    Ok(o)  => print("order: {o}"),
+    Err(e) => print("error: {e}"),
+}
+
+// Nullable faltante (`notes`) se completa con Null silenciosamente.
+print("")
+print("== Currency default + notes nullable ==")
+print("orden default+nullable funcionando ↑")
+
+// JSON malformado — el Err del Python baja como Result::Err y
+// nunca aborta el programa Fitz.
+print("")
+print("== Error path ==")
+let raw_bad = "\{ no es JSON"
+match parse_user(raw_bad) {
+    Ok(u)  => print("user: {u}"),
+    Err(e) => print("error: {e}"),
+}

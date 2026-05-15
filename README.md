@@ -136,26 +136,26 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.4 cerrada — Fitz coerciona dicts Python a tipos
-Fitz concretos con UNA sola anotación.** El patrón canónico del
-roadmap funciona end-to-end:
+🏔️ **Fase 8.5 cerrada — `fitz py-types` auto-mapea SQLAlchemy
+a `type` Fitz.** Un comando nuevo introspecciona un archivo
+Python con modelos SQLAlchemy (o mocks equivalentes) y emite
+los `type` Fitz correspondientes, listo para commitear. Los
+modelos se definen UNA vez en Python — Fitz los importa con sus
+tipos resueltos vía `from models import User, Order`. Reduce el
+doble-tipado en el caso canónico:
 
-```fitz
-fn fetch_user(s: Str) -> Result<User> {
-    let row: User = json.loads(s)?
-    return Ok(row)
-}
+```bash
+$ fitz py-types models.py --out models.fitz
+✓ types Fitz emitidos a models.fitz
 ```
 
-Tres pilares cierran el ciclo: el checker distingue valores
-Python de Any genérico (`Type::PyAny`), refina los calls a
-`Result<Any>` forzando manejo estático con `match`/`?`, y el
-runtime coerciona `Value::Map` → `Value::Instance` validando
-fields contra el `type` declarado (defaults aplicados, nullables
-completados con Null, extras del dict ignorados). El usuario sale
-del "limbo Python" a tipos Fitz nativos en un solo punto. La
-interop completa (auto-mapeo SQLAlchemy, async + GIL, CPython
-bundled) llega en los sub-pasos siguientes (8.5 a 8.8). Ver el
+Mapeo automático: `Column(Integer)` → `Int`, `Column(String)` →
+`Str`, `nullable=True` → `T?`, `default=42` → `= 42`. Tipos
+desconocidos quedan como `Any` con comentario. Introspección por
+duck typing (`__table__.columns`) — funciona con SQLAlchemy real
+y con mocks; solo requiere el shape correcto. La interop
+completa (async + GIL, CPython bundled, guía + ejemplo CRUD)
+llega en los sub-pasos siguientes (8.6 a 8.8). Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
@@ -282,23 +282,39 @@ Las fases cerradas:
   runnable `examples/python-interop-8.4.fitz` con 5 secciones
   (happy path, nullable faltante, extras ignorados, JSON
   malformado propagado, default aplicado).
+- **Fase 8.5 — `fitz py-types` auto-mapeo SQLAlchemy → `type`
+  Fitz**: sub-comando nuevo que introspecciona un archivo
+  Python con modelos SQLAlchemy (o mocks con el mismo shape) y
+  emite los `type` Fitz correspondientes. Reduce el
+  doble-tipado en proyectos que usan SQLAlchemy. Introspección
+  por duck typing (`__table__.columns`) — funciona con
+  SQLAlchemy real y con mocks. Mapeo: Integer/BigInteger →
+  `Int`, Float/Numeric → `Float`, String/Text → `Str`, Boolean
+  → `Bool`, DateTime → `Str` (ISO 8601), `nullable=True` → `?`,
+  default literal inline, callable ignorado. Tipos desconocidos
+  → `Any` con comentario `// ?`. In-process via PyO3 (no
+  subprocess), requiere `--features python`. Sub-pasos: 8.5.1
+  comando + introspección + mapping + 10 tests; 8.5.2 ejemplo
+  runnable `examples/py-types/` con `models.py` (mock SQLA
+  autosuficiente) + `models.fitz` (generado) + `usage.fitz`
+  (`from models import` + coerción 8.4.3 sobre dicts JSON).
 
-**1271 tests pasando con `--features python`** (1271 unit + 80 E2E
+**1281 tests pasando con `--features python`** (1281 unit + 80 E2E
 con `fitz build` + 3 openapi_e2e). **1193 + 80 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.5 — `fitz py-types` auto-mapeo
-SQLAlchemy → `type` Fitz** — herramienta separada que
-introspecciona modelos `DeclarativeBase` Python y emite un
-`.fitz` con los `type` correspondientes, listo para commitear.
-Reduce el doble-tipado en proyectos SQLAlchemy. Después: 8.6
-(async + GIL bridge tokio ↔ asyncio), 8.7 (CPython bundled —
-candidato para cerrar F19), 8.8 (guía + ejemplo CRUD). Ver el
-[roadmap](docs/roadmap.md) para detalle. **Deudas comprometidas
-que siguen**: F19 (codegen interop Python en `fitz build`),
-stubs `.pyi` parseados (pospuesto a Fase 9+), descripciones via
-doc-strings sobre handlers (OpenAPI enrichment), modelo wrap de
-middleware (post-process) si aparece presión real.
+Próximo norte: **Fase 8.6 — Async + GIL: bridge tokio ↔
+asyncio** — permite `py_coro().await` sobre corutinas Python
+desde cualquier `async fn` Fitz. Habilita SQLAlchemy 2.x async,
+httpx async, asyncpg, etc. Requiere `pyo3-asyncio` y política
+de GIL (soltar automático en calls async, mantener en sync).
+Después: 8.7 (CPython bundled — candidato para cerrar F19), 8.8
+(guía + ejemplo CRUD). Ver el [roadmap](docs/roadmap.md) para
+detalle. **Deudas comprometidas que siguen**: F19 (codegen
+interop Python en `fitz build`), stubs `.pyi` parseados
+(pospuesto a Fase 9+), descripciones via doc-strings sobre
+handlers (OpenAPI enrichment), modelo wrap de middleware
+(post-process) si aparece presión real.
 
 ## Qué funciona hoy
 

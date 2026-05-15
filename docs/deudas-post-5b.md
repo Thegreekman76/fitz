@@ -271,6 +271,36 @@
 > (5 secciones validadas bit-a-bit). Detalles completos en
 > `docs/roadmap.md` → "Fase 8.4". Próximo norte: **Fase 8.5
 > (`fitz py-types` auto-mapeo SQLAlchemy → `type` Fitz)**.
+>
+> **Fase 8.5 (2026-05-15): CERRADA** — sub-comando nuevo
+> `fitz py-types <archivo.py> [--out <archivo.fitz>]` que
+> introspecciona modelos SQLAlchemy en un archivo Python y emite
+> los `type` Fitz correspondientes, listos para commitear.
+> Reduce el doble-tipado en proyectos SQLAlchemy. Dos sub-pasos:
+> 8.5.1 `Commands::PyTypes` en CLI + nuevo módulo `src/py_types.rs`
+> feature-gated (in-process via PyO3, no subprocess) + introspección
+> por duck typing sobre `__table__.columns` (compatible con
+> SQLAlchemy real y mocks sin requerir `pip install sqlalchemy`)
+> + mapping por nombre canónico (Integer/BigInteger/...→Int,
+> Float/Numeric/...→Float, String/Text/...→Str, Boolean→Bool,
+> DateTime/Date/Time→Str ISO 8601 placeholder, resto→Any con
+> `// ?` comment) + nullable + defaults literales (callable
+> ignorado) + 10 unit tests con classes Python mock. 8.5.2 ejemplo
+> runnable `examples/py-types/` (`models.py` autosuficiente con
+> mock SQLAlchemy de 25 LoC + 2 modelos User/Order, `models.fitz`
+> generado y commiteado como referencia, `usage.fitz` con
+> `from models import` + coerción 8.4.3 + 4 escenarios incluyendo
+> JSON malformado propagado) + cierre formal (CHANGELOG v0.8.6,
+> roadmap, README, CLAUDE). Decisiones: in-process via PyO3,
+> duck typing por shape, solo SQLAlchemy en 8.5 (otros ORMs si
+> entra demanda real), tipos desconocidos a `Any` con comentario,
+> defaults callable ignorados silenciosamente, sin verificación
+> de drift (regeneración manual). Total al cierre: **1281 unit +
+> 80 E2E + 3 openapi_e2e** con feature; **1193 + 80 + 3** sin
+> feature. Ejemplo runnable: `examples/py-types/` con tres
+> archivos. Detalles completos en `docs/roadmap.md` → "Fase 8.5".
+> Próximo norte: **Fase 8.6 (async + GIL: bridge tokio ↔
+> asyncio)**.
 
 ## Resumen ejecutivo
 

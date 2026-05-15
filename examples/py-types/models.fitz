@@ -1,0 +1,20 @@
+// Generado por `fitz py-types` — no editar a mano.
+// Fuente: examples/py-types/models.py
+
+type User {
+    id: Int,
+    email: Str,
+    name: Str,
+    age: Int?,
+    is_admin: Bool = false,
+    created_at: Str
+}
+
+type Order {
+    id: Int,
+    user_id: Int,
+    total: Float,
+    currency: Str = "USD",
+    notes: Str?
+}
+

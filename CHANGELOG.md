@@ -12,12 +12,112 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. El próximo
-hito comprometido es **Fase 8.5 — Auto-mapeo de modelos SQLAlchemy
-a `type` Fitz** vía herramienta `fitz py-types`: introspecciona
-un archivo Python con modelos `DeclarativeBase` y emite un
-`.fitz` con los `type` correspondientes, listo para commitear.
-Reduce el doble-tipado (Python + Fitz) en proyectos que usan
-SQLAlchemy.
+hito comprometido es **Fase 8.6 — Async + GIL: bridge tokio ↔
+asyncio**, que permite `py_coro().await` sobre corutinas Python
+desde cualquier `async fn` Fitz. Habilita SQLAlchemy 2.x async,
+httpx async, asyncpg, etc. Requiere `pyo3-asyncio` y política
+de GIL (soltar automático en calls async, mantener en sync).
+
+## [v0.8.6] — 2026-05-15 — Fase 8.5: `fitz py-types` auto-mapeo SQLAlchemy → type Fitz
+
+Quinto sub-paso de la Fase 8 (Interop Python). Cierra la
+ergonomía del caso canónico SQLAlchemy: un comando nuevo
+`fitz py-types <archivo.py> [--out <archivo.fitz>]` introspecciona
+un archivo Python con modelos SQLAlchemy (o mocks equivalentes)
+y emite los `type` Fitz correspondientes, listo para commitear.
+Reduce el doble-tipado (Python + Fitz) — escribís los modelos UNA
+vez en Python y Fitz los importa con sus tipos resueltos.
+
+- **8.5.1 — Sub-comando + introspección + mapping**:
+  - `Commands::PyTypes { source, out }` en el CLI con flag opcional
+    `--out` (default: stdout).
+  - Nuevo módulo `src/py_types.rs` feature-gated. Usa PyO3
+    in-process (no subprocess) reusando el GIL + dep ya disponible
+    con `--features python`. Sin la feature, el sub-comando aborta
+    con error claro citando `cargo install --features python`.
+  - `generate_from_file(source) -> Result<String, String>`:
+    canonicaliza el path, importa el archivo Python via
+    `importlib.util.spec_from_file_location` + `module_from_spec`
+    + `loader.exec_module`, itera el `__dict__` filtrando clases
+    definidas en ESE módulo (filtra re-exports SQLA como `Base`,
+    `Column`, `Integer`, etc.). Duck typing: clase tiene que tener
+    `__table__.columns` para contar como modelo — compatible con
+    SQLAlchemy real Y con mocks que cumplan el contract.
+  - Mapping por nombre canónico de la clase de `Column.type`:
+      Integer/BigInteger/SmallInteger/INTEGER/...   → Int
+      Float/Numeric/Double/REAL/FLOAT/NUMERIC       → Float
+      String/Text/Unicode/VARCHAR/TEXT/CHAR/CLOB    → Str
+      Boolean/BOOLEAN                               → Bool
+      DateTime/Date/Time/TIMESTAMP/DATE/TIME        → Str (ISO 8601)
+      resto                                         → Any + `// ?` comment
+  - `nullable=True` → sufijo `?`. `default=<literal>` (Int/Float/
+    Str/Bool/None) → inline `= valor`. Defaults callable
+    (`datetime.utcnow`) se ignoran silenciosamente — emitir
+    `= func()` no aporta.
+  - 10 tests con classes Python mock que cumplen el shape SQLA sin
+    requerir `pip install sqlalchemy` (modelo simple, mapping
+    completo de tipos, nullable, default literal, default callable
+    ignorado, tipo desconocido con comentario, múltiples modelos,
+    archivo sin modelos error claro, clases sin `__table__`
+    filtradas, header cita fuente).
+- **8.5.2 — Ejemplo runnable + cierre formal**:
+  - `examples/py-types/models.py` autosuficiente: 25 LoC de mock
+    SQLAlchemy (clases `Column`, `_Table`, `Integer`, etc.) +
+    modelos `User` (6 campos: int, str, str, int?, bool=false,
+    str-datetime) y `Order` (5 campos: bigint, int, float,
+    str="USD", str?). Comentario explica cómo reemplazar el mock
+    con `from sqlalchemy import ...` para uso real.
+  - `examples/py-types/models.fitz` (generado y commiteado): el
+    output de `fitz py-types models.py --out models.fitz`. Sirve
+    como referencia del output esperado.
+  - `examples/py-types/usage.fitz`: `from models import User, Order`
+    + dos fns `parse_user`/`parse_order` que demuestran coerción
+    runtime 8.4.3 sobre dicts JSON (`json.loads` Python → Map →
+    User Instance). Cubre happy path con todos los campos,
+    default `currency="USD"` aplicado en Order, nullable `notes`
+    como Null, y JSON malformado propagado como `Result::Err`.
+    Validado bit-a-bit con
+    `cargo run --features python -- run examples/py-types/usage.fitz`.
+  - CHANGELOG v0.8.6, roadmap.md actualiza 8.5 a CERRADA con
+    sub-pasos detallados, deudas-post-5b.md nota de cierre,
+    CLAUDE + README refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **In-process via PyO3** (no subprocess): reusa el GIL + dep
+  PyO3 ya disponible. Más simple que armar subprocess management
+  + parseo de output. Requiere `--features python`; sin la feature
+  el sub-comando aborta antes.
+- **Duck typing sobre `__table__.columns`** (no `isinstance(cls,
+  DeclarativeBase)`): permite tests con mocks sin requerir
+  SQLAlchemy real instalado. Funciona igual con SQLAlchemy real.
+- **Solo SQLAlchemy en 8.5**: Django, Tortoise, peewee,
+  dataclasses quedan como sub-comandos futuros si entra demanda
+  (`fitz py-types-django`, etc.). La arquitectura es reusable —
+  el dispatch va por shape del object, no por ORM específico.
+- **Defaults callable ignorados** silenciosamente: emitir
+  `= datetime.utcnow()` confunde más de lo que ayuda (no es
+  evaluable estáticamente desde Fitz).
+- **Tipos desconocidos → `Any` con comentario** `// ?` citando el
+  nombre original SQLA. Permite al usuario detectar y refinar a
+  mano (ej. `JSON` → `Map<Str, Any>`).
+- **Output a stdout por default**; `--out <archivo>` opcional.
+  El archivo generado lleva header `// Generado por fitz py-types
+  — no editar a mano` + cita de la fuente — facilita el flujo
+  "commitear el .fitz, regenerar si cambia el schema".
+- **Sin verificación de drift** entre `.py` y `.fitz` generado
+  (regeneración manual cuando el schema cambia). Linter de drift
+  queda para Fase 9+ si entra demanda.
+
+**Cierre formal**:
+
+  - Sin feature: **1193 unit** (sin cambios — `py_types` es
+    feature-gated) + 80 compile_e2e + 3 openapi_e2e.
+  - Con feature: **1281 unit** (1271 + 10 nuevos en `py_types`)
+    + 80 + 3.
+  - Clippy `-D warnings` limpio en ambos modos.
+
+Detalle completo: `docs/roadmap.md` → "Fase 8.5".
 
 ## [v0.8.5] — 2026-05-15 — Fase 8.4: Tipos del checker + anotaciones del lado Fitz
 
