@@ -335,8 +335,63 @@
 > configurable, cancelación de Futures Python, tests
 > multi_thread con paralelismo real. Detalles completos en
 > `docs/roadmap.md` → "Fase 8.6". Próximo norte: **Fase 8.7
-> (distribución con CPython embebido — `fitz build
-> --bundle-python`)**.
+> (codegen interop Python en `fitz build` — cierra deuda F19)**.
+>
+> **Fase 8.7 (2026-05-15): CERRADA** — codegen interop Python en
+> `fitz build`. **Cierra la deuda F19** del roadmap post-5b: el
+> codegen acepta `from python import`, emite Cargo.toml condicional
+> con pyo3, preludio `__FitzPyObject(Arc<Py<PyAny>>)` con helpers
+> (import, getattr opaco/primitivo, call con marshaling automático,
+> Result wrap, bridge async), y bindings globales (`static
+> OnceLock` + getter) accesibles desde cualquier fn. Trait
+> `__FitzToPy` con impls genéricos para primitivos, List, Map,
+> Option e Instance Fitz (impl emitido por `gen_type_def` cuando
+> `uses_python`). Patrón canónico `<py_call>?.await` para bridge
+> async (paralelo a 8.6.1 baseline blocking). Cuatro sub-pasos:
+> 8.7.1 preludio + import + getattr + Cargo.toml; 8.7.2 call +
+> marshaling Fitz→Python + Result + Instance; 8.7.3 bridge async;
+> 8.7.4 cierre formal con `examples/python-interop-8.7.fitz`
+> validado bit-a-bit `fitz run` ↔ `fitz build`. Decisiones:
+> alcance acotado (codegen sí, bundling no — sub-paso futuro
+> separado con decisión python-build-standalone vs PyOxidizer
+> pendiente); bindings globales con OnceLock + getter (vs `let`
+> local — destraba uso en handlers HTTP sin refactor); patrón
+> `?.await` único (paridad bit-a-bit con intérprete); auto-coerción
+> primitiva via `coerce(PyAny → T)` (aprovecha infraestructura
+> existente). Total al cierre: **1295 unit + 88 E2E + 3 openapi_e2e**
+> con feature; **1204 + 79 + 3** sin feature. Ejemplo runnable:
+> `examples/python-interop-8.7.fitz` con 3 secciones (constantes
+> + calls + bridge async). Deuda residual visible (sub-paso
+> futuro): coerción Python list/dict → Fitz List/Map/Instance,
+> `.await` con binding intermedio split, bundling CPython
+> embebido, trait `__FitzFromPy` simétrico. Detalles completos en
+> `docs/roadmap.md` → "Fase 8.7". Próximo norte: **Fase 8.8 (guía
+> + ejemplo CRUD + cierre formal de Fase 8)**.
+>
+> **Fase 8.8 (2026-05-15): CERRADA** — guía + ejemplo CRUD +
+> cierre formal de Fase 8 entera. Tres sub-pasos: 8.8.1 cap 21
+> "Interop Python" en `docs/guide.md` con 12 sub-secciones
+> cubriendo 8.1-8.7 + renumeración cap 21→22; 8.8.2 ejemplo
+> ejecutable `examples/guide/21-python-crud/` con SQLAlchemy +
+> SQLite (`models.py` + `db.py` + `models.fitz` generado + `app.fitz`
+> con handlers HTTP), validado end-to-end con curl; 8.8.3 cierre
+> formal (CHANGELOG v0.8.9, roadmap, deudas, README, CLAUDE).
+> Decisiones de scope (confirmadas con autor): cap 21 con una
+> renumeración (vs cap 20 con dos), backend SQLite (vs Postgres
+> con Docker o sin DB), solo `fitz run` con nota explícita sobre
+> deuda residual de 8.7 (vs validar paridad con `fitz build`).
+> Detalles completos en `docs/roadmap.md` → "Fase 8.8".
+>
+> **Cierre formal de Fase 8 (Interop Python) entera (2026-05-15)**:
+> roadmap original cumplido al 100% (8.1 embedding, 8.2 marshaling,
+> 8.3 excepciones → Result, 8.4 tipos del checker + coerción,
+> 8.5 fitz py-types, 8.6 bridge async, 8.7 codegen, 8.8 guía +
+> CRUD). **Sub-paso separado pendiente** (no parte del roadmap
+> original): bundling CPython embebido (`fitz build
+> --bundle-python`). Próximo norte: **Fase 9 — Ecosistema**
+> (package manager, LSP, formatter, linter); pre-reqs habilitantes
+> ya identificados: F15 (parser error recovery) + F16 (IR tipado
+> persistido por nodo).
 
 ## Resumen ejecutivo
 

@@ -3808,34 +3808,134 @@ clippy `-D warnings` limpio en ambos modos; paridad bit-a-bit
   solo cubre primitivos. Un trait dual permitiría conversiones
   estructurales completas. Sin presión real hoy.
 
-#### 8.8 — Guía + ejemplos + cierre de Fase 8
-**Pendiente** — capítulo nuevo en `docs/guide.md` titulado
-"Interop Python", probablemente entre el cap 17 (HTTP nativo)
-y el 18 ("Qué sigue"). Ejemplo ejecutable
-`examples/guide/19-python.fitz` (numeración tentativa) con un
-CRUD completo usando SQLAlchemy contra Postgres. Setup
-auxiliar `examples/guide/19-python.setup/` con `docker-compose.yml`
-para levantar Postgres local y `models.py` con los modelos
-SQLAlchemy. Actualización del cap "Qué sigue" para reflejar
-que la interop ya está cubierta.
+#### 8.8 — Guía + ejemplo CRUD + cierre formal de Fase 8 — CERRADA (2026-05-15)
 
-**Criterio de éxito**: un usuario que sabe Python básico + ha
-leído los caps 1-18 de la guía puede:
-1. Leer el cap nuevo (estimado 20-30 min de lectura).
-2. Correr `docker compose up` en el setup.
-3. Correr `fitz py-types models.py --out models.fitz`.
-4. Correr `fitz run 19-python.fitz`.
-5. Hacer `curl localhost:3000/users` y ver respuesta tipada.
+**Decisiones de scope al arrancar 8.8** (confirmadas con el autor):
+- **Posición del capítulo**: cap 21 nuevo "Interop Python" entre
+  cap 20 (`fitz build`) y el viejo cap 21 (Qué sigue). Una sola
+  renumeración (21 → 22). Lectura lineal — el cap 20 menciona
+  limitaciones que cierra interop, así que conviene leerlos en
+  ese orden.
+- **Backend de DB del ejemplo CRUD**: SQLite + SQLAlchemy
+  in-process (sobre las tres opciones consideradas: SQLite,
+  Postgres+docker-compose+async, sin DB). Setup mínimo
+  (`pip install sqlalchemy`), sin Docker ni Postgres remoto.
+  Cubre el mismo patrón conceptual que Postgres (sesiones,
+  models, queries) — el código Fitz es idéntico salvo la URL
+  de conexión.
+- **Modo de ejecución del ejemplo**: solo `fitz run`
+  (intérprete) con nota explícita sobre 8.7. El intérprete ya
+  tiene la coerción `Map → Instance` de 8.4.3 que el ejemplo
+  necesita; `fitz build` cubre el codegen interop pero la
+  coerción de compuestos sigue siendo deuda residual. Honesto
+  sobre lo que está y lo que falta.
 
-Sin pasos intermedios fuera de la guía.
+**Sub-pasos cerrados**:
 
-**Cierre formal de Fase 8**: todas las features de la lista de
-abajo marcadas, los 18 ejemplos existentes pasan `fitz check`
-sin regresiones, el ejemplo nuevo `19-python.fitz` corre
-end-to-end contra una Postgres real, y `examples/server.fitz`
-opcionalmente se reescribe para usar SQLAlchemy en lugar de
-state in-memory (decisión a tomar al cerrar — el server.fitz
-actual puede quedar como referencia de modo standalone).
+- **8.8.1 — Capítulo 21 "Interop Python" en `docs/guide.md`**:
+  - Capítulo nuevo con 12 sub-secciones cubriendo todo lo de
+    8.1-8.7: setup, sintaxis (`from python import` + alias +
+    path punteado), constantes/atributos, calls con Result
+    wrap automático, propagación con `?`, marshaling Fitz →
+    Python (List/Map/Instance), recuperación con anotaciones,
+    `fitz py-types` SQLAlchemy, bridge async (`<py_call>?.await`),
+    `fitz build` con interop (qué anda y qué es deuda residual),
+    ejemplo CRUD ejecutable referenciado, y limitaciones
+    honestas (GIL, numpy C extensions, herencia, gather con
+    futures Fitz).
+  - Renumeración: cap 21 viejo "Qué sigue" → cap 22; índice
+    actualizado con la parte 10 nueva ("Cerrando").
+  - Cap 22 ("Qué sigue") refrescado: la sección "Lo que ya
+    sabés" suma el bullet de interop Python; la sección "Lo
+    que viene" pasa de "más allá de Fase 7" a "más allá de
+    Fase 8" + próximo norte Fase 9 + sub-paso futuro separado
+    de bundling + stack DB nativo (Fase 10+).
+
+- **8.8.2 — Ejemplo CRUD ejecutable**:
+  - `examples/guide/21-python-crud/` con:
+    - `models.py` — modelo SQLAlchemy `User` sobre SQLite.
+    - `db.py` — helpers DB (`init_db`, `add_user`, `list_users`,
+      `get_user`, `reset`) que devuelven dicts/lists nativos
+      Python para marshaling directo a Fitz.
+    - `models.fitz` — output de `fitz py-types models.py`
+      (versionado para que el ejemplo funcione sin requerir
+      `sqlalchemy` solo para regenerar).
+    - `app.fitz` — programa Fitz principal con 3 handlers HTTP
+      (`POST /users`, `GET /users`, `GET /users/{id}`).
+  - Helper `user_from_py(raw)` — round-trip por JSON
+    (`json.dumps` + `json.loads`) para disparar la coerción
+    `Map → Instance` de 8.4.3 sobre dicts Python opacos.
+  - Setup: `pip install sqlalchemy` + `PYTHONPATH=examples/guide/21-python-crud`
+    antes del comando. El cap 21 explica por qué (preferimos
+    respetar el estándar Python sobre magia de Fitz para
+    sys.path; además `sys.path.insert` no funciona desde Fitz
+    porque `sys.path` se coerce a `List` Fitz nativa via
+    `py_to_value` y no tiene `.insert`).
+  - `.gitignore` suma reglas para `__pycache__/`, `*.pyc`, y
+    `examples/guide/21-python-crud/crud.db` (la DB SQLite que
+    el ejemplo crea al boot).
+  - Validación end-to-end con curl: POST inserta filas con id
+    auto-asignado, GET lista todas como JSON, GET por id devuelve
+    `User` Fitz tipado.
+
+- **8.8.3 — Cierre formal**: CHANGELOG v0.8.9, este roadmap
+  marca Fase 8.8 CERRADA + sección de cierre de Fase 8 entera,
+  deudas-post-5b refresh con nota final, README + CLAUDE
+  refresh para reflejar Fase 8 completa.
+
+**Limitaciones documentadas** (honesta) en el ejemplo + cap:
+- Iterar `List<Any>` opaca de Python con coerción por item a
+  `List<User>` requiere el wiring de `coerce(PyAny → List<T>)`
+  recursivo — deuda residual de 8.7. El ejemplo `list_users()`
+  devuelve JSON crudo en lugar de `List<User>` Fitz, y la guía
+  documenta el workaround "iterar con `user_from_py` adentro
+  de `.map(...)`" como ejercicio.
+
+### Cierre formal de Fase 8 entera (Interop Python)
+
+Roadmap original cumplido al 100%:
+
+- ✅ **8.1** — Embedding básico de CPython (`from python import X`
+  desde `fitz run`)
+- ✅ **8.2** — Marshaling List/Map/Instance bidireccional
+- ✅ **8.3** — Excepciones Python → `Result<T>` automático
+- ✅ **8.4** — Tipos del checker (`Type::PyAny`) + coerción
+  runtime `Map → Instance` con anotaciones
+- ✅ **8.5** — `fitz py-types` auto-mapeo SQLAlchemy → `type`
+  Fitz
+- ✅ **8.6** — Bridge tokio ↔ asyncio (`<py_call>?.await`
+  baseline blocking)
+- ✅ **8.7** — Codegen interop Python en `fitz build`
+  (cierra deuda F19)
+- ✅ **8.8** — Guía + ejemplo CRUD + cierre formal
+
+**Tests al cierre**: 1204 unit + 79 E2E + 3 openapi sin feature;
+1295 unit + 88 E2E + 3 openapi con `--features python`. Clippy
+`-D warnings` limpio en ambos modos.
+
+**Sub-paso separado pendiente** (NO parte del roadmap original
+de Fase 8): bundling CPython embebido (`fitz build
+--bundle-python`). Decisión python-build-standalone (mantenido
+activamente por Astral para `uv`, recomendado) vs PyOxidizer
+(ralentizado 2024-2025) pendiente. Sin presión real al cierre —
+el binario actual asume Python instalado, funcional para
+deploys con Docker base Python.
+
+**Próximo norte**: **Fase 9 — Ecosistema** (package manager,
+LSP con autocomplete + hover + go-to-def, formatter, linter).
+Pre-reqs habilitantes ya identificados en deudas-post-5b: F15
+(parser error recovery) + F16 (IR tipado persistido por nodo).
+
+**Deuda residual derivada de Fase 8** (NO bloquea Fase 9):
+- Coerción Python `list`/`dict` → Fitz `List<T>`/`Map<K,V>`/
+  `Instance` en `fitz build` (helpers `__fitz_py_to_list_*` ya
+  emitidos en preludio 8.7.2, falta wiring en `coerce(PyAny → ...)`)
+- `.await` con binding intermedio split (hoy solo el patrón
+  `<py_call>?.await` inmediato)
+- Trait `__FitzFromPy` simétrico al `__FitzToPy` actual
+- Stubs `.pyi` parseados (pospuesto a Fase 9+)
+- KeyboardInterrupt/SystemExit estructurados como tipos
+  específicos (hoy bajan como Err genérico)
 
 ### Decisiones cross-cutting
 

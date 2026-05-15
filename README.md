@@ -136,13 +136,12 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.7 cerrada — `fitz build` compila programas con
-interop Python a binario nativo standalone con pyo3 linkeado.**
-Cierra la deuda F19 del post-5b: el codegen acepta
-`from python import X`, emite el Cargo.toml condicional con
-`pyo3 = "0.28"` y un preludio con `__FitzPyObject(Arc<Py<PyAny>>)`
-+ helpers para getattr, call con args primitivos y compuestos,
-manejo de Result, y bridge async tokio ↔ asyncio:
+🏔️ **Fase 8 (Interop Python) cerrada entera — el roadmap original
+está cumplido al 100%.** Fitz puede importar módulos Python,
+llamar funciones, marshalar tipos en ambas direcciones, manejar
+excepciones como `Result<T>`, generar `type` Fitz desde modelos
+SQLAlchemy, `await` corutinas, y compilar todo a binario nativo
+con pyo3 linkeado:
 
 ```fitz
 from python import math
@@ -162,6 +161,12 @@ let u = User { id: 1, name: "Ada" }
 match json.dumps(u) { Ok(s) => print(s), Err(_) => print("err") }
 // → {"id": 1, "name": "Ada"}
 
+// Recuperar tipos Fitz desde Python con anotaciones.
+fn parse_user(s: Str) -> Result<User> {
+    let row: User = json.loads(s)?
+    return Ok(row)
+}
+
 // Bridge async con patrón canónico `?.await`.
 async fn run() -> Result<Str> {
     let _ = asyncio.sleep(0.001)?.await
@@ -169,18 +174,34 @@ async fn run() -> Result<Str> {
 }
 ```
 
-El binario resultante linkea pyo3 con `abi3-py310 + auto-initialize`
-y asume Python instalado en el destino (`PYO3_PYTHON` o `python3`
-en PATH). Paridad bit-a-bit `fitz run` ↔ `fitz build` validada
-con `examples/python-interop-8.7.fitz`. Programas SIN interop
-Python siguen produciendo binarios libres como Fase 5b (pyo3
-solo se incluye cuando `uses_python = true`).
+El binario `fitz build` con interop linkea pyo3 con `abi3-py310 +
+auto-initialize` y asume Python instalado en el destino.
+Paridad bit-a-bit `fitz run` ↔ `fitz build` validada en los
+ejemplos. Programas SIN interop Python siguen produciendo
+binarios libres como Fase 5b (pyo3 solo se incluye cuando
+`uses_python = true`).
 
-Bundling de CPython embebido (`fitz build --bundle-python`)
-queda como sub-paso futuro separado — proyecto distinto con
-decisión de herramienta pendiente (python-build-standalone vs
-PyOxidizer). Cierre formal de la fase con guía + CRUD completo
-en 8.8. Ver el [roadmap](docs/roadmap.md) para el plan completo.
+La guía del lenguaje gana un capítulo dedicado (cap 21 "Interop
+Python") con 12 sub-secciones cubriendo setup, sintaxis, marshaling,
+coerciones, `fitz py-types`, async, `fitz build`, y limitaciones
+honestas. El ejemplo CRUD completo en
+[`examples/guide/21-python-crud/`](examples/guide/21-python-crud/)
+combina SQLAlchemy + SQLite + HTTP nativo Fitz + tipos:
+
+```bash
+pip install sqlalchemy
+PYTHONPATH=examples/guide/21-python-crud \
+  cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+# luego: curl http://localhost:3000/users
+```
+
+**Sub-paso separado pendiente** (no parte del roadmap original):
+bundling CPython embebido con `fitz build --bundle-python` para
+producir un binario standalone que NO requiera Python en el
+destino. Decisión de herramienta pendiente (python-build-standalone
+vs PyOxidizer). Próximo norte: **Fase 9 — Ecosistema** (package
+manager, LSP, formatter, linter). Ver el
+[roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
 
@@ -352,20 +373,40 @@ Las fases cerradas:
   `examples/python-interop-8.7.fitz`. **Bundling de CPython
   embebido queda como sub-paso futuro separado** — el binario
   asume Python instalado en el destino.
+- **Fase 8.8 — Guía + ejemplo CRUD + cierre formal de Fase 8**:
+  cierra la Fase 8 entera con docs y un ejemplo ejecutable. Cap
+  21 nuevo "Interop Python" en `docs/guide.md` con 12 sub-secciones
+  cubriendo setup, sintaxis, marshaling, coerciones, `fitz
+  py-types`, async, `fitz build`, y limitaciones honestas
+  (renumeración cap 21→22). Ejemplo
+  `examples/guide/21-python-crud/` (SQLAlchemy + SQLite + handlers
+  HTTP) validado end-to-end con curl. Sub-pasos: 8.8.1 cap 21
+  + renumeración; 8.8.2 ejemplo CRUD; 8.8.3 cierre formal
+  (CHANGELOG, roadmap, deudas, README, CLAUDE). Decisiones de
+  scope: cap 21 (una renumeración), SQLite (sin Docker), solo
+  `fitz run` con nota explícita sobre deuda residual de 8.7.
+
+**Cierre formal de Fase 8 entera (Interop Python)** — roadmap
+original cumplido al 100%: embedding (8.1), marshaling (8.2),
+excepciones → Result (8.3), tipos del checker (8.4), `fitz
+py-types` (8.5), bridge async (8.6), codegen (8.7), y docs +
+CRUD (8.8).
 
 **1295 tests pasando con `--features python`** (1295 unit + 88 E2E
 con `fitz build` + 3 openapi_e2e). **1204 + 79 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.8 — Guía + ejemplos + cierre formal de
-Fase 8** — capítulo nuevo "Interop Python" en `docs/guide.md` +
-ejemplo CRUD ejecutable con SQLAlchemy contra Postgres. Cierra
-la Fase 8 entera. **Sub-paso separado pendiente (post-Fase 8 o
-cuando aparezca presión real)**: bundling CPython embebido
-(`fitz build --bundle-python`) con dos opciones evaluadas
-(python-build-standalone — mantenida activamente por Astral;
-PyOxidizer — ralentizada 2024-2025). Ver el
-[roadmap](docs/roadmap.md) para detalle. **Deudas
+Próximo norte: **Fase 9 — Ecosistema** (package manager con
+registry, LSP con autocomplete + hover + go-to-def en VSCode/Neovim,
+formatter, linter). Pre-reqs habilitantes ya identificados en
+deudas-post-5b: F15 (parser con error recovery — pre-req para
+LSP que muestra diagnostics sobre código incompleto) + F16 (IR
+tipado persistido por nodo — pre-req para hover y completion
+contextual). **Sub-paso separado pendiente sin presión**:
+bundling CPython embebido (`fitz build --bundle-python`) con
+dos opciones evaluadas (python-build-standalone — mantenida
+activamente por Astral; PyOxidizer — ralentizada 2024-2025).
+Ver el [roadmap](docs/roadmap.md) para detalle. **Deudas
 comprometidas que siguen**: coerción Python list/dict → Fitz
 `List<T>`/`Map<K,V>`/`Instance` en `fitz build` (helpers ya
 emitidos, falta wiring en `coerce`), `.await` con binding
