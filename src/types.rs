@@ -5035,4 +5035,119 @@ mod tests {
         );
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
+
+    // -----------------------------------------------------------------
+    // Fase 9.0.2 — el checker es silencioso sobre nodos Error del AST
+    // (los emite solo `parse_with_recovery`). Sin estas garantías, el
+    // LSP corriendo `check_program` sobre un AST recuperado generaría
+    // cascadas de errores derivados sobre el mismo punto que ya está
+    // reportado en la lista del parser.
+    // -----------------------------------------------------------------
+
+    /// Helper específico de los tests de 9.0.2: corre el pipeline
+    /// completo del LSP (`parse_with_recovery` → `check_program`) y
+    /// devuelve los errores que reportaría el checker. Los errores del
+    /// parser quedan separados — el caller los pide aparte si los
+    /// necesita.
+    fn check_recovering(src: &str) -> Vec<FitzError> {
+        let tokens = tokenize(src).expect("lex OK");
+        let (program, _parser_errors) = crate::parser::parse_with_recovery(tokens);
+        let (_env, errors) = check_program(&program);
+        errors
+    }
+
+    #[test]
+    fn checker_stmt_error_no_emite_errores_propios() {
+        // El parser produce un `Stmt::Error` en el lugar del stmt
+        // roto. El checker no debe agregar ningún error sobre ese
+        // nodo (los errores reales viven en la lista del parser).
+        let src = "let x = 1 +\nlet y: Int = 2";
+        let errors = check_recovering(src);
+        assert!(
+            errors.is_empty(),
+            "el checker no debe emitir errores sobre Stmt::Error ni sobre stmts válidos vecinos: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_stmt_error_silencioso_pero_errores_reales_se_reportan() {
+        // El checker silencia el Stmt::Error pero sigue reportando
+        // errores genuinos del código bueno. El `let z: Int = "no"`
+        // tiene tipo incompatible — el checker lo debe captar aunque
+        // haya un Stmt::Error antes.
+        let src = "let x = 1 +\nlet z: Int = \"no\"";
+        let errors = check_recovering(src);
+        assert_eq!(
+            errors.len(),
+            1,
+            "esperaba 1 error de tipo del stmt válido: {:?}",
+            errors
+        );
+        // El error es del stmt válido en la línea 2, no del Error node.
+        assert_eq!(errors[0].line, 2);
+    }
+
+    #[test]
+    fn checker_stmt_error_en_fn_body_no_aborta_check() {
+        // `fn foo() { ... }` con un stmt roto adentro: el checker
+        // sigue chequeando el resto del programa (la fn `bar` y su
+        // anotación de tipo incorrecta) sin abortar por el Error
+        // node intermedio.
+        let src = "fn foo() {\n  let a = 1 +\n}\nfn bar() -> Int { return \"no\" }\n";
+        let errors = check_recovering(src);
+        // El error de la anotación de retorno (`Int` vs `Str`) DEBE
+        // reportarse. Otros errores derivados del Error node NO.
+        // (Cantidad exacta puede variar según refinamientos futuros;
+        // lo crítico es: al menos un error de tipo del stmt válido, y
+        // ninguno que mencione el Error node directamente.)
+        assert!(
+            errors.iter().any(|e| e.line == 4),
+            "esperaba al menos un error de tipo en la línea 4 (return mal tipado): {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_pipeline_recovering_no_panic_sobre_buffer_muy_roto() {
+        // Smoke: programa salpicado de errores no debe crashear el
+        // checker. La validación real es que `check_program` retorne
+        // (no panic) sobre el AST con varios Error nodes.
+        let src = "let a = +\nlet b: Int = \"no\"\nlet c = *\nfn ok() -> Int { return 7 }\n";
+        let errors = check_recovering(src);
+        // Garantía: al menos el error genuino del `let b: Int = "no"`
+        // se reporta (línea 2). El resto puede o no tener errores
+        // derivados — el contrato es "no panic" + "errores genuinos
+        // del código bueno".
+        assert!(
+            errors.iter().any(|e| e.line == 2),
+            "esperaba error de tipo en la línea 2: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_expr_error_se_propaga_como_any_sin_emitir_error() {
+        // `Expr::Error` directo en el AST debe sintetizar `Type::Any`
+        // y no emitir ningún error desde el checker. Construimos el
+        // nodo manualmente porque el parser en 9.0.1 solo produce
+        // Stmt::Error (recovery sub-expression llega después).
+        //
+        // Caso: `let x: Int = <Expr::Error>` — anotación Int + valor
+        // Any. La regla de gradual (`is_compatible(Any, _)` siempre
+        // true) hace que no haya error de tipo.
+        use crate::ast::{AssignTarget, Span, Stmt, Expr as AstExpr};
+        let program = vec![Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
+            type_: Some(TypeExpr::Named("Int".into())),
+            value: AstExpr::Error(Span::ZERO),
+            span: Span::ZERO,
+        }];
+        let (_env, errors) = check_program(&program);
+        assert!(
+            errors.is_empty(),
+            "Expr::Error debe sintetizar Type::Any y no agregar errores: {:?}",
+            errors
+        );
+    }
 }
