@@ -1306,19 +1306,19 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             match &operand_ty {
                 Type::Any => Type::Any,
                 Type::Future(inner_ty) => (**inner_ty).clone(),
-                // Fase 8.7.3: `.await` sobre call Python (PyAny o
-                // `Result<Any>` — que es lo que sintetiza 8.4 para
-                // `pyobj(args)`) ejecuta la corutina vía el bridge
-                // tokio ↔ asyncio. El resultado siempre llega envuelto
-                // en `Result<Any>` — excepciones asyncio aparecen
-                // como `Err(Str("<Class>: <msg>"))` paralelo a 8.3.
-                // El usuario destransla con `?` o `match`.
-                Type::PyAny => Type::Result(Box::new(Type::Any)),
-                Type::Result(inner)
-                    if matches!(**inner, Type::PyAny | Type::Any) =>
-                {
-                    Type::Result(Box::new(Type::Any))
-                }
+                // Fase 8.7.3: `.await` sobre `Result<PyAny>` o
+                // `Result<Any>` (lo que el call Python sintetiza per
+                // 8.4 → 8.3) NO está soportado directo en intérprete
+                // (el evaluator rechaza con "se esperaba Future").
+                // El patrón canónico es `<py_call>?.await`: el `?`
+                // desempaca el Result a Future, y el .await opera
+                // sobre el Future. Acá NO agregamos rama para
+                // `Result<...>` — sigue siendo error de tipo si el
+                // usuario omite el `?`. La rama para `PyAny` solo
+                // cubre el caso del codegen 8.7.3 donde el inner del
+                // await después de `?` es PyAny (`<call>?.await` con
+                // el helper combinado).
+                Type::PyAny => Type::Any,
                 other => {
                     ctx.error_at(*span, format!(
                         "`.await` solo aplica a `Future<T>`, recibió `{}`",

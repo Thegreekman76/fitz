@@ -1,0 +1,134 @@
+// examples/python-interop-8.7.fitz — Interop Python en `fitz build`
+// (Fase 8.7).
+//
+//   # con `fitz run` (intérprete con feature `python`):
+//   cargo run --features python -- run examples/python-interop-8.7.fitz
+//
+//   # con `fitz build` (binario nativo standalone + pyo3 linkeado):
+//   cargo run --features python -- build examples/python-interop-8.7.fitz
+//   ./examples/python-interop-8.7
+//
+// Necesita Python 3.10+ disponible en el sistema (`PYO3_PYTHON` o
+// `python3` en PATH). Cierra la deuda F19 (codegen interop Python):
+// el binario producido por `fitz build` linkea pyo3 con feature
+// `abi3-py310 + auto-initialize`. CPython se boota lazy en la primera
+// llamada a `Python::attach`.
+//
+// Tres modos cubiertos:
+//   1. Import + field access (constante Python) + coerción a primitivo.
+//   2. Call con args primitivos y compuestos + manejo de Result.
+//   3. Bridge async tokio ↔ asyncio (`asyncio.sleep().await`).
+//
+// Paridad bit-a-bit con `fitz run`. La principal diferencia es de
+// distribución: `fitz build` produce un binario que NO necesita el
+// binario `fitz` instalado en el destino — solo Python.
+
+from python import math
+from python import json
+from python import asyncio
+
+// ---------------------------------------------------------------------
+// 1. Constantes Python + coerción primitiva con anotación destino
+// ---------------------------------------------------------------------
+
+print("== Constantes Python ==")
+
+// Con anotación destino primitiva, `coerce(PyAny → T)` aplica la
+// extracción automática (`__fitz_py_extract_f64`). Sin anotación,
+// el binding queda como `__FitzPyObject` opaco con Display que
+// delega a `__str__` Python — paridad bit-a-bit en `print`.
+let pi: Float = math.pi
+print("math.pi (Float)  = {pi}")
+print("math.pi (opaco)  = {math.pi}")
+
+// ---------------------------------------------------------------------
+// 2. Call con args + manejo de Result (excepciones Python → Err)
+// ---------------------------------------------------------------------
+
+print("")
+print("== Calls Python (Result wrap) ==")
+
+// `math.sqrt(16.0)` retorna `Result<PyAny>`. Match destrancla el Ok.
+let r1 = math.sqrt(16.0)
+match r1 {
+    Ok(v)  => print("sqrt(16.0)  = {v}"),
+    Err(e) => print("err: {e}"),
+}
+
+// Excepción Python — `math.sqrt(-1.0)` lanza ValueError. Llega
+// envuelto como `Err(Str("ValueError: ..."))`.
+let r2 = math.sqrt(-1.0)
+match r2 {
+    Ok(_)  => print("(no debería)"),
+    Err(e) => print("caught: {e}"),
+}
+
+// Marshaling Fitz → Python: una `List<Int>` Fitz cruza como list
+// Python via el impl genérico `__FitzToPy for Arc<Mutex<Vec<T>>>`.
+let xs: List<Int> = [1, 2, 3]
+match json.dumps(xs) {
+    Ok(s)  => print("dumps(List<Int>) = {s}"),
+    Err(e) => print("err: {e}"),
+}
+
+// Marshaling Instance Fitz → Python dict via `gen_type_def` que
+// emite `impl __FitzToPy for UserData` cuando `uses_python = true`.
+// El dict Python preserva el orden de declaración de los fields.
+type User { id: Int, name: Str }
+let u = User { id: 1, name: "Ada" }
+match json.dumps(u) {
+    Ok(s)  => print("dumps(User)      = {s}"),
+    Err(e) => print("err: {e}"),
+}
+
+// Propagación con `?` adentro de fn `Result<Float>`. El `?` desempaca
+// el Result del call; si la corutina falla, propaga al caller.
+fn root_safe(x: Float) -> Result<Float> {
+    let v: Float = math.sqrt(x)?
+    return Ok(v)
+}
+
+match root_safe(25.0) {
+    Ok(r)  => print("root_safe(25.0)  = {r}"),
+    Err(_) => print("(no debería)"),
+}
+
+// ---------------------------------------------------------------------
+// 3. Bridge async tokio ↔ asyncio — `<py_call>.await`
+// ---------------------------------------------------------------------
+
+print("")
+print("== Bridge async ==")
+
+// Patrón canónico Fitz para `.await` sobre corutina Python:
+// `<py_call>?.await`. El `?` desempaca el `Result<Any>` que el call
+// envuelve (per 8.3); el `.await` consume el resultado (Future Fitz
+// en el intérprete; combinado call+await en codegen). Ejecuta vía
+// `tokio::spawn_blocking + asyncio.run_until_complete`.
+async fn esperita() -> Result<Str> {
+    let _ = asyncio.sleep(0.001)?.await
+    return Ok("done")
+}
+
+match esperita().await {
+    Ok(v)  => print("esperita()       = {v}"),
+    Err(e) => print("err: {e}"),
+}
+
+// ---------------------------------------------------------------------
+// Lo que falta vs intérprete (deudas comprometidas post-8.7):
+//
+//   - Coerción Python list/dict → Fitz `List<T>` / `Map<K,V>` /
+//     `Instance` (helpers `__fitz_py_to_list_*` ya emitidos, falta
+//     el wiring en `coerce(PyAny → ...)` para tipos compuestos).
+//     Sub-paso futuro habilita `let users: List<User> = py_call(...)?`.
+//   - `.await` split (`let fut = py_call()?; fut.await` con binding
+//     intermedio): hoy solo el patrón `<py_call>.await` o
+//     `<py_call>?.await` inmediato. Deuda menor.
+//   - Bundling CPython embebido (`fitz build --bundle-python`):
+//     queda como sub-paso ortogonal post-8.7 / sub-fase futura.
+//     Hoy el binario asume Python instalado en el destino.
+// ---------------------------------------------------------------------
+
+print("")
+print("done.")

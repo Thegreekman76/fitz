@@ -2488,43 +2488,45 @@ fn fase_8_7_2_build_call_python_propagacion_con_try() {
 #[cfg(feature = "python")]
 #[test]
 fn fase_8_7_3_build_await_corutina_asyncio_sleep() {
-    // Criterio canónico 8.7.3: `asyncio.sleep(0.001).await` desde
-    // `fitz build` ejecuta la corutina vía `tokio::spawn_blocking` +
-    // `asyncio.run_until_complete`. La corutina devuelve `None` →
-    // `__FitzPyObject` con Display "None". Lo importante: el programa
-    // termina sin bloquearse + sin error.
-    let src = "from python import asyncio\n\
-               async fn run() -> Bool {\n\
-                 let raw = asyncio.sleep(0.001).await\n\
-                 return match raw {\n\
-                   Ok(_) => true,\n\
-                   Err(_) => false\n\
-                 }\n\
-               }\n\
-               let ok = run().await\n\
-               print(\"done = {ok}\")\n";
-    let (stdout, exit) = build_and_run("fase_8_7_3_asyncio_sleep", src);
-    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
-    assert_eq!(stdout.trim(), "done = true");
-}
-
-#[cfg(feature = "python")]
-#[test]
-fn fase_8_7_3_build_await_propagacion_con_try() {
-    // Operador `?` Fitz adentro de `async fn -> Result<Str>` propaga el
-    // Err Python si la corutina falla. Caso happy: la corutina termina,
-    // ignoramos el resultado None de asyncio.sleep, y devolvemos un Ok
-    // con un literal.
+    // Criterio canónico 8.7.3: patrón canónico Fitz `<py_call>?.await`.
+    // El `?` desempaca el `Result<Any>` del call (per 8.4 → 8.3); el
+    // `.await` ejecuta la corutina vía `tokio::spawn_blocking` +
+    // `asyncio.run_until_complete`. Paridad bit-a-bit con `fitz run`:
+    // el intérprete usa el mismo patrón.
     let src = "from python import asyncio\n\
                async fn run() -> Result<Str> {\n\
-                 let _ = asyncio.sleep(0.001).await?\n\
+                 let _ = asyncio.sleep(0.001)?.await\n\
                  return Ok(\"done\")\n\
                }\n\
                match run().await {\n\
                  Ok(v) => print(\"got = {v}\"),\n\
                  Err(e) => print(\"err: {e}\")\n\
                }\n";
-    let (stdout, exit) = build_and_run("fase_8_7_3_propagacion", src);
-    assert_eq!(exit, 0);
+    let (stdout, exit) = build_and_run("fase_8_7_3_asyncio_sleep", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
     assert_eq!(stdout.trim(), "got = done");
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_3_build_pipeline_con_multiples_awaits() {
+    // Múltiples awaits encadenados sobre corutinas distintas — cada
+    // uno ejecuta su propia `run_until_complete`. Paridad con el
+    // ejemplo canónico 8.6.
+    let src = "from python import asyncio\n\
+               async fn pipeline(start: Int) -> Result<Int> {\n\
+                 let _ = asyncio.sleep(0)?.await\n\
+                 let a = start + 1\n\
+                 let _ = asyncio.sleep(0)?.await\n\
+                 let b = a * 2\n\
+                 return Ok(b + 100)\n\
+               }\n\
+               match pipeline(10).await {\n\
+                 Ok(v) => print(\"result = {v}\"),\n\
+                 Err(_) => print(\"(no debería)\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_3_pipeline", src);
+    assert_eq!(exit, 0);
+    // (10+1) * 2 + 100 = 122
+    assert_eq!(stdout.trim(), "result = 122");
 }

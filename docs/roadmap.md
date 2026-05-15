@@ -3617,8 +3617,7 @@ el patrón es idéntico.
 **Cierre formal de Fase 8.6**: 1284 unit + 80 compile_e2e +
 3 openapi_e2e con feature; 1193 + 80 + 3 sin feature. Clippy
 `-D warnings` limpio en ambos modos. **Próximo norte**: Fase 8.7
-(distribución del binario con CPython embebido — `fitz build
---bundle-python`).
+(codegen interop Python en `fitz build` — cierra deuda F19).
 
 **Deuda residual visible que se queda como sub-paso futuro**:
 
@@ -3649,47 +3648,165 @@ el patrón es idéntico.
   son `current_thread` por compatibilidad con el resto de
   Fitz. Bench dedicado queda como deuda.
 
-#### 8.7 — Distribución del binario con CPython embebido
-**Pendiente** — un binario Fitz que use interop Python necesita
-CPython disponible en runtime. La promesa "binario nativo
-standalone" de la Fase 5b se mantiene como **modo de build
-disponible** (proyectos sin interop), pero proyectos con
-interop tienen tres opciones de distribución:
+#### 8.7 — Codegen interop Python en `fitz build` (cierra F19) — CERRADA (2026-05-15)
 
-1. **CPython preinstalado en el sistema** (default 8.1-8.6,
-   simple, peor experiencia): el binario asume `python3.X` en
-   el `PATH`. Falla en máquinas que no lo tienen.
-2. **CPython embebido en el binario** (PyOxidizer o
-   equivalente, mejor experiencia, más tamaño): el binario
-   lleva su propio intérprete + standard library. ~10-30MB
-   extra de tamaño. Sin dependencias externas en runtime.
-3. **Docker base con Python** (compromise, cloud-native): el
-   binario espera Python en runtime, el contenedor lo provee.
-   Útil cuando ya estás deployando en contenedores.
+**Decisión de alcance al arrancar 8.7** — la versión original del
+roadmap mezclaba dos pistas ortogonales bajo el nombre "8.7":
+**(a)** codegen interop Python en `fitz build` (deuda F19) y
+**(b)** distribución con CPython embebido (`--bundle-python`).
+Al revisar la deuda F19 y el setup necesario, decidimos
+**partir el sub-paso en dos**: 8.7 cierra solo (a), F19 queda
+resuelta, y (b) — bundling de CPython — queda como sub-paso
+**futuro post-8** con dos opciones reales evaluadas: PyOxidizer
+(mantenimiento muy lento en 2024-2025) y python-build-standalone
+(la opción que usa `uv` de Astral, mantenida activamente). La
+promesa "binario nativo standalone" se preserva: programas
+**sin** interop Python siguen produciendo binarios libres
+exactamente como Fase 5b. Programas **con** interop asumen
+Python instalado en el destino — modo (1) del roadmap original,
+el caso "pasa solo si tenés Python".
 
-**Recomendación**: empezar con (1) durante desarrollo y
-testing (más rápido de iterar); agregar `fitz build
---bundle-python` para emitir (2) cuando 8.7 cierre. Documentar
-(3) como pattern para deployments containerizados.
+**Sub-pasos cerrados** (1284 unit + 80 E2E + 3 openapi sin
+feature; **1295 unit + 88 E2E + 3 openapi con `--features python`**;
+clippy `-D warnings` limpio en ambos modos; paridad bit-a-bit
+`fitz run` ↔ `fitz build` validada con `examples/python-interop-8.7.fitz`):
 
-**Criterio de éxito**: `fitz build api.fitz --bundle-python`
-produce un binario standalone que corre en un sistema fresh
-install (Ubuntu / Alpine / Windows sin Python instalado) y
-sirve el CRUD canónico de 8.5 contra una Postgres remota.
+- **8.7.1 — Preludio Python + import + getattr + Cargo.toml**:
+  - `collect_python_imports(program) → Vec<PythonImport>` separa
+    los imports Python del top-level del AST. El `ModuleLoader`
+    de Fitz los skipea (no hay archivo `.fitz` que cargar).
+  - Cargo.toml condicional: si hay imports Python, suma
+    `pyo3 = { version = "0.28", features = ["abi3-py310",
+    "auto-initialize"] }`. Programas sin interop no pagan el
+    costo de bajar/linkear pyo3.
+  - Preludio Python emitido en `emit_python_prelude` (solo
+    cuando `uses_python = true`):
+    - `struct __FitzPyObject(Arc<Py<PyAny>>)` con Clone, Debug,
+      PartialEq (por puntero), Display que delega a `__str__`
+      Python (paridad bit-a-bit con `print(math.pi)` del
+      intérprete).
+    - Helpers `__fitz_py_import(dotted) → __FitzPyObject`
+      (panic on fail al boot), `__fitz_py_get_attr_obj`,
+      `__fitz_py_extract_{i64,f64,string,bool}`,
+      `__fitz_py_err_to_string` (formato canónico
+      `<Class>: <msg>` paralelo a 8.1.2).
+  - **Bindings globales**: cada `from python import X` se
+    emite como `static __FITZ_PY_BIND_X: OnceLock<__FitzPyObject>` +
+    getter `__fitz_py_bind_x()` al top-level del crate. Lazy
+    init en el primer `Python::attach`; cualquier fn
+    (main, handlers HTTP, helpers) los puede referenciar.
+  - `Type::PyAny` → `__FitzPyObject` en `rust_type_for`.
+    `gen_field_access` despacha sobre receptor PyAny.
+    `coerce(PyAny → T)` para primitivos emite extracción
+    directa (`let pi: Float = math.pi` →
+    `__fitz_py_extract_f64(...)`).
 
-**Decisiones técnicas a resolver**:
-- Herramienta de empaquetado: PyOxidizer es la opción
-  mainstream Rust-friendly, pero el proyecto se ralentizó en
-  2024-2025. Verificar estado al arrancar 8.7. Alternativas:
-  scripts custom que copian el `python3X.so` + standard lib +
-  archivo zip; o cosign de un release de python-build-standalone.
-- Librerías Python con extensiones C (numpy, pandas, psycopg2):
-  empaquetarlas standalone es notoriamente difícil. La
-  documentación de la fase debe ser honesta sobre qué funciona
-  out-of-the-box vs qué requiere venv preconfigurado.
-- Tamaño aceptable: ~30MB extra es razonable para un binario
-  de API. Si llegamos a 200MB porque NumPy+pandas+SQLAlchemy
-  cargan todo el universo, replantear.
+- **8.7.2 — Call + marshaling Fitz → Python + Result wrap**:
+  - `gen_call` y `gen_method_call` aceptan receptor PyAny y
+    emiten `__fitz_py_invoke(&<callable>, |py| Ok(vec![<args
+    marshalled>]))` con resultado `Result<__FitzPyObject,
+    String>`. Excepciones Python aparecen como
+    `Err(Str("<Class>: <msg>"))` con el formato 8.1.2/8.3.
+  - Trait `__FitzToPy` con impls genéricos para primitivos
+    (i64/f64/bool/()/String), `__FitzPyObject` (passthrough
+    con clone_ref), `Option<T>`, `Arc<Mutex<Vec<T>>>` (List
+    → list Python con breadcrumb `arg0[i]`), y
+    `Arc<Mutex<Vec<(K,V)>>>` (Map → dict con `__fitz_py_marshal_map_key`
+    para validar primitivos hashables).
+  - **Marshaling Instance Fitz → Python dict**: `gen_type_def`
+    emite `impl __FitzToPy for FooData` (iterando los fields y
+    construyendo un PyDict) + `impl __FitzToPy for Arc<Mutex<FooData>>`
+    (wrapper que delega vía lock) cuando `uses_python = true`.
+    Destraba el caso canónico 8.5: pasar `User { id: 1,
+    name: "Ada" }` a `json.dumps(user)`.
+  - `gen_python_call_args(args)` emite cada arg como
+    `<code>.__fitz_to_py(py, "arg<i>")?` con breadcrumb
+    numerado paralelo a `value_to_py(path: &str)` del
+    intérprete 8.2.
+
+- **8.7.3 — Bridge async tokio ↔ asyncio**:
+  - Helper `async fn __fitz_py_invoke_await<F>(callable, args_fn)
+    → Result<__FitzPyObject, String>` emitido en el preludio
+    (solo cuando `uses_async = true`). Combina call sync +
+    detección `inspect.isawaitable` + ejecución vía
+    `tokio::task::spawn_blocking` + `asyncio.new_event_loop().
+    run_until_complete()`. Si no es awaitable, devuelve el
+    value directo — `.await` ergonómico aún sobre fns Python
+    sync. Paralelo a `py_coro_to_fitz_future` 8.6.1 (mismo
+    baseline blocking, mismo trade-off).
+  - **Patrón canónico Fitz**: `<py_call>?.await`. El AST es
+    `Await(Try(Call PyAny))`. El codegen detecta el patrón
+    (`try_gen_python_await` + `try_gen_python_call_await`) y
+    emite `__fitz_py_invoke_await(&callable, |py| Ok(vec![<args>])).
+    await?` — el `?` Rust al final propaga excepciones asyncio
+    del await mismo. Tipo Fitz resultante: `PyAny` (gradual).
+  - Checker (`Type::PyAny.await → Any`) acepta el patrón
+    canónico estáticamente; rechaza `<call>.await` directo
+    sin `?` (paridad con evaluator del intérprete, que rechaza
+    en runtime con "se esperaba Future").
+
+- **8.7.4 — Cierre formal**:
+  - `examples/python-interop-8.7.fitz` con 3 secciones (constantes
+    + coerción primitiva, calls + Result + marshaling List/
+    Instance, bridge async con patrón canónico). Validado
+    bit-a-bit `fitz run` ↔ `fitz build` + binario standalone.
+  - CHANGELOG.md v0.8.8, roadmap actualizado, deudas-post-5b
+    marca **F19 como CERRADO** con nota detallada, README +
+    CLAUDE refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+- **Alcance acotado (codegen sí, bundling no)**: F19 era la
+  deuda comprometida; bundling era el "siguiente paso" del
+  roadmap original. Separados, F19 es chico y medible
+  (~3 sub-pasos), bundling es proyecto separado con decisión
+  de herramienta pendiente. Carta blanca del autor para tomar
+  esta decisión al ver que mezclar las pistas inflaba el
+  alcance.
+- **Bindings globales con OnceLock + getter** (vs `let X =
+  __fitz_py_import(...)` en main body): destraba uso adentro
+  de handlers HTTP y user-fns separadas. Cero refactor para
+  los próximos sub-pasos (interop Python en handlers, CRUD
+  contra SQLAlchemy/asyncpg).
+- **Trait `__FitzToPy` con impls condicionales por nominal**
+  (vs un mini-Value runtime): se mantiene en el modelo
+  estático del codegen. El impl genérico para `Arc<Mutex<Vec<T>>>`
+  (List) no conflictúa con el wrapper de nominales sobre
+  `Arc<Mutex<FooData>>` porque `Vec<T>` ≠ `FooData`.
+- **Patrón canónico `?.await` único** (en lugar de soportar
+  también `<call>.await` directo): paridad bit-a-bit con
+  intérprete + un solo camino que mantener. La rama "checker
+  permite Result<PyAny>.await" se evaluó y descartó porque
+  el evaluator del intérprete no la acepta — sería divergencia
+  semántica entre los dos paths.
+- **Auto-coerción primitiva via `coerce(PyAny → T)`** (vs un
+  trait `__FitzFromPy` simétrico): aprovecha la infraestructura
+  existente del codegen. La extracción dispara solo cuando
+  hay anotación destino concreta (`let pi: Float = math.pi`);
+  sin anotación, el binding queda opaco con Display delegado
+  a `__str__` Python.
+
+**Deuda residual visible (sub-paso futuro)**:
+
+- **Coerción Python list/dict → Fitz `List<T>` / `Map<K,V>` /
+  `Instance`**: los helpers `__fitz_py_to_list_{i64,f64,string}`
+  ya están emitidos en el preludio, pero falta el wiring en
+  `coerce(PyAny → List<T>)` y equivalentes. Sub-paso futuro
+  habilita el patrón `let users: List<User> = py_call(...)?`
+  que es el caso canónico 8.5 para recibir filas de SQLAlchemy.
+  Paralelo a `coerce_to_annotation` 8.4.3 del intérprete.
+- **`.await` con binding intermedio** (`let fut = py_call()?;
+  fut.await` con split del call y el await): hoy solo el patrón
+  `<py_call>?.await` inmediato. Deuda menor — requiere helper
+  separado `__fitz_py_await_value(&pyobj)` que opere sobre
+  PyAny aislado.
+- **Bundling CPython embebido** (`fitz build --bundle-python`):
+  proyecto separado. Decisión de herramienta entre
+  python-build-standalone (recomendado al cierre) y PyOxidizer
+  (verificar estado al arrancar). Tres opciones de distribución
+  del roadmap original siguen vigentes.
+- **Trait `__FitzFromPy` simétrico**: el actual `coerce(PyAny → T)`
+  solo cubre primitivos. Un trait dual permitiría conversiones
+  estructurales completas. Sin presión real hoy.
 
 #### 8.8 — Guía + ejemplos + cierre de Fase 8
 **Pendiente** — capítulo nuevo en `docs/guide.md` titulado

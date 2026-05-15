@@ -136,30 +136,51 @@ fitz build examples/guide/19-async.fitz
 
 ## Estado del proyecto
 
-🏔️ **Fase 8.6 cerrada — Fitz puede `await` corutinas Python
-desde cualquier `async fn`.** El bridge tokio ↔ asyncio es
-invisible al usuario: cuando un call a una función Python
-devuelve una corutina (caso típico de `async def`), Fitz la
-envuelve automáticamente en `Value::Future`, y el `.await`
-postfix (Fase 6) la desempaca y ejecuta:
+🏔️ **Fase 8.7 cerrada — `fitz build` compila programas con
+interop Python a binario nativo standalone con pyo3 linkeado.**
+Cierra la deuda F19 del post-5b: el codegen acepta
+`from python import X`, emite el Cargo.toml condicional con
+`pyo3 = "0.28"` y un preludio con `__FitzPyObject(Arc<Py<PyAny>>)`
++ helpers para getattr, call con args primitivos y compuestos,
+manejo de Result, y bridge async tokio ↔ asyncio:
 
 ```fitz
-async fn doble_eventual(x: Int) -> Result<Int> {
-    let _ = asyncio.sleep(0)?.await
-    return Ok(x * 2)
+from python import math
+from python import json
+from python import asyncio
+
+type User { id: Int, name: Str }
+
+// Coerción primitiva con anotación destino.
+let pi: Float = math.pi  // 3.141592653589793
+
+// Call con args + Result wrap. Excepciones Python → Err.
+match math.sqrt(16.0) { Ok(v) => print(v), Err(_) => print("err") }
+
+// Marshaling Instance Fitz → Python dict.
+let u = User { id: 1, name: "Ada" }
+match json.dumps(u) { Ok(s) => print(s), Err(_) => print("err") }
+// → {"id": 1, "name": "Ada"}
+
+// Bridge async con patrón canónico `?.await`.
+async fn run() -> Result<Str> {
+    let _ = asyncio.sleep(0.001)?.await
+    return Ok("done")
 }
-let r = match doble_eventual(21).await { Ok(v) => v, Err(_) => -1 }
-// r → 42
 ```
 
-Excepciones asyncio bajan como `Result::Err` con el formato
-canónico ya estable desde 8.1.2. Implementación "baseline
-blocking" con `tokio::spawn_blocking` + `asyncio.run_until_complete`
-— funcional para APIs DB-bound (queries SQLAlchemy/asyncpg
-cortas). La distribución bundled (binario standalone sin
-requerir Python en la máquina destino) llega en 8.7 + cierre
-formal de la fase con guía + CRUD completo en 8.8. Ver el
-[roadmap](docs/roadmap.md) para el plan completo.
+El binario resultante linkea pyo3 con `abi3-py310 + auto-initialize`
+y asume Python instalado en el destino (`PYO3_PYTHON` o `python3`
+en PATH). Paridad bit-a-bit `fitz run` ↔ `fitz build` validada
+con `examples/python-interop-8.7.fitz`. Programas SIN interop
+Python siguen produciendo binarios libres como Fase 5b (pyo3
+solo se incluye cuando `uses_python = true`).
+
+Bundling de CPython embebido (`fitz build --bundle-python`)
+queda como sub-paso futuro separado — proyecto distinto con
+decisión de herramienta pendiente (python-build-standalone vs
+PyOxidizer). Cierre formal de la fase con guía + CRUD completo
+en 8.8. Ver el [roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:
 
@@ -316,20 +337,39 @@ Las fases cerradas:
   Sub-pasos: 8.6.1 detección + bridge + 3 tests; 8.6.2 ejemplo
   runnable `examples/python-interop-8.6.fitz` con 3 secciones
   (patrón canónico, awaits encadenados, lazy sin .await).
+- **Fase 8.7 — Codegen interop Python en `fitz build`**: cierra la
+  deuda F19 del post-5b. `fitz build` compila programas con
+  `from python import X` a binario nativo standalone con pyo3
+  linkeado (Cargo.toml condicional, preludio `__FitzPyObject` +
+  helpers, bindings globales con `OnceLock` + getter). Cubre
+  getattr opaco/primitivo, call con args primitivos + List/Map/
+  Instance via trait `__FitzToPy`, Result wrap automático,
+  bridge async tokio ↔ asyncio (patrón canónico `<py_call>?.await`).
+  Paridad bit-a-bit `fitz run` ↔ `fitz build`. Sub-pasos: 8.7.1
+  preludio + import + getattr + Cargo.toml, 8.7.2 call + marshaling
+  Fitz → Python + Result, 8.7.3 bridge async (baseline blocking
+  paralelo a 8.6.1), 8.7.4 cierre formal con ejemplo
+  `examples/python-interop-8.7.fitz`. **Bundling de CPython
+  embebido queda como sub-paso futuro separado** — el binario
+  asume Python instalado en el destino.
 
-**1284 tests pasando con `--features python`** (1284 unit + 80 E2E
-con `fitz build` + 3 openapi_e2e). **1193 + 80 + 3** sin feature.
+**1295 tests pasando con `--features python`** (1295 unit + 88 E2E
+con `fitz build` + 3 openapi_e2e). **1204 + 79 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-Próximo norte: **Fase 8.7 — Distribución del binario con CPython
-embebido** — `fitz build --bundle-python` produce un binario
-standalone que NO requiere Python en la máquina destino.
-Reemplaza el modelo actual donde el binario asume `python3.X`
-en el PATH. Candidato para cerrar la deuda F19 (codegen interop
-Python en `fitz build`). Después: 8.8 (guía + ejemplo CRUD).
-Ver el [roadmap](docs/roadmap.md) para detalle. **Deudas
-comprometidas que siguen**: F19 (codegen interop Python en
-`fitz build`), stubs `.pyi` parseados (pospuesto a Fase 9+),
+Próximo norte: **Fase 8.8 — Guía + ejemplos + cierre formal de
+Fase 8** — capítulo nuevo "Interop Python" en `docs/guide.md` +
+ejemplo CRUD ejecutable con SQLAlchemy contra Postgres. Cierra
+la Fase 8 entera. **Sub-paso separado pendiente (post-Fase 8 o
+cuando aparezca presión real)**: bundling CPython embebido
+(`fitz build --bundle-python`) con dos opciones evaluadas
+(python-build-standalone — mantenida activamente por Astral;
+PyOxidizer — ralentizada 2024-2025). Ver el
+[roadmap](docs/roadmap.md) para detalle. **Deudas
+comprometidas que siguen**: coerción Python list/dict → Fitz
+`List<T>`/`Map<K,V>`/`Instance` en `fitz build` (helpers ya
+emitidos, falta wiring en `coerce`), `.await` con binding
+intermedio split, stubs `.pyi` parseados (pospuesto a Fase 9+),
 descripciones via doc-strings sobre handlers (OpenAPI enrichment),
 modelo wrap de middleware (post-process) si aparece presión real,
 event loop asyncio persistente (paralelismo I/O real en interop
