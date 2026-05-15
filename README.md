@@ -201,15 +201,17 @@ producir un binario standalone que NO requiera Python en el
 destino. Decisión de herramienta pendiente (python-build-standalone
 vs PyOxidizer).
 
-**Fase 9 (Ecosistema) arrancada** — primer sub-paso **F15 (error
-recovery del parser) CERRADO** el 2026-05-15. Nueva API
-`parse_with_recovery(tokens) -> (Program, Vec<FitzError>)` para
-tooling externo (LSP, formatter) que necesita un AST parcial
-sobre buffers en construcción. **Sin cambio user-facing**:
-`fitz run` / `fitz build` / `fitz check` siguen usando `parse()`
-strict y abortando al primer error. Próximo sub-paso de Fase 9.0:
-**F16 (IR tipado persistido por nodo)** — segundo pre-req
-habilitante antes de las sub-fases visibles del LSP. Ver el
+**Fase 9.0 (pre-reqs habilitantes del LSP) CERRADA** — los dos
+sub-pasos cerrados el 2026-05-15. **F15 (error recovery del parser)**
+introduce `parse_with_recovery(tokens) -> (Program, Vec<FitzError>)`
+para tooling externo que necesita un AST parcial sobre buffers en
+construcción. **F16 (IR tipado persistido por nodo)** suma un
+side-table `TypeInfo` que retiene el tipo sintetizado de cada
+nodo `Expr`, accesible vía la nueva firma de `check_program`.
+**Sin cambio user-facing**: `fitz run` / `fitz build` / `fitz check`
+siguen usando `parse()` strict y descartando el side-table. Próximo
+norte: las sub-fases visibles del LSP (9.x.1 diagnostics → 9.x.5
+distribución VSCode Marketplace). Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
 
 Las fases cerradas:

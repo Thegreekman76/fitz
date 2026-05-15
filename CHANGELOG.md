@@ -12,11 +12,82 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.0
-(pre-reqs habilitantes del LSP) avanza**: F15 (error recovery del
-parser) CERRADO; queda F16 (IR tipado persistido por nodo) antes
-de las sub-fases visibles del LSP (9.x.1 → 9.x.5). Sub-paso
-separado pendiente sin presión: bundling CPython embebido
-(`fitz build --bundle-python`).
+(pre-reqs habilitantes del LSP) CERRADA**: F15 (error recovery del
+parser) + F16 (IR tipado persistido por nodo). Próximo norte: las
+sub-fases visibles del LSP (9.x.1 → 9.x.5). Sub-paso separado
+pendiente sin presión: bundling CPython embebido (`fitz build
+--bundle-python`).
+
+## [v0.9.1] — 2026-05-15 — Fase 9.0: F16 cierre — IR tipado persistido por nodo
+
+Segundo y último sub-paso de Fase 9.0. Cierra la deuda F16
+identificada post-5b: **segundo pre-requisito habilitante del LSP**
+(hover y completion contextual). El checker ahora retiene los tipos
+sintetizados de cada nodo `Expr` en un side-table devuelto junto al
+`TypeEnv`.
+
+**Sin cambio de comportamiento user-facing**: `fitz run` / `fitz
+build` / `fitz check` siguen ignorando el side-table. La API nueva
+(`TypeInfo`, retornada por `check_program`) está pensada para los
+consumidores del LSP que llegan en sub-fases siguientes.
+
+- **9.0.4 — Side-table TypeInfo + populación + tests** (8 unit nuevos):
+  - Nuevo `pub struct SpanKey(usize, usize)` como clave hashable.
+    Necesario porque `Span` propio no sirve: su `PartialEq` devuelve
+    `true` siempre (intencional para que los tests de AST comparen
+    estructura sin re-derivar posiciones del parser).
+  - Nuevo `pub struct TypeInfo` con `record(span, ty)`,
+    `type_at(span)` y `len()`. Omite `Span::ZERO` (sintéticos /
+    tests) para evitar colisiones bajo la misma clave `(0, 0)`.
+  - `infer_expr` pasa a ser wrapper sobre `synthesize_expr`: la
+    lógica del match queda igual, y el wrapper centraliza el
+    `record` al salir. Cobertura amplia desde un solo punto, sin
+    "olvidé tal caso".
+  - `pub fn check_program` cambia firma de `(TypeEnv,
+    Vec<FitzError>)` a `(TypeEnv, TypeInfo, Vec<FitzError>)`. Los
+    13 call sites internos (main.rs, codegen.rs, tests) migrados
+    descartando el segundo elemento con `_types` — la CLI no
+    consume el side-table todavía.
+  - `Expr::Error` (F15) se persiste como `Type::Any` uniforme con
+    el comportamiento del checker. El LSP decide qué mostrar en
+    hover sobre Error nodes.
+  - Tests del side-table (`types::tests::types_info_*`): literales,
+    ident + BinOp, call + field, match arms, omisión de Span::ZERO,
+    Error nodes como Any, lookup ausente devuelve None, smoke
+    sobre programa real (`info.len() >= 10`).
+
+- **9.0.5 — Cierre formal**: este CHANGELOG, `docs/roadmap.md`
+  con Fase 9.0 — F16 documentada paso a paso, `docs/deudas-post-5b.md`
+  con F16 marcado CERRADO, README + CLAUDE refresh.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **`HashMap<SpanKey, Type>` (vs NodeId asignado al nodo, vs
+  `*const Expr`)**: simple, reusa los spans que ya tiene cada
+  `Expr` post-S1.2, zero refactor del AST. La colisión potencial
+  por `Span::ZERO` se resuelve omitiendo esos nodos.
+- **Cobertura amplia (todo `Expr` que pasa por `infer_expr`)**:
+  un solo `record` en el wrapper en lugar de un insert por
+  brazo del match. Futuro-proof contra nuevos tipos de Expr.
+- **API: una sola** (no variante `check_program_with_types`):
+  los 13 call sites son triviales (`let (env, _types, errors) =
+  ...`), una sola API es más limpia que dos en paralelo.
+- **`Span::ZERO` omitido**: sintéticos del parser y nodos de
+  tests colisionarían entre sí bajo la misma clave; ninguno es
+  user-visible para hover.
+- **Solo `Expr` (no `Stmt` / `TypeExpr` / `Pattern`)**: el LSP
+  obtiene info de variables y fns por scope lookup; persistir
+  Stmt es ortogonal. Spans en `TypeExpr` y `Pattern` siguen
+  como deuda residual menor de S1 — refinable post-LSP MVP si
+  aparece presión real.
+
+**Total al cierre**: 1227 unit + 79 E2E + 3 openapi sin feature.
+Clippy `-D warnings` limpio.
+
+**Próximo norte**: las sub-fases visibles del LSP — **9.x.1
+(diagnostics MVP)**, 9.x.2 (hover, ya consume `TypeInfo`), 9.x.3
+(go-to-definition), 9.x.4 (autocomplete), 9.x.5 (distribución
+VSCode Marketplace). Ver `docs/roadmap.md` → "Fase 9.x".
 
 ## [v0.9.0] — 2026-05-15 — Fase 9.0: F15 cierre — error recovery del parser
 

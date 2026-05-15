@@ -4496,13 +4496,13 @@ reemplazado); MW.4 sin tests nuevos (smoke +1 implícito en
 ---
 
 ## Fase 9 — Ecosistema 🌍
-**Estado: EN CURSO** — Fase 9.0 (pre-reqs habilitantes del LSP)
-arrancada. F15 (error recovery del parser) **CERRADO** el
-2026-05-15. Queda F16 (IR tipado persistido por nodo) antes de
-las sub-fases visibles del LSP (9.x.1 → 9.x.5).
+**Estado: pre-reqs habilitantes del LSP CERRADOS** — Fase 9.0
+cerrada entera el 2026-05-15. F15 (error recovery del parser) +
+F16 (IR tipado persistido por nodo) cerrados. Próximo: sub-fases
+visibles del LSP (9.x.1 → 9.x.5).
 
 - [x] **F15 — error recovery del parser** (Fase 9.0, 2026-05-15) — ver 9.0 abajo
-- [ ] F16 — IR tipado persistido por nodo (pre-req habilitante del hover/completion del LSP)
+- [x] **F16 — IR tipado persistido por nodo** (Fase 9.0, 2026-05-15) — ver 9.0 abajo
 - [ ] LSP + extensión VSCode (ver 9.x abajo)
 - [ ] Formatter (`fitz fmt`)
 - [ ] Package manager (`fitz add`)
@@ -4637,11 +4637,132 @@ API recovering es para tooling externo.
 #### Próximo norte
 
 **Fase 9.0 — F16 (IR tipado persistido por nodo)** — segundo
-pre-req habilitante del LSP. Persistir el `Type` resuelto de cada
-nodo del AST en un side-table (`HashMap<SpanKey, Type>` o
-paralelo) para que el LSP pueda responder
-`textDocument/hover` ("¿qué tipo tiene esta expresión?") y
-completion contextual ("tras `u.`, mostrar fields de `User`").
+pre-req habilitante del LSP. **CERRADO 2026-05-15** — ver sección
+inmediatamente abajo.
+
+---
+
+### Fase 9.0 — F16: IR tipado persistido por nodo ✓ (CERRADA, 2026-05-15)
+
+Segundo y último sub-paso de Fase 9.0. Cierre formal de la deuda
+F16 identificada post-5b. Habilita que el LSP (sub-fases 9.x.2
+hover y 9.x.4 completion) responda "¿qué tipo tiene esta
+expresión?" sin re-correr el checker por cada request.
+
+**Sin cambio user-facing**: el side-table se devuelve junto al
+`TypeEnv` y los errores, pero `fitz run` / `fitz build` /
+`fitz check` lo descartan con `_types`. Consumidores del LSP en
+9.x lo usan directamente.
+
+#### 9.0.4 — Side-table TypeInfo + populación + tests
+
+- **AST**: sin cambios. Los spans ya estaban en `Expr` (S1.2).
+- **`SpanKey(usize, usize)`** como clave hashable. `Span`
+  propio no sirve porque su `PartialEq` devuelve `true` siempre
+  (intencional para que los tests de AST comparen nodos
+  estructuralmente sin re-derivar posiciones del parser; ver
+  comentario en `src/ast.rs`).
+- **`TypeInfo`** con `record(span, ty)` (omite `Span::ZERO` —
+  nodos sintéticos y de tests colisionarían bajo la misma clave),
+  `type_at(span) -> Option<&Type>`, `len()`, `is_empty()`.
+- **`infer_expr` pasa a ser wrapper sobre `synthesize_expr`**: el
+  match con la lógica de síntesis queda intacto en
+  `synthesize_expr`; el wrapper hace el `record` al salir.
+  Cobertura amplia desde un solo punto — recursión incluida (el
+  wrapper se invoca por cada subnodo).
+- **`check_program` cambia firma** de `(TypeEnv, Vec<FitzError>)`
+  a `(TypeEnv, TypeInfo, Vec<FitzError>)`. Los 13 call sites
+  migrados:
+  - `main.rs` (4 sitios): `let (env, _types, errors) = ...`.
+  - `codegen.rs` (6 sitios): mismo patrón en `generate_project`
+    (módulo) y en tests.
+  - `types.rs` (3 sitios internos en tests).
+- **`Expr::Error` (F15)** se persiste como `Type::Any` uniforme
+  con la semántica del checker. Decisión: el LSP decide qué
+  mostrar (probable "expresión inválida"); no omitirlos del
+  side-table mantiene cobertura visible.
+- **Tests del side-table** (8 unit nuevos en
+  `types::tests::types_info_*`):
+  - `types_info_persiste_tipos_de_literales` — Int/Float/Str/Bool/Null.
+  - `types_info_persiste_ident_y_binop` — `let y = x + 5` debe
+    persistir el ident `x`, el literal `5` y el BinOp todos
+    como Int.
+  - `types_info_persiste_call_y_field` — call de fn nominal
+    tipa como su return, struct lit tipa como Nominal.
+  - `types_info_persiste_match_arms` — match sobre Result<Int>
+    persiste Int en las ramas.
+  - `types_info_omite_span_zero` — programa construido a mano
+    con Span::ZERO en todos los nodos no debe agregar nada al
+    side-table.
+  - `types_info_expr_error_se_persiste_como_any` — Error node
+    con span known tipa como Any en el side-table.
+  - `types_info_type_at_devuelve_none_para_span_desconocido` —
+    lookup por span ausente / Span::ZERO devuelve None.
+  - `types_info_smoke_programa_real` — programa con type
+    custom + fn + struct lit + call + print persiste ≥10
+    entries.
+
+#### 9.0.5 — Cierre formal
+
+- **Docs**: CHANGELOG v0.9.1, este roadmap (Fase 9.0 — F16
+  documentada paso a paso, Fase 9.0 marcada CERRADA entera),
+  `docs/deudas-post-5b.md` con F16 marcado CERRADO + nota
+  paralela a F15, README + CLAUDE refresh.
+
+#### Decisiones técnicas tomadas
+
+- **`HashMap<SpanKey, Type>` (D1)**: simple, reusa los spans del
+  AST post-S1.2, sin refactor invasivo. Alternativas
+  consideradas y descartadas: NodeId asignado al nodo (refactor
+  de cientos de sitios), `*const Expr` (lifetime gymnastics),
+  side-vector indexado paralelo al AST (no ergonómico para
+  lookup por posición).
+- **Cobertura amplia (D2)**: todo `Expr` que pasa por
+  `infer_expr` queda registrado. Alternativa "solo nodos clave
+  (Ident/Field/Call/StructLit)" descartada — el costo extra es
+  trivial (un insert por nodo) y centralizar en el wrapper
+  evita "olvidé tal caso" futuro.
+- **API: una sola firma de `check_program` (D3)**: los 13 call
+  sites se actualizan con `_types` trivialmente. Alternativa
+  "agregar `check_program_with_types` separada" descartada —
+  dos APIs en paralelo es churn sin valor.
+- **`Expr::Error` como `Type::Any` en el side-table (D4)**:
+  uniforme con la semántica del checker; el LSP decide qué
+  mostrar.
+- **Solo `Expr` (no `Stmt`, `TypeExpr`, `Pattern`) (D6)**: el
+  LSP obtiene info de variables y fns por scope lookup;
+  persistir `Stmt` es ortogonal. Spans en `TypeExpr` y
+  `Pattern` siguen como deuda menor S1 — refinable post-LSP
+  MVP si aparece presión.
+
+#### Total al cierre
+
+**1227 unit + 79 E2E + 3 openapi sin feature** (1318 + 88 + 3
+con `--features python`). Clippy `-D warnings` limpio.
+
+#### Deuda residual derivada de F16
+
+- **Sin index espacial (rango inicio-fin)** — el side-table
+  guarda solo el span del primer token de cada `Expr`. Para
+  hover, el LSP elige el nodo cuyo span está más cerca del
+  cursor; un refinamiento con rangos completos requiere
+  `end_span` en `Expr` y queda como sub-paso post-LSP MVP.
+- **Spans en `TypeExpr` y `Pattern`** — heredado de S1.
+  Necesario si el LSP quiere hover sobre anotaciones
+  (`let x: User = ...` → hover sobre `User`) o sobre patrones
+  (`Ok(x)` → hover sobre `x`). Refinable cuando aterrice el
+  primer caso de uso real del LSP.
+- **Cobertura de `Stmt`** — el side-table cubre `Expr`. Si el
+  LSP quiere hover sobre el nombre de una variable en su sitio
+  de declaración (`let X = ...`), necesita o caminar al RHS o
+  registrar el Stmt. Caso 9.x.3 (go-to-definition) lo resuelve
+  con tabla de resolución de scopes — vía paralela al
+  side-table, no competidora.
+
+#### Próximo norte
+
+**Sub-fases visibles del LSP** (9.x.1 → 9.x.5). Ver sección
+"9.x — LSP + extensión VSCode" más abajo en este roadmap.
 
 ---
 
@@ -4669,10 +4790,14 @@ go-to-definition.
 - ✅ **F15** — error recovery del parser. **CERRADO 2026-05-15**
   en Fase 9.0 (ver arriba). API pública `parse_with_recovery`
   + nodos `Expr::Error`/`Stmt::Error` + checker silencioso.
-- **F16** — IR tipado persistido por nodo. Sin esto no hay
-  hover ni completion contextual sobre tipos. **Próximo norte**.
+- ✅ **F16** — IR tipado persistido por nodo. **CERRADO 2026-05-15**
+  en Fase 9.0 (ver arriba). `pub struct TypeInfo` con
+  `HashMap<SpanKey, Type>` retornado por `check_program`; el
+  LSP lo consume para hover (9.x.2) y completion contextual
+  (9.x.4).
 - **S1.Pattern/TypeExpr** — completar spans en los nodos que
-  todavía no los tienen (deuda residual de S1.2).
+  todavía no los tienen (deuda residual de S1.2). Refinable
+  cuando aterrice el primer caso de uso real del LSP.
 
 **Sub-pasos sugeridos** (granito incremental, cada uno con
 valor entregable):
