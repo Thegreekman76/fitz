@@ -1717,6 +1717,26 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                         ))
                     })
                 }
+                // Fase 8.1.3 — `Value::PyObject(.field)` baja a CPython
+                // via `getattr`. La auto-coerción primitiva la hace
+                // `py_interop::get_attr`: primitivos vuelven como
+                // `Value` nativos (Int/Float/Str/Bool/Null), tipos
+                // compuestos como `Value::PyObject` opaco para
+                // chaining (`math.sqrt(16)` será válido en 8.1.4).
+                #[cfg(feature = "python")]
+                Value::PyObject(handle) => {
+                    crate::py_interop::get_attr(&handle, field).map_err(|mut e| {
+                        // El `py_err_to_fitz` setea línea/columna 0 porque
+                        // se ejecuta sin contexto del AST. Sobrescribimos
+                        // con el span del field access para que el error
+                        // apunte al sitio del `.attr` en el source Fitz.
+                        if e.line == 0 && e.column == 0 {
+                            e.line = span.line;
+                            e.column = span.column;
+                        }
+                        EvalSignal::Error(e)
+                    })
+                }
                 other => Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeMismatch {
                         expected: "Instance o Module".into(),
@@ -6811,6 +6831,81 @@ let r = match n {
             "mensaje debería citar el flag de build, fue: {}",
             err.message,
         );
+    }
+
+    // -------------------------------------------------------------------
+    // Fase 8.1.3 — Expr::Field sobre Value::PyObject (getattr + auto-coerción)
+    // -------------------------------------------------------------------
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn field_access_math_pi_coerciona_a_float() {
+        let (env, res) = parse_eval_into_env(
+            "from python import math\nlet p = math.pi\n"
+        ).await;
+        res.unwrap();
+        // Sacamos el binding fuera del lock para que el MutexGuard
+        // se libere antes de que `env` se dropee al fin del scope.
+        let p = env.lock().get("p").unwrap();
+        match p {
+            Value::Float(f) => {
+                assert!((f - std::f64::consts::PI).abs() < 1e-15, "got {}", f);
+            }
+            other => panic!("esperaba Float, fue {:?}", other),
+        }
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn field_access_funcion_python_queda_pyobject_opaco() {
+        // `math.sqrt` no se invoca, solo se lee. Debería quedar como
+        // PyObject opaco listo para call en 8.1.4.
+        let (env, res) = parse_eval_into_env(
+            "from python import math\nlet f = math.sqrt\n"
+        ).await;
+        res.unwrap();
+        assert!(matches!(env.lock().get("f"), Some(Value::PyObject(_))));
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn field_access_atributo_inexistente_emite_attributeerror() {
+        let (_env, res) = parse_eval_into_env(
+            "from python import math\nlet x = math.no_existe_xyz_813\n"
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("AttributeError"),
+            "mensaje: {}",
+            err.message,
+        );
+    }
+
+    #[cfg(feature = "python")]
+    #[tokio::test(flavor = "current_thread")]
+    async fn field_access_anidado_modulo_pyobject() {
+        // `os.path` es un submódulo. Field access debería darnos otro
+        // PyObject opaco — al chequearlo con `__name__` confirmamos
+        // que es realmente el submódulo correcto.
+        let (env, res) = parse_eval_into_env(
+            "from python import os\nlet p = os.path\nlet n = p.__name__\n"
+        ).await;
+        res.unwrap();
+        let p = env.lock().get("p");
+        assert!(matches!(p, Some(Value::PyObject(_))));
+        let name = env.lock().get("n").unwrap();
+        // `os.path.__name__` típicamente es "ntpath" en Windows,
+        // "posixpath" en Unix. Cualquiera de los dos es válido.
+        match name {
+            Value::Str(s) => {
+                assert!(
+                    s == "ntpath" || s == "posixpath" || s == "os.path",
+                    "nombre inesperado: {}",
+                    s,
+                );
+            }
+            other => panic!("esperaba Str, fue {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------

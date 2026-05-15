@@ -21,6 +21,7 @@
 // igual que un panic del intérprete.
 
 use pyo3::prelude::*;
+use pyo3::types::{PyBool, PyFloat, PyInt, PyString};
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::value::{PyObjectHandle, Value};
@@ -56,6 +57,83 @@ pub fn import_module(dotted: &str) -> FitzResult<Value> {
         }
         Err(err) => Err(py_err_to_fitz(py, err)),
     })
+}
+
+/// Fase 8.1.3 — acceso a atributo sobre un objeto Python con
+/// auto-coerción primitiva. Implementa la mecánica de `math.pi`
+/// (constante Float), `math.sqrt` (función opaca → `Value::PyObject`),
+/// y por extensión cualquier `obj.attr` donde `obj: Value::PyObject`.
+///
+/// Política de coerción en 8.1:
+///   - `None` → `Value::Null`
+///   - `bool` → `Value::Bool` (chequea **antes** que int — en Python
+///     `bool ⊂ int`).
+///   - `int` → `Value::Int` si cabe en `i64`. Si excede, error
+///     explícito (deuda menor: bignum support cuando entre demanda).
+///   - `float` → `Value::Float`.
+///   - `str` → `Value::Str`.
+///   - cualquier otro tipo (función, clase, instancia, list, dict,
+///     submódulo, etc.) → `Value::PyObject` opaco. Marshaling para
+///     `list/dict` específicos llega en 8.2.
+pub fn get_attr(handle: &PyObjectHandle, name: &str) -> FitzResult<Value> {
+    Python::attach(|py| {
+        let bound = handle.0.bind(py);
+        match bound.getattr(name) {
+            Ok(attr) => py_to_value(py, &attr),
+            Err(err) => Err(py_err_to_fitz(py, err)),
+        }
+    })
+}
+
+/// Convierte un `Bound<'_, PyAny>` a `Value` Fitz aplicando la política
+/// de coerción primitiva. Helper reusable: lo consumen `get_attr`
+/// (8.1.3) y va a consumirlo el dispatcher de `Expr::Call` sobre
+/// PyObject (8.1.4) para procesar el return value.
+///
+/// Pre-condición: el caller ya tomó el GIL (parámetro `py` lo testifica).
+fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
+    if obj.is_none() {
+        return Ok(Value::Null);
+    }
+    // bool ANTES que int: en Python `isinstance(True, int) == True`, así
+    // que un chequeo de int primero capturaría True/False como 1/0.
+    if obj.is_instance_of::<PyBool>() {
+        let b: bool = obj.extract().map_err(|e| py_err_to_fitz(py, e))?;
+        return Ok(Value::Bool(b));
+    }
+    if obj.is_instance_of::<PyInt>() {
+        // `extract::<i64>()` falla si el int Python excede el rango de
+        // i64 (`2^63`). En 8.1 reportamos error claro citando el
+        // límite; bignum support quedaría como deuda menor de 8.2+.
+        return match obj.extract::<i64>() {
+            Ok(n) => Ok(Value::Int(n)),
+            Err(_) => Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int (i64)".into(),
+                    found: "int Python fuera de rango i64".into(),
+                },
+                0, 0,
+                format!(
+                    "el entero Python `{}` excede el rango de Int en Fitz (i64); \
+                     bignum support llega en una fase posterior",
+                    obj.str().map(|s| s.to_string()).unwrap_or_else(|_| "<repr falló>".into()),
+                ),
+            )),
+        };
+    }
+    if obj.is_instance_of::<PyFloat>() {
+        let f: f64 = obj.extract().map_err(|e| py_err_to_fitz(py, e))?;
+        return Ok(Value::Float(f));
+    }
+    if obj.is_instance_of::<PyString>() {
+        let s: String = obj.extract().map_err(|e| py_err_to_fitz(py, e))?;
+        return Ok(Value::Str(s));
+    }
+    // Fallback: tipos compuestos (list, dict, función, clase, instancia,
+    // submódulo). En 8.1 los envolvemos opacos. 8.2 trae marshaling
+    // bidireccional para list/dict/Instance.
+    let owned: Py<PyAny> = obj.clone().unbind();
+    Ok(Value::PyObject(PyObjectHandle::new(owned)))
 }
 
 /// Convierte un `PyErr` a un `FitzError` con mensaje
@@ -142,5 +220,91 @@ mod tests {
         let a = import_module("math").unwrap();
         let b = import_module("json").unwrap();
         assert_ne!(a, b);
+    }
+
+    // -------------------------------------------------------------------
+    // 8.1.3 — get_attr + auto-coerción primitiva
+    // -------------------------------------------------------------------
+
+    fn handle_of(v: Value) -> PyObjectHandle {
+        match v {
+            Value::PyObject(h) => h,
+            other => panic!("se esperaba Value::PyObject, fue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_attr_math_pi_es_float() {
+        let math = handle_of(import_module("math").unwrap());
+        let v = get_attr(&math, "pi").expect("math.pi debería existir");
+        match v {
+            Value::Float(f) => {
+                // Comparación aproximada — el valor exacto de math.pi
+                // está pinneado, pero usamos un epsilon por las dudas.
+                assert!((f - std::f64::consts::PI).abs() < 1e-15, "got {}", f);
+            }
+            other => panic!("se esperaba Float, fue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn get_attr_math_sqrt_es_pyobject_opaco() {
+        // `sqrt` es una función Python — no es primitivo, debe
+        // envolverse como PyObject opaco para invocación en 8.1.4.
+        let math = handle_of(import_module("math").unwrap());
+        let v = get_attr(&math, "sqrt").expect("math.sqrt debería existir");
+        assert!(matches!(v, Value::PyObject(_)), "got: {:?}", v);
+    }
+
+    #[test]
+    fn get_attr_inexistente_emite_attributeerror() {
+        let math = handle_of(import_module("math").unwrap());
+        let err = get_attr(&math, "no_existe_xyz_813").expect_err("attr no debería existir");
+        assert!(
+            err.message.contains("AttributeError"),
+            "mensaje debería citar AttributeError, fue: {}",
+            err.message,
+        );
+    }
+
+    #[test]
+    fn get_attr_str_es_str() {
+        // `math.__name__` es la string "math".
+        let math = handle_of(import_module("math").unwrap());
+        let v = get_attr(&math, "__name__").expect("__name__ debe existir");
+        assert_eq!(v, Value::Str("math".to_string()));
+    }
+
+    #[test]
+    fn py_to_value_coerciona_bool_true() {
+        // Construimos un PyBool sin pasar por un módulo: importamos
+        // `builtins` y leemos `True`.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let v = get_attr(&builtins, "True").unwrap();
+        assert_eq!(v, Value::Bool(true));
+    }
+
+    #[test]
+    fn py_to_value_coerciona_int_chico() {
+        // `sys.maxsize` es un int Python — en sistemas 64-bit es 2^63 - 1,
+        // que cabe justo en i64. Lo usamos para verificar que int → Int.
+        let sys = handle_of(import_module("sys").unwrap());
+        let v = get_attr(&sys, "maxsize").unwrap();
+        assert_eq!(v, Value::Int(i64::MAX));
+    }
+
+    #[test]
+    fn py_to_value_coerciona_none() {
+        // `sys.__interactivehook__` no siempre es None, mejor un atributo
+        // que sea explícitamente None. Usamos `ctypes` que en algunos
+        // sistemas puede no estar; mejor usar un truco: `sys.flags` tiene
+        // sub-atributos, pero todos son int. Usamos `inspect.Parameter.empty`
+        // que es un sentinel — pero ese no es None. Vamos por el camino
+        // directo: importar `dataclasses` y leer `MISSING` no funciona
+        // porque es objeto. Mejor: evaluamos el atributo `None` de
+        // `builtins`, que ES el singleton Python None.
+        let builtins = handle_of(import_module("builtins").unwrap());
+        let v = get_attr(&builtins, "None").unwrap();
+        assert_eq!(v, Value::Null);
     }
 }
