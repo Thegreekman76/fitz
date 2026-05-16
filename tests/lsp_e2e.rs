@@ -7,6 +7,8 @@
 //   `textDocument/publishDiagnostics` con el error mapeado.
 // - 9.x.2.b: did_open con programa válido + textDocument/hover →
 //   response con el tipo del nodo bajo el cursor en markdown.
+// - 9.x.3.b: did_open con programa válido + textDocument/definition
+//   → response con Location apuntando al span de declaración.
 //
 // Requiere `--features lsp` (el bin `fitz-lsp` tiene
 // `required-features = ["lsp"]` en Cargo.toml). Sin la feature, el
@@ -347,6 +349,131 @@ fn hover_sobre_literal_int_devuelve_tipo_en_markdown() {
         null_resp.contains(r#""result":null"#)
             || null_resp.contains(r#""result": null"#),
         "hover en posición sin spans debería ser null: {null_resp}",
+    );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+#[test]
+fn goto_definition_sobre_uso_de_var_local_devuelve_location_de_let() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let init_resp = read_message(&mut stdout);
+    // Sanity: la capability definition_provider se anuncia.
+    assert!(
+        init_resp.contains(r#""definitionProvider":true"#),
+        "initialize sin definitionProvider: {init_resp}",
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con `let x = 42\nlet y = x\n`. El uso de `x` está en
+    // línea 1, col 8 (0-based). El `def_span` apunta al Stmt::Assign
+    // de `x` (línea 0 → línea 1 1-based en Fitz, mapeado a línea 0
+    // 0-based LSP).
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///def.fitz","languageId":"fitz","version":1,"text":"let x = 42\nlet y = x\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    // Drenamos la notification de publishDiagnostics post didOpen.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // textDocument/definition sobre `x` en línea 1, col 8 (0-based).
+    let def_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///def.fitz"},"position":{"line":1,"character":8}}}"#;
+    stdin.write_all(&frame(def_req)).expect("write definition");
+    stdin.flush().expect("flush definition");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let def_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando definition response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    // Validamos: result.uri == el documento que abrimos, result.range
+    // está en línea 0 (el let de x en la primera línea, 0-based LSP).
+    assert!(
+        def_resp.contains("def.fitz"),
+        "definition response sin URI esperado: {def_resp}",
+    );
+    assert!(
+        def_resp.contains(r#""line":0"#) || def_resp.contains(r#""line": 0"#),
+        "definition range no apunta a línea 0: {def_resp}",
+    );
+    assert!(
+        !def_resp.contains(r#""error""#),
+        "definition devolvió error: {def_resp}",
+    );
+
+    // Cursor sobre el builtin `print` (no debería resolver). Lo armamos
+    // sobre un programa nuevo para que el cursor caiga sobre el ident.
+    let did_open2 = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///print.fitz","languageId":"fitz","version":1,"text":"print(42)\n"}}}"#;
+    stdin.write_all(&frame(did_open2)).expect("write didOpen2");
+    stdin.flush().expect("flush didOpen2");
+    // Drenamos diagnostics.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics2");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("print.fitz") && msg.contains("publishDiagnostics") {
+            break;
+        }
+    }
+
+    let def_builtin = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///print.fitz"},"position":{"line":0,"character":0}}}"#;
+    stdin.write_all(&frame(def_builtin)).expect("write definition builtin");
+    stdin.flush().expect("flush definition builtin");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let null_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando definition null response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":3"#) {
+            break msg;
+        }
+    };
+    assert!(
+        null_resp.contains(r#""result":null"#)
+            || null_resp.contains(r#""result": null"#),
+        "definition sobre builtin debería ser null: {null_resp}",
     );
 
     drop(stdin);

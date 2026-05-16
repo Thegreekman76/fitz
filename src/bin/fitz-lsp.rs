@@ -22,15 +22,16 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, Hover,
-    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
-    MessageType, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
-    Url,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf, ServerCapabilities,
+    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::lsp::{
-    check_source_with_types, fitz_errors_to_diagnostics, hover_for_position, make_hover,
+    check_source_with_types, definition_for_position, fitz_errors_to_diagnostics,
+    hover_for_position, make_definition_location, make_hover,
 };
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
@@ -49,10 +50,6 @@ struct DocumentState {
     text: String,
     type_env: TypeEnv,
     type_info: TypeInfo,
-    // `def_info` se escribe en 9.x.3.a; lo lee el handler `definition`
-    // en 9.x.3.b. Mismo patrón que `parse_with_recovery` pre-consumidores
-    // en F15.
-    #[allow(dead_code)]
     def_info: DefinitionInfo,
 }
 
@@ -114,6 +111,12 @@ impl LanguageServer for Backend {
                 // cursor. La heurística de lookup y el formato de
                 // respuesta viven en `fitz::lsp`.
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
+                // Fase 9.x.3 — anunciamos que respondemos
+                // `textDocument/definition`. Devolvemos un solo
+                // `Location` (no multi-definición — Fitz no tiene
+                // overloading), por eso `OneOf::Left(true)` (forma
+                // simple) en lugar de `DefinitionOptions`.
+                definition_provider: Some(OneOf::Left(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -176,6 +179,28 @@ impl LanguageServer for Backend {
         let hover = hover_for_position(&state.type_info, pos.line, pos.character)
             .map(|ty| make_hover(ty, &state.type_env));
         Ok(hover)
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> LspResult<Option<GotoDefinitionResponse>> {
+        // Resolvemos `(uri, pos) → def_span` bajo el lock, construimos
+        // el `Location` con el URI del documento abierto (cross-module
+        // def queda como deuda visible — `from foo import X` apunta al
+        // span del Stmt::Import local, no al módulo remoto). Sin
+        // awaits adentro del lock.
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let documents = self.documents.lock();
+        let state = match documents.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let location = definition_for_position(&state.def_info, pos.line, pos.character)
+            .map(|def_span| make_definition_location(uri.clone(), def_span))
+            .map(GotoDefinitionResponse::Scalar);
+        Ok(location)
     }
 }
 

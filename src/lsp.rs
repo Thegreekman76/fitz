@@ -10,8 +10,11 @@ use crate::lexer::tokenize;
 use crate::parser::parse_with_recovery;
 use crate::types::{check_program, DefinitionInfo, Type, TypeEnv, TypeInfo};
 
+use crate::ast::Span;
+
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, Hover, HoverContents, MarkupContent, MarkupKind, Position, Range,
+    Diagnostic, DiagnosticSeverity, Hover, HoverContents, Location, MarkupContent, MarkupKind,
+    Position, Range, Url,
 };
 
 /// Pipeline LSP-style sobre `source`: tokeniza, parsea con recovery,
@@ -160,6 +163,57 @@ pub fn make_hover(ty: &Type, env: &TypeEnv) -> Hover {
             value: format!("```fitz\n{}\n```", ty.display(env)),
         }),
         range: None,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Go-to-definition (Fase 9.x.3)
+// ---------------------------------------------------------------------------
+
+/// Encuentra el `Span` de la declaración del ident bajo el cursor según
+/// una posición LSP (0-based). Misma heurística que `hover_for_position`:
+/// filtra entries de `DefinitionInfo` cuya línea coincide con el cursor
+/// y cuya columna es menor o igual a la del cursor, y devuelve el
+/// `def_span` cuya columna es máxima (el ident más cercano a la
+/// izquierda en la misma línea).
+///
+/// El span devuelto apunta a la posición de la declaración (1-based
+/// Fitz). El caller lo convierte a `Range` LSP (0-based) vía
+/// `make_definition_location`.
+pub fn definition_for_position(
+    def_info: &DefinitionInfo,
+    line: u32,
+    character: u32,
+) -> Option<Span> {
+    // LSP 0-based → Fitz 1-based.
+    let target_line = (line as usize) + 1;
+    let target_col = (character as usize) + 1;
+    def_info
+        .iter()
+        .filter(|(key, _)| key.0 == target_line && key.1 <= target_col)
+        .max_by_key(|(key, _)| key.1)
+        .map(|(_, def_span)| *def_span)
+}
+
+/// Construye la respuesta `Location` LSP a partir del `Span` de
+/// declaración. Convierte 1-based Fitz → 0-based LSP; range de 1
+/// caracter porque sin `end_span` no podemos devolver el rango exacto
+/// del identificador declarado (paralelo a `error_to_diagnostic`).
+///
+/// `uri` es el del documento actual: cross-module def queda como deuda
+/// visible del MVP — los imports `from foo import X` registran el def
+/// como el span del `Stmt::Import` local, no como la declaración real
+/// en el módulo `foo`. Mapear paths del loader a URIs requiere
+/// resolución cross-file que pertenece a una sub-fase posterior.
+pub fn make_definition_location(uri: Url, def_span: Span) -> Location {
+    let line = (def_span.line.saturating_sub(1)) as u32;
+    let col = (def_span.column.saturating_sub(1)) as u32;
+    Location {
+        uri,
+        range: Range {
+            start: Position::new(line, col),
+            end: Position::new(line, col + 1),
+        },
     }
 }
 
@@ -430,5 +484,63 @@ mod tests {
             assert_eq!(a.line, b.line);
             assert_eq!(a.column, b.column);
         }
+    }
+
+    // Tests sobre `definition_for_position` y `make_definition_location`
+    // (Fase 9.x.3.b).
+
+    #[test]
+    fn definition_for_position_devuelve_span_de_declaracion_de_var_local() {
+        // `let x = 1` en línea 0, `let y = x` en línea 1. El uso de
+        // `x` está en línea 1, col 8 (0-based) — el `def_span`
+        // devuelto debe ser de línea 1 (1-based, el Stmt::Assign de `x`).
+        let src = "let x = 1\nlet y = x\n";
+        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        let def_span = definition_for_position(&def_info, 1, 8)
+            .expect("uso de x debe resolver");
+        assert_eq!(def_span.line, 1, "def en línea 1 (1-based)");
+    }
+
+    #[test]
+    fn definition_for_position_linea_sin_idents_devuelve_none() {
+        let src = "let x = 1\n";
+        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        assert!(definition_for_position(&def_info, 5, 0).is_none());
+    }
+
+    #[test]
+    fn definition_for_position_no_resuelve_uso_de_builtin() {
+        // `print(42)` — `print` es builtin con def_span Span::ZERO.
+        // No debe aparecer en DefinitionInfo (filtrado por política),
+        // así que el lookup devuelve None.
+        let src = "print(42)\n";
+        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        // Cursor sobre `print` (línea 0, col 0).
+        assert!(definition_for_position(&def_info, 0, 0).is_none());
+    }
+
+    #[test]
+    fn make_definition_location_convierte_1_based_a_0_based() {
+        let uri = Url::parse("file:///test.fitz").unwrap();
+        // def_span en línea 3, col 5 (1-based) → LSP línea 2, col 4 (0-based).
+        let loc = make_definition_location(uri.clone(), Span::new(3, 5));
+        assert_eq!(loc.uri, uri);
+        assert_eq!(loc.range.start, Position::new(2, 4));
+        assert_eq!(loc.range.end, Position::new(2, 5));
+    }
+
+    #[test]
+    fn definition_end_to_end_pipeline_devuelve_location_de_def() {
+        // Smoke combinado: pipeline + definition_for_position +
+        // make_definition_location.
+        let src = "let x = 1\nlet y = x\n";
+        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        let def_span = definition_for_position(&def_info, 1, 8).expect("matchea");
+        let uri = Url::parse("file:///t.fitz").unwrap();
+        let loc = make_definition_location(uri, def_span);
+        // El Stmt::Assign de `x` está en línea 1 (1-based) → línea 0
+        // (0-based). Su columna depende del parser; asumimos col 1
+        // (1-based, primer caracter de `let`).
+        assert_eq!(loc.range.start.line, 0);
     }
 }
