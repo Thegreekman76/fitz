@@ -1,0 +1,172 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Fitz",
+  "scopeName": "source.fitz",
+  "fileTypes": ["fitz"],
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#decorators" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#builtins" },
+    { "include": "#operators" },
+    { "include": "#functions" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.fitz",
+          "match": "//.*$"
+        },
+        {
+          "name": "comment.block.fitz",
+          "begin": "/\\*",
+          "end": "\\*/"
+        }
+      ]
+    },
+    "strings": {
+      "name": "string.quoted.double.fitz",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.fitz",
+          "match": "\\\\."
+        },
+        {
+          "name": "meta.embedded.expression.fitz",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.embedded.begin.fitz" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.section.embedded.end.fitz" }
+          },
+          "patterns": [
+            { "include": "$self" }
+          ]
+        }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.float.fitz",
+          "match": "\\b[0-9]+\\.[0-9]+\\b"
+        },
+        {
+          "name": "constant.numeric.integer.fitz",
+          "match": "\\b[0-9]+\\b"
+        }
+      ]
+    },
+    "decorators": {
+      "name": "entity.name.function.decorator.fitz",
+      "match": "@[a-zA-Z_][a-zA-Z0-9_]*"
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.fitz",
+          "match": "\\b(if|else|while|for|loop|match|return|break|continue|in|async|await)\\b"
+        },
+        {
+          "name": "keyword.declaration.fitz",
+          "match": "\\b(let|fn|type|import|from|as)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.fitz",
+          "match": "\\b(and|or)\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.builtin.fitz",
+          "match": "\\b(Int|Float|Str|Bool|Null|Range|Any|List|Map|Result|Future|Request|Response|PyAny)\\b"
+        },
+        {
+          "name": "entity.name.type.fitz",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "constants": {
+      "patterns": [
+        {
+          "name": "constant.language.boolean.fitz",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "constant.language.null.fitz",
+          "match": "\\bnull\\b"
+        },
+        {
+          "name": "variant.fitz",
+          "match": "\\b(Ok|Err)\\b"
+        }
+      ]
+    },
+    "builtins": {
+      "name": "support.function.builtin.fitz",
+      "match": "\\b(print|len|sleep|cors)\\b(?=\\s*\\()"
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.arrow.fitz",
+          "match": "=>|->"
+        },
+        {
+          "name": "keyword.operator.range.fitz",
+          "match": "\\.\\."
+        },
+        {
+          "name": "keyword.operator.try.fitz",
+          "match": "\\?"
+        },
+        {
+          "name": "keyword.operator.comparison.fitz",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.logical.fitz",
+          "match": "&&|\\|\\||!"
+        },
+        {
+          "name": "keyword.operator.assignment.fitz",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.fitz",
+          "match": "\\+|-|\\*|/|%"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "comment": "Definición de función: `fn nombre(...)`",
+          "match": "\\bfn\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "entity.name.function.fitz" }
+          }
+        },
+        {
+          "comment": "Llamada a función: `nombre(...)` (no built-in)",
+          "match": "\\b([a-z_][a-zA-Z0-9_]*)(?=\\s*\\()",
+          "captures": {
+            "1": { "name": "entity.name.function.call.fitz" }
+          }
+        }
+      ]
+    }
+  }
+}

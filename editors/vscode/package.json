@@ -1,0 +1,74 @@
+{
+  "name": "fitz-language",
+  "displayName": "Fitz Language",
+  "description": "Syntax highlighting and language server for the Fitz programming language.",
+  "version": "0.9.2",
+  "publisher": "patagonia",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onLanguage:fitz"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "fitz",
+        "aliases": [
+          "Fitz",
+          "fitz"
+        ],
+        "extensions": [
+          ".fitz"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "fitz",
+        "scopeName": "source.fitz",
+        "path": "./syntaxes/fitz.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Fitz",
+      "properties": {
+        "fitz.lspPath": {
+          "type": "string",
+          "default": "fitz-lsp",
+          "description": "Path al binario fitz-lsp. Default: 'fitz-lsp' (buscado en PATH). Puede ser absoluto: '/usr/local/bin/fitz-lsp', 'C:\\Users\\me\\fitz\\target\\release\\fitz-lsp.exe'."
+        },
+        "fitz.trace.server": {
+          "type": "string",
+          "scope": "window",
+          "enum": [
+            "off",
+            "messages",
+            "verbose"
+          ],
+          "default": "off",
+          "description": "Traza la comunicación cliente-servidor LSP en el output panel 'Fitz Language Server'. 'verbose' incluye los payloads JSON-RPC completos."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20",
+    "@types/vscode": "^1.75.0",
+    "typescript": "^5.5.0"
+  }
+}
