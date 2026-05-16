@@ -8,7 +8,7 @@
 use crate::error::FitzError;
 use crate::lexer::tokenize;
 use crate::parser::parse_with_recovery;
-use crate::types::check_program;
+use crate::types::{check_program, TypeInfo};
 
 use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 
@@ -20,15 +20,32 @@ use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 /// Los errores del lexer abortan la pipeline (no hay AST sobre el cual
 /// chequear). Parser y checker siempre devuelven sus errores en
 /// paralelo a lo que pudieron recuperar.
+///
+/// Esta variante descarta el `TypeInfo` retornado por `check_program`
+/// (consumidores que solo necesitan diagnostics). Para hover, usar
+/// `check_source_with_types`.
 pub fn check_source(source: &str) -> Vec<FitzError> {
+    let (_type_info, errors) = check_source_with_types(source);
+    errors
+}
+
+/// Pipeline LSP-style + `TypeInfo` retenido. Variante de `check_source`
+/// para consumidores que necesitan el side-table de tipos por nodo
+/// (Fase 9.x.2 — hover). El `TypeInfo` viene poblado por
+/// `check_program` (F16): cada `Expr` con span conocido tiene su tipo
+/// sintetizado adentro.
+///
+/// Si la pipeline aborta antes del checker (error de lexer), el
+/// `TypeInfo` retornado está vacío.
+pub fn check_source_with_types(source: &str) -> (TypeInfo, Vec<FitzError>) {
     let tokens = match tokenize(source) {
         Ok(t) => t,
-        Err(e) => return vec![e],
+        Err(e) => return (TypeInfo::new(), vec![e]),
     };
     let (program, mut errors) = parse_with_recovery(tokens);
-    let (_env, _types, mut type_errors) = check_program(&program);
+    let (_env, type_info, mut type_errors) = check_program(&program);
     errors.append(&mut type_errors);
-    errors
+    (type_info, errors)
 }
 
 /// Convierte una lista de `FitzError` en `Diagnostic`s LSP. Pure
@@ -187,5 +204,63 @@ mod tests {
             !errs.is_empty(),
             "debería haber al menos un error de parser",
         );
+    }
+
+    // Tests sobre `check_source_with_types` — variante para hover (Fase
+    // 9.x.2). Lo nuevo respecto a `check_source` es que retiene el
+    // `TypeInfo` poblado por F16.
+
+    #[test]
+    fn check_source_with_types_programa_valido_devuelve_type_info_no_vacio() {
+        let src = "let x = 42\nlet y = x + 1";
+        let (type_info, errors) = check_source_with_types(src);
+        assert!(errors.is_empty(), "errores inesperados: {errors:?}");
+        assert!(
+            !type_info.is_empty(),
+            "TypeInfo no debería estar vacío sobre un programa con Exprs",
+        );
+    }
+
+    #[test]
+    fn check_source_with_types_error_lexer_devuelve_type_info_vacio() {
+        // String sin cerrar — lexer aborta antes del parser/checker,
+        // entonces el `TypeInfo` no se puede poblar.
+        let src = "let x = \"sin cerrar";
+        let (type_info, errors) = check_source_with_types(src);
+        assert!(!errors.is_empty(), "lexer debería rechazar string sin cerrar");
+        assert!(
+            type_info.is_empty(),
+            "TypeInfo debería estar vacío si la pipeline aborta en el lexer",
+        );
+    }
+
+    #[test]
+    fn check_source_with_types_error_de_tipo_no_borra_type_info() {
+        // El checker chequea lo que pudo aún cuando hay errores: los
+        // Exprs válidos quedan en TypeInfo, los inválidos también con
+        // el tipo "best-effort".
+        let src = "let x = 42\nlet y: Int = \"mal\"";
+        let (type_info, errors) = check_source_with_types(src);
+        assert!(!errors.is_empty(), "debería haber un TypeError");
+        assert!(
+            !type_info.is_empty(),
+            "TypeInfo debería retener tipos de los Exprs válidos pese al error",
+        );
+    }
+
+    #[test]
+    fn check_source_y_with_types_devuelven_la_misma_lista_de_errores() {
+        // Sanity check: ambas APIs comparten pipeline, los errores
+        // deberían ser equivalentes (mismo orden, misma cantidad,
+        // mismos mensajes).
+        let src = "let x: Int = \"mal\"\nlet y: Str = 42";
+        let errs_solo = check_source(src);
+        let (_type_info, errs_with) = check_source_with_types(src);
+        assert_eq!(errs_solo.len(), errs_with.len());
+        for (a, b) in errs_solo.iter().zip(errs_with.iter()) {
+            assert_eq!(a.message, b.message);
+            assert_eq!(a.line, b.line);
+            assert_eq!(a.column, b.column);
+        }
     }
 }

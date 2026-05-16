@@ -28,27 +28,46 @@ use tower_lsp::lsp_types::{
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use fitz::lsp::{check_source, fitz_errors_to_diagnostics};
+use fitz::lsp::{check_source_with_types, fitz_errors_to_diagnostics};
+use fitz::types::TypeInfo;
+
+/// Estado por documento abierto. Persiste el último texto recibido por
+/// `did_open`/`did_change` y el `TypeInfo` resultante del último
+/// chequeo, que el handler `hover` (Fase 9.x.2.b) consulta para responder
+/// `textDocument/hover` sin re-correr el pipeline.
+//
+// `#[allow(dead_code)]` puntual: los fields se escriben en 9.x.2.a pero
+// los lee el handler `hover` en 9.x.2.b. Mismo patrón que
+// `parse_with_recovery` cuando aterrizó en F15 antes que sus consumidores.
+#[allow(dead_code)]
+#[derive(Debug)]
+struct DocumentState {
+    text: String,
+    type_info: TypeInfo,
+}
 
 #[derive(Debug)]
 struct Backend {
     client: Client,
-    /// Buffer en memoria por documento abierto. Se popula en `did_open`,
-    /// se actualiza completo en `did_change` (anunciamos `FULL` sync),
-    /// y se borra en `did_close`. `parking_lot::Mutex` (no `tokio`)
-    /// porque las secciones críticas son ~microsegundos: lock, get/insert,
-    /// unlock — sin awaits adentro. La pipeline del checker corre fuera
-    /// del lock.
-    documents: Arc<Mutex<HashMap<Url, String>>>,
+    /// Estado por documento abierto. Se popula en `did_open`, se
+    /// actualiza completo en `did_change` (anunciamos `FULL` sync), y
+    /// se borra en `did_close`. `parking_lot::Mutex` (no `tokio`)
+    /// porque las secciones críticas son ~microsegundos: lock,
+    /// get/insert, unlock — sin awaits adentro. La pipeline del checker
+    /// corre fuera del lock.
+    documents: Arc<Mutex<HashMap<Url, DocumentState>>>,
 }
 
 impl Backend {
-    /// Corre el pipeline LSP-style sobre `text` y publica los diagnósticos
-    /// resultantes (vacíos si no hay errores → VSCode borra los marcadores
-    /// previos del archivo).
-    async fn publish(&self, uri: Url, text: &str, version: Option<i32>) {
-        let errors = check_source(text);
+    /// Corre el pipeline LSP-style sobre `text`, persiste el resultado
+    /// en `documents`, y publica los diagnósticos. Devuelve nada — la
+    /// notificación es fire-and-forget.
+    async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
+        let (type_info, errors) = check_source_with_types(&text);
         let diagnostics = fitz_errors_to_diagnostics(&errors);
+        self.documents
+            .lock()
+            .insert(uri.clone(), DocumentState { text, type_info });
         self.client
             .publish_diagnostics(uri, diagnostics, version)
             .await;
@@ -93,8 +112,7 @@ impl LanguageServer for Backend {
         let uri = params.text_document.uri;
         let text = params.text_document.text;
         let version = params.text_document.version;
-        self.documents.lock().insert(uri.clone(), text.clone());
-        self.publish(uri, &text, Some(version)).await;
+        self.check_and_publish(uri, text, Some(version)).await;
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) {
@@ -110,8 +128,7 @@ impl LanguageServer for Backend {
             .last()
             .map(|c| c.text)
             .unwrap_or_default();
-        self.documents.lock().insert(uri.clone(), text.clone());
-        self.publish(uri, &text, Some(version)).await;
+        self.check_and_publish(uri, text, Some(version)).await;
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) {
