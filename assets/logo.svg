@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     width="256" height="256">
+  <title>Fitz Language</title>
+  <desc>Engranaje estilo Rust con la silueta del monte Fitz Roy (Patagonia, Argentina) — Fitz, lenguaje compilado nacido en El Chaltén, construido en Rust.</desc>
+
+  <defs>
+    <!-- Diente del engranaje. Se replica con rotación para los 12 dientes. -->
+    <rect id="tooth"
+          x="116" y="8" width="24" height="32"
+          rx="3" ry="3"
+          fill="#CE412B"/>
+
+    <!-- Clip circular: confina la silueta de la montaña al hueco
+         interior. La "base" del path se recorta formando una media
+         luna que sugiere tierra/sombra. -->
+    <clipPath id="hueco-clip">
+      <circle cx="128" cy="128" r="68"/>
+    </clipPath>
+  </defs>
+
+  <!-- 12 dientes alrededor del centro (128, 128), cada 30° -->
+  <g>
+    <use href="#tooth" transform="rotate(0 128 128)"/>
+    <use href="#tooth" transform="rotate(30 128 128)"/>
+    <use href="#tooth" transform="rotate(60 128 128)"/>
+    <use href="#tooth" transform="rotate(90 128 128)"/>
+    <use href="#tooth" transform="rotate(120 128 128)"/>
+    <use href="#tooth" transform="rotate(150 128 128)"/>
+    <use href="#tooth" transform="rotate(180 128 128)"/>
+    <use href="#tooth" transform="rotate(210 128 128)"/>
+    <use href="#tooth" transform="rotate(240 128 128)"/>
+    <use href="#tooth" transform="rotate(270 128 128)"/>
+    <use href="#tooth" transform="rotate(300 128 128)"/>
+    <use href="#tooth" transform="rotate(330 128 128)"/>
+  </g>
+
+  <!-- Cuerpo del engranaje (tapa la parte interna de los dientes) -->
+  <circle cx="128" cy="128" r="100" fill="#CE412B"/>
+
+  <!-- Hueco interior (cielo blanco) -->
+  <circle cx="128" cy="128" r="68" fill="#FFFFFF"/>
+
+  <!-- Silueta del Fitz Roy: 3 picos triangulares (central más alto,
+       los dos laterales escalonados), confinados al hueco circular
+       vía clipPath. -->
+  <g clip-path="url(#hueco-clip)">
+    <path d="M 50 200
+             L 92 130
+             L 110 158
+             L 128 78
+             L 148 150
+             L 168 108
+             L 206 200
+             Z"
+          fill="#CE412B"/>
+  </g>
+</svg>

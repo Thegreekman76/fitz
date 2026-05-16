@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/logo.png" alt="Fitz logo" width="160" />
+</p>
+
 # Fitz 🏔️
 
 > Un lenguaje de programación moderno, compilado y orientado a servicios web.
