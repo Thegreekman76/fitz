@@ -214,12 +214,12 @@ norte: las sub-fases visibles del LSP (9.x.1 diagnostics → 9.x.5
 distribución VSCode Marketplace). Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
 
-**Fase 9.x.1 + 9.x.2 + 9.x.3 (LSP MVP + hover + go-to-def) CERRADAS
-— 2026-05-15/16** — las tres primeras sub-fases visibles del LSP.
-Habilitan la experiencia "escribir Fitz en VSCode con errores
-subrayados al tipear" + "pasá el mouse y ve qué tipo tiene" + "F12
-sobre un nombre te lleva a su declaración". Tres componentes
-coordinados:
+**Fase 9.x.1 + 9.x.2 + 9.x.3 + 9.x.4 (LSP MVP completo) CERRADAS
+— 2026-05-15/16** — las cuatro sub-fases del LSP MVP. Habilitan la
+experiencia "escribir Fitz en VSCode con errores subrayados al
+tipear" + "pasá el mouse y ve qué tipo tiene" + "F12 sobre un
+nombre te lleva a su declaración" + "autocomplete contextual con
+tipos". Tres componentes coordinados:
 **bin nuevo `fitz-lsp`** (opt-in con `--features lsp`,
 `cargo build --release --features lsp`) que implementa el protocolo
 LSP estándar (JSON-RPC sobre stdio, tower-lsp 0.20); **módulo
@@ -228,8 +228,9 @@ LSP estándar (JSON-RPC sobre stdio, tower-lsp 0.20); **módulo
 Diagnostic`; **extensión VSCode** en
 [`editors/vscode/`](editors/vscode/) con grammar TextMate y cliente
 LSP que spawnea `fitz-lsp` (configurable via setting `fitz.lspPath`).
-Próximas sub-fases: **9.x.4 autocomplete contextual** → 9.x.5
-distribución VSCode Marketplace. Ver
+Próxima sub-fase: **9.x.5 distribución VSCode Marketplace** —
+publicar la extensión con binarios pre-compilados por plataforma
+bundleados en el `.vsix`, al estilo rust-analyzer. Ver
 [cap 22 de la guía](docs/guide.md#22-soporte-para-editores) para
 instalación + settings.
 
@@ -475,12 +476,14 @@ async), marshaling Future↔Coroutine.
   `fitz openapi archivo.fitz` gratis. `@header(name="X")` para
   headers como params, opt-out con `@server(docs=false)`. Ver
   [cap 18 de la guía](docs/guide.md#18-docs-automáticas).
-- **Soporte para editores** (Fase 9.x.1 + 9.x.2 + 9.x.3): bin
-  `fitz-lsp` (LSP server sobre tower-lsp) + extensión VSCode con
-  highlighting, diagnostics en vivo, hover y go-to-definition.
-  Errores del lexer/parser/checker subrayados al tipear; mouse
-  sobre una expresión muestra su tipo; F12 sobre un nombre te
-  lleva a su declaración. Ver
+- **Soporte para editores** (Fase 9.x.1 + 9.x.2 + 9.x.3 + 9.x.4):
+  bin `fitz-lsp` (LSP server sobre tower-lsp) + extensión VSCode
+  con highlighting, diagnostics en vivo, hover, go-to-definition
+  y autocomplete contextual. Errores del lexer/parser/checker
+  subrayados al tipear; mouse sobre una expresión muestra su tipo;
+  F12 te lleva a su declaración; tras `.` aparecen los métodos
+  del tipo, en otras posiciones aparecen los símbolos en scope.
+  Ver
   [cap 22 de la guía](docs/guide.md#22-soporte-para-editores).
 
 ### CLI

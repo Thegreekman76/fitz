@@ -11,14 +11,167 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.3
-(LSP go-to-definition) CERRADA**: `textDocument/definition` resuelve
-`Ident` → span de la declaración (let, fn, type, param, for, match
-binding). Próximo norte: **9.x.4 (autocomplete contextual)** —
-`textDocument/completion` con cuatro contextos (símbolos en scope,
-fields tras `obj.`, métodos built-in tras `xs.`/`m.`/`s.`, símbolos
-importados tras `from mod import `). Sub-paso separado pendiente
-sin presión: bundling CPython embebido (`fitz build --bundle-python`).
+En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.4
+(LSP autocomplete contextual) CERRADA**: `textDocument/completion`
+con dos contextos — scope-level (top-level + builtins + tipos +
+keywords) y after-dot (fields de Nominal, métodos de List/Map/Str).
+Próximo norte: **9.x.5 (distribución VSCode Marketplace)** —
+publicar la extensión con binarios pre-compilados por plataforma
+bundleados en el `.vsix`, al estilo rust-analyzer. Sub-paso
+separado pendiente sin presión: bundling CPython embebido (`fitz
+build --bundle-python`).
+
+## [v0.9.5] — 2026-05-16 — Fase 9.x.4: LSP autocomplete contextual
+
+Cuarta sub-fase visible del LSP — completa el MVP del language
+server. El cliente VSCode (o cualquier otro cliente LSP) ahora puede
+pedir `textDocument/completion` con una posición y recibe una lista
+de `CompletionItem` apropiados al contexto: tras un `.` muestra los
+fields/métodos del tipo del receiver, en cualquier otra posición
+muestra los símbolos top-level del programa + builtins + tipos +
+keywords. Cierra el loop "errores subrayados + hover + go-to-def
++ autocomplete" — el LSP MVP ya cubre la experiencia core de
+editing.
+
+Dos sub-pasos coordinados (un commit por sub-paso):
+
+- **9.x.4.a — Persistir Program + helper `completion_at_position`**:
+  - `check_source_with_types` retorna 5-tupla incluyendo `Program`:
+    `(Program, TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>)`.
+    El AST es necesario para que el LSP enumere top-level
+    declarations en scope-level y resuelva receivers por nombre en
+    after-dot (fallback cuando el parser abandona stmts rotos).
+    Call sites del LSP actualizados.
+  - `fitz::lsp::completion_at_position(text, program, type_info,
+    type_env, line, character) -> Vec<CompletionItem>` (pure
+    function, unit-testeable). Despacha por contexto detectado:
+
+    - **Scope-level**: enumera top-level del Program
+      (let/fn/type/import) + builtins (print/len/sleep/cors) +
+      tipos built-in (Int/Float/Str/.../PyAny) + keywords del
+      lenguaje. **NO scope-aware**: no enumera vars locales/params
+      como función del cursor (deuda MVP — requiere refactor del
+      checker para exponer scopes por stmt). VSCode filtra por
+      prefix client-side; el usuario puede tipear vars locales
+      aunque no aparezcan en la lista.
+
+    - **After-dot**: identifica el receiver (un solo ident antes
+      del `.`), resuelve el tipo con **dos fallbacks**:
+      1. TypeInfo lookup heurístico (max col <= recv_col en la
+         misma línea).
+      2. Walk del Program por nombre — busca `Stmt::Assign`
+         top-level con `target == recv_name` y mira el tipo del
+         value en TypeInfo. Cubre el caso típico `obj.<cursor>`
+         al final del buffer donde el parser abandona el stmt
+         entero por el `.` huérfano (deuda F15 recovery sub-stmt).
+
+      Tipos cubiertos: `Nominal` (fields del TypeEnv), `List` (6
+      métodos), `Map` (5 métodos), `Str` (3 métodos). Otros (Any,
+      PyAny, primitivos) devuelven lista vacía.
+
+  - Helpers internos: `CompletionContext` enum (AfterDot con
+    `recv_name`+`recv_line`+`recv_col` / ScopeLevel),
+    `detect_completion_context` (walk hacia atrás del cursor),
+    `position_to_offset` / `offset_to_position` (UTF-8 char-based;
+    UTF-16 LSP default queda como refinamiento si aparece presión
+    real con código no-ASCII), `is_ident_continue` (ASCII
+    alphanumeric + `_`), `method_items` (factory para METHOD kind),
+    `after_dot_completions`, `scope_level_completions`.
+
+  - `DocumentState` del backend suma `program: Program` con
+    `#[allow(dead_code)]` puntual hasta 9.x.4.b.
+
+  - 10 unit tests nuevos en `fitz::lsp::tests`: round-trip
+    `position_to_offset`/`offset_to_position`; 4 casos de
+    `detect_context` (vacío, después de ident, after-dot, after-dot
+    con prefix); scope-level lista top-level+builtins+tipos+kws;
+    after-dot Nominal lista fields del type (FIELD kind); after-dot
+    List lista 6 métodos (METHOD kind); after-dot Str lista 3
+    métodos (cubre el fallback walk-del-Program); after-dot
+    receiver sin tipo devuelve vacío.
+
+- **9.x.4.b — Handler `completion` + capability + E2E**:
+  - Capability `completion_provider: Some(CompletionOptions {
+    trigger_characters: Some(vec![".".into()]), resolve_provider:
+    Some(false), ... })` anunciada en `initialize`. El trigger char
+    `.` hace que VSCode invoque automáticamente completion tras un
+    punto; para typing normal, el cliente invoca por su cuenta.
+    `resolve_provider: false` porque mandamos toda la info en el
+    item (no usamos `completionItem/resolve` para lazy details).
+  - Handler `Backend::completion` lee state bajo lock, delega al
+    helper pure-function, devuelve `CompletionResponse::Array(items)`.
+    Sin awaits dentro del lock.
+  - `#[allow(dead_code)]` removido de `DocumentState.text` y
+    `DocumentState.program` (ya tienen consumidor).
+  - 1 E2E nuevo `completion_after_dot_sobre_str_lista_metodos_built_in`:
+    valida capability anunciada con `triggerCharacters: ["."]`,
+    after-dot sobre `s.` con `s: Str` lista `upper`/`lower` y NO
+    `push` (no es método de Str), scope-level lista `s` (var
+    top-level) + `print` (builtin) + `Int` (tipo built-in) + `let`
+    (keyword).
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Alcance**: MVP cubre (1) scope-level y (2) after-dot. **(3)
+  imports** (`from mod import `) queda como deuda visible — requiere
+  cargar el módulo remoto y enumerar sus exports, complejidad del
+  loader que pertenece a sub-paso futuro.
+- **Scope-level no scope-aware**: enumeramos top-level del Program
+  + builtins + tipos + keywords. NO enumeramos vars locales/params
+  según la posición del cursor. Scope-aware requiere refactor del
+  checker. Trade-off MVP aceptado: VSCode filtra por prefix client-
+  side, el usuario puede tipear vars locales igual.
+- **After-dot solo `<ident>.`**: chain `a.b.c.` queda como deuda
+  — requeriría parser parcial.
+- **After-dot con dos fallbacks**: TypeInfo lookup heurístico +
+  walk del Program por nombre. El walk cubre el caso típico donde
+  el parser abandona el stmt entero por el `.` huérfano (deuda F15
+  recovery sub-stmt). Sin el fallback, `obj.<cursor>` al final del
+  buffer no funcionaría.
+- **Persistir `Program` en `DocumentState`**: el AST es necesario
+  en cada completion request (scope-level enumera top-level; after-
+  dot fallback walkea por nombre). Re-walkar es barato vs re-parsear.
+- **`CompletionItem` shape**: label, kind (Variable/Function/Field/
+  Method/Keyword/Class/Module), detail opcional (firma de fn/método
+  o tipo de field). VSCode renderea kind con íconos distintivos.
+- **`UTF-8 char-based` para position↔offset**: LSP default es UTF-16,
+  pero el MVP asume programas mayormente ASCII. Refinable post-MVP
+  si aparece presión real con código no-ASCII.
+
+**Total al cierre**: 1233 unit (default) + 79 E2E + 3 openapi sin
+cambios respecto a Fase 9.x.3. **10 unit nuevos + 1 E2E nuevo** con
+`--features lsp` (acumulado 36 unit + 5 E2E en LSP). Clippy
+`-D warnings` limpio sobre lib + ambos bins + tests.
+
+**Cierre formal del LSP MVP**: con 9.x.4 cerrada, el LSP cubre
+la experiencia core de editing — diagnostics, hover, go-to-def,
+autocomplete. Lo que sigue (9.x.5) es distribución (publicar al
+VSCode Marketplace con binarios bundleados por plataforma).
+
+**Próximo norte**: **9.x.5 (distribución VSCode Marketplace)** —
+publicar la extensión con binarios pre-compilados (Windows x64,
+macOS x64+ARM, Linux x64+ARM) bundleados en el `.vsix`, al estilo
+rust-analyzer. Alternativa de alfa: `.vsix` manual + `fitz-lsp` en
+PATH (lo que ya tenemos en 9.x.1.c).
+
+**Deuda residual derivada (NO bloquea 9.x.5)**:
+
+- **Completion para imports** (`from mod import `): listar
+  símbolos exportados por el módulo. Requiere cargar el módulo
+  remoto y mapearlo a CompletionItems. Sub-paso futuro.
+- **Scope-aware en scope-level**: enumerar vars locales y params
+  según la posición del cursor. Requiere refactor del checker para
+  exponer scopes por stmt. Refinable cuando el usuario lo pida.
+- **Chain `a.b.c.`** en after-dot: solo soportamos `<ident>.`.
+  Requiere parser parcial para resolver el tipo del FieldAccess
+  intermedio.
+- **Position UTF-16 strict** (LSP default): hoy UTF-8 char-based.
+  Programas mayormente ASCII funcionan; con muchos caracteres
+  no-latin puede haber off-by-one. Refinable.
+- **Completion en posiciones context-sensitive del parser**: tras
+  `@`, sugerir decoradores (`@get`/`@server`/`@middleware`); tras
+  `import `, sugerir paths de módulos. Hoy todo eso cae en scope-
+  level genérico.
 
 ## [v0.9.4] — 2026-05-16 — Fase 9.x.3: LSP go-to-definition
 

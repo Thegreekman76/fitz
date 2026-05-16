@@ -5520,14 +5520,28 @@ VSCode** que lo aprovecha.
   (apuntando al `from foo import X` local — cross-module def
   remota es deuda visible). Los built-ins (`print`/`len`/
   `sleep`/`cors`) no resuelven (no hay archivo donde saltar).
+- **Autocomplete contextual** — al tipear, VSCode te muestra una
+  lista de sugerencias según el contexto:
+  - Tras `.` (caso *after-dot*): si el receiver es un tipo custom
+    (`u: User`), aparecen sus fields. Si es `List<T>`, sus 6
+    métodos built-in (`push`/`pop`/`map`/`filter`/`find`/`len`).
+    Si es `Map<K, V>`, sus 5 (`get`/`has`/`keys`/`values`/`len`).
+    Si es `Str`, sus 3 (`upper`/`lower`/`len`). Para otros tipos
+    (`Any`, `PyAny`, primitivos) la lista queda vacía.
+  - En cualquier otra posición (caso *scope-level*): aparecen las
+    variables y funciones top-level del archivo, los tipos custom
+    declarados, los símbolos importados, los builtins (`print`/
+    `len`/`sleep`/`cors`), los tipos built-in (`Int`/`Float`/`Str`/
+    `Bool`/`List`/`Map`/...), y los keywords del lenguaje (`let`/
+    `fn`/`if`/`match`/...).
+  El autocomplete no es scope-aware todavía: vars locales y params
+  no aparecen en la lista scope-level, pero el usuario puede
+  tipearlas igual sin que el LSP las marque como error.
 
 ### Lo que viene
 
 Las próximas sub-fases del LSP están planificadas:
 
-- **9.x.4 — Autocomplete contextual**: tras `obj.`, mostrar fields
-  del tipo. Tras `xs.`, métodos built-in de `List`. Tras
-  `from foo import `, símbolos exportados por el módulo `foo`.
 - **9.x.5 — Distribución**: publicar la extensión al **VSCode
   Marketplace** con binarios pre-compilados por plataforma
   (Windows x64, macOS x64+ARM, Linux x64+ARM) bundleados en el
@@ -5612,10 +5626,10 @@ las demás integraciones quedan abiertas a contribuciones.
 
 ### Estado del proyecto LSP
 
-Esto es el MVP del LSP, ya con diagnostics (9.x.1), hover (9.x.2) y
-go-to-definition (9.x.3). Las features que faltan — autocomplete
-contextual (9.x.4), distribución VSCode Marketplace (9.x.5) — llegan
-en las siguientes sub-fases.
+El MVP del LSP está completo: diagnostics (9.x.1), hover (9.x.2),
+go-to-definition (9.x.3) y autocomplete contextual (9.x.4). Lo que
+falta es distribución — publicar la extensión al VSCode Marketplace
+con binarios pre-compilados por plataforma (9.x.5).
 
 Si encontrás bugs en el LSP o sugerencias para la grammar
 TextMate (palabras que no se colorean, falsos positivos), abrí
@@ -5677,11 +5691,11 @@ Con los capítulos 1 a 21 podés:
   auto-generar `type` Fitz desde SQLAlchemy con `fitz py-types`,
   y `await` corutinas Python via bridge tokio ↔ asyncio (Fase 8).
 - **Tooling de editor**: extensión VSCode con highlighting +
-  diagnostics + hover + go-to-definition en vivo via LSP
-  (Fase 9.x.1 + 9.x.2 + 9.x.3). Errores del lexer/parser/checker
-  subrayados al tipear, mouse sobre una expresión muestra su tipo,
-  F12 sobre un nombre te lleva a su declaración. Sin ir a la
-  terminal. Ver
+  diagnostics + hover + go-to-definition + autocomplete contextual
+  via LSP (Fase 9.x.1 + 9.x.2 + 9.x.3 + 9.x.4). Errores subrayados
+  al tipear, mouse sobre una expresión muestra su tipo, F12 te
+  lleva a su declaración, tras `.` aparecen métodos del tipo. Sin
+  ir a la terminal. Ver
   [cap 22](#22-soporte-para-editores) para cómo instalar.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
@@ -5690,7 +5704,7 @@ ejecuten, un compilador que produce binarios standalone, y un
 puente al ecosistema Python para usar SQLAlchemy/numpy/asyncpg
 sin abandonar Fitz.
 
-### Lo que viene — más allá de Fase 9.x.3
+### Lo que viene — más allá de Fase 9.x.4
 
 Las fases cerradas (al cierre de Fase 8): type checker estático
 (5a), codegen a binario nativo (5b), async nativo (6), DX HTTP
@@ -5707,9 +5721,9 @@ cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
 
 Lo que sigue post-8:
 
-- **Fase 9 — Ecosistema**: el LSP MVP está vivo — diagnostics
-  (9.x.1), hover con tipos (9.x.2) y go-to-definition (9.x.3).
-  Próximas sub-fases: 9.x.4 autocomplete contextual, 9.x.5
+- **Fase 9 — Ecosistema**: el LSP MVP está completo — diagnostics
+  (9.x.1), hover con tipos (9.x.2), go-to-definition (9.x.3) y
+  autocomplete contextual (9.x.4). Próxima sub-fase: 9.x.5
   distribución VSCode Marketplace. Después: package manager,
   registry, formatter, linter.
 - **Sub-paso futuro separado: bundling CPython embebido** —
