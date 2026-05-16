@@ -12,21 +12,64 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager con 9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4 CERRADOS** —
-todo el 2026-05-16. El usuario puede hoy crear proyectos
-(`fitz new`/`init`), correr/compilar/chequear contra el manifest
-(`fitz run`/`build`/`check` sin args), declarar deps path/git en
-`[dependencies]` con lockfile reproducible, importar deps desde
-código (`from <dep> import X`), y editar el manifest via CLI
-(`fitz add`/`remove`/`update`).
+manager con 9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4 CERRADOS** y
+**9.z (DX) arrancó con 9.z.1.a CERRADO** — todo el 2026-05-16.
+El usuario puede hoy crear proyectos, correr/compilar/chequear
+contra el manifest, declarar deps path/git con lockfile
+reproducible, importar deps desde código, editar el manifest via
+CLI, y formatear código (`fitz fmt`, con limitación documentada
+de pérdida de comments hasta 9.z.1.b).
 
-Próximo norte: **9.y.5** (registry — servicio + protocolo). El
-paso más grande del bloque 9.y: diseño + deployment del servicio
-que aloja los paquetes (crates.io-style centralizado, escrito en
-Fitz mismo).
+**Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
+git deps cubren el caso 90% y registry implica decisiones de
+hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
+repl + lint) que no requiere infra externa.
+
+Próximo norte: **9.z.1.b** (comment + blank line preservation
+del formatter) → 9.z.2 (`fitz test`). Registry queda para cuando
+aparezca demanda real.
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.13] — 2026-05-16 — Fase 9.z.1.a: `fitz fmt` (sin comment preservation)
+
+Primer slice del formatter. Pretty-printer escrito a mano sobre
+el AST, cero config (4 espacios indent, comillas dobles, blank
+line solo entre fn/type top-level consecutivos). Cubre >20 nodos
+del AST: literales, let, fn (con/sin async/decorators),
+if/while/for/loop, match, struct lit, list/map, BinOp/UnaryOp,
+Call/Field/Index, Range, Ok/Err/Try/Await, FnExpr (preserva
+flecha si body es Return único), TypeDef con defaults, Decorator,
+Import/FromImport.
+
+**⚠ LIMITACIÓN CRÍTICA** — el lexer strippea comentarios antes
+de llegar al AST. Modo write (`fitz fmt`) borra comments y blank
+lines del usuario. Modo `--check` (read-only) es safe. Para
+hacer al formatter usable en código real, comment preservation
+llega en **9.z.1.b** (lexer side stream + parser side-table +
+threading en el formatter). Mientras tanto, el CLI emite warning
+loud explicando la pérdida + sugiriendo `--check`.
+
+CLI:
+- `fitz fmt <files...>` — formatea archivos explícitos.
+- `fitz fmt` (sin args) — descubre `.fitz` del proyecto via
+  manifest (walk recursivo de `src/`).
+- `fitz fmt --check` — modo CI, read-only, exit 1 si hay diffs.
+
+Decisiones cerradas: indent 4 espacios, comillas dobles, sin
+auto-wrap de líneas largas (deuda futura); `is_let` recuperado
+del source via Span (AST no preserva `let x = ...` vs `x = ...`);
+`fn f() => expr` se normaliza a bloque (AST no preserva flecha
+en defs); `if` con paréntesis obligatorios en condición;
+warning loud solo en write mode (`--check` silencioso).
+
+- 21 unit tests nuevos en `fmt::tests` (incl. idempotencia
+  sobre programas complejos).
+- 7 E2E nuevos en `tests/cli_e2e.rs` (file/check/sin args/error
+  de sintaxis/warning emission/project discovery).
+- Total: 1315 unit + 55 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
 
 ## [v0.9.12] — 2026-05-16 — Fase 9.y.4: `fitz add` / `fitz remove` / `fitz update`
 

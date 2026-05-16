@@ -6107,32 +6107,146 @@ de F16). Ninguno requiere cambios del lenguaje core.
 
 #### 9.z.1 — `fitz fmt` (formatter sin config)
 
-- **Sub-comando** `fitz fmt [archivo...]` formatea in-place. Sin
-  argumentos formatea todo el proyecto (vía manifest).
-- **Modo check**: `fitz fmt --check` no escribe, exit 1 si hay
-  diffs (para CI).
-- **Convenciones (cero config)**: 4 espacios indentación,
-  comillas dobles para strings, trailing comma en multi-línea,
-  etc. Decisiones específicas a documentar en
-  `docs/fmt-style.md`.
-- **Implementación**: pretty-printer escrito a mano sobre el
-  AST. Reusa `parse_with_recovery` (F15) — formatea hasta donde
-  el parser entiende y deja intacto lo demás.
-- **Decisiones**:
-  - ¿Indent: 4 espacios (Python) o 2 (TS/JS)? Lean: **4**
-    (Python heritage).
-  - ¿Línea máxima: 80, 100, 120? Lean: **100** (compromise
-    moderno).
-  - ¿Trailing comma siempre, nunca, o solo multi-línea? Lean:
-    **solo multi-línea**.
-  - ¿Preservar blank lines del usuario o forzar densidad? Lean:
-    **preservar máximo 1 blank line consecutivo**.
-- **Trade-offs**: pretty-printer a mano es código aburrido pero
-  da control total. Alternativa: usar un AST printer genérico —
-  no hay en ecosistema Rust uno ideal para Fitz.
-- **Deuda anticipada**: ¿format on save desde el LSP? Sí, vía
-  `textDocument/formatting`. Llega gratis si fmt está como
-  librería.
+Sub-paso grande — partido en dos sub-commits porque el descubrimiento
+al hacer el smoke fue que **el lexer strippea comentarios antes de
+llegar al AST**, así que sin trabajo adicional el formatter es
+destructivo (borra comments + blank lines). Comment preservation es
+table-stakes para un formatter de producción (gofmt, prettier, black
+todos preservan).
+
+- **9.z.1.a — Pretty-printer + CLI con warning loud**
+  ✓ CERRADO (2026-05-16). Cubre los nodos comunes del AST; el modo
+  write emite warning explícito advirtiendo la pérdida. Modo
+  `--check` (read-only) es safe y no necesita warning. Útil para
+  código nuevo, NO usable sobre código con comments hasta 9.z.1.b.
+  Detalle abajo.
+- **9.z.1.b — Comment + blank line preservation**: pendiente.
+  Requiere: lexer emite comentarios como side stream (o tokens
+  con kind `Comment`) + parser side-table `Vec<(SpanKey, Comment)>`
+  paralelo al AST + threading en el formatter para re-insertar
+  comments según posición original. Refactor mayor del lexer +
+  parser. Hasta entonces, `fitz fmt` (modo write) sigue con warning.
+
+##### 9.z.1.a — Pretty-printer + CLI con warning loud ✓ (CERRADA, 2026-05-16)
+
+- **Sub-comando** `fitz fmt [files...]` formatea in-place. Sin
+  argumentos formatea todo el proyecto (vía manifest: walk
+  recursivo de `src/`, excluye `target/` y dirs ocultos).
+- **Modo check** `fitz fmt --check`: read-only, exit 1 si hay
+  diffs (para CI). Safe — no rompe nada aunque la deuda 9.z.1.b
+  no haya cerrado todavía.
+- **Modo write**: emite warning ⚠ loud antes de cualquier
+  modificación, citando 9.z.1.b como remediación.
+- **Convenciones (cero config)**: 4 espacios indent, comillas
+  dobles, blank line obligatoria solo entre fn/type top-level
+  consecutivos, paréntesis en condición de `if`/`while`.
+- **Implementación**: pretty-printer escrito a mano sobre el AST
+  (no usa `parse_with_recovery` todavía — strict parse). Cubre
+  >20 nodos: literales, let, fn (con/sin async, con/sin
+  decorators), if/while/for/loop, match, struct lit, list/map,
+  BinOp/UnaryOp, Call/Field/Index, Range, Ok/Err/Try/Await,
+  FnExpr (preserva flecha si body es Return único), TypeDef
+  con defaults, Decorator, Import/FromImport.
+
+###### Decisiones técnicas tomadas
+
+- **Indent: 4 espacios** (Python heritage). Comillas dobles.
+- **Línea máxima**: NO se enforcea en MVP. Auto-wrap requiere
+  análisis de break-points sensato — deuda futura.
+- **Trailing comma**: solo en multi-línea (match arms,
+  type fields).
+- **`is_let` recuperado del source via `Span`**: el parser
+  produce el mismo `Stmt::Assign` para `let x = 1` y `x = 1`.
+  El formatter inspecciona `source[span.line]` para detectar la
+  keyword. Hack contenido en `stmt_has_let_keyword`. Refactor
+  del AST (agregar `is_let: bool`) es deuda menor.
+- **`fn f() => expr` se normaliza a bloque**: el parser ya
+  convierte `=>` a `[Return(expr)]`; sin info en AST para
+  distinguir. Trade-off documentado.
+- **`if` con paréntesis obligatorios** en la condición:
+  consistente con el parser actual.
+- **FnExpr inline preserva la flecha** (`fn(x) => expr`) cuando
+  el body es un único `Return` — sintaxis expr-context.
+- **Project discovery**: walk recursivo de `src/`, excluye
+  `target/` y dirs ocultos (`.git/`, etc.), dedup por canonical
+  path.
+- **Warning loud en modo write**: una línea ⚠ al inicio de cada
+  invocación de fmt (write mode), citando 9.z.1.b. `--check`
+  silencioso.
+
+###### Total al cierre
+
+**1315 unit + 55 cli_e2e** (+21 unit en `fmt::tests` y +7 cli_e2e
+fmt sobre los previos) **+ 79 compile_e2e + 3 openapi**. Clippy
+`-D warnings` limpio.
+
+Archivos:
+
+- `src/fmt.rs` (nuevo, +~700 LoC) — `FmtCtx`, `format_source`,
+  formatters por categoría de nodo, 21 unit tests inline (incl.
+  idempotencia sobre programas complejos).
+- `src/lib.rs` — `pub mod fmt`.
+- `src/main.rs` (+~120 LoC) — `Commands::Fmt { files, check }` +
+  `fmt_cmd` + `fmt_one_file` + `discover_project_fitz_files` +
+  `collect_fitz_recursive` + warning loud en write mode.
+- `tests/cli_e2e.rs` (+~120 LoC) — 7 E2E nuevos: archivo
+  explícito canonicaliza, `--check` idempotente devuelve 0,
+  `--check` no canónico devuelve 1 sin modificar, warning loud
+  en write mode, `--check` no emite warning, error de sintaxis
+  aborta sin escribir, sin args descubre archivos de `src/`.
+
+###### Decisiones residuales (NO bloquean 9.z.1.b)
+
+- **Comment + blank line preservation**: scope de 9.z.1.b.
+- **`is_let` en AST**: deuda menor, refactor en cualquier
+  momento; mientras tanto el hack via Span funciona.
+- **Forma flecha de fn def**: AST no preserva. Refactor menor.
+- **Auto-wrap líneas largas**: deuda futura post-9.z.1.b.
+- **`parse_with_recovery` integration**: el formatter strict
+  hoy aborta si el source tiene errores de sintaxis. Cuando
+  9.z.1.b cierre podemos integrar recovery para formatear
+  hasta donde el parser entiende.
+- **Format on save desde el LSP** vía `textDocument/formatting`:
+  llega gratis cuando 9.z.1.b cierre — `fmt::format_source` ya
+  es una API libray-able.
+- **`docs/fmt-style.md`** (referencia formal de convenciones):
+  diferido a 9.z.1.b cuando el formatter sea production-ready.
+
+##### 9.z.1.b — Comment + blank line preservation (PENDIENTE)
+
+- **Lexer**: hoy descarta comentarios en `tokenize`. Pasa a
+  emitirlos como `Token::Comment(text, span)` o como side stream
+  paralelo al stream principal (decisión open). Lean: side
+  stream — el parser ignora comments en su lógica habitual,
+  los recoge en un buffer.
+- **Parser**: arma `Vec<(SpanKey, Comment)>` (o similar) que
+  retorna junto al `Program`. Cada comment lleva su posición
+  original para que el formatter sepa dónde re-insertarlo.
+- **Blank lines**: registrar también como markers (`BlankLine
+  at line N`).
+- **Formatter**: durante el walk, antes de cada `Stmt`, consulta
+  qué comments/blanks van entre el stmt anterior y el actual
+  según posición, y los emite. Trailing comments en la misma
+  línea de un stmt también — más complejo, pero esencial.
+- **Decisiones a cerrar**:
+  - ¿Comment kinds: `//` inline vs `/* block */`? Fitz hoy solo
+    tiene `//`. Si se agrega `/* */` en el futuro, manejo
+    aparte.
+  - ¿Comments adentro de expresiones (e.g., `f(x, // foo\n y)`)?
+    Lean: NO en MVP — solo comments stmt-level (entre stmts o
+    al final de un stmt).
+  - ¿Blank lines: preservar 1 max consecutivo o más? Lean:
+    1 max.
+  - ¿Comment style normalization? (`// foo` vs `//foo` —
+    forzar espacio post-`//`). Lean: SÍ.
+- **Cuando cierre 9.z.1.b**:
+  - Quitar el warning loud del CLI write mode.
+  - Marcar `fitz fmt` como production-ready.
+  - Crear `docs/fmt-style.md` con la referencia formal de
+    convenciones.
+  - Integrar `parse_with_recovery` para formatear código con
+    errores recuperables (deja stmts rotos verbatim via
+    Span fallback).
 
 #### 9.z.2 — `fitz test` (testing built-in)
 
