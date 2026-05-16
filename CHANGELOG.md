@@ -13,24 +13,87 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
 manager con 9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4 CERRADOS** y
-**9.z (DX) arrancó con 9.z.1.a CERRADO** — todo el 2026-05-16.
-El usuario puede hoy crear proyectos, correr/compilar/chequear
-contra el manifest, declarar deps path/git con lockfile
+**9.z (DX) arrancó con 9.z.1 entera CERRADA (a + b)** — todo el
+2026-05-16. El usuario puede hoy crear proyectos, correr/compilar/
+chequear contra el manifest, declarar deps path/git con lockfile
 reproducible, importar deps desde código, editar el manifest via
-CLI, y formatear código (`fitz fmt`, con limitación documentada
-de pérdida de comments hasta 9.z.1.b).
+CLI, y **formatear código** (`fitz fmt`, production-ready con
+preservación de comments + blank lines).
 
 **Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
 git deps cubren el caso 90% y registry implica decisiones de
 hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
 repl + lint) que no requiere infra externa.
 
-Próximo norte: **9.z.1.b** (comment + blank line preservation
-del formatter) → 9.z.2 (`fitz test`). Registry queda para cuando
-aparezca demanda real.
+Próximo norte: **9.z.2** (`fitz test` con `@test` builtin).
+Registry queda para cuando aparezca demanda real.
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.14] — 2026-05-16 — Fase 9.z.1.b + cierre de 9.z.1 entera: comment + blank preservation
+
+Cierra la deuda crítica de 9.z.1.a: el formatter ahora **preserva
+comentarios y blank lines del usuario** al reescribir archivos.
+`fitz fmt` es production-ready — el warning loud del modo write
+fue removido. **Cierra 9.z.1 entera** (a + b).
+
+Lexer:
+- `Trivia` struct nueva: `Vec<Comment>` (con `kind: Line | Block`,
+  `text`, `line`, `column`) + `Vec<usize>` con líneas blank.
+- `tokenize_with_trivia(src) -> (Vec<TokenWithPos>, Trivia)`
+  paralela a `tokenize` (que sigue zero-overhead — parser/LSP/
+  resto no se ven afectados). AST sin cambios.
+- `Lexer.collect_trivia` flag + `line_had_code` /
+  `line_had_comment` para distinguir líneas blank (sin nada) de
+  líneas comment-only (no son blank).
+
+Formatter:
+- `format_source` ahora invoca `tokenize_with_trivia` y threadea
+  la trivia en el output.
+- `fmt_stmt_list` emit leading comments + blank lines preservadas
+  + trailing comments por stmt.
+- `end_line_of_stmt`/`end_line_of_expr` recursivos para detectar
+  trailing comments en stmts multi-línea.
+- Smart blank entre fn/type defs **suprimida** si hay leading
+  comment recién emitido (el comment se ata al stmt siguiente).
+- Comments normalizados: `//foo` → `// foo` (espacio post-`//`).
+- Trailing comments emitidos con 2 espacios de separación.
+- Múltiples blank lines consecutivas colapsadas a 1.
+
+Decisiones cerradas: lexer side-stream vs token kind (lean
+side-stream porque parser no se contamina); fmt_stmt_list con
+`in_block` flag (blocks no emiten footer comments — caso raro de
+"comment entre último stmt y `}`" es deuda menor documentada);
+smart blank suprimida por leading comment.
+
+CLI:
+- Removido el warning loud del modo write (deuda 9.z.1.a cerrada).
+- Docstring de `Commands::Fmt` reescrita reflejando
+  production-ready.
+
+Limitaciones residuales (NO bloquean 9.z.2):
+- Comments entre último stmt de un bloque y el `}` terminan
+  saliendo del bloque al re-formatear (caso raro).
+- Multi-línea de listas/maps/method chains se colapsa a
+  single-line (auto-wrap line-aware es deuda futura).
+- Comments adentro de expresiones (`f(x, // foo\n y)`) no
+  soportados.
+
+- 8 unit tests nuevos en `lexer::tests` (trivia capture, blank
+  detection, comment-only lines, mixto).
+- 10 unit tests nuevos en `fmt::tests` (preservación de leading/
+  trailing/blanks/multiline, normalización de espacios,
+  idempotencia con comments, smoke con 02-hola).
+- 2 cli_e2e nuevos / actualizados.
+- Total: 1333 unit + 55 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
+
+Smoke a mano: `examples/guide/02-hola.fitz` round-trip exacto
+bit-a-bit (2 comments + 2 blank lines preservados).
+
+Ver `docs/fmt-style.md` para la referencia completa de
+convenciones del formatter.
 
 ## [v0.9.13] — 2026-05-16 — Fase 9.z.1.a: `fitz fmt` (sin comment preservation)
 

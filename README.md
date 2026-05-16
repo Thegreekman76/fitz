@@ -496,17 +496,19 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     concreta. Saltamos a 9.z.
 - **9.z — DX completo ✨** (en curso) — `fitz fmt`, `fitz test`,
   `fitz dev`, `fitz repl`, `fitz lint`. 5 sub-pasos.
-  - **9.z.1.a CERRADO (2026-05-16)** — formatter pretty-printer
-    sobre el AST, cero config (4 espacios indent, comillas
-    dobles, blank line solo entre fn/type top-level). Cubre
-    >20 nodos. CLI con `--check` (read-only, safe) + write mode
-    con warning loud porque **el modo write borra comments y
-    blank lines** (lexer strippea comments antes del AST).
-    Comment preservation llega en **9.z.1.b**.
-  - Total al cierre 9.z.1.a: 1315 unit + 55 cli_e2e + 79
-    compile_e2e + 3 openapi. Clippy `-D warnings` limpio.
-  - Próximo: **9.z.1.b** (comment + blank line preservation)
-    → 9.z.2 (`fitz test`).
+  - **9.z.1 entera CERRADA (2026-05-16)** — formatter
+    pretty-printer sobre el AST, cero config (4 espacios indent,
+    comillas dobles, blank line solo entre fn/type top-level).
+    Cubre >20 nodos. CLI con `--check` (read-only, CI mode) y
+    write mode **production-ready** (preserva comments + blank
+    lines del usuario; comments normalizados `//foo`→`// foo`;
+    trailing comments con 2 espacios). Lexer side-stream `Trivia`
+    nuevo — el parser/LSP/resto siguen zero overhead. Ver
+    [`docs/fmt-style.md`](docs/fmt-style.md) para la referencia
+    completa de convenciones.
+  - Total al cierre 9.z.1: 1333 unit + 55 cli_e2e + 79 compile_e2e
+    + 3 openapi. Clippy `-D warnings` limpio.
+  - Próximo: **9.z.2** (`fitz test` con `@test` builtin).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based), `@ws` (WebSockets tipados con
   `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM

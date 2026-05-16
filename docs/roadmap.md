@@ -6105,27 +6105,25 @@ de F16). Ninguno requiere cambios del lenguaje core.
 
 ### Sub-pasos
 
-#### 9.z.1 — `fitz fmt` (formatter sin config)
+#### 9.z.1 — `fitz fmt` (formatter sin config) ✓ (CERRADO ENTERO, 2026-05-16)
 
 Sub-paso grande — partido en dos sub-commits porque el descubrimiento
 al hacer el smoke fue que **el lexer strippea comentarios antes de
-llegar al AST**, así que sin trabajo adicional el formatter es
-destructivo (borra comments + blank lines). Comment preservation es
-table-stakes para un formatter de producción (gofmt, prettier, black
-todos preservan).
+llegar al AST**, así que sin trabajo adicional el formatter era
+destructivo (borraba comments + blank lines). Comment preservation
+es table-stakes para un formatter de producción (gofmt, prettier,
+black todos preservan).
 
 - **9.z.1.a — Pretty-printer + CLI con warning loud**
-  ✓ CERRADO (2026-05-16). Cubre los nodos comunes del AST; el modo
-  write emite warning explícito advirtiendo la pérdida. Modo
-  `--check` (read-only) es safe y no necesita warning. Útil para
-  código nuevo, NO usable sobre código con comments hasta 9.z.1.b.
-  Detalle abajo.
-- **9.z.1.b — Comment + blank line preservation**: pendiente.
-  Requiere: lexer emite comentarios como side stream (o tokens
-  con kind `Comment`) + parser side-table `Vec<(SpanKey, Comment)>`
-  paralelo al AST + threading en el formatter para re-insertar
-  comments según posición original. Refactor mayor del lexer +
-  parser. Hasta entonces, `fitz fmt` (modo write) sigue con warning.
+  ✓ CERRADO (2026-05-16). Cubre los nodos comunes del AST.
+- **9.z.1.b — Comment + blank line preservation**
+  ✓ CERRADO (2026-05-16). Lexer emite comments + blank lines como
+  side-stream `Trivia`; el formatter threadea todo según posición
+  original. El warning loud del modo write fue removido —
+  `fitz fmt` es production-ready. Detalle abajo.
+
+**Próximo norte tras 9.z.1**: **9.z.2** (`fitz test` con `@test`
+builtin).
 
 ##### 9.z.1.a — Pretty-printer + CLI con warning loud ✓ (CERRADA, 2026-05-16)
 
@@ -6212,41 +6210,103 @@ Archivos:
 - **`docs/fmt-style.md`** (referencia formal de convenciones):
   diferido a 9.z.1.b cuando el formatter sea production-ready.
 
-##### 9.z.1.b — Comment + blank line preservation (PENDIENTE)
+##### 9.z.1.b — Comment + blank line preservation ✓ (CERRADA, 2026-05-16)
 
-- **Lexer**: hoy descarta comentarios en `tokenize`. Pasa a
-  emitirlos como `Token::Comment(text, span)` o como side stream
-  paralelo al stream principal (decisión open). Lean: side
-  stream — el parser ignora comments en su lógica habitual,
-  los recoge en un buffer.
-- **Parser**: arma `Vec<(SpanKey, Comment)>` (o similar) que
-  retorna junto al `Program`. Cada comment lleva su posición
-  original para que el formatter sepa dónde re-insertarlo.
-- **Blank lines**: registrar también como markers (`BlankLine
-  at line N`).
-- **Formatter**: durante el walk, antes de cada `Stmt`, consulta
-  qué comments/blanks van entre el stmt anterior y el actual
-  según posición, y los emite. Trailing comments en la misma
-  línea de un stmt también — más complejo, pero esencial.
-- **Decisiones a cerrar**:
-  - ¿Comment kinds: `//` inline vs `/* block */`? Fitz hoy solo
-    tiene `//`. Si se agrega `/* */` en el futuro, manejo
-    aparte.
-  - ¿Comments adentro de expresiones (e.g., `f(x, // foo\n y)`)?
-    Lean: NO en MVP — solo comments stmt-level (entre stmts o
-    al final de un stmt).
-  - ¿Blank lines: preservar 1 max consecutivo o más? Lean:
-    1 max.
-  - ¿Comment style normalization? (`// foo` vs `//foo` —
-    forzar espacio post-`//`). Lean: SÍ.
-- **Cuando cierre 9.z.1.b**:
-  - Quitar el warning loud del CLI write mode.
-  - Marcar `fitz fmt` como production-ready.
-  - Crear `docs/fmt-style.md` con la referencia formal de
-    convenciones.
-  - Integrar `parse_with_recovery` para formatear código con
-    errores recuperables (deja stmts rotos verbatim via
-    Span fallback).
+Cierra la deuda crítica de 9.z.1.a: el formatter ahora preserva
+comentarios y blank lines del usuario al reescribir archivos.
+`fitz fmt` es production-ready — el warning loud del modo write
+fue removido.
+
+###### Decisiones técnicas tomadas
+
+- **Lexer Trivia side-stream**: nueva fn `tokenize_with_trivia(src)
+  -> (Vec<TokenWithPos>, Trivia)` paralela a `tokenize`. La vieja
+  `tokenize` sigue zero-overhead — parser/LSP/etc. no se ven
+  afectados. AST sin cambios.
+- **`Trivia` struct**: `Vec<Comment>` (con `kind: Line | Block`,
+  `text`, `line`, `column`) + `Vec<usize>` con números de línea
+  blank. Ambos en orden de aparición.
+- **`Lexer.collect_trivia` flag** + `line_had_code` /
+  `line_had_comment` para distinguir líneas blank (sin nada) de
+  líneas comment-only (no son blanks).
+- **Comments style normalization**: `//foo` → `// foo` (espacio
+  post-`//`). Block comments `/* */` se preservan raw.
+- **Trailing comments**: emitidos con **2 espacios** de separación
+  (`stmt  // comment`).
+- **Blank lines colapsadas**: máximo **1 consecutiva** (3 blanks
+  del user → 1 en output).
+- **Smart blank suppressed** cuando un leading comment se acaba
+  de emitir: el comment "se ata" al stmt siguiente y no queremos
+  blank entre ellos.
+- **`fmt_stmt_list` con `in_block`**: blocks NO emiten trailing
+  footer comments (los deja para el outer scope). Top-level sí.
+- **`end_line_of_stmt`/`end_line_of_expr` recursivos**: necesario
+  para detectar trailing comments en stmts multi-línea.
+- **`expr_to_inline_string` usa `Trivia::default()`**: comments
+  adentro de expresiones inline son deuda futura — no MVP.
+
+###### Total al cierre
+
+**1333 unit + 55 cli_e2e + 79 compile_e2e + 3 openapi** (+18 unit
+sobre 9.z.1.a: 8 lexer trivia + 10 fmt threading + 0 cli_e2e neto
+porque reemplazo 1 viejo). Clippy `-D warnings` limpio.
+
+Archivos:
+
+- `src/lexer.rs` (+~180 LoC) — `Trivia` + `Comment` + `CommentKind`
+  + `Lexer.collect_trivia/trivia/line_had_*` + `tokenize_with_trivia`.
+  8 unit tests nuevos.
+- `src/fmt.rs` (+~280 LoC) — `FmtCtx.trivia` + `fmt_stmt_list`
+  threading + `emit_leading_comments`/`emit_trailing_comments`/
+  `emit_single_comment`/`peek_comment_at_line` + `end_line_of_stmt`/
+  `end_line_of_expr` + `has_blank_between` + smart blank logic.
+  10 unit tests nuevos (preserva comment líneas, multiples,
+  blanks, trailing, normaliza `//foo`→`// foo`, mix, smoke
+  02-hola, colapsa blanks, idempotencia con comments).
+- `src/main.rs` — warning loud removido + docstring de `Commands::Fmt`
+  reescrita reflejando production-ready.
+- `tests/cli_e2e.rs` — `fmt_emite_warning_loud` reemplazado por
+  `fmt_no_emite_warning_post_9z1b` (regresión guard) + nuevo
+  `fmt_preserva_comments_y_blank_lines` (E2E del round-trip).
+
+###### Smoke validado a mano
+
+- `examples/guide/02-hola.fitz` round-trip exacto bit-a-bit:
+  2 comments + 2 blank lines preservados.
+- `examples/guide/04-operadores.fitz`: solo normaliza espacios
+  pre-trailing (de 4-5 espacios alineados a 2 espacios canónicos).
+- `examples/guide/13-metodos.fitz`: colapsa listas y method chains
+  multi-línea a single-line (limitación documentada abajo).
+
+###### Decisiones residuales (NO bloquean 9.z.2)
+
+- **Multi-líneas de listas/maps/method chains se colapsan a
+  single-line**: el formatter no preserva multi-líneas que el
+  usuario haya formateado a mano para legibilidad. Si una lista
+  era multi-línea en el source y entra (o no) en una sola línea,
+  se inlinea. Auto-wrap line-length-aware es deuda futura — el
+  problema general de pretty-printing con line breaks sensatos
+  es no trivial.
+- **`type` defs siempre multi-línea**: regardless de si el user
+  los tenía inline.
+- **Comments entre último stmt de un bloque y el `}`**: terminan
+  saliendo del bloque al re-formatear (caso raro en práctica).
+  Documentado.
+- **Comments adentro de expresiones** (`f(x, // foo\n y)`): no
+  soportados. Fitz no genera mucho de este patrón, deuda futura.
+- **`parse_with_recovery` integration**: el formatter strict hoy
+  aborta si hay errores de sintaxis. Cuando aparezca presión,
+  integrar recovery para formatear hasta donde el parser entiende.
+- **Format on save desde el LSP** vía `textDocument/formatting`:
+  llega gratis ahora que `fmt::format_source` es library-able y
+  production-ready. Sub-paso opcional si aparece demanda.
+
+###### Próximo norte tras 9.z.1 entera
+
+**9.z.2 — `fitz test`** — decorator `@test` sobre fn sin args +
+builtins de aserción (`assert`, `assert_eq`, `assert_ne`,
+`assert_throws`) + sub-comando `fitz test` con discovery por
+proyecto (inline + carpeta `tests/`).
 
 #### 9.z.2 — `fitz test` (testing built-in)
 
