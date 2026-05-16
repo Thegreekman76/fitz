@@ -437,10 +437,17 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
 **Próximo norte — tres bloques planificados con detalle alto en
 [`docs/roadmap.md`](docs/roadmap.md)**:
 
-- **9.y — Package manager + registry 📦** (siguiente arranque) —
-  `fitz.toml`, `fitz new`/`init`, `fitz add`/`remove`/`update`,
-  resolución + lockfile, registry HTTP escrito en Fitz mismo,
-  `fitz publish` + auth. 7 sub-pasos.
+- **9.y — Package manager + registry 📦** (en curso) — `fitz.toml`,
+  `fitz new`/`init`, `fitz add`/`remove`/`update`, resolución +
+  lockfile, registry HTTP escrito en Fitz mismo, `fitz publish` +
+  auth. 7 sub-pasos. **9.y.1 CERRADO (2026-05-16)** — formato
+  manifest TOML + `fitz new <nombre>` y `fitz init` con templates
+  default (`print` top-level) y `--http` (`@get`/`@server`),
+  `git init` automático con `--no-git`, validación de nombre
+  estilo crates.io. 13 unit + 11 E2E nuevos; total al cierre:
+  1246 unit + 11 cli_e2e + 79 compile_e2e + 3 openapi. Sin
+  cambio user-facing en `fitz run`/`build` (esa integración llega
+  en 9.y.2).
 - **9.z — DX completo ✨** — `fitz fmt` (cero config, gofmt-style),
   `fitz test` con `@test` builtin, `fitz dev` con hot reload,
   `fitz repl` interactivo, `fitz lint` (estilo + patrones).

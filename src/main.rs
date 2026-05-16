@@ -4,7 +4,7 @@
 // lib + bin para que `fitz-lsp` pueda reusarlos sin compilación
 // duplicada). Acá solo importamos lo que el CLI consume.
 
-use fitz::{codegen, evaluator, http, lexer, openapi, parser, types};
+use fitz::{codegen, evaluator, http, lexer, manifest, openapi, parser, types};
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
 #[cfg(feature = "python")]
@@ -63,6 +63,39 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// Fase 9.y.1 — Crea un proyecto Fitz nuevo en una carpeta.
+    ///
+    /// Genera `<name>/fitz.toml`, `<name>/src/main.fitz`, `<name>/.gitignore`,
+    /// y (a menos que se pase `--no-git`) corre `git init`. El nombre
+    /// debe matchear `^[a-z][a-z0-9_-]{0,63}$`.
+    New {
+        /// Nombre del proyecto (también nombre de la carpeta a crear).
+        name: String,
+        /// Template HTTP en vez de CLI hello world.
+        #[arg(long)]
+        http: bool,
+        /// No correr `git init` en la carpeta creada.
+        #[arg(long)]
+        no_git: bool,
+    },
+    /// Fase 9.y.1 — Inicializa un proyecto Fitz en el directorio actual.
+    ///
+    /// Genera `./fitz.toml`, `./src/main.fitz`, `./.gitignore`, y (a
+    /// menos que se pase `--no-git`) corre `git init`. El nombre del
+    /// paquete se deriva del nombre del directorio actual, o del flag
+    /// `--name` si se provee. Falla si ya existe un `fitz.toml`.
+    Init {
+        /// Sobrescribe el nombre del paquete (default: nombre del
+        /// directorio actual). Debe matchear `^[a-z][a-z0-9_-]{0,63}$`.
+        #[arg(long)]
+        name: Option<String>,
+        /// Template HTTP en vez de CLI hello world.
+        #[arg(long)]
+        http: bool,
+        /// No correr `git init` en el directorio.
+        #[arg(long)]
+        no_git: bool,
+    },
 }
 
 fn main() {
@@ -83,6 +116,12 @@ fn main() {
         }
         Commands::PyTypes { source, out } => {
             py_types_file(&source, out.as_deref());
+        }
+        Commands::New { name, http, no_git } => {
+            new_project(&name, http, no_git);
+        }
+        Commands::Init { name, http, no_git } => {
+            init_project(name.as_deref(), http, no_git);
         }
     }
 }
@@ -501,6 +540,208 @@ fn run_file(path: &PathBuf, no_typecheck: bool) {
         if let Err(e) = http::serve(registry, program_for_server, addr) {
             eprintln!("Error del servidor HTTP: {}", e);
             std::process::exit(1);
+        }
+    }
+}
+
+// ---- Fase 9.y.1 — scaffolding (`fitz new` / `fitz init`) ----
+
+/// Template para el `src/main.fitz` default (CLI hello world).
+/// Sigue el estilo del cap 2 de la guía (`examples/guide/02-hola.fitz`):
+/// top-level `print(...)` sin `fn main`.
+fn template_cli(name: &str) -> String {
+    format!(
+        "// main.fitz — generado por `fitz new`\n\
+         //\n\
+         // Tu primer programa Fitz. Corrélo con `fitz run src/main.fitz`.\n\
+         // Cuando 9.y.2 aterrice, también vas a poder simplemente `fitz run`\n\
+         // desde la raíz del proyecto (lee `fitz.toml` automáticamente).\n\
+         \n\
+         print(\"Hola desde {name} 🏔️\")\n"
+    )
+}
+
+/// Template para `src/main.fitz` con `--http`. Servidor mínimo que
+/// responde un GET en `/`. Sigue el patrón canónico
+/// `@server(...) fn main() => 0` del cap 17 de la guía.
+fn template_http(name: &str) -> String {
+    format!(
+        "// main.fitz — generado por `fitz new --http`\n\
+         //\n\
+         // Servidor HTTP mínimo. Corrélo con `fitz run src/main.fitz` y\n\
+         // probá: curl http://127.0.0.1:3000/\n\
+         \n\
+         @get(\"/\")\n\
+         fn index() -> Str {{\n\
+         \x20   return \"Hola desde {name} 🏔️\"\n\
+         }}\n\
+         \n\
+         @server(3000)\n\
+         fn main() => 0\n"
+    )
+}
+
+/// Template para el `.gitignore`. `fitz.lock` NO está acá: el lockfile
+/// se commitea (Cargo-style), no se ignora.
+fn template_gitignore() -> &'static str {
+    "# Artefactos de compilación\n\
+     target/\n\
+     \n\
+     # Binarios generados por `fitz build` adyacentes al fuente.\n\
+     # Si publicás un paquete, ajustá esto a tus necesidades.\n\
+     *.exe\n\
+     *.pdb\n"
+}
+
+/// `fitz new <nombre> [--http] [--no-git]` — crea un proyecto Fitz
+/// nuevo en una carpeta. Falla si la carpeta ya existe.
+fn new_project(name: &str, http: bool, no_git: bool) {
+    if !manifest::is_valid_package_name(name) {
+        eprintln!(
+            "✗ nombre inválido: `{name}`. Debe matchear `^[a-z][a-z0-9_-]{{0,63}}$` \
+             (lowercase, empezar con letra, contener solo letras/dígitos/`-`/`_`, máx \
+             64 caracteres)."
+        );
+        std::process::exit(1);
+    }
+
+    let target = PathBuf::from(name);
+    if target.exists() {
+        eprintln!("✗ `{}` ya existe — borralo o elegí otro nombre.", target.display());
+        std::process::exit(1);
+    }
+
+    scaffold_project(&target, name, http, no_git);
+    println!("✓ proyecto Fitz creado en `{}`", target.display());
+    println!();
+    println!("Para probarlo:");
+    println!("  cd {}", target.display());
+    println!("  fitz run src/main.fitz");
+}
+
+/// `fitz init [--name X] [--http] [--no-git]` — inicializa un proyecto
+/// Fitz en el directorio actual. Falla si ya existe un `fitz.toml`.
+fn init_project(name_override: Option<&str>, http: bool, no_git: bool) {
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        std::process::exit(1);
+    });
+
+    let name = match name_override {
+        Some(n) => n.to_string(),
+        None => match cwd.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n.to_string(),
+            None => {
+                eprintln!(
+                    "✗ no se pudo derivar el nombre del directorio actual. \
+                     Pasalo explícito con `--name <nombre>`."
+                );
+                std::process::exit(1);
+            }
+        },
+    };
+
+    if !manifest::is_valid_package_name(&name) {
+        eprintln!(
+            "✗ nombre inválido: `{name}`. Debe matchear `^[a-z][a-z0-9_-]{{0,63}}$`. \
+             Pasá `--name <nombre-válido>` si el directorio no respeta el formato."
+        );
+        std::process::exit(1);
+    }
+
+    if cwd.join(manifest::MANIFEST_FILE).exists() {
+        eprintln!(
+            "✗ `{}` ya existe en el directorio actual.",
+            manifest::MANIFEST_FILE
+        );
+        std::process::exit(1);
+    }
+
+    scaffold_project(&cwd, &name, http, no_git);
+    println!(
+        "✓ proyecto Fitz `{name}` inicializado en `{}`",
+        cwd.display()
+    );
+    println!();
+    println!("Para probarlo:");
+    println!("  fitz run src/main.fitz");
+}
+
+/// Common scaffolding: crea `<target>/fitz.toml`, `<target>/src/main.fitz`,
+/// `<target>/.gitignore`, y (a menos que `no_git`) corre `git init`.
+///
+/// Sale del proceso con código 1 ante cualquier error de I/O.
+fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bool) {
+    // Crear directorios.
+    let src = target.join("src");
+    if let Err(e) = fs::create_dir_all(&src) {
+        eprintln!("✗ no se pudo crear `{}`: {e}", src.display());
+        std::process::exit(1);
+    }
+
+    // Escribir fitz.toml.
+    let m = match manifest::Manifest::new_default(name) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let toml_text = match m.to_toml_string() {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    let toml_path = target.join(manifest::MANIFEST_FILE);
+    if let Err(e) = fs::write(&toml_path, toml_text) {
+        eprintln!("✗ no se pudo escribir `{}`: {e}", toml_path.display());
+        std::process::exit(1);
+    }
+
+    // Escribir src/main.fitz con el template elegido.
+    let main_text = if http {
+        template_http(name)
+    } else {
+        template_cli(name)
+    };
+    let main_path = src.join("main.fitz");
+    if let Err(e) = fs::write(&main_path, main_text) {
+        eprintln!("✗ no se pudo escribir `{}`: {e}", main_path.display());
+        std::process::exit(1);
+    }
+
+    // Escribir .gitignore.
+    let gi_path = target.join(".gitignore");
+    if let Err(e) = fs::write(&gi_path, template_gitignore()) {
+        eprintln!("✗ no se pudo escribir `{}`: {e}", gi_path.display());
+        std::process::exit(1);
+    }
+
+    // git init (opcional). No abortamos si falla: el proyecto sigue
+    // siendo válido sin git; solo lo notamos como warning.
+    if !no_git {
+        match std::process::Command::new("git")
+            .arg("init")
+            .arg("--quiet")
+            .current_dir(target)
+            .status()
+        {
+            Ok(status) if status.success() => {}
+            Ok(status) => {
+                eprintln!(
+                    "  (aviso: `git init` salió con código {} — el proyecto se creó igual. \
+                     Pasá `--no-git` para silenciar este aviso.)",
+                    status.code().unwrap_or(-1)
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "  (aviso: no se pudo ejecutar `git init` ({e}). El proyecto se creó \
+                     igual. Pasá `--no-git` para silenciar este aviso.)"
+                );
+            }
         }
     }
 }

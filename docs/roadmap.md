@@ -5288,7 +5288,7 @@ usuario:
 
 ### Sub-pasos
 
-#### 9.y.1 — Manifest + scaffolding (`fitz.toml`, `fitz new`, `fitz init`)
+#### 9.y.1 — Manifest + scaffolding ✓ (CERRADA, 2026-05-16)
 
 Primer sub-paso del bloque. Sin red, sin deps remotas, sin nada
 que se rompa.
@@ -5300,31 +5300,95 @@ que se rompa.
   name = "mi-app"
   version = "0.1.0"
   edition = "2026"
-  authors = ["Tu Nombre <tu@email>"]
 
   [bin]
   main = "src/main.fitz"
-
-  [dependencies]
   ```
-- **Sub-comando `fitz new <nombre>`**: crea carpeta con
-  `fitz.toml` + `src/main.fitz` + `.gitignore` + (opcional)
-  `README.md`. Templates: `--lib`, `--bin` (default), `--http`
-  (template con `@get`).
-- **Sub-comando `fitz init`**: agrega `fitz.toml` al directorio
-  actual sin crear carpeta nueva.
-- **Decisiones a cerrar**:
-  - ¿`edition` (concepto Cargo, year-based) o `fitz-version`
-    (concepto pyproject)?
-  - ¿Permitir `[lib]` y `[[bin]]` múltiples desde el día uno o
-    solo single-bin?
-  - ¿Validación de nombres de paquete: regex? lowercase?
-    guiones permitidos?
-  - ¿Crear repo git automáticamente o solo el `.gitignore`?
-- **Trade-offs**: arrancar con manifest mínimo deja espacio para
-  extender (deps, build scripts, workspaces) sin breaking
-  changes. Arrancar con todo de una baja velocidad inicial pero
-  da fundamento.
+- **Sub-comando `fitz new <nombre> [--http] [--no-git]`**: crea
+  carpeta con `fitz.toml` + `src/main.fitz` + `.gitignore` + (si
+  no `--no-git`) `git init`. Templates: default CLI (top-level
+  `print(...)` estilo `02-hola.fitz`) y `--http` (patrón canónico
+  `@get("/")` + `@server(3000) fn main() => 0`). El `--lib` queda
+  como deuda hasta que library publishing sea real (9.y.5+).
+- **Sub-comando `fitz init [--name X] [--http] [--no-git]`**:
+  inicializa proyecto en el directorio actual sin crear carpeta
+  nueva. Nombre derivado del cwd (o del flag `--name`). Falla si
+  ya existe `fitz.toml` o si el nombre derivado no matchea la
+  regex.
+
+#### Decisiones técnicas tomadas
+
+- **Formato**: TOML (`fitz.toml`). Lean del bloque cerrada.
+- **Estructura**: `src/main.fitz`. Lean del bloque cerrada.
+- **Field versionado**: `edition = "2026"` (Cargo-style year).
+- **Bin único** (`[bin]`, no `[[bin]]` array). Multi-bin queda
+  como sub-paso 9.y.8+ post-MVP.
+- **Validación de nombre**: `^[a-z][a-z0-9_-]{0,63}$` (política
+  crates.io: lowercase + alfanumérico + `-`/`_`, máx 64). Regex
+  implementada a mano para no agregar dep `regex` por algo tan
+  chico.
+- **git init**: corre por default con `--quiet`. Flag `--no-git`
+  para opt-out (CI, monorepos, autores que prefieren manual).
+  Si `git init` falla (git no instalado), emite warning pero NO
+  aborta — el proyecto sigue siendo válido sin git.
+- **`.gitignore`**: excluye `target/` + `*.exe`/`*.pdb` (binarios
+  generados por `fitz build`). **NO** excluye `fitz.lock` — el
+  lockfile se commitea (Cargo-style, sub-paso 9.y.3).
+- **Manifest serialization**: serde con `skip_serializing_if`
+  para que el TOML default sea **mínimo** (sin campos vacíos
+  `authors = []`, `description = ""`, etc.).
+- **`find_manifest`**: walk-up del cwd buscando `fitz.toml`
+  (Cargo-style). Ya implementado y testeado, sin consumidor
+  todavía — `#[allow(dead_code)]` puntual hasta 9.y.2.
+
+#### Total al cierre
+
+**1246 unit** (+13 de `manifest::tests`) **+ 11 cli_e2e** (nuevos)
+**+ 79 compile_e2e + 3 openapi** sin features. Clippy
+`-D warnings` limpio en lib + bins + tests. **Sin breaking**: el
+modo single-file (`fitz run archivo.fitz`) sigue funcionando
+idéntico — 9.y.1 solo agrega comandos nuevos, no cambia
+comportamiento existente.
+
+Archivos:
+
+- `Cargo.toml` — dep nueva `toml = "0.8"` (no opcional).
+- `src/lib.rs` — `pub mod manifest`.
+- `src/manifest.rs` (nuevo, +279 LoC) — `Manifest`/`Package`/`Bin`
+  structs serde-able, `parse`/`to_toml_string`/`new_default`,
+  `is_valid_package_name`, `find_manifest`, 13 unit tests.
+- `src/main.rs` — `Commands::New`/`Init` en clap + `new_project`/
+  `init_project`/`scaffold_project` + templates inline CLI/HTTP.
+- `tests/cli_e2e.rs` (nuevo, +173 LoC) — 11 E2E tests:
+  estructura completa default, template `--http`, git init,
+  `--no-git`, error si carpeta ya existe, error nombre inválido,
+  init usa nombre del directorio, init con `--name` override,
+  init falla si manifest ya existe, init falla con nombre
+  inválido sin override, programa generado corre con `fitz run`.
+
+#### Decisiones residuales (NO bloquean 9.y.2)
+
+- **Multi-bin (`[[bin]]`)**: sin `[[bin]]` array todavía. Sub-paso
+  9.y.8+ post-MVP.
+- **`--lib` template**: sin template `--lib` todavía. Aterriza
+  cuando library publishing sea real (9.y.5+).
+- **Repo público pre-existente con `git init`**: `git init` sobre
+  un dir que YA es git repo no rompe (git lo detecta y no toca
+  nada). Sin caso especial necesario.
+- **Nombres reservados** (ej. `fitz`, `main`, `test`): sin lista
+  de reservados todavía. Aterriza con el registry (9.y.5).
+- **Manifest con `[lib]` o `[[bin]]`** en `parse`: el parser los
+  rechaza silenciosamente (campos desconocidos para serde por
+  default). Si el usuario edita a mano y agrega `[lib]`, el
+  parse falla. Refinable con `#[serde(deny_unknown_fields)]` o
+  agregando explícitamente las variantes futuras.
+
+#### Próximo norte
+
+**9.y.2 — `fitz run`/`build`/`check` integrados con manifest** —
+detectar `fitz.toml` en cwd o ancestros (Cargo-style) y usar
+`[bin].main` como entry point. `find_manifest` ya está listo
+desde 9.y.1.
 
 #### 9.y.2 — `fitz run`/`build` integrados con manifest
 

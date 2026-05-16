@@ -11,19 +11,42 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.5
-(LSP distribución multi-platform) CERRADA**: extensión VSCode
-multi-platform aware con binario `fitz-lsp` bundleado en el .vsix
-per-plataforma + logo oficial del proyecto (engranaje Rust +
-silueta Fitz Roy). **Plan LSP entero (9.x.1 → 9.x.5) cerrado** —
-el MVP del language server + su distribución técnica están
-completos. Lo que sigue son acciones del autor (publicación al
-VSCode Marketplace requiere cuenta de publisher + repo público) y
-el resto de Fase 9: package manager, formatter, linter.
+En curso: ver `docs/roadmap.md` para el plan vigente. **Package
+manager arrancó** — sub-paso 9.y.1 (manifest + scaffolding)
+CERRADO el 2026-05-16. Próximo: 9.y.2 (integración de `fitz run`/
+`build`/`check` con el manifest).
 
-Próximo norte (técnico): **package manager + registry** o
-**formatter** (a definir al arrancar). Sub-paso separado pendiente
-sin presión: bundling CPython embebido (`fitz build --bundle-python`).
+Sub-paso separado pendiente sin presión: bundling CPython embebido
+(`fitz build --bundle-python`).
+
+## [v0.9.7] — 2026-05-16 — Fase 9.y.1: manifest + `fitz new` / `fitz init`
+
+Primer sub-paso del package manager (Fase 9.y). Define el formato
+`fitz.toml` (TOML, Cargo-style) y suma dos subcomandos para crear
+proyectos: `fitz new <name>` (carpeta nueva con `git init`
+automático) y `fitz init` (directorio actual). Templates `--http`
+(server con `@get`/`@server`) y default (`print` top-level estilo
+cap 2 de la guía).
+
+**Sin cambio breaking**: el modo single-file (`fitz run
+archivo.fitz`) sigue funcionando idéntico. La integración del
+manifest con `fitz run`/`build`/`check` llega en 9.y.2.
+
+Decisiones cerradas: TOML para el manifest, `src/main.fitz` como
+entry default, `edition = "2026"` (Cargo-style year), bin único
+en MVP (multi-bin queda 9.y.8+), validación de nombre
+`^[a-z][a-z0-9_-]{0,63}$` (política crates.io), `git init`
+automático con flag `--no-git` para opt-out, `.gitignore` excluye
+`target/` + binarios (no `fitz.lock` — el lockfile se commitea).
+
+- 13 unit tests nuevos en `manifest::tests`.
+- 11 E2E tests nuevos en `tests/cli_e2e.rs` cubriendo estructura
+  completa, ambos templates, git init opt-in/out, errores
+  (nombre inválido, carpeta ya existe, manifest existente).
+- Total: 1246 unit + 11 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
+
+Dep nueva no-opcional: `toml = "0.8"`.
 
 ## [v0.9.6] — 2026-05-16 — Fase 9.x.5: distribución VSCode multi-platform + logo
 

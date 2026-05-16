@@ -94,6 +94,12 @@ pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optiona
 # suma el wrapper LSP + lsp-types. Convención paralela a `python = ["dep:pyo3"]`.
 tower-lsp = { version = "0.20", optional = true }
 
+# Fase 9.y.1 — parser/serializador TOML para el manifest `fitz.toml`.
+# Dep no-opcional porque el CLI lo va a usar SIEMPRE (incluso `fitz new`
+# emite TOML; `fitz run`/`build` con manifest llega en 9.y.2). Versión
+# 0.8 es la actual estable, deriva por serde (que ya tenemos).
+toml = "0.8"
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el

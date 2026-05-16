@@ -21,6 +21,7 @@ pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
 pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base
 pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
 pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
+pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 
 // Fase 8.1.2 — interop Python via PyO3 (feature opt-in `python`).
 // El módulo envuelve `Python::with_gil` + `py.import(...)` y produce
