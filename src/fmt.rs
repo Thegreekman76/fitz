@@ -48,7 +48,7 @@ use crate::ast::{
     TypeExpr, UnaryOpKind,
 };
 use crate::error::FitzError;
-use crate::lexer::tokenize;
+use crate::lexer::{tokenize_with_trivia, Comment, CommentKind, Trivia};
 use crate::parser::parse;
 
 /// Estilo del formatter — cero config en 9.z.1, pero centralizado
@@ -65,14 +65,23 @@ struct FmtCtx<'a> {
     /// Source original — usado para detectar `let` keyword en
     /// `Stmt::Assign` y para fallback de nodos no manejados via Span.
     source: &'a str,
+    /// Fase 9.z.1.b — trivia capturada por el lexer (comments +
+    /// blank lines). Empty cuando se llama desde `format_source_only_ast`
+    /// (path interno de tests que no necesitan threading de trivia).
+    trivia: &'a Trivia,
+    /// Cursor sobre `trivia.comments` para emitirlos en orden de
+    /// aparición sin re-escanear.
+    comment_cursor: usize,
 }
 
 impl<'a> FmtCtx<'a> {
-    fn new(source: &'a str) -> Self {
+    fn new(source: &'a str, trivia: &'a Trivia) -> Self {
         Self {
             indent_level: 0,
             output: String::new(),
             source,
+            trivia,
+            comment_cursor: 0,
         }
     }
 
@@ -101,12 +110,16 @@ impl<'a> FmtCtx<'a> {
 /// formateada. Si el source tiene errores de sintaxis, falla — el
 /// formatter no intenta arreglar código que el parser no entiende.
 ///
+/// Fase 9.z.1.b: usa `tokenize_with_trivia` para capturar
+/// comentarios y blank lines del source, y los re-emite en sus
+/// posiciones originales en el output.
+///
 /// Idempotencia: `format_source(format_source(x)) == format_source(x)`
 /// para cualquier código válido (testeado en unit tests).
 pub fn format_source(source: &str) -> Result<String, FitzError> {
-    let tokens = tokenize(source)?;
+    let (tokens, trivia) = tokenize_with_trivia(source)?;
     let program = parse(tokens)?;
-    let mut ctx = FmtCtx::new(source);
+    let mut ctx = FmtCtx::new(source, &trivia);
     format_program(&mut ctx, &program);
     Ok(ctx.output)
 }
@@ -114,31 +127,302 @@ pub fn format_source(source: &str) -> Result<String, FitzError> {
 // ---- Programa + statements ----
 
 fn format_program(ctx: &mut FmtCtx, program: &[Stmt]) {
-    for (i, stmt) in program.iter().enumerate() {
-        if i > 0 && needs_blank_line_before(&program[i - 1], stmt) {
+    fmt_stmt_list(ctx, program, /* in_block = */ false);
+}
+
+/// Renderiza una lista de stmts top-level o adentro de un bloque,
+/// threading los comments + blank lines de `ctx.trivia` en sus
+/// posiciones originales del source.
+///
+/// Algoritmo:
+///
+/// 1. Para cada stmt en orden:
+///    - (a) Emit "leading" trivia: comments con
+///      `line < stmt.start_line` que todavía no se emitieron.
+///    - (b) Si entre el stmt anterior (o el comment anterior) y
+///      este hay una blank line preservada, emit blank.
+///    - (c) Render el stmt.
+///    - (d) Emit "trailing" trivia: comment en la misma línea de
+///      fin del stmt (al lado, con 2 espacios).
+/// 2. Después del último stmt: emit cualquier comment/blank
+///    remanente (post-último).
+fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
+    // `prev_end_line` rastrea el límite superior de "ya emitido" para
+    // decidir si una línea blank fue preservada en el original.
+    // En top-level arranca en 0; adentro de un bloque, en la línea
+    // de apertura del bloque (mid-stream).
+    let mut prev_end_line: usize = 0;
+
+    for stmt in stmts {
+        let stmt_start = stmt.span().line;
+        let stmt_end = end_line_of_stmt(stmt);
+
+        // 1a. Leading comments (cualquier comment con line < stmt_start
+        // que todavía no se emitió). Esto incluye comentarios del
+        // "header" del archivo antes del primer stmt.
+        emit_leading_comments(ctx, prev_end_line, stmt_start);
+
+        // 1b. Blank line en el gap entre prev y stmt — dos sources:
+        //  (a) Preservada del original: trivia.blank_lines contiene
+        //      una línea en (after_what, stmt_start).
+        //  (b) Smart heuristic top-level: entre dos stmts donde al
+        //      menos uno es fn/type, insertamos blank (mejora
+        //      legibilidad). PERO suprimida si acabamos de emitir
+        //      un leading comment para el stmt actual — los
+        //      comments "se atan" al stmt siguiente y no queremos
+        //      separarlos.
+        //
+        // Skip totalmente si es el primer stmt del file/block.
+        let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line(ctx));
+        let had_blank_in_source =
+            after_what > 0 && has_blank_between(ctx.trivia, after_what, stmt_start);
+        // Si el último comment emitido pertenece "al gap" entre prev_end_line
+        // y stmt_start, suppress smart_blank (comment ya cumple esa función
+        // de separación visual + queremos que el comment quede pegado al stmt).
+        let leading_comment_just_emitted = last_emitted_comment_line(ctx) > prev_end_line;
+        let smart_blank = !in_block
+            && prev_end_line > 0
+            && !leading_comment_just_emitted
+            && needs_blank_line_before_smart(prev_stmt_at(stmts, stmt_start), stmt);
+        if had_blank_in_source || smart_blank {
             ctx.newline();
         }
-        // Preservar comentarios y blank lines via source-inspection
-        // queda como deuda — el formatter actual los borra. Refactor
-        // mayor (lexer que retiene comentarios + AST con comment
-        // attachments) llega cuando aparezca presión real.
+
+        // 1c. Render el stmt.
         fmt_stmt(ctx, stmt);
+
+        // 1d. Trailing comment en la misma línea del fin del stmt.
+        let trailing_text = peek_comment_at_line(ctx, stmt_end).map(|c| c.text.clone());
+        if let Some(text) = trailing_text {
+            ctx.write("  // ");
+            ctx.write(text.trim_start());
+            ctx.comment_cursor += 1;
+        }
+
         ctx.newline();
+        prev_end_line = stmt_end;
+    }
+
+    // Post-última-stmt: solo emit footer comments si estamos
+    // top-level. Adentro de un bloque, los comments restantes
+    // quedan en el cursor — los procesa el caller exterior cuando
+    // emit comments leading del siguiente stmt outer.
+    //
+    // Deuda menor: comments INSIDE un block, después del último stmt
+    // pero antes del `}` (ej. `fn f() { x = 1; // trailing\n }`),
+    // terminan saliendo del block en el output formateado. Caso
+    // raro en práctica — documentado.
+    if !in_block {
+        emit_trailing_comments(ctx, prev_end_line);
     }
 }
 
-/// Inserta blank line entre stmts top-level cuando uno de los dos es
-/// "complejo" (fn/type/decorator), para legibilidad. Stmts simples
-/// consecutivos no obtienen blank line.
-fn needs_blank_line_before(prev: &Stmt, curr: &Stmt) -> bool {
+/// Emite todos los comments con `line < upper_bound` que todavía no
+/// se emitieron. Los pone como líneas propias con su indent actual.
+/// Trailing comments (los de la línea de un stmt) los maneja el
+/// caller por separado.
+fn emit_leading_comments(ctx: &mut FmtCtx, prev_end_line: usize, upper_bound: usize) {
+    while ctx.comment_cursor < ctx.trivia.comments.len() {
+        let c = &ctx.trivia.comments[ctx.comment_cursor];
+        if c.line >= upper_bound {
+            break;
+        }
+        // Blank line antes del comment si en el original había una
+        // entre el último item emitido y este comment.
+        let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line_excluding_current(ctx));
+        if after_what > 0 && has_blank_between(ctx.trivia, after_what, c.line) {
+            ctx.newline();
+        }
+        emit_single_comment(ctx, c);
+        ctx.comment_cursor += 1;
+    }
+}
+
+/// Emite los comments restantes (cualquier line >= prev_end_line +
+/// que no haya sido emitido todavía). Útil para footer comments
+/// post-último-stmt.
+fn emit_trailing_comments(ctx: &mut FmtCtx, prev_end_line: usize) {
+    while ctx.comment_cursor < ctx.trivia.comments.len() {
+        let c = &ctx.trivia.comments[ctx.comment_cursor];
+        let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line_excluding_current(ctx));
+        if after_what > 0 && has_blank_between(ctx.trivia, after_what, c.line) {
+            ctx.newline();
+        }
+        emit_single_comment(ctx, c);
+        ctx.comment_cursor += 1;
+    }
+}
+
+fn emit_single_comment(ctx: &mut FmtCtx, c: &Comment) {
+    ctx.write_indent();
+    match c.kind {
+        CommentKind::Line => {
+            // Normalizar `//foo` → `// foo` (espacio post-`//`).
+            ctx.write("//");
+            let trimmed = c.text.trim_start();
+            if !trimmed.is_empty() {
+                ctx.write(" ");
+                ctx.write(trimmed);
+            }
+        }
+        CommentKind::Block => {
+            // Mantenemos el `/* ... */` igual; el contenido raw.
+            ctx.write("/*");
+            ctx.write(&c.text);
+            ctx.write("*/");
+        }
+    }
+    ctx.newline();
+}
+
+fn peek_comment_at_line<'a>(ctx: &'a FmtCtx, line: usize) -> Option<&'a Comment> {
+    let c = ctx.trivia.comments.get(ctx.comment_cursor)?;
+    if c.line == line {
+        Some(c)
+    } else {
+        None
+    }
+}
+
+fn last_emitted_comment_line(ctx: &FmtCtx) -> usize {
+    if ctx.comment_cursor == 0 {
+        0
+    } else {
+        ctx.trivia.comments[ctx.comment_cursor - 1].line
+    }
+}
+
+/// Igual que la anterior pero useful cuando estamos por DECIDIR si
+/// emitir blank antes de un comment todavía no emitido — necesitamos
+/// el "anterior" sin contar el actual.
+fn last_emitted_comment_line_excluding_current(ctx: &FmtCtx) -> usize {
+    last_emitted_comment_line(ctx)
+}
+
+fn has_blank_between(trivia: &Trivia, lower_exclusive: usize, upper_exclusive: usize) -> bool {
+    trivia
+        .blank_lines
+        .iter()
+        .any(|&bl| bl > lower_exclusive && bl < upper_exclusive)
+}
+
+/// Heurística top-level: si el stmt anterior o el actual es un
+/// fn/type def, queremos blank entre ellos aunque el source no la
+/// tuviera. Mejora legibilidad sin contradecir intención (el user
+/// no puso blank pero no objeta que la haya).
+fn needs_blank_line_before_smart(prev: Option<&Stmt>, curr: &Stmt) -> bool {
+    let Some(prev) = prev else { return false; };
     is_complex_top_level(prev) || is_complex_top_level(curr)
 }
 
 fn is_complex_top_level(stmt: &Stmt) -> bool {
-    matches!(
-        stmt,
-        Stmt::FnDef { .. } | Stmt::TypeDef { .. }
-    )
+    matches!(stmt, Stmt::FnDef { .. } | Stmt::TypeDef { .. })
+}
+
+/// Devuelve el stmt anterior dentro de `stmts` al que tiene
+/// `start_line == cur_start_line`. Linear pero stmts típicamente
+/// son pocos por bloque.
+fn prev_stmt_at(stmts: &[Stmt], cur_start_line: usize) -> Option<&Stmt> {
+    let mut prev: Option<&Stmt> = None;
+    for s in stmts {
+        if s.span().line == cur_start_line {
+            return prev;
+        }
+        prev = Some(s);
+    }
+    prev
+}
+
+/// Recursivamente computa la línea más alta de cualquier descendiente
+/// del stmt. Necesario para detectar trailing comments (que viven en
+/// `stmt.end_line`, no en `stmt.start_line`).
+fn end_line_of_stmt(stmt: &Stmt) -> usize {
+    let start = stmt.span().line;
+    let nested = match stmt {
+        Stmt::Assign { value, .. } => Some(end_line_of_expr(value)),
+        Stmt::Return(e, _) => Some(end_line_of_expr(e)),
+        Stmt::ReturnStatus { status, body, .. } => {
+            let s = end_line_of_expr(status);
+            body.as_ref().map(end_line_of_expr).map(|b| s.max(b)).or(Some(s))
+        }
+        Stmt::Expr(e, _) => Some(end_line_of_expr(e)),
+        Stmt::FnDef { body, .. }
+        | Stmt::While { body, .. }
+        | Stmt::Loop { body, .. }
+        | Stmt::For { body, .. } => body.iter().map(end_line_of_stmt).max(),
+        Stmt::TypeDef { fields, .. } => fields
+            .iter()
+            .filter_map(|f| f.default.as_ref().map(end_line_of_expr))
+            .max(),
+        Stmt::Break(_)
+        | Stmt::Continue(_)
+        | Stmt::Import { .. }
+        | Stmt::FromImport { .. }
+        | Stmt::Error(_) => None,
+    };
+    start.max(nested.unwrap_or(start))
+}
+
+fn end_line_of_expr(expr: &Expr) -> usize {
+    let start = expr.span().line;
+    let nested = match expr {
+        Expr::BinOp { left, right, .. } => {
+            Some(end_line_of_expr(left).max(end_line_of_expr(right)))
+        }
+        Expr::UnaryOp { operand, .. } => Some(end_line_of_expr(operand)),
+        Expr::Call { callee, args, .. } => {
+            let mut m = end_line_of_expr(callee);
+            for a in args {
+                m = m.max(end_line_of_expr(a));
+            }
+            Some(m)
+        }
+        Expr::FnExpr { body, .. } => body.iter().map(end_line_of_stmt).max(),
+        Expr::Field { object, .. } | Expr::Index { object, .. } => {
+            Some(end_line_of_expr(object))
+        }
+        Expr::List(items, _) => items.iter().map(end_line_of_expr).max(),
+        Expr::Map(entries, _) => entries
+            .iter()
+            .flat_map(|(k, v)| [end_line_of_expr(k), end_line_of_expr(v)])
+            .max(),
+        Expr::Range { start: s, end: e, .. } => {
+            Some(end_line_of_expr(s).max(end_line_of_expr(e)))
+        }
+        Expr::If { condition, then, else_, .. } => {
+            let mut m = end_line_of_expr(condition);
+            if let Some(s) = then.iter().map(end_line_of_stmt).max() {
+                m = m.max(s);
+            }
+            if let Some(e) = else_.as_ref().and_then(|el| el.iter().map(end_line_of_stmt).max()) {
+                m = m.max(e);
+            }
+            Some(m)
+        }
+        Expr::Match { value, arms, .. } => {
+            let mut m = end_line_of_expr(value);
+            for a in arms {
+                m = m.max(end_line_of_expr(&a.body));
+            }
+            Some(m)
+        }
+        Expr::StructLit { fields, .. } => {
+            fields.iter().map(|(_, e)| end_line_of_expr(e)).max()
+        }
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+            Some(end_line_of_expr(inner))
+        }
+        Expr::StrInterp(parts, _) => parts
+            .iter()
+            .filter_map(|p| match p {
+                StrPart::Expr(e) => Some(end_line_of_expr(e)),
+                StrPart::Lit(_) => None,
+            })
+            .max(),
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _)
+        | Expr::Null(_) | Expr::Ident(_, _) | Expr::Error(_) => None,
+    };
+    start.max(nested.unwrap_or(start))
 }
 
 fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
@@ -285,10 +569,7 @@ fn fmt_block(ctx: &mut FmtCtx, body: &[Stmt]) {
     ctx.write("{");
     ctx.newline();
     ctx.with_indent(|ctx| {
-        for stmt in body {
-            fmt_stmt(ctx, stmt);
-            ctx.newline();
-        }
+        fmt_stmt_list(ctx, body, /* in_block = */ true);
     });
     ctx.write_indent();
     ctx.write("}");
@@ -477,9 +758,11 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
 
 /// Para evitar regenerar el FmtCtx, las expresiones que aparecen
 /// adentro de una sola línea (args de fn, items de lista, etc.) se
-/// formatean a String aparte y se concatenan.
+/// formatean a String aparte y se concatenan. No threading de trivia
+/// — comments adentro de expresiones inline son deuda futura.
 fn expr_to_inline_string(expr: &Expr) -> String {
-    let mut ctx = FmtCtx::new("");
+    let empty = Trivia::default();
+    let mut ctx = FmtCtx::new("", &empty);
     fmt_expr(&mut ctx, expr);
     ctx.output
 }
@@ -850,6 +1133,110 @@ fn main() {
     }
 }
 "#,
+        );
+    }
+
+    // ---- Fase 9.z.1.b — comment + blank line preservation ----
+
+    #[test]
+    fn preserva_comment_de_linea_antes_de_stmt() {
+        check(
+            "// header\nlet x = 1\n",
+            "// header\nlet x = 1\n",
+        );
+    }
+
+    #[test]
+    fn preserva_multiple_comments_seguidos() {
+        check(
+            "// uno\n// dos\nlet x = 1\n",
+            "// uno\n// dos\nlet x = 1\n",
+        );
+    }
+
+    #[test]
+    fn preserva_blank_line_entre_stmts() {
+        check(
+            "let x = 1\n\nlet y = 2\n",
+            "let x = 1\n\nlet y = 2\n",
+        );
+    }
+
+    #[test]
+    fn preserva_comment_trailing_en_misma_linea() {
+        check(
+            "let x = 1 // explicación\n",
+            "let x = 1  // explicación\n",
+        );
+    }
+
+    #[test]
+    fn normaliza_comment_sin_espacio_post_slash() {
+        // `//foo` se normaliza a `// foo`.
+        check(
+            "//foo\nlet x = 1\n",
+            "// foo\nlet x = 1\n",
+        );
+    }
+
+    #[test]
+    fn preserva_comment_entre_stmts_con_blank() {
+        check(
+            "let x = 1\n\n// separador\nlet y = 2\n",
+            "let x = 1\n\n// separador\nlet y = 2\n",
+        );
+    }
+
+    #[test]
+    fn comments_adentro_de_fn_body_se_preservan() {
+        check(
+            "fn f() {\n    // primera\n    let x = 1\n    // segunda\n    return x\n}\n",
+            "fn f() {\n    // primera\n    let x = 1\n    // segunda\n    return x\n}\n",
+        );
+    }
+
+    #[test]
+    fn idempotente_con_comments_y_blanks() {
+        check_idempotent(
+            r#"// header del archivo
+// segunda línea de header
+
+let x = 10  // var importante
+
+// separador
+fn double(n: Int) -> Int {
+    // doc del cuerpo
+    return n * 2
+}
+
+// otro separador
+fn main() {
+    print(double(x))
+}
+"#,
+        );
+    }
+
+    #[test]
+    fn preserva_smoke_de_02_hola_de_la_guia() {
+        // Replica el contenido de examples/guide/02-hola.fitz.
+        // El smoke a mano confirmó que el round-trip preserva todo.
+        let original = "// 02-hola.fitz — El primer programa de la guía.\n\
+                       // Muestra: print, asignación sin tipo, interpolación de strings.\n\
+                       \n\
+                       print(\"Hola desde Fitz 🏔️\")\n\
+                       \n\
+                       name = \"Patagonia\"\n\
+                       print(\"Hola, {name}!\")\n";
+        check(original, original);
+    }
+
+    #[test]
+    fn multiples_blanks_consecutivas_se_colapsan_a_una() {
+        // El user podría tener 3 blanks; el formatter colapsa a 1.
+        check(
+            "let x = 1\n\n\n\nlet y = 2\n",
+            "let x = 1\n\nlet y = 2\n",
         );
     }
 

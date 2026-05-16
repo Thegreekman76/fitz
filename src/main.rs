@@ -145,21 +145,19 @@ enum Commands {
         /// actualiza todas las deps del manifest.
         name: Option<String>,
     },
-    /// Fase 9.z.1.a — Formatea código Fitz a su estilo canónico
-    /// (cero config). 4 espacios indent, comillas dobles, trailing
-    /// comma solo multi-línea. Sin argumentos, formatea todos los
-    /// `.fitz` del proyecto actual (vía manifest). Con archivos
-    /// explícitos, formatea solo esos.
+    /// Fase 9.z.1 (a + b CERRADAS) — Formatea código Fitz a su
+    /// estilo canónico (cero config). 4 espacios indent, comillas
+    /// dobles, trailing comma solo multi-línea. **Preserva
+    /// comentarios y blank lines del usuario** (9.z.1.b).
     ///
-    /// ⚠ ALPHA (9.z.1.a): el modo write borra comentarios y blank
-    /// lines del usuario. Comment preservation llega en 9.z.1.b.
-    /// El modo `--check` es safe (read-only) y no estropea nada.
+    /// Sin argumentos, formatea todos los `.fitz` del proyecto
+    /// actual (vía manifest). Con archivos explícitos, formatea
+    /// solo esos. `--check` no escribe, exit 1 si hay diffs.
     Fmt {
         /// Archivos `.fitz` a formatear. Si se omiten, formatea todo
         /// el proyecto (requiere `fitz.toml`).
         files: Vec<PathBuf>,
-        /// Modo CI: no escribe, exit 1 si hay diffs. Read-only, sin
-        /// pérdida de comments/blanks.
+        /// Modo CI: no escribe, exit 1 si hay diffs.
         #[arg(long)]
         check: bool,
     },
@@ -1283,16 +1281,8 @@ fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
         std::process::exit(1);
     }
 
-    // ⚠ Warning loud en modo write (9.z.1.a alpha). El modo --check
-    // es read-only y no necesita warning.
-    if !check {
-        eprintln!(
-            "⚠ aviso (9.z.1.a alpha): `fitz fmt` actualmente borra \
-             comentarios y blank lines (preservación llega en 9.z.1.b). \
-             Asegurate de tener los cambios versionados antes. Usá \
-             `fitz fmt --check` para ver diffs sin escribir."
-        );
-    }
+    // (Fase 9.z.1.b: el warning loud de 9.z.1.a se removió porque
+    // ya preservamos comments + blank lines del usuario.)
 
     let mut any_diff = false;
     let mut errors = 0usize;

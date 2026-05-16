@@ -1160,7 +1160,9 @@ fn fmt_check_no_canonico_devuelve_1_sin_modificar() {
 }
 
 #[test]
-fn fmt_emite_warning_loud_en_modo_write() {
+fn fmt_no_emite_warning_post_9z1b() {
+    // Fase 9.z.1.b cerró la deuda de comments — el warning loud
+    // del modo write fue removido. Este test bloquea regresiones.
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("scratch.fitz");
     std::fs::write(&file, "let x = 1\n").unwrap();
@@ -1173,29 +1175,45 @@ fn fmt_emite_warning_loud_en_modo_write() {
     assert!(output.status.success());
 
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("⚠"), "stderr no incluye warning: {stderr}");
-    assert!(stderr.contains("9.z.1.b"), "stderr no menciona la deuda: {stderr}");
     assert!(
-        stderr.contains("comentarios") || stderr.contains("blank"),
-        "stderr no explica qué se pierde: {stderr}"
+        !stderr.contains("⚠"),
+        "post-9.z.1.b no debe haber warning de pérdida: {stderr}"
+    );
+    assert!(
+        !stderr.contains("9.z.1.b"),
+        "post-9.z.1.b no debe mencionar la deuda como pendiente: {stderr}"
     );
 }
 
 #[test]
-fn fmt_check_no_emite_warning() {
+fn fmt_preserva_comments_y_blank_lines() {
+    // Fase 9.z.1.b: el round-trip debe ser exacto incluyendo
+    // comments y blank lines.
     let tmp = tempfile::tempdir().unwrap();
-    let file = tmp.path().join("ok.fitz");
-    std::fs::write(&file, "let x = 1\n").unwrap();
+    let file = tmp.path().join("doc.fitz");
+    let original = "// header\n\
+                    \n\
+                    let x = 1  // trailing\n\
+                    \n\
+                    // entre stmts\n\
+                    let y = 2\n";
+    std::fs::write(&file, original).unwrap();
 
     let output = Command::new(fitz_bin())
-        .args(["fmt", "--check"])
+        .args(["fmt"])
         .arg(&file)
         .output()
-        .expect("fitz fmt --check");
-    let stderr = String::from_utf8_lossy(&output.stderr);
+        .expect("fitz fmt");
+    assert!(output.status.success());
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(after.contains("// header"), "comment header se borró: {after}");
+    assert!(after.contains("// trailing"), "trailing se borró: {after}");
+    assert!(after.contains("// entre stmts"), "comment intermedio se borró: {after}");
+    // Blank line entre el header y `let x = 1` debe estar presente.
     assert!(
-        !stderr.contains("⚠"),
-        "--check no debe emitir warning (read-only): {stderr}"
+        after.contains("// header\n\nlet x"),
+        "blank entre header y let se borró: {after}"
     );
 }
 

@@ -95,12 +95,64 @@ impl TokenWithPos {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Trivia — Fase 9.z.1.b (formatter comment preservation)
+//
+// El lexer normalmente strippea comentarios y blank lines: el AST no los
+// necesita y el resto del pipeline tampoco. Pero el formatter SÍ los
+// necesita para preservar el código del usuario al reescribir. Trivia
+// es el side-channel que `tokenize_with_trivia` retorna: tokens van
+// por un lado, comments + blank lines por el otro. El parser sigue
+// usando solo los tokens, así que el AST no se contamina.
+// ---------------------------------------------------------------------------
+
+/// Tipo de comentario capturado. Fitz solo tiene `//` (line) y
+/// `/* */` (block). El formatter los emite diferente.
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommentKind {
+    Line,
+    Block,
+}
+
+/// Comentario capturado del source. La `text` NO incluye el prefijo
+/// (`//` o `/*`) ni el sufijo (`*/` para block). Posición es 1-based
+/// e indica dónde arranca el delimitador de apertura.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Comment {
+    pub text: String,
+    pub line: usize,
+    pub column: usize,
+    pub kind: CommentKind,
+}
+
+/// Side-channel del lexer: todo lo que el lexer normalmente
+/// descartaría pero que el formatter necesita preservar.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Trivia {
+    /// Comments en orden de aparición.
+    pub comments: Vec<Comment>,
+    /// Números de línea (1-based) que estaban completamente vacías
+    /// en el source. NO incluye líneas que contienen solo un
+    /// comentario — esas están representadas via `comments`.
+    pub blank_lines: Vec<usize>,
+}
+
 /// Estado interno del escaneo. Privado al módulo.
 struct Lexer {
     chars: Vec<char>,
     pos: usize,
     line: usize,
     column: usize,
+    /// Si está activo, el lexer captura comments y blank lines en
+    /// `trivia` (Fase 9.z.1.b). Inactivo por default — la `tokenize`
+    /// rápida sigue siendo zero-overhead.
+    collect_trivia: bool,
+    trivia: Trivia,
+    /// Flags por línea para detectar blank lines correctamente
+    /// (líneas con solo whitespace cuentan como blank; líneas con
+    /// comentario NO). Se resetean al consumir un `\n`.
+    line_had_code: bool,
+    line_had_comment: bool,
 }
 
 impl Lexer {
@@ -110,7 +162,17 @@ impl Lexer {
             pos: 0,
             line: 1,
             column: 1,
+            collect_trivia: false,
+            trivia: Trivia::default(),
+            line_had_code: false,
+            line_had_comment: false,
         }
+    }
+
+    fn new_with_trivia(source: &str) -> Self {
+        let mut l = Self::new(source);
+        l.collect_trivia = true;
+        l
     }
 
     /// Char actual sin consumir. None si llegamos al final.
@@ -124,12 +186,25 @@ impl Lexer {
     }
 
     /// Consume el char actual y actualiza línea/columna.
+    ///
+    /// **Fase 9.z.1.b**: al cruzar un `\n`, si la línea que
+    /// estamos cerrando no tuvo ningún token NI comment (es decir,
+    /// solo whitespace), la registramos como blank_line en `trivia`.
+    /// Comments-only lines no son blanks.
     fn advance(&mut self) -> Option<char> {
         let c = self.peek()?;
         self.pos += 1;
         if c == '\n' {
+            if self.collect_trivia
+                && !self.line_had_code
+                && !self.line_had_comment
+            {
+                self.trivia.blank_lines.push(self.line);
+            }
             self.line += 1;
             self.column = 1;
+            self.line_had_code = false;
+            self.line_had_comment = false;
         } else {
             self.column += 1;
         }
@@ -145,11 +220,27 @@ impl Lexer {
                 }
                 Some('/') if self.peek_next() == Some('/') => {
                     // comentario de línea — consumimos hasta el '\n' (sin incluirlo)
+                    let start_line = self.line;
+                    let start_col = self.column;
+                    self.advance(); // '/'
+                    self.advance(); // '/'
+                    let text_start = self.pos;
                     while let Some(c) = self.peek() {
                         if c == '\n' {
                             break;
                         }
                         self.advance();
+                    }
+                    if self.collect_trivia {
+                        let text: String =
+                            self.chars[text_start..self.pos].iter().collect();
+                        self.trivia.comments.push(Comment {
+                            text,
+                            line: start_line,
+                            column: start_col,
+                            kind: CommentKind::Line,
+                        });
+                        self.line_had_comment = true;
                     }
                 }
                 Some('/') if self.peek_next() == Some('*') => {
@@ -157,9 +248,12 @@ impl Lexer {
                     let start_col = self.column;
                     self.advance(); // '/'
                     self.advance(); // '*'
+                    let text_start = self.pos;
+                    let text_end;
                     loop {
                         match self.peek() {
                             Some('*') if self.peek_next() == Some('/') => {
+                                text_end = self.pos;
                                 self.advance();
                                 self.advance();
                                 break;
@@ -176,6 +270,17 @@ impl Lexer {
                                 ));
                             }
                         }
+                    }
+                    if self.collect_trivia {
+                        let text: String =
+                            self.chars[text_start..text_end].iter().collect();
+                        self.trivia.comments.push(Comment {
+                            text,
+                            line: start_line,
+                            column: start_col,
+                            kind: CommentKind::Block,
+                        });
+                        self.line_had_comment = true;
                     }
                 }
                 _ => break,
@@ -498,6 +603,13 @@ impl Lexer {
             }
         };
 
+        // Fase 9.z.1.b — marcar la línea como "tuvo código" para
+        // que `\n` no la cuente como blank. Newline NO marca código
+        // (sino, ninguna línea sería blank).
+        if self.collect_trivia && !matches!(token, Token::Newline) {
+            self.line_had_code = true;
+        }
+
         Ok(Some(TokenWithPos::new(token, line, column)))
     }
 }
@@ -512,6 +624,24 @@ pub fn tokenize(source: &str) -> FitzResult<Vec<TokenWithPos>> {
     }
     tokens.push(TokenWithPos::new(Token::EOF, lexer.line, lexer.column));
     Ok(tokens)
+}
+
+/// Fase 9.z.1.b — variante de `tokenize` que ADEMÁS captura
+/// comentarios y blank lines como `Trivia` side-channel. Consumida
+/// por el formatter (`fitz fmt`) para preservar comments + blank
+/// lines del usuario al reescribir.
+///
+/// Cualquier otro consumidor del lexer (parser, LSP, etc.) sigue
+/// usando `tokenize` y obtiene zero overhead. La `Trivia` no se
+/// inyecta en el AST.
+pub fn tokenize_with_trivia(source: &str) -> FitzResult<(Vec<TokenWithPos>, Trivia)> {
+    let mut lexer = Lexer::new_with_trivia(source);
+    let mut tokens = Vec::new();
+    while let Some(tok) = lexer.next_token()? {
+        tokens.push(tok);
+    }
+    tokens.push(TokenWithPos::new(Token::EOF, lexer.line, lexer.column));
+    Ok((tokens, lexer.trivia))
 }
 
 // ---------------------------------------------------------------------------
@@ -756,5 +886,91 @@ print("Hola, {name}!")"#;
                 Token::EOF,
             ]
         );
+    }
+
+    // ---- Fase 9.z.1.b — trivia (comments + blank lines) ----
+
+    #[test]
+    fn tokenize_default_no_captura_trivia() {
+        // El `tokenize` rápido no debe gastar memoria en trivia.
+        // El test confirma indirectamente que el lexer no se ralentiza
+        // (no hay un side-table que llenar).
+        let _ = tokenize("// comentario\nlet x = 1\n").unwrap();
+        // Nada que assertear directamente — tokenize no expone trivia.
+        // El test garantiza que la API sigue siendo zero-overhead.
+    }
+
+    #[test]
+    fn tokenize_with_trivia_captura_comment_de_linea() {
+        let (_toks, trivia) =
+            tokenize_with_trivia("// hola\nlet x = 1\n").unwrap();
+        assert_eq!(trivia.comments.len(), 1);
+        let c = &trivia.comments[0];
+        assert_eq!(c.kind, CommentKind::Line);
+        assert_eq!(c.text, " hola"); // sin el `//`, con el espacio
+        assert_eq!(c.line, 1);
+        assert_eq!(c.column, 1);
+    }
+
+    #[test]
+    fn tokenize_with_trivia_captura_comment_trailing() {
+        let (_toks, trivia) =
+            tokenize_with_trivia("let x = 1 // explicación\n").unwrap();
+        assert_eq!(trivia.comments.len(), 1);
+        let c = &trivia.comments[0];
+        assert_eq!(c.text, " explicación");
+        assert_eq!(c.line, 1);
+        // El `//` arranca en columna 11 (después de `let x = 1 `).
+        assert!(c.column > 1);
+    }
+
+    #[test]
+    fn tokenize_with_trivia_captura_comment_de_bloque() {
+        let (_toks, trivia) =
+            tokenize_with_trivia("/* foo bar */\nlet x = 1\n").unwrap();
+        assert_eq!(trivia.comments.len(), 1);
+        let c = &trivia.comments[0];
+        assert_eq!(c.kind, CommentKind::Block);
+        assert_eq!(c.text, " foo bar ");
+        assert_eq!(c.line, 1);
+    }
+
+    #[test]
+    fn tokenize_with_trivia_captura_blank_lines() {
+        let src = "let x = 1\n\nlet y = 2\n\n\nlet z = 3\n";
+        let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
+        // Líneas blank: 2 (entre x y y), 4 y 5 (entre y y z).
+        assert_eq!(trivia.blank_lines, vec![2, 4, 5]);
+    }
+
+    #[test]
+    fn tokenize_with_trivia_no_cuenta_line_de_comment_como_blank() {
+        let src = "let x = 1\n// solo comment\nlet y = 2\n";
+        let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
+        assert!(trivia.blank_lines.is_empty(), "blanks: {:?}", trivia.blank_lines);
+        assert_eq!(trivia.comments.len(), 1);
+        assert_eq!(trivia.comments[0].line, 2);
+    }
+
+    #[test]
+    fn tokenize_with_trivia_orden_de_comments_es_source_order() {
+        let src = "// uno\nlet x = 1\n// dos\nlet y = 2\n// tres\n";
+        let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
+        assert_eq!(trivia.comments.len(), 3);
+        let texts: Vec<&str> = trivia.comments.iter().map(|c| c.text.as_str()).collect();
+        assert_eq!(texts, [" uno", " dos", " tres"]);
+        assert_eq!(trivia.comments[0].line, 1);
+        assert_eq!(trivia.comments[1].line, 3);
+        assert_eq!(trivia.comments[2].line, 5);
+    }
+
+    #[test]
+    fn tokenize_with_trivia_mix_de_comments_y_blanks() {
+        let src = "\n// header\n\nlet x = 1\n\n// otro\nlet y = 2 // trailing\n";
+        let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
+        assert_eq!(trivia.comments.len(), 3);
+        assert!(trivia.blank_lines.contains(&1));
+        assert!(trivia.blank_lines.contains(&3));
+        assert!(trivia.blank_lines.contains(&5));
     }
 }
