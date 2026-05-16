@@ -1082,6 +1082,160 @@ fn update_dep_inexistente_aborta() {
     assert!(stderr.contains("no está"), "stderr: {stderr}");
 }
 
+// ---- Fase 9.z.1.a — `fitz fmt` ----
+
+#[test]
+fn fmt_archivo_explicito_canonicaliza_indent_y_blocks() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("scratch.fitz");
+    std::fs::write(
+        &file,
+        "fn double(n: Int) -> Int { return n * 2 }\nprint(double(21))\n",
+    )
+    .unwrap();
+
+    let (_, stderr, code) = run_fitz(&["fmt"], file.parent().unwrap());
+    // Sin args sin manifest debería fallar:
+    assert_eq!(code, 1, "stderr: {stderr}");
+
+    // Con archivo explícito:
+    let output = Command::new(fitz_bin())
+        .args(["fmt"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(
+        after.contains("fn double(n: Int) -> Int {\n    return n * 2\n}"),
+        "fn no quedó multi-línea con indent:\n{after}"
+    );
+    assert!(after.ends_with('\n'), "debería terminar con newline");
+}
+
+#[test]
+fn fmt_check_idempotente_devuelve_0() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("ok.fitz");
+    // Texto ya en forma canónica (blank line obligatoria entre
+    // fn def y stmt simple subsiguiente — ver
+    // `fmt::needs_blank_line_before`).
+    let canonical = "fn double(n: Int) -> Int {\n    return n * 2\n}\n\nprint(double(21))\n";
+    std::fs::write(&file, canonical).unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["fmt", "--check"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt --check");
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    // El archivo NO debe haberse modificado.
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, canonical);
+}
+
+#[test]
+fn fmt_check_no_canonico_devuelve_1_sin_modificar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("dirty.fitz");
+    let dirty = "fn double(n: Int) -> Int { return n * 2 }\n";
+    std::fs::write(&file, dirty).unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["fmt", "--check"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt --check");
+    assert_eq!(output.status.code(), Some(1));
+
+    // No debe modificar el archivo (--check es read-only).
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, dirty);
+}
+
+#[test]
+fn fmt_emite_warning_loud_en_modo_write() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("scratch.fitz");
+    std::fs::write(&file, "let x = 1\n").unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["fmt"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt");
+    assert!(output.status.success());
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("⚠"), "stderr no incluye warning: {stderr}");
+    assert!(stderr.contains("9.z.1.b"), "stderr no menciona la deuda: {stderr}");
+    assert!(
+        stderr.contains("comentarios") || stderr.contains("blank"),
+        "stderr no explica qué se pierde: {stderr}"
+    );
+}
+
+#[test]
+fn fmt_check_no_emite_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("ok.fitz");
+    std::fs::write(&file, "let x = 1\n").unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["fmt", "--check"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt --check");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !stderr.contains("⚠"),
+        "--check no debe emitir warning (read-only): {stderr}"
+    );
+}
+
+#[test]
+fn fmt_archivo_con_error_de_sintaxis_aborta_sin_escribir() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("broken.fitz");
+    let broken = "let x = (\n"; // paréntesis sin cerrar
+    std::fs::write(&file, broken).unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["fmt"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt");
+    assert_eq!(output.status.code(), Some(1));
+    // El archivo no debe haberse modificado.
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert_eq!(after, broken);
+}
+
+#[test]
+fn fmt_sin_args_dentro_de_proyecto_descubre_archivos_de_src() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "fmt-proj");
+
+    // Tocar src/main.fitz con formato no canónico.
+    let main = project.join("src").join("main.fitz");
+    std::fs::write(&main, "fn x() -> Int { return 1 }\n").unwrap();
+
+    let (_, _, code) = run_fitz(&["fmt"], &project);
+    assert_eq!(code, 0);
+
+    let after = std::fs::read_to_string(&main).unwrap();
+    assert!(
+        after.contains("fn x() -> Int {\n    return 1\n}"),
+        "src/main.fitz no se reformateó:\n{after}"
+    );
+}
+
 /// Build sin args en manifest mode: produce el binario en
 /// `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre del
 /// paquete (NO el stem del fuente). Test pesado (~3s) porque invoca

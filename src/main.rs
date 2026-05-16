@@ -4,7 +4,7 @@
 // lib + bin para que `fitz-lsp` pueda reusarlos sin compilación
 // duplicada). Acá solo importamos lo que el CLI consume.
 
-use fitz::{codegen, evaluator, http, lexer, lockfile, manifest, openapi, parser, types};
+use fitz::{codegen, evaluator, fmt, http, lexer, lockfile, manifest, openapi, parser, types};
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
 #[cfg(feature = "python")]
@@ -145,6 +145,24 @@ enum Commands {
         /// actualiza todas las deps del manifest.
         name: Option<String>,
     },
+    /// Fase 9.z.1.a — Formatea código Fitz a su estilo canónico
+    /// (cero config). 4 espacios indent, comillas dobles, trailing
+    /// comma solo multi-línea. Sin argumentos, formatea todos los
+    /// `.fitz` del proyecto actual (vía manifest). Con archivos
+    /// explícitos, formatea solo esos.
+    ///
+    /// ⚠ ALPHA (9.z.1.a): el modo write borra comentarios y blank
+    /// lines del usuario. Comment preservation llega en 9.z.1.b.
+    /// El modo `--check` es safe (read-only) y no estropea nada.
+    Fmt {
+        /// Archivos `.fitz` a formatear. Si se omiten, formatea todo
+        /// el proyecto (requiere `fitz.toml`).
+        files: Vec<PathBuf>,
+        /// Modo CI: no escribe, exit 1 si hay diffs. Read-only, sin
+        /// pérdida de comments/blanks.
+        #[arg(long)]
+        check: bool,
+    },
 }
 
 fn main() {
@@ -208,6 +226,9 @@ fn main() {
         }
         Commands::Update { name } => {
             update_deps_cmd(name.as_deref());
+        }
+        Commands::Fmt { files, check } => {
+            fmt_cmd(files, check);
         }
     }
 }
@@ -1236,6 +1257,142 @@ fn update_deps_cmd(name_filter: Option<&str>) {
     let _ = manifest_path; // mantener vivo el lifetime; resolve_entry hace el discover
     let resolved = resolve_entry(None);
     sync_lockfile_if_needed(&resolved);
+}
+
+// ---- Fase 9.z.1 — `fitz fmt` ----
+
+/// `fitz fmt [files...] [--check]` — Fase 9.z.1. Formatea archivos
+/// `.fitz` al estilo canónico. Sin `files`, formatea todo el proyecto
+/// (descubre vía manifest). Con `--check`, no escribe — exit 1 si
+/// algún archivo difiere de su forma canónica (modo CI).
+///
+/// El descubrimiento de archivos en project mode incluye
+/// `src/main.fitz` (del `[bin].main`), `src/lib.fitz` (del
+/// `[lib].entry`), y cualquier `.fitz` adicional en `src/` (walk
+/// recursivo). Excluye `target/` y cualquier dir oculto.
+fn fmt_cmd(files: Vec<PathBuf>, check: bool) {
+    let targets = if files.is_empty() {
+        // Project mode — descubrir vía manifest.
+        discover_project_fitz_files()
+    } else {
+        files
+    };
+
+    if targets.is_empty() {
+        eprintln!("✗ no se encontraron archivos `.fitz` para formatear.");
+        std::process::exit(1);
+    }
+
+    // ⚠ Warning loud en modo write (9.z.1.a alpha). El modo --check
+    // es read-only y no necesita warning.
+    if !check {
+        eprintln!(
+            "⚠ aviso (9.z.1.a alpha): `fitz fmt` actualmente borra \
+             comentarios y blank lines (preservación llega en 9.z.1.b). \
+             Asegurate de tener los cambios versionados antes. Usá \
+             `fitz fmt --check` para ver diffs sin escribir."
+        );
+    }
+
+    let mut any_diff = false;
+    let mut errors = 0usize;
+    for path in &targets {
+        match fmt_one_file(path, check) {
+            Ok(FmtResult::Unchanged) => {}
+            Ok(FmtResult::Wrote) => {
+                println!("✓ formateado {}", path.display());
+            }
+            Ok(FmtResult::WouldChange) => {
+                println!("✗ {} no está en formato canónico", path.display());
+                any_diff = true;
+            }
+            Err(e) => {
+                eprintln!("✗ {}: {e}", path.display());
+                errors += 1;
+            }
+        }
+    }
+
+    if errors > 0 {
+        eprintln!("\n{errors} archivo(s) con errores de parsing — fmt no pudo procesarlos.");
+        std::process::exit(1);
+    }
+    if check && any_diff {
+        eprintln!("\nuso `fitz fmt` (sin `--check`) para aplicar el formato.");
+        std::process::exit(1);
+    }
+}
+
+enum FmtResult {
+    /// El archivo ya estaba en forma canónica.
+    Unchanged,
+    /// Escribimos el archivo con la forma canónica.
+    Wrote,
+    /// `--check` mode: el archivo cambiaría si se formateara.
+    WouldChange,
+}
+
+fn fmt_one_file(path: &std::path::Path, check_only: bool) -> Result<FmtResult, String> {
+    let source = fs::read_to_string(path).map_err(|e| format!("no se pudo leer: {e}"))?;
+    let formatted = fmt::format_source(&source).map_err(|e| e.to_string())?;
+    if formatted == source {
+        return Ok(FmtResult::Unchanged);
+    }
+    if check_only {
+        return Ok(FmtResult::WouldChange);
+    }
+    fs::write(path, &formatted).map_err(|e| format!("no se pudo escribir: {e}"))?;
+    Ok(FmtResult::Wrote)
+}
+
+/// Descubre archivos `.fitz` del proyecto actual via manifest. Lee
+/// `[bin].main` y `[lib].entry` (si existen) + walk recursivo de
+/// `src/`. Excluye `target/` y dirs ocultos (`.git/`, etc.).
+fn discover_project_fitz_files() -> Vec<PathBuf> {
+    let manifest_path = find_local_manifest_or_exit();
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+
+    let mut targets: Vec<PathBuf> = Vec::new();
+    let src_dir = manifest_dir.join("src");
+    if src_dir.is_dir() {
+        collect_fitz_recursive(&src_dir, &mut targets);
+    }
+    // Dedup por path canonicalizado para evitar formatear el mismo
+    // archivo dos veces si aparece como `[bin].main` y también en
+    // el walk de `src/`.
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    targets.retain(|p| {
+        let canon = fs::canonicalize(p).unwrap_or_else(|_| p.clone());
+        seen.insert(canon)
+    });
+    targets.sort();
+    targets
+}
+
+fn collect_fitz_recursive(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = match path.file_name().and_then(|n| n.to_str()) {
+            Some(n) => n,
+            None => continue,
+        };
+        // Skip dirs ocultos (`.git`, `.fitz-cache`) y `target/`.
+        if name.starts_with('.') || name == "target" {
+            continue;
+        }
+        if path.is_dir() {
+            collect_fitz_recursive(&path, out);
+        } else if path.extension().and_then(|e| e.to_str()) == Some("fitz") {
+            out.push(path);
+        }
+    }
 }
 
 /// Helper compartido por add/remove/update: encuentra el `fitz.toml`
