@@ -4802,11 +4802,12 @@ go-to-definition.
 **Sub-pasos sugeridos** (granito incremental, cada uno con
 valor entregable):
 
-- **9.x.1 — Diagnostics MVP**: server con `did_open`/`did_change`
-  que corre `check_program` y publica `Diagnostic`s. Extensión
-  VSCode con grammar TextMate básica + cliente LSP apuntando
-  al binario en `target/release/fitz-lsp`. Resultado:
-  highlighting + errores en vivo.
+- **9.x.1 — Diagnostics MVP** ✅ **CERRADA 2026-05-15**: server con
+  `did_open`/`did_change` que corre `check_program` y publica
+  `Diagnostic`s. Extensión VSCode con grammar TextMate básica +
+  cliente LSP apuntando al binario en `target/release/fitz-lsp`.
+  Resultado: highlighting + errores en vivo. Detalle paso-a-paso
+  en sección "Fase 9.x.1" abajo.
 - **9.x.2 — Hover**: `textDocument/hover` devuelve el tipo del
   nodo bajo el cursor. Requiere F16.
 - **9.x.3 — Go-to-definition**: `textDocument/definition`
@@ -4838,6 +4839,90 @@ lenguaje core. Una vez que el lenguaje está estable (Fase 5
 cerrada) y el ecosistema empieza a expandirse, el LSP es lo
 que hace que escribir Fitz pase de "compilar y revisar" a
 "sentir el lenguaje mientras lo escribís".
+
+---
+
+## Fase 9.x.1 — LSP MVP: diagnostics + extensión VSCode (cerrada, 2026-05-15)
+
+Primera sub-fase visible del LSP. Habilita la experiencia "escribir
+Fitz en VSCode con errores subrayados al tipear" — equivalente al
+nivel de servicio que ofrece TypeScript en sus primeros segundos.
+Tres sub-pasos coordinados (un commit por sub-paso):
+
+- **9.x.1.a — Server skeleton**:
+  - Dep `tower-lsp = "0.20"` opcional; feature `lsp = ["dep:tower-lsp"]`
+    paralela a `python = ["dep:pyo3"]`. Bin `[[bin]] name = "fitz-lsp"`
+    con `required-features = ["lsp"]` — el `cargo build` default sigue
+    standalone.
+  - `src/bin/fitz-lsp.rs`: skeleton con `Backend` impl `LanguageServer`.
+    `initialize` → response con `serverInfo` + `textDocumentSync: FULL`.
+    `initialized` (log via `client.log_message`). `shutdown`.
+    `#[tokio::main(flavor = "current_thread")]` (LSP es I/O-bound).
+  - 1 test E2E `tests/lsp_e2e.rs` que spawnea el bin y valida el
+    handshake. Frames JSON-RPC construidos a mano via Content-Length.
+
+- **9.x.1.b — Lib refactor + helper diagnostics + lifecycle hooks**:
+  - **Lib refactor**: `src/lib.rs` nuevo expone los módulos como
+    `pub mod`. `src/main.rs` migra de `mod X;` a `use fitz::{...};`.
+    Habilita que `fitz-lsp` reuse `lexer`/`parser`/`types` sin
+    compilación duplicada.
+  - **`src/lsp.rs` (nuevo, lib, feature-gated)**: dos APIs públicas
+    pure-function:
+    - `check_source(&str) -> Vec<FitzError>` — pipeline LSP-style:
+      tokenize → `parse_with_recovery` → `check_program` (descarta
+      el `TypeInfo` que llega 9.x.2 hover).
+    - `fitz_errors_to_diagnostics(&[FitzError]) -> Vec<Diagnostic>` —
+      mapea 1-based Fitz → 0-based LSP. Range 1-char (refinable post-S1).
+      `hint` concatenado al `message`. Severity ERROR, source "fitz".
+      Sentinel `(0, 0)` → range degenerado.
+  - **Backend con DocumentStore**: `documents: Arc<parking_lot::Mutex
+    <HashMap<Url, String>>>`. `did_open`/`did_change`/`did_close`
+    disparan el pipeline fuera del lock.
+  - 9 unit tests + 1 E2E nuevo (`did_open` con buffer roto valida
+    `textDocument/publishDiagnostics`).
+  - **Deuda nueva**: `#[allow(clippy::result_unit_err)]` puntual sobre
+    `Environment::assign`. Lint apareció en clippy 1.95 + expuesto
+    por el refactor lib. El `Result<(), ()>` es sentinel intencional.
+
+- **9.x.1.c — Extensión VSCode** (`editors/vscode/`, paquete TypeScript):
+  - `package.json` con language `fitz`, extension `.fitz`, activation
+    `onLanguage:fitz`, settings `fitz.lspPath` + `fitz.trace.server`.
+  - Grammar TextMate: comments, strings con interpolación recursiva,
+    números, decoradores, keywords, tipos built-in + nominales,
+    constantes, built-ins, operadores, defs/calls fns.
+  - `language-configuration.json`: comments, brackets, autoClose,
+    indent rules.
+  - `src/extension.ts`: capa fina sobre `vscode-languageclient/node`.
+    `resolveServerPath` distingue absoluto / relativo-a-workspace /
+    PATH.
+  - Validaciones: JSON OK, `npm install` (12 packages, 0 vulns),
+    `tsc strict`, `vsce package` produce `.vsix` 294 KB.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- bin `fitz-lsp` separado del CLI principal (vs subcomando) — convención
+  ecosistema rust-analyzer/gopls/tsserver.
+- `tower-lsp` sobre `lsp-server` crudo — async-first, framing JSON-RPC
+  automático.
+- Grammar TextMate sobre tree-sitter — ~120 LoC JSON, suficiente para
+  MVP.
+- Setting `fitz.lspPath` para descubrimiento del binario (vs bundling)
+  — alfa simple, bundling rust-analyzer-style llega en 9.x.5.
+- `textDocumentSync: FULL` (vs `INCREMENTAL`) — default razonable.
+- `tokio current_thread` para LSP — I/O-bound, sin work-stealing.
+
+**Total al cierre**: 1227 unit + 79 E2E + 3 openapi sin cambios.
+9 unit + 2 E2E nuevos con `--features lsp`. Clippy `-D warnings` limpio.
+
+**Próximo norte**: **9.x.2 (hover)** — consume `TypeInfo` (F16).
+
+**Deuda residual derivada (NO bloquea 9.x.2)**:
+
+- Range de 1 carácter en Diagnostics — refinable cuando S1.Pattern/
+  TypeExpr sume `end_span` a los nodos del AST.
+- Solo `INCREMENTAL` ausente — sync FULL por ahora.
+- Smoke visual del `.vsix` instalado en VSCode real es manual del
+  autor (sin test automatizado).
 
 ---
 

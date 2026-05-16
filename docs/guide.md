@@ -57,8 +57,11 @@ abrí un issue.
 **Parte 9 — Interop**
 21. [Interop Python](#21-interop-python)
 
-**Parte 10 — Cerrando**
-22. [Qué sigue](#22-qué-sigue)
+**Parte 10 — Tooling**
+22. [Soporte para editores](#22-soporte-para-editores)
+
+**Parte 11 — Cerrando**
+23. [Qué sigue](#23-qué-sigue)
 
 ---
 
@@ -5472,7 +5475,142 @@ abierta en el roadmap, abrí un issue.
 
 ---
 
-## 22. Qué sigue
+## 22. Soporte para editores
+
+Hasta acá la guía cubrió el lenguaje y sus herramientas de línea
+de comando. Pero la experiencia diaria de escribir código pasa por
+el editor: errores subrayados al tipear, autocompletar, navegación.
+A partir de la **Fase 9.x.1** (cerrada el 2026-05-15), Fitz tiene
+su propio **Language Server Protocol** (LSP) y una **extensión
+VSCode** que lo aprovecha.
+
+### Qué da hoy
+
+- **Syntax highlighting** sobre archivos `.fitz` (grammar TextMate
+  embebida en la extensión). Colorea keywords (`let`, `fn`, `if`,
+  `match`, `async`/`await`...), tipos built-in (`Int`, `Float`,
+  `Str`, `Bool`, `List`, `Map`, `Result`, `Future`...), tipos
+  nominales (`User`, `Order`...), strings con interpolación
+  (`"hola, {name}"` con el `{name}` resaltado distinto), números,
+  decoradores (`@get`, `@server`, `@middleware`...), comentarios
+  (`//` y `/* */`), constantes (`true`/`false`/`null`/`Ok`/`Err`),
+  built-ins (`print`/`len`/`sleep`/`cors`).
+- **Diagnostics en vivo** — los errores del lexer, parser y type
+  checker aparecen subrayados en rojo al tipear, con el mismo
+  mensaje + sugerencia que `fitz check` muestra en la terminal.
+  Pipeline: tokenize → `parse_with_recovery` (parser tolerante a
+  buffer en construcción, Fase 9.0 — F15) → `check_program` (Fase
+  5a + F16). Severity `ERROR`, source `"fitz"` (visible en el
+  Problems panel de VSCode).
+
+### Lo que viene
+
+Las próximas sub-fases del LSP están planificadas:
+
+- **9.x.2 — Hover**: pasás el mouse sobre una variable o expresión
+  y aparece su tipo. Consume el side-table `TypeInfo` que el
+  checker ya retiene desde F16.
+- **9.x.3 — Go-to-definition**: F12 en VSCode (o tu binding) salta
+  al `let`, `fn` o `type` que define el nombre bajo el cursor.
+- **9.x.4 — Autocomplete contextual**: tras `obj.`, mostrar fields
+  del tipo. Tras `xs.`, métodos built-in de `List`. Tras
+  `from foo import `, símbolos exportados por el módulo `foo`.
+- **9.x.5 — Distribución**: publicar la extensión al **VSCode
+  Marketplace** con binarios pre-compilados por plataforma
+  (Windows x64, macOS x64+ARM, Linux x64+ARM) bundleados en el
+  `.vsix`, al estilo de rust-analyzer.
+
+### Cómo lo instalo
+
+#### 1. Compilar el LSP server
+
+Desde la raíz del repo `fitz`:
+
+```bash
+cargo build --release --features lsp
+```
+
+Produce `target/release/fitz-lsp` (o `fitz-lsp.exe` en Windows).
+La feature `lsp` es opt-in: el binario `fitz` default no incluye
+`tower-lsp` y se compila igual de rápido que antes.
+
+#### 2. Compilar y empaquetar la extensión
+
+```bash
+cd editors/vscode
+npm install
+npm run compile
+npx @vscode/vsce package
+```
+
+Produce `editors/vscode/fitz-language-X.Y.Z.vsix` (~294 KB).
+
+#### 3. Instalar en VSCode
+
+```bash
+code --install-extension editors/vscode/fitz-language-*.vsix
+```
+
+#### 4. Configurar el path del binario
+
+Si `fitz-lsp` quedó en el `PATH`, no hace falta nada más. Si no,
+agregá esto al `settings.json` de VSCode (Ctrl+, → "Open Settings (JSON)"):
+
+```json
+{
+  "fitz.lspPath": "/abs/path/to/fitz/target/release/fitz-lsp"
+}
+```
+
+En Windows, recordá escapar las barras:
+
+```json
+{
+  "fitz.lspPath": "C:\\Users\\me\\fitz\\target\\release\\fitz-lsp.exe"
+}
+```
+
+Abrí cualquier `.fitz` en VSCode y deberías ver coloreado + errores
+en vivo. Si algo falla, abrí el output panel ("View → Output → Fitz
+Language Server") para ver qué dice.
+
+### Settings
+
+| Setting | Default | Para qué |
+|---|---|---|
+| `fitz.lspPath` | `"fitz-lsp"` | Path al binario. Default asume `PATH`. |
+| `fitz.trace.server` | `"off"` | Debug del protocolo LSP en el output panel. `"verbose"` muestra payloads JSON-RPC completos — útil si la extensión actúa raro. |
+
+### Otros editores
+
+El protocolo LSP es estándar — cualquier editor con cliente LSP
+puede usar `fitz-lsp`. La configuración varía por editor:
+
+- **Neovim**: con `nvim-lspconfig`, agregás un setup que apunte a
+  `fitz-lsp` para el filetype `fitz`.
+- **Helix**: en `languages.toml`, definís `[[language]]` con
+  `name = "fitz"` + `[[language.language-server]]` con
+  `command = "fitz-lsp"`.
+- **Zed**: el extension API permite definir un language server
+  personalizado.
+
+La extensión VSCode es la única que mantenemos hoy en este repo;
+las demás integraciones quedan abiertas a contribuciones.
+
+### Estado del proyecto LSP
+
+Esto es la primera versión (MVP). Lo que cubre — diagnostics — ya
+es valioso de por sí (errores en tiempo real, sin tener que ir a
+la terminal a correr `fitz check`). Las features ricas (hover,
+autocomplete, go-to-def) llegan en las siguientes sub-fases.
+
+Si encontrás bugs en el LSP o sugerencias para la grammar
+TextMate (palabras que no se colorean, falsos positivos), abrí
+un issue en [github.com/Thegreekman76/fitz](https://github.com/Thegreekman76/fitz).
+
+---
+
+## 23. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
@@ -5525,6 +5663,11 @@ Con los capítulos 1 a 21 podés:
   desde Python con anotaciones (`let row: User = py_call(...)?`),
   auto-generar `type` Fitz desde SQLAlchemy con `fitz py-types`,
   y `await` corutinas Python via bridge tokio ↔ asyncio (Fase 8).
+- **Tooling de editor**: extensión VSCode con highlighting +
+  diagnostics en vivo via LSP (Fase 9.x.1). Errores del lexer/
+  parser/checker subrayados al tipear, sin necesidad de saltar a
+  la terminal a correr `fitz check`. Ver
+  [cap 22](#22-soporte-para-editores) para cómo instalar.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -5532,7 +5675,7 @@ ejecuten, un compilador que produce binarios standalone, y un
 puente al ecosistema Python para usar SQLAlchemy/numpy/asyncpg
 sin abandonar Fitz.
 
-### Lo que viene — más allá de Fase 8
+### Lo que viene — más allá de Fase 9.x.1
 
 Las fases cerradas (al cierre de Fase 8): type checker estático
 (5a), codegen a binario nativo (5b), async nativo (6), DX HTTP
@@ -5549,10 +5692,11 @@ cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
 
 Lo que sigue post-8:
 
-- **Fase 9 — Ecosistema**: package manager, registry, LSP
-  (autocomplete + hover + go-to-def en VSCode/Neovim), formatter,
-  linter, plugin de editores. Pre-reqs habilitantes: parser con
-  error recovery + IR tipado persistido por nodo.
+- **Fase 9 — Ecosistema**: el LSP arrancó con 9.x.1 (diagnostics +
+  extensión VSCode, ver [cap 22](#22-soporte-para-editores)). Próximas
+  sub-fases: 9.x.2 hover, 9.x.3 go-to-definition, 9.x.4 autocomplete
+  contextual, 9.x.5 distribución VSCode Marketplace. Después: package
+  manager, registry, formatter, linter.
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta

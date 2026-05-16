@@ -11,12 +11,112 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.0
-(pre-reqs habilitantes del LSP) CERRADA**: F15 (error recovery del
-parser) + F16 (IR tipado persistido por nodo). Próximo norte: las
-sub-fases visibles del LSP (9.x.1 → 9.x.5). Sub-paso separado
-pendiente sin presión: bundling CPython embebido (`fitz build
---bundle-python`).
+En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.1
+(LSP MVP) CERRADA**: bin nuevo `fitz-lsp` con diagnostics en vivo +
+extensión VSCode con grammar TextMate. Próximo norte: **9.x.2
+(hover)** — el LSP responde `textDocument/hover` con el tipo del
+nodo bajo el cursor (consume el `TypeInfo` de F16). Sub-paso
+separado pendiente sin presión: bundling CPython embebido (`fitz
+build --bundle-python`).
+
+## [v0.9.2] — 2026-05-15 — Fase 9.x.1: LSP MVP — diagnostics + extensión VSCode
+
+Primera sub-fase visible del LSP. Habilita la experiencia "escribir
+Fitz en VSCode con errores subrayados al tipear" — equivalente al
+nivel de servicio que ofrece TypeScript en sus primeros segundos.
+
+Tres componentes coordinados (un commit por sub-paso):
+
+- **9.x.1.a — Server skeleton** (bin nuevo `fitz-lsp`, feature opt-in
+  `lsp`, handshake initialize/shutdown):
+  - Dep `tower-lsp = "0.20"` opcional; feature `lsp = ["dep:tower-lsp"]`
+    paralela a `python = ["dep:pyo3"]`. Bin `[[bin]] name = "fitz-lsp"`
+    con `required-features = ["lsp"]`. El bin `fitz` default sigue
+    standalone, sin pagar el peso de tower-lsp + lsp-types en el dep tree.
+  - `src/bin/fitz-lsp.rs` con `Backend` impl `LanguageServer`:
+    `initialize` → response con `serverInfo` + `textDocumentSync: FULL`,
+    `initialized` (log via `client.log_message`), `shutdown`.
+    `#[tokio::main(flavor = "current_thread")]` (LSP es I/O-bound).
+  - 1 test E2E `tests/lsp_e2e.rs` que spawnea el bin y valida el
+    handshake. Frames JSON-RPC construidos a mano via Content-Length,
+    sin deps extras. `#![cfg(feature = "lsp")]`.
+
+- **9.x.1.b — Lib refactor + helper diagnostics + lifecycle hooks**:
+  - **Lib refactor**: `src/lib.rs` nuevo expone los módulos como
+    `pub mod`. `src/main.rs` migra de `mod X;` a `use fitz::{...};`.
+    Habilita que `fitz-lsp` reuse `lexer`/`parser`/`types` sin
+    compilación duplicada.
+  - **`src/lsp.rs` (nuevo, lib, feature-gated)**: dos APIs públicas
+    pure-function unit-testeables:
+    - `check_source(&str) -> Vec<FitzError>` — pipeline LSP-style:
+      tokenize → `parse_with_recovery` (F15) → `check_program`
+      (descarta el `TypeInfo` que llega 9.x.2 hover).
+    - `fitz_errors_to_diagnostics(&[FitzError]) -> Vec<Diagnostic>` —
+      mapea 1-based Fitz → 0-based LSP. Range 1-char (refinable a
+      span completo cuando S1.Pattern/TypeExpr sume `end_span`).
+      `hint` concatenado al `message`. Severity ERROR, source "fitz".
+      Sentinel `(0, 0)` → range degenerado al inicio del documento.
+  - **Backend con DocumentStore**: `documents: Arc<parking_lot::Mutex
+    <HashMap<Url, String>>>`. `did_open`/`did_change`/`did_close`
+    disparan `check_source → fitz_errors_to_diagnostics →
+    publish_diagnostics`. Cierre limpia diagnósticos.
+  - 9 unit tests + 1 test E2E nuevo (`did_open` con buffer roto valida
+    la notification `textDocument/publishDiagnostics`).
+  - **Deuda nueva visible**: `#[allow(clippy::result_unit_err)]`
+    puntual sobre `Environment::assign` en `src/env.rs`. Lint apareció
+    en clippy 1.95 + expuesto por el refactor lib (antes silencioso).
+    El `Result<(), ()>` ahí es sentinel intencional. Refactor a
+    newtype error queda como deuda menor.
+
+- **9.x.1.c — Extensión VSCode** (`editors/vscode/`, paquete TypeScript):
+  - Grammar TextMate (`syntaxes/fitz.tmLanguage.json`): comments,
+    strings con interpolación `{...}` recursiva, números, decoradores
+    `@nombre`, keywords (control + declaración + lógicos), tipos
+    built-in (Int/Float/Str/Bool/Null/Range/Any/List/Map/Result/
+    Future/Request/Response/PyAny) + nominales `[A-Z]…`, constantes
+    `true`/`false`/`null`/`Ok`/`Err`, built-ins `print`/`len`/`sleep`/
+    `cors`, operadores y defs/calls de funciones.
+  - `language-configuration.json`: comments, brackets, autoClose
+    (con `notIn` string/comment), surrounding, indent rules.
+  - `src/extension.ts`: capa fina sobre `vscode-languageclient/node`.
+    `resolveServerPath` distingue absoluto / relativo-a-workspace /
+    nombre-suelto-en-PATH. Error visible al usuario si el binario no
+    spawnea, citando el path intentado.
+  - Settings: `fitz.lspPath` (default `"fitz-lsp"`) y
+    `fitz.trace.server` (off/messages/verbose).
+  - Activation `onLanguage:fitz`.
+  - Validaciones build: 4 manifestos JSON OK; `npm install` (12
+    packages, 0 vulns); `npm run compile` (tsc strict, sin warnings);
+    `npx @vscode/vsce package` produce `.vsix` 294 KB con 209 archivos.
+    `node_modules/`, `out/`, `*.vsix` excluidos por `.gitignore` local.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **bin `fitz-lsp` separado del CLI principal** (vs subcomando):
+  convención ecosistema (rust-analyzer/gopls/tsserver). Bin `fitz`
+  queda chico, release ciclo independiente.
+- **`tower-lsp` sobre `lsp-server` crudo**: async-first, framing
+  JSON-RPC automático. Cientos de LoC menos para el MVP.
+- **Grammar TextMate sobre tree-sitter**: TextMate son ~120 LoC JSON,
+  suficiente para colores. Tree-sitter más preciso pero requiere
+  build chain extra. Refinable post-MVP.
+- **Descubrimiento via setting `fitz.lspPath`** (vs bundling): alfa
+  simple. Bundling rust-analyzer-style llega en 9.x.5.
+- **`textDocumentSync: FULL`** (vs `INCREMENTAL`): default razonable
+  para MVP. Migración es decisión de perf si aparece presión.
+- **`tokio::main(flavor = "current_thread")`** para LSP: I/O-bound,
+  sin work-stealing necesario. Decisión ortogonal a la del CLI HTTP
+  (multi-thread, F17).
+
+**Total al cierre**: 1227 unit + 79 E2E + 3 openapi sin cambios
+(default). **9 unit + 2 E2E nuevos** con `--features lsp`. Clippy
+`-D warnings` limpio sobre lib + ambos bins + tests.
+
+**Próximo norte**: **9.x.2 (hover)** — `textDocument/hover` devuelve
+el tipo del nodo bajo el cursor. Consume el `TypeInfo` (F16) que
+hoy `check_source` descarta. Después: 9.x.3 go-to-definition,
+9.x.4 autocomplete contextual, 9.x.5 distribución Marketplace.
+Ver `docs/roadmap.md` → "Fase 9.x".
 
 ## [v0.9.1] — 2026-05-15 — Fase 9.0: F16 cierre — IR tipado persistido por nodo
 

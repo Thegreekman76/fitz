@@ -214,6 +214,22 @@ norte: las sub-fases visibles del LSP (9.x.1 diagnostics → 9.x.5
 distribución VSCode Marketplace). Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
 
+**Fase 9.x.1 (LSP MVP) CERRADA — 2026-05-15** — primera sub-fase
+visible del LSP. Habilita la experiencia "escribir Fitz en VSCode
+con errores subrayados al tipear". Tres componentes coordinados:
+**bin nuevo `fitz-lsp`** (opt-in con `--features lsp`,
+`cargo build --release --features lsp`) que implementa el protocolo
+LSP estándar (JSON-RPC sobre stdio, tower-lsp 0.20); **módulo
+`fitz::lsp`** en la lib que expone el pipeline LSP-style
+(`parse_with_recovery + check_program`) y el helper `FitzError →
+Diagnostic`; **extensión VSCode** en
+[`editors/vscode/`](editors/vscode/) con grammar TextMate y cliente
+LSP que spawnea `fitz-lsp` (configurable via setting `fitz.lspPath`).
+Próximas sub-fases: **9.x.2 hover** → 9.x.3 go-to-def → 9.x.4
+autocomplete → 9.x.5 distribución VSCode Marketplace. Ver
+[cap 22 de la guía](docs/guide.md#22-soporte-para-editores) para
+instalación + settings.
+
 Las fases cerradas:
 
 - **Fase 2 — Intérprete base**: lexer, parser, AST, evaluador con
@@ -456,6 +472,11 @@ async), marshaling Future↔Coroutine.
   `fitz openapi archivo.fitz` gratis. `@header(name="X")` para
   headers como params, opt-out con `@server(docs=false)`. Ver
   [cap 18 de la guía](docs/guide.md#18-docs-automáticas).
+- **Soporte para editores** (Fase 9.x.1): bin `fitz-lsp` (LSP server
+  sobre tower-lsp) + extensión VSCode con highlighting + diagnostics
+  en vivo. Errores del lexer/parser/checker subrayados al tipear, sin
+  ir a la terminal. Ver
+  [cap 22 de la guía](docs/guide.md#22-soporte-para-editores).
 
 ### CLI
 
