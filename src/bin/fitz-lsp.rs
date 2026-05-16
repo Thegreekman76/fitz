@@ -33,21 +33,28 @@ use fitz::lsp::{
     check_source_with_types, definition_for_position, fitz_errors_to_diagnostics,
     hover_for_position, make_definition_location, make_hover,
 };
+use fitz::ast::Program;
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
 /// Estado por documento abierto. Persiste el último texto recibido por
-/// `did_open`/`did_change` y los side-tables resultantes del último
-/// chequeo: `TypeEnv` (resuelve nombres de tipos nominales para hover),
-/// `TypeInfo` (tipo por nodo — hover, Fase 9.x.2), `DefinitionInfo`
-/// (uso → declaración — go-to-definition, Fase 9.x.3).
+/// `did_open`/`did_change`, el AST parseado (Fase 9.x.4 — completion
+/// scope-level enumera top-level), y los side-tables del último
+/// chequeo: `TypeEnv` (resuelve nombres nominales para hover/
+/// completion), `TypeInfo` (tipo por nodo — hover, completion
+/// after-dot), `DefinitionInfo` (uso → declaración — go-to-definition).
 //
-// `#[allow(dead_code)]` puntual sobre `text` — lo persistimos para
-// consumidores futuros (autocomplete probablemente lo necesite para
-// mapear cursor → token preciso), pero hover y definition no lo leen.
+// `text` lo lee el handler `completion` (9.x.4.b) para detectar el
+// contexto walkeando hacia atrás desde el cursor. `program` también
+// es usado por completion (scope-level).
 #[derive(Debug)]
 struct DocumentState {
+    // `text` y `program` se escriben en 9.x.4.a; los lee el handler
+    // `completion` en 9.x.4.b. Mismo patrón que `parse_with_recovery`
+    // pre-consumidores en F15.
     #[allow(dead_code)]
     text: String,
+    #[allow(dead_code)]
+    program: Program,
     type_env: TypeEnv,
     type_info: TypeInfo,
     def_info: DefinitionInfo,
@@ -70,12 +77,14 @@ impl Backend {
     /// en `documents`, y publica los diagnósticos. Devuelve nada — la
     /// notificación es fire-and-forget.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
-        let (type_env, type_info, def_info, errors) = check_source_with_types(&text);
+        let (program, type_env, type_info, def_info, errors) =
+            check_source_with_types(&text);
         let diagnostics = fitz_errors_to_diagnostics(&errors);
         self.documents.lock().insert(
             uri.clone(),
             DocumentState {
                 text,
+                program,
                 type_env,
                 type_info,
                 def_info,

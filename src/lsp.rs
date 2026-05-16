@@ -5,16 +5,15 @@
 // unit-testeable: cargo no soporta bien `#[cfg(test)]` en `src/bin/*.rs`.
 // El bin `src/bin/fitz-lsp.rs` consume esto vía `use fitz::lsp::...`.
 
+use crate::ast::{Program, Span, Stmt};
 use crate::error::FitzError;
 use crate::lexer::tokenize;
 use crate::parser::parse_with_recovery;
 use crate::types::{check_program, DefinitionInfo, Type, TypeEnv, TypeInfo};
 
-use crate::ast::Span;
-
 use tower_lsp::lsp_types::{
-    Diagnostic, DiagnosticSeverity, Hover, HoverContents, Location, MarkupContent, MarkupKind,
-    Position, Range, Url,
+    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, Hover, HoverContents,
+    Location, MarkupContent, MarkupKind, Position, Range, Url,
 };
 
 /// Pipeline LSP-style sobre `source`: tokeniza, parsea con recovery,
@@ -26,38 +25,44 @@ use tower_lsp::lsp_types::{
 /// chequear). Parser y checker siempre devuelven sus errores en
 /// paralelo a lo que pudieron recuperar.
 ///
-/// Esta variante descarta los side-tables retornados por
+/// Esta variante descarta los side-tables y el AST retornados por
 /// `check_program` (consumidores que solo necesitan diagnostics). Para
-/// hover / go-to-definition, usar `check_source_with_types`.
+/// hover / go-to-definition / completion, usar `check_source_with_types`.
 pub fn check_source(source: &str) -> Vec<FitzError> {
-    let (_env, _type_info, _def_info, errors) = check_source_with_types(source);
+    let (_program, _env, _type_info, _def_info, errors) =
+        check_source_with_types(source);
     errors
 }
 
-/// Pipeline LSP-style + `TypeEnv`, `TypeInfo` y `DefinitionInfo`
-/// retenidos. Variante de `check_source` para consumidores que
-/// necesitan el side-table de tipos por nodo (Fase 9.x.2 — hover), el
-/// env para resolver nombres de tipos nominales al formatear, y el
-/// side-table de definiciones por uso (Fase 9.x.3 — go-to-definition).
+/// Pipeline LSP-style + `Program`, `TypeEnv`, `TypeInfo` y
+/// `DefinitionInfo` retenidos. Variante de `check_source` para
+/// consumidores que necesitan el AST (Fase 9.x.4 — autocomplete
+/// scope-level enumera top-level), el env para resolver nombres
+/// nominales (hover/completion), el side-table de tipos por nodo
+/// (hover, autocomplete after-dot), y el side-table de definiciones
+/// por uso (go-to-definition).
 ///
-/// Si la pipeline aborta antes del checker (error de lexer), los tres
-/// side-tables quedan vacíos.
+/// Si la pipeline aborta antes del checker (error de lexer), Program
+/// queda vacío y los side-tables también.
 pub fn check_source_with_types(
     source: &str,
-) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
+) -> (Program, TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     let tokens = match tokenize(source) {
         Ok(t) => t,
-        Err(e) => return (
-            TypeEnv::default(),
-            TypeInfo::new(),
-            DefinitionInfo::new(),
-            vec![e],
-        ),
+        Err(e) => {
+            return (
+                Vec::new(),
+                TypeEnv::default(),
+                TypeInfo::new(),
+                DefinitionInfo::new(),
+                vec![e],
+            );
+        }
     };
     let (program, mut errors) = parse_with_recovery(tokens);
     let (env, type_info, def_info, mut type_errors) = check_program(&program);
     errors.append(&mut type_errors);
-    (env, type_info, def_info, errors)
+    (program, env, type_info, def_info, errors)
 }
 
 /// Convierte una lista de `FitzError` en `Diagnostic`s LSP. Pure
@@ -217,6 +222,414 @@ pub fn make_definition_location(uri: Url, def_span: Span) -> Location {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Autocomplete contextual (Fase 9.x.4)
+// ---------------------------------------------------------------------------
+
+/// Contexto resuelto en `detect_completion_context`. Determina qué tipo
+/// de completion devolver.
+#[derive(Debug, PartialEq)]
+enum CompletionContext {
+    /// `obj.` o `obj.partial` — el receiver es un identificador cuyo
+    /// tipo buscamos. Llevamos:
+    /// - `recv_name`: para el fallback "buscar en top-level por nombre"
+    ///   cuando TypeInfo no tiene el ident (caso típico: el parser
+    ///   abortó el stmt entero por el `.` huérfano, deuda F15 recovery
+    ///   sub-stmt).
+    /// - `recv_line`/`recv_col`: posición Fitz 1-based del START del
+    ///   receiver, para lookup en TypeInfo cuando sí está.
+    AfterDot {
+        recv_name: String,
+        recv_line: usize,
+        recv_col: usize,
+    },
+    /// Cualquier otro contexto — listamos top-level + builtins + keywords.
+    ScopeLevel,
+}
+
+/// Endpoint principal de completion (Fase 9.x.4). Inspecciona el texto
+/// para detectar si el cursor está después de un `.` (after-dot) o no
+/// (scope-level), y devuelve la lista de `CompletionItem` apropiada.
+///
+/// **Scope-level**: enumera top-level del Program (`let`, `fn`, `type`,
+/// `import` bindings) + builtins (`print`/`len`/`sleep`/`cors`) +
+/// keywords del lenguaje. NO scope-aware: no enumeramos vars locales
+/// y params como función de la posición del cursor (deuda MVP —
+/// requiere refactor del checker para exponer scopes por stmt).
+/// VSCode filtra por prefix client-side; el usuario puede tipear vars
+/// locales aunque no aparezcan en la lista.
+///
+/// **After-dot**: identifica el receiver (un solo identificador antes
+/// del `.`), busca su tipo en `TypeInfo` por la posición del start del
+/// receiver, despacha por tipo:
+/// - `Nominal(id)` → fields del type via `TypeEnv.info(id)`.
+/// - `List<T>` → 6 métodos built-in.
+/// - `Map<K, V>` → 5 métodos built-in.
+/// - `Str` → 3 métodos.
+/// - `Any`/`PyAny`/otros → lista vacía.
+///
+/// Chain `a.b.c.` queda como deuda visible — solo soporta
+/// `<ident>.<prefix?>`.
+pub fn completion_at_position(
+    text: &str,
+    program: &Program,
+    type_info: &TypeInfo,
+    type_env: &TypeEnv,
+    line: u32,
+    character: u32,
+) -> Vec<CompletionItem> {
+    let ctx = match detect_completion_context(text, line, character) {
+        Some(c) => c,
+        None => return Vec::new(),
+    };
+    match ctx {
+        CompletionContext::AfterDot {
+            recv_name,
+            recv_line,
+            recv_col,
+        } => after_dot_completions(program, type_info, type_env, &recv_name, recv_line, recv_col),
+        CompletionContext::ScopeLevel => scope_level_completions(program, type_env),
+    }
+}
+
+/// Walkea hacia atrás del cursor en el texto. Si encuentra
+/// `<ident>.<partial_prefix?>` devuelve `AfterDot` con la posición del
+/// inicio del receiver. Si no, `ScopeLevel`. Devuelve `None` si la
+/// posición no es válida (más allá del fin del texto).
+fn detect_completion_context(
+    text: &str,
+    line: u32,
+    character: u32,
+) -> Option<CompletionContext> {
+    let offset = position_to_offset(text, line, character)?;
+    let bytes = text.as_bytes();
+    // Saltar el prefix que el usuario ya tipeó (chars de identificador
+    // antes del cursor).
+    let mut i = offset;
+    while i > 0 && is_ident_continue(bytes[i - 1]) {
+        i -= 1;
+    }
+    // Si justo antes hay un `.`, contexto after-dot.
+    if i > 0 && bytes[i - 1] == b'.' {
+        let dot_pos = i - 1;
+        let mut j = dot_pos;
+        while j > 0 && is_ident_continue(bytes[j - 1]) {
+            j -= 1;
+        }
+        if j < dot_pos {
+            // Receiver: bytes[j..dot_pos]. Convertimos j a (line, col)
+            // Fitz 1-based para lookup en TypeInfo.
+            let recv_name = std::str::from_utf8(&bytes[j..dot_pos])
+                .unwrap_or("")
+                .to_string();
+            let (recv_line_lsp, recv_col_lsp) = offset_to_position(text, j);
+            return Some(CompletionContext::AfterDot {
+                recv_name,
+                recv_line: (recv_line_lsp as usize) + 1,
+                recv_col: (recv_col_lsp as usize) + 1,
+            });
+        }
+    }
+    Some(CompletionContext::ScopeLevel)
+}
+
+/// Convierte una `(line, character)` LSP (0-based) a un offset en
+/// bytes dentro del `text`. Devuelve `None` si la posición está más
+/// allá del fin del texto. Asume que el cliente usa la misma convención
+/// de "character" que nosotros (chars UTF-8 — LSP por default usa
+/// UTF-16, pero el MVP asume programas mayormente ASCII; refinable
+/// post-MVP si aparece presión real con código en idiomas no-latin).
+fn position_to_offset(text: &str, line: u32, character: u32) -> Option<usize> {
+    let mut offset = 0usize;
+    let mut current_line = 0u32;
+    let mut current_char = 0u32;
+    for ch in text.chars() {
+        if current_line == line && current_char == character {
+            return Some(offset);
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_char = 0;
+        } else {
+            current_char += 1;
+        }
+        offset += ch.len_utf8();
+    }
+    if current_line == line && current_char == character {
+        return Some(offset);
+    }
+    None
+}
+
+/// Inverso de `position_to_offset` — usado para localizar la posición
+/// LSP de un punto en el texto dado en bytes (típicamente el start de
+/// un receiver para hacer lookup en TypeInfo).
+fn offset_to_position(text: &str, offset: usize) -> (u32, u32) {
+    let mut current_line = 0u32;
+    let mut current_char = 0u32;
+    let mut current_offset = 0usize;
+    for ch in text.chars() {
+        if current_offset >= offset {
+            break;
+        }
+        if ch == '\n' {
+            current_line += 1;
+            current_char = 0;
+        } else {
+            current_char += 1;
+        }
+        current_offset += ch.len_utf8();
+    }
+    (current_line, current_char)
+}
+
+/// Caracteres válidos a mitad de un identificador Fitz: alfanuméricos
+/// ASCII + underscore. Coincide con la definición del lexer.
+fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Genera completions para after-dot: busca el tipo del receiver y
+/// despacha por tipo.
+///
+/// **Resolución del tipo del receiver** con dos fallbacks:
+/// 1. **TypeInfo lookup heurístico**: filtra entries cuya línea es la
+///    misma del receiver y cuya col es <= recv_col, devuelve la de col
+///    máxima. Funciona cuando el `Expr::Ident(recv_name, span)` quedó
+///    en el AST (el caso `let r = foo.<cursor>` donde foo se parsea
+///    bien aunque sea Field roto).
+/// 2. **Walk del Program por nombre**: si TypeInfo no devolvió tipo,
+///    walkeamos `Stmt::Assign` top-level buscando `target == recv_name`
+///    y miramos el tipo del `value` en TypeInfo. Cubre el caso típico
+///    del usuario tipeando `obj.` al final del buffer — el parser
+///    abandona el stmt entero por el `.` huérfano (deuda F15 recovery
+///    sub-stmt), entonces el Expr::Ident no llega a TypeInfo, pero el
+///    `let obj = ...` previo sí tiene su value tipado.
+///
+/// Tipos cubiertos: `Nominal` (fields), `List` (6 métodos), `Map`
+/// (5 métodos), `Str` (3 métodos). Otros devuelven lista vacía.
+fn after_dot_completions(
+    program: &Program,
+    type_info: &TypeInfo,
+    type_env: &TypeEnv,
+    recv_name: &str,
+    recv_line: usize,
+    recv_col: usize,
+) -> Vec<CompletionItem> {
+    // Fallback 1: TypeInfo lookup heurístico (max col <= recv_col en la
+    // misma línea).
+    let recv_type = type_info
+        .iter()
+        .filter(|(key, _)| key.0 == recv_line && key.1 <= recv_col)
+        .max_by_key(|(key, _)| key.1)
+        .map(|(_, ty)| ty.clone());
+
+    // Fallback 2: walk de top-level por nombre, mirar el tipo del value
+    // del let con `target == recv_name`. Cubre el caso del parser
+    // abandonando el stmt entero por `.` huérfano.
+    let recv_type = recv_type.or_else(|| {
+        program.iter().find_map(|stmt| {
+            if let Stmt::Assign {
+                target: crate::ast::AssignTarget::Ident(name),
+                value,
+                ..
+            } = stmt
+            {
+                if name == recv_name {
+                    return type_info.type_at(value.span()).cloned();
+                }
+            }
+            None
+        })
+    });
+
+    let Some(ty) = recv_type else {
+        return Vec::new();
+    };
+    match &ty {
+        Type::Nominal(id) => {
+            // Fields del type. `info()` panics si el id no existe —
+            // no debería pasar (el checker valida).
+            let info = type_env.info(*id);
+            info.fields
+                .as_ref()
+                .map(|fs| {
+                    fs.iter()
+                        .map(|f| CompletionItem {
+                            label: f.name.clone(),
+                            kind: Some(CompletionItemKind::FIELD),
+                            detail: Some(f.type_.display(type_env)),
+                            ..CompletionItem::default()
+                        })
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        Type::List(t) => method_items(
+            &[
+                ("push", format!("fn({}) -> Null", t.display(type_env))),
+                ("pop", format!("fn() -> Result<{}>", t.display(type_env))),
+                ("map", format!("fn(fn({}) -> U) -> List<U>", t.display(type_env))),
+                ("filter", format!(
+                    "fn(fn({}) -> Bool) -> List<{}>",
+                    t.display(type_env),
+                    t.display(type_env)
+                )),
+                ("find", format!(
+                    "fn(fn({}) -> Bool) -> Result<{}>",
+                    t.display(type_env),
+                    t.display(type_env)
+                )),
+                ("len", "fn() -> Int".into()),
+            ],
+        ),
+        Type::Map(k, v) => method_items(
+            &[
+                ("get", format!(
+                    "fn({}) -> Result<{}>",
+                    k.display(type_env),
+                    v.display(type_env)
+                )),
+                ("has", format!("fn({}) -> Bool", k.display(type_env))),
+                ("keys", format!("fn() -> List<{}>", k.display(type_env))),
+                ("values", format!("fn() -> List<{}>", v.display(type_env))),
+                ("len", "fn() -> Int".into()),
+            ],
+        ),
+        Type::Str => method_items(&[
+            ("upper", "fn() -> Str".into()),
+            ("lower", "fn() -> Str".into()),
+            ("len", "fn() -> Int".into()),
+        ]),
+        // Any, PyAny y resto: sin info para sugerir.
+        _ => Vec::new(),
+    }
+}
+
+/// Construye una lista de `CompletionItem` de tipo Method desde un
+/// slice de `(nombre, firma)`.
+fn method_items(items: &[(&str, String)]) -> Vec<CompletionItem> {
+    items
+        .iter()
+        .map(|(name, detail)| CompletionItem {
+            label: (*name).to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: Some(detail.clone()),
+            ..CompletionItem::default()
+        })
+        .collect()
+}
+
+/// Genera completions para scope-level: walkea top-level del Program +
+/// builtins + keywords. NO scope-aware (ver doc en
+/// `completion_at_position`).
+fn scope_level_completions(program: &Program, type_env: &TypeEnv) -> Vec<CompletionItem> {
+    let mut items = Vec::new();
+
+    // Top-level del Program: let/fn/type/import.
+    for stmt in program {
+        match stmt {
+            Stmt::Assign {
+                target: crate::ast::AssignTarget::Ident(name),
+                ..
+            } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::VARIABLE),
+                    ..CompletionItem::default()
+                });
+            }
+            Stmt::FnDef { name, .. } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    ..CompletionItem::default()
+                });
+            }
+            Stmt::TypeDef { name, .. } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    ..CompletionItem::default()
+                });
+            }
+            Stmt::Import { path, alias, .. } => {
+                let label = alias.clone().or_else(|| path.last().cloned());
+                if let Some(name) = label {
+                    items.push(CompletionItem {
+                        label: name,
+                        kind: Some(CompletionItemKind::MODULE),
+                        ..CompletionItem::default()
+                    });
+                }
+            }
+            Stmt::FromImport { names, .. } => {
+                for (n, alias) in names {
+                    let label = alias.clone().unwrap_or_else(|| n.clone());
+                    items.push(CompletionItem {
+                        label,
+                        kind: Some(CompletionItemKind::VARIABLE),
+                        ..CompletionItem::default()
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Builtins del lenguaje (matchea `register_builtins` del checker).
+    for (name, detail) in [
+        ("print", "fn(args...)"),
+        ("len", "fn(x) -> Int"),
+        ("sleep", "fn(Int) -> Future<Null>"),
+        ("cors", "fn(config: Map?) -> CorsConfig"),
+    ] {
+        items.push(CompletionItem {
+            label: name.into(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(detail.into()),
+            ..CompletionItem::default()
+        });
+    }
+
+    // Tipos built-in: visibles como nombres en posición de anotación.
+    for name in [
+        "Int", "Float", "Str", "Bool", "Null", "Range", "Any", "List", "Map", "Result",
+        "Future", "Request", "Response", "PyAny",
+    ] {
+        items.push(CompletionItem {
+            label: name.into(),
+            kind: Some(CompletionItemKind::CLASS),
+            ..CompletionItem::default()
+        });
+    }
+
+    // Keywords del lenguaje. VSCode los renderiza con ícono distinto y
+    // los promueve cuando el usuario tipea sus primeras letras.
+    for kw in [
+        "let", "fn", "if", "else", "while", "for", "loop", "match", "type", "return", "break",
+        "continue", "import", "from", "as", "in", "async", "await", "and", "or", "true",
+        "false", "null",
+    ] {
+        items.push(CompletionItem {
+            label: kw.into(),
+            kind: Some(CompletionItemKind::KEYWORD),
+            ..CompletionItem::default()
+        });
+    }
+
+    // Nominales declarados por el usuario aparecen ya via TypeDef top-
+    // level (los walkeamos arriba). Si el programa importa nominales
+    // via `from foo import User`, también aparecen via FromImport.
+    // No duplicamos desde `type_env.nominals` (sería redundante con
+    // los emitidos arriba — y mezclaríamos con el orden de declaración
+    // del Program, que es lo que el usuario probablemente quiere
+    // primero).
+    let _ = type_env; // silencia warning hasta que use type_env aquí.
+
+    items
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,7 +745,7 @@ mod tests {
     #[test]
     fn check_source_with_types_programa_valido_devuelve_type_info_no_vacio() {
         let src = "let x = 42\nlet y = x + 1";
-        let (_env, type_info, _defs, errors) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(errors.is_empty(), "errores inesperados: {errors:?}");
         assert!(
             !type_info.is_empty(),
@@ -345,7 +758,7 @@ mod tests {
         // String sin cerrar — lexer aborta antes del parser/checker,
         // entonces el `TypeInfo` no se puede poblar.
         let src = "let x = \"sin cerrar";
-        let (_env, type_info, _defs, errors) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(!errors.is_empty(), "lexer debería rechazar string sin cerrar");
         assert!(
             type_info.is_empty(),
@@ -359,7 +772,7 @@ mod tests {
         // Exprs válidos quedan en TypeInfo, los inválidos también con
         // el tipo "best-effort".
         let src = "let x = 42\nlet y: Int = \"mal\"";
-        let (_env, type_info, _defs, errors) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(!errors.is_empty(), "debería haber un TypeError");
         assert!(
             !type_info.is_empty(),
@@ -375,7 +788,7 @@ mod tests {
         // que es col 8 LSP (0-based). El cursor en (line=0, char=8)
         // debería matchear el Int.
         let src = "let x = 42";
-        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 8);
         assert!(matches!(ty, Some(Type::Int)), "esperaba Int, dio {ty:?}");
     }
@@ -396,7 +809,7 @@ mod tests {
         // misma línea" debe devolver Some(_) (el tipo del Ident o el
         // del BinOp que comparte span — ambos Int).
         let src = "let nombre = 42\nlet x = nombre + 1";
-        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 1, 11);
         assert!(matches!(ty, Some(Type::Int)), "esperaba Int, dio {ty:?}");
     }
@@ -405,7 +818,7 @@ mod tests {
     fn hover_for_position_linea_sin_spans_devuelve_none() {
         // Programa de una línea; cursor en línea 5 → no hay spans.
         let src = "let x = 1";
-        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 5, 0);
         assert!(ty.is_none(), "esperaba None en línea sin spans, dio {ty:?}");
     }
@@ -415,7 +828,7 @@ mod tests {
         // `   let x = 1` — cursor en col 0 está antes de cualquier
         // Expr (el primer Expr es `1` en col 13 (1-based)).
         let src = "   let x = 1";
-        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 0);
         assert!(ty.is_none(), "esperaba None antes del primer token, dio {ty:?}");
     }
@@ -425,7 +838,7 @@ mod tests {
         // Aseguramos que la heurística no se "escapa" a la línea
         // anterior cuando la línea del cursor está vacía de spans.
         let src = "let x = 42\n   ";
-        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
+        let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 1, 0);
         assert!(ty.is_none(), "no debería cruzar líneas, dio {ty:?}");
     }
@@ -460,7 +873,7 @@ mod tests {
     fn hover_end_to_end_pipeline_devuelve_int_para_un_literal() {
         // Smoke combinado: pipeline + hover sobre el literal `42`.
         let src = "let x = 42";
-        let (env, type_info, _defs, _errs) = check_source_with_types(src);
+        let (_program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 8).expect("debería matchear");
         let hover = make_hover(ty, &env);
         if let HoverContents::Markup(MarkupContent { value, .. }) = &hover.contents {
@@ -477,7 +890,7 @@ mod tests {
         // mismos mensajes).
         let src = "let x: Int = \"mal\"\nlet y: Str = 42";
         let errs_solo = check_source(src);
-        let (_env, _type_info, _defs, errs_with) = check_source_with_types(src);
+        let (_program, _env, _type_info, _defs, errs_with) = check_source_with_types(src);
         assert_eq!(errs_solo.len(), errs_with.len());
         for (a, b) in errs_solo.iter().zip(errs_with.iter()) {
             assert_eq!(a.message, b.message);
@@ -495,7 +908,7 @@ mod tests {
         // `x` está en línea 1, col 8 (0-based) — el `def_span`
         // devuelto debe ser de línea 1 (1-based, el Stmt::Assign de `x`).
         let src = "let x = 1\nlet y = x\n";
-        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
         let def_span = definition_for_position(&def_info, 1, 8)
             .expect("uso de x debe resolver");
         assert_eq!(def_span.line, 1, "def en línea 1 (1-based)");
@@ -504,7 +917,7 @@ mod tests {
     #[test]
     fn definition_for_position_linea_sin_idents_devuelve_none() {
         let src = "let x = 1\n";
-        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
         assert!(definition_for_position(&def_info, 5, 0).is_none());
     }
 
@@ -514,7 +927,7 @@ mod tests {
         // No debe aparecer en DefinitionInfo (filtrado por política),
         // así que el lookup devuelve None.
         let src = "print(42)\n";
-        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
         // Cursor sobre `print` (línea 0, col 0).
         assert!(definition_for_position(&def_info, 0, 0).is_none());
     }
@@ -534,7 +947,7 @@ mod tests {
         // Smoke combinado: pipeline + definition_for_position +
         // make_definition_location.
         let src = "let x = 1\nlet y = x\n";
-        let (_env, _type_info, def_info, _errs) = check_source_with_types(src);
+        let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
         let def_span = definition_for_position(&def_info, 1, 8).expect("matchea");
         let uri = Url::parse("file:///t.fitz").unwrap();
         let loc = make_definition_location(uri, def_span);
@@ -542,5 +955,149 @@ mod tests {
         // (0-based). Su columna depende del parser; asumimos col 1
         // (1-based, primer caracter de `let`).
         assert_eq!(loc.range.start.line, 0);
+    }
+
+    // Tests sobre `completion_at_position` y helpers privados
+    // (Fase 9.x.4.a). Cubren detección de contexto (after-dot vs
+    // scope-level), conversión de offset, y los dos paths de
+    // completions.
+
+    #[test]
+    fn position_to_offset_y_back_son_inversas() {
+        // Sanity: el inverso compuesto recupera la posición.
+        let text = "abc\nde\nfghi";
+        for (line, ch) in [(0, 0), (0, 2), (1, 0), (1, 1), (2, 3)] {
+            let off = position_to_offset(text, line, ch).unwrap();
+            let (l, c) = offset_to_position(text, off);
+            assert_eq!((l, c), (line, ch), "round-trip falla en ({line},{ch})");
+        }
+    }
+
+    #[test]
+    fn detect_context_scope_level_en_documento_vacio() {
+        let ctx = detect_completion_context("", 0, 0).unwrap();
+        assert_eq!(ctx, CompletionContext::ScopeLevel);
+    }
+
+    #[test]
+    fn detect_context_after_dot_tras_ident_y_punto() {
+        // `obj.` con cursor justo después del `.`.
+        let text = "obj.";
+        let ctx = detect_completion_context(text, 0, 4).unwrap();
+        match ctx {
+            CompletionContext::AfterDot { recv_name, recv_line, recv_col } => {
+                // Receiver `obj` empieza en line 1, col 1 (Fitz 1-based).
+                assert_eq!(recv_name, "obj");
+                assert_eq!(recv_line, 1);
+                assert_eq!(recv_col, 1);
+            }
+            other => panic!("esperaba AfterDot, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_context_after_dot_con_prefix_partial() {
+        // `obj.fo` con cursor al final → el usuario ya tipeó "fo" del
+        // método. El context sigue siendo AfterDot; VSCode filtra por
+        // el prefix client-side.
+        let text = "obj.fo";
+        let ctx = detect_completion_context(text, 0, 6).unwrap();
+        assert!(matches!(ctx, CompletionContext::AfterDot { .. }));
+    }
+
+    #[test]
+    fn detect_context_scope_level_en_medio_de_ident() {
+        // `obj` sin `.` adelante → scope-level. Cursor en mitad del
+        // ident; el prefix ya tipeado lo filtra VSCode.
+        let text = "obj";
+        let ctx = detect_completion_context(text, 0, 3).unwrap();
+        assert_eq!(ctx, CompletionContext::ScopeLevel);
+    }
+
+    #[test]
+    fn scope_level_completion_incluye_top_level_y_builtins_y_keywords() {
+        // Cursor en línea 3 col 0 — fuera de cualquier stmt declarado,
+        // contexto scope-level.
+        let src = "let x = 1\nfn foo() => 0\ntype Bar { id: Int }\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 3, 0);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Top-level (let, fn, type).
+        assert!(labels.contains(&"x"), "falta var top-level `x`: {labels:?}");
+        assert!(labels.contains(&"foo"), "falta fn `foo`: {labels:?}");
+        assert!(labels.contains(&"Bar"), "falta type `Bar`: {labels:?}");
+        // Builtins.
+        assert!(labels.contains(&"print"), "falta builtin `print`");
+        assert!(labels.contains(&"len"));
+        // Tipos built-in.
+        assert!(labels.contains(&"Int"));
+        assert!(labels.contains(&"List"));
+        // Keywords.
+        assert!(labels.contains(&"let"));
+        assert!(labels.contains(&"match"));
+    }
+
+    #[test]
+    fn after_dot_sobre_nominal_lista_fields_del_type() {
+        // `type Point { x: Int, y: Int }` + `let p = Point { x: 1, y: 2 }`
+        // + ident `p` en línea 2 col 0 (1-based: line 3, col 1).
+        // After-dot sobre `p.` debería listar x, y.
+        let src = "type Point { x: Int, y: Int }\nlet p = Point { x: 1, y: 2 }\np.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor en línea 2, col 2 (0-based LSP), justo después del `.`.
+        let items = completion_at_position(src, &program, &type_info, &env, 2, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"x"), "falta field `x`: {labels:?}");
+        assert!(labels.contains(&"y"), "falta field `y`: {labels:?}");
+        // No debe incluir top-level: ya estamos en after-dot.
+        assert!(!labels.contains(&"print"), "no debería incluir builtins en after-dot");
+        // El kind debe ser FIELD.
+        let item_x = items.iter().find(|i| i.label == "x").unwrap();
+        assert_eq!(item_x.kind, Some(CompletionItemKind::FIELD));
+    }
+
+    #[test]
+    fn after_dot_sobre_list_lista_metodos_built_in() {
+        // `let xs = [1, 2, 3]` + `xs.` en línea 1.
+        let src = "let xs = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["push", "pop", "map", "filter", "find", "len"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` de List: {labels:?}"
+            );
+        }
+        let item_map = items.iter().find(|i| i.label == "map").unwrap();
+        assert_eq!(item_map.kind, Some(CompletionItemKind::METHOD));
+    }
+
+    #[test]
+    fn after_dot_sobre_str_lista_3_metodos() {
+        // Caso del usuario tipeando `obj.` al final del buffer: el
+        // parser abandona el stmt entero por el `.` huérfano (deuda
+        // F15 recovery sub-stmt), el Expr::Ident no llega a TypeInfo.
+        // El fallback "walk top-level por nombre" resuelve el tipo
+        // mirando el `let s = "hola"` previo.
+        let src = "let s = \"hola\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"upper"));
+        assert!(labels.contains(&"lower"));
+        assert!(labels.contains(&"len"));
+        // Sin métodos de List.
+        assert!(!labels.contains(&"push"));
+    }
+
+    #[test]
+    fn after_dot_sobre_receiver_sin_tipo_devuelve_vacio() {
+        // `desconocido.` — ident no resuelto → TypeInfo no tiene
+        // entry → lista vacía.
+        let src = "desconocido.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 0, 12);
+        assert!(items.is_empty(), "esperaba vacío, dio {items:?}");
     }
 }
