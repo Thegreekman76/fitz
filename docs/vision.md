@@ -242,6 +242,19 @@ fitz build
 
 Un binario. Sin runtime. Sin dependencias en producción.
 
+La promesa se extiende más allá del primer endpoint. El roadmap a
+mediano plazo (Fase 9) suma **stack web first-class** —
+`@authenticated`, `@ws`, `@cron`, `@background` como decoradores
+del lenguaje, no como combinación de 5 librerías a integrar — y
+**DX completo** (formatter sin config, test runner built-in, hot
+reload, REPL, linter, package manager + registry escrito en Fitz
+mismo). El norte largo: Fase 10 stack DB nativo + ORM declarativo,
+Fase 11 frontend en `.fitz` (componentes con SSR built-in, el
+mismo `type` para back y front), Fase 12 deployment de un solo
+comando (`fitz deploy` con Dockerfile autogenerado y observability
+nativa). Ver [`docs/roadmap.md`](roadmap.md) para el plan
+completo.
+
 ## Para quién es Fitz
 
 ### Desarrolladores de Python

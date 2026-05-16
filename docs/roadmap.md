@@ -4496,22 +4496,20 @@ reemplazado); MW.4 sin tests nuevos (smoke +1 implícito en
 ---
 
 ## Fase 9 — Ecosistema 🌍
-**Estado: pre-reqs habilitantes del LSP CERRADOS** — Fase 9.0
-cerrada entera el 2026-05-15. F15 (error recovery del parser) +
-F16 (IR tipado persistido por nodo) cerrados. Próximo: sub-fases
-visibles del LSP (9.x.1 → 9.x.5).
+**Estado: LSP MVP CERRADO entero (9.x.1 → 9.x.5)** — Fase 9.0
+(pre-reqs F15 + F16) cerrada el 2026-05-15; las cinco sub-fases
+visibles del LSP cerradas el 2026-05-15/16. Próximo: package
+manager + DX + stack web first-class (plan detallado abajo).
 
 - [x] **F15 — error recovery del parser** (Fase 9.0, 2026-05-15) — ver 9.0 abajo
 - [x] **F16 — IR tipado persistido por nodo** (Fase 9.0, 2026-05-15) — ver 9.0 abajo
-- [ ] LSP + extensión VSCode (ver 9.x abajo)
-- [ ] Formatter (`fitz fmt`)
-- [ ] Package manager (`fitz add`)
-- [ ] Fitz registry (repositorio de paquetes)
-- [ ] Linter (`fitz check` ya cubre tipos; queda lint de estilo
-  y patrones)
+- [x] **LSP + extensión VSCode** (Fase 9.x.1 → 9.x.5, CERRADO 2026-05-15/16) — diagnostics, hover, go-to-def, autocomplete, distribución multi-platform. Ver 9.x abajo.
+- [ ] **Package manager + registry** (Fase 9.y) — `fitz.toml`, `fitz new`, `fitz add`, `fitz publish`, registry escrito en Fitz. Ver sección detallada abajo.
+- [ ] **DX completo: formatter, test, dev, repl, linter** (Fase 9.z) — `fitz fmt` (cero config), `fitz test`, `fitz dev` (hot reload), `fitz repl`, `fitz lint`. Ver sección detallada abajo.
+- [ ] **Stack web first-class: auth, websockets, jobs** (Fase 9.w) — `@authenticated`, `@ws`, `@cron`, `@background` como decoradores nativos. Ver sección detallada abajo.
 - [ ] Stubs `.pyi` para interop Python (pospuesto desde Fase 8)
-- [ ] Driver Postgres nativo (paso previo al ORM Fitz, ver Fase 10+)
-- [ ] Compilación a WebAssembly
+- [ ] Driver Postgres nativo (paso previo al ORM Fitz, ver Fase 10+ en "Visión post-Fase 9")
+- [ ] Compilación a WebAssembly (relacionado con Fase 11 frontend, ver "Visión post-Fase 9")
 - [ ] Documentación oficial en español e inglés
 - [ ] Website del lenguaje
 
@@ -5221,6 +5219,806 @@ diagnostics + hover + go-to-def + autocomplete + distribución.
 - Publicación automática al Marketplace.
 - Cross-compile local (hoy cada plataforma genera su propio .vsix).
 - Logo: variantes adicionales (favicon, app icon, monochrome).
+
+---
+
+## Fase 9.y — Package manager + registry 📦
+
+**Estado: PENDIENTE (siguiente bloque post-LSP)** — primer trabajo
+del resto de Fase 9.
+
+**Objetivo**: convertir Fitz de "lenguaje con CLI que ejecuta
+archivos sueltos" en "ecosistema con proyectos, dependencias, y
+compartición". Cubre el ciclo completo: scaffolding inicial → uso
+de paquetes ajenos → publicar el propio. Es la pieza más visible
+para el usuario nuevo: la primera impresión de "¿qué tan serio es
+Fitz?" pasa por `fitz new mi-app`.
+
+**Por qué encaja en Fase 9**: el LSP fue la primera capa de tooling
+alrededor del lenguaje core; el package manager es la segunda.
+Ambos asumen que el lenguaje en sí ya está estable (Fase 5
+cerrada). Ningún cambio breaking del lenguaje se espera para
+soportar esto — todo es tooling encima.
+
+**Inspiración**:
+
+- **Cargo (Rust)** — convención de proyecto, manifest TOML,
+  lockfile, workspaces.
+- **npm (Node)** — modelo de registry centralizado + scoped
+  packages.
+- **uv (Python por Astral)** — velocidad de resolución, lockfile
+  multi-platform.
+- **deno** — registry federado por URLs (alternativa interesante
+  a rechazar o adoptar como complemento al centralizado).
+
+### Decisiones pendientes globales del bloque
+
+Antes de arrancar 9.y.1, hay que cerrar estas decisiones — todas
+tienen impacto en el formato de archivo y el modelo mental del
+usuario:
+
+1. **¿TOML, YAML, o JSON para el manifest?** Lean: **TOML**
+   (convención Rust, legible, comentarios, encaja con la
+   implementación en Rust del propio Fitz). YAML descartado por
+   indentation-sensitive. JSON descartado por falta de comentarios.
+2. **¿Estructura del project: `src/` o raíz?** Lean: **`src/`**
+   (convención Rust/Java/TS, separa source de manifest/docs).
+3. **¿Versionado: semver estricto o pre-releases permitidos?**
+   Lean: **estricto + canal `prerelease` opt-in** (estilo Rust).
+4. **¿Registry centralizado (npm/crates.io) o federado (deno.land)?**
+   Lean: **centralizado**, con soporte para git deps + path deps
+   como en Cargo. Centralizado da mejor DX (`fitz add foo` corto);
+   federado escala sin servidor central pero `import "https://..."`
+   es feo.
+5. **¿Resolución: SAT solver (PubGrub) o greedy (MVS estilo Go)?**
+   Decisión abierta. **PubGrub** (uv, dart pub) es correcto y da
+   mensajes de error excelentes pero es complejo. **MVS** ("usá
+   la versión mínima compatible") es simple. Lean: empezar greedy,
+   migrar a PubGrub si aparece dolor.
+6. **¿Scope: `paquete` flat o `@usuario/paquete` namespaceado?**
+   Lean: **namespaceado siempre**. Evita squatting + ambiente más
+   sano.
+7. **¿Múltiples versiones del mismo paquete coexistiendo (Cargo) o
+   single-version (npm flat / pip)?** Lean: **Cargo-style**, más
+   espacio pero menos conflictos.
+8. **¿Cache local: `~/.fitz/cache/` global o `target/` por
+   proyecto?** Lean: **global con dedupe** (Rust cargo + uv).
+9. **¿Workspaces (multi-paquete bajo manifest raíz)?** Sí, pero
+   **no en el MVP** — sub-paso 9.y.8+ futuro.
+
+### Sub-pasos
+
+#### 9.y.1 — Manifest + scaffolding (`fitz.toml`, `fitz new`, `fitz init`)
+
+Primer sub-paso del bloque. Sin red, sin deps remotas, sin nada
+que se rompa.
+
+- **Nuevo formato `fitz.toml`** en la raíz de cada proyecto.
+  Mínimo viable:
+  ```toml
+  [package]
+  name = "mi-app"
+  version = "0.1.0"
+  edition = "2026"
+  authors = ["Tu Nombre <tu@email>"]
+
+  [bin]
+  main = "src/main.fitz"
+
+  [dependencies]
+  ```
+- **Sub-comando `fitz new <nombre>`**: crea carpeta con
+  `fitz.toml` + `src/main.fitz` + `.gitignore` + (opcional)
+  `README.md`. Templates: `--lib`, `--bin` (default), `--http`
+  (template con `@get`).
+- **Sub-comando `fitz init`**: agrega `fitz.toml` al directorio
+  actual sin crear carpeta nueva.
+- **Decisiones a cerrar**:
+  - ¿`edition` (concepto Cargo, year-based) o `fitz-version`
+    (concepto pyproject)?
+  - ¿Permitir `[lib]` y `[[bin]]` múltiples desde el día uno o
+    solo single-bin?
+  - ¿Validación de nombres de paquete: regex? lowercase?
+    guiones permitidos?
+  - ¿Crear repo git automáticamente o solo el `.gitignore`?
+- **Trade-offs**: arrancar con manifest mínimo deja espacio para
+  extender (deps, build scripts, workspaces) sin breaking
+  changes. Arrancar con todo de una baja velocidad inicial pero
+  da fundamento.
+
+#### 9.y.2 — `fitz run`/`build` integrados con manifest
+
+Cambio de comportamiento del CLI: detectar `fitz.toml` en el
+directorio actual o en padres (Cargo-style).
+
+- **`fitz run`** sin argumentos: lee `fitz.toml`, ejecuta
+  `[bin].main`. Con argumento `fitz run archivo.fitz` sigue
+  funcionando como hoy (modo "single file").
+- **`fitz build`** análogo. Output: `target/release/<nombre>`
+  adyacente al `fitz.toml`, no al archivo fuente.
+- **`fitz check`** análogo: chequea todos los `.fitz` del proyecto,
+  no solo el de entry.
+- **Decisiones**:
+  - ¿`target/` adyacente al manifest o configurable?
+  - ¿Auto-discovery de tests (`tests/*.fitz` o `*_test.fitz`)?
+  - ¿Compatibilidad hacia atrás con el modo single-file: sí, sin
+    warning? Con warning de "considerá `fitz new`"? Solo durante
+    v0.X?
+- **Sin breaking** para los ejemplos de la guía: cada uno sigue
+  corriendo con `fitz run examples/guide/02-hola.fitz`.
+
+#### 9.y.3 — Resolución de deps + lockfile
+
+Antes del registry, primero la mecánica de resolución sobre deps
+**locales y git** (sin servidor):
+
+- **Tipos de dep soportados** en `[dependencies]`:
+  ```toml
+  [dependencies]
+  utils = { path = "../utils" }
+  http-helpers = { git = "https://github.com/...", tag = "v1.2.0" }
+  ```
+- **`fitz.lock`**: archivo paralelo al manifest que pinea
+  exactamente qué versión de cada dep se usó. Commiteable
+  (Cargo-style). Algoritmo de resolución: TBD según decisión
+  global 5.
+- **Cache local global** en `~/.fitz/cache/<paquete>/<version>/`.
+  Git deps cacheadas por commit hash.
+- **Decisiones**:
+  - ¿Formato del lockfile: TOML o JSON?
+  - Resolución determinística (mismo input → mismo output) —
+    garantía obligatoria.
+  - ¿Permitir `branch = "main"` en git deps (no reproducible) o
+    solo `tag`/`rev`?
+- **Trade-offs**: arrancar con path+git deps sin registry te
+  permite **dogfood** el package manager antes de tener servidor
+  — los primeros paquetes Fitz pueden vivir en repos GitHub.
+
+#### 9.y.4 — `fitz add` / `fitz remove` / `fitz update`
+
+Sub-comandos de manipulación del manifest + lockfile:
+
+- **`fitz add foo`** — agrega `foo = "X.Y.Z"` (versión más
+  reciente) a `[dependencies]`, actualiza lockfile, descarga.
+- **`fitz add foo --git https://...`** — git dep.
+- **`fitz add foo --path ../foo`** — path dep.
+- **`fitz remove foo`** — borra del manifest + cleanup del
+  lockfile.
+- **`fitz update`** — actualiza lockfile respetando rangos del
+  manifest.
+- **`fitz update foo`** — actualiza solo `foo`.
+- **Decisiones**:
+  - ¿`fitz add foo@1.2.3` (npm-style) o `--version 1.2.3`
+    (cargo-style)?
+  - ¿Default a `^1.2.3` (npm/cargo: rangos semver) o `=1.2.3`
+    (pin estricto)?
+  - ¿Dev deps separadas (`[dev-dependencies]`) para
+    tests/herramientas?
+
+#### 9.y.5 — Registry: servicio + protocolo
+
+**El paso más grande del bloque.** Diseño y deployment del
+servicio que aloja los paquetes.
+
+- **Diseño del servicio**: API HTTP que expone:
+  - `GET /api/v1/packages/<name>` — metadata + lista de versiones
+  - `GET /api/v1/packages/<name>/<version>` — metadata de versión
+  - `GET /api/v1/packages/<name>/<version>/download` — tarball
+  - `PUT /api/v1/packages/<name>/<version>` — publish (auth
+    required)
+- **Implementación en Fitz** — autoesfecto: el registry escrito
+  en Fitz mismo. Validación viviente de que el lenguaje sirve
+  para construir servicios reales. **Esto es lo que hace único a
+  Fitz vs npm/crates.io**: el registry corre en su propio
+  lenguaje.
+- **Storage del tarball**: filesystem local para empezar,
+  S3-compatible para producción. Decisión: ¿S3, Cloudflare R2, o
+  algo más barato como Backblaze B2?
+- **Auth**: token bearer en header. Los tokens se generan via
+  `fitz login` con username/password contra el registry. JWT
+  firmado.
+- **Index de paquetes**: ¿base de datos relacional o git-backed
+  (Cargo crates.io fue git-backed hasta 2023)? Lean: **SQLite/
+  Postgres directo, sin git index** (más simple, evita el
+  problema de escala que crates.io enfrentó).
+- **Decisiones críticas**:
+  - **¿Quién hospeda?** Decisión grande. Opciones: Railway
+    (fácil, caro a escala), VPS propio (más control, más
+    sysadmin), self-hostable (federación). Lean: **VPS propio o
+    Railway para arrancar**; documentar self-hosting como
+    tier-1.
+  - **¿Versiones inmutables?** Una vez publicada `1.2.3`, no se
+    puede sobreescribir (npm tiene esto). Sí, regla estricta.
+  - **¿Yanking?** Permite marcar versión como "no usar" sin
+    removerla. Sí, estándar.
+  - **¿Hard delete?** Solo por admin del registry, casos
+    extremos (paquete con secret leak). Documentado.
+  - **¿Search en el registry?** Por ahora `GET /api/v1/search?q=foo`.
+    UI web llega post-MVP del registry.
+- **Trade-offs**: implementar el registry en Fitz toma 2-3x más
+  tiempo que escribirlo en algo conocido, pero da una **historia
+  poderosa** para la web del lenguaje. "El registry de Fitz está
+  escrito en Fitz" es un argumento de marketing real.
+
+#### 9.y.6 — `fitz publish` + auth
+
+Cierra el ciclo: ahora el usuario puede compartir.
+
+- **`fitz login`** — pide token al registry, lo guarda en
+  `~/.fitz/credentials.toml`.
+- **`fitz logout`** — borra el credential.
+- **`fitz publish`** — empaqueta el proyecto en tarball (`*.fitz`
+  + `fitz.toml` + `README.md` + `LICENSE`), valida que el
+  manifest tenga campos obligatorios, sube al registry.
+- **`fitz yank <pkg>@<ver>`** — marca versión como obsoleta sin
+  borrar.
+- **Verificaciones pre-publish**:
+  - Versión nueva (no sobreescribe existente).
+  - Nombre disponible o usuario es owner.
+  - Manifest tiene `description`, `license`, `authors` (campos
+    obligatorios para publicar — opcionales para uso local).
+- **Decisiones**:
+  - ¿`.fitzignore` (estilo `.gitignore`) o lista explícita en
+    manifest (`include`/`exclude` de Cargo)?
+  - ¿Squat protection en nombres? (npm tiene reservados,
+    crates.io permitió squatting durante años).
+
+#### 9.y.7 — Guía + ejemplo end-to-end + cierre formal
+
+- Capítulo nuevo en `docs/guide.md`: "Tu primer paquete Fitz" —
+  `fitz new`, agregar dep, publicar.
+- Ejemplo en el repo: paquete chico publicable (ej. `fitz-uuid`
+  con un generador UUID v4 puro).
+- CHANGELOG bumps, roadmap marca todo como CERRADO.
+- Documentar el setup del registry (auto-hosting + servicio
+  oficial cuando exista).
+
+### Deuda anticipada (NO bloquea cierre del bloque)
+
+- **Workspaces** (multi-paquete bajo manifest raíz) — sub-paso
+  futuro 9.y.8+.
+- **Build scripts** (ejecutar tooling externo desde manifest) —
+  futuro.
+- **Vendoring** (`fitz vendor` para offline builds) — futuro.
+- **Feature flags** (Cargo features) — futuro, cuando aparezca
+  el primer uso real.
+- **Web UI del registry** (npm-style browse + docs) — post-MVP
+  del servicio.
+- **2FA + OAuth** (login con GitHub) — post-MVP.
+
+### Próximo norte tras 9.y
+
+**Fase 9.z (DX completo)** — formatter + test + dev + repl +
+lint. Naturalmente engrana con el package manager: `fitz test`
+lee el manifest, `fitz dev` se beneficia del project layout,
+`fitz fmt` se aplica a todo el proyecto, no a archivos sueltos.
+
+---
+
+## Fase 9.z — DX completo: formatter, test, dev, repl, lint ✨
+
+**Estado: PENDIENTE (siguiente bloque post-package manager)** —
+segundo trabajo del resto de Fase 9.
+
+**Objetivo**: cerrar la experiencia del developer al nivel de los
+lenguajes modernos. Cubre las 5 herramientas que un dev espera al
+sentarse a escribir código serio: formatter (sin debates), tests
+(sin libs externas), hot reload (sin nodemon), REPL (para
+experimentar), linter (para patrones más allá de tipos). **Apuesta
+de diferenciación**: la combinación viene en el lenguaje, no como
+un ecosistema disperso de packages a elegir.
+
+**Por qué encaja en Fase 9**: tooling secundario. Cada uno reusa
+la infraestructura del compilador (parser, checker, AST, TypeInfo
+de F16). Ninguno requiere cambios del lenguaje core.
+
+**Inspiración**:
+
+- **gofmt** — cero config, opinionado, indiscutible.
+- **cargo test + rust-analyzer test runner** — discovery por
+  convención + decorators.
+- **vite / uvicorn --reload** — file watcher + restart con
+  feedback inmediato.
+- **deno repl + ipython** — REPL persistente y multi-line.
+- **clippy + biome** — lint estructural (no solo estilo).
+
+### Decisiones pendientes globales del bloque
+
+1. **¿`fitz fmt` cero config o config opt-in?** Lean: **cero
+   config** (gofmt-style) — evita bikeshedding eterno.
+2. **¿Tests: decorator `@test` o convención por nombre
+   (`fn test_*`)?** Lean: **decorator** — consistente con
+   `@get`/`@background`.
+3. **¿Tests inline en el mismo archivo o separados (`tests/`)?**
+   **Ambos**. Tests inline al final del archivo (Rust-style) +
+   carpeta `tests/` para integration tests (Cargo-style).
+4. **¿`fitz dev` reinicia el server al cambiar archivo, o solo
+   recompila para CLI?** **Ambos**. Si hay `@get`/etc, restart
+   server. Si no, just recompile + run.
+5. **¿REPL: persistente del scope o cada comando independiente?**
+   Lean: **persistente** — Python/Deno style.
+
+### Sub-pasos
+
+#### 9.z.1 — `fitz fmt` (formatter sin config)
+
+- **Sub-comando** `fitz fmt [archivo...]` formatea in-place. Sin
+  argumentos formatea todo el proyecto (vía manifest).
+- **Modo check**: `fitz fmt --check` no escribe, exit 1 si hay
+  diffs (para CI).
+- **Convenciones (cero config)**: 4 espacios indentación,
+  comillas dobles para strings, trailing comma en multi-línea,
+  etc. Decisiones específicas a documentar en
+  `docs/fmt-style.md`.
+- **Implementación**: pretty-printer escrito a mano sobre el
+  AST. Reusa `parse_with_recovery` (F15) — formatea hasta donde
+  el parser entiende y deja intacto lo demás.
+- **Decisiones**:
+  - ¿Indent: 4 espacios (Python) o 2 (TS/JS)? Lean: **4**
+    (Python heritage).
+  - ¿Línea máxima: 80, 100, 120? Lean: **100** (compromise
+    moderno).
+  - ¿Trailing comma siempre, nunca, o solo multi-línea? Lean:
+    **solo multi-línea**.
+  - ¿Preservar blank lines del usuario o forzar densidad? Lean:
+    **preservar máximo 1 blank line consecutivo**.
+- **Trade-offs**: pretty-printer a mano es código aburrido pero
+  da control total. Alternativa: usar un AST printer genérico —
+  no hay en ecosistema Rust uno ideal para Fitz.
+- **Deuda anticipada**: ¿format on save desde el LSP? Sí, vía
+  `textDocument/formatting`. Llega gratis si fmt está como
+  librería.
+
+#### 9.z.2 — `fitz test` (testing built-in)
+
+- **Decorator `@test`** sobre fn sin args:
+  ```fitz
+  @test fn suma_funciona() {
+      assert_eq(2 + 2, 4)
+  }
+  ```
+- **Builtins de aserción**: `assert(cond, msg?)`, `assert_eq(a, b)`,
+  `assert_ne(a, b)`, `assert_throws(fn)`.
+- **Sub-comando `fitz test`** — descubre todos los `@test` en el
+  proyecto, los ejecuta, reporta. Output estilo cargo test:
+  nombre + ✓/✗ + summary.
+- **Filtrado**: `fitz test suma` ejecuta solo tests cuyo nombre
+  contiene "suma".
+- **Tests inline** en el mismo archivo del código (Rust-style
+  con `#[cfg(test)]` equivalente — los `@test` se compilan solo
+  en modo test).
+- **Tests integration** en `tests/*.fitz` del proyecto.
+- **Decisiones**:
+  - ¿`@bench` para benchmarks llega en el MVP o en sub-paso
+    futuro? Lean: **post-MVP**.
+  - ¿Test fixtures (`@before_all`, `@before_each`)? Lean:
+    **post-MVP**, empezar minimal.
+  - ¿Mocks/spies built-in? Lean: **NO**, problema de ecosistema.
+  - ¿Async tests? `@test async fn ...` — debe funcionar con
+    runtime tokio.
+  - ¿Coverage? Sub-paso futuro, complejo (requiere
+    instrumentación).
+- **Trade-offs**: tener test runner en el lenguaje vs ecosistema
+  (Python tiene pytest/unittest/nose). El lenguaje gana en
+  consistencia + zero-config.
+
+#### 9.z.3 — `fitz dev` (hot reload)
+
+- **Sub-comando `fitz dev`**: file watcher sobre el proyecto, al
+  cambio re-corre `fitz run` (o el server si hay rutas HTTP).
+- **Restart strategy**: kill+respawn del proceso. Incremental
+  rebuild es deuda (requiere modelo de módulos pre-compilados).
+- **Implementación**: crate `notify` para file watching. Debounce
+  100ms para evitar restarts en cadena.
+- **Feedback**: clear screen + banner "[restart]" + timestamp +
+  tiempo de compile.
+- **Decisiones**:
+  - ¿Watcher excluye `target/`, `.git/`, `node_modules/` por
+    default? Sí.
+  - ¿Configurable via manifest `[dev]` section o solo defaults?
+  - ¿Browser auto-refresh para HTTP? Requiere inyectar WebSocket
+    en respuestas — complejo. Lean: **NO en MVP**.
+  - ¿Print de errors del checker mientras escribís (sin
+    restart)? Sí — es la mitad del valor de `fitz dev`.
+- **Trade-offs**: kill+respawn es brutal pero simple y correcto.
+  Incremental llega cuando duela.
+
+#### 9.z.4 — `fitz repl` (interactivo)
+
+- **Sub-comando `fitz repl`** abre prompt `fitz> `.
+- **Comandos especiales**:
+  - `:help` — lista comandos.
+  - `:quit` / Ctrl+D — sale.
+  - `:type <expr>` — muestra el tipo sintetizado.
+  - `:env` — lista bindings del scope.
+  - `:reset` — limpia scope.
+  - `:load <archivo>` — eval del archivo en el scope actual.
+- **Persistencia de scope**: cada línea se evalúa en un env
+  compartido. `let x = 5` queda disponible en líneas siguientes.
+- **Multi-line**: detección automática si el statement no está
+  cerrado (`{` abierto, paréntesis pendiente). Continuation
+  prompt `... `.
+- **Histórico**: arrow up/down, persistencia en
+  `~/.fitz/history`. Crate `rustyline` para terminal handling.
+- **Decisiones**:
+  - ¿Async top-level en REPL? Sí, env tokio incluido para
+    `.await`.
+  - ¿Imports en REPL? Sí, `from utils import foo` debe funcionar
+    relativo al cwd.
+  - ¿Pretty-print del último valor (Python `_`)? Sí, muestra el
+    valor del último statement-expression sin `;`.
+- **Trade-offs**: REPL para lenguaje compilado es raro (Rust no
+  tiene oficial). Para Fitz tiene sentido porque ya hay
+  intérprete (`fitz run`). El REPL es básicamente el evaluador
+  con prompt.
+
+#### 9.z.5 — `fitz lint` (más allá de tipos)
+
+- **Sub-comando `fitz lint`** detecta patrones que el checker no
+  captura.
+- **Lints iniciales** (sugerencia):
+  - `unused_variable` — var declarada y no usada (no `_var`).
+  - `unused_import` — `from X import Y` con Y no referenciado.
+  - `useless_match` — match con un solo arm catch-all.
+  - `string_concat` — `"a" + "b"` (sugiere interpolación).
+  - `panic_in_test_only` — uso de `assert!` fuera de funciones
+    `@test`.
+  - `redundant_clone` — patrón visible cuando aterrice análisis
+    de movimientos.
+- **Supresión**: comentario `// @allow(name)` sobre el
+  statement.
+- **Decisiones**:
+  - ¿Lints fail-by-default (warning) o solo si `--strict`?
+    Lean: **warning**, `--deny <lint>` para CI.
+  - ¿Catálogo extensible (plugins) o cerrado? Lean: **cerrado al
+    principio**, plugins post-MVP.
+  - ¿Auto-fix (`fitz lint --fix`)? Sí para lints triviales
+    (`unused_import` remove, `string_concat` reescribe).
+- **Trade-offs**: linter compite con `fitz check` (tipos).
+  Decisión: `check` = errores de tipo (bloqueantes), `lint` =
+  sugerencias de estilo/patrón (no bloqueantes).
+
+### Próximo norte tras 9.z
+
+**Fase 9.w (stack web first-class)** — sumar `@authenticated`,
+`@ws`, `@cron`, `@background` como decoradores nativos del
+lenguaje. Cierra la apuesta de "HTTP nativo" extendiéndola a todo
+el stack web.
+
+---
+
+## Fase 9.w — Stack web first-class: auth, websockets, jobs, ORM 🌐
+
+**Estado: PENDIENTE (siguiente bloque post-DX)** — tercer trabajo
+del resto de Fase 9.
+
+**Objetivo**: extender la filosofía "HTTP es parte del lenguaje"
+al resto del stack web típico. Auth, WebSockets, cron jobs,
+background tasks y ORM dejan de ser elecciones de biblioteca
+(cada framework Python/TS tiene 3-4 opciones por categoría) y
+pasan a ser decoradores del lenguaje. **Apuesta de
+diferenciación**: lo que en FastAPI son `fastapi-users` +
+`python-jose` + `celery` + `apscheduler` + `sqlalchemy` (5 deps +
+integración) en Fitz son 4 decorators ya cargados.
+
+**Por qué encaja en Fase 9**: extiende patrones ya establecidos
+(`@get`/`@post`/`@middleware`/`@server`). La mecánica de
+decoradores (Fase 4.1) lo soporta sin cambios. El runtime axum +
+tokio ya cubre lo subyacente para WS y background tasks.
+
+**Cuidado del scope**: 9.w.4 (ORM nativo + migraciones)
+probablemente arranca **Fase 10**, no Fase 9. Está acá porque
+conceptualmente cierra la apuesta del bloque; se documenta como
+link a Fase 10 (ver Visión post-Fase 9 abajo).
+
+### Decisiones pendientes globales del bloque
+
+1. **¿Auth: JWT, sessions cookie-based, o ambos?** Lean: **JWT
+   primero** (stateless, simple). Sessions post-MVP.
+2. **¿Mensajes WebSocket: solo JSON o también binary?** Lean:
+   **JSON en MVP**, binary post-MVP.
+3. **¿Cron timezone configurable o solo UTC?** Lean: **default
+   UTC + override** via kwarg.
+4. **¿Background jobs persistentes (retry tras crash)?** Lean:
+   **NO en MVP** — in-memory queue. Persistencia post-MVP
+   (requiere storage backend).
+5. **¿ORM-first o query-builder-first?** Decisión grande de Fase
+   10. Lean: **ambos**, query builder como capa baja, ORM como
+   capa alta opcional.
+
+### Sub-pasos
+
+#### 9.w.1 — `@authenticated` / `@admin` — auth nativo
+
+- **Decorators apilables** sobre handlers:
+  ```fitz
+  @authenticated
+  @get("/me")
+  fn me(user: User) -> User { return user }
+
+  @admin
+  @delete("/users/{id}")
+  fn delete_user(id: Int) -> Str { ... }
+  ```
+- **Modelo de autenticación**: JWT-based (default), con opción a
+  sessions cookie-based (futuro).
+- **`fn authenticate(headers: Map<Str, Str>) -> Result<User>`** —
+  fn que el usuario implementa, registrada via decorator del
+  lenguaje:
+  ```fitz
+  @auth_provider
+  fn check_token(headers: Map<Str, Str>) -> Result<User> {
+      let token = headers.get("authorization")?
+      // ... validación, lookup en DB
+      return Ok(user)
+  }
+  ```
+- **Param `user`** inyectado por el runtime después de auth
+  exitosa.
+- **`@admin`** es shorthand de
+  `@authenticated + check(user.role == "admin")` o decorator
+  separado con su propio provider.
+- **Decisiones**:
+  - ¿JWT en el core o solo el patrón (delegando librería)? Lean:
+    **patrón + helper `jwt.encode`/`jwt.decode`** como built-in
+    del lenguaje.
+  - ¿Sessions cookie-based como tier-1 o post-MVP? Lean:
+    **post-MVP**. JWT primero (stateless, simple).
+  - ¿Bcrypt/Argon2 built-in para password hashing? Sí — sin
+    esto, cada app reescribe lo mismo.
+  - ¿Modelo de roles (RBAC) o solo "authenticated/admin"? Lean:
+    **solo dos roles en MVP**, sistema de roles via custom
+    decorator.
+- **Sintaxis OpenAPI**: el schema generado debe documentar el
+  requisito de auth (security scheme bearer).
+
+#### 9.w.2 — `@ws("/chat")` — WebSockets tipados
+
+- **Decorator paralelo a `@get`** para handlers WebSocket:
+  ```fitz
+  type ChatMsg { user: Str, text: Str }
+
+  @ws("/chat")
+  async fn chat_handler(conn: WsConn<ChatMsg>) {
+      loop {
+          match conn.recv().await {
+              Ok(msg) => conn.broadcast(msg).await,
+              Err(_) => break,
+          }
+      }
+  }
+  ```
+- **Tipo `WsConn<T>`** built-in con métodos `recv()`,
+  `send(msg)`, `broadcast(msg)`, `close()`. `T` es el tipo de
+  mensaje (serializado JSON automático).
+- **Decisiones**:
+  - ¿Broadcast a todas las conns de un endpoint built-in o
+    pattern manual? Lean: **built-in `broadcast`** con scope por
+    endpoint.
+  - ¿Reconexión automática del lado del client? Cliente WS no es
+    scope de Fitz (es del browser).
+  - ¿Heartbeat/keepalive configurable o automático? Lean:
+    **automático** con setting via `@server`.
+  - ¿Auth en WS (combinar `@authenticated` + `@ws`)? Sí, mismo
+    decorator stack.
+- **Trade-offs**: WS es estado, conflicto natural con el modelo
+  stateless del HTTP. Implementación requiere broadcaster
+  compartido (`Arc<Mutex<HashMap<EndpointId, Vec<Tx>>>>`).
+
+#### 9.w.3 — `@cron` + `@background` — jobs sin Celery
+
+- **`@cron("0 * * * *")`** sobre fn sin args — ejecuta según
+  cron expression:
+  ```fitz
+  @cron("0 0 * * *")  // cada medianoche
+  async fn cleanup_old_sessions() {
+      // ...
+  }
+  ```
+- **`@background`** marca fn como ejecutable en background con
+  `spawn`:
+  ```fitz
+  @background
+  async fn send_email(to: Str, body: Str) { ... }
+
+  @post("/users")
+  async fn create_user(input: UserInput) -> User {
+      let user = save(input)
+      spawn send_email(user.email, "welcome")  // fire-and-forget
+      return user
+  }
+  ```
+- **Built-in `spawn(fn_call)`** — devuelve `JoinHandle<T>` que se
+  puede `await`.
+- **Scheduler interno**: thread tokio dedicado para cron jobs,
+  registry de jobs vivo en memoria.
+- **Decisiones**:
+  - ¿Persistencia de jobs (retry tras crash)? Lean: **NO en
+    MVP** — jobs in-memory, perdidos al restart. Persistencia
+    post-MVP (requiere storage).
+  - ¿Backend de queue (Redis, etc.) o solo in-process? Lean:
+    **in-process MVP**, pluggable post-MVP.
+  - ¿Visibility de jobs (panel admin que liste runs)? Post-MVP.
+- **Trade-offs**: in-memory queue pierde jobs en crash — para
+  servicios críticos no alcanza. Para scripts de mantenimiento
+  (lo que usás en realidad), sobra. Documentar la limitación.
+
+#### 9.w.4 — ORM nativo + migraciones autogeneradas (LINK A FASE 10)
+
+**Probablemente arranca Fase 10**, citado acá porque cierra la
+apuesta del bloque conceptualmente.
+
+- **`type` Fitz con metadata DB**:
+  ```fitz
+  @table("users")
+  type User {
+      @primary id: Int
+      @unique email: Str
+      name: Str
+      created_at: DateTime = now()
+  }
+  ```
+- **API tipada**: `User.find_by(id=1)`,
+  `User.where(name="Ada").all()`, `User.create(email=...)`,
+  `user.save()`.
+- **Migraciones autogeneradas**: `fitz db diff` compara `type`
+  actual vs schema en DB, emite SQL de migración.
+  `fitz db migrate` aplica.
+- **Driver Postgres en Fitz puro** (no via libpq) — Fase 10.
+  Hasta entonces, interop Python con SQLAlchemy cubre el gap
+  (cap 21 de la guía).
+- **Decisiones a tomar al arrancar Fase 10**:
+  - ¿Postgres-first o multi-DB? Lean: **Postgres-first**,
+    MySQL/SQLite vía abstracción opt-in.
+  - ¿Async-first o sync-first? Lean: **async-first** (consistente
+    con Fase 6).
+  - ¿Connection pooling built-in?
+  - ¿Migraciones reversibles?
+- Ver "Visión post-Fase 9" abajo para Fase 10 completa.
+
+### Próximo norte tras 9.w
+
+**Fase 10** arranca con el stack DB nativo (driver Postgres puro
+Fitz + ORM declarativo + migraciones). Cierra la promesa "todo el
+stack web en el lenguaje". Ver bloque "Visión post-Fase 9" abajo.
+
+---
+
+## Visión post-Fase 9 — Fase 10+ 🔮
+
+**Estado: especulativo.** Estas fases no están comprometidas en
+el orden — son la visión a largo plazo del proyecto. Cada una
+requiere su propia ronda de diseño antes de arrancar. Sirven hoy
+como **norte direccional**: las decisiones de Fase 9 (package
+manager, DX, web stack) se evalúan contra "¿esto encaja con la
+visión de 10/11/12?".
+
+### Fase 10 — Stack DB nativo + ORM declarativo
+
+**Promesa**: cerrar el "stack web completo en el lenguaje" —
+backend + DB nativo, sin necesidad de interop con Python/Ruby/etc
+para acceder a una base de datos relacional.
+
+- Driver Postgres en Fitz puro (no wrapper de libpq).
+  Inspiración: sqlx-postgres en Rust.
+- ORM declarativo sobre `type` (anotaciones `@table`, `@primary`,
+  `@unique`, etc.).
+- Migraciones autogeneradas del diff de `type` vs schema actual.
+- Pool de conexiones built-in.
+- `fitz db` subcomando con `diff`, `migrate`, `rollback`, `seed`.
+
+**Por qué importa**: hoy todo proyecto serio en Fitz necesita
+SQLAlchemy via interop Python (cap 21 de la guía). Fase 10 la
+convierte en "opcional para Python ecosystem", no en "obligatorio
+para DB".
+
+**Inspiración**: sqlx (compile-time SQL check), Diesel (ORM
+tipado en Rust), Prisma (migraciones del diff de schema).
+
+### Fase 11 — Frontend en `.fitz` (SFC + SSR)
+
+**Promesa**: el mismo lenguaje en backend y frontend. Resuelve el
+problema del **doble tipado** que el autor sufre todos los días
+con Vue+FastAPI: definís `type User` en el backend, lo re-definís
+en TypeScript, los tipos divergen, bugs en producción.
+
+- **Single-file components**: `.fitz` con secciones
+  `<template>`/`<script>`/`<style>` estilo Vue SFC.
+- **Compilación a WASM o JS** — TBD según target. WASM para apps
+  grandes, JS para apps chicas + SEO.
+- **SSR built-in** — el mismo handler `@get("/users")` puede
+  devolver JSON (API) o HTML renderizado server-side (página)
+  según headers.
+- **Sharing de `type`** entre backend y frontend — el
+  `type User` se define una vez.
+- **Reactividad**: signals (estilo Solid.js) o ref/reactive
+  (estilo Vue 3). Decisión grande.
+
+**Por qué importa**: **la apuesta más ambiciosa de Fitz**. Si
+funciona, posiciona a Fitz como "el lenguaje que resuelve el
+split frontend/backend" — un nicho que ningún lenguaje moderno
+ataca de frente (Elixir + LiveView se acerca, Phoenix se acerca,
+pero ambos requieren mucha JS para apps ricas).
+
+**Por qué tarde**: es básicamente construir Fitz otra vez en el
+navegador. Implementación grande. Antes hay que tener: package
+manager (Fase 9.y), DX maduro (Fase 9.z), y al menos un stack DB
+nativo (Fase 10) para validar que el lenguaje sirve para apps
+completas.
+
+**Inspiración**: Vue SFC + Svelte + Solid + Phoenix LiveView +
+HTMX. Mezcla de las mejores ideas.
+
+### Fase 12 — Deployment ciudadano primera clase
+
+**Promesa**: del repo a producción en 1 comando.
+
+- **`fitz deploy`** con detección automática de la plataforma
+  destino (configurable):
+  - Dockerfile autogenerado (multi-stage, distroless final).
+  - Healthcheck route auto (`GET /_health` registrada por el
+    runtime).
+  - Manifest de deploy según target (railway.toml, fly.toml,
+    k8s manifest).
+- **Observability nativa**:
+  - `@trace fn ...` instrumenta la fn con OpenTelemetry spans.
+  - `@metric counter("requests_total")` emite métricas
+    Prometheus.
+  - Logging estructurado built-in (JSON por default en
+    producción).
+- **Secrets management**: `@secret VARIABLE` que valida + inyecta
+  desde env/vault.
+- **Feature flags built-in**: `@flag("new_checkout")` con backend
+  pluggable (LaunchDarkly, GrowthBook).
+
+**Por qué importa**: cierra el ciclo "código → producción" sin
+pasar por 10 herramientas externas. Es la **promesa de la
+visión**: "cero fricción hasta el primer deploy".
+
+**Inspiración**: fly.io DX, Vercel deployment, Datadog
+instrumentation as code.
+
+### Fase 13 — CLI builder nativo
+
+**Promesa**: Fitz no es solo para servicios web — también para
+scripts CLI con la misma ergonomía.
+
+- **`@command("greet")`** decorator + autogeneración de `--help`:
+  ```fitz
+  @command("greet")
+  @arg("name", help="A quién saludar")
+  @flag("loud", short="l", help="MAYÚSCULAS")
+  fn greet(name: Str, loud: Bool = false) {
+      let msg = if (loud) { "HOLA, {name}!" } else { "Hola, {name}" }
+      print(msg)
+  }
+  ```
+- Sin imports — typer/click/clap built-in.
+
+**Por qué importa**: amplía el público de Fitz a "devs que
+escriben scripts en Python/Bash" — un mercado más amplio que
+solo web.
+
+**Inspiración**: typer (Python), clap (Rust), cobra (Go).
+
+### Por qué este orden
+
+1. **Package manager primero** (Fase 9.y) — pre-requisito de
+   todo lo demás. Sin manifest no hay tests con discovery, sin
+   deps no hay ecosystem.
+2. **DX completo** (Fase 9.z) — segunda capa de tooling.
+   Necesita el manifest del package manager pero no más.
+3. **Stack web first-class** (Fase 9.w) — primera extensión al
+   lenguaje core post-tooling. Aprovecha el momentum del LSP +
+   package manager + DX para meter features grandes.
+4. **Fase 10 (DB)** — necesaria antes de Fase 11 (frontend)
+   porque sin DB el "stack completo" no tiene sustancia.
+5. **Fase 11 (Frontend)** — la apuesta más grande. Requiere todo
+   lo anterior maduro.
+6. **Fase 12 (Deploy)** — cierra el ciclo. Mejor con el
+   ecosistema ya vivo.
+7. **Fase 13 (CLI)** — opcional, amplía nicho. Puede adelantarse
+   si aparece presión.
 
 ---
 

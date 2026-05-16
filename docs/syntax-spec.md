@@ -398,6 +398,63 @@ async fn protected() -> Response {
 
 ---
 
+## HTTP avanzado — auth, websockets, jobs (futuro, Fase 9.w)
+
+Decoradores adicionales que extienden `@get`/`@post`/... al resto
+del stack web típico. **No implementado todavía** — sintaxis
+tentativa, sujeta a revisión al arrancar Fase 9.w.
+
+```fitz
+// auth con decoradores apilables sobre handlers
+@authenticated
+@get("/me")
+async fn me(user: User) -> User {
+    return user
+}
+
+@admin
+@delete("/users/{id}")
+async fn delete_user(id: Int) -> Str { ... }
+
+// el provider del auth lo define el usuario (una vez por proyecto)
+@auth_provider
+fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let token = headers.get("authorization")?
+    // ... validación, lookup en DB
+    return Ok(user)
+}
+
+// websockets tipados — decorator paralelo a @get
+type ChatMsg { user: Str, text: Str }
+
+@ws("/chat")
+async fn chat_handler(conn: WsConn<ChatMsg>) {
+    loop {
+        match conn.recv().await {
+            Ok(msg) => conn.broadcast(msg).await,
+            Err(_) => break,
+        }
+    }
+}
+
+// cron jobs
+@cron("0 0 * * *")  // cada medianoche
+async fn cleanup_sessions() { ... }
+
+// background tasks fire-and-forget
+@background
+async fn send_email(to: Str, body: Str) { ... }
+
+@post("/users")
+async fn create(input: UserInput) -> User {
+    let u = save(input)
+    spawn send_email(u.email, "welcome")
+    return u
+}
+```
+
+---
+
 ## Módulos e imports
 
 ```fitz
@@ -433,6 +490,69 @@ fn main() {
     print("Hola mundo")
 }
 ```
+
+---
+
+## Testing (futuro, Fase 9.z)
+
+Test runner built-in con decorator `@test`. **No implementado
+todavía** — sintaxis tentativa.
+
+```fitz
+@test fn suma_funciona() {
+    assert_eq(2 + 2, 4)
+}
+
+@test fn nullable_funciona() {
+    let u = User { id: 1, name: "Ada" }
+    assert(u.email == null)
+}
+
+@test async fn http_call_funciona() {
+    let res = http.get("https://api.test/users/1").await
+    match res {
+        Ok(r) => assert_eq(r.status, 200),
+        Err(e) => panic("falló: {e}"),
+    }
+}
+
+// benchmarks (post-MVP de @test)
+@bench fn fib_es_rapido() {
+    fib(20)  // medido por iteración
+}
+```
+
+Builtins de aserción: `assert(cond, msg?)`, `assert_eq(a, b)`,
+`assert_ne(a, b)`, `assert_throws(fn)`.
+
+Discovery: `fitz test` descubre todos los `@test` del proyecto
+(inline al final de cada archivo + carpeta `tests/`).
+
+---
+
+## CLI builder (futuro, Fase 13)
+
+Construcción de CLIs con decoradores + autogeneración de `--help`.
+**No implementado todavía** — sintaxis tentativa, Fase 13 del
+roadmap.
+
+```fitz
+@command("greet")
+@arg("name", help="A quién saludar")
+@flag("loud", short="l", help="MAYÚSCULAS")
+fn greet(name: Str, loud: Bool = false) {
+    let msg = if (loud) { "HOLA, {name}!" } else { "Hola, {name}" }
+    print(msg)
+}
+
+@command("server", help="Inicia el server HTTP")
+@arg("port", help="Puerto", default=3000)
+fn run_server(port: Int) {
+    // arranca el server
+}
+```
+
+Sin imports — typer/click/clap built-in.
 
 ---
 

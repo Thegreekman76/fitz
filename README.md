@@ -424,21 +424,45 @@ CRUD (8.8).
 con `fitz build` + 3 openapi_e2e). **1219 + 79 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
-**Fase 9 (Ecosistema) — F15 CERRADO (2026-05-15)**: error recovery
-del parser end-to-end (nodos `Expr::Error`/`Stmt::Error` in-band,
-API `parse_with_recovery` con sync points stmt-level + keywords,
-cota 100 errores, checker silencioso sobre Error nodes). 15 unit
-tests nuevos. CLI strict sin cambio. Próximo norte: **F16 (IR
-tipado persistido por nodo)** — segundo pre-req habilitante del
-LSP. Después: sub-fases 9.x.1 → 9.x.5 (LSP MVP →
-diagnostics/hover/go-to-def/autocomplete/distribución), formatter,
-linter, package manager. **Sub-paso separado pendiente sin presión**:
-bundling CPython embebido (`fitz build --bundle-python`) con
-dos opciones evaluadas (python-build-standalone — mantenida
-activamente por Astral; PyOxidizer — ralentizada 2024-2025).
-Ver el [roadmap](docs/roadmap.md) para detalle. **Deudas
-comprometidas que siguen**: coerción Python list/dict → Fitz
-`List<T>`/`Map<K,V>`/`Instance` en `fitz build` (helpers ya
+**Fase 9 (Ecosistema) — pre-reqs LSP (F15 + F16) y LSP MVP entero
+CERRADOS (2026-05-15/16)**: error recovery del parser, side-table
+`TypeInfo` por nodo, server `fitz-lsp` (tower-lsp), extensión
+VSCode con grammar TextMate + cliente LSP + diagnostics en vivo +
+hover con tipo del nodo + go-to-definition + autocomplete
+contextual + distribución multi-platform con binario bundleado en
+el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
+`--features lsp` (acumulado del plan LSP). Total al cierre de
+9.x.5: 1233 unit + 79 E2E + 3 openapi sin features.
+
+**Próximo norte — tres bloques planificados con detalle alto en
+[`docs/roadmap.md`](docs/roadmap.md)**:
+
+- **9.y — Package manager + registry 📦** (siguiente arranque) —
+  `fitz.toml`, `fitz new`/`init`, `fitz add`/`remove`/`update`,
+  resolución + lockfile, registry HTTP escrito en Fitz mismo,
+  `fitz publish` + auth. 7 sub-pasos.
+- **9.z — DX completo ✨** — `fitz fmt` (cero config, gofmt-style),
+  `fitz test` con `@test` builtin, `fitz dev` con hot reload,
+  `fitz repl` interactivo, `fitz lint` (estilo + patrones).
+  5 sub-pasos.
+- **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
+  (auth nativo JWT-based), `@ws` (WebSockets tipados con
+  `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM
+  nativo + migraciones autogeneradas escala a Fase 10.
+
+**Visión post-Fase 9 (Fase 10+)** — especulativo, norte
+direccional: Fase 10 stack DB nativo + ORM declarativo, Fase 11
+frontend en `.fitz` (SFC + SSR — la apuesta más ambiciosa), Fase
+12 deployment ciudadano primera clase (`fitz deploy`, observability
+nativa), Fase 13 CLI builder (`@command`/`@arg`/`@flag`).
+
+**Sub-paso separado pendiente sin presión**: bundling CPython
+embebido (`fitz build --bundle-python`) con dos opciones evaluadas
+(python-build-standalone — mantenida activamente por Astral;
+PyOxidizer — ralentizada 2024-2025).
+
+**Deudas comprometidas que siguen**: coerción Python list/dict →
+Fitz `List<T>`/`Map<K,V>`/`Instance` en `fitz build` (helpers ya
 emitidos, falta wiring en `coerce`), `.await` con binding
 intermedio split, stubs `.pyi` parseados (pospuesto a Fase 9+),
 descripciones via doc-strings sobre handlers (OpenAPI enrichment),
