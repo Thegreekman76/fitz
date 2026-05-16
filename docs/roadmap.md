@@ -4808,8 +4808,9 @@ valor entregable):
   cliente LSP apuntando al binario en `target/release/fitz-lsp`.
   Resultado: highlighting + errores en vivo. Detalle paso-a-paso
   en sección "Fase 9.x.1" abajo.
-- **9.x.2 — Hover**: `textDocument/hover` devuelve el tipo del
-  nodo bajo el cursor. Requiere F16.
+- **9.x.2 — Hover** ✅ **CERRADA 2026-05-16**: `textDocument/hover`
+  devuelve el tipo del nodo bajo el cursor (consume el `TypeInfo`
+  de F16). Detalle paso-a-paso en sección "Fase 9.x.2" abajo.
 - **9.x.3 — Go-to-definition**: `textDocument/definition`
   resuelve `Ident` → span de declaración. Requiere mantener
   tabla de resolución de scopes del checker.
@@ -4923,6 +4924,75 @@ Tres sub-pasos coordinados (un commit por sub-paso):
 - Solo `INCREMENTAL` ausente — sync FULL por ahora.
 - Smoke visual del `.vsix` instalado en VSCode real es manual del
   autor (sin test automatizado).
+
+---
+
+## Fase 9.x.2 — LSP hover: tipo del nodo bajo el cursor (cerrada, 2026-05-16)
+
+Segunda sub-fase visible del LSP. Habilita la experiencia "pasá el
+mouse y ve qué tipo tiene esta expresión" — desbloquea el patrón
+de exploración interactiva del código que TypeScript ofrece desde
+hace años. Dos sub-pasos coordinados (un commit por sub-paso):
+
+- **9.x.2.a — Persistencia de TypeInfo por documento**:
+  - Nueva API `fitz::lsp::check_source_with_types(src) -> (TypeEnv,
+    TypeInfo, Vec<FitzError>)` que retiene el side-table poblado
+    por F16. La fn vieja `check_source` se mantiene como wrapper
+    para consumidores que solo necesitan diagnostics.
+  - `DocumentState { text, type_env, type_info }` reemplaza el
+    `String` plano en `documents`. `did_open`/`did_change` persisten
+    los tres; `did_close` limpia.
+  - 4 unit tests nuevos.
+
+- **9.x.2.b — Hover handler + lookup heurístico + capability**:
+  - `hover_for_position(&TypeInfo, line, character) -> Option<&Type>`
+    en `fitz::lsp` (pure function). Heurística "max col <= cursor
+    en la misma línea". Convierte 0-based LSP a 1-based Fitz.
+  - `make_hover(&Type, &TypeEnv) -> Hover` arma respuesta con
+    `MarkupContent::Markdown` y bloque ```fitz<tipo>```. `range:
+    None` (sin end_span).
+  - Capability `hover_provider: Some(Simple(true))`.
+  - `Backend::hover` lee state bajo lock, delega al helper.
+  - `pub fn iter()` sobre `TypeInfo` (mínimo y backward-compatible).
+  - 8 unit tests + 1 E2E nuevo (hover sobre `42` devuelve `Int`,
+    posición sin spans devuelve `null`).
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- Persistencia de TypeInfo por URI (vs re-correr pipeline en cada
+  hover) — el TypeInfo pesa nada.
+- Heurística "max col <= cursor en la misma línea" (vs lookup
+  exacto) — sin `end_span` en los nodos (S1.deuda), el 90% del
+  caso funciona.
+- Colisiones en TypeInfo aceptadas como están (heredado de F16) —
+  cuando un `BinOp` comparte span con su primer operando, gana el
+  último escrito; en práctica el tipo "grande" es lo que el
+  usuario quiere ver.
+- Persistir TypeEnv junto con TypeInfo — `Type::display` lo
+  necesita para resolver nominales.
+- `MarkupContent::Markdown` con bloque ```fitz``` (vs PlainText) —
+  syntax highlighting nativo en VSCode, sin costo extra.
+- `range: None` en Hover — sin `end_span` no podemos devolver el
+  rango; el tooltip funciona igual.
+
+**Total al cierre**: 1227 unit + 79 E2E + 3 openapi sin cambios.
+12 unit + 1 E2E nuevos con `--features lsp`. Clippy `-D warnings`
+limpio.
+
+**Próximo norte**: **9.x.3 (go-to-definition)** —
+`textDocument/definition` resuelve `Ident` → span de declaración.
+Requiere mantener tabla de resolución de scopes.
+
+**Deuda residual derivada (NO bloquea 9.x.3)**:
+
+- Range exacto en la respuesta Hover — depende de `end_span` en
+  los nodos del AST (deuda S1.Pattern/TypeExpr).
+- Lookup heurístico imperfecto en tokens largos — cuando el cursor
+  está muy al final de un identificador de >10 chars, puede
+  agarrar el siguiente Expr en la línea. Refinable con `end_span`.
+- Cursor multi-línea (string interpolation, expression sobre
+  varias líneas) — la heurística "misma línea" no cruza. Para los
+  casos comunes de Fitz hoy alcanza; refinable si pinta corto.
 
 ---
 

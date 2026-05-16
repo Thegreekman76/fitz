@@ -5502,14 +5502,20 @@ VSCode** que lo aprovecha.
   buffer en construcción, Fase 9.0 — F15) → `check_program` (Fase
   5a + F16). Severity `ERROR`, source `"fitz"` (visible en el
   Problems panel de VSCode).
+- **Hover con tipos** — pasás el mouse sobre una variable o
+  expresión y aparece su tipo en un tooltip (renderizado como
+  bloque de código Fitz, con syntax highlighting). Funciona sobre
+  literales (`42` → `Int`), identificadores en uso (`nombre` →
+  `Str`), expresiones compuestas (`xs.map(...)` → `List<U>`),
+  tipos nominales (`u` → `User`). Heurística pragmática: el último
+  Expr iniciado antes del cursor en la misma línea. Cubre el 90%
+  del caso; refinable con span completo cuando aterrice esa
+  deuda del AST.
 
 ### Lo que viene
 
 Las próximas sub-fases del LSP están planificadas:
 
-- **9.x.2 — Hover**: pasás el mouse sobre una variable o expresión
-  y aparece su tipo. Consume el side-table `TypeInfo` que el
-  checker ya retiene desde F16.
 - **9.x.3 — Go-to-definition**: F12 en VSCode (o tu binding) salta
   al `let`, `fn` o `type` que define el nombre bajo el cursor.
 - **9.x.4 — Autocomplete contextual**: tras `obj.`, mostrar fields
@@ -5599,10 +5605,10 @@ las demás integraciones quedan abiertas a contribuciones.
 
 ### Estado del proyecto LSP
 
-Esto es la primera versión (MVP). Lo que cubre — diagnostics — ya
-es valioso de por sí (errores en tiempo real, sin tener que ir a
-la terminal a correr `fitz check`). Las features ricas (hover,
-autocomplete, go-to-def) llegan en las siguientes sub-fases.
+Esto es el MVP del LSP, ya con diagnostics (9.x.1) y hover (9.x.2).
+Las features que faltan — go-to-definition (9.x.3), autocomplete
+contextual (9.x.4), distribución VSCode Marketplace (9.x.5) — llegan
+en las siguientes sub-fases.
 
 Si encontrás bugs en el LSP o sugerencias para la grammar
 TextMate (palabras que no se colorean, falsos positivos), abrí
@@ -5664,9 +5670,10 @@ Con los capítulos 1 a 21 podés:
   auto-generar `type` Fitz desde SQLAlchemy con `fitz py-types`,
   y `await` corutinas Python via bridge tokio ↔ asyncio (Fase 8).
 - **Tooling de editor**: extensión VSCode con highlighting +
-  diagnostics en vivo via LSP (Fase 9.x.1). Errores del lexer/
-  parser/checker subrayados al tipear, sin necesidad de saltar a
-  la terminal a correr `fitz check`. Ver
+  diagnostics + hover en vivo via LSP (Fase 9.x.1 + 9.x.2).
+  Errores del lexer/parser/checker subrayados al tipear, y pasás
+  el mouse sobre cualquier expresión para ver su tipo. Sin ir a
+  la terminal. Ver
   [cap 22](#22-soporte-para-editores) para cómo instalar.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
@@ -5675,7 +5682,7 @@ ejecuten, un compilador que produce binarios standalone, y un
 puente al ecosistema Python para usar SQLAlchemy/numpy/asyncpg
 sin abandonar Fitz.
 
-### Lo que viene — más allá de Fase 9.x.1
+### Lo que viene — más allá de Fase 9.x.2
 
 Las fases cerradas (al cierre de Fase 8): type checker estático
 (5a), codegen a binario nativo (5b), async nativo (6), DX HTTP
@@ -5692,11 +5699,11 @@ cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
 
 Lo que sigue post-8:
 
-- **Fase 9 — Ecosistema**: el LSP arrancó con 9.x.1 (diagnostics +
-  extensión VSCode, ver [cap 22](#22-soporte-para-editores)). Próximas
-  sub-fases: 9.x.2 hover, 9.x.3 go-to-definition, 9.x.4 autocomplete
-  contextual, 9.x.5 distribución VSCode Marketplace. Después: package
-  manager, registry, formatter, linter.
+- **Fase 9 — Ecosistema**: el LSP MVP está vivo — diagnostics
+  (9.x.1) y hover con tipos (9.x.2). Próximas sub-fases: 9.x.3
+  go-to-definition, 9.x.4 autocomplete contextual, 9.x.5
+  distribución VSCode Marketplace. Después: package manager,
+  registry, formatter, linter.
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta

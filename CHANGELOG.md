@@ -11,13 +11,106 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.1
-(LSP MVP) CERRADA**: bin nuevo `fitz-lsp` con diagnostics en vivo +
-extensión VSCode con grammar TextMate. Próximo norte: **9.x.2
-(hover)** — el LSP responde `textDocument/hover` con el tipo del
-nodo bajo el cursor (consume el `TypeInfo` de F16). Sub-paso
-separado pendiente sin presión: bundling CPython embebido (`fitz
-build --bundle-python`).
+En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.2
+(LSP hover) CERRADA**: `textDocument/hover` devuelve el tipo del
+nodo bajo el cursor consumiendo el `TypeInfo` de F16. Próximo
+norte: **9.x.3 (go-to-definition)** — `textDocument/definition`
+resuelve `Ident` → span de declaración. Sub-paso separado
+pendiente sin presión: bundling CPython embebido (`fitz build
+--bundle-python`).
+
+## [v0.9.3] — 2026-05-16 — Fase 9.x.2: LSP hover — tipo del nodo bajo el cursor
+
+Segunda sub-fase visible del LSP. El cliente VSCode (o cualquier
+otro cliente LSP) ahora puede preguntar `textDocument/hover` con
+una posición y recibe el tipo del nodo bajo el cursor — desbloquea
+la experiencia "pasá el mouse y ve qué tipo tiene esta expresión",
+equivalente al hover que TypeScript provee desde hace años.
+
+Dos sub-pasos coordinados (un commit por sub-paso):
+
+- **9.x.2.a — Persistencia de TypeInfo por documento**:
+  - Nueva API `fitz::lsp::check_source_with_types(src) -> (TypeEnv,
+    TypeInfo, Vec<FitzError>)` que retiene el side-table de tipos
+    poblado por F16. La fn vieja `check_source` se mantiene como
+    wrapper que descarta env + types (consumidores que solo
+    necesitan diagnostics).
+  - `DocumentState { text, type_env, type_info }` reemplaza el
+    `String` plano en el `documents` map del backend. `did_open`/
+    `did_change` corren la pipeline y persisten los tres; `did_close`
+    limpia.
+  - 4 unit tests nuevos: programa válido devuelve TypeInfo no vacío,
+    error de lexer aborta antes del checker (TypeInfo vacío), error
+    de tipo no borra TypeInfo (Exprs válidos quedan), sanity check
+    de equivalencia entre las dos APIs.
+
+- **9.x.2.b — Hover handler + lookup heurístico + capability**:
+  - `hover_for_position(&TypeInfo, line, character) -> Option<&Type>`
+    en `fitz::lsp` (pure function, unit-testeable). Heurística "max
+    col <= cursor en la misma línea" sobre el TypeInfo iterado.
+    Convierte 0-based LSP a 1-based Fitz. Sin `end_span` en los
+    nodos (deuda S1), asume que el último Expr iniciado antes del
+    cursor en la misma línea es el más probable — cubre 90% del
+    caso (cursor sobre o inmediatamente después de un identificador
+    /literal). Refinable cuando los nodos tengan span completo.
+  - `make_hover(&Type, &TypeEnv) -> Hover` arma la respuesta LSP
+    con `MarkupContent::Markdown` y bloque ```fitz<tipo>```. VSCode
+    renderea con syntax highlighting nativo. `range: None` porque
+    sin `end_span` no podemos devolver el rango exacto del nodo —
+    el tooltip funciona, el token no se resalta.
+  - Capability `hover_provider: Some(HoverProviderCapability::Simple(true))`
+    anunciada en `initialize`.
+  - `Backend::hover` lee el state bajo lock, delega al helper y
+    formatea con `make_hover`. Sin awaits dentro del lock.
+  - Exposición de `pub fn iter()` sobre `TypeInfo` — necesario para
+    que el LSP haga lookup heurístico (sin esto, solo `type_at`
+    para lookup exacto). Mínimo y backward-compatible.
+  - 8 unit tests nuevos cubriendo: posición exacta sobre literal,
+    medio de Ident usado como Expr, línea sin spans, cursor antes
+    del primer token, no cruce de líneas, markdown format, tipos
+    compuestos (`List<Int>` se formatea OK), smoke end-to-end.
+  - 1 E2E nuevo `hover_sobre_literal_int_devuelve_tipo_en_markdown`:
+    valida capability anunciada, hover sobre `42` en col 8 devuelve
+    `Int` en markdown fitz, hover en posición sin spans devuelve
+    `result: null`.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Persistencia de TypeInfo por URI** (vs re-correr el pipeline en
+  cada hover): re-correr sería lento sobre buffers grandes; el
+  TypeInfo es solo un `HashMap<SpanKey, Type>` — pesa nada.
+- **Heurística de lookup "max col <= cursor en la misma línea"** (vs
+  lookup exacto que casi nunca funcionaría sin que el cursor esté
+  en el inicio exacto del span). Limitación heredada de F16: sin
+  `end_span` no podemos hacer "está adentro del nodo". El 90% del
+  caso (cursor sobre token corto) funciona; tokens largos pueden
+  fallar si el cursor está muy al final.
+- **Colisiones en TypeInfo aceptadas como están**: cuando dos `Expr`
+  comparten span (típicamente un `BinOp` y su primer operando),
+  TypeInfo guarda solo el último escrito (heredado de F16). En la
+  práctica el tipo del Expr más "grande" es lo que el usuario
+  quiere ver al hover.
+- **Persistir TypeEnv junto con TypeInfo**: `Type::display` necesita
+  el env para resolver nombres de tipos nominales. Sin el env, el
+  hover sobre un `User` mostraría `Nominal(TypeId(3))` en vez de
+  `User`. Cambio chico de firma en `check_source_with_types`.
+- **`MarkupContent::Markdown` con bloque ```fitz``` (vs PlainText)**:
+  VSCode aplica syntax highlighting si reconoce el lenguaje. Más
+  bonito sin costo.
+- **`range: None` en la respuesta Hover**: sin `end_span` no podemos
+  devolver el rango exacto. El tooltip se muestra igual, solo el
+  highlighting del token no aparece.
+
+**Total al cierre**: 1227 unit (default) + 79 E2E + 3 openapi sin
+cambios. **12 unit nuevos + 1 E2E nuevo** con `--features lsp`
+(acumulado 21 unit + 3 E2E en LSP). Clippy `-D warnings` limpio.
+
+**Próximo norte**: **9.x.3 (go-to-definition)** —
+`textDocument/definition` resuelve `Ident` → span de la declaración
+(`let x = ...`, `fn f(...)`, `type T { ... }`). Requiere mantener
+una tabla de resolución de scopes desde el checker. Después: 9.x.4
+autocomplete contextual, 9.x.5 distribución VSCode Marketplace.
+Ver `docs/roadmap.md` → "Fase 9.x".
 
 ## [v0.9.2] — 2026-05-15 — Fase 9.x.1: LSP MVP — diagnostics + extensión VSCode
 
