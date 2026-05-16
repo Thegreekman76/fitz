@@ -317,6 +317,75 @@ impl TypeInfo {
     }
 }
 
+/// Side-table que persiste el `Span` de la **declaración** de cada
+/// `Ident` usado en el programa. Pre-requisito habilitante del LSP
+/// (Fase 9.x.3 — go-to-definition): `textDocument/definition` busca
+/// el ident bajo el cursor y devuelve la ubicación donde fue
+/// declarado.
+///
+/// Política de poblamiento:
+/// - Cada `Expr::Ident(name, use_span)` que el checker resuelve
+///   exitosamente vía `lookup_binding` registra
+///   `(use_span → def_span)` cuando la binding tiene span conocido.
+/// - **Builtins** (`print`, `len`, `sleep`, `cors`) tienen
+///   `def_span = Span::ZERO` y se omiten (no hay archivo donde
+///   saltar).
+/// - **Nodos con `use_span == Span::ZERO`** (sintéticos / tests)
+///   se omiten igual que en `TypeInfo`.
+///
+/// Granularidad del `def_span` registrado: por limitaciones del AST
+/// actual (sin spans propios en `AssignTarget::Ident`/`Param`/
+/// `For.var`), usamos el span del `Stmt` contenedor como
+/// aproximación. VSCode salta al stmt — el usuario ve la línea de
+/// declaración. Precisión por nombre exacto queda como deuda S1.
+#[derive(Debug, Clone, Default)]
+pub struct DefinitionInfo {
+    inner: HashMap<SpanKey, Span>,
+}
+
+impl DefinitionInfo {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Persiste la relación `use_span → def_span`. Omite silenciosa
+    /// cuando alguno de los dos es `Span::ZERO` (sintéticos / builtins).
+    pub fn record(&mut self, use_span: Span, def_span: Span) {
+        if !use_span.is_known() || !def_span.is_known() {
+            return;
+        }
+        self.inner.insert(SpanKey::from(use_span), def_span);
+    }
+
+    /// Lookup exacto por span del uso. API pública para tests.
+    #[allow(dead_code)]
+    pub fn definition_at(&self, use_span: Span) -> Option<Span> {
+        if !use_span.is_known() {
+            return None;
+        }
+        self.inner.get(&SpanKey::from(use_span)).copied()
+    }
+
+    /// Cantidad de entries. `#[allow(dead_code)]` paralelo a
+    /// `TypeInfo::len`.
+    #[allow(dead_code)]
+    pub fn len(&self) -> usize {
+        self.inner.len()
+    }
+
+    /// `true` si no hay entries registradas.
+    #[allow(dead_code)]
+    pub fn is_empty(&self) -> bool {
+        self.inner.is_empty()
+    }
+
+    /// Itera todas las entries. Útil para el LSP (Fase 9.x.3) que
+    /// hace lookup heurístico sobre posiciones del cursor.
+    pub fn iter(&self) -> impl Iterator<Item = (&SpanKey, &Span)> {
+        self.inner.iter()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Resolución de TypeExpr → Type
 // ---------------------------------------------------------------------------
@@ -728,6 +797,10 @@ use crate::ast::{AssignTarget, BinOpKind, StrPart, UnaryOpKind};
 struct VarBinding {
     ty: Type,
     annotated: bool,
+    /// Span de la declaración (let stmt, fn def, type def, param, etc.).
+    /// `Span::ZERO` para builtins — el LSP los filtra en go-to-definition
+    /// porque no hay archivo donde saltar.
+    def_span: Span,
 }
 
 /// Estado mutable durante la pasada de chequeo de expresiones.
@@ -771,6 +844,11 @@ struct CheckCtx<'a> {
     /// expone vía `check_program` para que el LSP responda hover y
     /// completion contextual.
     type_info: TypeInfo,
+    /// Side-table de definiciones por uso (Fase 9.x.3 — go-to-definition).
+    /// Poblado cuando `infer_expr` resuelve un `Expr::Ident` vía
+    /// `lookup_binding` y la binding tiene `def_span` conocido (no
+    /// builtin). Mismo flujo de exposición que `type_info`.
+    def_info: DefinitionInfo,
 }
 
 impl<'a> CheckCtx<'a> {
@@ -785,6 +863,7 @@ impl<'a> CheckCtx<'a> {
             middleware_fn_names: std::collections::HashSet::new(),
             errors: Vec::new(),
             type_info: TypeInfo::new(),
+            def_info: DefinitionInfo::new(),
         };
         ctx.register_builtins();
         ctx
@@ -795,11 +874,19 @@ impl<'a> CheckCtx<'a> {
     /// aridad y eventualmente tipos); los variádicos se modelan
     /// como `Any` hasta tener una representación dedicada.
     fn register_builtins(&mut self) {
+        // Todos los builtins usan `def_span: Span::ZERO` — no hay
+        // archivo Fitz donde saltar para go-to-definition. El LSP
+        // los filtra al responder `textDocument/definition`.
+
         // `print(args...)` — variádico. Modelado como Any: ningún
         // call sobre Any se chequea (gradual escape).
         self.scopes[0].insert(
             "print".into(),
-            VarBinding { ty: Type::Any, annotated: false },
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+            },
         );
         // `len(x) -> Int` — aridad 1 sobre List/Map/Str/Range. El
         // param es Any porque los receptores no comparten un solo
@@ -813,6 +900,7 @@ impl<'a> CheckCtx<'a> {
                     ret: Box::new(Type::Int),
                 },
                 annotated: false,
+                def_span: Span::ZERO,
             },
         );
         // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
@@ -823,7 +911,11 @@ impl<'a> CheckCtx<'a> {
         // El evaluator hace la validación completa en runtime.
         self.scopes[0].insert(
             "cors".into(),
-            VarBinding { ty: Type::Any, annotated: false },
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+            },
         );
         // `sleep(ms: Int) -> Future<Null>` — primer async primitive.
         // Introducido en Fase 6.3. La firma envuelve `Null` en
@@ -840,6 +932,7 @@ impl<'a> CheckCtx<'a> {
                     ret: Box::new(Type::Future(Box::new(Type::Null))),
                 },
                 annotated: false,
+                def_span: Span::ZERO,
             },
         );
     }
@@ -854,24 +947,36 @@ impl<'a> CheckCtx<'a> {
 
     /// Declara una variable sin anotación de tipo (inferida o
     /// gradual). Permite que reasignaciones futuras cambien el
-    /// tipo libremente.
-    fn declare_var(&mut self, name: String, ty: Type) {
+    /// tipo libremente. `def_span` es la posición de la declaración
+    /// (Fase 9.x.3 — usado por go-to-definition); pasar `Span::ZERO`
+    /// para builtins / declaraciones sintéticas.
+    fn declare_var(&mut self, name: String, ty: Type, def_span: Span) {
         if let Some(top) = self.scopes.last_mut() {
-            top.insert(name, VarBinding { ty, annotated: false });
+            top.insert(
+                name,
+                VarBinding {
+                    ty,
+                    annotated: false,
+                    def_span,
+                },
+            );
         }
     }
 
     /// Declara una variable con anotación explícita de tipo. Las
     /// reasignaciones posteriores sin anotación se van a chequear
-    /// contra este tipo.
-    fn declare_var_annotated(&mut self, name: String, ty: Type) {
+    /// contra este tipo. `def_span` igual que `declare_var`.
+    fn declare_var_annotated(&mut self, name: String, ty: Type, def_span: Span) {
         if let Some(top) = self.scopes.last_mut() {
-            top.insert(name, VarBinding { ty, annotated: true });
+            top.insert(
+                name,
+                VarBinding {
+                    ty,
+                    annotated: true,
+                    def_span,
+                },
+            );
         }
-    }
-
-    fn lookup_var(&self, name: &str) -> Option<&Type> {
-        self.lookup_binding(name).map(|b| &b.ty)
     }
 
     fn lookup_binding(&self, name: &str) -> Option<&VarBinding> {
@@ -964,8 +1069,17 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         }
 
         Expr::Ident(name, span) => {
-            if let Some(t) = ctx.lookup_var(name) {
-                return t.clone();
+            // Resolvemos el binding y clonamos lo necesario para liberar
+            // el préstamo inmutable de `ctx.scopes` antes de tocar
+            // `ctx.def_info` (que requiere &mut self). Fase 9.x.3:
+            // registramos el `def_span` para go-to-definition cuando
+            // existe (no es builtin con Span::ZERO).
+            let resolved = ctx
+                .lookup_binding(name)
+                .map(|b| (b.ty.clone(), b.def_span));
+            if let Some((ty, def_span)) = resolved {
+                ctx.def_info.record(*span, def_span);
+                return ty;
             }
             // Si es un tipo nominal declarado, el usuario lo está
             // usando como valor (lo cual el evaluator soporta:
@@ -1277,7 +1391,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
             }
         }
-        Expr::FnExpr { params, body, .. } => {
+        Expr::FnExpr { params, body, span } => {
             // Walkeamos el body con un scope nuevo y los params
             // bindeados (con su tipo declarado o `Any` si la
             // anotación faltó). El tipo del FnExpr es `Function`;
@@ -1301,7 +1415,11 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
                 .collect();
             for (p, t) in params.iter().zip(param_types.iter()) {
-                ctx.declare_var(p.name.clone(), t.clone());
+                // Sin span propio en `Param` (deuda S1), aproximamos
+                // con el span del FnExpr contenedor: hover/go-to-def
+                // sobre un uso del param salta al `fn(...)` que lo
+                // declara.
+                ctx.declare_var(p.name.clone(), t.clone(), *span);
             }
             check_block(ctx, body);
             let returns = ctx.inferred_returns.pop().unwrap_or_default();
@@ -1369,7 +1487,12 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             let mut first: Option<Type> = None;
             for arm in arms {
                 ctx.push_scope();
-                bind_pattern(ctx, &arm.pattern, &scrutinee);
+                // Sin span propio en `MatchArm`/`Pattern` (deuda S1),
+                // usamos el span del body como aproximación del
+                // `def_span` del binding — el más cercano del arm en
+                // el AST actual. go-to-def sobre el uso del binding
+                // salta al body del arm.
+                bind_pattern(ctx, &arm.pattern, &scrutinee, arm.body.span());
                 let t = infer_expr(ctx, &arm.body);
                 ctx.pop_scope();
                 if first.is_none() {
@@ -1905,11 +2028,19 @@ fn check_result_match_exhaustiveness(
 
 /// Bindea las variables introducidas por un patrón en el scope
 /// actual. `scrutinee` es el tipo del valor que se está matcheando.
-fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type) {
+/// `arm_span` es el span de aproximación que el binding usa como
+/// `def_span` (Fase 9.x.3) — sin span propio en `Pattern` (deuda
+/// S1), el caller pasa el span del body del MatchArm.
+fn bind_pattern(
+    ctx: &mut CheckCtx,
+    pat: &crate::ast::Pattern,
+    scrutinee: &Type,
+    arm_span: Span,
+) {
     use crate::ast::Pattern;
     match pat {
         Pattern::Ident(name) => {
-            ctx.declare_var(name.clone(), scrutinee.clone());
+            ctx.declare_var(name.clone(), scrutinee.clone(), arm_span);
         }
         Pattern::OkBinding(name) => {
             // `Ok(x)` desempaca `Result<T>` — x es T.
@@ -1917,11 +2048,11 @@ fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type)
                 Type::Result(t) => (**t).clone(),
                 _ => Type::Any,
             };
-            ctx.declare_var(name.clone(), inner);
+            ctx.declare_var(name.clone(), inner, arm_span);
         }
         Pattern::ErrBinding(name) => {
             // `Err(e)` — por convención la E está fijada en Str.
-            ctx.declare_var(name.clone(), Type::Str);
+            ctx.declare_var(name.clone(), Type::Str, arm_span);
         }
         Pattern::Wildcard
         | Pattern::OkWildcard
@@ -2118,7 +2249,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         }
                         // Una anotación explícita "redeclara" el binding
                         // con el tipo declarado y marca annotated=true.
-                        ctx.declare_var_annotated(name.clone(), declared);
+                        // `def_span = span` del Stmt::Assign: en caso de
+                        // reasignación, go-to-def salta al ÚLTIMO
+                        // binding stmt (semántica simplificada del MVP).
+                        ctx.declare_var_annotated(name.clone(), declared, *span);
                     }
                     None => {
                         // Sin anotación nueva: si la variable ya existe
@@ -2139,10 +2273,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                 }
                                 // Conservamos el binding anotado — la
                                 // reasignación no relaja el tipo.
-                                ctx.declare_var_annotated(name.clone(), existing_ty);
+                                ctx.declare_var_annotated(name.clone(), existing_ty, *span);
                             }
                             _ => {
-                                ctx.declare_var(name.clone(), value_ty);
+                                ctx.declare_var(name.clone(), value_ty, *span);
                             }
                         }
                     }
@@ -2263,7 +2397,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             body,
             decorators,
             is_async,
-            ..
+            span: fn_span,
         } => {
             // Abrimos scope nuevo para params y locales. Los params se
             // bindean con su tipo declarado (o Any). Empujamos el
@@ -2299,7 +2433,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.await_stack.push(*is_async);
             for p in params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
-                ctx.declare_var(p.name.clone(), pty);
+                // Sin span propio en `Param` (deuda S1), aproximamos
+                // con el span del FnDef. go-to-def sobre el uso del
+                // param salta a la línea de la fn.
+                ctx.declare_var(p.name.clone(), pty, *fn_span);
             }
             check_block(ctx, body);
             ctx.inferred_returns.pop();
@@ -2347,14 +2484,17 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 }
             };
             ctx.push_scope();
-            ctx.declare_var(var.clone(), elem_ty);
+            // `For.var` no tiene span propio (deuda S1) — aproximamos
+            // con el span del Stmt::For. go-to-def sobre el uso del
+            // var salta al `for ... in ...`.
+            ctx.declare_var(var.clone(), elem_ty, *span);
             check_block(ctx, body);
             ctx.pop_scope();
         }
 
         Stmt::Break(_) | Stmt::Continue(_) => {}
 
-        Stmt::Import { path, alias, .. } => {
+        Stmt::Import { path, alias, span } => {
             // `import a.b.c` bindea `c` (o `alias` si está) como Module.
             // 8.4: si el path arranca con `python` (prefijo reservado de
             // interop), el binding tipa como `PyAny` para que el
@@ -2364,11 +2504,14 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let binding = alias.clone().or_else(|| path.last().cloned());
             if let Some(name) = binding {
                 let ty = if from_python { Type::PyAny } else { Type::Any };
-                ctx.declare_var(name, ty);
+                // go-to-def sobre el binding salta a la línea del
+                // import (al stmt, no al módulo remoto — cross-module
+                // def es deuda visible del MVP de 9.x.3).
+                ctx.declare_var(name, ty, *span);
             }
         }
 
-        Stmt::FromImport { path, names, .. } => {
+        Stmt::FromImport { path, names, span } => {
             // Cada nombre se trae al scope como var. Algunos pueden
             // ser tipos (los chequea StructLit vía TypeEnv, ya
             // registrados en resolve_program), otros funciones o
@@ -2385,7 +2528,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             for (n, alias) in names {
                 let binding = alias.clone().unwrap_or_else(|| n.clone());
                 let ty = if from_python { Type::PyAny } else { Type::Any };
-                ctx.declare_var(binding, ty);
+                // go-to-def sobre el binding salta a la línea del
+                // `from foo import ...` — cross-module def remoto
+                // queda como deuda visible del MVP.
+                ctx.declare_var(binding, ty, *span);
             }
         }
 
@@ -2407,6 +2553,7 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
             params,
             return_type,
             is_async,
+            span,
             ..
         } = stmt
         {
@@ -2432,12 +2579,16 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
             } else {
                 ret
             };
+            // go-to-def sobre el uso de la fn salta al span del FnDef
+            // (que apunta al `fn` keyword). Aproximación; precisión
+            // por nombre requiere span propio del identificador.
             ctx.declare_var(
                 name.clone(),
                 Type::Function {
                     params: param_types,
                     ret: Box::new(outer_ret),
                 },
+                *span,
             );
         }
     }
@@ -2446,26 +2597,30 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
 /// Entrada pública del checker estático completo: corre resolución
 /// de anotaciones (`resolve_program`) y luego chequeo de expresiones.
 /// Devuelve el env, el side-table de tipos por nodo (`TypeInfo`, Fase
-/// 9.0 — F16) y la lista de errores acumulados (mezcla de los dos).
+/// 9.0 — F16), el side-table de definiciones por uso (`DefinitionInfo`,
+/// Fase 9.x.3) y la lista de errores acumulados.
 ///
-/// El `TypeInfo` se llena durante el chequeo: cada nodo `Expr` con
-/// `Span` conocido queda registrado con su tipo sintetizado. La CLI
-/// (`fitz run`/`build`/`check`) ignora el side-table; el LSP (Fase
-/// 9.x) lo consume para hover y completion contextual.
-pub fn check_program(program: &Program) -> (TypeEnv, TypeInfo, Vec<FitzError>) {
+/// Los side-tables se llenan durante el chequeo: cada nodo `Expr` con
+/// `Span` conocido tipa en `TypeInfo`; cada `Expr::Ident` resuelto a
+/// una binding con `def_span` conocido registra `(use_span → def_span)`
+/// en `DefinitionInfo`. La CLI (`fitz run`/`build`/`check`) descarta
+/// ambos; el LSP (Fase 9.x) los consume para hover y go-to-definition.
+pub fn check_program(
+    program: &Program,
+) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     let (env, mut errors) = resolve_program(program);
     // Encapsulamos `ctx` en un bloque para que su préstamo sobre `env`
-    // termine antes del return: queremos mover `env` y `ctx.type_info`
-    // por separado al caller.
-    let type_info = {
+    // termine antes del return: queremos mover `env`, `ctx.type_info`
+    // y `ctx.def_info` por separado al caller.
+    let (type_info, def_info) = {
         let mut ctx = CheckCtx::new(&env);
         preregister_fn_signatures(&mut ctx, program);
         collect_middleware_fn_names(&mut ctx, program);
         check_block(&mut ctx, program);
         errors.append(&mut ctx.errors);
-        ctx.type_info
+        (ctx.type_info, ctx.def_info)
     };
-    (env, type_info, errors)
+    (env, type_info, def_info, errors)
 }
 
 /// Mini-fase MW.1: pre-scan del programa para recolectar nombres de fns
@@ -2521,7 +2676,7 @@ mod tests {
     fn errors_of(src: &str) -> Vec<FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        let (_env, _types, errors) = check_program(&program);
+        let (_env, _types, _defs, errors) = check_program(&program);
         errors
     }
 
@@ -3442,7 +3597,7 @@ mod tests {
     fn check_str(src: &str) -> (TypeEnv, Vec<FitzError>) {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        let (env, _types, errors) = check_program(&program);
+        let (env, _types, _defs, errors) = check_program(&program);
         (env, errors)
     }
 
@@ -5183,7 +5338,7 @@ mod tests {
     fn check_recovering(src: &str) -> Vec<FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let (program, _parser_errors) = crate::parser::parse_with_recovery(tokens);
-        let (_env, _types, errors) = check_program(&program);
+        let (_env, _types, _defs, errors) = check_program(&program);
         errors
     }
 
@@ -5274,7 +5429,7 @@ mod tests {
             value: AstExpr::Error(Span::ZERO),
             span: Span::ZERO,
         }];
-        let (_env, _types, errors) = check_program(&program);
+        let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
             errors.is_empty(),
             "Expr::Error debe sintetizar Type::Any y no agregar errores: {:?}",
@@ -5298,7 +5453,7 @@ mod tests {
     fn types_of(src: &str) -> TypeInfo {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        let (_env, type_info, _errors) = check_program(&program);
+        let (_env, type_info, _defs, _errors) = check_program(&program);
         type_info
     }
 
@@ -5438,7 +5593,7 @@ let v = match r {
             value: AstExpr::Int(42, Span::ZERO),
             span: Span::ZERO,
         }];
-        let (_env, type_info, _errors) = check_program(&program);
+        let (_env, type_info, _defs, _errors) = check_program(&program);
         // El Int(42, Span::ZERO) NO debe quedar en el side-table —
         // su span no es known. Cualquier otra cosa (si el parser
         // emite algo) tampoco tiene span real porque el programa fue
@@ -5466,7 +5621,7 @@ let v = match r {
             value: AstExpr::Error(span),
             span,
         }];
-        let (_env, type_info, _errors) = check_program(&program);
+        let (_env, type_info, _defs, _errors) = check_program(&program);
         assert_eq!(
             type_info.type_at(span),
             Some(&Type::Any),
@@ -5512,6 +5667,113 @@ print(total)
             "programa con varios nodos debe persistir ≥10 entries; got {}: {:?}",
             info.len(),
             info.inner
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Fase 9.x.3 — DefinitionInfo: side-table de uso → declaración.
+    //
+    // Tests sobre la población del side-table desde el wrapper
+    // `infer_expr` cuando ve un `Expr::Ident`. Cubrimos: var local, fn
+    // top-level, no-registro para builtins (def_span Span::ZERO).
+    // -----------------------------------------------------------------------
+
+    /// Helper: corre el pipeline y devuelve el `DefinitionInfo`.
+    fn defs_of(src: &str) -> DefinitionInfo {
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (_env, _types, def_info, _errors) = check_program(&program);
+        def_info
+    }
+
+    #[test]
+    fn def_info_registra_uso_de_variable_local() {
+        // `let x = 1` en línea 1, `let y = x` en línea 2. El uso de
+        // `x` en línea 2 debe registrar (use_span, def_span) con
+        // def_span apuntando al Stmt::Assign de la línea 1.
+        let defs = defs_of("let x = 1\nlet y = x\n");
+        assert!(
+            !defs.is_empty(),
+            "uso de variable local debe registrarse en DefinitionInfo"
+        );
+        // Al menos un entry tiene def_span en línea 1 (el let de x).
+        let has_def_in_line_1 = defs.iter().any(|(_, def_span)| def_span.line == 1);
+        assert!(
+            has_def_in_line_1,
+            "def_span del binding `x` debe apuntar a línea 1: {:?}",
+            defs.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn def_info_no_registra_builtins() {
+        // `print` es builtin con def_span = Span::ZERO. Usar `print`
+        // no debe agregar entries a DefinitionInfo (Span::ZERO se
+        // omite por política — no hay archivo donde saltar).
+        let defs = defs_of("print(42)\n");
+        // Solo el ident `print` produciría una entry; el literal `42`
+        // no es un Ident. Verificamos que NO hay registros (DefInfo
+        // vacío) — el filtro de Span::ZERO descarta el builtin.
+        assert!(
+            defs.is_empty(),
+            "uso de builtin no debe registrarse en DefinitionInfo: {:?}",
+            defs.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn def_info_registra_uso_de_fn_top_level() {
+        // `fn dobla(n: Int) -> Int => n * 2` en línea 1.
+        // `dobla(21)` en línea 2 — el uso del nombre `dobla` debe
+        // registrar def_span en línea 1.
+        let defs = defs_of("fn dobla(n: Int) -> Int => n * 2\nlet x = dobla(21)\n");
+        assert!(!defs.is_empty(), "uso de fn top-level debe registrarse");
+        let has_def_in_line_1 = defs.iter().any(|(_, def_span)| def_span.line == 1);
+        assert!(
+            has_def_in_line_1,
+            "def_span del FnDef `dobla` debe estar en línea 1: {:?}",
+            defs.iter().collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn def_info_registra_uso_de_param_de_fn() {
+        // El uso del param `n` adentro del body de `fn dobla` se
+        // registra como Ident con def_span en la línea del FnDef
+        // (sin span propio en `Param`, aproximamos al FnDef).
+        let defs = defs_of("fn dobla(n: Int) -> Int => n * 2\n");
+        // El cuerpo flecha contiene un uso del ident `n` en línea 1.
+        // El def_span del param también es línea 1 (mismo Stmt).
+        assert!(!defs.is_empty(), "uso del param debe registrarse");
+        let entry = defs.iter().next().unwrap();
+        let (use_span, def_span) = entry;
+        assert_eq!(use_span.0, 1, "use en línea 1");
+        assert_eq!(def_span.line, 1, "def_span del param es la fn (línea 1)");
+    }
+
+    #[test]
+    fn def_info_definition_at_devuelve_none_para_span_desconocido() {
+        let defs = defs_of("let x = 1\nlet y = x\n");
+        assert!(
+            defs.definition_at(Span::new(999, 999)).is_none(),
+            "span ausente debe devolver None"
+        );
+        assert!(
+            defs.definition_at(Span::ZERO).is_none(),
+            "Span::ZERO debe devolver None"
+        );
+    }
+
+    #[test]
+    fn def_info_no_registra_uso_de_ident_no_definido() {
+        // El ident `nope` no existe en scope — el checker emite
+        // error, pero no debe registrar entries en DefinitionInfo
+        // (no hay binding al cual apuntar).
+        let defs = defs_of("let y = nope\n");
+        assert!(
+            defs.is_empty(),
+            "ident no definido no debe registrarse: {:?}",
+            defs.iter().collect::<Vec<_>>()
         );
     }
 }

@@ -32,25 +32,28 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use fitz::lsp::{
     check_source_with_types, fitz_errors_to_diagnostics, hover_for_position, make_hover,
 };
-use fitz::types::{TypeEnv, TypeInfo};
+use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
 /// Estado por documento abierto. Persiste el último texto recibido por
-/// `did_open`/`did_change`, el `TypeEnv` resuelto (necesario para
-/// formatear nombres de tipos nominales en hover) y el `TypeInfo`
-/// resultante del último chequeo. El handler `hover` (Fase 9.x.2)
-/// consulta ambos para responder `textDocument/hover` sin re-correr
-/// el pipeline.
+/// `did_open`/`did_change` y los side-tables resultantes del último
+/// chequeo: `TypeEnv` (resuelve nombres de tipos nominales para hover),
+/// `TypeInfo` (tipo por nodo — hover, Fase 9.x.2), `DefinitionInfo`
+/// (uso → declaración — go-to-definition, Fase 9.x.3).
 //
 // `#[allow(dead_code)]` puntual sobre `text` — lo persistimos para
-// consumidores futuros (9.x.3 go-to-definition probablemente lo
-// necesite para mapear cursor → span), pero hover no lo lee. Mismo
-// patrón que `parse_with_recovery` pre-consumidores en F15.
+// consumidores futuros (autocomplete probablemente lo necesite para
+// mapear cursor → token preciso), pero hover y definition no lo leen.
 #[derive(Debug)]
 struct DocumentState {
     #[allow(dead_code)]
     text: String,
     type_env: TypeEnv,
     type_info: TypeInfo,
+    // `def_info` se escribe en 9.x.3.a; lo lee el handler `definition`
+    // en 9.x.3.b. Mismo patrón que `parse_with_recovery` pre-consumidores
+    // en F15.
+    #[allow(dead_code)]
+    def_info: DefinitionInfo,
 }
 
 #[derive(Debug)]
@@ -70,7 +73,7 @@ impl Backend {
     /// en `documents`, y publica los diagnósticos. Devuelve nada — la
     /// notificación es fire-and-forget.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
-        let (type_env, type_info, errors) = check_source_with_types(&text);
+        let (type_env, type_info, def_info, errors) = check_source_with_types(&text);
         let diagnostics = fitz_errors_to_diagnostics(&errors);
         self.documents.lock().insert(
             uri.clone(),
@@ -78,6 +81,7 @@ impl Backend {
                 text,
                 type_env,
                 type_info,
+                def_info,
             },
         );
         self.client

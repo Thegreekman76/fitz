@@ -891,7 +891,7 @@ impl ModuleLoader {
             crate::lexer::tokenize(&source).map_err(|e| loader_err(e.message.clone()))?;
         let module_program =
             crate::parser::parse(tokens).map_err(|e| loader_err(e.message.clone()))?;
-        let (module_env, _types, type_errors) = check_program(&module_program);
+        let (module_env, _types, _defs, type_errors) = check_program(&module_program);
         if !type_errors.is_empty() {
             return Err(loader_err(format!(
                 "el módulo `{}` tiene errores de tipo: {}",
@@ -8140,7 +8140,7 @@ mod tests {
     fn gen(src: &str) -> Result<String, FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        let (env, _types, errors) = check_program(&program);
+        let (env, _types, _defs, errors) = check_program(&program);
         if !errors.is_empty() {
             panic!("checker errors: {:?}", errors);
         }
@@ -8170,7 +8170,7 @@ mod tests {
     fn gen_ignoring_check(src: &str) -> Result<String, FitzError> {
         let tokens = tokenize(src).expect("lex OK");
         let program = parse(tokens).expect("parse OK");
-        let (env, _types, _errors) = check_program(&program);
+        let (env, _types, _defs, _errors) = check_program(&program);
         generate_rust(&program, &env)
     }
 
@@ -11532,7 +11532,7 @@ mod tests {
         )
         .unwrap();
         let program = crate::parser::parse(tokens).unwrap();
-        let (env, _types, errs) = crate::types::check_program(&program);
+        let (env, _types, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty(), "checker errors: {:?}", errs);
         let project = generate_project(Path::new("test.fitz"), &program, &env).unwrap();
         assert!(
@@ -11557,7 +11557,7 @@ mod tests {
         use std::path::Path;
         let tokens = crate::lexer::tokenize("print(\"hola\")").unwrap();
         let program = crate::parser::parse(tokens).unwrap();
-        let (env, _types, errs) = crate::types::check_program(&program);
+        let (env, _types, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty());
         let project = generate_project(Path::new("test.fitz"), &program, &env).unwrap();
         assert!(
@@ -11841,7 +11841,7 @@ mod tests {
     fn gen_module(src: &str) -> Result<String, FitzError> {
         let tokens = crate::lexer::tokenize(src).expect("lex OK");
         let program = crate::parser::parse(tokens).expect("parse OK");
-        let (env, _types, errors) = crate::types::check_program(&program);
+        let (env, _types, _defs, errors) = crate::types::check_program(&program);
         if !errors.is_empty() {
             panic!("checker errors: {:?}", errors);
         }

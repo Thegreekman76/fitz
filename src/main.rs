@@ -161,7 +161,7 @@ fn openapi_file(path: &PathBuf) {
     // Checker estricto: no tiene sentido emitir un schema de un programa
     // con errores de tipo (el handler quizá ni siquiera tipa). Mismo
     // criterio que `fitz build`.
-    let (_env, _types, type_errors) = types::check_program(&program);
+    let (_env, _types, _defs, type_errors) = types::check_program(&program);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} error(es) de tipo:",
@@ -230,7 +230,7 @@ fn check_file(path: &PathBuf) {
             std::process::exit(1);
         }
     };
-    let (_env, _types, errors) = types::check_program(&program);
+    let (_env, _types, _defs, errors) = types::check_program(&program);
     if errors.is_empty() {
         println!("✓ {} — sin errores de tipo", path.display());
     } else {
@@ -280,7 +280,7 @@ fn build_file(path: &PathBuf) {
     };
 
     // Checker en modo strict — no hay `--no-typecheck` en build.
-    let (env, _types, type_errors) = types::check_program(&program);
+    let (env, _types, _defs, type_errors) = types::check_program(&program);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} error(es) de tipo:",
@@ -432,7 +432,7 @@ fn run_file(path: &PathBuf, no_typecheck: bool) {
     // evaluator. La flag `--no-typecheck` cambia el comportamiento
     // a warning (los reporta pero sigue ejecutando), pensada para
     // legacy code o para diagnosticar bugs del checker.
-    let (_type_env, _types, type_errors) = types::check_program(&program);
+    let (_type_env, _types, _defs, type_errors) = types::check_program(&program);
     if !type_errors.is_empty() {
         if no_typecheck {
             eprintln!(

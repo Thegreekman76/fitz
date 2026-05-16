@@ -8,9 +8,7 @@
 use crate::error::FitzError;
 use crate::lexer::tokenize;
 use crate::parser::parse_with_recovery;
-use crate::types::{check_program, TypeEnv, TypeInfo};
-
-use crate::types::Type;
+use crate::types::{check_program, DefinitionInfo, Type, TypeEnv, TypeInfo};
 
 use tower_lsp::lsp_types::{
     Diagnostic, DiagnosticSeverity, Hover, HoverContents, MarkupContent, MarkupKind, Position, Range,
@@ -25,33 +23,38 @@ use tower_lsp::lsp_types::{
 /// chequear). Parser y checker siempre devuelven sus errores en
 /// paralelo a lo que pudieron recuperar.
 ///
-/// Esta variante descarta el `TypeEnv` y `TypeInfo` retornados por
+/// Esta variante descarta los side-tables retornados por
 /// `check_program` (consumidores que solo necesitan diagnostics). Para
-/// hover, usar `check_source_with_types`.
+/// hover / go-to-definition, usar `check_source_with_types`.
 pub fn check_source(source: &str) -> Vec<FitzError> {
-    let (_env, _type_info, errors) = check_source_with_types(source);
+    let (_env, _type_info, _def_info, errors) = check_source_with_types(source);
     errors
 }
 
-/// Pipeline LSP-style + `TypeEnv` y `TypeInfo` retenidos. Variante de
-/// `check_source` para consumidores que necesitan el side-table de
-/// tipos por nodo (Fase 9.x.2 — hover) y el env para resolver nombres
-/// de tipos nominales al formatear (`Type::display(&env)`).
+/// Pipeline LSP-style + `TypeEnv`, `TypeInfo` y `DefinitionInfo`
+/// retenidos. Variante de `check_source` para consumidores que
+/// necesitan el side-table de tipos por nodo (Fase 9.x.2 — hover), el
+/// env para resolver nombres de tipos nominales al formatear, y el
+/// side-table de definiciones por uso (Fase 9.x.3 — go-to-definition).
 ///
-/// El `TypeInfo` viene poblado por `check_program` (F16): cada `Expr`
-/// con span conocido tiene su tipo sintetizado adentro.
-///
-/// Si la pipeline aborta antes del checker (error de lexer), el
-/// `TypeEnv` queda vacío y el `TypeInfo` también.
-pub fn check_source_with_types(source: &str) -> (TypeEnv, TypeInfo, Vec<FitzError>) {
+/// Si la pipeline aborta antes del checker (error de lexer), los tres
+/// side-tables quedan vacíos.
+pub fn check_source_with_types(
+    source: &str,
+) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     let tokens = match tokenize(source) {
         Ok(t) => t,
-        Err(e) => return (TypeEnv::default(), TypeInfo::new(), vec![e]),
+        Err(e) => return (
+            TypeEnv::default(),
+            TypeInfo::new(),
+            DefinitionInfo::new(),
+            vec![e],
+        ),
     };
     let (program, mut errors) = parse_with_recovery(tokens);
-    let (env, type_info, mut type_errors) = check_program(&program);
+    let (env, type_info, def_info, mut type_errors) = check_program(&program);
     errors.append(&mut type_errors);
-    (env, type_info, errors)
+    (env, type_info, def_info, errors)
 }
 
 /// Convierte una lista de `FitzError` en `Diagnostic`s LSP. Pure
@@ -275,7 +278,7 @@ mod tests {
     #[test]
     fn check_source_with_types_programa_valido_devuelve_type_info_no_vacio() {
         let src = "let x = 42\nlet y = x + 1";
-        let (_env, type_info, errors) = check_source_with_types(src);
+        let (_env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(errors.is_empty(), "errores inesperados: {errors:?}");
         assert!(
             !type_info.is_empty(),
@@ -288,7 +291,7 @@ mod tests {
         // String sin cerrar — lexer aborta antes del parser/checker,
         // entonces el `TypeInfo` no se puede poblar.
         let src = "let x = \"sin cerrar";
-        let (_env, type_info, errors) = check_source_with_types(src);
+        let (_env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(!errors.is_empty(), "lexer debería rechazar string sin cerrar");
         assert!(
             type_info.is_empty(),
@@ -302,7 +305,7 @@ mod tests {
         // Exprs válidos quedan en TypeInfo, los inválidos también con
         // el tipo "best-effort".
         let src = "let x = 42\nlet y: Int = \"mal\"";
-        let (_env, type_info, errors) = check_source_with_types(src);
+        let (_env, type_info, _defs, errors) = check_source_with_types(src);
         assert!(!errors.is_empty(), "debería haber un TypeError");
         assert!(
             !type_info.is_empty(),
@@ -318,7 +321,7 @@ mod tests {
         // que es col 8 LSP (0-based). El cursor en (line=0, char=8)
         // debería matchear el Int.
         let src = "let x = 42";
-        let (_env, type_info, _errs) = check_source_with_types(src);
+        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 8);
         assert!(matches!(ty, Some(Type::Int)), "esperaba Int, dio {ty:?}");
     }
@@ -339,7 +342,7 @@ mod tests {
         // misma línea" debe devolver Some(_) (el tipo del Ident o el
         // del BinOp que comparte span — ambos Int).
         let src = "let nombre = 42\nlet x = nombre + 1";
-        let (_env, type_info, _errs) = check_source_with_types(src);
+        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 1, 11);
         assert!(matches!(ty, Some(Type::Int)), "esperaba Int, dio {ty:?}");
     }
@@ -348,7 +351,7 @@ mod tests {
     fn hover_for_position_linea_sin_spans_devuelve_none() {
         // Programa de una línea; cursor en línea 5 → no hay spans.
         let src = "let x = 1";
-        let (_env, type_info, _errs) = check_source_with_types(src);
+        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 5, 0);
         assert!(ty.is_none(), "esperaba None en línea sin spans, dio {ty:?}");
     }
@@ -358,7 +361,7 @@ mod tests {
         // `   let x = 1` — cursor en col 0 está antes de cualquier
         // Expr (el primer Expr es `1` en col 13 (1-based)).
         let src = "   let x = 1";
-        let (_env, type_info, _errs) = check_source_with_types(src);
+        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 0);
         assert!(ty.is_none(), "esperaba None antes del primer token, dio {ty:?}");
     }
@@ -368,7 +371,7 @@ mod tests {
         // Aseguramos que la heurística no se "escapa" a la línea
         // anterior cuando la línea del cursor está vacía de spans.
         let src = "let x = 42\n   ";
-        let (_env, type_info, _errs) = check_source_with_types(src);
+        let (_env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 1, 0);
         assert!(ty.is_none(), "no debería cruzar líneas, dio {ty:?}");
     }
@@ -403,7 +406,7 @@ mod tests {
     fn hover_end_to_end_pipeline_devuelve_int_para_un_literal() {
         // Smoke combinado: pipeline + hover sobre el literal `42`.
         let src = "let x = 42";
-        let (env, type_info, _errs) = check_source_with_types(src);
+        let (env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 8).expect("debería matchear");
         let hover = make_hover(ty, &env);
         if let HoverContents::Markup(MarkupContent { value, .. }) = &hover.contents {
@@ -420,7 +423,7 @@ mod tests {
         // mismos mensajes).
         let src = "let x: Int = \"mal\"\nlet y: Str = 42";
         let errs_solo = check_source(src);
-        let (_env, _type_info, errs_with) = check_source_with_types(src);
+        let (_env, _type_info, _defs, errs_with) = check_source_with_types(src);
         assert_eq!(errs_solo.len(), errs_with.len());
         for (a, b) in errs_solo.iter().zip(errs_with.iter()) {
             assert_eq!(a.message, b.message);
