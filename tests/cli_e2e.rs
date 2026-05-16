@@ -190,3 +190,155 @@ fn programa_generado_por_new_corre_con_fitz_run() {
         "stdout inesperado: {stdout}"
     );
 }
+
+// ---- Fase 9.y.2 — `fitz run`/`build`/`check` integrados con manifest ----
+
+/// Helper: crea un proyecto con `fitz new <name> --no-git` adentro de
+/// `tmp` y devuelve el path del proyecto.
+fn create_project(tmp_root: &Path, name: &str) -> std::path::PathBuf {
+    let (_stdout, stderr, code) =
+        run_fitz(&["new", name, "--no-git"], tmp_root);
+    assert_eq!(code, 0, "fitz new falló: {stderr}");
+    tmp_root.join(name)
+}
+
+#[test]
+fn run_sin_args_dentro_de_proyecto_ejecuta_bin_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "run-test");
+    let (stdout, stderr, code) = run_fitz(&["run"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("Hola desde run-test"),
+        "stdout inesperado: {stdout}"
+    );
+}
+
+#[test]
+fn check_sin_args_dentro_de_proyecto_chequea_bin_main() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "check-test");
+    let (stdout, _stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("sin errores de tipo"),
+        "stdout inesperado: {stdout}"
+    );
+}
+
+#[test]
+fn run_camina_hacia_arriba_buscando_manifest() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "walk-test");
+    let nested = project.join("subdir").join("more");
+    std::fs::create_dir_all(&nested).unwrap();
+    let (stdout, stderr, code) = run_fitz(&["run"], &nested);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("Hola desde walk-test"), "stdout: {stdout}");
+}
+
+#[test]
+fn run_con_archivo_explicito_ignora_manifest_y_corre_en_single_file_mode() {
+    // El archivo explícito es de un proyecto ajeno: el cwd está adentro
+    // de `walk-test` pero pasamos un .fitz que vive en otro lado.
+    let tmp = tempfile::tempdir().unwrap();
+    let _project = create_project(tmp.path(), "walk-test");
+    let other_dir = tmp.path().join("other");
+    std::fs::create_dir_all(&other_dir).unwrap();
+    let other_fitz = other_dir.join("script.fitz");
+    std::fs::write(&other_fitz, "print(\"single-file mode OK\")\n").unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&other_fitz)
+        .current_dir(tmp.path().join("walk-test"))
+        .output()
+        .expect("fitz run");
+    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("single-file mode OK"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn run_sin_manifest_y_sin_archivo_aborta_con_mensaje_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    // No creamos proyecto: el tempdir está vacío.
+    let (_stdout, stderr, code) = run_fitz(&["run"], tmp.path());
+    assert_eq!(code, 1);
+    assert!(stderr.contains("fitz.toml"), "stderr: {stderr}");
+    assert!(stderr.contains("fitz new"), "stderr: {stderr}");
+}
+
+#[test]
+fn check_sin_manifest_y_sin_archivo_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["check"], tmp.path());
+    assert_eq!(code, 1);
+    assert!(stderr.contains("fitz.toml"), "stderr: {stderr}");
+}
+
+#[test]
+fn manifest_sin_seccion_bin_aborta_con_mensaje_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::write(
+        tmp.path().join("fitz.toml"),
+        "[package]\nname = \"sin-bin\"\nversion = \"0.1.0\"\nedition = \"2026\"\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["run"], tmp.path());
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("[bin]"),
+        "stderr no menciona [bin]: {stderr}"
+    );
+}
+
+#[test]
+fn manifest_corrupto_aborta_con_mensaje_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    // TOML malformado: cierra una tabla sin abrir.
+    std::fs::write(tmp.path().join("fitz.toml"), "this is = = not toml\n").unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["run"], tmp.path());
+    assert_eq!(code, 1);
+    // El mensaje viene de ManifestError::Parse (toml::de::Error).
+    assert!(
+        stderr.contains("parseando manifest") || stderr.contains("fitz.toml"),
+        "stderr no menciona parsing: {stderr}"
+    );
+}
+
+/// Build sin args en manifest mode: produce el binario en
+/// `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre del
+/// paquete (NO el stem del fuente). Test pesado (~3s) porque invoca
+/// rustc real adentro de cargo build.
+#[test]
+fn build_sin_args_emite_a_target_release_con_pkg_name() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "build-target-test");
+    let (_stdout, stderr, code) = run_fitz(&["build"], &project);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let bin_name = if cfg!(windows) {
+        "build-target-test.exe"
+    } else {
+        "build-target-test"
+    };
+    let bin_path = project.join("target").join("release").join(bin_name);
+    assert!(
+        bin_path.exists(),
+        "binario no existe en {}",
+        bin_path.display()
+    );
+
+    // Ejecutar el binario y verificar el output.
+    let output = Command::new(&bin_path).output().expect("ejecutar binario");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("Hola desde build-target-test"),
+        "stdout del binario: {stdout}"
+    );
+}

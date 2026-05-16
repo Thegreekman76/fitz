@@ -26,24 +26,33 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Ejecutar un archivo .fitz
+    /// Ejecutar un archivo .fitz (o el `[bin].main` del `fitz.toml` si
+    /// no se pasa archivo — Fase 9.y.2).
     Run {
-        /// Archivo a ejecutar
-        file: PathBuf,
+        /// Archivo a ejecutar. Si se omite, busca `fitz.toml` en el
+        /// directorio actual o ancestros (Cargo-style) y ejecuta su
+        /// `[bin].main`.
+        file: Option<PathBuf>,
         /// Saltar el chequeo estático de tipos. Sin esta flag los
         /// errores del checker abortan la ejecución (modo strict).
         #[arg(long)]
         no_typecheck: bool,
     },
-    /// Compilar a binario (Fase 5)
+    /// Compilar a binario (Fase 5b). Sin archivo, lee el manifest
+    /// (Fase 9.y.2) y emite el binario a `<manifest>/target/release/`
+    /// con el nombre del paquete.
     Build {
-        /// Archivo a compilar
-        file: PathBuf,
+        /// Archivo a compilar. Si se omite, busca `fitz.toml` y
+        /// compila su `[bin].main` con output en
+        /// `<manifest_dir>/target/release/<pkg-name>`.
+        file: Option<PathBuf>,
     },
-    /// Verificar tipos y sintaxis
+    /// Verificar tipos y sintaxis. Sin archivo, lee el manifest
+    /// (Fase 9.y.2) y chequea el `[bin].main`.
     Check {
-        /// Archivo a verificar
-        file: PathBuf,
+        /// Archivo a verificar. Si se omite, busca `fitz.toml` y
+        /// chequea su `[bin].main`.
+        file: Option<PathBuf>,
     },
     /// Emite el schema OpenAPI 3.1 del programa a stdout
     Openapi {
@@ -103,13 +112,30 @@ fn main() {
 
     match cli.command {
         Commands::Run { file, no_typecheck } => {
-            run_file(&file, no_typecheck);
+            let resolved = resolve_entry(file);
+            run_file(&resolved.entry, no_typecheck);
         }
         Commands::Build { file } => {
-            build_file(&file);
+            let resolved = resolve_entry(file);
+            // En manifest mode, output a `<manifest_dir>/target/release/
+            // <pkg-name>(.exe)` (Cargo-style). En single-file mode, el
+            // copy adyacente al fuente se decide adentro de build_file.
+            let override_dest = resolved.manifest_ctx.as_ref().map(|ctx| {
+                let filename = if cfg!(windows) {
+                    format!("{}.exe", ctx.manifest.package.name)
+                } else {
+                    ctx.manifest.package.name.clone()
+                };
+                ctx.manifest_dir
+                    .join("target")
+                    .join("release")
+                    .join(filename)
+            });
+            build_file(&resolved.entry, override_dest.as_deref());
         }
         Commands::Check { file } => {
-            check_file(&file);
+            let resolved = resolve_entry(file);
+            check_file(&resolved.entry);
         }
         Commands::Openapi { file } => {
             openapi_file(&file);
@@ -123,6 +149,109 @@ fn main() {
         Commands::Init { name, http, no_git } => {
             init_project(name.as_deref(), http, no_git);
         }
+    }
+}
+
+// ---- Fase 9.y.2 — resolución de entry point (single-file vs manifest) ----
+
+/// Contexto del manifest cargado durante `resolve_entry`. Cuando está
+/// presente, el caller sabe que el run/build/check arrancó desde un
+/// proyecto Fitz (no en modo single-file).
+///
+/// Por ahora solo lo consume `build_file` para decidir el destino del
+/// binario. Los otros call sites (`run_file`, `check_file`) ignoran el
+/// ctx — el entry resuelto ya es suficiente para reproducir el
+/// comportamiento single-file pre-9.y.2.
+struct ManifestCtx {
+    manifest: manifest::Manifest,
+    manifest_dir: PathBuf,
+}
+
+/// Resultado de resolver el entry point del comando. `entry` apunta al
+/// `.fitz` a procesar; `manifest_ctx` está presente cuando se llegó
+/// vía `fitz.toml` (manifest mode).
+struct ResolvedEntry {
+    entry: PathBuf,
+    manifest_ctx: Option<ManifestCtx>,
+}
+
+/// Resuelve el entry point del subcomando:
+///
+/// - Si `file_opt.is_some()`, modo **single-file** (compatibilidad
+///   pre-9.y.2): devuelve el path tal cual, sin manifest ctx.
+/// - Si `file_opt.is_none()`, modo **manifest**: busca `fitz.toml`
+///   subiendo desde el cwd (Cargo-style), lo parsea, y devuelve
+///   `<manifest_dir>/[bin].main` como entry. Sale del proceso con
+///   mensaje claro si:
+///   - no hay `fitz.toml` arriba del cwd (sugiere `fitz new` o pasar
+///     archivo explícito);
+///   - el manifest no parsea;
+///   - el manifest no tiene sección `[bin]` (el MVP de 9.y exige uno;
+///     multi-bin queda 9.y.8+).
+fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
+    if let Some(entry) = file_opt {
+        return ResolvedEntry {
+            entry,
+            manifest_ctx: None,
+        };
+    }
+
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        std::process::exit(1);
+    });
+
+    let manifest_path = match manifest::find_manifest(&cwd) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "✗ no se encontró `{}` en `{}` ni en directorios padre.\n   \
+                 Pasá un archivo explícito (`fitz <cmd> archivo.fitz`) o creá un \
+                 proyecto con `fitz new <nombre>` / `fitz init`.",
+                manifest::MANIFEST_FILE,
+                cwd.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!(
+            "✗ no se pudo leer `{}`: {e}",
+            manifest_path.display()
+        );
+        std::process::exit(1);
+    });
+
+    let manifest = manifest::Manifest::parse(&manifest_text).unwrap_or_else(|e| {
+        eprintln!("✗ `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    });
+
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.clone());
+
+    let bin = match &manifest.bin {
+        Some(b) => b,
+        None => {
+            eprintln!(
+                "✗ `{}` no tiene sección `[bin]` con un `main`. El MVP del package \
+                 manager (Fase 9.y) requiere uno. Agregá:\n\n[bin]\nmain = \"src/main.fitz\"\n",
+                manifest_path.display()
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let entry = manifest_dir.join(&bin.main);
+    ResolvedEntry {
+        entry,
+        manifest_ctx: Some(ManifestCtx {
+            manifest,
+            manifest_dir,
+        }),
     }
 }
 
@@ -287,8 +416,16 @@ fn check_file(path: &PathBuf) {
 
 /// `fitz build <archivo>` — Fase 5b. Compila el .fitz a binario nativo.
 /// Flujo: lex → parse → checker (strict) → codegen a Cargo project →
-/// `cargo build --release` → copia el binario adyacente al archivo
-/// fuente.
+/// `cargo build --release` → copia el binario.
+///
+/// Destino del binario:
+/// - **Single-file mode** (`override_dest = None`): adyacente al `.fitz`
+///   con el stem original (`hello.fitz` → `hello.exe`). Comportamiento
+///   pre-9.y.2.
+/// - **Manifest mode** (`override_dest = Some(p)`): el caller provee la
+///   ruta destino completa (típicamente `<manifest_dir>/target/release/
+///   <pkg-name>(.exe)`). Llega desde el dispatch en `main()` cuando el
+///   user corre `fitz build` sin args y hay un `fitz.toml`.
 ///
 /// Desde 5b.5 generamos un Cargo project en lugar de invocar rustc
 /// directamente. Razones: (a) los imports cross-archivo necesitan
@@ -297,7 +434,7 @@ fn check_file(path: &PathBuf) {
 /// `Cargo.toml` generado sin reescribir pipeline; (c) cargo cachea
 /// incremental, lo que abarata segunda compilación. Trade-off: la
 /// primera compilación cuesta ~1-2s más que `rustc` directo.
-fn build_file(path: &PathBuf) {
+fn build_file(path: &PathBuf, override_dest: Option<&std::path::Path>) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
         std::process::exit(1);
@@ -425,10 +562,28 @@ fn build_file(path: &PathBuf) {
         .join("target")
         .join("release")
         .join(&release_bin_filename);
-    let bin_out = path
-        .parent()
-        .map(|p| p.join(&output_filename))
-        .unwrap_or_else(|| PathBuf::from(&output_filename));
+
+    // Destino: override del manifest (9.y.2) o adyacente al fuente.
+    let bin_out = match override_dest {
+        Some(p) => p.to_path_buf(),
+        None => path
+            .parent()
+            .map(|p| p.join(&output_filename))
+            .unwrap_or_else(|| PathBuf::from(&output_filename)),
+    };
+
+    // Crear el directorio destino si hace falta (manifest mode: el
+    // primer build de un proyecto recién creado no tiene target/release/
+    // todavía).
+    if let Some(parent) = bin_out.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Error creando {}: {}", parent.display(), e);
+                std::process::exit(1);
+            }
+        }
+    }
+
     if let Err(e) = fs::copy(&release_bin_path, &bin_out) {
         eprintln!(
             "Error copiando {} a {}: {}",

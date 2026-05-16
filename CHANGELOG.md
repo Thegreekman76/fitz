@@ -12,12 +12,40 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager arrancó** — sub-paso 9.y.1 (manifest + scaffolding)
-CERRADO el 2026-05-16. Próximo: 9.y.2 (integración de `fitz run`/
-`build`/`check` con el manifest).
+manager con dos sub-pasos cerrados** — 9.y.1 (manifest +
+scaffolding) y 9.y.2 (integración de `fitz run`/`build`/`check`
+con el manifest), ambos el 2026-05-16. Próximo: 9.y.3 (resolución
+de deps + lockfile).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.8] — 2026-05-16 — Fase 9.y.2: `fitz run`/`build`/`check` leen el manifest
+
+Segundo sub-paso del package manager. Sin archivo explícito, los
+tres subcomandos detectan `fitz.toml` en el cwd o ancestros
+(Cargo-style) y usan `[bin].main` como entry point. En manifest
+mode, `fitz build` emite el binario a
+`<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre del
+paquete (no el stem del fuente).
+
+**Sin breaking**: los ejemplos de la guía siguen corriendo
+idénticos con `fitz run examples/guide/02-hola.fitz`. Los 79 tests
+de `compile_e2e` (single-file mode) verdes sin cambio.
+
+Decisiones cerradas: `target/release/<pkg-name>(.exe)` adyacente
+al manifest hardcodeado (configurable post-MVP), `fitz check`
+chequea solo el `[bin].main` (loader walks imports
+transitivamente), compat single-file silenciosa sin warning,
+manifest sin `[bin]` aborta con la sección sugerida inline,
+multi-bin (`[[bin]]` array) sigue deuda 9.y.8+.
+
+- 9 E2E tests nuevos en `tests/cli_e2e.rs`: run/check sin args,
+  walk-up desde subdir, single-file mode compat, errores (sin
+  manifest + sin archivo, sin `[bin]`, TOML corrupto), build sin
+  args produce binario con pkg-name en `target/release/`.
+- Total: 1246 unit + 20 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
 
 ## [v0.9.7] — 2026-05-16 — Fase 9.y.1: manifest + `fitz new` / `fitz init`
 

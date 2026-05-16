@@ -5390,7 +5390,7 @@ detectar `fitz.toml` en cwd o ancestros (Cargo-style) y usar
 `[bin].main` como entry point. `find_manifest` ya está listo
 desde 9.y.1.
 
-#### 9.y.2 — `fitz run`/`build` integrados con manifest
+#### 9.y.2 — `fitz run`/`build`/`check` integrados con manifest ✓ (CERRADA, 2026-05-16)
 
 Cambio de comportamiento del CLI: detectar `fitz.toml` en el
 directorio actual o en padres (Cargo-style).
@@ -5398,18 +5398,86 @@ directorio actual o en padres (Cargo-style).
 - **`fitz run`** sin argumentos: lee `fitz.toml`, ejecuta
   `[bin].main`. Con argumento `fitz run archivo.fitz` sigue
   funcionando como hoy (modo "single file").
-- **`fitz build`** análogo. Output: `target/release/<nombre>`
-  adyacente al `fitz.toml`, no al archivo fuente.
-- **`fitz check`** análogo: chequea todos los `.fitz` del proyecto,
-  no solo el de entry.
-- **Decisiones**:
-  - ¿`target/` adyacente al manifest o configurable?
-  - ¿Auto-discovery de tests (`tests/*.fitz` o `*_test.fitz`)?
-  - ¿Compatibilidad hacia atrás con el modo single-file: sí, sin
-    warning? Con warning de "considerá `fitz new`"? Solo durante
-    v0.X?
-- **Sin breaking** para los ejemplos de la guía: cada uno sigue
-  corriendo con `fitz run examples/guide/02-hola.fitz`.
+- **`fitz build`** sin argumentos: lee el manifest y compila
+  `[bin].main`, emitiendo el binario a
+  `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre
+  del paquete (NO el stem del fuente). Con argumento explícito
+  sigue copiando adyacente al `.fitz` (comportamiento pre-9.y.2).
+- **`fitz check`** sin argumentos: chequea el `[bin].main`. El
+  loader walks los `import`s transitivamente, así que la cobertura
+  del checker llega a todo el proyecto vía el grafo de módulos.
+  Auto-discovery de archivos sueltos (`*.fitz` no importados) es
+  deuda menor.
+
+#### Decisiones técnicas tomadas
+
+- **`target/release/<pkg-name>(.exe)`** adyacente al manifest,
+  hardcodeado en el dispatch. Configurable via `[build] target =
+  "..."` post-MVP si aparece presión.
+- **`fitz check` solo el entry**: el loader walks imports, así que
+  todos los módulos referenciados se chequean transitivamente. Un
+  modo que recorra TODOS los `.fitz` del directorio (incluyendo
+  archivos sueltos no importados) es deuda menor — refinable si
+  aparece presión.
+- **Compat single-file silenciosa**: sin warning. Los ejemplos de
+  la guía siguen corriendo idénticos con `fitz run examples/
+  guide/02-hola.fitz`. La promesa "sin breaking" del bloque 9.y
+  se cumple bit-a-bit.
+- **Manifest sin `[bin]`**: error claro con la sección sugerida
+  inline. Multi-bin (`[[bin]]` array) sigue siendo deuda 9.y.8+.
+- **TOML corrupto**: error explícito via `ManifestError::Parse`
+  (delegado al mensaje de `toml::de::Error`).
+- **`find_manifest` ya estaba en 9.y.1**: ahora tiene consumidor,
+  saco el `#[allow(dead_code)]` puntual.
+- **Estructura del dispatch**: `ResolvedEntry { entry,
+  manifest_ctx: Option<ManifestCtx> }` devuelto por
+  `resolve_entry()`. Single-file mode: ctx = None. Manifest mode:
+  ctx = Some con la `Manifest` parseada + `manifest_dir`. El
+  `build_file` toma `override_dest: Option<&Path>` y decide el
+  destino del copy del binario.
+
+#### Total al cierre
+
+**1246 unit + 20 cli_e2e** (+9 nuevos de 9.y.2 sobre los 11 de
+9.y.1) **+ 79 compile_e2e + 3 openapi** sin features. Clippy
+`-D warnings` limpio. **Sin breaking**: los 79 tests de
+`compile_e2e` (single-file mode) siguen verdes idénticos.
+
+Archivos:
+
+- `src/main.rs` — `Commands::Run/Build/Check.file` pasa a
+  `Option<PathBuf>`. Nuevo `ResolvedEntry` + `ManifestCtx` +
+  `resolve_entry()`. `build_file` toma `override_dest:
+  Option<&Path>` con `create_dir_all` del parent destino para que
+  `target/release/` se cree on-demand al primer build.
+- `tests/cli_e2e.rs` — 9 E2E nuevos: run/check sin args, walk-up
+  desde subdir, single-file mode compat, errores (sin manifest +
+  sin archivo, sin `[bin]`, TOML corrupto), build sin args produce
+  binario con pkg-name en `target/release/`.
+
+#### Decisiones residuales (NO bloquean 9.y.3)
+
+- **`fitz check` recorriendo TODOS los `.fitz` del proyecto** (no
+  solo el entry + imports): refinable post-MVP. El loader ya
+  cubre transitivamente cualquier módulo importado; archivos
+  sueltos no importados quedan sin chequear hasta que aparezca el
+  caso de uso real.
+- **Configuración del output dir**: `[build] target = "..."`
+  hardcodeable post-MVP. Hoy `target/release/` adyacente al
+  manifest, Cargo-style.
+- **Multi-bin (`[[bin]]` array)**: sigue siendo deuda 9.y.8+.
+- **`fitz build` con `--release`/`--debug`**: hoy siempre release
+  (idem comportamiento pre-9.y.2). Modo debug llega cuando aparezca
+  presión.
+- **Discovery de `tests/`**: auto-discovery de `tests/*.fitz`
+  llega con 9.z.2 (`fitz test`), no es scope de 9.y.
+
+#### Próximo norte
+
+**9.y.3 — Resolución de deps + lockfile** — agregar
+`[dependencies]` con tipos `path = "..."` y `git = "..."`,
+algoritmo de resolución, lockfile `fitz.lock` commiteable, cache
+local en `~/.fitz/cache/`. Sin registry todavía (9.y.5).
 
 #### 9.y.3 — Resolución de deps + lockfile
 

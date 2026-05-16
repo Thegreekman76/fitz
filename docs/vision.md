@@ -302,3 +302,25 @@ si podía existir un lenguaje que tomara lo mejor de ambos mundos.
 
 El nombre es por el Fitz Roy — la montaña más icónica de la Patagonia.
 Imponente, reconocible, única. Como el lenguaje que intenta ser.
+
+## El logo
+
+El logo de Fitz es un **engranaje de Rust** con la **silueta del
+Fitz Roy adentro**. Cuenta exactamente lo que es el proyecto:
+
+- **El engranaje** — en el naranja oficial de Rust (`#CE412B`) —
+  representa el lenguaje con el que Fitz está construido. Fitz es,
+  en su corazón, un compilador escrito en Rust; el engranaje
+  reconoce esa deuda y se inscribe en el ecosistema Rust en lugar
+  de fingir ser otra cosa.
+- **El Fitz Roy adentro** — tres picos, el central más alto —
+  recuerda el origen del nombre y del proyecto. La montaña que se
+  ve desde El Chaltén, imponente y reconocible, da el nombre y la
+  identidad: un lenguaje nacido en la Patagonia, no en Silicon
+  Valley.
+
+La combinación dice "construido con Rust, nacido en una montaña":
+**ingeniería sólida sirviendo una identidad clara**. Es la misma
+tesis que el lenguaje propone — tomar lo mejor de un stack
+existente (Rust como base, Python/TS como ergonomía) para algo
+nuevo con personalidad propia.

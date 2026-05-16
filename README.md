@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="assets/logo.png" alt="Fitz logo" width="160" />
+  <img src="assets/logo.png" alt="Fitz logo — engranaje de Rust con la silueta del Fitz Roy adentro" width="160" />
+</p>
+
+<p align="center">
+  <em>Engranaje de Rust, Fitz Roy adentro: construido con Rust, nacido en una montaña.<br/>
+  Más sobre el porqué del logo en <a href="docs/vision.md#el-logo">docs/vision.md → El logo</a>.</em>
 </p>
 
 # Fitz
@@ -440,14 +445,19 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
 - **9.y — Package manager + registry 📦** (en curso) — `fitz.toml`,
   `fitz new`/`init`, `fitz add`/`remove`/`update`, resolución +
   lockfile, registry HTTP escrito en Fitz mismo, `fitz publish` +
-  auth. 7 sub-pasos. **9.y.1 CERRADO (2026-05-16)** — formato
-  manifest TOML + `fitz new <nombre>` y `fitz init` con templates
-  default (`print` top-level) y `--http` (`@get`/`@server`),
-  `git init` automático con `--no-git`, validación de nombre
-  estilo crates.io. 13 unit + 11 E2E nuevos; total al cierre:
-  1246 unit + 11 cli_e2e + 79 compile_e2e + 3 openapi. Sin
-  cambio user-facing en `fitz run`/`build` (esa integración llega
-  en 9.y.2).
+  auth. 7 sub-pasos. **9.y.1 + 9.y.2 CERRADOS (2026-05-16)**:
+  - **9.y.1** — formato manifest TOML + `fitz new <nombre>` y
+    `fitz init` con templates default (`print` top-level) y
+    `--http` (`@get`/`@server`), `git init` automático con
+    `--no-git`, validación de nombre estilo crates.io.
+  - **9.y.2** — `fitz run`/`build`/`check` sin args leen el
+    manifest del cwd/ancestros (Cargo-style walk-up). `fitz build`
+    en manifest mode emite a `<manifest>/target/release/<pkg-name>(.exe)`
+    con el nombre del paquete. **Sin breaking**: los ejemplos de la
+    guía siguen corriendo idénticos con `fitz run examples/guide/X.fitz`.
+  - Total al cierre 9.y.2: 1246 unit + 20 cli_e2e + 79 compile_e2e
+    + 3 openapi. Clippy `-D warnings` limpio.
+  - Próximo: **9.y.3** — resolución de deps + lockfile.
 - **9.z — DX completo ✨** — `fitz fmt` (cero config, gofmt-style),
   `fitz test` con `@test` builtin, `fitz dev` con hot reload,
   `fitz repl` interactivo, `fitz lint` (estilo + patrones).
