@@ -4,7 +4,7 @@
 // lib + bin para que `fitz-lsp` pueda reusarlos sin compilación
 // duplicada). Acá solo importamos lo que el CLI consume.
 
-use fitz::{codegen, evaluator, http, lexer, manifest, openapi, parser, types};
+use fitz::{codegen, evaluator, http, lexer, lockfile, manifest, openapi, parser, types};
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
 #[cfg(feature = "python")]
@@ -113,10 +113,12 @@ fn main() {
     match cli.command {
         Commands::Run { file, no_typecheck } => {
             let resolved = resolve_entry(file);
+            sync_lockfile_if_needed(&resolved);
             run_file(&resolved.entry, no_typecheck);
         }
         Commands::Build { file } => {
             let resolved = resolve_entry(file);
+            sync_lockfile_if_needed(&resolved);
             // En manifest mode, output a `<manifest_dir>/target/release/
             // <pkg-name>(.exe)` (Cargo-style). En single-file mode, el
             // copy adyacente al fuente se decide adentro de build_file.
@@ -135,6 +137,7 @@ fn main() {
         }
         Commands::Check { file } => {
             let resolved = resolve_entry(file);
+            sync_lockfile_if_needed(&resolved);
             check_file(&resolved.entry);
         }
         Commands::Openapi { file } => {
@@ -252,6 +255,44 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
             manifest,
             manifest_dir,
         }),
+    }
+}
+
+/// Fase 9.y.3.a — sincroniza el `fitz.lock` con las deps del manifest.
+/// No-op en modo single-file y cuando el manifest no tiene deps.
+///
+/// Para 9.y.3.a las deps son solo path deps (resolución determinística
+/// trivial). El lockfile se regenera siempre; `write_lockfile_if_changed`
+/// hace short-circuit byte-a-byte cuando el contenido coincide para
+/// no spamear mtime y diff vacío.
+fn sync_lockfile_if_needed(resolved: &ResolvedEntry) {
+    let ctx = match &resolved.manifest_ctx {
+        Some(c) => c,
+        None => return,
+    };
+    if ctx.manifest.dependencies.is_empty() {
+        return;
+    }
+
+    let deps = manifest::resolve_dependencies(&ctx.manifest, &ctx.manifest_dir)
+        .unwrap_or_else(|e| {
+            eprintln!("✗ no se pudieron resolver las dependencias: {e}");
+            std::process::exit(1);
+        });
+
+    let lock = lockfile::Lockfile::from_resolved(&deps);
+    let path = lockfile::lockfile_path(&ctx.manifest_dir);
+    match lockfile::write_lockfile_if_changed(&path, &lock) {
+        Ok(true) => {
+            // Solo notificamos cuando escribimos algo nuevo. La
+            // regeneración silenciosa es el caso 90% y no merece spam.
+            println!("✓ actualizado {}", path.display());
+        }
+        Ok(false) => {} // sin cambios
+        Err(e) => {
+            eprintln!("✗ no se pudo escribir `{}`: {e}", path.display());
+            std::process::exit(1);
+        }
     }
 }
 

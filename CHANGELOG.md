@@ -12,13 +12,56 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager con dos sub-pasos cerrados** — 9.y.1 (manifest +
-scaffolding) y 9.y.2 (integración de `fitz run`/`build`/`check`
-con el manifest), ambos el 2026-05-16. Próximo: 9.y.3 (resolución
-de deps + lockfile).
+manager con tres sub-pasos cerrados** — 9.y.1 (manifest +
+scaffolding), 9.y.2 (integración de `fitz run`/`build`/`check`
+con el manifest), y 9.y.3.a (path deps + sección `[lib]` + lockfile
+`fitz.lock`), todos el 2026-05-16. **9.y.3 está partido en tres
+sub-commits**: 9.y.3.a CERRADO; próximos 9.y.3.b (loader
+integration — deps usables desde código) y 9.y.3.c (git deps +
+cache local).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.9] — 2026-05-16 — Fase 9.y.3.a: path deps + sección `[lib]` + `fitz.lock`
+
+Primer slice del tercer sub-paso del package manager. Habilita
+declarar `[dependencies] foo = { path = "../foo" }` en el manifest;
+el `fitz.lock` se emite/sincroniza automáticamente en cada
+`fitz run`/`build`/`check` (manifest mode). **NO toca el loader
+del lenguaje** todavía — las deps quedan declaradas y bloqueadas
+en el lockfile pero `from foo import X` no las resuelve aún. Esa
+promesa es 9.y.3.b.
+
+Sintaxis: `[dependencies] utils-lib = { path = "../utils-lib" }`
+en el importer + sección nueva `[lib] entry = "src/lib.fitz"` en
+la dep (paralelo a `[bin] main`). Path deps son librerías por
+definición — si la dep solo tiene `[bin]`, el resolver aborta
+con la sección `[lib]` sugerida inline.
+
+`fitz.lock` formato TOML Cargo-style: `version = 1` + `[[package]]`
+con `name`/`version`, sin campo `source` para path deps (convención
+Cargo: implícitas). El lockfile se regenera idempotentemente —
+sin cambios = sin escritura (no spam de mtime).
+
+Decisiones cerradas: lockfile TOML, `Dependency` enum
+`Version(String) | Detailed(...)` con `serde(untagged)`,
+`Lib.entry` obligatorio sin defaults mágicos, path deps son libs
+por definición, lockfile siempre regenerado idempotente, sin
+emisión si no hay deps. Versiones sueltas (`foo = "1.0.0"`) y
+git deps se aceptan al parse pero el resolver las rechaza con
+errores accionables citando 9.y.5 (registry) y 9.y.3.c (git)
+respectivamente.
+
+- 10 unit tests nuevos en `manifest::tests` (Dependency parse
+  forms, Lib parse, resolve_dependencies happy + 5 error paths).
+- 14 unit tests nuevos en `lockfile::tests` (parse/serialize/
+  round-trip, from_resolved ordering, idempotencia de write).
+- 8 E2E tests nuevos en `tests/cli_e2e.rs` (lockfile emitido,
+  idempotencia, regen en cambio de versión, sin deps no emite,
+  errores: version/git/path inexistente/sin `[lib]`).
+- Total: 1270 unit + 28 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
 
 ## [v0.9.8] — 2026-05-16 — Fase 9.y.2: `fitz run`/`build`/`check` leen el manifest
 

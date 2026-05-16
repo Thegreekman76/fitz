@@ -310,6 +310,169 @@ fn manifest_corrupto_aborta_con_mensaje_claro() {
     );
 }
 
+// ---- Fase 9.y.3.a — path deps + lockfile ----
+
+/// Helper: convierte un proyecto `path/to/proj` (creado con `fitz new`)
+/// de binary a library reescribiendo `fitz.toml` con `[lib]` en vez
+/// de `[bin]`. También escribe un `src/lib.fitz` mínimo.
+fn convert_to_lib(project_dir: &Path, name: &str, version: &str) {
+    let lib_manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"{version}\"\nedition = \"2026\"\n\n[lib]\nentry = \"src/lib.fitz\"\n"
+    );
+    std::fs::write(project_dir.join("fitz.toml"), lib_manifest).unwrap();
+    std::fs::create_dir_all(project_dir.join("src")).unwrap();
+    std::fs::write(
+        project_dir.join("src").join("lib.fitz"),
+        "// lib mínima para tests\nfn helper(x: Int) -> Int => x + 1\n",
+    )
+    .unwrap();
+}
+
+/// Helper: reescribe el `fitz.toml` de un proyecto agregando una sección
+/// `[dependencies]` con un path dep.
+fn add_path_dep(project_dir: &Path, app_name: &str, dep_name: &str, rel_path: &str) {
+    let manifest = format!(
+        "[package]\nname = \"{app_name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n\n[dependencies]\n{dep_name} = {{ path = \"{rel_path}\" }}\n"
+    );
+    std::fs::write(project_dir.join("fitz.toml"), manifest).unwrap();
+}
+
+#[test]
+fn check_con_path_dep_emite_lockfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_dir = tmp.path().join("utils-lib");
+    let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
+    convert_to_lib(&lib_dir, "utils-lib", "0.2.0");
+
+    let app_dir = tmp.path().join("app");
+    let _ = run_fitz(&["new", "app", "--no-git"], tmp.path());
+    add_path_dep(&app_dir, "app", "utils-lib", "../utils-lib");
+
+    let (stdout, stderr, code) = run_fitz(&["check"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("actualizado"), "stdout: {stdout}");
+
+    let lock_path = app_dir.join("fitz.lock");
+    assert!(lock_path.is_file(), "lockfile no existe");
+    let lock_text = std::fs::read_to_string(&lock_path).unwrap();
+    assert!(lock_text.contains("version = 1"));
+    assert!(lock_text.contains("name = \"utils-lib\""));
+    assert!(lock_text.contains("version = \"0.2.0\""));
+    // Path deps NO tienen source en el lockfile (Cargo convention).
+    assert!(!lock_text.contains("source"), "lockfile: {lock_text}");
+}
+
+#[test]
+fn check_es_idempotente_sin_re_escribir_lockfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_dir = tmp.path().join("utils-lib");
+    let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
+    convert_to_lib(&lib_dir, "utils-lib", "0.2.0");
+
+    let app_dir = tmp.path().join("app");
+    let _ = run_fitz(&["new", "app", "--no-git"], tmp.path());
+    add_path_dep(&app_dir, "app", "utils-lib", "../utils-lib");
+
+    // Primera corrida escribe el lockfile.
+    let (stdout1, _, _) = run_fitz(&["check"], &app_dir);
+    assert!(stdout1.contains("actualizado"));
+
+    // Segunda corrida no re-escribe (mismo contenido).
+    let (stdout2, _, _) = run_fitz(&["check"], &app_dir);
+    assert!(
+        !stdout2.contains("actualizado"),
+        "segunda corrida no debía notificar update: {stdout2}"
+    );
+}
+
+#[test]
+fn lockfile_se_regenera_cuando_dep_cambia_version() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_dir = tmp.path().join("utils-lib");
+    let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
+    convert_to_lib(&lib_dir, "utils-lib", "0.2.0");
+
+    let app_dir = tmp.path().join("app");
+    let _ = run_fitz(&["new", "app", "--no-git"], tmp.path());
+    add_path_dep(&app_dir, "app", "utils-lib", "../utils-lib");
+
+    let _ = run_fitz(&["check"], &app_dir);
+
+    // Cambiar la versión de la dep.
+    convert_to_lib(&lib_dir, "utils-lib", "0.5.1");
+
+    let (stdout, _, code) = run_fitz(&["check"], &app_dir);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("actualizado"), "stdout: {stdout}");
+    let lock_text = std::fs::read_to_string(app_dir.join("fitz.lock")).unwrap();
+    assert!(lock_text.contains("version = \"0.5.1\""), "lock: {lock_text}");
+}
+
+#[test]
+fn proyecto_sin_deps_no_emite_lockfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "no-deps");
+    let (_stdout, _stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(code, 0);
+    assert!(
+        !project.join("fitz.lock").exists(),
+        "no debió crearse fitz.lock para proyecto sin deps"
+    );
+}
+
+#[test]
+fn version_corta_aborta_citando_9y5() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "ver-app");
+    std::fs::write(
+        project.join("fitz.toml"),
+        "[package]\nname = \"ver-app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n\n[dependencies]\nfoo = \"1.0.0\"\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("9.y.5"), "stderr: {stderr}");
+}
+
+#[test]
+fn git_dep_aborta_citando_9y3c() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "git-app");
+    std::fs::write(
+        project.join("fitz.toml"),
+        "[package]\nname = \"git-app\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n\n[dependencies]\nhelpers = { git = \"https://github.com/foo/bar\" }\n",
+    )
+    .unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("9.y.3.c"), "stderr: {stderr}");
+}
+
+#[test]
+fn path_dep_inexistente_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "missing-app");
+    add_path_dep(&project, "missing-app", "ghost", "../no-existe");
+    let (_stdout, stderr, code) = run_fitz(&["check"], &project);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no existe"), "stderr: {stderr}");
+}
+
+#[test]
+fn path_dep_sin_lib_aborta_con_sugerencia() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Dep es un proyecto solo-bin (no library).
+    let _ = run_fitz(&["new", "solo-bin", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("app");
+    let _ = run_fitz(&["new", "app", "--no-git"], tmp.path());
+    add_path_dep(&app_dir, "app", "solo-bin", "../solo-bin");
+
+    let (_stdout, stderr, code) = run_fitz(&["check"], &app_dir);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("[lib]"), "stderr: {stderr}");
+    assert!(stderr.contains("entry"), "stderr: {stderr}");
+}
+
 /// Build sin args en manifest mode: produce el binario en
 /// `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre del
 /// paquete (NO el stem del fuente). Test pesado (~3s) porque invoca

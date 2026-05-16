@@ -5482,29 +5482,193 @@ local en `~/.fitz/cache/`. Sin registry todavía (9.y.5).
 #### 9.y.3 — Resolución de deps + lockfile
 
 Antes del registry, primero la mecánica de resolución sobre deps
-**locales y git** (sin servidor):
+**locales y git** (sin servidor). Sub-paso grande — partido en
+tres sub-commits para que cada deliverable cierre algo testeable
+sin meternos en commits gigantes:
 
-- **Tipos de dep soportados** en `[dependencies]`:
+- **9.y.3.a — Path deps + sección `[lib]` + lockfile**
+  ✓ CERRADO (2026-05-16). Detalle abajo.
+- **9.y.3.b — Loader integration** (deps usables desde código):
+  pendiente.
+- **9.y.3.c — Git deps + cache local**: pendiente.
+
+##### 9.y.3.a — Path deps + sección `[lib]` + lockfile ✓ (CERRADA, 2026-05-16)
+
+Primer slice del tercer sub-paso. Habilita declarar
+`[dependencies]` con `foo = { path = "../foo" }` en el manifest;
+el `fitz.lock` se emite/sincroniza automáticamente en cada
+`fitz run`/`build`/`check` (manifest mode). **NO toca el loader
+del lenguaje** — las deps quedan declaradas y bloqueadas en el
+lockfile pero `from foo import X` todavía no las resuelve. Esa
+promesa es 9.y.3.b.
+
+- **Sintaxis manifest**:
   ```toml
   [dependencies]
-  utils = { path = "../utils" }
-  http-helpers = { git = "https://github.com/...", tag = "v1.2.0" }
+  utils-lib = { path = "../utils-lib" }
+  # Versión suelta (futuro 9.y.5 = registry):
+  # algo = "1.0.0"
+  # Git deps (futuro 9.y.3.c):
+  # helpers = { git = "https://github.com/foo/bar", tag = "v1.0.0" }
   ```
-- **`fitz.lock`**: archivo paralelo al manifest que pinea
-  exactamente qué versión de cada dep se usó. Commiteable
-  (Cargo-style). Algoritmo de resolución: TBD según decisión
-  global 5.
-- **Cache local global** en `~/.fitz/cache/<paquete>/<version>/`.
-  Git deps cacheadas por commit hash.
-- **Decisiones**:
-  - ¿Formato del lockfile: TOML o JSON?
-  - Resolución determinística (mismo input → mismo output) —
-    garantía obligatoria.
-  - ¿Permitir `branch = "main"` en git deps (no reproducible) o
-    solo `tag`/`rev`?
-- **Trade-offs**: arrancar con path+git deps sin registry te
-  permite **dogfood** el package manager antes de tener servidor
-  — los primeros paquetes Fitz pueden vivir en repos GitHub.
+- **Sección `[lib]`** nueva, paralela a `[bin]`. Marca al
+  proyecto como librería importable:
+  ```toml
+  [lib]
+  entry = "src/lib.fitz"
+  ```
+- **`fitz.lock`** TOML, Cargo-style:
+  ```toml
+  version = 1
+
+  [[package]]
+  name = "utils-lib"
+  version = "0.2.0"
+  ```
+  Sin campo `source` para path deps (convención Cargo: las path
+  deps son implícitas; `source = "git+..."` y `source = "registry+..."`
+  vienen en 9.y.3.c y 9.y.5 respectivamente).
+
+###### Decisiones técnicas tomadas
+
+- **Lockfile en TOML** (uniforme con `fitz.toml`). v1 = path deps
+  solamente; bumps incrementales si rompemos compat.
+- **`Dependency` enum con `serde(untagged)`**: acepta
+  `foo = "1.2.3"` (`Version(String)`) y
+  `foo = { path = "..." }` (`Detailed(...)`). Los campos
+  `git`/`tag`/`rev` se aceptan al parse pero el resolver los
+  rechaza con error claro citando `9.y.3.c`. La versión suelta
+  se rechaza citando `9.y.5` (registry). Política: parser
+  permisivo, resolver estricto → mensajes accionables.
+- **`Lib.entry` obligatorio** (sin default mágico). Quien quiere
+  exponer su proyecto como library lo declara explícito.
+- **Path deps son librerías por definición**: si una dep tiene
+  solo `[bin]` (sin `[lib]`), el resolver aborta con la sección
+  `[lib]` sugerida inline en el mensaje.
+- **Resolución determinística**: trivial para path deps (un dep,
+  un path). Para git/registry vendrá un algoritmo real cuando
+  aparezca (lean global 5: empezar greedy, migrar a PubGrub si
+  duele).
+- **Lockfile siempre re-generado** en `fitz run`/`build`/`check`
+  (idempotente para path deps). `write_lockfile_if_changed` hace
+  short-circuit byte-a-byte cuando el contenido coincide — no
+  spam de mtime, diff vacío.
+- **Lockfile NO se emite si no hay deps**: proyecto vacío de
+  `[dependencies]` no genera `fitz.lock` (sin valor, ruido).
+- **Notificación discreta**: `✓ actualizado fitz.lock` solo
+  cuando re-escribe; caso 90% silencioso.
+
+###### Total al cierre
+
+**1270 unit** (+24: 10 manifest + 14 lockfile) **+ 28 cli_e2e**
+(+8 de 9.y.3.a sobre los 20 previos) **+ 79 compile_e2e + 3
+openapi**. Clippy `-D warnings` limpio. **Sin breaking**: las
+79 corridas de `compile_e2e` (single-file mode) verdes idéntico,
+todos los E2E previos de 9.y.1/9.y.2 verdes.
+
+Archivos:
+
+- `src/manifest.rs` (+~320 LoC) — `Dependency` enum,
+  `DetailedDependency`, `Lib`, `Manifest.lib`,
+  `Manifest.dependencies: BTreeMap<String, Dependency>`,
+  `ResolvedDep`, `ResolvedDepSource`, `resolve_dependencies`,
+  5 variants nuevas en `ManifestError` con mensajes accionables.
+- `src/lockfile.rs` (nuevo, +~250 LoC) — `Lockfile`,
+  `LockedPackage`, `LockfileError`, `parse`/`to_toml_string`,
+  `from_resolved` (ordena alfabéticamente), `lockfile_matches`,
+  `write_lockfile_if_changed`.
+- `src/lib.rs` — `pub mod lockfile`.
+- `src/main.rs` — `sync_lockfile_if_needed(&ResolvedEntry)`
+  llamado desde Run/Build/Check arms.
+- `tests/cli_e2e.rs` (+~130 LoC) — 8 E2E nuevos: path dep
+  emitido, idempotencia, regen en cambio de versión, sin deps
+  no emite, errores (`version`/`git`/`path inexistente`/`sin [lib]`).
+
+###### Decisiones residuales (NO bloquean 9.y.3.b)
+
+- **Loader integration**: las deps están en el lockfile pero
+  `from utils-lib import helper` desde el código del importer
+  todavía NO resuelve. Es exactamente el scope de 9.y.3.b.
+- **Cache local** en `~/.fitz/cache/`: no aplica para path deps
+  (los paths son referencias directas al filesystem). Necesario
+  para git/registry — llega con 9.y.3.c.
+- **`source` field en lockfile**: el campo está reservado en el
+  schema (`LockedPackage.source: Option<String>`) pero solo se
+  emite en `None` para path deps en 9.y.3.a. 9.y.3.c lo poblará
+  con `"git+url#sha"`.
+- **Aliasing de deps** (`foo = { path = "../bar", package = "bar" }`):
+  diferido. Hoy el nombre en `[dependencies]` debe matchear el
+  `package.name` del manifest de la dep.
+- **Validación cruzada** (no permitir `path` + `git` juntos):
+  diferida. El resolver hoy chequea `path` primero, después
+  `git`/`tag`/`rev` por separado; combinaciones inválidas dan
+  errores secuenciales en vez de combinados.
+
+###### Próximo norte tras 9.y.3.a
+
+**9.y.3.b — Loader integration**: cambiar el module loader
+(usado por `evaluator::load_module` en `fitz run` y por
+`codegen` en `fitz build`) para que consulte el dep registry
+resuelto antes de fallback a paths relativos. `from utils-lib
+import helper` resuelve contra `<utils-lib>/src/lib.fitz`
+(el `lib_entry` de `ResolvedDep`). Toca lo más invasivo de
+9.y.3 — refactor del loader compartido.
+
+##### 9.y.3.b — Loader integration (PENDIENTE)
+
+Segundo slice. Hace que las deps declaradas y bloqueadas en
+9.y.3.a sean **realmente usables** desde código Fitz.
+
+- Cambio en `evaluator::load_module` y el equivalente en
+  `codegen`: antes de resolver `from <name> import X` como path
+  relativo al importer, consultar un "dep registry" que
+  contenga las `ResolvedDep` del proyecto en curso.
+- Si `<name>` matchea una dep resuelta → cargar desde
+  `dep.lib_entry`; si no, comportamiento actual (path relativo).
+- Imports transitivos: una dep puede a su vez tener
+  `[dependencies]` propias (deuda de 5b.5: imports transitivos
+  no soportaban en codegen). Resolver recursivamente al cargar
+  el manifest del importer raíz.
+- Decisiones a cerrar:
+  - ¿Cómo se pasa el dep registry al loader? Argument-passing
+    explícito vs thread-local vs context struct nuevo.
+  - ¿Path deps que importan otras path deps? Sí, transitivo.
+  - ¿Conflicto si dos deps tienen el mismo nombre (caso ridículo
+    con paths distintos)? Error al resolver.
+  - ¿Imports relativos DENTRO de una dep (`from ./helpers import X`):
+    resuelven contra `dep.abs_path`, no contra el cwd del
+    importer.
+  - ¿Caching del módulo: cada `from X import Y` re-parsea o
+    cache por path canonicalizado?
+
+##### 9.y.3.c — Git deps + cache local (PENDIENTE)
+
+Tercer slice. Habilita deps de repos remotos.
+
+- **Sintaxis**:
+  ```toml
+  [dependencies]
+  helpers = { git = "https://github.com/foo/bar", tag = "v1.0.0" }
+  ```
+- **`git clone --depth 1`** a `~/.fitz/cache/git/<hash>/`.
+  Hash = SHA-256 de la URL + tag/rev/commit para deduplicar.
+- **Lockfile** registra el commit hash exacto:
+  ```toml
+  [[package]]
+  name = "helpers"
+  version = "1.0.0"
+  source = "git+https://github.com/foo/bar#abc123def..."
+  ```
+- **Decisiones a cerrar**:
+  - ¿`branch = "main"` permitido (no reproducible) o solo
+    `tag`/`rev`? Lean: solo `tag`/`rev`.
+  - ¿`git` invocado via subprocess o vía crate (`git2`/`gix`)?
+    Lean: subprocess `git clone` (zero deps adicionales, OS-git
+    funciona; crate más limpio pero pesado).
+  - ¿Cache eviction: cuándo? Lean: nunca automático; comando
+    explícito `fitz cache clean` post-MVP.
+  - ¿Verificación de integridad (`commit signature`)? Lean: no
+    en MVP; deuda visible.
 
 #### 9.y.4 — `fitz add` / `fitz remove` / `fitz update`
 
