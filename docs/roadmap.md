@@ -4811,9 +4811,10 @@ valor entregable):
 - **9.x.2 — Hover** ✅ **CERRADA 2026-05-16**: `textDocument/hover`
   devuelve el tipo del nodo bajo el cursor (consume el `TypeInfo`
   de F16). Detalle paso-a-paso en sección "Fase 9.x.2" abajo.
-- **9.x.3 — Go-to-definition**: `textDocument/definition`
-  resuelve `Ident` → span de declaración. Requiere mantener
-  tabla de resolución de scopes del checker.
+- **9.x.3 — Go-to-definition** ✅ **CERRADA 2026-05-16**:
+  `textDocument/definition` resuelve `Ident` → span de declaración
+  (let, fn, type, param, for, match binding). Detalle paso-a-paso
+  en sección "Fase 9.x.3" abajo.
 - **9.x.4 — Autocomplete**: `textDocument/completion` con
   cuatro contextos: símbolos en scope, fields tras `obj.`,
   métodos built-in tras `xs.`/`m.`/`s.`, símbolos importados
@@ -4993,6 +4994,80 @@ Requiere mantener tabla de resolución de scopes.
 - Cursor multi-línea (string interpolation, expression sobre
   varias líneas) — la heurística "misma línea" no cruza. Para los
   casos comunes de Fitz hoy alcanza; refinable si pinta corto.
+
+---
+
+## Fase 9.x.3 — LSP go-to-definition (cerrada, 2026-05-16)
+
+Tercera sub-fase visible del LSP. Habilita "F12 sobre un nombre te
+lleva a su definición" — core del workflow de exploración. Dos
+sub-pasos coordinados:
+
+- **9.x.3.a — Side-table `DefinitionInfo` + populación en el checker**:
+  - `VarBinding` suma `def_span: Span`. Builtins usan `Span::ZERO`
+    (filtrados al responder).
+  - `declare_var`/`declare_var_annotated` reciben `def_span`; 12
+    call sites actualizados con el span apropiado. Aproximaciones
+    documentadas donde el AST no tiene span propio del binding
+    (deuda S1).
+  - `pub struct DefinitionInfo` paralelo a `TypeInfo` (F16).
+    Política: omite `Span::ZERO` en use y def.
+  - Wrapper `infer_expr` para `Expr::Ident` registra `(use_span,
+    def_span)` cuando `lookup_binding` encuentra binding con span
+    conocido.
+  - `check_program` retorna 4-tupla; 18 call sites internos
+    actualizados.
+  - 6 unit tests nuevos en `types::tests::def_info_*`.
+  - Limpieza colateral: `lookup_var` eliminado (duplicaba
+    `lookup_binding`).
+
+- **9.x.3.b — Handler `definition` + helpers + capability**:
+  - `definition_for_position(&DefinitionInfo, line, character) ->
+    Option<Span>` en `fitz::lsp`. Misma heurística que hover.
+  - `make_definition_location(Url, Span) -> Location` convierte
+    1-based Fitz a 0-based LSP; range 1-char.
+  - Capability `definition_provider: Some(OneOf::Left(true))`.
+  - `Backend::goto_definition` devuelve
+    `GotoDefinitionResponse::Scalar(loc)` (un solo Location).
+  - 5 unit tests + 1 E2E nuevo (`definition` sobre uso de var local
+    devuelve Location con line:0; sobre builtin devuelve `null`).
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- Side-table dedicado `DefinitionInfo` (vs reuso de TypeInfo) —
+  mismo patrón que F16.
+- `VarBinding.def_span` con `Span::ZERO` para builtins (filtrados).
+- Aproximaciones de granularidad: AST sin span propio en `Param`/
+  `For.var`/`AssignTarget::Ident`/`MatchArm.pattern` (deuda S1)
+  — usamos el span del stmt contenedor.
+- Reasignaciones sobrescriben `def_span` con el último let stmt
+  (semántica simplificada del MVP; TypeScript apunta a la primera
+  declaración).
+- Lookup heurístico = mismo que hover (max col <= cursor en la
+  misma línea).
+- `range` 1-char (sin end_span); `uri` = documento abierto (sin
+  cross-module).
+- `OneOf::Left(true)` para la capability — Fitz no tiene
+  overloading, un solo Location alcanza.
+
+**Total al cierre**: 1233 unit + 79 E2E + 3 openapi sin cambios.
++6 unit en `types::tests` + 5 unit + 1 E2E nuevos con `--features lsp`
+(acumulado 26 unit + 4 E2E en LSP). Clippy `-D warnings` limpio.
+
+**Próximo norte**: **9.x.4 (autocomplete contextual)** — cuatro
+contextos (símbolos en scope, fields tras `obj.`, métodos built-in
+tras `xs.`/`m.`/`s.`, símbolos importados).
+
+**Deuda residual derivada (NO bloquea 9.x.4)**:
+
+- Cross-module go-to-def: `from foo import X` apunta al Stmt::Import
+  local, no al módulo remoto. Requiere mapear paths del loader a
+  URIs.
+- `def_span` granular por nombre — depende de `Span` propio en
+  nodos `Param`/`AssignTarget::Ident`/`For.var`/`MatchArm.pattern`
+  (deuda S1).
+- Reasignaciones apuntan al último let stmt (vs primera declaración
+  como TypeScript). Refinable con tracking adicional.
 
 ---
 

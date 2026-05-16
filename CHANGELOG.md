@@ -11,13 +11,137 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.2
-(LSP hover) CERRADA**: `textDocument/hover` devuelve el tipo del
-nodo bajo el cursor consumiendo el `TypeInfo` de F16. Próximo
-norte: **9.x.3 (go-to-definition)** — `textDocument/definition`
-resuelve `Ident` → span de declaración. Sub-paso separado
-pendiente sin presión: bundling CPython embebido (`fitz build
---bundle-python`).
+En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.3
+(LSP go-to-definition) CERRADA**: `textDocument/definition` resuelve
+`Ident` → span de la declaración (let, fn, type, param, for, match
+binding). Próximo norte: **9.x.4 (autocomplete contextual)** —
+`textDocument/completion` con cuatro contextos (símbolos en scope,
+fields tras `obj.`, métodos built-in tras `xs.`/`m.`/`s.`, símbolos
+importados tras `from mod import `). Sub-paso separado pendiente
+sin presión: bundling CPython embebido (`fitz build --bundle-python`).
+
+## [v0.9.4] — 2026-05-16 — Fase 9.x.3: LSP go-to-definition
+
+Tercera sub-fase visible del LSP. El cliente VSCode (o cualquier
+otro cliente LSP) ahora puede pedir `textDocument/definition` con
+una posición y recibe la `Location` de la declaración del ident bajo
+el cursor — desbloquea la experiencia "F12 sobre un nombre te lleva
+a su definición", core del workflow de exploración del código.
+
+Dos sub-pasos coordinados (un commit por sub-paso):
+
+- **9.x.3.a — Side-table `DefinitionInfo` + populación en el checker**:
+  - `VarBinding` suma `def_span: Span`: cada binding recuerda dónde
+    se declaró. Builtins (`print`/`len`/`sleep`/`cors`) usan
+    `Span::ZERO` y el LSP los filtra (no hay archivo donde saltar).
+  - `declare_var`/`declare_var_annotated` reciben `def_span` como
+    nuevo parámetro. 12 call sites actualizados con el span
+    apropiado (Stmt::Assign, FnDef body params, For.var, Import,
+    FromImport, FnExpr params, match patterns vía
+    `bind_pattern(...arm_span)`, `preregister_fn_signatures`).
+    Aproximaciones documentadas donde el AST no tiene span propio
+    del binding (Param, AssignTarget::Ident, For.var,
+    MatchArm.pattern — deuda S1). VSCode salta al stmt contenedor;
+    el usuario ve la línea de declaración.
+  - `pub struct DefinitionInfo` paralelo a `TypeInfo` (F16). Side-
+    table `HashMap<SpanKey (use), Span (def)>` con `record`,
+    `definition_at`, `len`, `is_empty`, `iter`. Política: omite
+    `Span::ZERO` en use y def (sintéticos y builtins).
+  - El wrapper `infer_expr` para `Expr::Ident` resuelve vía
+    `lookup_binding`, clona los fields para liberar el préstamo
+    inmutable de `ctx.scopes`, y registra `(use_span, def_span)`
+    antes de retornar.
+  - `check_program` retorna 4-tupla `(TypeEnv, TypeInfo,
+    DefinitionInfo, Vec<FitzError>)`. 18 call sites internos
+    actualizados (CLI + codegen + LSP + tests).
+  - `check_source_with_types` del LSP también retorna la 4-tupla.
+  - `DocumentState` del backend suma `def_info` con
+    `#[allow(dead_code)]` puntual hasta 9.x.3.b.
+  - Limpieza colateral: `lookup_var` (que duplicaba `lookup_binding`)
+    eliminado — el único caller pasó a usar `lookup_binding`
+    directamente para acceder al `def_span`.
+  - 6 unit tests nuevos en `types::tests::def_info_*`: registra var
+    local, NO registra builtins (Span::ZERO filtra), registra fn
+    top-level, registra param de fn (aproximación al span del FnDef),
+    `definition_at` devuelve None para spans ausentes o ZERO, ident
+    no definido no agrega entry.
+
+- **9.x.3.b — Handler `definition` + helpers + capability**:
+  - `definition_for_position(&DefinitionInfo, line, character) -> Option<Span>`
+    en `fitz::lsp` (pure function). Misma heurística que
+    `hover_for_position`: max col <= cursor en la misma línea sobre
+    `DefinitionInfo.iter()`.
+  - `make_definition_location(Url, Span) -> Location` arma la
+    respuesta LSP. Convierte 1-based Fitz a 0-based LSP; range de
+    1 carácter. `uri` es el del documento abierto.
+  - Capability `definition_provider: Some(OneOf::Left(true))`
+    anunciada en `initialize`.
+  - Handler `Backend::goto_definition` lee state bajo lock, delega
+    a los helpers, devuelve `GotoDefinitionResponse::Scalar(loc)`
+    (un solo Location — Fitz no tiene overloading).
+  - 5 unit tests nuevos cubriendo: var local resuelve a def_span,
+    línea sin idents devuelve None, builtin filtrado, conversión
+    1-based → 0-based correcta, smoke pipeline end-to-end.
+  - 1 E2E nuevo `goto_definition_sobre_uso_de_var_local_devuelve_location_de_let`:
+    valida capability anunciada, definition sobre uso de `x` en
+    `let x = 42\nlet y = x\n` devuelve Location con line:0,
+    definition sobre `print` (builtin) devuelve `result: null`.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Side-table dedicado vs reuso de TypeInfo**: dedicado
+  `DefinitionInfo`. Mismo patrón que F16; semánticas distintas no se
+  mezclan. El checker ya hace el lookup; solo agregamos la captura
+  del span al wrapper.
+- **`VarBinding` gana `def_span: Span`**: refactor mecánico — los 12
+  call sites de `declare_var*` pasan el span apropiado. Compiler
+  ayuda a no olvidar ningún call site. Builtins usan `Span::ZERO`
+  y se filtran.
+- **Granularidad del span de def**: aproximaciones pragmáticas dado
+  el AST actual (`Param`, `AssignTarget::Ident`, `For.var`,
+  `MatchArm.pattern` no tienen span propio — deuda S1). Para
+  `Stmt::Assign` reasignaciones, el `def_span` se sobreescribe con
+  el del último binding stmt (semántica simplificada del MVP —
+  refinable a "primera declaración" con tracking adicional).
+- **Lookup heurístico igual que hover** (max col <= cursor en la
+  misma línea): consistente con 9.x.2, identidad sobre idents.
+- **`range` de 1 carácter en la respuesta** (sin `end_span`):
+  paralelo a Diagnostics y Hover.
+- **`uri` = documento abierto** (vs resolución cross-module): cross-
+  module def requiere mapear paths del loader a URIs — agrega
+  complejidad del loader que pertenece a 9.x.4 o post-MVP.
+- **`OneOf::Left(true)` para `definition_provider`** (vs
+  `DefinitionOptions`): forma simple del LSP. Fitz no tiene
+  overloading, no necesitamos múltiples Locations por nombre.
+
+**Total al cierre**: 1233 unit (default) + 79 E2E + 3 openapi sin
+cambios respecto a Fase 9.x.2 (+6 unit nuevos en `types::tests::def_info_*`).
+**5 unit nuevos + 1 E2E nuevo** con `--features lsp` (acumulado 26
+unit + 4 E2E en LSP). Clippy `-D warnings` limpio sobre lib + ambos
+bins + tests.
+
+**Próximo norte**: **9.x.4 (autocomplete contextual)** —
+`textDocument/completion` con cuatro contextos: símbolos en scope
+visible (typing en cualquier posición), fields tras `obj.` (mirar
+el tipo del receptor), métodos built-in tras `xs.`/`m.`/`s.` (List/
+Map/Str), símbolos importados tras `from mod import `. Después: 9.x.5
+distribución VSCode Marketplace. Ver `docs/roadmap.md` → "Fase 9.x".
+
+**Deuda residual derivada (NO bloquea 9.x.4)**:
+
+- Cross-module go-to-def: `from foo import X` apunta al span del
+  Stmt::Import local, no al módulo remoto. Requiere mapear paths
+  del loader a URIs.
+- `def_span` granular por nombre (vs por Stmt contenedor): el AST
+  no tiene `Span` propio en `Param`, `AssignTarget::Ident`,
+  `For.var`, `MatchArm.pattern`. Refinable con S1.deuda.
+- Reasignaciones sobrescriben `def_span` con el último let stmt
+  (semántica simplificada). TypeScript salta a la primera
+  declaración; Fitz salta a la última. Refinable con tracking
+  adicional si pinta corto.
+- Cross-method tipos (definición de método built-in `xs.map`):
+  no aplica — los métodos built-in no tienen "definición" en el
+  código fuente Fitz.
 
 ## [v0.9.3] — 2026-05-16 — Fase 9.x.2: LSP hover — tipo del nodo bajo el cursor
 
