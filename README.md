@@ -445,8 +445,8 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
 - **9.y — Package manager + registry 📦** (en curso) — `fitz.toml`,
   `fitz new`/`init`, `fitz add`/`remove`/`update`, resolución +
   lockfile, registry HTTP escrito en Fitz mismo, `fitz publish` +
-  auth. 7 sub-pasos. **9.y.1 + 9.y.2 + 9.y.3 entera (a/b/c)
-  CERRADOS (2026-05-16)**:
+  auth. 7 sub-pasos. **9.y.1 + 9.y.2 + 9.y.3 entera (a/b/c) +
+  9.y.4 CERRADOS (2026-05-16)**:
   - **9.y.1** — formato manifest TOML + `fitz new <nombre>` y
     `fitz init` con templates default (`print` top-level) y
     `--http` (`@get`/`@server`), `git init` automático con
@@ -479,9 +479,18 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
   - **9.y.3 entera CERRADA**: el package manager Fitz puede hoy
     declarar, resolver, bloquear y CONSUMIR deps tanto locales
     como de repos git remotos, sin registry todavía.
-  - Total al cierre 9.y.3: 1283 unit + 37 cli_e2e + 79 compile_e2e
-    + 3 openapi. Clippy `-D warnings` limpio.
-  - Próximo: **9.y.4** (`fitz add` / `fitz remove` / `fitz update`).
+  - **9.y.4** — **`fitz add` / `fitz remove` / `fitz update`**.
+    Automatiza la edición del manifest + lockfile. `fitz add
+    <name> --path <p>` agrega path dep; `fitz add <name> --git
+    <url> --tag <t>` (o `--rev`) agrega git dep; `fitz remove
+    <name>` quita entry + sync lockfile; `fitz update [name]`
+    invalida cache de git deps y fuerza re-clone. Sobreescribe
+    si la dep ya existía. `toml_edit` preserva comentarios y
+    formatting del usuario al modificar `fitz.toml`. Smoke
+    validado: add path + git + remove + update + casos de error.
+  - Total al cierre 9.y.4: 1294 unit + 48 cli_e2e + 79
+    compile_e2e + 3 openapi. Clippy `-D warnings` limpio.
+  - Próximo: **9.y.5** (registry — servicio + protocolo).
 - **9.z — DX completo ✨** — `fitz fmt` (cero config, gofmt-style),
   `fitz test` con `@test` builtin, `fitz dev` con hot reload,
   `fitz repl` interactivo, `fitz lint` (estilo + patrones).

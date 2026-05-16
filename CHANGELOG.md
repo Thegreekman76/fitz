@@ -12,17 +12,61 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager con 9.y.3 entera CERRADA** — 9.y.1 (manifest +
-scaffolding), 9.y.2 (integración de `fitz run`/`build`/`check`
-con el manifest), 9.y.3.a (path deps + sección `[lib]` + lockfile
-`fitz.lock`), 9.y.3.b (loader integration — deps usables desde
-código), y 9.y.3.c (git deps + cache local), todos el 2026-05-16.
-Próximo norte: **9.y.4** (`fitz add` / `fitz remove` /
-`fitz update`) — sub-comandos de manipulación del manifest +
-lockfile.
+manager con 9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4 CERRADOS** —
+todo el 2026-05-16. El usuario puede hoy crear proyectos
+(`fitz new`/`init`), correr/compilar/chequear contra el manifest
+(`fitz run`/`build`/`check` sin args), declarar deps path/git en
+`[dependencies]` con lockfile reproducible, importar deps desde
+código (`from <dep> import X`), y editar el manifest via CLI
+(`fitz add`/`remove`/`update`).
+
+Próximo norte: **9.y.5** (registry — servicio + protocolo). El
+paso más grande del bloque 9.y: diseño + deployment del servicio
+que aloja los paquetes (crates.io-style centralizado, escrito en
+Fitz mismo).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.12] — 2026-05-16 — Fase 9.y.4: `fitz add` / `fitz remove` / `fitz update`
+
+Cuarto sub-paso del package manager. Automatiza la edición del
+manifest + lockfile que hasta 9.y.3 era manual. Tres subcomandos
+nuevos con UX cargo-style. Hoy editás el `fitz.toml` con un
+comando, no a mano.
+
+- `fitz add <name> --path <p>` — agrega path dep.
+- `fitz add <name> --git <url> --tag <t>` (o `--rev <r>`) —
+  agrega git dep. clap valida conflicts entre `path`/`git` y
+  entre `tag`/`rev`.
+- `fitz add <name>` sin flags — error claro citando 9.y.5
+  (registry futuro).
+- `fitz remove <name>` — quita entry + sync lockfile. Si la dep
+  era la única, borra `fitz.lock` entero (deps vacías).
+- `fitz update [name]` — invalida cache de git deps (force
+  re-clone). Path deps son no-op (siempre fresh). Sin name
+  actualiza todas; con name solo esa (error si no existe).
+
+Decisiones cerradas: dep nueva `toml_edit = "0.22"` (preserva
+comentarios + formatting al modificar `fitz.toml`); persist eager
+incluso si la resolución posterior falla (cargo-style, usuario
+revierte con `fitz remove`); validación cruzada delegada a clap
+(`conflicts_with` + `requires`) — mensajes limpios sin código
+custom; `fitz add` sobreescribe sin warning si la dep existía;
+`fitz remove` borra `fitz.lock` cuando deps queda vacío para no
+dejar stale state; `fitz update no-existe` da error claro (no
+silent no-op); dev deps `[dev-dependencies]` diferidas a 9.z.2.
+
+- 11 unit tests nuevos en `manifest::tests` (add path/git,
+  sobreescribe, sin `[dependencies]`, preserva comentarios;
+  remove existente/inexistente/borra sección vacía;
+  add+remove inversa).
+- 11 E2E tests nuevos en `tests/cli_e2e.rs` cubriendo todos los
+  caminos del CLI + errores (sin flags, sin tag/rev, conflicts,
+  fuera de proyecto, dep inexistente, cache busted con marker
+  file).
+- Total: 1294 unit + 48 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
 
 ## [v0.9.11] — 2026-05-16 — Fase 9.y.3.c + cierre de 9.y.3 entera: git deps + cache local
 

@@ -868,6 +868,220 @@ fn build_resuelve_from_dep_import_via_dep_registry() {
     assert!(stdout.contains("d=42"), "stdout del binario: {stdout}");
 }
 
+// ---- Fase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
+
+#[test]
+fn add_path_dep_modifica_manifest_y_emite_lockfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let lib_dir = tmp.path().join("utils-lib");
+    let _ = run_fitz(&["new", "utils-lib", "--no-git"], tmp.path());
+    convert_to_lib(&lib_dir, "utils-lib", "0.1.0");
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+
+    let (stdout, stderr, code) = run_fitz(
+        &["add", "utils-lib", "--path", "../utils-lib"],
+        &app_dir,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("agregado"), "stdout: {stdout}");
+
+    let manifest = std::fs::read_to_string(app_dir.join("fitz.toml")).unwrap();
+    assert!(
+        manifest.contains("utils-lib = { path = \"../utils-lib\" }"),
+        "manifest:\n{manifest}"
+    );
+    let lockfile = std::fs::read_to_string(app_dir.join("fitz.lock")).unwrap();
+    assert!(lockfile.contains("name = \"utils-lib\""), "lockfile:\n{lockfile}");
+}
+
+#[test]
+fn add_sin_flags_aborta_pidiendo_path_o_git() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "myapp");
+    let (_stdout, stderr, code) = run_fitz(&["add", "foo"], &project);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("--path") && stderr.contains("--git"), "stderr: {stderr}");
+    assert!(stderr.contains("9.y.5"), "stderr debería mencionar el registry: {stderr}");
+}
+
+#[test]
+fn add_git_sin_tag_ni_rev_aborta_pidiendo_uno() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "myapp");
+    let (_stdout, stderr, code) =
+        run_fitz(&["add", "foo", "--git", "https://x.com/r"], &project);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("tag") && stderr.contains("rev"), "stderr: {stderr}");
+    assert!(stderr.contains("reproducibilidad"), "stderr: {stderr}");
+}
+
+#[test]
+fn add_path_y_git_juntos_aborta_clap_conflict() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "myapp");
+    let (_stdout, stderr, code) = run_fitz(
+        &["add", "foo", "--path", "../x", "--git", "https://y.com/z"],
+        &project,
+    );
+    assert_eq!(code, 2); // clap exit code 2 para argument conflicts.
+    assert!(stderr.contains("cannot be used"), "stderr: {stderr}");
+}
+
+#[test]
+fn add_fuera_de_proyecto_aborta_con_mensaje_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) =
+        run_fitz(&["add", "foo", "--path", "../x"], tmp.path());
+    assert_eq!(code, 1);
+    assert!(stderr.contains("fitz.toml"), "stderr: {stderr}");
+    assert!(stderr.contains("fitz new"), "stderr: {stderr}");
+}
+
+#[test]
+fn add_sobreescribe_dep_existente() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "lib-uno", "--no-git"], tmp.path());
+    convert_to_lib(&tmp.path().join("lib-uno"), "lib-uno", "0.1.0");
+    let _ = run_fitz(&["new", "lib-dos", "--no-git"], tmp.path());
+    convert_to_lib(&tmp.path().join("lib-dos"), "lib-dos", "0.2.0");
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+
+    // Add primero, después overwrite con otro path.
+    let _ = run_fitz(&["add", "compartido", "--path", "../lib-uno"], &app_dir);
+    let (_stdout, _stderr, code) =
+        run_fitz(&["add", "compartido", "--path", "../lib-dos"], &app_dir);
+    assert_eq!(code, 0);
+
+    let manifest = std::fs::read_to_string(app_dir.join("fitz.toml")).unwrap();
+    assert!(
+        manifest.contains("compartido = { path = \"../lib-dos\" }"),
+        "manifest:\n{manifest}"
+    );
+    assert!(
+        !manifest.contains("../lib-uno"),
+        "el path viejo no debió persistir:\n{manifest}"
+    );
+}
+
+#[test]
+fn remove_dep_existente_quita_y_actualiza_lockfile() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "u", "--no-git"], tmp.path());
+    convert_to_lib(&tmp.path().join("u"), "u", "0.1.0");
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    let _ = run_fitz(&["add", "u", "--path", "../u"], &app_dir);
+    assert!(app_dir.join("fitz.lock").is_file());
+
+    let (stdout, stderr, code) = run_fitz(&["remove", "u"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("quitada"), "stdout: {stdout}");
+
+    let manifest = std::fs::read_to_string(app_dir.join("fitz.toml")).unwrap();
+    assert!(!manifest.contains("u = "), "manifest:\n{manifest}");
+    // Como era la única dep, [dependencies] se borró y el lockfile
+    // también (deps vacías = sin lockfile).
+    assert!(!manifest.contains("[dependencies]"));
+    assert!(
+        !app_dir.join("fitz.lock").exists(),
+        "fitz.lock debió borrarse al quedar sin deps"
+    );
+}
+
+#[test]
+fn remove_dep_inexistente_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let project = create_project(tmp.path(), "myapp");
+    let (_stdout, stderr, code) = run_fitz(&["remove", "no-existe"], &project);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no estaba"), "stderr: {stderr}");
+}
+
+#[test]
+fn update_sin_git_deps_reporta_no_op() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "u", "--no-git"], tmp.path());
+    convert_to_lib(&tmp.path().join("u"), "u", "0.1.0");
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    let _ = run_fitz(&["add", "u", "--path", "../u"], &app_dir);
+
+    let (stdout, _, code) = run_fitz(&["update"], &app_dir);
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("no había git deps"),
+        "stdout: {stdout}"
+    );
+}
+
+#[test]
+fn update_invalida_cache_de_git_dep_y_re_clona() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Setup repo git con tag.
+    let lib_dir = tmp.path().join("u");
+    std::fs::create_dir_all(lib_dir.join("src")).unwrap();
+    std::fs::write(
+        lib_dir.join("fitz.toml"),
+        "[package]\nname = \"u\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[lib]\nentry = \"src/lib.fitz\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib_dir.join("src/lib.fitz"), "fn x() -> Int => 1\n").unwrap();
+    init_git_repo_with_tag(&lib_dir, "v0.1.0");
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    let cache_dir = tmp.path().join(".cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+
+    let lib_path_str = lib_dir.to_string_lossy().replace('\\', "/");
+    let git_url = format!("file:///{}", lib_path_str.trim_start_matches('/'));
+
+    // Add la git dep — clona al cache.
+    let (_, stderr, code) = run_fitz_with_cache(
+        &["add", "u", "--git", &git_url, "--tag", "v0.1.0"],
+        &app_dir,
+        &cache_dir,
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    let git_cache = cache_dir.join("git");
+    let cache_entries: Vec<_> = std::fs::read_dir(&git_cache).unwrap().collect();
+    assert_eq!(cache_entries.len(), 1);
+    let clone_dir = cache_entries[0].as_ref().unwrap().path();
+    // Marker para verificar que update borra el dir.
+    std::fs::write(clone_dir.join("FITZ_TEST_MARKER"), "se va a borrar").unwrap();
+
+    let (stdout, _, code) = run_fitz_with_cache(&["update"], &app_dir, &cache_dir);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("cache invalidado"), "stdout: {stdout}");
+
+    // El cache fue re-clonado: el marker NO debería existir más.
+    let cache_entries_after: Vec<_> = std::fs::read_dir(&git_cache).unwrap().collect();
+    assert_eq!(cache_entries_after.len(), 1, "debió quedar exactamente un clone");
+    let new_clone = cache_entries_after[0].as_ref().unwrap().path();
+    assert!(
+        !new_clone.join("FITZ_TEST_MARKER").exists(),
+        "el marker debió desaparecer tras re-clone"
+    );
+}
+
+#[test]
+fn update_dep_inexistente_aborta() {
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "u", "--no-git"], tmp.path());
+    convert_to_lib(&tmp.path().join("u"), "u", "0.1.0");
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    let _ = run_fitz(&["add", "u", "--path", "../u"], &app_dir);
+
+    let (_, stderr, code) = run_fitz(&["update", "no-existe"], &app_dir);
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no está"), "stderr: {stderr}");
+}
+
 /// Build sin args en manifest mode: produce el binario en
 /// `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre del
 /// paquete (NO el stem del fuente). Test pesado (~3s) porque invoca

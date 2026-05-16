@@ -105,6 +105,46 @@ enum Commands {
         #[arg(long)]
         no_git: bool,
     },
+    /// Fase 9.y.4 — Agrega una dep al `fitz.toml` del proyecto actual
+    /// y sincroniza el `fitz.lock`. Requiere `--path` o `--git`
+    /// (versiones sueltas registry-style llegan en 9.y.5).
+    ///
+    /// Si la dep ya existía con el mismo nombre, se sobreescribe
+    /// (cargo-style). Si la resolución posterior falla (path
+    /// inexistente, git clone fallido, etc.), el manifest persiste
+    /// igual — usá `fitz remove <name>` para revertir.
+    Add {
+        /// Nombre de la dep tal como aparecerá en `[dependencies]`.
+        name: String,
+        /// Path dep relativo al manifest del proyecto.
+        #[arg(long, conflicts_with = "git")]
+        path: Option<String>,
+        /// URL del repo git. Requiere también `--tag` o `--rev`.
+        #[arg(long, conflicts_with = "path")]
+        git: Option<String>,
+        /// Tag a checkout-ear (mutuamente exclusivo con `--rev`).
+        #[arg(long, conflicts_with = "rev", requires = "git")]
+        tag: Option<String>,
+        /// Commit SHA a checkout-ear (mutuamente exclusivo con `--tag`).
+        #[arg(long, conflicts_with = "tag", requires = "git")]
+        rev: Option<String>,
+    },
+    /// Fase 9.y.4 — Quita una dep del `fitz.toml` del proyecto actual
+    /// y sincroniza el `fitz.lock`. Si la dep no existía, error claro.
+    Remove {
+        /// Nombre de la dep a quitar (tal como aparece en
+        /// `[dependencies]`).
+        name: String,
+    },
+    /// Fase 9.y.4 — Re-resuelve las deps del proyecto actual. Para
+    /// git deps, invalida el cache local y re-clona (útil cuando el
+    /// tag upstream se movió o cuando querés un fetch fresh). Para
+    /// path deps es no-op (siempre fresh). Sin args, actualiza todas.
+    Update {
+        /// Nombre de la dep específica a actualizar. Sin este flag,
+        /// actualiza todas las deps del manifest.
+        name: Option<String>,
+    },
 }
 
 fn main() {
@@ -159,6 +199,15 @@ fn main() {
         }
         Commands::Init { name, http, no_git } => {
             init_project(name.as_deref(), http, no_git);
+        }
+        Commands::Add { name, path, git, tag, rev } => {
+            add_dep_cmd(&name, path.as_deref(), git.as_deref(), tag.as_deref(), rev.as_deref());
+        }
+        Commands::Remove { name } => {
+            remove_dep_cmd(&name);
+        }
+        Commands::Update { name } => {
+            update_deps_cmd(name.as_deref());
         }
     }
 }
@@ -974,6 +1023,239 @@ fn scaffold_project(target: &std::path::Path, name: &str, http: bool, no_git: bo
                      igual. Pasá `--no-git` para silenciar este aviso.)"
                 );
             }
+        }
+    }
+}
+
+// ---- Fase 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ----
+
+/// `fitz add <name> [--path <p>] [--git <url> --tag <t>|--rev <r>]`
+/// — Fase 9.y.4. Modifica el `[dependencies]` del `fitz.toml` del
+/// proyecto actual (cwd o ancestros), preserva formatting con
+/// `toml_edit`, y sincroniza el `fitz.lock` resolviendo todas las
+/// deps incluida la nueva. Si la dep ya existía, se sobreescribe.
+fn add_dep_cmd(
+    name: &str,
+    path_opt: Option<&str>,
+    git_opt: Option<&str>,
+    tag_opt: Option<&str>,
+    rev_opt: Option<&str>,
+) {
+    // Build el spec según los flags. clap ya validó conflicts_with /
+    // requires entre path/git/tag/rev; igual chequeamos defensivo.
+    let spec = match (path_opt, git_opt) {
+        (Some(p), None) => manifest::AddDepSpec::Path { path: p.to_string() },
+        (None, Some(g)) => {
+            let gitref = match (tag_opt, rev_opt) {
+                (Some(t), None) => fitz::git_dep::GitRef::Tag(t.to_string()),
+                (None, Some(r)) => fitz::git_dep::GitRef::Rev(r.to_string()),
+                (Some(_), Some(_)) => {
+                    eprintln!("✗ `--tag` y `--rev` son mutuamente exclusivos.");
+                    std::process::exit(1);
+                }
+                (None, None) => {
+                    eprintln!(
+                        "✗ `--git` requiere también `--tag <tag>` o `--rev <commit>` para \
+                         reproducibilidad. `branch` no se soporta intencionalmente."
+                    );
+                    std::process::exit(1);
+                }
+            };
+            manifest::AddDepSpec::Git {
+                url: g.to_string(),
+                gitref,
+            }
+        }
+        (Some(_), Some(_)) => {
+            // clap debería haber bloqueado esto.
+            eprintln!("✗ `--path` y `--git` son mutuamente exclusivos.");
+            std::process::exit(1);
+        }
+        (None, None) => {
+            eprintln!(
+                "✗ `fitz add` requiere `--path <p>` o `--git <url> --tag <t>`. \
+                 Las versiones registry-style (`foo@1.0.0`) llegan en 9.y.5."
+            );
+            std::process::exit(1);
+        }
+    };
+
+    let manifest_path = find_local_manifest_or_exit();
+    let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    });
+    let new_text = match manifest::add_dep_to_manifest(&text, name, &spec) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = std::fs::write(&manifest_path, &new_text) {
+        eprintln!("✗ no se pudo escribir `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    }
+    println!("✓ agregado `{name}` a `{}`", manifest_path.display());
+
+    // Re-resolver + sync lockfile (manifest mode con file=None).
+    // resolve_entry carga el manifest actualizado y resuelve TODAS
+    // las deps (la nueva incluida). Si la resolución falla, el
+    // manifest queda persistido — el usuario puede `fitz remove`
+    // para revertir.
+    let resolved = resolve_entry(None);
+    sync_lockfile_if_needed(&resolved);
+}
+
+/// `fitz remove <name>` — Fase 9.y.4. Quita la entry del manifest y
+/// re-sincroniza el lockfile. Si la dep no existía, error claro.
+fn remove_dep_cmd(name: &str) {
+    let manifest_path = find_local_manifest_or_exit();
+    let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    });
+    let (new_text, removed) = match manifest::remove_dep_from_manifest(&text, name) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("✗ {e}");
+            std::process::exit(1);
+        }
+    };
+    if !removed {
+        eprintln!("✗ la dep `{name}` no estaba en `[dependencies]` de `{}`.", manifest_path.display());
+        std::process::exit(1);
+    }
+    if let Err(e) = std::fs::write(&manifest_path, &new_text) {
+        eprintln!("✗ no se pudo escribir `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    }
+    println!("✓ quitada `{name}` de `{}`", manifest_path.display());
+
+    // Re-resolver para que el lockfile refleje la nueva lista de deps.
+    // Si la dep removida era la única, sync_lockfile_if_needed
+    // detectará deps vacías y no escribe (pero el lockfile viejo
+    // sigue ahí con la entry stale). Limpiamos eso a mano:
+    let resolved = resolve_entry(None);
+    if let Some(ctx) = &resolved.manifest_ctx {
+        if ctx.resolved_deps.is_empty() {
+            let lock_path = lockfile::lockfile_path(&ctx.manifest_dir);
+            if lock_path.exists() {
+                if let Err(e) = std::fs::remove_file(&lock_path) {
+                    eprintln!("  (aviso: no se pudo borrar `{}`: {e})", lock_path.display());
+                } else {
+                    println!("✓ borrado {} (deps vacías)", lock_path.display());
+                }
+            }
+        }
+    }
+    sync_lockfile_if_needed(&resolved);
+}
+
+/// `fitz update [name]` — Fase 9.y.4. Re-resuelve las deps; para
+/// git deps, invalida el cache local (borra el dir) y fuerza
+/// re-clone con el commit más reciente del tag/rev pedido. Para
+/// path deps es no-op (siempre fresh). Sin `name`, actualiza todas;
+/// con `name`, solo esa dep.
+fn update_deps_cmd(name_filter: Option<&str>) {
+    let manifest_path = find_local_manifest_or_exit();
+
+    // Parse del manifest sin tocar el resolver — solo necesitamos el
+    // listado de [dependencies] para iterar.
+    let text = std::fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    });
+    let parsed = match manifest::Manifest::parse(&text) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("✗ `{}`: {e}", manifest_path.display());
+            std::process::exit(1);
+        }
+    };
+
+    let mut busted: Vec<String> = Vec::new();
+    for (dep_name, dep) in &parsed.dependencies {
+        if let Some(filter) = name_filter {
+            if dep_name != filter {
+                continue;
+            }
+        }
+        // Solo git deps tienen cache para invalidar; path deps son no-op.
+        if let manifest::Dependency::Detailed(d) = dep {
+            if let Some(url) = &d.git {
+                let gitref = match (&d.tag, &d.rev) {
+                    (Some(t), None) => fitz::git_dep::GitRef::Tag(t.clone()),
+                    (None, Some(r)) => fitz::git_dep::GitRef::Rev(r.clone()),
+                    _ => continue, // shape inválido — el resolver reportará
+                };
+                let cache_path = match fitz::git_dep::cache_path_for(url, &gitref) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("✗ dep `{dep_name}`: no se pudo computar el cache path: {e}");
+                        std::process::exit(1);
+                    }
+                };
+                if cache_path.exists() {
+                    if let Err(e) = std::fs::remove_dir_all(&cache_path) {
+                        eprintln!(
+                            "✗ no se pudo borrar el cache de `{dep_name}` en `{}`: {e}",
+                            cache_path.display()
+                        );
+                        std::process::exit(1);
+                    }
+                    busted.push(dep_name.clone());
+                }
+            }
+        }
+    }
+
+    // Validar que el `--name` filter haya matcheado algo (UX: si el
+    // user typea mal el nombre, no quiero silencio).
+    if let Some(filter) = name_filter {
+        if !parsed.dependencies.contains_key(filter) {
+            eprintln!("✗ la dep `{filter}` no está en `[dependencies]` de `{}`.", manifest_path.display());
+            std::process::exit(1);
+        }
+    }
+
+    if busted.is_empty() {
+        match name_filter {
+            Some(_) => println!("(no había nada que actualizar — dep sin cache)"),
+            None => println!("(no había git deps con cache para invalidar)"),
+        }
+    } else {
+        println!("✓ cache invalidado para: {}", busted.join(", "));
+    }
+
+    // Re-resolver via manifest mode (que va a re-clonar las git deps
+    // porque su cache ya no existe) + sync lockfile. Pasamos `None`
+    // para que resolve_entry haga `find_manifest` desde el cwd; ya
+    // sabemos que el manifest existe (manifest_path arriba lo
+    // confirmó).
+    let _ = manifest_path; // mantener vivo el lifetime; resolve_entry hace el discover
+    let resolved = resolve_entry(None);
+    sync_lockfile_if_needed(&resolved);
+}
+
+/// Helper compartido por add/remove/update: encuentra el `fitz.toml`
+/// del proyecto actual o sale con error claro.
+fn find_local_manifest_or_exit() -> PathBuf {
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        std::process::exit(1);
+    });
+    match manifest::find_manifest(&cwd) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "✗ no se encontró `{}` en `{}` ni en directorios padre. \
+                 Creá un proyecto con `fitz new <nombre>` / `fitz init` antes de \
+                 usar `add`/`remove`/`update`.",
+                manifest::MANIFEST_FILE,
+                cwd.display()
+            );
+            std::process::exit(1);
         }
     }
 }

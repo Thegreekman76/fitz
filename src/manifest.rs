@@ -154,6 +154,10 @@ pub enum ManifestError {
         name: String,
         source: crate::git_dep::GitDepError,
     },
+    /// Error parseando el manifest con `toml_edit` (camino de edición
+    /// preservando formato — `fitz add`/`remove`). Separado de
+    /// `Parse` porque ese viene del serde-toml flow.
+    EditParse(toml_edit::TomlError),
 }
 
 impl fmt::Display for ManifestError {
@@ -204,6 +208,7 @@ impl fmt::Display for ManifestError {
                 f,
                 "dep `{name}` (git): {source}"
             ),
+            ManifestError::EditParse(e) => write!(f, "error parseando manifest: {e}"),
         }
     }
 }
@@ -290,6 +295,100 @@ pub fn find_manifest(start: &Path) -> Option<PathBuf> {
             return None;
         }
     }
+}
+
+// ---- Fase 9.y.4 — edición del manifest preservando formato ----
+
+/// Especificación de una dep para `fitz add`. Aliasing del shape que
+/// el CLI parsea desde flags (`--path`, `--git`, `--tag`, `--rev`).
+#[derive(Debug, Clone, PartialEq)]
+pub enum AddDepSpec {
+    Path { path: String },
+    Git {
+        url: String,
+        gitref: crate::git_dep::GitRef,
+    },
+}
+
+/// Agrega una dep al `fitz.toml` (texto). Preserva comentarios y
+/// formatting del usuario gracias a `toml_edit`. Si ya existía una
+/// entry con el mismo nombre, la sobreescribe (cargo-style). Si no
+/// existía `[dependencies]`, la crea.
+///
+/// Devuelve el texto TOML actualizado. No persiste a disco — eso es
+/// responsabilidad del caller (típicamente `main.rs::add_dep`).
+pub fn add_dep_to_manifest(
+    existing_text: &str,
+    name: &str,
+    spec: &AddDepSpec,
+) -> Result<String, ManifestError> {
+    let mut doc: toml_edit::DocumentMut =
+        existing_text.parse().map_err(ManifestError::EditParse)?;
+
+    // Asegurar [dependencies] como table existing.
+    if !doc.contains_key("dependencies") {
+        doc["dependencies"] = toml_edit::Item::Table(toml_edit::Table::new());
+    }
+    let deps = doc["dependencies"]
+        .as_table_mut()
+        .ok_or_else(|| ManifestError::InvalidName("[dependencies] no es una tabla".to_string()))?;
+
+    // Construir la inline table para la nueva dep.
+    let inline = build_inline_dep_table(spec);
+    deps.insert(name, toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)));
+
+    Ok(doc.to_string())
+}
+
+/// Quita una dep del `fitz.toml` (texto). Si la dep no existe en
+/// `[dependencies]`, devuelve `false` (sin error — el caller decide
+/// si reportar como warning o error según el comando). Si `[dependencies]`
+/// queda vacío tras quitar la entry, la sección se borra entera para
+/// no dejar ruido.
+pub fn remove_dep_from_manifest(
+    existing_text: &str,
+    name: &str,
+) -> Result<(String, bool), ManifestError> {
+    let mut doc: toml_edit::DocumentMut =
+        existing_text.parse().map_err(ManifestError::EditParse)?;
+
+    let Some(deps_item) = doc.get_mut("dependencies") else {
+        return Ok((doc.to_string(), false));
+    };
+    let Some(deps) = deps_item.as_table_mut() else {
+        return Ok((doc.to_string(), false));
+    };
+
+    let removed = deps.remove(name).is_some();
+    let is_now_empty = deps.is_empty();
+    if is_now_empty {
+        doc.remove("dependencies");
+    }
+    Ok((doc.to_string(), removed))
+}
+
+/// Construye la inline table TOML para una dep agregada por
+/// `fitz add`. La forma es `{ path = "..." }` o `{ git = "...",
+/// tag = "..." }` / `{ git = "...", rev = "..." }`.
+fn build_inline_dep_table(spec: &AddDepSpec) -> toml_edit::InlineTable {
+    let mut table = toml_edit::InlineTable::new();
+    match spec {
+        AddDepSpec::Path { path } => {
+            table.insert("path", toml_edit::Value::from(path.as_str()));
+        }
+        AddDepSpec::Git { url, gitref } => {
+            table.insert("git", toml_edit::Value::from(url.as_str()));
+            match gitref {
+                crate::git_dep::GitRef::Tag(t) => {
+                    table.insert("tag", toml_edit::Value::from(t.as_str()));
+                }
+                crate::git_dep::GitRef::Rev(r) => {
+                    table.insert("rev", toml_edit::Value::from(r.as_str()));
+                }
+            }
+        }
+    }
+    table
 }
 
 // ---- Fase 9.y.3.b — registry de deps consumido por evaluator + codegen ----
@@ -923,6 +1022,148 @@ entry = "src/lib.fitz"
     // se eliminó al cerrar 9.y.3.c — git deps son ahora soportadas.
     // La validación de shape la cubren los tests `resolve_git_dep_*`
     // arriba.)
+
+    // ---- Fase 9.y.4 — edición del manifest (add/remove preservan formato) ----
+
+    #[test]
+    fn add_dep_a_manifest_sin_dependencies_crea_la_seccion() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"\n";
+        let spec = AddDepSpec::Path {
+            path: "../utils".to_string(),
+        };
+        let updated = add_dep_to_manifest(original, "utils", &spec).unwrap();
+        assert!(updated.contains("[dependencies]"));
+        assert!(updated.contains("utils = { path = \"../utils\" }"));
+        // El resto del manifest sigue intacto.
+        assert!(updated.contains("[package]"));
+        assert!(updated.contains("[bin]"));
+    }
+
+    #[test]
+    fn add_dep_path_emite_inline_table() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nya = { path = \"../ya\" }\n";
+        let spec = AddDepSpec::Path {
+            path: "../nuevo".to_string(),
+        };
+        let updated = add_dep_to_manifest(original, "nuevo", &spec).unwrap();
+        assert!(updated.contains("nuevo = { path = \"../nuevo\" }"));
+        // La dep previa sigue ahí.
+        assert!(updated.contains("ya = { path = \"../ya\" }"));
+    }
+
+    #[test]
+    fn add_dep_git_con_tag_emite_inline_table() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let spec = AddDepSpec::Git {
+            url: "https://github.com/foo/bar".to_string(),
+            gitref: crate::git_dep::GitRef::Tag("v1.0.0".to_string()),
+        };
+        let updated = add_dep_to_manifest(original, "bar", &spec).unwrap();
+        assert!(
+            updated.contains("bar = { git = \"https://github.com/foo/bar\", tag = \"v1.0.0\" }"),
+            "manifest:\n{updated}"
+        );
+    }
+
+    #[test]
+    fn add_dep_git_con_rev_emite_inline_table() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let spec = AddDepSpec::Git {
+            url: "https://x.com/r".to_string(),
+            gitref: crate::git_dep::GitRef::Rev("abc123".to_string()),
+        };
+        let updated = add_dep_to_manifest(original, "r", &spec).unwrap();
+        assert!(
+            updated.contains("r = { git = \"https://x.com/r\", rev = \"abc123\" }"),
+            "manifest:\n{updated}"
+        );
+    }
+
+    #[test]
+    fn add_dep_sobreescribe_si_ya_existia() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nfoo = { path = \"../viejo\" }\n";
+        let spec = AddDepSpec::Path {
+            path: "../nuevo".to_string(),
+        };
+        let updated = add_dep_to_manifest(original, "foo", &spec).unwrap();
+        assert!(updated.contains("foo = { path = \"../nuevo\" }"));
+        assert!(
+            !updated.contains("../viejo"),
+            "el path viejo no debió persistir:\n{updated}"
+        );
+    }
+
+    #[test]
+    fn add_dep_preserva_comentarios_del_usuario() {
+        let original = "# Mi proyecto Fitz\n[package]\nname = \"x\"  # NOTA: cambiar antes de publicar\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[bin]\nmain = \"src/main.fitz\"  # entry CLI\n";
+        let spec = AddDepSpec::Path {
+            path: "../u".to_string(),
+        };
+        let updated = add_dep_to_manifest(original, "u", &spec).unwrap();
+        assert!(updated.contains("# Mi proyecto Fitz"));
+        assert!(updated.contains("# NOTA: cambiar antes de publicar"));
+        assert!(updated.contains("# entry CLI"));
+    }
+
+    #[test]
+    fn remove_dep_quita_entry_y_reporta_true() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\ndos = { path = \"../dos\" }\n";
+        let (updated, removed) = remove_dep_from_manifest(original, "uno").unwrap();
+        assert!(removed);
+        assert!(!updated.contains("uno = "));
+        assert!(updated.contains("dos = { path = \"../dos\" }"));
+    }
+
+    #[test]
+    fn remove_dep_reporta_false_si_no_existia() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\n";
+        let (updated, removed) = remove_dep_from_manifest(original, "no-existe").unwrap();
+        assert!(!removed);
+        // El manifest queda intacto.
+        assert!(updated.contains("uno = { path = \"../uno\" }"));
+    }
+
+    #[test]
+    fn remove_dep_borra_seccion_si_queda_vacia() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[dependencies]\nuno = { path = \"../uno\" }\n";
+        let (updated, removed) = remove_dep_from_manifest(original, "uno").unwrap();
+        assert!(removed);
+        assert!(
+            !updated.contains("[dependencies]"),
+            "[dependencies] debió borrarse al quedar vacío:\n{updated}"
+        );
+    }
+
+    #[test]
+    fn remove_dep_sin_seccion_dependencies_es_no_op() {
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let (updated, removed) = remove_dep_from_manifest(original, "foo").unwrap();
+        assert!(!removed);
+        assert_eq!(updated, original);
+    }
+
+    #[test]
+    fn add_y_remove_son_inverso_aproximadamente() {
+        // Tras add+remove de la MISMA dep, el manifest debe quedar
+        // semánticamente equivalente al original. Acepto pequeñas
+        // diferencias de formatting (toml_edit puede normalizar
+        // whitespace) pero el shape es el mismo.
+        let original = "[package]\nname = \"x\"\nversion = \"0.1.0\"\nedition = \"2026\"\n";
+        let after_add = add_dep_to_manifest(
+            original,
+            "tmp",
+            &AddDepSpec::Path {
+                path: "../t".to_string(),
+            },
+        )
+        .unwrap();
+        let (after_remove, removed) = remove_dep_from_manifest(&after_add, "tmp").unwrap();
+        assert!(removed);
+        // El parser debe ver el mismo manifest semánticamente.
+        let m1 = Manifest::parse(original).unwrap();
+        let m2 = Manifest::parse(&after_remove).unwrap();
+        assert_eq!(m1, m2);
+    }
 
     #[test]
     fn resolve_dependencies_path_inexistente_aborta() {

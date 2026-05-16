@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 rust-version = "1.95"
 description = "The Fitz programming language"
-authors = ["El Chaltén, Patagonia, Argentina"]
+authors = ["TheGreekMan, El Chaltén, Patagonia, Argentina"]
 license = "MIT"
 
 [[bin]]
@@ -99,6 +99,15 @@ tower-lsp = { version = "0.20", optional = true }
 # emite TOML; `fitz run`/`build` con manifest llega en 9.y.2). Versión
 # 0.8 es la actual estable, deriva por serde (que ya tenemos).
 toml = "0.8"
+
+# Fase 9.y.4 — editor TOML que preserva comentarios y formatting al
+# modificar `fitz.toml` desde `fitz add` / `fitz remove`. `toml` (la
+# crate que ya tenemos) parsea con serde y serializa de cero — pierde
+# comentarios y orden del usuario. `toml_edit` mantiene la
+# representación lo más fiel posible. Es la crate que `toml` 0.8 usa
+# internamente para parsear; sumarla explícita nos da acceso a
+# `DocumentMut`.
+toml_edit = "0.22"
 
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario

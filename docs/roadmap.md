@@ -5857,26 +5857,108 @@ foo@1.0.0` agrega entry a `[dependencies]`, resuelve, actualiza
 `fitz.lock`. Hoy el usuario edita el manifest a mano; 9.y.4 lo
 automatiza con UX `cargo add`-style.
 
-#### 9.y.4 — `fitz add` / `fitz remove` / `fitz update`
+#### 9.y.4 — `fitz add` / `fitz remove` / `fitz update` ✓ (CERRADA, 2026-05-16)
 
-Sub-comandos de manipulación del manifest + lockfile:
+Cuarto sub-paso del package manager. Automatiza la edición del
+manifest + lockfile que hasta 9.y.3 era manual. Tres subcomandos
+nuevos con UX cargo-style.
 
-- **`fitz add foo`** — agrega `foo = "X.Y.Z"` (versión más
-  reciente) a `[dependencies]`, actualiza lockfile, descarga.
-- **`fitz add foo --git https://...`** — git dep.
-- **`fitz add foo --path ../foo`** — path dep.
-- **`fitz remove foo`** — borra del manifest + cleanup del
-  lockfile.
-- **`fitz update`** — actualiza lockfile respetando rangos del
-  manifest.
-- **`fitz update foo`** — actualiza solo `foo`.
-- **Decisiones**:
-  - ¿`fitz add foo@1.2.3` (npm-style) o `--version 1.2.3`
-    (cargo-style)?
-  - ¿Default a `^1.2.3` (npm/cargo: rangos semver) o `=1.2.3`
-    (pin estricto)?
-  - ¿Dev deps separadas (`[dev-dependencies]`) para
-    tests/herramientas?
+- **`fitz add <name> --path <p>`** — agrega path dep.
+- **`fitz add <name> --git <url> --tag <t>`** (o `--rev <r>`) —
+  agrega git dep. clap valida conflicts entre `path`/`git` y
+  entre `tag`/`rev`, y exige `git` si se pasa `tag`/`rev`.
+- **`fitz add <name>`** sin flags — error claro citando 9.y.5
+  (registry futuro).
+- **`fitz remove <name>`** — quita entry del manifest y
+  sincroniza `fitz.lock`. Si la dep era la única, borra el
+  lockfile entero (deps vacías).
+- **`fitz update [name]`** — invalida el cache de git deps
+  (force re-clone con commit fresh del tag/rev). Para path
+  deps es no-op (siempre fresh). Sin `name` actualiza todas;
+  con `name` solo esa (error claro si no existe).
+
+###### Decisiones técnicas tomadas
+
+- **`toml_edit = "0.22"`** dep nueva para preservar comentarios
+  y formatting al modificar `fitz.toml`. La crate `toml` que ya
+  teníamos serializa de cero — pierde comentarios y orden del
+  usuario. `toml_edit` mantiene la representación lo más fiel
+  posible. Test cubre: manifest con comments sobrevive
+  add+remove.
+- **Persist eager incluso si la resolución falla** (cargo-style):
+  `fitz add` escribe primero, después resuelve. Si la resolución
+  falla, el manifest ya está modificado — el usuario puede
+  `fitz remove <name>` para revertir. Trade-off documentado.
+- **Validación cruzada delegada a clap** (`conflicts_with` /
+  `requires`): mensajes de error limpios sin código custom para
+  `--path` + `--git`, `--tag` + `--rev`, `--tag`/`--rev` sin
+  `--git`.
+- **`fitz add` sobre dep existente**: sobreescribe sin warning
+  (cargo-style). Test cubre.
+- **`fitz remove` cuando la dep era la única**: borra el
+  `fitz.lock` entero (sync_lockfile_if_needed sería no-op porque
+  `resolved_deps` queda vacío, dejaría stale state).
+- **`fitz update` flow**: borra cache dirs de git deps + llama
+  `resolve_entry(None)` que re-resuelve via `find_manifest`
+  (re-clone automático porque el cache no existe). Las path deps
+  no tienen cache, son no-op explícitas.
+- **`fitz update no-existe`**: error claro (no silent no-op) —
+  UX: si el user typea mal el nombre, queremos feedback.
+- **Dev deps `[dev-dependencies]`**: diferidas a 9.z.2
+  (`fitz test`) — no scope de 9.y.4.
+- **`AddDepSpec` enum** (`Path` | `Git`) en `manifest.rs` —
+  aislado del shape parsed (`DetailedDependency`) para que el
+  helper de edición sea explícito sobre qué shape produce.
+
+###### Total al cierre
+
+**1294 unit + 48 cli_e2e** (+11 nuevos sobre los 37 previos) **+
+79 compile_e2e + 3 openapi**. Clippy `-D warnings` limpio. Sin
+breaking en los E2E previos de 9.y.1/.2/.3.
+
+Archivos:
+
+- `Cargo.toml` — dep nueva `toml_edit = "0.22"` (preserva
+  comments + formatting en edits de `fitz.toml`).
+- `src/manifest.rs` (+~180 LoC) — `AddDepSpec` enum,
+  `add_dep_to_manifest`, `remove_dep_from_manifest`,
+  `build_inline_dep_table`, `ManifestError::EditParse` variant.
+  11 unit tests nuevos (add path/git tag/rev, sobreescribe, sin
+  `[dependencies]`, preserva comentarios; remove existente /
+  inexistente / borra sección si queda vacía; add+remove inversa).
+- `src/main.rs` (+~200 LoC) — `Commands::Add`/`Remove`/`Update`
+  en clap con flags + validation via `conflicts_with`/`requires`;
+  `add_dep_cmd` / `remove_dep_cmd` / `update_deps_cmd`;
+  `find_local_manifest_or_exit` helper compartido.
+- `tests/cli_e2e.rs` (+~250 LoC) — 11 E2E nuevos cubriendo
+  todos los caminos del CLI + errores: add path/git/sin flags/
+  sin tag-rev/conflicts/fuera de proyecto/sobreescribe; remove
+  existente/inexistente; update sin git deps/invalida cache con
+  marker file/dep inexistente.
+
+###### Decisiones residuales (NO bloquean 9.y.5)
+
+- **`fitz add foo@1.2.3` (npm-style sugar)**: no soportado.
+  Solo flags (`--version`, `--tag`, `--rev`). Si aparece demanda,
+  trivial agregar como parser layer encima de clap.
+- **Default version range** (`^1.2.3` vs `=1.2.3`): irrelevante
+  hasta 9.y.5 (registry). Hoy las versiones sueltas
+  (`foo = "1.0.0"`) abortan al resolver.
+- **`fitz upgrade <dep>`** (semver bump dentro del rango):
+  diferido a 9.y.5 (necesita registry).
+- **Dev deps `[dev-dependencies]`**: diferidas a 9.z.2
+  (`fitz test` discovery).
+- **Drift detection en `fitz update`** (avisar si el commit nuevo
+  difiere del lockfile previo): no implementado. El re-clone
+  silenciosamente sobreescribe el lockfile entry. Refinable
+  si aparece presión.
+
+###### Próximo norte tras 9.y.4
+
+**9.y.5 — Registry: servicio + protocolo** — el paso más grande
+del bloque 9.y. Diseño y deployment del servicio que aloja los
+paquetes (`crates.io`-style centralizado, escrito en Fitz mismo).
+Habilita `fitz add foo@1.0.0` con resolución contra el registry.
 
 #### 9.y.5 — Registry: servicio + protocolo
 
