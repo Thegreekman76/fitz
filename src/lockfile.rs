@@ -105,6 +105,13 @@ impl Lockfile {
                     // Path deps no llevan `source` en el lockfile
                     // (convención Cargo: son implícitas).
                     ResolvedDepSource::Path { .. } => None,
+                    // Git deps emiten `git+<url>#<commit-hash>` —
+                    // Fase 9.y.3.c. El hash exacto del commit permite
+                    // reproducir el build aunque el tag upstream
+                    // mute.
+                    ResolvedDepSource::Git {
+                        url, commit_hash, ..
+                    } => Some(crate::git_dep::lockfile_source_string(url, commit_hash)),
                 },
             })
             .collect();

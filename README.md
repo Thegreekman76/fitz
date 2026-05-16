@@ -445,8 +445,8 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
 - **9.y — Package manager + registry 📦** (en curso) — `fitz.toml`,
   `fitz new`/`init`, `fitz add`/`remove`/`update`, resolución +
   lockfile, registry HTTP escrito en Fitz mismo, `fitz publish` +
-  auth. 7 sub-pasos. **9.y.1 + 9.y.2 + 9.y.3.a + 9.y.3.b CERRADOS
-  (2026-05-16)**:
+  auth. 7 sub-pasos. **9.y.1 + 9.y.2 + 9.y.3 entera (a/b/c)
+  CERRADOS (2026-05-16)**:
   - **9.y.1** — formato manifest TOML + `fitz new <nombre>` y
     `fitz init` con templates default (`print` top-level) y
     `--http` (`@get`/`@server`), `git init` automático con
@@ -459,22 +459,29 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
   - **9.y.3.a** — path deps + sección `[lib]` + lockfile `fitz.lock`.
     `[dependencies] foo = { path = "../foo" }` en el importer + sección
     `[lib] entry = "src/lib.fitz"` en la dep. Lockfile TOML Cargo-style,
-    emitido/sincronizado automáticamente, idempotente. Versiones
-    sueltas y git deps se aceptan al parse pero el resolver las rechaza
-    con errores accionables citando 9.y.5 (registry) y 9.y.3.c (git).
+    emitido/sincronizado automáticamente, idempotente.
   - **9.y.3.b** — **loader integration**: el loader del evaluator
     (`fitz run`) y del codegen (`fitz build`) consultan el
     `dep_registry` resuelto del manifest ANTES de fallback a paths
     relativos. `from <dep-name> import X` resuelve al `lib_entry`
     absoluto de la dep. **Las deps declaradas en 9.y.3.a son
-    finalmente usables desde código.** Smoke validado: `myutils`
-    lib + `myapp` con `from myutils import double, greet` funciona
-    en `run` y `build` produciendo el output esperado bit-a-bit.
-    Transitive deps + hyphens importables quedan como deuda
-    explícita (9.y.4+ y futuro).
-  - Total al cierre 9.y.3.b: 1270 unit + 33 cli_e2e + 79 compile_e2e
+    finalmente usables desde código.**
+  - **9.y.3.c** — **git deps + cache local**. Habilita
+    `[dependencies] foo = { git = "https://...", tag = "v1.0.0" }`
+    en `fitz.toml`. El primer acceso clona a `<cache>/git/
+    <sanitized-url>@<ref>/` (default `~/.fitz/cache/`, override
+    con `FITZ_CACHE_DIR`) y reusa el dir en accesos siguientes.
+    El lockfile registra el commit hash exacto Cargo-style:
+    `source = "git+<url>#<commit>"`. `tag` XOR `rev`; `branch` NO
+    soportado (no reproducible). Subprocess `git` sobre crate
+    (zero deps). Smoke validado: dep git con `file://` URL +
+    `fitz run` + `fitz build` + binario bit-a-bit idéntico.
+  - **9.y.3 entera CERRADA**: el package manager Fitz puede hoy
+    declarar, resolver, bloquear y CONSUMIR deps tanto locales
+    como de repos git remotos, sin registry todavía.
+  - Total al cierre 9.y.3: 1283 unit + 37 cli_e2e + 79 compile_e2e
     + 3 openapi. Clippy `-D warnings` limpio.
-  - Próximo: **9.y.3.c** (git deps + cache local).
+  - Próximo: **9.y.4** (`fitz add` / `fitz remove` / `fitz update`).
 - **9.z — DX completo ✨** — `fitz fmt` (cero config, gofmt-style),
   `fitz test` con `@test` builtin, `fitz dev` con hot reload,
   `fitz repl` interactivo, `fitz lint` (estilo + patrones).

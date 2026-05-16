@@ -435,7 +435,12 @@ fn version_corta_aborta_citando_9y5() {
 }
 
 #[test]
-fn git_dep_aborta_citando_9y3c() {
+fn git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
+    // Pre-9.y.3.c este test verificaba que git deps eran rechazadas
+    // wholesale citando 9.y.3.c. Post-cierre: git deps SÍ se aceptan,
+    // pero requieren `tag` o `rev` explícito por reproducibilidad
+    // (no `branch`). Esta versión del test asegura el mensaje
+    // accionable.
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "git-app");
     std::fs::write(
@@ -445,7 +450,8 @@ fn git_dep_aborta_citando_9y3c() {
     .unwrap();
     let (_stdout, stderr, code) = run_fitz(&["check"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("9.y.3.c"), "stderr: {stderr}");
+    assert!(stderr.contains("tag") && stderr.contains("rev"), "stderr: {stderr}");
+    assert!(stderr.contains("reproducibilidad"), "stderr: {stderr}");
 }
 
 #[test]
@@ -594,6 +600,243 @@ fn run_dep_shadowea_archivo_local_con_mismo_nombre() {
     assert!(
         !stdout.contains("LOCAL"),
         "el archivo local no debe haberse cargado: {stdout}"
+    );
+}
+
+// ---- Fase 9.y.3.c — Git deps + cache local ----
+
+/// Helper: convierte un directorio `<dir>` ya armado como library
+/// Fitz (con `fitz.toml` y `src/lib.fitz`) en un git repo con un commit
+/// inicial y un tag. Devuelve el commit hash.
+fn init_git_repo_with_tag(dir: &Path, tag: &str) -> String {
+    let run = |args: &[&str]| {
+        let output = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .expect("invocar git");
+        assert!(
+            output.status.success(),
+            "git {} falló:\n{}",
+            args.join(" "),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).into_owned()
+    };
+    run(&["init", "-q"]);
+    run(&["config", "user.email", "test@fitz.dev"]);
+    run(&["config", "user.name", "test"]);
+    run(&["add", "."]);
+    run(&["commit", "-q", "-m", "initial"]);
+    run(&["tag", tag]);
+    run(&["rev-parse", "HEAD"]).trim().to_string()
+}
+
+/// Helper: setup minimal git dep — crea `<tmp>/<lib>/` con `[lib]` +
+/// código, lo convierte en git repo con tag; crea `<tmp>/<app>/` con
+/// `[dependencies] <lib> = { git = "file://<lib-path>", tag = "<tag>" }`
+/// + `src/main.fitz`. Devuelve `(app_dir, cache_dir, commit_hash)`.
+///
+/// El cache_dir es un tempdir aislado vía `FITZ_CACHE_DIR`.
+fn setup_git_dep_project(
+    tmp_root: &Path,
+    lib_name: &str,
+    lib_version: &str,
+    lib_body: &str,
+    tag: &str,
+    app_name: &str,
+    app_body: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, String) {
+    // 1. Crear lib + convertir a git repo.
+    let _ = run_fitz(&["new", lib_name, "--no-git"], tmp_root);
+    let lib_dir = tmp_root.join(lib_name);
+    convert_to_lib(&lib_dir, lib_name, lib_version);
+    std::fs::write(lib_dir.join("src").join("lib.fitz"), lib_body).unwrap();
+    let commit = init_git_repo_with_tag(&lib_dir, tag);
+
+    // 2. Crear app con dep git al file:// URL del repo local.
+    let _ = run_fitz(&["new", app_name, "--no-git"], tmp_root);
+    let app_dir = tmp_root.join(app_name);
+
+    // file:// URL — git acepta paths absolutos directos en todas las
+    // plataformas pero el formato canónico con file:/// trabaja
+    // uniforme en Linux/Mac/Windows. Convertimos backslashes a forward
+    // para que la URL sea legal.
+    let lib_path_str = lib_dir.to_string_lossy().replace('\\', "/");
+    let git_url = format!("file:///{}", lib_path_str.trim_start_matches('/'));
+
+    let manifest = format!(
+        "[package]\nname = \"{app_name}\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [bin]\nmain = \"src/main.fitz\"\n\n\
+         [dependencies]\n{lib_name} = {{ git = \"{git_url}\", tag = \"{tag}\" }}\n"
+    );
+    std::fs::write(app_dir.join("fitz.toml"), manifest).unwrap();
+    std::fs::write(app_dir.join("src").join("main.fitz"), app_body).unwrap();
+
+    // 3. Cache dir aislado en otro subdir del tmp.
+    let cache_dir = tmp_root.join(".fitz-cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+
+    (app_dir, cache_dir, commit)
+}
+
+/// Helper: corre fitz en `cwd` con `FITZ_CACHE_DIR` apuntando a
+/// `cache_dir`. Necesario para que git deps no toquen el cache global
+/// del usuario.
+fn run_fitz_with_cache(
+    args: &[&str],
+    cwd: &Path,
+    cache_dir: &Path,
+) -> (String, String, i32) {
+    let output = Command::new(fitz_bin())
+        .args(args)
+        .current_dir(cwd)
+        .env("FITZ_CACHE_DIR", cache_dir)
+        .output()
+        .expect("invocar fitz");
+    (
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+        output.status.code().unwrap_or(-1),
+    )
+}
+
+#[test]
+fn git_dep_clona_al_cache_y_emite_lockfile_con_commit() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app_dir, cache_dir, commit) = setup_git_dep_project(
+        tmp.path(),
+        "myutils",
+        "0.1.0",
+        "fn double(x: Int) -> Int => x * 2\n",
+        "v0.1.0",
+        "myapp",
+        "from myutils import double\nprint(\"d={double(21)}\")\n",
+    );
+
+    let (stdout, stderr, code) = run_fitz_with_cache(&["run"], &app_dir, &cache_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("d=42"), "stdout: {stdout}");
+
+    // Cache directory creado con el naming esperado.
+    let git_cache = cache_dir.join("git");
+    assert!(git_cache.is_dir(), "cache/git no existe");
+    let entries: Vec<_> = std::fs::read_dir(&git_cache).unwrap().collect();
+    assert_eq!(entries.len(), 1, "se esperaba un dir clonado, hay: {entries:?}");
+
+    // Lockfile incluye source con el commit hash exacto.
+    let lockfile = std::fs::read_to_string(app_dir.join("fitz.lock")).unwrap();
+    assert!(lockfile.contains("name = \"myutils\""));
+    assert!(
+        lockfile.contains(&format!("#{commit}")),
+        "lockfile no incluye el commit hash {commit}: {lockfile}"
+    );
+    assert!(lockfile.contains("source = \"git+"), "lockfile: {lockfile}");
+}
+
+#[test]
+fn git_dep_reusa_cache_sin_re_clonar() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app_dir, cache_dir, _commit) = setup_git_dep_project(
+        tmp.path(),
+        "reused",
+        "0.1.0",
+        "fn helper() -> Int => 7\n",
+        "v0.1.0",
+        "myapp",
+        "from reused import helper\nprint(\"h={helper()}\")\n",
+    );
+
+    // Primera corrida: clona.
+    let (_, _, code1) = run_fitz_with_cache(&["run"], &app_dir, &cache_dir);
+    assert_eq!(code1, 0);
+
+    // Marcar el cache dir con un mtime de referencia: tocamos un
+    // archivo dentro para luego verificar que NO se sobrescribió.
+    let git_cache = cache_dir.join("git");
+    let clone_dir = std::fs::read_dir(&git_cache)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    let marker = clone_dir.join("FITZ_TEST_MARKER");
+    std::fs::write(&marker, "no me toques").unwrap();
+
+    // Segunda corrida: debe REUSAR cache (el marker debe persistir).
+    let (_, _, code2) = run_fitz_with_cache(&["run"], &app_dir, &cache_dir);
+    assert_eq!(code2, 0);
+
+    assert!(
+        marker.is_file(),
+        "el marker se borró — el cache fue re-clonado en lugar de reusado"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&marker).unwrap(),
+        "no me toques",
+        "el marker fue sobrescrito — re-clone destructivo"
+    );
+}
+
+#[test]
+fn git_dep_lockfile_idempotente_si_commit_no_cambia() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (app_dir, cache_dir, _commit) = setup_git_dep_project(
+        tmp.path(),
+        "idem",
+        "0.1.0",
+        "fn helper() -> Int => 1\n",
+        "v0.1.0",
+        "myapp",
+        "print(\"ok\")\n",
+    );
+
+    // Primera corrida: emite lockfile.
+    let (stdout1, _, _) = run_fitz_with_cache(&["check"], &app_dir, &cache_dir);
+    assert!(stdout1.contains("actualizado"), "stdout1: {stdout1}");
+
+    // Segunda corrida: lockfile ya está sync, no debe notificar
+    // "actualizado".
+    let (stdout2, _, _) = run_fitz_with_cache(&["check"], &app_dir, &cache_dir);
+    assert!(
+        !stdout2.contains("actualizado"),
+        "lockfile no debió re-escribirse: {stdout2}"
+    );
+}
+
+#[test]
+fn git_dep_tag_inexistente_aborta_con_mensaje_de_git() {
+    let tmp = tempfile::tempdir().unwrap();
+    // Crear repo con tag v0.1.0 pero pedir tag v9.9.9 que no existe.
+    let lib_dir = tmp.path().join("realib");
+    std::fs::create_dir_all(lib_dir.join("src")).unwrap();
+    std::fs::write(
+        lib_dir.join("fitz.toml"),
+        "[package]\nname = \"realib\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n[lib]\nentry = \"src/lib.fitz\"\n",
+    )
+    .unwrap();
+    std::fs::write(lib_dir.join("src").join("lib.fitz"), "fn x() -> Int => 1\n").unwrap();
+    init_git_repo_with_tag(&lib_dir, "v0.1.0");
+
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    let lib_path_str = lib_dir.to_string_lossy().replace('\\', "/");
+    let git_url = format!("file:///{}", lib_path_str.trim_start_matches('/'));
+    let manifest = format!(
+        "[package]\nname = \"myapp\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [bin]\nmain = \"src/main.fitz\"\n\n\
+         [dependencies]\nrealib = {{ git = \"{git_url}\", tag = \"v9.9.9\" }}\n"
+    );
+    std::fs::write(app_dir.join("fitz.toml"), manifest).unwrap();
+    let cache_dir = tmp.path().join(".fitz-cache");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+
+    let (_, stderr, code) = run_fitz_with_cache(&["check"], &app_dir, &cache_dir);
+    assert_eq!(code, 1);
+    // El mensaje debería citar `git clone` failing.
+    assert!(
+        stderr.to_lowercase().contains("git"),
+        "stderr no menciona git: {stderr}"
     );
 }
 

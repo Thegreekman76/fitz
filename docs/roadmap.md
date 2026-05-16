@@ -5479,7 +5479,7 @@ Archivos:
 algoritmo de resolución, lockfile `fitz.lock` commiteable, cache
 local en `~/.fitz/cache/`. Sin registry todavía (9.y.5).
 
-#### 9.y.3 — Resolución de deps + lockfile
+#### 9.y.3 — Resolución de deps + lockfile ✓ (CERRADO ENTERO, 2026-05-16)
 
 Antes del registry, primero la mecánica de resolución sobre deps
 **locales y git** (sin servidor). Sub-paso grande — partido en
@@ -5489,8 +5489,13 @@ sin meternos en commits gigantes:
 - **9.y.3.a — Path deps + sección `[lib]` + lockfile**
   ✓ CERRADO (2026-05-16). Detalle abajo.
 - **9.y.3.b — Loader integration** (deps usables desde código):
-  pendiente.
-- **9.y.3.c — Git deps + cache local**: pendiente.
+  ✓ CERRADO (2026-05-16).
+- **9.y.3.c — Git deps + cache local**:
+  ✓ CERRADO (2026-05-16).
+
+**Próximo norte tras 9.y.3 entera**: 9.y.4 — `fitz add` /
+`fitz remove` / `fitz update` (sub-comandos de manipulación del
+manifest + lockfile).
 
 ##### 9.y.3.a — Path deps + sección `[lib]` + lockfile ✓ (CERRADA, 2026-05-16)
 
@@ -5726,34 +5731,131 @@ Habilita `[dependencies] helpers = { git = "...", tag = "..." }`
 clonando a `~/.fitz/cache/git/<hash>/`, lockfile registra commit
 hash exacto. Cierra 9.y.3 entera.
 
-##### 9.y.3.c — Git deps + cache local (PENDIENTE)
+##### 9.y.3.c — Git deps + cache local ✓ (CERRADA, 2026-05-16)
 
-Tercer slice. Habilita deps de repos remotos.
+Tercer y último slice. Habilita deps de repos remotos. **Cierra
+9.y.3 entera** (a + b + c).
 
-- **Sintaxis**:
+- **Sintaxis** en `fitz.toml`:
   ```toml
   [dependencies]
   helpers = { git = "https://github.com/foo/bar", tag = "v1.0.0" }
+  # `rev` también soportado:
+  # helpers = { git = "https://github.com/foo/bar", rev = "abc123..." }
   ```
-- **`git clone --depth 1`** a `~/.fitz/cache/git/<hash>/`.
-  Hash = SHA-256 de la URL + tag/rev/commit para deduplicar.
-- **Lockfile** registra el commit hash exacto:
+- **Cache local** en `<cache>/git/<url-sanitized>@<ref>/`. Default
+  `~/.fitz/cache/`, override con env var `FITZ_CACHE_DIR` (esencial
+  para tests aislados + power users).
+- **Lockfile** registra el commit hash exacto Cargo-style:
   ```toml
   [[package]]
   name = "helpers"
   version = "1.0.0"
-  source = "git+https://github.com/foo/bar#abc123def..."
+  source = "git+https://github.com/foo/bar#abc123def4567890..."
   ```
-- **Decisiones a cerrar**:
-  - ¿`branch = "main"` permitido (no reproducible) o solo
-    `tag`/`rev`? Lean: solo `tag`/`rev`.
-  - ¿`git` invocado via subprocess o vía crate (`git2`/`gix`)?
-    Lean: subprocess `git clone` (zero deps adicionales, OS-git
-    funciona; crate más limpio pero pesado).
-  - ¿Cache eviction: cuándo? Lean: nunca automático; comando
-    explícito `fitz cache clean` post-MVP.
-  - ¿Verificación de integridad (`commit signature`)? Lean: no
-    en MVP; deuda visible.
+
+###### Decisiones técnicas tomadas
+
+- **Subprocess `git`** sobre crate (`git2`/`gix`): zero deps
+  adicionales, asume `git` en el PATH (caso 99% para dev de
+  Fitz). Trade-off: si git no está instalado, error claro
+  pidiendo instalar.
+- **`tag` XOR `rev`**, NUNCA juntos. `branch` NO soportado
+  intencionalmente — los branches mutan upstream y rompen
+  reproducibilidad. Validado al resolver con mensaje accionable.
+- **Cache directory naming**: URL sanitizada + `@` + ref, sin
+  hashing. Determinístico y human-readable
+  (`github.com_foo_bar@v1.0.0/`). Trunca a 200 chars para
+  filesystem safety en Windows. Sin sha2 dep — sanitización
+  textual alcanza para el caso 99%.
+- **Cache reuse**: si el dir existe, asume el clone previo es
+  válido y solo lee el commit hash. Sin re-clone automático.
+  Invalidación manual (borrar el dir, o `fitz cache clean` que
+  llega post-MVP).
+- **Estrategia de clone**:
+  - Tag → `git clone --depth 1 --branch <tag>` (eficiente,
+    shallow).
+  - Rev → `git clone` full + `git checkout <sha>` (git no acepta
+    SHAs en `--branch`). Wasteful pero correcto; optimización
+    con `--filter=blob:none` es deuda.
+- **Source format del lockfile**: `git+<url>#<commit-hash>`
+  (Cargo-style, 40-char SHA completo). Path deps siguen sin
+  emitir `source` (convención Cargo: implícitas).
+- **Validaciones cruzadas con mensajes accionables**: `path` +
+  `git` (combinación inválida), `tag` + `rev` (mutuamente
+  exclusivos), `tag`/`rev` sin `git` (falta url), `git` sin
+  `tag`/`rev` (cita reproducibilidad + por qué no `branch`),
+  `tag` o `rev` vacíos.
+- **`FITZ_CACHE_DIR` env var** override del default
+  `~/.fitz/cache/`. Esencial para tests E2E (cada test crea un
+  tempdir y lo apunta como cache para no contaminar el home
+  real).
+
+###### Total al cierre
+
+**1283 unit + 37 cli_e2e** (+8 unit en git_dep + 5 nuevos en
+manifest − 1 viejo eliminado; +4 E2E nuevos sobre los 33
+previos) **+ 79 compile_e2e + 3 openapi**. Clippy `-D warnings`
+limpio. **Sin breaking**: los 33 cli_e2e + 79 compile_e2e
+previos verdes idénticos.
+
+Archivos:
+
+- `src/git_dep.rs` (nuevo, +~320 LoC) — `cache_root` con
+  `FITZ_CACHE_DIR` override, `GitRef` enum, `sanitize_url`,
+  `cache_path_for`, `clone_or_use_cache`, `git_rev_parse_head`,
+  `lockfile_source_string`, `GitDepError`. 8 unit tests.
+- `src/manifest.rs` (+~180 LoC) — `ResolvedDepSource::Git { url,
+  requested, commit_hash }` variant nuevo, `parse_git_ref`
+  (valida tag XOR rev), `resolve_git_dep` (clone + read manifest
+  dep + valida `[lib]`), 2 variants nuevas en `ManifestError`
+  (`DepInvalidGitShape`, `DepGitError`), routing en
+  `resolve_single_dep`. 6 unit tests nuevos.
+- `src/lockfile.rs` — `from_resolved` emite `source =
+  "git+<url>#<sha>"` para git deps via
+  `git_dep::lockfile_source_string`.
+- `src/lib.rs` — `pub mod git_dep`.
+- `tests/cli_e2e.rs` (+~200 LoC) — 4 E2E nuevos:
+  `git_dep_clona_al_cache_y_emite_lockfile_con_commit`,
+  `git_dep_reusa_cache_sin_re_clonar` (verifica con marker file
+  que el dir no se sobrescribe),
+  `git_dep_lockfile_idempotente_si_commit_no_cambia`,
+  `git_dep_tag_inexistente_aborta_con_mensaje_de_git`. Helpers
+  `init_git_repo_with_tag`, `setup_git_dep_project`,
+  `run_fitz_with_cache` (env-aware).
+
+###### Decisiones residuales (NO bloquean 9.y.4)
+
+- **Drift entre lockfile commit y cache borrado**: si el cache
+  desaparece y al re-clone el upstream movió el tag, el nuevo
+  commit difiere del lockfile registrado. Hoy NO se detecta —
+  prevalence baja (tags inmutables son convención), pero deuda
+  explícita para 9.y.4 (lockfile-driven re-clone con verificación).
+- **`fitz cache clean`**: borrar el cache es manual hoy
+  (`rm -rf ~/.fitz/cache/git/...`). Sub-comando explícito llega
+  post-MVP.
+- **Auth para repos privados**: delegado al `git` del sistema
+  (SSH/HTTPS credentials del usuario). Sin tokens explícitos en
+  el manifest todavía — diseño futuro cuando aparezca demanda.
+- **Shallow clone con `--filter`**: tags usan `--depth 1` ya;
+  revs (SHAs) usan full clone porque `--branch` no acepta SHAs.
+  Optimización con `--filter=blob:none` para revs queda como
+  deuda menor de performance.
+- **Verificación de integridad** (commit signature, GPG): no
+  en MVP. Si aparece demanda real, integrar via `git verify-commit`.
+- **Concurrencia de clone**: dos `fitz run` simultáneos sobre el
+  mismo proyecto podrían intentar clonar la misma dep en paralelo
+  (race condition al crear el dir). Hoy no lo manejamos — caso
+  raro en práctica. Lockfile-style locking sobre el cache root
+  llega si aparece.
+
+###### Próximo norte tras 9.y.3 entera
+
+**9.y.4 — `fitz add` / `fitz remove` / `fitz update`** —
+sub-comandos de manipulación del manifest + lockfile. `fitz add
+foo@1.0.0` agrega entry a `[dependencies]`, resuelve, actualiza
+`fitz.lock`. Hoy el usuario edita el manifest a mano; 9.y.4 lo
+automatiza con UX `cargo add`-style.
 
 #### 9.y.4 — `fitz add` / `fitz remove` / `fitz update`
 

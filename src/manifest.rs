@@ -144,6 +144,16 @@ pub enum ManifestError {
     /// Dep con forma inválida: ni `path`, ni `git`, ni nada
     /// resoluble.
     DepInvalidShape { name: String },
+    /// Dep `git` con shape inválido: combinación prohibida o falta
+    /// de tag/rev. El `reason` ya viene formateado para el usuario.
+    DepInvalidGitShape { name: String, reason: String },
+    /// Falló el clone/checkout/rev-parse de una git dep. Wrappea el
+    /// error del módulo `git_dep` con el nombre de la dep para que
+    /// el mensaje sea accionable.
+    DepGitError {
+        name: String,
+        source: crate::git_dep::GitDepError,
+    },
 }
 
 impl fmt::Display for ManifestError {
@@ -182,10 +192,17 @@ impl fmt::Display for ManifestError {
             ),
             ManifestError::DepInvalidShape { name } => write!(
                 f,
-                "dep `{name}`: debe especificar al menos `path = \"...\"` \
-                 (los campos `git`/`tag`/`rev` llegan en 9.y.3.c; \
-                 versiones sueltas tipo `\"1.0.0\"` llegan con el registry \
-                 en 9.y.5)."
+                "dep `{name}`: debe especificar `path = \"...\"` o \
+                 `git = \"...\"` con `tag`/`rev` (versiones sueltas \
+                 tipo `\"1.0.0\"` llegan con el registry en 9.y.5)."
+            ),
+            ManifestError::DepInvalidGitShape { name, reason } => write!(
+                f,
+                "dep `{name}` (git): {reason}"
+            ),
+            ManifestError::DepGitError { name, source } => write!(
+                f,
+                "dep `{name}` (git): {source}"
             ),
         }
     }
@@ -327,15 +344,22 @@ pub struct ResolvedDep {
     pub source: ResolvedDepSource,
 }
 
-/// Tipo de origen de una dep resuelta. En 9.y.3.a solo `Path`; los
-/// otros variants quedan reservados para sub-pasos futuros.
+/// Tipo de origen de una dep resuelta.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ResolvedDepSource {
     /// Path dep. El campo guarda el path tal cual aparece en el
     /// manifest del importer (no canonicalizado) para preservar la
     /// intención del usuario en mensajes y diffs del lockfile.
     Path { declared: String },
-    // `Git { url, rev }` llega en 9.y.3.c.
+    /// Git dep (9.y.3.c). `url` es la URL tal como la declaró el
+    /// usuario; `requested` distingue Tag/Rev; `commit_hash` es el
+    /// SHA exacto que terminamos checkout-eando (consumido por el
+    /// lockfile como `source = "git+<url>#<commit>"`).
+    Git {
+        url: String,
+        requested: crate::git_dep::GitRef,
+        commit_hash: String,
+    },
     // `Registry { url, version }` llega en 9.y.5.
 }
 
@@ -369,30 +393,157 @@ fn resolve_single_dep(
             name: name.to_string(),
             reason: "las deps con versión suelta (`foo = \"1.0.0\"`) requieren \
                      el registry, que llega en 9.y.5. Por ahora usá \
-                     `foo = { path = \"...\" }`."
+                     `foo = { path = \"...\" }` o `foo = { git = \"...\", tag = \"...\" }`."
                 .to_string(),
         }),
         Dependency::Detailed(d) => {
-            // git/tag/rev: reservados para 9.y.3.c.
-            if d.git.is_some() || d.tag.is_some() || d.rev.is_some() {
-                return Err(ManifestError::DepNotImplemented {
+            let has_path = d.path.is_some();
+            let has_git = d.git.is_some();
+
+            // path + git: combinación inválida (cuál prioridad?).
+            if has_path && has_git {
+                return Err(ManifestError::DepInvalidGitShape {
                     name: name.to_string(),
-                    reason: "git deps (`git`/`tag`/`rev`) llegan en 9.y.3.c. \
-                             Por ahora usá `path = \"...\"`."
+                    reason: "no se puede combinar `path` con `git` en la misma dep. \
+                             Usá uno u otro."
                         .to_string(),
                 });
             }
-            let path_str = match &d.path {
-                Some(p) => p,
-                None => {
-                    return Err(ManifestError::DepInvalidShape {
-                        name: name.to_string(),
-                    })
-                }
-            };
-            resolve_path_dep(name, path_str, manifest_dir)
+
+            if has_path {
+                // path-only deps (9.y.3.a) — el resto de los fields
+                // git-relacionados se ignoran silenciosamente. No
+                // erroneamos para no romper el caso donde el usuario
+                // está iterando entre `path` y `git`.
+                let path_str = d.path.as_ref().expect("has_path checked");
+                return resolve_path_dep(name, path_str, manifest_dir);
+            }
+
+            if has_git {
+                let url = d.git.as_ref().expect("has_git checked");
+                let gitref = parse_git_ref(name, d.tag.as_deref(), d.rev.as_deref())?;
+                return resolve_git_dep(name, url, gitref);
+            }
+
+            // Ni path ni git pero alguno de tag/rev — usuario olvidó
+            // el url. Mensaje específico.
+            if d.tag.is_some() || d.rev.is_some() {
+                return Err(ManifestError::DepInvalidGitShape {
+                    name: name.to_string(),
+                    reason: "`tag`/`rev` requieren también `git = \"<url>\"`.".to_string(),
+                });
+            }
+
+            Err(ManifestError::DepInvalidShape {
+                name: name.to_string(),
+            })
         }
     }
+}
+
+/// Valida tag/rev: exactamente uno de los dos debe estar presente.
+fn parse_git_ref(
+    name: &str,
+    tag: Option<&str>,
+    rev: Option<&str>,
+) -> Result<crate::git_dep::GitRef, ManifestError> {
+    match (tag, rev) {
+        (Some(_), Some(_)) => Err(ManifestError::DepInvalidGitShape {
+            name: name.to_string(),
+            reason: "`tag` y `rev` son mutuamente exclusivos — elegí uno.".to_string(),
+        }),
+        (Some(t), None) => {
+            if t.trim().is_empty() {
+                return Err(ManifestError::DepInvalidGitShape {
+                    name: name.to_string(),
+                    reason: "`tag` no puede ser vacío.".to_string(),
+                });
+            }
+            Ok(crate::git_dep::GitRef::Tag(t.to_string()))
+        }
+        (None, Some(r)) => {
+            if r.trim().is_empty() {
+                return Err(ManifestError::DepInvalidGitShape {
+                    name: name.to_string(),
+                    reason: "`rev` no puede ser vacío.".to_string(),
+                });
+            }
+            Ok(crate::git_dep::GitRef::Rev(r.to_string()))
+        }
+        (None, None) => Err(ManifestError::DepInvalidGitShape {
+            name: name.to_string(),
+            reason: "git deps requieren `tag = \"...\"` o `rev = \"...\"` para reproducibilidad. \
+                     `branch` no se soporta intencionalmente (mutables → builds no reproducibles)."
+                .to_string(),
+        }),
+    }
+}
+
+/// Resolución de git deps (9.y.3.c). Clona o reusa el cache, lee el
+/// manifest de la dep, valida `[lib]`, y devuelve un `ResolvedDep`
+/// con `source = ResolvedDepSource::Git { ... }`.
+fn resolve_git_dep(
+    name: &str,
+    url: &str,
+    gitref: crate::git_dep::GitRef,
+) -> Result<ResolvedDep, ManifestError> {
+    let cloned =
+        crate::git_dep::clone_or_use_cache(url, &gitref).map_err(|e| ManifestError::DepGitError {
+            name: name.to_string(),
+            source: e,
+        })?;
+
+    let dep_manifest_path = cloned.abs_path.join(MANIFEST_FILE);
+    if !dep_manifest_path.is_file() {
+        return Err(ManifestError::DepPathNotFound {
+            name: name.to_string(),
+            path: dep_manifest_path,
+        });
+    }
+
+    let dep_manifest_text = std::fs::read_to_string(&dep_manifest_path).map_err(|_| {
+        ManifestError::DepPathNotFound {
+            name: name.to_string(),
+            path: dep_manifest_path.clone(),
+        }
+    })?;
+    let dep_manifest = Manifest::parse(&dep_manifest_text).map_err(|e| {
+        ManifestError::DepManifestInvalid {
+            name: name.to_string(),
+            path: dep_manifest_path.clone(),
+            source: Box::new(e),
+        }
+    })?;
+
+    let lib = match dep_manifest.lib {
+        Some(l) => l,
+        None => {
+            return Err(ManifestError::DepMissingLib {
+                name: name.to_string(),
+                path: dep_manifest_path,
+            })
+        }
+    };
+
+    let lib_entry = cloned.abs_path.join(&lib.entry);
+    if !lib_entry.is_file() {
+        return Err(ManifestError::DepPathNotFound {
+            name: name.to_string(),
+            path: lib_entry,
+        });
+    }
+
+    Ok(ResolvedDep {
+        name: name.to_string(),
+        version: dep_manifest.package.version,
+        abs_path: cloned.abs_path,
+        lib_entry,
+        source: ResolvedDepSource::Git {
+            url: url.to_string(),
+            requested: gitref,
+            commit_hash: cloned.commit_hash,
+        },
+    })
 }
 
 fn resolve_path_dep(
@@ -752,6 +903,7 @@ entry = "src/lib.fitz"
         assert!(resolved[0].lib_entry.ends_with("src/lib.fitz") || resolved[0].lib_entry.ends_with("src\\lib.fitz"));
         match &resolved[0].source {
             ResolvedDepSource::Path { declared } => assert_eq!(declared, "../utils"),
+            other => panic!("se esperaba ResolvedDepSource::Path, fue {other:?}"),
         }
     }
 
@@ -767,23 +919,10 @@ entry = "src/lib.fitz"
         assert!(msg.contains("foo"), "msg: {msg}");
     }
 
-    #[test]
-    fn resolve_dependencies_git_aborta_citando_9y3c() {
-        let importer_dir = tempfile::tempdir().unwrap();
-        let mut m = Manifest::new_default("importer").unwrap();
-        m.dependencies.insert(
-            "helpers".to_string(),
-            Dependency::Detailed(DetailedDependency {
-                path: None,
-                git: Some("https://github.com/foo/bar".to_string()),
-                tag: None,
-                rev: None,
-            }),
-        );
-        let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
-        let msg = err.to_string();
-        assert!(msg.contains("9.y.3.c"), "msg: {msg}");
-    }
+    // (El test viejo `resolve_dependencies_git_aborta_citando_9y3c`
+    // se eliminó al cerrar 9.y.3.c — git deps son ahora soportadas.
+    // La validación de shape la cubren los tests `resolve_git_dep_*`
+    // arriba.)
 
     #[test]
     fn resolve_dependencies_path_inexistente_aborta() {
@@ -833,6 +972,97 @@ entry = "src/lib.fitz"
         let msg = err.to_string();
         assert!(msg.contains("[lib]"), "msg: {msg}");
         assert!(msg.contains("entry"), "msg: {msg}");
+    }
+
+    // ---- Fase 9.y.3.c — validaciones de shape de git deps ----
+
+    fn git_dep(
+        path: Option<&str>,
+        git: Option<&str>,
+        tag: Option<&str>,
+        rev: Option<&str>,
+    ) -> Dependency {
+        Dependency::Detailed(DetailedDependency {
+            path: path.map(|s| s.to_string()),
+            git: git.map(|s| s.to_string()),
+            tag: tag.map(|s| s.to_string()),
+            rev: rev.map(|s| s.to_string()),
+        })
+    }
+
+    #[test]
+    fn resolve_git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
+        let importer_dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::new_default("importer").unwrap();
+        m.dependencies.insert(
+            "helpers".to_string(),
+            git_dep(None, Some("https://example.com/r"), None, None),
+        );
+        let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("tag") && msg.contains("rev"), "msg: {msg}");
+        assert!(msg.contains("reproducibilidad"), "msg debería citar reproducibilidad: {msg}");
+    }
+
+    #[test]
+    fn resolve_git_dep_con_tag_y_rev_juntos_aborta() {
+        let importer_dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::new_default("importer").unwrap();
+        m.dependencies.insert(
+            "helpers".to_string(),
+            git_dep(None, Some("https://example.com/r"), Some("v1"), Some("abc")),
+        );
+        let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("mutuamente exclusivos"), "msg: {msg}");
+    }
+
+    #[test]
+    fn resolve_git_dep_tag_vacio_aborta() {
+        let importer_dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::new_default("importer").unwrap();
+        m.dependencies.insert(
+            "helpers".to_string(),
+            git_dep(None, Some("https://example.com/r"), Some("  "), None),
+        );
+        let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("`tag` no puede ser vacío"), "msg: {msg}");
+    }
+
+    #[test]
+    fn resolve_path_y_git_juntos_aborta_combinacion_invalida() {
+        let importer_dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::new_default("importer").unwrap();
+        m.dependencies.insert(
+            "x".to_string(),
+            git_dep(Some("../x"), Some("https://example.com/r"), Some("v1"), None),
+        );
+        let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("no se puede combinar"), "msg: {msg}");
+    }
+
+    #[test]
+    fn resolve_tag_sin_git_aborta_pidiendo_url() {
+        let importer_dir = tempfile::tempdir().unwrap();
+        let mut m = Manifest::new_default("importer").unwrap();
+        m.dependencies.insert(
+            "x".to_string(),
+            git_dep(None, None, Some("v1"), None),
+        );
+        let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("requieren también `git"), "msg: {msg}");
+    }
+
+    #[test]
+    fn parse_git_ref_devuelve_tag_o_rev_correcto() {
+        let t = parse_git_ref("x", Some("v1.0.0"), None).unwrap();
+        assert_eq!(t, crate::git_dep::GitRef::Tag("v1.0.0".to_string()));
+
+        let r = parse_git_ref("x", None, Some("abc123")).unwrap();
+        assert_eq!(r, crate::git_dep::GitRef::Rev("abc123".to_string()));
     }
 
     #[test]

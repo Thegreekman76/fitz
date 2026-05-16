@@ -12,16 +12,69 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager con cuatro sub-pasos cerrados** — 9.y.1 (manifest +
+manager con 9.y.3 entera CERRADA** — 9.y.1 (manifest +
 scaffolding), 9.y.2 (integración de `fitz run`/`build`/`check`
 con el manifest), 9.y.3.a (path deps + sección `[lib]` + lockfile
-`fitz.lock`), y 9.y.3.b (loader integration — deps usables desde
-código), todos el 2026-05-16. **9.y.3 está partido en tres
-sub-commits**: 9.y.3.a + 9.y.3.b CERRADOS; próximo 9.y.3.c (git
-deps + cache local) cierra el bloque 9.y.3 entera.
+`fitz.lock`), 9.y.3.b (loader integration — deps usables desde
+código), y 9.y.3.c (git deps + cache local), todos el 2026-05-16.
+Próximo norte: **9.y.4** (`fitz add` / `fitz remove` /
+`fitz update`) — sub-comandos de manipulación del manifest +
+lockfile.
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.11] — 2026-05-16 — Fase 9.y.3.c + cierre de 9.y.3 entera: git deps + cache local
+
+Tercer y último slice del tercer sub-paso del package manager.
+Habilita `[dependencies] foo = { git = "https://...", tag = "v1.0.0" }`
+en `fitz.toml`. El primer acceso clona el repo a `<cache>/git/
+<sanitized-url>@<ref>/` (cache global, default `~/.fitz/cache/`,
+override con `FITZ_CACHE_DIR`) y reusa el dir en accesos
+siguientes — sin re-clone automático. El lockfile registra el
+commit hash exacto Cargo-style: `source = "git+<url>#<commit>"`.
+
+**Cierra 9.y.3 entera**: path deps (a) + loader integration (b)
++ git deps (c) están todos vivos. El package manager Fitz puede
+hoy declarar, resolver, bloquear y CONSUMIR deps tanto locales
+como de repos git remotos, sin registry todavía. Próximo norte:
+9.y.4 (`fitz add`/`remove`/`update`).
+
+Decisiones cerradas: subprocess `git` sobre crate (zero deps);
+`tag` XOR `rev` mutuamente exclusivos; `branch` NO soportado
+intencionalmente (no reproducible); cache naming determinístico
+sin hashing (`github.com_foo_bar@v1.0.0/`, trunca a 200 chars);
+cache reuse sin re-clone automático; estrategia split (`--depth 1
+--branch <tag>` para tags, full clone + checkout para revs porque
+git no acepta SHAs en `--branch`); `FITZ_CACHE_DIR` env var
+override para tests E2E aislados.
+
+Validaciones cruzadas con mensajes accionables: `path` + `git`,
+`tag` + `rev` juntos, `tag`/`rev` sin `git`, `git` sin `tag`/`rev`
+(cita reproducibilidad), `tag`/`rev` vacíos.
+
+Smoke end-to-end: `myutils` con `[lib]` + git repo + tag `v0.1.0`;
+`myapp` con `[dependencies] myutils = { git = "file:///...", tag
+= "v0.1.0" }`. `fitz run` clona, lockfile correcto, output ok;
+segunda corrida sin re-clone (verificado con marker file); `fitz
+build` produce binario ejecutable bit-a-bit idéntico.
+
+- 8 unit tests nuevos en `git_dep::tests` (sanitize_url,
+  cache_path_for, lockfile_source_string, GitRef shape).
+- 6 unit tests nuevos en `manifest::tests` (parse_git_ref +
+  validaciones de shape: sin tag/rev, tag+rev juntos, tag vacío,
+  path+git, tag sin git).
+- 4 E2E tests nuevos en `tests/cli_e2e.rs` con bare git repo
+  local + `FITZ_CACHE_DIR` aislado.
+- Total: 1283 unit + 37 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
+
+Deuda residual visible (NO bloquea 9.y.4): drift entre lockfile
+commit y cache borrado (re-clone fresh no detecta si upstream
+movió el tag); `fitz cache clean` sub-comando (borrar cache es
+manual hoy); auth para repos privados (delegado al git del
+sistema); shallow clone con `--filter` para revs (optimización
+de performance); verificación de integridad (commit signature).
 
 ## [v0.9.10] — 2026-05-16 — Fase 9.y.3.b: loader integration (deps usables desde código)
 
