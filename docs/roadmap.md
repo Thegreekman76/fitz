@@ -5614,32 +5614,117 @@ import helper` resuelve contra `<utils-lib>/src/lib.fitz`
 (el `lib_entry` de `ResolvedDep`). Toca lo más invasivo de
 9.y.3 — refactor del loader compartido.
 
-##### 9.y.3.b — Loader integration (PENDIENTE)
+##### 9.y.3.b — Loader integration ✓ (CERRADA, 2026-05-16)
 
 Segundo slice. Hace que las deps declaradas y bloqueadas en
-9.y.3.a sean **realmente usables** desde código Fitz.
+9.y.3.a sean **realmente usables** desde código Fitz. El loader
+del evaluator (`fitz run`) y el del codegen (`fitz build`)
+consultan ahora el `dep_registry` resuelto del manifest ANTES de
+fallback a paths relativos del importer. `from <dep-name> import
+X` resuelve al `lib_entry` absoluto de la dep.
 
-- Cambio en `evaluator::load_module` y el equivalente en
-  `codegen`: antes de resolver `from <name> import X` como path
-  relativo al importer, consultar un "dep registry" que
-  contenga las `ResolvedDep` del proyecto en curso.
-- Si `<name>` matchea una dep resuelta → cargar desde
-  `dep.lib_entry`; si no, comportamiento actual (path relativo).
-- Imports transitivos: una dep puede a su vez tener
-  `[dependencies]` propias (deuda de 5b.5: imports transitivos
-  no soportaban en codegen). Resolver recursivamente al cargar
-  el manifest del importer raíz.
-- Decisiones a cerrar:
-  - ¿Cómo se pasa el dep registry al loader? Argument-passing
-    explícito vs thread-local vs context struct nuevo.
-  - ¿Path deps que importan otras path deps? Sí, transitivo.
-  - ¿Conflicto si dos deps tienen el mismo nombre (caso ridículo
-    con paths distintos)? Error al resolver.
-  - ¿Imports relativos DENTRO de una dep (`from ./helpers import X`):
-    resuelven contra `dep.abs_path`, no contra el cwd del
-    importer.
-  - ¿Caching del módulo: cada `from X import Y` re-parsea o
-    cache por path canonicalizado?
+###### Decisiones técnicas tomadas
+
+- **`dep_registry` como `HashMap<String, PathBuf>`** (alias
+  `manifest::DepRegistry`) — map liviano `dep-name → lib_entry-
+  absoluto`. Helper `build_dep_registry(&[ResolvedDep])`
+  centralizado en `manifest.rs`.
+- **Resolución orden 1 — dep registry shortcut**: en
+  `resolve_module_path` (evaluator) y `resolve_path` (codegen),
+  si `segments.len() == 1` y matchea key del registry, devolver
+  `lib_entry` directo. Solo single-segment porque los nombres de
+  dep son siempre identificadores planos.
+- **Resolución orden 2 — path relativo (fallback)**: si no hay
+  match en el registry, comportamiento idéntico a pre-9.y.3.b.
+  Single-file mode (sin manifest) pasa registry vacío → siempre
+  fallback.
+- **Dep shadowea archivo local con mismo nombre**: si tenés
+  `[dependencies] foo = { ... }` Y un `src/foo.fitz` local, gana
+  la dep. Decisión explícita: la declaración en `[dependencies]`
+  es intención primaria del usuario. Test cubre.
+- **API del evaluator extendida con backward compat**:
+  `eval_with_base(_sync)` quedan como wrappers de los nuevos
+  `eval_with_base_and_deps(_sync)` con registry vacío. Tests y
+  callers externos (openapi) no necesitan migrar si no quieren
+  consumir deps.
+- **`fitz check` NO consume dep_registry**: el checker no
+  recursea en módulos importados (los nombres se tipan como
+  Any/nominal placeholder). La validación real ocurre en run/
+  build. Wiring queda como futuro si el checker mejora cross-
+  module.
+- **Transitive deps NO soportadas en 9.y.3.b**: el dep_registry
+  es flat (solo deps del importer raíz). El check de 5b.5 del
+  codegen ("imports transitivos no soportados") sigue activo.
+  Una dep no puede a su vez tener `[dependencies]` propias
+  usables. Para soportarlo hay que resolver recursivamente las
+  deps de las deps + extender el registry — refactor mayor, deuda
+  futura.
+- **`ManifestCtx.resolved_deps` poblado en `resolve_entry`**:
+  single source of truth. `sync_lockfile_if_needed` ya no
+  re-resuelve. `dep_registry_from(&ResolvedEntry)` helper arma
+  el registry desde ahí.
+
+###### Total al cierre
+
+**1270 unit + 33 cli_e2e** (+5 de 9.y.3.b sobre los 28 previos)
+**+ 79 compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
+**Sin breaking**: los 79 compile_e2e (single-file mode) verdes
+idénticos; los 28 cli_e2e previos también.
+
+Archivos:
+
+- `src/manifest.rs` — `DepRegistry` type alias +
+  `build_dep_registry()` helper.
+- `src/evaluator.rs` — `Loader.dep_registry` campo nuevo;
+  `install_loader(base, deps)` signature ampliada;
+  `resolve_module_path` con shortcut + fallback; pub APIs nuevas
+  `eval_with_base_and_deps(_sync)`; los viejos
+  `eval_with_base(_sync)` quedan como wrappers con empty deps.
+- `src/codegen.rs` — `ModuleLoader.dep_registry` campo nuevo;
+  `ModuleLoader::new(base, deps)` signature ampliada;
+  `resolve_path` con shortcut + fallback; `generate_project`
+  signature ampliada; 2 test call sites actualizados.
+- `src/main.rs` — `ManifestCtx.resolved_deps` campo nuevo
+  populated en `resolve_entry`; `sync_lockfile_if_needed` ya no
+  re-resuelve (consume directo); `dep_registry_from()` helper;
+  dispatch de Run/Build pasa el registry a `run_file`/`build_file`;
+  `run_file` invoca `eval_with_base_and_deps_sync`; `build_file`
+  toma `dep_registry` y la pasa a `generate_project`.
+- `tests/cli_e2e.rs` — 5 E2E nuevos:
+  `run_resuelve_from_dep_import_via_dep_registry`,
+  `run_dep_no_referenciada_no_falla_si_no_se_importa`,
+  `run_local_fitz_no_es_shadoweado_por_archivo_inexistente`
+  (fallback path-relativo en proyecto sin deps en manifest),
+  `run_dep_shadowea_archivo_local_con_mismo_nombre`,
+  `build_resuelve_from_dep_import_via_dep_registry`.
+
+###### Decisiones residuales (NO bloquean 9.y.3.c)
+
+- **Hyphens en dep names**: aceptados en el manifest (la regex
+  crates.io-style los permite), pero NO importables porque el
+  parser de Fitz no acepta `-` en identifiers (`from utils-lib
+  import X` no parsea: `-` separa expresiones). Auto-translation
+  `-` ↔ `_` queda como deuda 9.y.4 (igual que Rust auto-traduce
+  `my-crate` ↔ `my_crate` en `use`).
+- **Transitive deps** (deps de deps): no soportadas. La dep
+  registry es flat. Requiere refactor del manifest loading para
+  resolver recursivamente. Deuda futura sin sub-paso comprometido.
+- **`fitz check` cross-module**: no chequea contra el código real
+  de las deps. Los nombres importados se tipan como Any/nominal
+  placeholder; la validación real es en run/build. Si el LSP
+  o `fitz check` mejoran para cross-module, hay que extender el
+  pipeline del checker.
+- **Smoke E2E con HTTP + deps**: no testeado en 9.y.3.b (los
+  E2E nuevos son CLI). El path debería funcionar igual (el
+  codegen no diferencia tipo de programa al cargar deps), pero
+  sin E2E que lo valide. Deuda menor.
+
+###### Próximo norte tras 9.y.3.b
+
+**9.y.3.c — Git deps + cache local**: tercer slice del bloque.
+Habilita `[dependencies] helpers = { git = "...", tag = "..." }`
+clonando a `~/.fitz/cache/git/<hash>/`, lockfile registra commit
+hash exacto. Cierra 9.y.3 entera.
 
 ##### 9.y.3.c — Git deps + cache local (PENDIENTE)
 

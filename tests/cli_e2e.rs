@@ -473,6 +473,158 @@ fn path_dep_sin_lib_aborta_con_sugerencia() {
     assert!(stderr.contains("entry"), "stderr: {stderr}");
 }
 
+// ---- Fase 9.y.3.b — Loader integration (deps usables desde código) ----
+
+/// Helper: setup mínimo de proyecto importer + lib. Crea
+/// `<tmp>/<lib>/` con `[lib] entry = "src/lib.fitz"` exponiendo las
+/// funciones del template; crea `<tmp>/<app>/` con `[dependencies]`
+/// apuntando al lib + `src/main.fitz` con `from <lib> import ...`.
+/// Devuelve el path del importer.
+fn setup_dep_project(
+    tmp: &Path,
+    lib_name: &str,
+    lib_version: &str,
+    lib_body: &str,
+    app_name: &str,
+    app_body: &str,
+) -> std::path::PathBuf {
+    // Lib.
+    let _ = run_fitz(&["new", lib_name, "--no-git"], tmp);
+    let lib_dir = tmp.join(lib_name);
+    convert_to_lib(&lib_dir, lib_name, lib_version);
+    std::fs::write(lib_dir.join("src").join("lib.fitz"), lib_body).unwrap();
+
+    // App.
+    let _ = run_fitz(&["new", app_name, "--no-git"], tmp);
+    let app_dir = tmp.join(app_name);
+    add_path_dep(&app_dir, app_name, lib_name, &format!("../{lib_name}"));
+    std::fs::write(app_dir.join("src").join("main.fitz"), app_body).unwrap();
+    app_dir
+}
+
+#[test]
+fn run_resuelve_from_dep_import_via_dep_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = setup_dep_project(
+        tmp.path(),
+        "myutils",
+        "0.1.0",
+        "fn double(x: Int) -> Int => x * 2\nfn greet(name: Str) -> Str => \"hola {name}\"\n",
+        "myapp",
+        "from myutils import double, greet\nprint(\"d={double(21)}\")\nprint(greet(\"Patagonia\"))\n",
+    );
+
+    let (stdout, stderr, code) = run_fitz(&["run"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("d=42"), "stdout: {stdout}");
+    assert!(stdout.contains("hola Patagonia"), "stdout: {stdout}");
+}
+
+#[test]
+fn run_dep_no_referenciada_no_falla_si_no_se_importa() {
+    // Setup proyecto con dep en manifest pero main.fitz no la importa.
+    // El lockfile se emite igual, el programa corre sin tocar la dep.
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = setup_dep_project(
+        tmp.path(),
+        "unused-lib",
+        "0.1.0",
+        "fn helper() -> Int => 1\n",
+        "myapp",
+        "print(\"sin imports\")\n",
+    );
+    let (stdout, _stderr, code) = run_fitz(&["run"], &app_dir);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("sin imports"));
+    assert!(app_dir.join("fitz.lock").is_file(), "lockfile debió emitirse");
+}
+
+#[test]
+fn run_local_fitz_no_es_shadoweado_por_archivo_inexistente() {
+    // Confirma que el fallback path-relativo sigue funcionando cuando
+    // el segment NO matchea ninguna dep. Importer importa un módulo
+    // local `utils.fitz` que vive en `<app>/src/`. Sin deps en el
+    // manifest, sin shadowing — comportamiento single-file mode
+    // dentro de un proyecto.
+    let tmp = tempfile::tempdir().unwrap();
+    let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
+    let app_dir = tmp.path().join("myapp");
+    // Módulo local utils.fitz adyacente al main.
+    std::fs::write(
+        app_dir.join("src").join("utils.fitz"),
+        "fn triple(x: Int) -> Int => x * 3\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app_dir.join("src").join("main.fitz"),
+        "from utils import triple\nprint(\"t={triple(7)}\")\n",
+    )
+    .unwrap();
+    let (stdout, stderr, code) = run_fitz(&["run"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("t=21"), "stdout: {stdout}");
+}
+
+#[test]
+fn run_dep_shadowea_archivo_local_con_mismo_nombre() {
+    // Decisión documentada: si hay `[dependencies] foo = { path = ... }`
+    // Y un `src/foo.fitz` local, la dep gana. Verificamos el behavior.
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = setup_dep_project(
+        tmp.path(),
+        "shared",
+        "0.1.0",
+        "fn ping() -> Str => \"DEP\"\n",
+        "myapp",
+        "from shared import ping\nprint(ping())\n",
+    );
+    // Crear un `src/shared.fitz` local con OTRO `ping()`.
+    std::fs::write(
+        app_dir.join("src").join("shared.fitz"),
+        "fn ping() -> Str => \"LOCAL\"\n",
+    )
+    .unwrap();
+
+    let (stdout, stderr, code) = run_fitz(&["run"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("DEP"),
+        "la dep debe ganar sobre el archivo local: {stdout}"
+    );
+    assert!(
+        !stdout.contains("LOCAL"),
+        "el archivo local no debe haberse cargado: {stdout}"
+    );
+}
+
+/// Build sin args en manifest mode: el codegen carga la dep del
+/// dep_registry y compila ambos módulos en un Cargo project unificado.
+/// Test pesado (~3-5s) porque invoca rustc real para 2 archivos `.fitz`.
+#[test]
+fn build_resuelve_from_dep_import_via_dep_registry() {
+    let tmp = tempfile::tempdir().unwrap();
+    let app_dir = setup_dep_project(
+        tmp.path(),
+        "myutils",
+        "0.1.0",
+        "fn double(x: Int) -> Int => x * 2\n",
+        "myapp",
+        "from myutils import double\nprint(\"d={double(21)}\")\n",
+    );
+
+    let (_stdout, stderr, code) = run_fitz(&["build"], &app_dir);
+    assert_eq!(code, 0, "stderr: {stderr}");
+
+    let bin_name = if cfg!(windows) { "myapp.exe" } else { "myapp" };
+    let bin_path = app_dir.join("target").join("release").join(bin_name);
+    assert!(bin_path.is_file(), "binario no existe en {}", bin_path.display());
+
+    let output = Command::new(&bin_path).output().expect("ejecutar binario");
+    assert!(output.status.success());
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("d=42"), "stdout del binario: {stdout}");
+}
+
 /// Build sin args en manifest mode: produce el binario en
 /// `<manifest_dir>/target/release/<pkg-name>(.exe)` con el nombre del
 /// paquete (NO el stem del fuente). Test pesado (~3s) porque invoca

@@ -275,6 +275,31 @@ pub fn find_manifest(start: &Path) -> Option<PathBuf> {
     }
 }
 
+// ---- Fase 9.y.3.b — registry de deps consumido por evaluator + codegen ----
+
+/// Map liviano `dep-name → lib_entry-absoluto` que pasamos al loader
+/// del evaluator (`fitz run`) y al loader del codegen (`fitz build`).
+///
+/// Fase 9.y.3.b: el loader chequea esto ANTES de fallback a paths
+/// relativos del importer. Cuando `from utils_lib import X` aparece y
+/// `utils_lib` está acá, el loader carga directo desde `lib_entry`.
+///
+/// Hyphens en nombres de paquete: aceptados en el manifest, pero NO
+/// pueden aparecer en imports Fitz porque el parser no acepta `-` en
+/// identificadores. Una dep `utils-lib` queda en el registry pero
+/// `from utils-lib import X` no parsea. Convención hasta 9.y.4:
+/// nombrar deps con `_` o sin separador si vas a importarlas.
+pub type DepRegistry = std::collections::HashMap<String, PathBuf>;
+
+/// Helper: arma el registry desde una lista de `ResolvedDep`. Cada dep
+/// entra una vez por su `name` (el nombre con el que aparece en
+/// `[dependencies]` del importer).
+pub fn build_dep_registry(deps: &[ResolvedDep]) -> DepRegistry {
+    deps.iter()
+        .map(|d| (d.name.clone(), d.lib_entry.clone()))
+        .collect()
+}
+
 // ---- Fase 9.y.3.a — resolución de dependencias ----
 
 /// Una dep resuelta a path absoluto + metadata necesaria para que el

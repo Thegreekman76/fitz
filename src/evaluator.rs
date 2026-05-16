@@ -101,8 +101,25 @@ pub async fn eval(program: Program) -> FitzResult<()> {
 /// Versión async de `eval` que recibe explícitamente el directorio raíz
 /// para resolver `import`s relativos. Para uso desde contextos async
 /// (tests con `#[tokio::test]`, handlers HTTP, otros async fns).
+///
+/// Si tu programa importa deps registradas en `fitz.toml`, usá
+/// `eval_with_base_and_deps` para que el loader resuelva `from <dep>
+/// import X` contra el `lib_entry` correcto (Fase 9.y.3.b). Esta
+/// versión asume "sin deps" (registry vacío).
 pub async fn eval_with_base(program: Program, base_dir: PathBuf) -> FitzResult<()> {
-    install_loader(base_dir);
+    eval_with_base_and_deps(program, base_dir, crate::manifest::DepRegistry::new()).await
+}
+
+/// Fase 9.y.3.b — variante de `eval_with_base` que recibe el
+/// `dep_registry` resuelto del `fitz.toml`. Lo consume el loader para
+/// que `from <dep-name> import X` resuelva al `lib_entry` absoluto en
+/// vez de fallback a path relativo del importer.
+pub async fn eval_with_base_and_deps(
+    program: Program,
+    base_dir: PathBuf,
+    dep_registry: crate::manifest::DepRegistry,
+) -> FitzResult<()> {
+    install_loader(base_dir, dep_registry);
     // Guard para des-instalar el loader siempre — incluso ante panic.
     // Si el programa termina por error, igual queremos limpiar el
     // thread_local así un siguiente `eval` arranca limpio.
@@ -124,8 +141,20 @@ pub async fn eval_with_base(program: Program, base_dir: PathBuf) -> FitzResult<(
 /// y bloquea sobre el future. Si ya estás adentro de un runtime, usá
 /// `eval_with_base(...).await` directo.
 pub fn eval_with_base_sync(program: Program, base_dir: PathBuf) -> FitzResult<()> {
+    eval_with_base_and_deps_sync(program, base_dir, crate::manifest::DepRegistry::new())
+}
+
+/// Fase 9.y.3.b — wrapper sync de `eval_with_base_and_deps` para
+/// el CLI cuando `fitz run` corre adentro de un proyecto Fitz con
+/// `[dependencies]`. El `dep_registry` viene construido por
+/// `manifest::build_dep_registry` desde el `ManifestCtx`.
+pub fn eval_with_base_and_deps_sync(
+    program: Program,
+    base_dir: PathBuf,
+    dep_registry: crate::manifest::DepRegistry,
+) -> FitzResult<()> {
     let runtime = build_runtime();
-    runtime.block_on(eval_with_base(program, base_dir))
+    runtime.block_on(eval_with_base_and_deps(program, base_dir, dep_registry))
 }
 
 /// Construye el runtime tokio `current_thread` que comparten el
@@ -793,18 +822,26 @@ struct Loader {
     base_dir: PathBuf,
     loading: Vec<PathBuf>,
     cache: HashMap<PathBuf, Value>,
+    /// Fase 9.y.3.b — registry de deps del proyecto raíz (`fitz.toml`
+    /// del importer principal). `from <name> import X` con `<name>`
+    /// en este map resuelve directo a `<lib_entry>.fitz` en vez de
+    /// fallback a path relativo. Permanece estable durante toda la
+    /// vida del loader (no se modifica en nested loads — los módulos
+    /// que cargamos no pueden re-bind el registry).
+    dep_registry: crate::manifest::DepRegistry,
 }
 
 thread_local! {
     static LOADER: RefCell<Option<Loader>> = const { RefCell::new(None) };
 }
 
-fn install_loader(base_dir: PathBuf) {
+fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
     LOADER.with(|cell| {
         *cell.borrow_mut() = Some(Loader {
             base_dir,
             loading: Vec::new(),
             cache: HashMap::new(),
+            dep_registry,
         });
     });
 }
@@ -824,13 +861,38 @@ impl Drop for LoaderGuard {
     }
 }
 
-/// Resuelve los segmentos del path al archivo correspondiente,
-/// relativo al `base_dir` actual del loader. `["foo"]` →
-/// `<base>/foo.fitz`; `["sub", "foo"]` → `<base>/sub/foo.fitz`.
+/// Resuelve los segmentos del path al archivo correspondiente.
+///
+/// **Fase 9.y.3.b — orden de resolución**:
+/// 1. Si `segments` es de un solo nombre y matchea una key del
+///    `dep_registry` del loader, devolvemos el `lib_entry` absoluto
+///    de la dep directamente.
+/// 2. Si no, fallback a path relativo al `base_dir` actual del loader:
+///    `["foo"]` → `<base>/foo.fitz`; `["sub", "foo"]` →
+///    `<base>/sub/foo.fitz`.
+///
+/// Decisión: las deps shadowean archivos locales con el mismo nombre
+/// (si tenés `[dependencies] utils = { ... }` y un `utils.fitz` local,
+/// gana la dep). Comportamiento explícito por design — la dep es
+/// declaración primaria de intención.
 ///
 /// No verifica existencia — el caller hace `canonicalize`, que falla
 /// con un mensaje útil si el archivo no está.
 fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
+    // Step 1 — dep registry shortcut (Fase 9.y.3.b).
+    let dep_hit = LOADER.with(|cell| {
+        let borrow = cell.borrow();
+        let loader = borrow.as_ref()?;
+        if segments.len() != 1 {
+            return None;
+        }
+        loader.dep_registry.get(&segments[0]).cloned()
+    });
+    if let Some(lib_entry) = dep_hit {
+        return Ok(lib_entry);
+    }
+
+    // Step 2 — path relativo (comportamiento pre-9.y.3.b).
     let base = LOADER.with(|cell| {
         cell.borrow().as_ref().map(|l| l.base_dir.clone())
     });
@@ -6543,7 +6605,7 @@ let r = match n {
         let tokens = crate::lexer::tokenize(main_src).expect("la fuente debe tokenizar");
         let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
 
-        install_loader(dir.path().to_path_buf());
+        install_loader(dir.path().to_path_buf(), crate::manifest::DepRegistry::new());
         // Guard local: garantizamos uninstall aun ante panic en eval.
         let _guard = LoaderGuard;
 

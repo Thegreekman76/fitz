@@ -12,16 +12,52 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager con tres sub-pasos cerrados** — 9.y.1 (manifest +
+manager con cuatro sub-pasos cerrados** — 9.y.1 (manifest +
 scaffolding), 9.y.2 (integración de `fitz run`/`build`/`check`
-con el manifest), y 9.y.3.a (path deps + sección `[lib]` + lockfile
-`fitz.lock`), todos el 2026-05-16. **9.y.3 está partido en tres
-sub-commits**: 9.y.3.a CERRADO; próximos 9.y.3.b (loader
-integration — deps usables desde código) y 9.y.3.c (git deps +
-cache local).
+con el manifest), 9.y.3.a (path deps + sección `[lib]` + lockfile
+`fitz.lock`), y 9.y.3.b (loader integration — deps usables desde
+código), todos el 2026-05-16. **9.y.3 está partido en tres
+sub-commits**: 9.y.3.a + 9.y.3.b CERRADOS; próximo 9.y.3.c (git
+deps + cache local) cierra el bloque 9.y.3 entera.
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.10] — 2026-05-16 — Fase 9.y.3.b: loader integration (deps usables desde código)
+
+Segundo slice del tercer sub-paso del package manager. El loader
+del evaluator (`fitz run`) y el del codegen (`fitz build`) consultan
+ahora el `dep_registry` resuelto del manifest ANTES de fallback a
+paths relativos del importer. `from <dep-name> import X` resuelve
+al `lib_entry` absoluto de la dep — las deps declaradas en 9.y.3.a
+son finalmente **usables desde código**.
+
+Smoke end-to-end: con un proyecto `myutils` (con `[lib] entry =
+"src/lib.fitz"` exponiendo `double`/`greet`) y un proyecto `myapp`
+con `[dependencies] myutils = { path = "../myutils" }`, el código
+`from myutils import double, greet` en `myapp/src/main.fitz`
+funciona tanto en `fitz run` como en `fitz build`, produciendo el
+output esperado bit-a-bit.
+
+Decisiones cerradas: `DepRegistry` como `HashMap<String, PathBuf>`
+alias en `manifest.rs`; resolución con shortcut single-segment +
+fallback path-relativo (paralelo en evaluator y codegen); deps
+shadowean archivos locales con el mismo nombre; transitive deps
+(deps de deps) NO soportadas en este slice (refactor mayor, deuda
+futura); hyphens en dep names aceptados al parse pero no
+importables porque el parser Fitz no acepta `-` en identifiers
+(deuda 9.y.4 para auto-translation); `fitz check` no consume el
+dep_registry (los nombres importados se tipan como Any/nominal
+placeholder, validación real ocurre en run/build).
+
+API del evaluator: `eval_with_base_and_deps(_sync)` nuevas pub APIs;
+`eval_with_base(_sync)` quedan como wrappers con registry vacío
+(backward compat para callers sin manifest awareness).
+
+- 5 E2E nuevos en `tests/cli_e2e.rs` (deps en run + build, no
+  ref no falla, fallback path-relativo, dep shadowea local).
+- Total: 1270 unit + 33 cli_e2e + 79 compile_e2e + 3 openapi.
+  Clippy `-D warnings` limpio.
 
 ## [v0.9.9] — 2026-05-16 — Fase 9.y.3.a: path deps + sección `[lib]` + `fitz.lock`
 

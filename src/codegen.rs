@@ -93,6 +93,7 @@ pub fn generate_project(
     src_path: &Path,
     program: &Program,
     env: &TypeEnv,
+    dep_registry: crate::manifest::DepRegistry,
 ) -> Result<ProjectArtifacts, FitzError> {
     let raw_stem = src_path
         .file_stem()
@@ -123,7 +124,7 @@ pub fn generate_project(
     // desde el main, generar su código Rust y registrarlos. Los
     // imports Python ya están separados en `python_imports`; el loader
     // los ignora (skip por path[0] == "python").
-    let mut loader = ModuleLoader::new(base_dir.clone());
+    let mut loader = ModuleLoader::new(base_dir.clone(), dep_registry);
     loader.collect_imports(program)?;
 
     // 5b.6: detectar si el programa (o algún módulo cargado) usa
@@ -778,15 +779,21 @@ struct ModuleLoader {
     /// Mapean cada `import foo` / `from foo import X` al módulo
     /// resuelto y al kind de uso.
     bindings: HashMap<String, ResolvedBinding>,
+    /// Fase 9.y.3.b — registry de deps del proyecto raíz. Cuando
+    /// `from <dep> import X` aparece, `resolve_path` matchea contra
+    /// este map ANTES de fallback al path relativo `<base>/foo.fitz`.
+    /// Empty hashmap en single-file mode (pre-9.y.2 behavior).
+    dep_registry: crate::manifest::DepRegistry,
 }
 
 impl ModuleLoader {
-    fn new(base_dir: PathBuf) -> Self {
+    fn new(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) -> Self {
         Self {
             base_dir,
             modules: Vec::new(),
             by_path: HashMap::new(),
             bindings: HashMap::new(),
+            dep_registry,
         }
     }
 
@@ -845,9 +852,27 @@ impl ModuleLoader {
         Ok(())
     }
 
-    /// Resuelve los segmentos a un path absoluto. `["foo"]` →
-    /// `<base>/foo.fitz`; `["sub", "foo"]` → `<base>/sub/foo.fitz`.
+    /// Resuelve los segmentos a un path absoluto.
+    ///
+    /// **Fase 9.y.3.b — orden de resolución** (paralelo al evaluator):
+    /// 1. Si `segments` es de un único nombre y matchea una key del
+    ///    `dep_registry`, devolvemos el `lib_entry` absoluto de la
+    ///    dep directamente.
+    /// 2. Si no, fallback: `["foo"]` → `<base>/foo.fitz`;
+    ///    `["sub", "foo"]` → `<base>/sub/foo.fitz`.
+    ///
+    /// Decisión: las deps shadowean archivos locales con el mismo
+    /// nombre (gana la dep si hay conflicto), igual que en el
+    /// evaluator. Comportamiento explícito por design.
     fn resolve_path(&self, segments: &[String]) -> PathBuf {
+        // Step 1 — dep registry shortcut.
+        if segments.len() == 1 {
+            if let Some(lib_entry) = self.dep_registry.get(&segments[0]) {
+                return lib_entry.clone();
+            }
+        }
+
+        // Step 2 — path relativo (pre-9.y.3.b behavior).
         let mut path = self.base_dir.clone();
         let n = segments.len();
         for (i, seg) in segments.iter().enumerate() {
@@ -1328,7 +1353,7 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
 /// checker ya hizo.
 #[allow(dead_code)]
 pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzError> {
-    let loader = ModuleLoader::new(PathBuf::from("."));
+    let loader = ModuleLoader::new(PathBuf::from("."), crate::manifest::DepRegistry::new());
     let python_imports = collect_python_imports(program);
     generate_main_rs(program, env, &loader, &python_imports)
 }
@@ -11534,7 +11559,7 @@ mod tests {
         let program = crate::parser::parse(tokens).unwrap();
         let (env, _types, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty(), "checker errors: {:?}", errs);
-        let project = generate_project(Path::new("test.fitz"), &program, &env).unwrap();
+        let project = generate_project(Path::new("test.fitz"), &program, &env, crate::manifest::DepRegistry::new()).unwrap();
         assert!(
             project.cargo_toml.contains("axum = \"0.8\""),
             "esperaba axum en Cargo.toml, got:\n{}",
@@ -11559,7 +11584,7 @@ mod tests {
         let program = crate::parser::parse(tokens).unwrap();
         let (env, _types, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty());
-        let project = generate_project(Path::new("test.fitz"), &program, &env).unwrap();
+        let project = generate_project(Path::new("test.fitz"), &program, &env, crate::manifest::DepRegistry::new()).unwrap();
         assert!(
             !project.cargo_toml.contains("axum"),
             "no debería haber axum en Cargo.toml sin HTTP, got:\n{}",

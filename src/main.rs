@@ -114,7 +114,8 @@ fn main() {
         Commands::Run { file, no_typecheck } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
-            run_file(&resolved.entry, no_typecheck);
+            let dep_registry = dep_registry_from(&resolved);
+            run_file(&resolved.entry, no_typecheck, dep_registry);
         }
         Commands::Build { file } => {
             let resolved = resolve_entry(file);
@@ -133,11 +134,18 @@ fn main() {
                     .join("release")
                     .join(filename)
             });
-            build_file(&resolved.entry, override_dest.as_deref());
+            let dep_registry = dep_registry_from(&resolved);
+            build_file(&resolved.entry, override_dest.as_deref(), dep_registry);
         }
         Commands::Check { file } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
+            // `fitz check` no usa el loader (el checker no recursea en
+            // módulos importados — los nombres del importer se tipan
+            // como Any/nominal placeholder y la validación real ocurre
+            // en `fitz run`/`build`). Por eso `check_file` no recibe el
+            // dep_registry. Si en el futuro el checker quiere consumir
+            // tipos del módulo importado, agregar acá el wiring.
             check_file(&resolved.entry);
         }
         Commands::Openapi { file } => {
@@ -161,13 +169,18 @@ fn main() {
 /// presente, el caller sabe que el run/build/check arrancó desde un
 /// proyecto Fitz (no en modo single-file).
 ///
-/// Por ahora solo lo consume `build_file` para decidir el destino del
-/// binario. Los otros call sites (`run_file`, `check_file`) ignoran el
-/// ctx — el entry resuelto ya es suficiente para reproducir el
-/// comportamiento single-file pre-9.y.2.
+/// Por ahora lo consumen: `build_file` para decidir el destino del
+/// binario; `sync_lockfile_if_needed` para emitir el `fitz.lock`; y
+/// el dispatch (Run/Build) para construir el `dep_registry` que
+/// recibe el evaluator y el codegen (9.y.3.b).
 struct ManifestCtx {
     manifest: manifest::Manifest,
     manifest_dir: PathBuf,
+    /// Deps resueltas (path deps resueltas a `lib_entry` absoluto).
+    /// Fase 9.y.3.a: poblado en `resolve_entry`, consumido por
+    /// `sync_lockfile_if_needed`. Fase 9.y.3.b: también usado para
+    /// armar el `dep_registry` que pasa al evaluator / codegen.
+    resolved_deps: Vec<manifest::ResolvedDep>,
 }
 
 /// Resultado de resolver el entry point del comando. `entry` apunta al
@@ -249,12 +262,37 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     };
 
     let entry = manifest_dir.join(&bin.main);
+
+    // Fase 9.y.3.a — resolver deps eager (fail-fast con mensaje del
+    // resolver). Si hay errores, abortamos antes de tocar el lockfile
+    // o invocar al evaluator/codegen.
+    let resolved_deps = manifest::resolve_dependencies(&manifest, &manifest_dir)
+        .unwrap_or_else(|e| {
+            eprintln!("✗ no se pudieron resolver las dependencias: {e}");
+            std::process::exit(1);
+        });
+
     ResolvedEntry {
         entry,
         manifest_ctx: Some(ManifestCtx {
             manifest,
             manifest_dir,
+            resolved_deps,
         }),
+    }
+}
+
+/// Fase 9.y.3.b — construye el `DepRegistry` (map `dep-name →
+/// lib_entry-absoluto`) consumido por `eval_with_base_and_deps_sync`
+/// (`fitz run`) y `codegen::generate_project` (`fitz build`).
+///
+/// Devuelve registry vacío en single-file mode (sin manifest) o cuando
+/// el manifest no tiene `[dependencies]`. El loader trata empty igual
+/// que pre-9.y.3.b: solo path-relativo, sin shortcuts.
+fn dep_registry_from(resolved: &ResolvedEntry) -> manifest::DepRegistry {
+    match &resolved.manifest_ctx {
+        Some(ctx) => manifest::build_dep_registry(&ctx.resolved_deps),
+        None => manifest::DepRegistry::new(),
     }
 }
 
@@ -270,17 +308,11 @@ fn sync_lockfile_if_needed(resolved: &ResolvedEntry) {
         Some(c) => c,
         None => return,
     };
-    if ctx.manifest.dependencies.is_empty() {
+    if ctx.resolved_deps.is_empty() {
         return;
     }
 
-    let deps = manifest::resolve_dependencies(&ctx.manifest, &ctx.manifest_dir)
-        .unwrap_or_else(|e| {
-            eprintln!("✗ no se pudieron resolver las dependencias: {e}");
-            std::process::exit(1);
-        });
-
-    let lock = lockfile::Lockfile::from_resolved(&deps);
+    let lock = lockfile::Lockfile::from_resolved(&ctx.resolved_deps);
     let path = lockfile::lockfile_path(&ctx.manifest_dir);
     match lockfile::write_lockfile_if_changed(&path, &lock) {
         Ok(true) => {
@@ -475,7 +507,11 @@ fn check_file(path: &PathBuf) {
 /// `Cargo.toml` generado sin reescribir pipeline; (c) cargo cachea
 /// incremental, lo que abarata segunda compilación. Trade-off: la
 /// primera compilación cuesta ~1-2s más que `rustc` directo.
-fn build_file(path: &PathBuf, override_dest: Option<&std::path::Path>) {
+fn build_file(
+    path: &PathBuf,
+    override_dest: Option<&std::path::Path>,
+    dep_registry: manifest::DepRegistry,
+) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
         std::process::exit(1);
@@ -512,7 +548,7 @@ fn build_file(path: &PathBuf, override_dest: Option<&std::path::Path>) {
     }
 
     // Codegen a Cargo project.
-    let project = match codegen::generate_project(path, &program, &env) {
+    let project = match codegen::generate_project(path, &program, &env, dep_registry) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("✗ codegen: {}", e);
@@ -638,7 +674,7 @@ fn build_file(path: &PathBuf, override_dest: Option<&std::path::Path>) {
     println!("✓ binario: {}", bin_out.display());
 }
 
-fn run_file(path: &PathBuf, no_typecheck: bool) {
+fn run_file(path: &PathBuf, no_typecheck: bool, dep_registry: manifest::DepRegistry) {
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
         eprintln!("Error leyendo {}: {}", path.display(), e);
         std::process::exit(1);
@@ -714,7 +750,7 @@ fn run_file(path: &PathBuf, no_typecheck: bool) {
     // `Stmt::TypeDef`). Clonamos antes de moverlo al evaluator.
     let program_for_server = program.clone();
     let (eval_result, registry) = http::with_active_registry(|| {
-        evaluator::eval_with_base_sync(program, base_dir)
+        evaluator::eval_with_base_and_deps_sync(program, base_dir, dep_registry)
     });
 
     if let Err(e) = eval_result {
