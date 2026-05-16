@@ -22,27 +22,34 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    InitializeParams, InitializeResult, InitializedParams, MessageType, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams, Hover,
+    HoverParams, HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams,
+    MessageType, ServerCapabilities, ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind,
+    Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
-use fitz::lsp::{check_source_with_types, fitz_errors_to_diagnostics};
-use fitz::types::TypeInfo;
+use fitz::lsp::{
+    check_source_with_types, fitz_errors_to_diagnostics, hover_for_position, make_hover,
+};
+use fitz::types::{TypeEnv, TypeInfo};
 
 /// Estado por documento abierto. Persiste el último texto recibido por
-/// `did_open`/`did_change` y el `TypeInfo` resultante del último
-/// chequeo, que el handler `hover` (Fase 9.x.2.b) consulta para responder
-/// `textDocument/hover` sin re-correr el pipeline.
+/// `did_open`/`did_change`, el `TypeEnv` resuelto (necesario para
+/// formatear nombres de tipos nominales en hover) y el `TypeInfo`
+/// resultante del último chequeo. El handler `hover` (Fase 9.x.2)
+/// consulta ambos para responder `textDocument/hover` sin re-correr
+/// el pipeline.
 //
-// `#[allow(dead_code)]` puntual: los fields se escriben en 9.x.2.a pero
-// los lee el handler `hover` en 9.x.2.b. Mismo patrón que
-// `parse_with_recovery` cuando aterrizó en F15 antes que sus consumidores.
-#[allow(dead_code)]
+// `#[allow(dead_code)]` puntual sobre `text` — lo persistimos para
+// consumidores futuros (9.x.3 go-to-definition probablemente lo
+// necesite para mapear cursor → span), pero hover no lo lee. Mismo
+// patrón que `parse_with_recovery` pre-consumidores en F15.
 #[derive(Debug)]
 struct DocumentState {
+    #[allow(dead_code)]
     text: String,
+    type_env: TypeEnv,
     type_info: TypeInfo,
 }
 
@@ -63,11 +70,16 @@ impl Backend {
     /// en `documents`, y publica los diagnósticos. Devuelve nada — la
     /// notificación es fire-and-forget.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
-        let (type_info, errors) = check_source_with_types(&text);
+        let (type_env, type_info, errors) = check_source_with_types(&text);
         let diagnostics = fitz_errors_to_diagnostics(&errors);
-        self.documents
-            .lock()
-            .insert(uri.clone(), DocumentState { text, type_info });
+        self.documents.lock().insert(
+            uri.clone(),
+            DocumentState {
+                text,
+                type_env,
+                type_info,
+            },
+        );
         self.client
             .publish_diagnostics(uri, diagnostics, version)
             .await;
@@ -93,6 +105,11 @@ impl LanguageServer for Backend {
                 text_document_sync: Some(TextDocumentSyncCapability::Kind(
                     TextDocumentSyncKind::FULL,
                 )),
+                // Fase 9.x.2 — anunciamos que respondemos
+                // `textDocument/hover` con el tipo del nodo bajo el
+                // cursor. La heurística de lookup y el formato de
+                // respuesta viven en `fitz::lsp`.
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
                 ..ServerCapabilities::default()
             },
         })
@@ -137,6 +154,24 @@ impl LanguageServer for Backend {
         // Convención LSP: al cerrar, mandamos un publish con lista
         // vacía para que VSCode limpie los marcadores del archivo.
         self.client.publish_diagnostics(uri, vec![], None).await;
+    }
+
+    async fn hover(&self, params: HoverParams) -> LspResult<Option<Hover>> {
+        // Resolvemos todo bajo el lock — clonamos lo mínimo (un `Type`
+        // y formateamos contra el env) para soltarlo antes de devolver.
+        // El env no se clona; el `make_hover` corre adentro del lock
+        // porque solo lee y serializa a string. Sin awaits → sin
+        // deadlock risk.
+        let uri = params.text_document_position_params.text_document.uri;
+        let pos = params.text_document_position_params.position;
+        let documents = self.documents.lock();
+        let state = match documents.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let hover = hover_for_position(&state.type_info, pos.line, pos.character)
+            .map(|ty| make_hover(ty, &state.type_env));
+        Ok(hover)
     }
 }
 

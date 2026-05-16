@@ -307,6 +307,14 @@ impl TypeInfo {
     pub fn is_empty(&self) -> bool {
         self.inner.is_empty()
     }
+
+    /// Itera todas las entries del side-table. Útil para consumidores
+    /// del LSP (Fase 9.x.2 — hover) que necesitan hacer un lookup
+    /// heurístico sobre posiciones (encontrar el span más cercano a
+    /// un cursor). Sin esto, `type_at` solo permite lookup exacto.
+    pub fn iter(&self) -> impl Iterator<Item = (&SpanKey, &Type)> {
+        self.inner.iter()
+    }
 }
 
 // ---------------------------------------------------------------------------

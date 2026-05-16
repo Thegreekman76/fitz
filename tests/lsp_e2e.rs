@@ -1,10 +1,12 @@
-// tests/lsp_e2e.rs — Smoke E2E del bin `fitz-lsp` (Fase 9.x.1).
+// tests/lsp_e2e.rs — Smoke E2E del bin `fitz-lsp` (Fase 9.x.1+).
 //
 // Spawnea el binario, le manda mensajes LSP por stdio, valida las
 // respuestas y notifications, y chequea exit code 0. Cubre:
 // - 9.x.1.a: handshake initialize/initialized/shutdown.
 // - 9.x.1.b: did_open con un buffer roto → notification
 //   `textDocument/publishDiagnostics` con el error mapeado.
+// - 9.x.2.b: did_open con programa válido + textDocument/hover →
+//   response con el tipo del nodo bajo el cursor en markdown.
 //
 // Requiere `--features lsp` (el bin `fitz-lsp` tiene
 // `required-features = ["lsp"]` en Cargo.toml). Sin la feature, el
@@ -237,6 +239,116 @@ fn did_open_documento_roto_publica_diagnostic_con_error_de_tipo() {
     stdin.flush().expect("flush shutdown");
     // No esperamos la respuesta — solo cerramos stdin para que el
     // server salga del loop.
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+#[test]
+fn hover_sobre_literal_int_devuelve_tipo_en_markdown() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let init_resp = read_message(&mut stdout);
+    // Sanity: la capability hover_provider se anuncia.
+    assert!(
+        init_resp.contains(r#""hoverProvider":true"#),
+        "initialize sin hoverProvider: {init_resp}",
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con `let x = 42`. El literal `42` empieza en col 9
+    // (1-based) = col 8 (0-based). Sin diagnostics esperados.
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///hover.fitz","languageId":"fitz","version":1,"text":"let x = 42\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    // Drenamos la notification de publishDiagnostics (no la usamos
+    // acá pero llega siempre tras didOpen). Iteramos hasta verla.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // Mandamos hover sobre la posición del literal `42`.
+    let hover_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///hover.fitz"},"position":{"line":0,"character":8}}}"#;
+    stdin.write_all(&frame(hover_req)).expect("write hover");
+    stdin.flush().expect("flush hover");
+
+    // Esperamos la response con id 2 (puede venir otras notifications
+    // intermedias).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let hover_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando hover response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    // Validamos: result.contents.kind == "markdown" y value contiene "Int".
+    assert!(
+        hover_resp.contains(r#""kind":"markdown""#)
+            || hover_resp.contains(r#""kind": "markdown""#),
+        "hover sin MarkupContent markdown: {hover_resp}",
+    );
+    assert!(
+        hover_resp.contains("```fitz") && hover_resp.contains("Int"),
+        "hover sin bloque fitz con tipo Int: {hover_resp}",
+    );
+    assert!(
+        !hover_resp.contains(r#""error""#),
+        "hover devolvió error: {hover_resp}",
+    );
+
+    // Hover en una posición sin spans (línea 2 — fuera del documento)
+    // debe devolver `result: null`.
+    let hover_empty = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/hover","params":{"textDocument":{"uri":"file:///hover.fitz"},"position":{"line":5,"character":0}}}"#;
+    stdin.write_all(&frame(hover_empty)).expect("write hover2");
+    stdin.flush().expect("flush hover2");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let null_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando hover null response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":3"#) {
+            break msg;
+        }
+    };
+    assert!(
+        null_resp.contains(r#""result":null"#)
+            || null_resp.contains(r#""result": null"#),
+        "hover en posición sin spans debería ser null: {null_resp}",
+    );
+
     drop(stdin);
     wait_for_clean_exit(&mut child);
 }
