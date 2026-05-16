@@ -1,0 +1,5 @@
+# Binarios generados por `scripts/build-vsix.mjs` y bundleados en el
+# .vsix por plataforma. NO se versionan — cada release los regenera
+# desde Rust source.
+fitz-lsp
+fitz-lsp.exe

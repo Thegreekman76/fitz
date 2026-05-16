@@ -2,7 +2,7 @@
   <img src="assets/logo.png" alt="Fitz logo" width="160" />
 </p>
 
-# Fitz 🏔️
+# Fitz
 
 > Un lenguaje de programación moderno, compilado y orientado a servicios web.
 > Nacido en la Patagonia. Construido con Rust.
@@ -39,15 +39,15 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 **Fitz toma lo mejor de cada uno:**
 
-| Feature              | Python | TypeScript | Go  | Fitz |
-| -------------------- | ------ | ---------- | --- | ---- |
-| Sintaxis limpia      | ✅     | ⚠️         | ❌  | ✅   |
-| Tipado gradual       | ❌     | ✅         | ❌  | ✅ * |
-| Compilado nativo     | ❌     | ❌         | ✅  | ✅ † |
-| HTTP en el core      | ❌     | ❌         | ❌  | ✅   |
-| Async nativo         | ⚠️     | ✅         | ✅  | ✅ ‡ |
-| Docs HTTP automáticas | ⚠️    | ❌         | ❌  | ✅ ◊ |
-| Interop Python       | ✅     | ❌         | ❌  | 🚧 § |
+| Feature                | Python | TypeScript | Go | Fitz  |
+| ---------------------- | ------ | ---------- | -- | ----- |
+| Sintaxis limpia        | ✅     | ⚠️       | ❌ | ✅    |
+| Tipado gradual         | ❌     | ✅         | ❌ | ✅ *  |
+| Compilado nativo       | ❌     | ❌         | ✅ | ✅ † |
+| HTTP en el core        | ❌     | ❌         | ❌ | ✅    |
+| Async nativo           | ⚠️   | ✅         | ✅ | ✅ ‡ |
+| Docs HTTP automáticas | ⚠️   | ❌         | ❌ | ✅ ◊ |
+| Interop Python         | ✅     | ❌         | ❌ | 🚧 § |
 
 \* **Tipado gradual con chequeo estático** — Fase 5a completada.
 `fitz check` y `fitz run` validan anotaciones en compile time;
@@ -75,8 +75,7 @@ el ejemplo
 autogenerado desde los decoradores (path/query/body/headers
 y `Result<T>` en return), UI Scalar embebida en `/docs`,
 `@header(name="X")` para headers como params, opt-out con
-`@server(docs=false)`. Schema bit-a-bit idéntico entre `fitz
-run`, `fitz openapi archivo.fitz` y `fitz build`. Ver
+`@server(docs=false)`. Schema bit-a-bit idéntico entre `fitz run`, `fitz openapi archivo.fitz` y `fitz build`. Ver
 [cap 18 de la guía](docs/guide.md#18-docs-automáticas).
 
 § **Interop Python via PyO3** — planificado para Fase 8,
@@ -178,8 +177,7 @@ async fn run() -> Result<Str> {
 }
 ```
 
-El binario `fitz build` con interop linkea pyo3 con `abi3-py310 +
-auto-initialize` y asume Python instalado en el destino.
+El binario `fitz build` con interop linkea pyo3 con `abi3-py310 + auto-initialize` y asume Python instalado en el destino.
 Paridad bit-a-bit `fitz run` ↔ `fitz build` validada en los
 ejemplos. Programas SIN interop Python siguen produciendo
 binarios libres como Fase 5b (pyo3 solo se incluye cuando
@@ -228,8 +226,7 @@ tipos". Tres componentes coordinados:
 `cargo build --release --features lsp`) que implementa el protocolo
 LSP estándar (JSON-RPC sobre stdio, tower-lsp 0.20); **módulo
 `fitz::lsp`** en la lib que expone el pipeline LSP-style
-(`parse_with_recovery + check_program`) y el helper `FitzError →
-Diagnostic`; **extensión VSCode** en
+(`parse_with_recovery + check_program`) y el helper `FitzError → Diagnostic`; **extensión VSCode** en
 [`editors/vscode/`](editors/vscode/) con grammar TextMate y cliente
 LSP que spawnea `fitz-lsp` (configurable via setting `fitz.lspPath`).
 Próxima sub-fase: **9.x.5 distribución VSCode Marketplace** —
@@ -268,8 +265,7 @@ Las fases cerradas:
 - **Fase 6 — Async nativo**: `async fn`, `.await` postfix,
   `Future<T>` como tipo built-in, builtin `sleep(ms)`, evaluator
   async sobre tokio `current_thread`, handlers HTTP async y
-  codegen `async fn` Rust + `tokio::time::sleep` para `fitz
-  build`. Cumple la promesa de "HTTP nativo" a nivel de ejecución.
+  codegen `async fn` Rust + `tokio::time::sleep` para `fitz build`. Cumple la promesa de "HTTP nativo" a nivel de ejecución.
 - **Fase 7 — DX HTTP**: schema OpenAPI 3.1 autogenerado desde
   los decoradores (path/query/body/headers y `Result<T>` en
   return); UI Scalar embebida en `/docs`; `@header(name="X")`
@@ -280,8 +276,7 @@ Las fases cerradas:
   schema en build-time).
 - **Mini-fase MW — Middleware y CORS**: decorator
   `@middleware(fn)` apilable sobre handlers HTTP (modelo gate-only:
-  `return null` o sin return → continúa la chain; `return <status>
-  { ... }` → short-circuit). Built-in `Request` (method/path/headers)
+  `return null` o sin return → continúa la chain; `return <status> { ... }` → short-circuit). Built-in `Request` (method/path/headers)
   y `Response` opaco. Built-in `cors(...)` configurable con kwargs
   via Map literal — preflight OPTIONS automático y headers
   `Access-Control-Allow-*` inyectados en la response real
@@ -303,16 +298,15 @@ Las fases cerradas:
   output bit-a-bit idéntico), PreF8.2 method chain multi-línea en
   parser, PreF8.3 audit de defaults de tipos importados (fix de
   eager-at-import), PreF8.4 import aliasing (`as`).
-- **Fase 8.1 — Embedding básico de CPython**: `from python import
-  X` desde el intérprete (`fitz run --features python`). PyO3 0.28
+- **Fase 8.1 — Embedding básico de CPython**: `from python import X` desde el intérprete (`fitz run --features python`). PyO3 0.28
   + ABI3-py310. Acceso a atributos, llamadas con args primitivos,
-  return primitivo coercionado a `Value` Fitz. Sub-pasos: 8.1.1
-  dep PyO3 opcional + `Value::PyObject` feature-gated, 8.1.2 loader
+    return primitivo coercionado a `Value` Fitz. Sub-pasos: 8.1.1
+    dep PyO3 opcional + `Value::PyObject` feature-gated, 8.1.2 loader
   + `from python import X`, 8.1.3 `Expr::Field` + auto-coerción
-  primitiva, 8.1.4 `Expr::Call` con args primitivos (cumple el
-  criterio del roadmap end-to-end), 8.1.5 guard de codegen
-  (`fitz build` aborta con mensaje claro — deuda F19 comprometida
-  para sub-paso futuro).
+    primitiva, 8.1.4 `Expr::Call` con args primitivos (cumple el
+    criterio del roadmap end-to-end), 8.1.5 guard de codegen
+    (`fitz build` aborta con mensaje claro — deuda F19 comprometida
+    para sub-paso futuro).
 - **Fase 8.2 — Marshaling de tipos compuestos**: `List<T>` ↔
   `list`, `Map<K, V>` ↔ `dict`, e `Instance` → `dict` (por field
   name) entre los dos runtimes. Copia eager bidireccional, sin
@@ -411,20 +405,18 @@ Las fases cerradas:
 - **Fase 8.8 — Guía + ejemplo CRUD + cierre formal de Fase 8**:
   cierra la Fase 8 entera con docs y un ejemplo ejecutable. Cap
   21 nuevo "Interop Python" en `docs/guide.md` con 12 sub-secciones
-  cubriendo setup, sintaxis, marshaling, coerciones, `fitz
-  py-types`, async, `fitz build`, y limitaciones honestas
+  cubriendo setup, sintaxis, marshaling, coerciones, `fitz py-types`, async, `fitz build`, y limitaciones honestas
   (renumeración cap 21→22). Ejemplo
   `examples/guide/21-python-crud/` (SQLAlchemy + SQLite + handlers
   HTTP) validado end-to-end con curl. Sub-pasos: 8.8.1 cap 21
   + renumeración; 8.8.2 ejemplo CRUD; 8.8.3 cierre formal
-  (CHANGELOG, roadmap, deudas, README, CLAUDE). Decisiones de
-  scope: cap 21 (una renumeración), SQLite (sin Docker), solo
-  `fitz run` con nota explícita sobre deuda residual de 8.7.
+    (CHANGELOG, roadmap, deudas, README, CLAUDE). Decisiones de
+    scope: cap 21 (una renumeración), SQLite (sin Docker), solo
+    `fitz run` con nota explícita sobre deuda residual de 8.7.
 
 **Cierre formal de Fase 8 entera (Interop Python)** — roadmap
 original cumplido al 100%: embedding (8.1), marshaling (8.2),
-excepciones → Result (8.3), tipos del checker (8.4), `fitz
-py-types` (8.5), bridge async (8.6), codegen (8.7), y docs +
+excepciones → Result (8.3), tipos del checker (8.4), `fitz py-types` (8.5), bridge async (8.6), codegen (8.7), y docs +
 CRUD (8.8).
 
 **1310 tests pasando con `--features python`** (1310 unit + 88 E2E
@@ -531,8 +523,7 @@ nuget wrapper), setear `PYO3_PYTHON` al `.exe` real + prepender al
 PATH el dir con `python3.dll` — ver CLAUDE.md para detalle.
 
 El binario `fitz` default (sin la feature) sigue siendo standalone
-sin link a libpython. Programs Fitz que no usan `from python
-import` no pagan nada.
+sin link a libpython. Programs Fitz que no usan `from python import` no pagan nada.
 
 ## Estabilidad
 

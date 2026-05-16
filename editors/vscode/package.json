@@ -11,9 +11,6 @@
   "categories": [
     "Programming Languages"
   ],
-  "activationEvents": [
-    "onLanguage:fitz"
-  ],
   "main": "./out/extension.js",
   "contributes": {
     "languages": [
@@ -63,7 +60,8 @@
     "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "build:icon": "node scripts/build-icon.mjs"
+    "build:icon": "node scripts/build-icon.mjs",
+    "build:vsix": "node scripts/build-vsix.mjs"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

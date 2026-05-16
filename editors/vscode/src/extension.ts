@@ -1,10 +1,22 @@
-// extension.ts — VSCode entry point para Fitz Language (Fase 9.x.1.c).
+// extension.ts — VSCode entry point para Fitz Language (Fase 9.x.1.c+).
 //
 // Capa fina: spawnea `fitz-lsp` como proceso hijo y conecta el
 // LanguageClient estándar de Microsoft. Toda la inteligencia (parsing,
-// type checking, diagnostics, futuras features de hover/completion)
-// vive del lado Rust en el binario `fitz-lsp` (src/bin/fitz-lsp.rs).
+// type checking, diagnostics, hover, go-to-def, completion) vive del
+// lado Rust en el binario `fitz-lsp` (src/bin/fitz-lsp.rs).
+//
+// Resolución del binario (Fase 9.x.5 — multi-platform aware):
+//
+// 1. Si el user setó `fitz.lspPath` a algo distinto del default
+//    (`"fitz-lsp"`), respetamos su override.
+// 2. Si no, buscamos un binario bundleado en `server/fitz-lsp[.exe]`
+//    relativo al `extensionPath` — caso típico cuando el usuario
+//    instaló el `.vsix` desde Marketplace.
+// 3. Como último fallback, asumimos `fitz-lsp` en el PATH del sistema
+//    (caso del flujo alfa de 9.x.1.c, donde el user compiló el binario
+//    a mano y lo dejó en PATH o configuró `fitz.lspPath`).
 
+import * as fs from "fs";
 import * as path from "path";
 import * as vscode from "vscode";
 import {
@@ -17,13 +29,7 @@ import {
 let client: LanguageClient | undefined;
 
 export function activate(context: vscode.ExtensionContext): void {
-  const config = vscode.workspace.getConfiguration("fitz");
-  // `fitz.lspPath` puede ser:
-  //  - un nombre suelto ("fitz-lsp") → se busca en PATH
-  //  - un path absoluto → se usa directo
-  //  - un path relativo → se resuelve relativo al workspace folder activo
-  // Sin workspace activo y path relativo, fallamos prolijo.
-  const lspPath = resolveServerPath(config.get<string>("lspPath", "fitz-lsp"));
+  const lspPath = resolveServerPath(context);
 
   const serverOptions: ServerOptions = {
     run: { command: lspPath, transport: TransportKind.stdio },
@@ -75,12 +81,44 @@ export function deactivate(): Thenable<void> | undefined {
   return client?.stop();
 }
 
-function resolveServerPath(raw: string): string {
-  // Path absoluto → tal cual.
+/**
+ * Resuelve el path al binario `fitz-lsp` siguiendo el orden:
+ * 1. `fitz.lspPath` setteado por el user (override manual) → respeta.
+ * 2. Binario bundleado en `<extensionPath>/server/fitz-lsp[.exe]` →
+ *    caso típico cuando el usuario instaló el `.vsix` desde Marketplace.
+ * 3. Fallback al PATH del sistema (`"fitz-lsp"`).
+ */
+function resolveServerPath(context: vscode.ExtensionContext): string {
+  const config = vscode.workspace.getConfiguration("fitz");
+  const userPath = config.get<string>("lspPath", "fitz-lsp").trim();
+
+  // (1) Override explícito del user. Distinguimos del default
+  // declarado en package.json (`"fitz-lsp"`) — si el user lo cambió,
+  // respetamos absoluto/relativo-a-workspace/nombre-suelto.
+  if (userPath !== "" && userPath !== "fitz-lsp") {
+    return resolveUserPath(userPath);
+  }
+
+  // (2) Bundled binary del `.vsix` (Marketplace).
+  const bundled = bundledBinaryPath(context.extensionPath);
+  if (bundled) {
+    return bundled;
+  }
+
+  // (3) Fallback PATH (flujo alfa 9.x.1.c — `cargo install`).
+  return "fitz-lsp";
+}
+
+/**
+ * Traduce el setting `fitz.lspPath` del user a path absoluto:
+ * - Absoluto → tal cual.
+ * - Relativo (contiene separador) → resuelve contra el workspace folder activo.
+ * - Nombre suelto → asume PATH.
+ */
+function resolveUserPath(raw: string): string {
   if (path.isAbsolute(raw)) {
     return raw;
   }
-  // Path relativo (contiene separador) → relativo al workspace.
   if (raw.includes("/") || raw.includes("\\")) {
     const folder = vscode.workspace.workspaceFolders?.[0];
     if (folder) {
@@ -92,4 +130,18 @@ function resolveServerPath(raw: string): string {
   }
   // Nombre suelto (ej. "fitz-lsp") → se asume en PATH.
   return raw;
+}
+
+/**
+ * Busca el binario bundleado en `<extensionPath>/server/fitz-lsp[.exe]`.
+ * Devuelve el path si existe, `null` si no.
+ */
+function bundledBinaryPath(extensionPath: string): string | null {
+  const binaryName =
+    process.platform === "win32" ? "fitz-lsp.exe" : "fitz-lsp";
+  const bundled = path.join(extensionPath, "server", binaryName);
+  if (fs.existsSync(bundled)) {
+    return bundled;
+  }
+  return null;
 }
