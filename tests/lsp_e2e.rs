@@ -9,6 +9,8 @@
 //   response con el tipo del nodo bajo el cursor en markdown.
 // - 9.x.3.b: did_open con programa válido + textDocument/definition
 //   → response con Location apuntando al span de declaración.
+// - 9.x.4.b: did_open + textDocument/completion → response con items
+//   contextuales (after-dot lista métodos del tipo del receiver).
 //
 // Requiere `--features lsp` (el bin `fitz-lsp` tiene
 // `required-features = ["lsp"]` en Cargo.toml). Sin la feature, el
@@ -475,6 +477,130 @@ fn goto_definition_sobre_uso_de_var_local_devuelve_location_de_let() {
             || null_resp.contains(r#""result": null"#),
         "definition sobre builtin debería ser null: {null_resp}",
     );
+
+    drop(stdin);
+    wait_for_clean_exit(&mut child);
+}
+
+#[test]
+fn completion_after_dot_sobre_str_lista_metodos_built_in() {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_fitz-lsp"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("spawn de fitz-lsp");
+
+    let mut stdin = child.stdin.take().expect("stdin");
+    let mut stdout = child.stdout.take().expect("stdout");
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"capabilities":{},"rootUri":null,"processId":null}}"#;
+    stdin.write_all(&frame(init)).expect("write initialize");
+    stdin.flush().expect("flush initialize");
+    let init_resp = read_message(&mut stdout);
+    // Sanity: capability completionProvider con trigger character `.`.
+    assert!(
+        init_resp.contains(r#""completionProvider""#),
+        "initialize sin completionProvider: {init_resp}",
+    );
+    assert!(
+        init_resp.contains(r#""triggerCharacters":["."]"#)
+            || init_resp.contains(r#""triggerCharacters": ["."]"#),
+        "completionProvider sin trigger character `.`: {init_resp}",
+    );
+
+    let initialized = r#"{"jsonrpc":"2.0","method":"initialized","params":{}}"#;
+    stdin
+        .write_all(&frame(initialized))
+        .expect("write initialized");
+    stdin.flush().expect("flush initialized");
+
+    // didOpen con `let s = "hola"\ns.\n`. Cursor en línea 1, col 2
+    // (0-based) — justo después del `.`. El receiver `s` tiene tipo
+    // `Str`; el fallback walk-del-Program resuelve el tipo aún cuando
+    // el parser abandona el stmt `s.` por el `.` huérfano.
+    let did_open = r#"{"jsonrpc":"2.0","method":"textDocument/didOpen","params":{"textDocument":{"uri":"file:///comp.fitz","languageId":"fitz","version":1,"text":"let s = \"hola\"\ns.\n"}}}"#;
+    stdin.write_all(&frame(did_open)).expect("write didOpen");
+    stdin.flush().expect("flush didOpen");
+
+    // Drenamos diagnostics post didOpen.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando publishDiagnostics post didOpen");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains("textDocument/publishDiagnostics") {
+            break;
+        }
+    }
+
+    // textDocument/completion en (1, 2) — after-dot sobre Str.
+    let comp_req = r#"{"jsonrpc":"2.0","id":2,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///comp.fitz"},"position":{"line":1,"character":2},"context":{"triggerKind":2,"triggerCharacter":"."}}}"#;
+    stdin.write_all(&frame(comp_req)).expect("write completion");
+    stdin.flush().expect("flush completion");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let comp_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando completion response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":2"#) {
+            break msg;
+        }
+    };
+
+    // Los 3 métodos de Str deben aparecer. No matcheamos formato
+    // exacto del JSON — buscamos las labels.
+    for expected in ["upper", "lower"] {
+        assert!(
+            comp_resp.contains(&format!(r#""label":"{expected}""#))
+                || comp_resp.contains(&format!(r#""label": "{expected}""#)),
+            "completion response sin label `{expected}`: {comp_resp}",
+        );
+    }
+    assert!(
+        !comp_resp.contains(r#""error""#),
+        "completion devolvió error: {comp_resp}",
+    );
+    // Sin métodos de List (que no aplican a Str).
+    assert!(
+        !comp_resp.contains(r#""label":"push""#)
+            && !comp_resp.contains(r#""label": "push""#),
+        "completion no debería incluir métodos de List: {comp_resp}",
+    );
+
+    // Segundo request: completion scope-level en línea 2 col 0
+    // (después del newline final, contexto top-level).
+    let comp_scope = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///comp.fitz"},"position":{"line":2,"character":0}}}"#;
+    stdin.write_all(&frame(comp_scope)).expect("write completion scope");
+    stdin.flush().expect("flush completion scope");
+
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let scope_resp = loop {
+        if Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("timeout esperando completion scope response");
+        }
+        let msg = read_message(&mut stdout);
+        if msg.contains(r#""id":3"#) {
+            break msg;
+        }
+    };
+
+    // Scope-level debe incluir: la var top-level `s`, builtins
+    // (print/len), tipos built-in (Int), keywords (let/fn/match).
+    for expected in ["s", "print", "Int", "let"] {
+        assert!(
+            scope_resp.contains(&format!(r#""label":"{expected}""#))
+                || scope_resp.contains(&format!(r#""label": "{expected}""#)),
+            "completion scope-level sin label `{expected}`: {scope_resp}",
+        );
+    }
 
     drop(stdin);
     wait_for_clean_exit(&mut child);

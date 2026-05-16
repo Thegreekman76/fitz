@@ -22,16 +22,17 @@ use std::sync::Arc;
 use parking_lot::Mutex;
 use tower_lsp::jsonrpc::Result as LspResult;
 use tower_lsp::lsp_types::{
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, MessageType, OneOf, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Url,
+    CompletionOptions, CompletionParams, CompletionResponse, DidChangeTextDocumentParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability, InitializeParams,
+    InitializeResult, InitializedParams, MessageType, OneOf, ServerCapabilities, ServerInfo,
+    TextDocumentSyncCapability, TextDocumentSyncKind, Url,
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::lsp::{
-    check_source_with_types, definition_for_position, fitz_errors_to_diagnostics,
-    hover_for_position, make_definition_location, make_hover,
+    check_source_with_types, completion_at_position, definition_for_position,
+    fitz_errors_to_diagnostics, hover_for_position, make_definition_location, make_hover,
 };
 use fitz::ast::Program;
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
@@ -48,12 +49,7 @@ use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 // es usado por completion (scope-level).
 #[derive(Debug)]
 struct DocumentState {
-    // `text` y `program` se escriben en 9.x.4.a; los lee el handler
-    // `completion` en 9.x.4.b. Mismo patrón que `parse_with_recovery`
-    // pre-consumidores en F15.
-    #[allow(dead_code)]
     text: String,
-    #[allow(dead_code)]
     program: Program,
     type_env: TypeEnv,
     type_info: TypeInfo,
@@ -126,6 +122,18 @@ impl LanguageServer for Backend {
                 // overloading), por eso `OneOf::Left(true)` (forma
                 // simple) en lugar de `DefinitionOptions`.
                 definition_provider: Some(OneOf::Left(true)),
+                // Fase 9.x.4 — anunciamos completion contextual.
+                // `trigger_characters = [".".into()]` hace que VSCode
+                // invoque automáticamente la completion tras un `.`
+                // (caso after-dot). Para typing normal, el cliente
+                // invoca por su cuenta. `resolve_provider: false`
+                // porque mandamos toda la info en el item (no usamos
+                // `completionItem/resolve` para detalles lazy).
+                completion_provider: Some(CompletionOptions {
+                    trigger_characters: Some(vec![".".into()]),
+                    resolve_provider: Some(false),
+                    ..CompletionOptions::default()
+                }),
                 ..ServerCapabilities::default()
             },
         })
@@ -210,6 +218,31 @@ impl LanguageServer for Backend {
             .map(|def_span| make_definition_location(uri.clone(), def_span))
             .map(GotoDefinitionResponse::Scalar);
         Ok(location)
+    }
+
+    async fn completion(
+        &self,
+        params: CompletionParams,
+    ) -> LspResult<Option<CompletionResponse>> {
+        // Detección de contexto + lookup en TypeInfo/Program bajo el
+        // lock. El helper `completion_at_position` es pure-function;
+        // sin awaits dentro del lock.
+        let uri = params.text_document_position.text_document.uri;
+        let pos = params.text_document_position.position;
+        let documents = self.documents.lock();
+        let state = match documents.get(&uri) {
+            Some(s) => s,
+            None => return Ok(None),
+        };
+        let items = completion_at_position(
+            &state.text,
+            &state.program,
+            &state.type_info,
+            &state.type_env,
+            pos.line,
+            pos.character,
+        );
+        Ok(Some(CompletionResponse::Array(items)))
     }
 }
 
