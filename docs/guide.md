@@ -5540,56 +5540,88 @@ VSCode** que lo aprovecha.
 
 ### Lo que viene
 
-Las próximas sub-fases del LSP están planificadas:
+El MVP del LSP está completo — las 5 sub-fases visibles (9.x.1
+→ 9.x.5) están cerradas. Lo que sigue son refinamientos opcionales
+post-MVP (sin sub-fase asignada todavía):
 
-- **9.x.5 — Distribución**: publicar la extensión al **VSCode
-  Marketplace** con binarios pre-compilados por plataforma
-  (Windows x64, macOS x64+ARM, Linux x64+ARM) bundleados en el
-  `.vsix`, al estilo de rust-analyzer.
+- **Publicación real al VSCode Marketplace** — la extensión está
+  lista (`.vsix` per-plataforma generable), pero la publicación
+  requiere acciones del autor (cuenta de publisher, decisión sobre
+  hacer el repo público). Ver "Publicar al Marketplace" al final
+  de este capítulo.
+- **CI multi-platform** — GitHub Actions workflow que genera los
+  `.vsix` de las 6 plataformas automáticamente en cada release.
+- **Features LSP refinadas**: rename, refactoring, semantic
+  highlighting, inlay hints, hover con docstrings, etc. Cuando
+  aparezca demanda real.
 
 ### Cómo lo instalo
 
-#### 1. Compilar el LSP server
+Hay dos modalidades:
 
-Desde la raíz del repo `fitz`:
+#### A) Bundled (recomendado) — el `.vsix` trae el binario adentro
 
-```bash
-cargo build --release --features lsp
-```
-
-Produce `target/release/fitz-lsp` (o `fitz-lsp.exe` en Windows).
-La feature `lsp` es opt-in: el binario `fitz` default no incluye
-`tower-lsp` y se compila igual de rápido que antes.
-
-#### 2. Compilar y empaquetar la extensión
+Un solo comando genera un `.vsix` per-plataforma con `fitz-lsp`
+bundleado en `server/`. No necesitás configurar nada después de
+instalar.
 
 ```bash
 cd editors/vscode
 npm install
-npm run compile
-npx @vscode/vsce package
+npm run build:vsix
 ```
 
-Produce `editors/vscode/fitz-language-X.Y.Z.vsix` (~294 KB).
+Esto produce `editors/vscode/fitz-language-X.Y.Z-<platform>-<arch>.vsix`
+(ej. `fitz-language-0.9.6-win32-x64.vsix`, ~1.5 MB) y corre:
 
-#### 3. Instalar en VSCode
+1. `cargo build --release --features lsp` (compila `fitz-lsp`).
+2. Copia el binario a `editors/vscode/server/`.
+3. `tsc` compila la extensión.
+4. `vsce package --target <platform>` empaqueta todo.
+
+Después lo instalás en VSCode:
 
 ```bash
-code --install-extension editors/vscode/fitz-language-*.vsix
+code --install-extension editors/vscode/fitz-language-*.vsix --force
 ```
 
-#### 4. Configurar el path del binario
+Abrí cualquier `.fitz` y deberías ver highlighting + diagnostics +
+hover + go-to-def + autocomplete funcionando. Cero settings extra.
 
-Si `fitz-lsp` quedó en el `PATH`, no hace falta nada más. Si no,
-agregá esto al `settings.json` de VSCode (Ctrl+, → "Open Settings (JSON)"):
+Para empaquetar para **otra plataforma** (cross-compile, requiere
+`rustup target add <triple>` previo):
 
-```json
-{
-  "fitz.lspPath": "/abs/path/to/fitz/target/release/fitz-lsp"
-}
+```bash
+node scripts/build-vsix.mjs --target linux-x64
+node scripts/build-vsix.mjs --target darwin-arm64
+# Plataformas soportadas: win32-x64, win32-arm64, linux-x64,
+# linux-arm64, darwin-x64, darwin-arm64
 ```
 
-En Windows, recordá escapar las barras:
+#### B) Manual (alfa / desarrollo) — `fitz-lsp` en PATH o setting
+
+Si querés iterar sobre el LSP sin re-empaquetar cada vez:
+
+```bash
+# Build local
+cargo build --release --features lsp
+
+# Instalar global (opcional, deja `fitz-lsp` en PATH)
+cargo install --path . --features lsp
+```
+
+Después instalás una versión "delgada" del `.vsix` (sin binario
+bundleado):
+
+```bash
+cd editors/vscode
+npm install && npm run compile
+npx @vscode/vsce package  # sin --target, no bundlea
+code --install-extension fitz-language-*.vsix
+```
+
+Si `fitz-lsp` no está en `PATH`, agregá esto al `settings.json` de
+VSCode (Ctrl+, → "Open Settings (JSON)"):
 
 ```json
 {
@@ -5597,9 +5629,39 @@ En Windows, recordá escapar las barras:
 }
 ```
 
-Abrí cualquier `.fitz` en VSCode y deberías ver coloreado + errores
-en vivo. Si algo falla, abrí el output panel ("View → Output → Fitz
-Language Server") para ver qué dice.
+La extensión sigue una **cascada de resolución**:
+
+1. Si setteás `fitz.lspPath` a algo distinto del default — lo
+   respeta (override manual).
+2. Si no, busca `fitz-lsp` bundleado en `server/` adentro del
+   `.vsix` (modo bundled).
+3. Como último fallback, busca `fitz-lsp` en el `PATH` del sistema.
+
+Si algo falla, abrí el output panel ("View → Output → Fitz Language
+Server") para ver qué dice.
+
+### Publicar al Marketplace (autor)
+
+La publicación real al [VSCode Marketplace](https://marketplace.visualstudio.com/)
+es **acción del autor**, no del repo. Requiere:
+
+1. **Cuenta de publisher**: Microsoft account + Azure DevOps
+   organization. [Docs](https://code.visualstudio.com/api/working-with-extensions/publishing-extension).
+2. **Personal Access Token** (PAT) con scope "Marketplace
+   (manage)".
+3. **Repo público**: pre-requisito para que el `repository` field
+   del `package.json` sea válido + para el Social Preview.
+4. **`vsce publish`** por cada plataforma:
+
+```bash
+vsce publish --packagePath editors/vscode/fitz-language-X.Y.Z-win32-x64.vsix
+vsce publish --packagePath editors/vscode/fitz-language-X.Y.Z-linux-x64.vsix
+vsce publish --packagePath editors/vscode/fitz-language-X.Y.Z-darwin-arm64.vsix
+# ... una por target
+```
+
+Marketplace muestra solo la versión apropiada al cliente que
+descarga.
 
 ### Settings
 
@@ -5626,10 +5688,11 @@ las demás integraciones quedan abiertas a contribuciones.
 
 ### Estado del proyecto LSP
 
-El MVP del LSP está completo: diagnostics (9.x.1), hover (9.x.2),
-go-to-definition (9.x.3) y autocomplete contextual (9.x.4). Lo que
-falta es distribución — publicar la extensión al VSCode Marketplace
-con binarios pre-compilados por plataforma (9.x.5).
+**El plan LSP entero está cerrado**: diagnostics (9.x.1), hover
+(9.x.2), go-to-definition (9.x.3), autocomplete contextual (9.x.4)
+y distribución multi-platform (9.x.5). Las cinco sub-fases visibles
+del LSP están vivas. La publicación real al Marketplace queda como
+acción del autor (ver sección anterior).
 
 Si encontrás bugs en el LSP o sugerencias para la grammar
 TextMate (palabras que no se colorean, falsos positivos), abrí
@@ -5692,11 +5755,13 @@ Con los capítulos 1 a 21 podés:
   y `await` corutinas Python via bridge tokio ↔ asyncio (Fase 8).
 - **Tooling de editor**: extensión VSCode con highlighting +
   diagnostics + hover + go-to-definition + autocomplete contextual
-  via LSP (Fase 9.x.1 + 9.x.2 + 9.x.3 + 9.x.4). Errores subrayados
-  al tipear, mouse sobre una expresión muestra su tipo, F12 te
-  lleva a su declaración, tras `.` aparecen métodos del tipo. Sin
-  ir a la terminal. Ver
-  [cap 22](#22-soporte-para-editores) para cómo instalar.
+  via LSP (Fase 9.x.1 → 9.x.5, MVP completo + distribución
+  multi-platform). Errores subrayados al tipear, mouse sobre una
+  expresión muestra su tipo, F12 te lleva a su declaración, tras
+  `.` aparecen métodos del tipo. `.vsix` per-plataforma con el
+  binario bundleado adentro vía `npm run build:vsix`. Sin ir a
+  la terminal. Ver [cap 22](#22-soporte-para-editores) para cómo
+  instalar.
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -5704,7 +5769,7 @@ ejecuten, un compilador que produce binarios standalone, y un
 puente al ecosistema Python para usar SQLAlchemy/numpy/asyncpg
 sin abandonar Fitz.
 
-### Lo que viene — más allá de Fase 9.x.4
+### Lo que viene — más allá del LSP MVP (9.x.1 → 9.x.5 cerradas)
 
 Las fases cerradas (al cierre de Fase 8): type checker estático
 (5a), codegen a binario nativo (5b), async nativo (6), DX HTTP
@@ -5721,11 +5786,11 @@ cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
 
 Lo que sigue post-8:
 
-- **Fase 9 — Ecosistema**: el LSP MVP está completo — diagnostics
-  (9.x.1), hover con tipos (9.x.2), go-to-definition (9.x.3) y
-  autocomplete contextual (9.x.4). Próxima sub-fase: 9.x.5
-  distribución VSCode Marketplace. Después: package manager,
-  registry, formatter, linter.
+- **Fase 9 — Ecosistema**: el plan LSP entero cerrado —
+  diagnostics (9.x.1), hover (9.x.2), go-to-definition (9.x.3),
+  autocomplete contextual (9.x.4) y distribución multi-platform
+  (9.x.5). Próximo en Fase 9: **package manager + registry**,
+  **formatter**, **linter** (plan a definir al arrancar).
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta

@@ -11,15 +11,145 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 ## [Sin publicar]
 
-En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.4
-(LSP autocomplete contextual) CERRADA**: `textDocument/completion`
-con dos contextos — scope-level (top-level + builtins + tipos +
-keywords) y after-dot (fields de Nominal, métodos de List/Map/Str).
-Próximo norte: **9.x.5 (distribución VSCode Marketplace)** —
-publicar la extensión con binarios pre-compilados por plataforma
-bundleados en el `.vsix`, al estilo rust-analyzer. Sub-paso
-separado pendiente sin presión: bundling CPython embebido (`fitz
-build --bundle-python`).
+En curso: ver `docs/roadmap.md` para el plan vigente. **Fase 9.x.5
+(LSP distribución multi-platform) CERRADA**: extensión VSCode
+multi-platform aware con binario `fitz-lsp` bundleado en el .vsix
+per-plataforma + logo oficial del proyecto (engranaje Rust +
+silueta Fitz Roy). **Plan LSP entero (9.x.1 → 9.x.5) cerrado** —
+el MVP del language server + su distribución técnica están
+completos. Lo que sigue son acciones del autor (publicación al
+VSCode Marketplace requiere cuenta de publisher + repo público) y
+el resto de Fase 9: package manager, formatter, linter.
+
+Próximo norte (técnico): **package manager + registry** o
+**formatter** (a definir al arrancar). Sub-paso separado pendiente
+sin presión: bundling CPython embebido (`fitz build --bundle-python`).
+
+## [v0.9.6] — 2026-05-16 — Fase 9.x.5: distribución VSCode multi-platform + logo
+
+Quinta y última sub-fase visible del LSP **completa el plan LSP
+entero**. Deja la extensión lista para publicar al VSCode Marketplace:
+binarios pre-compilados por plataforma bundleados en el `.vsix`,
+logo oficial del proyecto, script reproducible de build local.
+
+La publicación real al Marketplace queda como acción del autor
+(requiere cuenta de publisher + decisión sobre hacer el repo
+público), no commit técnico.
+
+Sub-pasos coordinados:
+
+- **9.x.5.0 — Logo de Fitz**:
+  - Diseño: engranaje estilo Rust (color naranja `#CE412B`, 12
+    dientes) con silueta del monte Fitz Roy adentro del hueco
+    (3 picos, central más alto, los dos laterales escalonados;
+    confinada vía `clipPath` circular).
+  - `assets/logo.svg` — single source of truth (256×256).
+  - `assets/logo.png` — generado para README + propósitos generales.
+  - `assets/logo-social.svg` + `.png` (1280×640) — Social preview
+    de GitHub (se sube manual a Settings → Social preview).
+  - `editors/vscode/icon.png` — copia para el .vsix de la extensión.
+  - `editors/vscode/scripts/build-icon.mjs` — regenera los 3 PNGs
+    desde los SVGs vía `@resvg/resvg-js` (puro JS bindings de
+    resvg, Rust SVG renderer; más confiable que cairosvg en Windows).
+  - `npm run build:icon` desde editors/vscode/ regenera todo.
+  - `editors/vscode/package.json` declara `"icon": "icon.png"` →
+    Marketplace usa el icon en el listing.
+  - README raíz suma hero image centrada al inicio.
+
+- **9.x.5.a — Extensión multi-platform aware + script `build-vsix`**:
+  - `src/extension.ts` refactorizado con `resolveServerPath`
+    siguiendo prioridad:
+    (a) Override del user (`fitz.lspPath` ≠ default `"fitz-lsp"`)
+        → respeta.
+    (b) Bundled: busca `<extensionPath>/server/fitz-lsp[.exe]`
+        (caso típico del .vsix de Marketplace).
+    (c) Fallback al PATH del sistema (flujo alfa de 9.x.1.c —
+        `cargo install` + setting default).
+  - Helpers privados nuevos: `bundledBinaryPath`, `resolveUserPath`.
+  - `scripts/build-vsix.mjs` orquesta: cargo build (con opcional
+    `--target <triple>`) → copia binario a `server/` → tsc compile
+    → `vsce package --target <vsce>` → produce `.vsix` con sufijo
+    `-<platform>-<arch>`. Args: `--target <vsce>`, `--rust-target
+    <triple>`. Default: plataforma actual via `process.platform`+
+    `process.arch`. 6 plataformas soportadas con mapping a Rust
+    triples: win32-x64/arm64, linux-x64/arm64, darwin-x64/arm64.
+  - Estructura `editors/vscode/server/` con `.gitignore` que excluye
+    los binarios (se regeneran cada build, no se versionan).
+  - `.vscodeignore` actualizado para excluir `**/.gitignore` del
+    .vsix final.
+  - `activationEvents` removido del package.json (auto-derived por
+    VSCode ≥1.74 desde `contributes.languages`).
+  - `npm run build:vsix` desde editors/vscode/ corre todo.
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Logo**: engranaje Rust + Fitz Roy (la inspiración del nombre
+  del lenguaje + el lenguaje de implementación). Color `#CE412B`
+  (Rust orange).
+- **SVG single source of truth en `assets/`** (raíz del repo, no
+  enterrado en `editors/vscode/`). Script regenera múltiples PNGs.
+- **`@resvg/resvg-js` para SVG→PNG**: puro JS bindings, sin
+  compilación nativa pesada, confiable en Windows. Alternativas
+  rechazadas: `sharp` (compilación nativa), `cairosvg` Python
+  (problemas en Windows).
+- **Per-plataforma `.vsix`** (estándar rust-analyzer/Marketplace):
+  un .vsix por target, cada uno con SU binario en `server/`.
+  Alternativa rechazada: mega-.vsix con los 5 binarios (~50 MB).
+- **Resolución del binario en orden** (override > bundled > PATH):
+  backward-compatible con flujo 9.x.1.c.
+- **`activationEvents` removido**: auto-derived por VSCode ≥1.74.
+- **CI multi-platform y publicación al Marketplace fuera de scope**:
+  acciones del autor (decisión sobre repo público, cuenta de
+  publisher, PAT). Documentadas como pasos manuales en la guía.
+
+**Cierre formal del plan LSP (9.x.1 → 9.x.5)**:
+
+| Sub-fase | Feature | Cerrada |
+|---|---|---|
+| 9.x.1 | Diagnostics MVP + extensión VSCode base | 2026-05-15 |
+| 9.x.2 | Hover (tipo del nodo bajo el cursor) | 2026-05-16 |
+| 9.x.3 | Go-to-definition (uso → declaración) | 2026-05-16 |
+| 9.x.4 | Autocomplete contextual (scope-level + after-dot) | 2026-05-16 |
+| 9.x.5 | Distribución multi-platform + logo | 2026-05-16 |
+
+El LSP MVP cubre la experiencia core de editing — diagnostics,
+hover, go-to-def, autocomplete — más la infraestructura de
+distribución. Lo que falta es decisión del autor (publicar) +
+features avanzadas refinables post-MVP (rename, refactoring,
+semantic highlighting, inlay hints).
+
+**Acciones manuales pendientes del autor** (no commit técnico):
+
+1. **GitHub Social Preview**: Settings → General → Social preview
+   → upload `assets/logo-social.png`.
+2. **Hacer el repo público** (cuando decida): pre-requisito para
+   publicar al Marketplace + para que el Social Preview se
+   renderice en link previews.
+3. **Crear publisher en VSCode Marketplace**: Microsoft account +
+   Azure DevOps + Personal Access Token.
+4. **Publicar al Marketplace**: `vsce publish --packagePath
+   editors/vscode/fitz-language-X.Y.Z-<target>.vsix` por cada
+   plataforma.
+5. **CI multi-platform** (opcional): GitHub Actions workflow con
+   jobs Windows/macOS/Linux que corren `npm run build:vsix` y
+   publican post release tag.
+
+**Total al cierre**: 1233 unit + 79 E2E + 3 openapi sin cambios;
+36 unit + 5 E2E LSP sin cambios. Logo + script no agregan tests
+Rust. Validación local Windows: ✅ `fitz-language-win32-x64-0.9.2.vsix`
+(1.49 MB, 211 archivos, `server/fitz-lsp.exe` bundleado).
+
+**Próximo norte (técnico)**: resto de Fase 9 — **package manager
++ registry**, **formatter**, **linter**. Plan a definir al arrancar.
+
+**Deuda residual derivada (NO bloquea próximas fases)**:
+
+- CI multi-platform (GitHub Actions workflow).
+- Publicación automática al Marketplace post-CI build.
+- Cross-compile local desde una plataforma (requiere `cross` crate
+  o Docker). Hoy: cada plataforma genera su propio .vsix nativo.
+- Logo: versiones adicionales (favicon 32×32, app icon 512×512,
+  monochrome para temas dark) si aparece demanda.
 
 ## [v0.9.5] — 2026-05-16 — Fase 9.x.4: LSP autocomplete contextual
 

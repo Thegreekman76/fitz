@@ -4822,11 +4822,14 @@ valor entregable):
   (`from mod import `) queda como deuda visible — requiere
   cargar el módulo remoto. Detalle paso-a-paso en sección "Fase
   9.x.4" abajo.
-- **9.x.5 — Distribución**: publicar al VSCode Marketplace
-  con binarios pre-compilados por plataforma (Windows
-  x64, macOS x64+ARM, Linux x64+ARM) bundleados en el
-  `.vsix`, al estilo de rust-analyzer. Alternativa de alfa:
-  `.vsix` manual + `fitz-lsp` en PATH.
+- **9.x.5 — Distribución** ✅ **CERRADA 2026-05-16**:
+  extensión VSCode multi-platform aware con binario `fitz-lsp`
+  bundleado en el `.vsix` per-plataforma (6 targets: win32-x64/
+  arm64, linux-x64/arm64, darwin-x64/arm64) + logo oficial
+  (engranaje Rust + Fitz Roy) + script reproducible de build
+  local. Publicación real al Marketplace queda como acción del
+  autor (cuenta de publisher + repo público). Detalle paso-a-paso
+  en sección "Fase 9.x.5" abajo.
 
 **Trade-offs y decisiones pendientes**:
 
@@ -5151,6 +5154,73 @@ Linux x64+ARM) bundleados en el `.vsix`, al estilo rust-analyzer.
 - Position UTF-16 strict (LSP default).
 - Completion context-sensitive del parser: tras `@` sugerir
   decoradores, tras `import ` sugerir paths.
+
+---
+
+## Fase 9.x.5 — LSP distribución multi-platform + logo (cerrada, 2026-05-16)
+
+Quinta y última sub-fase visible del LSP. **Completa el plan LSP
+entero (9.x.1 → 9.x.5)**. Deja la extensión lista para publicar
+al Marketplace; la publicación real queda como acción del autor.
+
+- **9.x.5.0 — Logo de Fitz**:
+  - Engranaje Rust naranja `#CE412B` (12 dientes) + silueta Fitz
+    Roy adentro (3 picos, central más alto, vía `clipPath`).
+  - `assets/logo.svg` source + `assets/logo.png` (256×256) +
+    `assets/logo-social.svg/.png` (1280×640) + `editors/vscode/
+    icon.png` (copia para .vsix).
+  - `scripts/build-icon.mjs` regenera los PNGs vía `@resvg/resvg-js`.
+  - README raíz con hero image al inicio.
+
+- **9.x.5.a — Extensión multi-platform aware + script build-vsix**:
+  - `resolveServerPath` con prioridad: (a) override del user, (b)
+    bundled en `server/`, (c) fallback PATH. Backward-compatible.
+  - `scripts/build-vsix.mjs` orquesta cargo build → copia binario
+    → tsc → vsce package con sufijo `-<platform>-<arch>`. 6
+    plataformas soportadas.
+  - Estructura `editors/vscode/server/` con `.gitignore` que
+    excluye binarios (se regeneran cada build).
+  - `activationEvents` removido (auto-derived por VSCode ≥1.74).
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- Logo: engranaje Rust + Fitz Roy (inspiración del nombre del
+  lenguaje + lenguaje de implementación).
+- SVG single source en `assets/` (raíz, no enterrado en la
+  extensión).
+- `@resvg/resvg-js` para SVG→PNG (puro JS bindings, sin
+  compilación nativa pesada).
+- Per-plataforma `.vsix` (estándar rust-analyzer/Marketplace) vs
+  mega-.vsix con todos los binarios (rechazado por tamaño).
+- Resolución del binario override > bundled > PATH (backward-
+  compatible con 9.x.1.c).
+- CI multi-platform y publicación al Marketplace fuera de scope —
+  acciones del autor.
+
+**Cierre del plan LSP (9.x.1 → 9.x.5)** — MVP completo:
+diagnostics + hover + go-to-def + autocomplete + distribución.
+
+**Acciones manuales pendientes del autor** (no commit técnico):
+
+1. GitHub Social Preview (Settings → upload `assets/logo-social.png`).
+2. Hacer el repo público (decisión del autor).
+3. Crear publisher en Marketplace + PAT.
+4. `vsce publish --packagePath` por cada plataforma.
+5. CI multi-platform (GitHub Actions, opcional).
+
+**Total al cierre**: 1233 unit + 79 E2E + 3 openapi sin cambios.
+36 unit + 5 E2E LSP sin cambios. Validación local Windows:
+✅ `.vsix` 1.49 MB con `server/fitz-lsp.exe` bundleado.
+
+**Próximo norte (técnico)**: resto de Fase 9 — **package manager
++ registry**, **formatter**, **linter**. Plan a definir.
+
+**Deuda residual derivada (NO bloquea próximas fases)**:
+
+- CI multi-platform.
+- Publicación automática al Marketplace.
+- Cross-compile local (hoy cada plataforma genera su propio .vsix).
+- Logo: variantes adicionales (favicon, app icon, monochrome).
 
 ---
 
