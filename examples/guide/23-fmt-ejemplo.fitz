@@ -1,0 +1,14 @@
+type User {
+    id: Int
+    name: Str
+}
+
+let users = [User { id: 1, name: "Ada" }, User { id: 2, name: "Bob" }]
+
+fn greet(u: User) -> Str {
+    return "Hola, {u.name}!"
+}
+
+for user in users {
+    print(greet(user))
+}

@@ -435,6 +435,84 @@
 > resuelve declaraciones por scope lookup en 9.x.3). Próximo
 > norte: **sub-fases visibles del LSP — 9.x.1 (diagnostics MVP)**.
 > Ver detalle en `docs/roadmap.md` → "Fase 9.0 — F16".
+>
+> **Mini-tanda Q.z (2026-05-16): CERRADA** — quickwins pre-9.z.2.
+> Tres ítems atacados antes de arrancar `fitz test`:
+> - **F6 audit builtins**: confirmado que el syntax-spec NO promete
+>   `range`/`type_of`/`to_string` globales (la matriz F6 estaba
+>   especulando). Builtins implementados (`print`, `len`, `sleep`,
+>   `cors`) coinciden 1:1 con lo que el spec lista como
+>   builtin-globales. Único hallazgo: el ejemplo del test runner
+>   en `docs/syntax-spec.md:515` usa `panic("falló: {e}")` que NO
+>   está en la lista oficial de assertion builtins (`assert`,
+>   `assert_eq`, `assert_ne`, `assert_throws`). Decisión de
+>   scope para 9.z.2: incluir `panic(msg)` como builtin auxiliar
+>   o dejarlo fuera. Sin acción técnica en Q.z.
+> - **D1 refresh header guide.md**: pasó de "Fase MW + tanda Q,
+>   1153 unit + 74 E2E" a "Fase 9.z.1 cerrada — fitz fmt
+>   production-ready, 1333 unit + 55 cli_e2e + 79 compile_e2e + 3
+>   openapi". Bullets stale de "Qué todavía no anda" depurados
+>   (async/await reales, status codes custom, query params,
+>   named args ya cerrados — 4 ítems quitados). "Builtins
+>   globales" expandido a los 4. "Cómo está organizada" actualizó
+>   parte 10 (Tooling = LSP + formatter) y sumó partes 8-11.
+>   Sección "Lo que viene" (cap 24) refrescó el bullet de Fase 9
+>   con el estado real (LSP entero cerrado, PM 9.y.1-9.y.4
+>   cerrados, fmt cerrado, próximo testing).
+> - **Cap 23 nuevo "`fitz fmt`"** en guía: cap dedicado con
+>   features, CLI, estilo canónico (resumen + link a
+>   `docs/fmt-style.md`), 2 ejemplos in-line (antes/después +
+>   preservación de comments) + ejemplo runnable nuevo
+>   `examples/guide/23-fmt-ejemplo.fitz` sumado al smoke
+>   `GUIDE_EXAMPLES_COMPILE`. Renumeración 23→24 ("Qué sigue").
+>   Cumple la regla del proyecto "implementado = documentado
+>   con uno o varios ejemplos".
+>
+> **Deudas residuales identificadas durante Q.z** (NO bloquean
+> 9.z.2):
+> - **Cap "Package manager" en la guía**: las 6 subcomandos del
+>   PM (`fitz new`/`init` 9.y.1, `fitz add`/`remove`/`update`
+>   9.y.4) están implementadas + cerradas + en CHANGELOG/roadmap
+>   pero NO tienen capítulo dedicado en `docs/guide.md`.
+>   Estructura sugerida: cap nuevo "Package manager" en Parte 6
+>   (Organización), entre cap 16 (Módulos) y cap 17 (HTTP), con
+>   sub-secciones para `fitz new`/`init`, manifest `fitz.toml`,
+>   `[dependencies]` path/git, lockfile `fitz.lock`,
+>   `fitz add`/`remove`/`update`, y al menos un ejemplo runnable
+>   completo con dos proyectos (lib + binario que importa la lib).
+>   ~2h de trabajo bien hecho. **Etapa**: meter como sub-paso
+>   dedicado pre-9.w (después que 9.z entera cierre — testing,
+>   dev, repl, lint), junto con un refresh general de la guía
+>   sincronizado con todo 9.y + 9.z cerrado. Si aparece presión
+>   antes (preguntas de usuarios sobre cómo crear un proyecto),
+>   acelerable como sub-paso pre-9.z.2 dedicado.
+> - **Bug del formatter: trailing comment al final del body de
+>   una fn seguido de otro bloque inserta blank spurious dentro
+>   del body del bloque siguiente**. MRE preciso (descubierto
+>   redactando el ejemplo del cap 23):
+>   ```fitz
+>   fn greet(name: Str) -> Str {
+>       return "Hola, {name}!" // inline
+>   }
+>
+>   for n in ["Ada"] {
+>       print(greet(n))
+>   }
+>   ```
+>   Tras `fitz fmt`, queda blank line spurious entre el `{` del
+>   `for` y `print(greet(n))`. Variante del caso edge ya
+>   documentado en `docs/fmt-style.md` ("Comments entre último
+>   stmt de un bloque y el `}` ... pueden terminar fuera del
+>   bloque al re-formatear"), pero acá el comment está EN LA
+>   MISMA LÍNEA que el último stmt (trailing), no entre stmt y
+>   `}`. El bug afecta la enseñanza del cap 23 (el ejemplo
+>   runnable tuvo que removerse el trailing comment final).
+>   **Etapa**: sub-paso de fix-up de 9.z.1 (deuda residual
+>   reconocida del closing de 9.z.1.b). Pre-9.z.2 dedicado si
+>   el fix es chico (~30 min — probablemente bookkeeping del
+>   estado "just emitted blank" en `fmt.rs`); si requiere
+>   refactor del trivia stream, post-9.z.5 cuando 9.z entera
+>   cierre. Auditoría rápida del módulo antes de decidir.
 
 ## Resumen ejecutivo
 

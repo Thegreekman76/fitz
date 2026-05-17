@@ -2,8 +2,9 @@
 
 > Estado: viva — cubre lo que el intérprete ejecuta hoy y lo que el
 > compilador (`fitz build`) produce como binario nativo.
-> Última actualización: 2026-05-14 (Mini-fase MW cerrada — Middleware
-> + CORS + tanda Q de quick wins, 1153 unit + 74 E2E pasando).
+> Última actualización: 2026-05-16 (Fase 9.z.1 cerrada — `fitz fmt`
+> production-ready con preservación de comments + blank lines.
+> 1333 unit + 55 cli_e2e + 79 compile_e2e + 3 openapi).
 
 Esta guía es para developers que vienen de Python, TypeScript, Vue o
 similares y quieren aprender Fitz escribiendo programas reales. Está
@@ -59,9 +60,10 @@ abrí un issue.
 
 **Parte 10 — Tooling**
 22. [Soporte para editores](#22-soporte-para-editores)
+23. [`fitz fmt` — formateador automático](#23-fitz-fmt--formateador-automático)
 
 **Parte 11 — Cerrando**
-23. [Qué sigue](#23-qué-sigue)
+24. [Qué sigue](#24-qué-sigue)
 
 ---
 
@@ -116,7 +118,7 @@ Solo lo que el intérprete ejecuta hoy:
   registrar rutas, path params tipados, body deserializado contra un
   `type`, serialización JSON automática, `@server(port, host)` para
   configurar.
-- Builtins globales: `print`, `len`.
+- Builtins globales: `print`, `len`, `sleep`, `cors`.
 
 ### Qué todavía no anda
 
@@ -128,12 +130,6 @@ error explícito:
 - Asignación a índice (`xs[0] = v`).
 - Métodos custom declarados por el usuario sobre `type`
   (`type User { ... fn greet() => ... }`).
-- `async` / `await` reales (la palabra `async` parsea sobre handlers
-  HTTP pero no aporta nada en runtime; el bridge es síncrono).
-- Status codes custom en handlers HTTP (`return 401 { ... }`) —
-  hoy se traducen automático con `Result`.
-- Query params en handlers HTTP (`?page=1`).
-- Named args en decoradores (`@server(port: 8080)`) — hoy positional.
 
 Todo eso está mapeado en el [roadmap](roadmap.md). Cada vez que una de
 estas piezas se cierra, esta guía suma el capítulo correspondiente.
@@ -148,9 +144,13 @@ La guía está dividida en partes que se leen en orden:
 4. **Abstracción** — funciones, tipos custom, métodos, mutación.
 5. **Errores** — `Result` y mensajes del intérprete.
 6. **Organización** — partir el código en módulos.
-7. **HTTP nativo** — el diferencial de Fitz: decoradores y server
-   automático.
-8. **Cerrando** — el mapa de lo que viene.
+7. **HTTP nativo y concurrencia** — el diferencial de Fitz: decoradores
+   y server automático, docs autogeneradas, async.
+8. **Compilar** — `fitz build` a binario nativo standalone.
+9. **Interop** — `from python import ...` para reusar el ecosistema
+   Python.
+10. **Tooling** — LSP + extensión VSCode, formateador `fitz fmt`.
+11. **Cerrando** — el mapa de lo que viene.
 
 ### Cómo usar los ejemplos
 
@@ -5700,14 +5700,170 @@ un issue en [github.com/Thegreekman76/fitz](https://github.com/Thegreekman76/fit
 
 ---
 
-## 23. Qué sigue
+## 23. `fitz fmt` — formateador automático
+
+`fitz fmt` aplica un estilo canónico a tu código Fitz. Cero config:
+no hay archivo `.fitzfmt`, no hay opciones de la CLI para indent o
+comillas. La filosofía es la de **gofmt** — la uniformidad
+cross-codebase vale más que la preferencia individual. Si discrepás
+con una regla, abrí un issue; las reglas pueden ajustarse, pero
+NO se configuran por proyecto.
+
+Llegó con la Fase 9.z.1 (cerrada el 2026-05-16) y es
+**production-ready**: preserva los comentarios y blank lines del
+usuario, no solo el código.
+
+### Qué hace
+
+- **Pretty-printer sobre el AST**. Re-emite el código siguiendo el
+  estilo canónico (4 espacios de indent, comillas dobles,
+  `and`/`or`/`not` como keywords, paréntesis obligatorios en `if`/
+  `while`, type defs siempre multi-línea, un field por línea).
+- **Preserva comments** (`//` y `/* */`) en cualquier posición:
+  top-level, entre stmts, trailing. Los comments `//foo` se
+  normalizan a `// foo` (espacio post-`//`). Trailing comments
+  tienen 2 espacios de separación: `let x = 1  // explicación`.
+- **Preserva blank lines** del usuario, con dos reglas: máximo 1
+  blank line consecutiva (las múltiples se colapsan), y blank
+  obligatoria entre `fn` o `type` top-level consecutivos.
+- **Idempotente**: aplicarlo dos veces produce el mismo resultado.
+  Si `fitz fmt --check` reporta diffs después de un `fitz fmt`, es
+  un bug — reportalo.
+
+### Cómo se usa
+
+```bash
+# Formatear archivos explícitos in-place
+fitz fmt src/main.fitz src/utils.fitz
+
+# Formatear todo el proyecto (requiere fitz.toml)
+fitz fmt
+
+# Modo check para CI / pre-commit (read-only, exit 1 si hay diffs)
+fitz fmt --check
+fitz fmt --check src/main.fitz
+```
+
+Sin args, hace walk recursivo del proyecto excluyendo `target/` y
+directorios ocultos — necesita un `fitz.toml` en el cwd o un
+ancestro (manifest mode). Con archivos explícitos no exige
+manifest.
+
+Cada archivo que cambia reporta `✓ formateado <path>`; los que ya
+estaban canónicos quedan silenciosos. Si un archivo tiene errores
+de sintaxis, el formatter aborta para ese archivo con el error del
+parser y sigue con los demás.
+
+### El estilo canónico (resumen)
+
+| Aspecto | Regla |
+|---|---|
+| Indent | 4 espacios, no tabs |
+| Strings | Comillas dobles siempre (`"hola"`, nunca `'hola'`) |
+| Operadores lógicos | `and`/`or`/`not` keywords |
+| `if`/`while` | Paréntesis obligatorios en la condición |
+| `for`/`loop` | Sin paréntesis |
+| Type defs | Siempre multi-línea, un field por línea |
+| Trailing commas | Solo en multi-línea (match arms, type fields) |
+| Blank lines | Máximo 1 consecutiva. Obligatoria entre fn/type top-level |
+| Comments `//` | Normalizados a `// texto` con espacio post-`//` |
+
+La referencia completa, con los casos particulares (FnExpr inline,
+struct lits, method chains, etc.), vive en
+[docs/fmt-style.md](fmt-style.md).
+
+### Ejemplo: antes y después
+
+Input desformateado (`src/main.fitz`):
+
+```fitz
+let users=[{"id":1,"name":"Ada"},{"id":2,"name":"Bob"}]
+fn greet(u){return "Hola, {u.name}!"}//inline
+for user in users{print(greet(user))}
+```
+
+Después de `fitz fmt src/main.fitz`:
+
+```fitz
+let users = [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Bob"}]
+
+fn greet(u) {
+    return "Hola, {u.name}!" // inline
+}
+
+for user in users {
+    print(greet(user))
+}
+```
+
+Re-aplicar `fitz fmt` sobre el output no produce más cambios
+(idempotencia).
+
+### Ejemplo: preservación de comments y blank lines
+
+Input con comments en varias posiciones:
+
+```fitz
+// Lista inicial de usuarios
+
+let users = [
+    {"id": 1, "name": "Ada"},  // pionera
+    {"id": 2, "name": "Bob"},
+]
+
+// Helper de saludo
+fn greet(u) {
+    // formato compacto
+    return "Hola, {u.name}!"
+}
+```
+
+Tras `fitz fmt`, el output respeta los 3 comments (top-level,
+trailing, y dentro del body) y la blank line entre el `let` y la
+`fn`. Comments `//foo` sin espacio se normalizan a `// foo`.
+
+### Modo `--check` en CI
+
+Para evitar drift de estilo en una codebase compartida, usalo en
+pre-commit hook o pipeline:
+
+```bash
+# .git/hooks/pre-commit
+fitz fmt --check || {
+    echo "✗ código no formateado. Corré: fitz fmt"
+    exit 1
+}
+```
+
+El exit code es 0 si todo está canónico, 1 si algún archivo
+difiere. Sin escribir nada.
+
+### Limitaciones conocidas
+
+- **No auto-wrappea líneas largas**: 100 chars es soft limit, no
+  enforced. El user decide cuándo partir una línea.
+- **Multi-líneas user-formateadas se colapsan**: si formateaste
+  una lista o un method chain en varias líneas para legibilidad y
+  entran en una sola, el formatter las inlinea. Deuda futura.
+- **Comments adentro de expresiones** (`f(x, // foo`,`y)`): no
+  soportados. Si aparecen, pueden quedar mal posicionados al
+  re-formatear.
+- **Comments entre el último stmt de un bloque y el `}`**: pueden
+  terminar fuera del bloque al re-formatear. Caso raro.
+- **Format-on-save desde el LSP**: no conectado todavía.
+  `fmt::format_source` es library-able, así que el wiring desde el
+  LSP es trivial — pendiente cuando aparezca demanda.
+
+---
+
+## 24. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 21 podés:
+Con los capítulos 1 a 23 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -5762,6 +5918,10 @@ Con los capítulos 1 a 21 podés:
   binario bundleado adentro vía `npm run build:vsix`. Sin ir a
   la terminal. Ver [cap 22](#22-soporte-para-editores) para cómo
   instalar.
+- **Formato canónico** con `fitz fmt` (Fase 9.z.1): cero config,
+  estilo gofmt, preserva comments y blank lines del usuario.
+  Modo `--check` para CI / pre-commit hooks. Ver
+  [cap 23](#23-fitz-fmt--formateador-automático).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -5786,11 +5946,21 @@ cumplida: HTTP nativo + tipos + interop con el ecosistema Python.
 
 Lo que sigue post-8:
 
-- **Fase 9 — Ecosistema**: el plan LSP entero cerrado —
-  diagnostics (9.x.1), hover (9.x.2), go-to-definition (9.x.3),
-  autocomplete contextual (9.x.4) y distribución multi-platform
-  (9.x.5). Próximo en Fase 9: **package manager + registry**,
-  **formatter**, **linter** (plan a definir al arrancar).
+- **Fase 9 — Ecosistema** (en curso):
+  - **Plan LSP entero cerrado** — diagnostics (9.x.1), hover
+    (9.x.2), go-to-definition (9.x.3), autocomplete contextual
+    (9.x.4) y distribución multi-platform (9.x.5). Ver cap 22.
+  - **Package manager (9.y)**: `fitz new`/`init`, manifest
+    `fitz.toml`, deps path + git con lockfile `fitz.lock`,
+    sub-comandos `fitz add`/`remove`/`update` (9.y.1 → 9.y.4
+    cerrados). Registry público (9.y.5) diferido — path + git
+    cubren el 90% del caso real. **Capítulo dedicado en la guía
+    pendiente** (deuda explícita en `docs/deudas-post-5b.md`,
+    entra cuando 9.z entera cierre).
+  - **DX (9.z) — en curso**: formatter `fitz fmt` cerrado
+    (9.z.1, ver cap 23). Próximo: `fitz test` (9.z.2),
+    `fitz dev` (9.z.3), `fitz repl` (9.z.4), `fitz lint`
+    (9.z.5).
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta
