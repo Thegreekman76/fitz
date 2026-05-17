@@ -300,6 +300,11 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::UnaryOp { operand, .. } => expr_uses_async(operand),
             Expr::Field { object, .. } => expr_uses_async(object),
             Expr::Index { object, index, .. } => expr_uses_async(object) || expr_uses_async(index),
+            Expr::Slice { object, start, end, .. } => {
+                expr_uses_async(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_async(s))
+                    || end.as_ref().is_some_and(|e| expr_uses_async(e))
+            }
             Expr::List(items, _) => items.iter().any(expr_uses_async),
             Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
             Expr::Range { start, end, .. } => expr_uses_async(start) || expr_uses_async(end),
@@ -580,6 +585,11 @@ fn walk_expr_for_state_refs(
         Expr::Index { object, index, .. } => {
             walk_expr_for_state_refs(object, candidates, locals, refs);
             walk_expr_for_state_refs(index, candidates, locals, refs);
+        }
+        Expr::Slice { object, start, end, .. } => {
+            walk_expr_for_state_refs(object, candidates, locals, refs);
+            if let Some(s) = start { walk_expr_for_state_refs(s, candidates, locals, refs); }
+            if let Some(e) = end { walk_expr_for_state_refs(e, candidates, locals, refs); }
         }
         Expr::Field { object, .. } => {
             walk_expr_for_state_refs(object, candidates, locals, refs);
@@ -3650,10 +3660,11 @@ impl<'a> CodegenCtx<'a> {
                      let __val = {}; \
                      let mut __g = __coll.lock().unwrap(); \
                      let __len = __g.len() as i64; \
-                     if __idx < 0 || __idx >= __len {{ \
+                     let __eff = if __idx < 0 {{ __len + __idx }} else {{ __idx }}; \
+                     if __eff < 0 || __eff >= __len {{ \
                      panic!(\"índice {{}} fuera de rango (lista de tamaño {{}})\", __idx, __len); \
                      }} \
-                     __g[__idx as usize] = __val; \
+                     __g[__eff as usize] = __val; \
                      }}",
                     obj_code, idx_code, coerced
                 )
@@ -4088,6 +4099,9 @@ impl<'a> CodegenCtx<'a> {
             Expr::List(items, span) => self.gen_list_lit(items, *span),
             Expr::Map(pairs, span) => self.gen_map_lit(pairs, *span),
             Expr::Index { object, index, span } => self.gen_index(object, index, *span),
+            Expr::Slice { object, start, end, inclusive, span } => {
+                self.gen_slice(object, start.as_deref(), end.as_deref(), *inclusive, *span)
+            }
             Expr::Field { object, field, span } => self.gen_field_access(object, field, *span),
             Expr::StructLit { type_name, fields, span } => self.gen_struct_lit(type_name, fields, *span),
             Expr::Ok(inner, _) => self.gen_ok(inner),
@@ -5937,11 +5951,52 @@ impl<'a> CodegenCtx<'a> {
                         display_type(&idx_ty, self.env)
                     )));
                 }
+                // I.1 (mini-tanda I) — índices negativos: `xs[-1]`
+                // = último. Convertimos a `effective = len + i` si
+                // `i < 0`. Out-of-range → panic con mensaje claro
+                // (paralelo al intérprete).
                 let code = format!(
-                    "({}).lock().unwrap()[({}) as usize].clone()",
+                    "{{ \
+                        let __recv = ({}).clone(); \
+                        let __i: i64 = {}; \
+                        let __g = __recv.lock().unwrap(); \
+                        let __len = __g.len() as i64; \
+                        let __e = if __i < 0 {{ __len + __i }} else {{ __i }}; \
+                        if __e < 0 || __e >= __len {{ \
+                            panic!(\"índice fuera de rango: {{}} en lista de tamaño {{}}\", __i, __len); \
+                        }} \
+                        __g[__e as usize].clone() \
+                    }}",
                     obj_code, idx_code
                 );
                 Ok((code, (**inner).clone()))
+            }
+            // I.1 — `s[i]` devuelve el i-ésimo char como `String`.
+            // Cuenta CHARS, no bytes. Soporta negativos. Out-of-range
+            // → panic. Bindeamos el `String` a una var antes de
+            // tomar `.as_str()` para que no se dropee como temporary.
+            Type::Str => {
+                if !matches!(idx_ty, Type::Int) {
+                    return Err(self.err_at(index.span(), format!(
+                        "indexing de Str con `{}`: el índice debe ser Int",
+                        display_type(&idx_ty, self.env)
+                    )));
+                }
+                let code = format!(
+                    "{{ \
+                        let __s_owned: String = ({}); \
+                        let __i: i64 = {}; \
+                        let __chars: Vec<char> = __s_owned.chars().collect(); \
+                        let __len = __chars.len() as i64; \
+                        let __e = if __i < 0 {{ __len + __i }} else {{ __i }}; \
+                        if __e < 0 || __e >= __len {{ \
+                            panic!(\"índice fuera de rango: {{}} en Str de tamaño {{}}\", __i, __len); \
+                        }} \
+                        __chars[__e as usize].to_string() \
+                    }}",
+                    obj_code, idx_code
+                );
+                Ok((code, Type::Str))
             }
             Type::Map(k_ty, v_ty) => {
                 let coerced_idx = coerce(&idx_code, &idx_ty, k_ty);
@@ -5967,6 +6022,100 @@ impl<'a> CodegenCtx<'a> {
             }
             other => Err(self.err_at(index_span, format!(
                 "indexing `[]` sobre `{}`: solo soportado en List<T> y Map<K, V>",
+                display_type(other, self.env)
+            ))),
+        }
+    }
+
+    /// I.2 (mini-tanda I) — slicing. Genera Rust que clamp+slice
+    /// inline. Política idéntica al evaluator:
+    ///  - `start=None` → 0; `end=None` → len.
+    ///  - Negativos wrap por `len + i`.
+    ///  - `inclusive` ajusta `end_excl = end + 1` antes de clamp.
+    ///  - Clamp ambos extremos a `[0, len]`; si start > end, vacío.
+    ///  - Devuelve copia: `Arc::new(Mutex::new(slice.to_vec()))`
+    ///    para List, `String` nuevo para Str.
+    fn gen_slice(
+        &mut self,
+        object: &Expr,
+        start: Option<&Expr>,
+        end: Option<&Expr>,
+        inclusive: bool,
+        slice_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let (obj_code, obj_ty) = self.gen_expr(object)?;
+        // start/end codes: si None, "None". Si Some, "Some(<code>)".
+        let start_code = match start {
+            None => "None".to_string(),
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let coerced = coerce(&c, &t, &Type::Int);
+                format!("Some({})", coerced)
+            }
+        };
+        let end_code = match end {
+            None => "None".to_string(),
+            Some(e) => {
+                let (c, t) = self.gen_expr(e)?;
+                let coerced = coerce(&c, &t, &Type::Int);
+                format!("Some({})", coerced)
+            }
+        };
+        let incl_lit = if inclusive { "true" } else { "false" };
+
+        match &obj_ty {
+            Type::List(inner) => {
+                let elem_rs = rust_type_for(inner, self.env)?;
+                let code = format!(
+                    "{{ \
+                        let __recv = ({}).clone(); \
+                        let __s_opt: Option<i64> = {}; \
+                        let __e_opt: Option<i64> = {}; \
+                        let __incl: bool = {}; \
+                        let __g = __recv.lock().unwrap(); \
+                        let __len = __g.len() as i64; \
+                        let __s_raw = __s_opt.unwrap_or(0); \
+                        let __e_raw = __e_opt.unwrap_or(if __incl {{ __len - 1 }} else {{ __len }}); \
+                        let __s_wrap = if __s_raw < 0 {{ __len + __s_raw }} else {{ __s_raw }}; \
+                        let __e_wrap = if __e_raw < 0 {{ __len + __e_raw }} else {{ __e_raw }}; \
+                        let __e_excl = if __incl {{ __e_wrap + 1 }} else {{ __e_wrap }}; \
+                        let __s_clamp = __s_wrap.clamp(0, __len); \
+                        let __e_clamp = __e_excl.clamp(0, __len); \
+                        let __a = __s_clamp.min(__e_clamp) as usize; \
+                        let __b = __e_clamp as usize; \
+                        let __slice: Vec<{}> = __g[__a..__b].to_vec(); \
+                        Arc::new(Mutex::new(__slice)) \
+                    }}",
+                    obj_code, start_code, end_code, incl_lit, elem_rs
+                );
+                Ok((code, Type::List(Box::new((**inner).clone()))))
+            }
+            Type::Str => {
+                let code = format!(
+                    "{{ \
+                        let __s_owned: String = ({}); \
+                        let __s_opt: Option<i64> = {}; \
+                        let __e_opt: Option<i64> = {}; \
+                        let __incl: bool = {}; \
+                        let __chars: Vec<char> = __s_owned.chars().collect(); \
+                        let __len = __chars.len() as i64; \
+                        let __s_raw = __s_opt.unwrap_or(0); \
+                        let __e_raw = __e_opt.unwrap_or(if __incl {{ __len - 1 }} else {{ __len }}); \
+                        let __s_wrap = if __s_raw < 0 {{ __len + __s_raw }} else {{ __s_raw }}; \
+                        let __e_wrap = if __e_raw < 0 {{ __len + __e_raw }} else {{ __e_raw }}; \
+                        let __e_excl = if __incl {{ __e_wrap + 1 }} else {{ __e_wrap }}; \
+                        let __s_clamp = __s_wrap.clamp(0, __len); \
+                        let __e_clamp = __e_excl.clamp(0, __len); \
+                        let __a = __s_clamp.min(__e_clamp) as usize; \
+                        let __b = __e_clamp as usize; \
+                        __chars[__a..__b].iter().collect::<String>() \
+                    }}",
+                    obj_code, start_code, end_code, incl_lit
+                );
+                Ok((code, Type::Str))
+            }
+            other => Err(self.err_at(slice_span, format!(
+                "slicing `[..]` sobre `{}`: solo soportado en List<T> y Str",
                 display_type(other, self.env)
             ))),
         }
@@ -8072,6 +8221,11 @@ fn collect_captures_expr(
         Expr::Index { object, index, .. } => {
             collect_captures_expr(object, params, locals, ctx, seen, out);
             collect_captures_expr(index, params, locals, ctx, seen, out);
+        }
+        Expr::Slice { object, start, end, .. } => {
+            collect_captures_expr(object, params, locals, ctx, seen, out);
+            if let Some(s) = start { collect_captures_expr(s, params, locals, ctx, seen, out); }
+            if let Some(e) = end { collect_captures_expr(e, params, locals, ctx, seen, out); }
         }
         Expr::List(items, _) => {
             for it in items {
@@ -10658,9 +10812,9 @@ mod tests {
 
     #[test]
     fn list_indexing_emite_borrow_clone() {
-        // `xs[0]` → `(xs.clone()).lock().unwrap()[(0i64) as usize].clone()`.
-        // El `.clone()` final es del Rc para Nominal/List/Map o copy
-        // para primitivos — siempre seguro.
+        // I.1 (mini-tanda I): el indexing ahora emite un bloque
+        // con bounds check + wrap negativo + clone. Verificamos
+        // que las piezas clave estén presentes.
         let file = ast_test::parse(
             &gen("let xs: List<Int> = [10, 20]\nlet x = xs[0]").unwrap(),
         );
@@ -10668,23 +10822,17 @@ mod tests {
         let l = ast_test::find_let(stmts, "x").expect("falta let x");
         // El binding `x` debe quedar tipado i64 (List<Int> indexing).
         assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
-        // El init debe contener el pipeline borrow + index + clone.
         let init = ast_test::local_init_expr(l).unwrap();
+        let ts = ast_test::ts(init);
+        // El nuevo emit usa `lock().unwrap()` adentro del bloque.
+        assert!(ts.contains("lock"), "esperaba .lock(), fue: {}", ts);
+        // Y el `clone()` final del elemento.
+        assert!(ts.contains("clone"), "esperaba .clone(), fue: {}", ts);
+        // Verificamos el wrap negativo (signature del nuevo emit).
         assert!(
-            ast_test::contains_method_call_in_expr(init, "lock"),
-            "esperaba .lock().unwrap() en el init de x, fue: {}",
-            ast_test::ts(init)
-        );
-        assert!(
-            ast_test::contains_method_call_in_expr(init, "clone"),
-            "esperaba .clone() en el init de x, fue: {}",
-            ast_test::ts(init)
-        );
-        // El subscript `[(0i64) as usize]` se preserva tokenizado.
-        assert!(
-            ast_test::ts(init).contains("(0i64) as usize"),
-            "esperaba subscript `[(0i64) as usize]`, fue: {}",
-            ast_test::ts(init)
+            ts.contains("__len + __i"),
+            "esperaba wrap negativo `__len + __i`, fue: {}",
+            ts
         );
     }
 

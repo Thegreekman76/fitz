@@ -223,6 +223,11 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             collect_uses_in_expr(object, uses);
             collect_uses_in_expr(index, uses);
         }
+        Expr::Slice { object, start, end, .. } => {
+            collect_uses_in_expr(object, uses);
+            if let Some(s) = start { collect_uses_in_expr(s, uses); }
+            if let Some(e) = end { collect_uses_in_expr(e, uses); }
+        }
         Expr::List(items, _) => {
             for i in items {
                 collect_uses_in_expr(i, uses);
@@ -590,6 +595,11 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         Expr::Index { object, index, .. } => {
             walk_expr(object, f);
             walk_expr(index, f);
+        }
+        Expr::Slice { object, start, end, .. } => {
+            walk_expr(object, f);
+            if let Some(s) = start { walk_expr(s, f); }
+            if let Some(e) = end { walk_expr(e, f); }
         }
         Expr::List(items, _) => {
             for i in items {

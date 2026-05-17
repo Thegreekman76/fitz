@@ -42,6 +42,12 @@ struct Parser {
     /// explícito sugiriendo envolver en paréntesis.
     no_struct_literal: bool,
 
+    /// Mini-tanda I.2 — slicing. Cuando es `true`, `range_expr` NO
+    /// consume el operador `..`/`..=`: devuelve el start sin
+    /// promoverlo a `Expr::Range`. El postfix `[` lo mira y arma el
+    /// `Expr::Slice` correspondiente.
+    in_slice_context: bool,
+
     /// Fase 9.0.1 (F15): si es `true`, los loops top-level de stmts
     /// (`parse_program` + `parse_block`) capturan errores de
     /// `parse_stmt`, los acumulan en `recovered_errors`, sincronizan
@@ -70,6 +76,7 @@ impl Parser {
             tokens,
             pos: 0,
             no_struct_literal: false,
+            in_slice_context: false,
             recovery_mode: false,
             recovered_errors: Vec::new(),
         }
@@ -355,6 +362,11 @@ impl Parser {
     /// `span` apunta al `..` o `..=`.
     fn range_expr(&mut self) -> FitzResult<Expr> {
         let start = self.term()?;
+        // I.2 — en bracket context, NO consumimos `..`/`..=`: el
+        // postfix `[` lo mira para armar el `Expr::Slice`.
+        if self.in_slice_context {
+            return Ok(start);
+        }
         let inclusive = match self.peek() {
             Token::DotDot => false,
             Token::DotDotEq => true,
@@ -577,19 +589,73 @@ impl Parser {
                 Token::LBracket => {
                     let span = self.cur_span();
                     self.advance(); // consume '['
-                    let prev = std::mem::replace(&mut self.no_struct_literal, false);
-                    let idx_result = self.expression();
-                    self.no_struct_literal = prev;
-                    let index = idx_result?;
+                    let prev_no_struct = std::mem::replace(&mut self.no_struct_literal, false);
+                    // I.2 — entrar a slice context para que range_expr
+                    // NO consuma `..`/`..=`. Lo manejamos manual.
+                    let prev_slice = std::mem::replace(&mut self.in_slice_context, true);
+
+                    // Caso A: `[..end]` o `[..=end]` o `[..]` — slice
+                    // sin start.
+                    let bracket_result: FitzResult<Expr> = match self.peek().clone() {
+                        Token::DotDot | Token::DotDotEq => {
+                            let inclusive = matches!(self.peek(), Token::DotDotEq);
+                            self.advance(); // consume `..` o `..=`
+                            let end = if matches!(self.peek(), Token::RBracket) {
+                                None
+                            } else {
+                                Some(Box::new(self.expression()?))
+                            };
+                            Ok(Expr::Slice {
+                                object: Box::new(expr.clone()),
+                                start: None,
+                                end,
+                                inclusive,
+                                span,
+                            })
+                        }
+                        _ => {
+                            // Caso B: parsear primer expr (con
+                            // in_slice_context=true, no consume `..`).
+                            let first = self.expression()?;
+                            // Caso B.1: index simple.
+                            if matches!(self.peek(), Token::RBracket) {
+                                Ok(Expr::Index {
+                                    object: Box::new(expr.clone()),
+                                    index: Box::new(first),
+                                    span,
+                                })
+                            } else if matches!(self.peek(), Token::DotDot | Token::DotDotEq) {
+                                // Caso B.2: slice con start. End
+                                // opcional.
+                                let inclusive = matches!(self.peek(), Token::DotDotEq);
+                                self.advance(); // consume `..` o `..=`
+                                let end = if matches!(self.peek(), Token::RBracket) {
+                                    None
+                                } else {
+                                    Some(Box::new(self.expression()?))
+                                };
+                                Ok(Expr::Slice {
+                                    object: Box::new(expr.clone()),
+                                    start: Some(Box::new(first)),
+                                    end,
+                                    inclusive,
+                                    span,
+                                })
+                            } else {
+                                Err(self.error(
+                                    ErrorKind::UnexpectedToken,
+                                    "se esperaba ']', '..' o '..=' en el contenido del indexing",
+                                ))
+                            }
+                        }
+                    };
+                    self.no_struct_literal = prev_no_struct;
+                    self.in_slice_context = prev_slice;
+                    expr = bracket_result?;
                     self.expect(
                         &Token::RBracket,
                         "se esperaba ']' para cerrar el indexing",
                     )?;
-                    expr = Expr::Index {
-                        object: Box::new(expr),
-                        index: Box::new(index),
-                        span,
-                    };
                 }
                 Token::LBrace => {
                     let ident_info = match &expr {

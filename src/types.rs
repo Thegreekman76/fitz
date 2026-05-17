@@ -1570,6 +1570,34 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ret: Box::new(ret),
             }
         }
+        Expr::Slice { object, start, end, span, .. } => {
+            let obj_ty = infer_expr(ctx, object);
+            for (name, e) in [("start", start), ("end", end)] {
+                if let Some(inner) = e {
+                    let t = infer_expr(ctx, inner);
+                    if !is_compatible(&t, &Type::Int) {
+                        ctx.error_at(inner.span(), format!(
+                            "el `{}` de un slice debe ser Int, recibió `{}`",
+                            name,
+                            t.display(ctx.types),
+                        ));
+                    }
+                }
+            }
+            match obj_ty.base() {
+                Type::List(t) => Type::List(Box::new((**t).clone())),
+                Type::Str => Type::Str,
+                Type::Any | Type::Nominal(_) => Type::Any,
+                other => {
+                    ctx.error_at(*span, format!(
+                        "el tipo `{}` no soporta slicing con `[..]`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            }
+        }
+
         Expr::Index { object, index, span } => {
             let obj_ty = infer_expr(ctx, object);
             let idx_ty = infer_expr(ctx, index);
@@ -1596,11 +1624,18 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     (**v).clone()
                 }
                 Type::Str => {
-                    // Str indexable es deuda explícita de 3.1 (la
-                    // unidad — char vs byte vs grafema — sin
-                    // decidir). El evaluator también corta.
-                    ctx.error_at(*span, "`Str` no soporta indexing con `[]` todavía".to_string());
-                    Type::Any
+                    // I.1 (mini-tanda I) — `s[i]` devuelve el i-ésimo
+                    // char como `Str` de un char (Fitz no tiene Char).
+                    // Indexación por CHAR, no por byte (consistente con
+                    // `s.len()` que cuenta chars). Negativos soportados:
+                    // `s[-1]` = último.
+                    if !is_compatible(&idx_ty, &Type::Int) {
+                        ctx.error_at(index.span(), format!(
+                            "el índice de un `Str` debe ser Int, recibió `{}`",
+                            idx_ty.display(ctx.types)
+                        ));
+                    }
+                    Type::Str
                 }
                 // Gradual: Any y Nominal no chequean. Nominal con
                 // operador `[]` es deuda (custom indexers no existen);
@@ -5342,6 +5377,76 @@ mod tests {
         );
     }
 
+    // ---- I.1: indexing con tipos ----
+
+    #[test]
+    fn str_index_devuelve_str() {
+        // I.1: `s[i]` ahora tipa como Str (antes era error).
+        assert_ok(
+            "let s = \"hola\"\n\
+             let c: Str = s[0]",
+        );
+    }
+
+    #[test]
+    fn str_index_con_arg_no_int_es_error() {
+        assert_error_with(
+            "let s = \"hola\"\n\
+             let c = s[\"x\"]",
+            &["Str", "Int"],
+        );
+    }
+
+    // ---- I.2: slicing ----
+
+    #[test]
+    fn list_slice_devuelve_list_mismo_tipo() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let ys: List<Int> = xs[1..3]\n\
+             let zs: List<Int> = xs[..2]\n\
+             let ws: List<Int> = xs[3..]\n\
+             let qs: List<Int> = xs[..]",
+        );
+    }
+
+    #[test]
+    fn str_slice_devuelve_str() {
+        assert_ok(
+            "let s = \"hola\"\n\
+             let a: Str = s[0..2]\n\
+             let b: Str = s[..2]\n\
+             let c: Str = s[2..]\n\
+             let d: Str = s[..]",
+        );
+    }
+
+    #[test]
+    fn slice_con_inclusive() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let ys: List<Int> = xs[0..=2]",
+        );
+    }
+
+    #[test]
+    fn slice_bound_no_int_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let ys = xs[\"a\"..2]",
+            &["slice", "Int"],
+        );
+    }
+
+    #[test]
+    fn slice_sobre_tipo_no_soportado_es_error() {
+        assert_error_with(
+            "let n: Int = 42\n\
+             let r = n[0..1]",
+            &["slicing"],
+        );
+    }
+
     // Encadenado
 
     #[test]
@@ -5514,13 +5619,11 @@ mod tests {
     }
 
     #[test]
-    fn index_sobre_str_es_error_hasta_que_se_implemente() {
-        // Indexing de Str sigue siendo deuda de 3.1 — el checker
-        // se adelanta al evaluator con un mensaje claro.
-        assert_error_with(
+    fn index_sobre_str_ahora_si_se_implementa() {
+        // I.1 (mini-tanda I): `s[i]` devuelve `Str` (un char).
+        assert_ok(
             "let s = \"hola\"\n\
-             let c = s[0]",
-            &["Str", "indexing", "todavía"],
+             let c: Str = s[0]",
         );
     }
 

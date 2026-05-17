@@ -1930,6 +1930,55 @@ while (i < 3) {
 print(nums)          // [10, 20, 30]
 ```
 
+### Indexing y slicing (mini-tanda I)
+
+Listas y strings soportan **índices negativos** y **slicing**
+(post-mini-tanda I).
+
+**Índices negativos**: `xs[-1]` es el último, `xs[-2]` el
+penúltimo, etc. (igual que Python). Resolución: `effective =
+len + i`. Out-of-range → error claro.
+
+```fitz
+let xs = [10, 20, 30, 40, 50]
+print(xs[-1])             // 50
+print(xs[-2])             // 40
+
+let s = "fitz"
+print(s[0])               // "f"
+print(s[-1])              // "z"
+
+xs[-1] = 99               // asignación con negativo también
+```
+
+`s[i]` sobre `Str` devuelve un `Str` de un char (Fitz no tiene
+tipo Char). Cuenta CHARS, no bytes (consistente con
+`s.len()`).
+
+**Slicing**: `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`,
+`xs[a..=b]`. Funciona para listas y strings; devuelve siempre
+una **copia** (mutar el slice no afecta al original).
+
+```fitz
+let xs = [10, 20, 30, 40, 50]
+print(xs[1..3])           // [20, 30]
+print(xs[..2])            // [10, 20]
+print(xs[3..])            // [40, 50]
+print(xs[..])             // [10, 20, 30, 40, 50] (copia)
+print(xs[1..=3])          // [20, 30, 40]
+print(xs[-2..])           // [40, 50]
+
+let s = "hola fitz"
+print(s[..4])             // "hola"
+print(s[-4..])            // "fitz"
+```
+
+**Clamp** silencioso para slices fuera de rango (estilo Python):
+`xs[100..]` con `len=5` → `[]`. `xs[..100]` → copia entera. Si
+`start > end` tras clamp → vacío.
+
+Ver [examples/guide/09b-indexing-slicing.fitz](../examples/guide/09b-indexing-slicing.fitz).
+
 ### Lo que todavía no anda
 
 - **Métodos sobre listas y mapas** — `xs.push(...)`, `xs.map(...)`,
@@ -1942,8 +1991,13 @@ print(nums)          // [10, 20, 30]
   Error — `for` sobre Map aún no soportado — necesita el tipo Pair
   ```
 
-- **Índices negativos** (`xs[-1]`) al estilo Python.
 - **Comprehensions** (`[x * 2 for x in xs]`).
+- **Slicing con paso** (`xs[::2]`) — sin demanda concreta.
+
+> Lo que **sí anda** y antes era deuda (mini-tanda I post-S):
+> **índices negativos** `xs[-1]` para listas y strings + **slicing**
+> `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`, `xs[a..=b]` (con
+> clamp silencioso). Ver la sub-sección de arriba.
 
 > Lo que **sí anda** y antes era deuda: **asignación a índice**
 > (R.1.3) — ver sección "Asignación a índice" arriba. **Rangos

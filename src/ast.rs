@@ -77,6 +77,20 @@ pub enum Expr {
         span: Span,
     },
 
+    /// Slicing `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`,
+    /// `xs[a..=b]` (I.2, mini-tanda I). Devuelve una copia.
+    /// `start: None` → desde el principio; `end: None` → hasta el
+    /// final. Out-of-range se clampea (estilo Python, no panic).
+    /// Soporta receivers `List<T>` (devuelve `List<T>`) y `Str`
+    /// (devuelve `Str`).
+    Slice {
+        object: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
+        inclusive: bool,
+        span: Span,
+    },
+
     /// Lista literal `[1, 2, 3]`, `[]`. Anidable.
     List(Vec<Expr>, Span),
 
@@ -171,6 +185,7 @@ impl Expr {
             Expr::FnExpr { span, .. } => *span,
             Expr::Field { span, .. } => *span,
             Expr::Index { span, .. } => *span,
+            Expr::Slice { span, .. } => *span,
             Expr::List(_, s) => *s,
             Expr::Map(_, s) => *s,
             Expr::Range { span, .. } => *span,

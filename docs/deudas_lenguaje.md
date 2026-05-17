@@ -711,12 +711,30 @@ GUIDE_EXAMPLES_COMPILE).
 - **Labels** en break/continue (`break 'outer`). ~3h, parser más
   complejo.
 
-### Index / slicing
+### ~~Index / slicing~~ ✓ CERRADO 2026-05-17 (mini-tanda I post-S)
 
-- **Índices negativos** `xs[-1]` — ~1h, lookup tiene que distinguir
-  signo.
-- **Slicing** `xs[1..5]`, `xs[..3]`, `xs[2..]` — ~3h, sintaxis ya
-  parsea como `Range`.
+- ~~**Índices negativos** `xs[-1]`~~ ✓ (I.1). Wrap `len + i`.
+  Funciona en lectura (`xs[-1]`), asignación (`xs[-1] = v`), y
+  para strings (`s[-1]` devuelve `Str` de un char). Out-of-range
+  → error de runtime.
+- ~~**Slicing** `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`,
+  `xs[a..=b]`~~ ✓ (I.2). Sintaxis parsea via flag
+  `in_slice_context` que silencia `range_expr` adentro de `[`.
+  Nueva variante `Expr::Slice { object, start: Option<Box<Expr>>,
+  end: Option<Box<Expr>>, inclusive: bool, span }`. Política
+  Python-style: clamp silencioso para extremos fuera de rango,
+  `start > end` tras clamp → vacío. Devuelve copia (no view),
+  funciona sobre List<T> y Str.
+
+Implementación en 5 capas (ast, parser, checker, evaluator,
+codegen, fmt). **16 unit tests nuevos** + smoke E2E bit-a-bit
+`fitz run` ↔ `fitz build` sobre
+`examples/guide/09b-indexing-slicing.fitz` (sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`). Cap 9 de la guía suma sub-sección
+"Indexing y slicing (mini-tanda I)".
+
+**Diferido como deuda menor**: slicing con paso (`xs[::2]`).
+Sin demanda concreta.
 
 ### Comprehensions
 

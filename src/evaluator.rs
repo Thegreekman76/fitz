@@ -1505,7 +1505,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                             };
                             let mut borrowed = items.lock();
                             let len = borrowed.len() as i64;
-                            if idx < 0 || idx >= len {
+                            // I.1 — mismo wrap negativo que en lectura.
+                            let effective = if idx < 0 { len + idx } else { idx };
+                            if effective < 0 || effective >= len {
                                 drop(borrowed);
                                 return Err(EvalSignal::Error(FitzError::new(
                                     ErrorKind::InvalidSyntax,
@@ -1516,7 +1518,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                                     ),
                                 )));
                             }
-                            borrowed[idx as usize] = v;
+                            borrowed[effective as usize] = v;
                         }
                         Value::Map(pairs) => {
                             // Linear search por la clave (mismo modelo
@@ -2358,6 +2360,24 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             let obj = eval_expr(object, env.clone()).await?;
             let idx = eval_expr(index, env).await?;
             eval_index(&obj, &idx, *span)
+        }
+
+        // I.2 (mini-tanda I) — slicing `xs[a..b]`, `xs[..b]`,
+        // `xs[a..]`, `xs[..]`, `xs[a..=b]`. Out-of-range se clampea
+        // (estilo Python). Soporta receivers List<T> y Str.
+        Expr::Slice { object, start, end, inclusive, span } => {
+            let obj = eval_expr(object, env.clone()).await?;
+            let start_v = if let Some(s) = start {
+                Some(eval_expr(s, env.clone()).await?)
+            } else {
+                None
+            };
+            let end_v = if let Some(e) = end {
+                Some(eval_expr(e, env.clone()).await?)
+            } else {
+                None
+            };
+            eval_slice(&obj, start_v.as_ref(), end_v.as_ref(), *inclusive, *span)
         }
 
         // `if cond { then } else { else_ }`. Funciona como expresión: su
@@ -3659,28 +3679,59 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                     ),
                 ))),
             };
-            // Sin índices negativos por ahora (sin Python-style xs[-1]).
-            // Si después lo agregamos, vivirá acá.
-            if i < 0 {
-                return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::InvalidSyntax,
-                    span.line, span.column,
-                    format!("índice negativo en lista: {}", i),
-                )));
-            }
-            let i_usize = i as usize;
+            // I.1 (mini-tanda I) — índices negativos al estilo Python:
+            // `xs[-1]` es el último, `xs[-2]` el penúltimo, etc. La
+            // resolución es `effective = len + i`. Si sigue negativo o
+            // ≥ len, error de runtime claro (sin auto-wrap más allá del
+            // tamaño).
             let borrowed = items.lock();
-            borrowed.get(i_usize).cloned().ok_or_else(|| {
-                EvalSignal::Error(FitzError::new(
+            let len = borrowed.len() as i64;
+            let effective = if i < 0 { len + i } else { i };
+            if effective < 0 || effective >= len {
+                return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
                     span.line, span.column,
                     format!(
                         "índice fuera de rango: {} en lista de tamaño {}",
-                        i,
-                        borrowed.len()
+                        i, len,
                     ),
-                ))
-            })
+                )));
+            }
+            Ok(borrowed[effective as usize].clone())
+        }
+        Value::Str(s) => {
+            // I.1 — `s[i]` devuelve el i-ésimo char como `Str` de un
+            // char (Fitz no tiene tipo Char). Soporta negativos
+            // (`s[-1]` = último char). Cuenta CHARS, no bytes — mismo
+            // contrato que `s.len()`.
+            let i = match idx {
+                Value::Int(n) => *n,
+                other => return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Int".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "el índice de un Str debe ser Int, no `{}`",
+                        other.type_name()
+                    ),
+                ))),
+            };
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let effective = if i < 0 { len + i } else { i };
+            if effective < 0 || effective >= len {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    format!(
+                        "índice fuera de rango: {} en Str de tamaño {}",
+                        i, len,
+                    ),
+                )));
+            }
+            Ok(Value::Str(chars[effective as usize].to_string()))
         }
         Value::Map(pairs) => {
             // Búsqueda lineal por igualdad. Esto va a ser O(n) hasta que
@@ -3706,6 +3757,88 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                 "el tipo `{}` no soporta indexing con `[]`",
                 other.type_name()
             ),
+        ))),
+    }
+}
+
+/// I.2 (mini-tanda I) — slicing. Resuelve `xs[a..b]`, `xs[..b]`,
+/// `xs[a..]`, `xs[..]`, `xs[a..=b]` sobre List<T> y Str.
+///
+/// Política:
+///  - `start = None` → 0.
+///  - `end = None` → len.
+///  - Índices negativos se convierten a `len + i` (igual que
+///    indexing).
+///  - **Clamp**: si después del wrap el índice queda fuera de
+///    `[0, len]`, se ajusta a las cotas (Python-style). `xs[100..]`
+///    con len=5 → []. No paniquea.
+///  - Si `start > end` tras clamp → slice vacío.
+///  - `inclusive: true` ajusta `end += 1` ANTES del clamp.
+///
+/// Devuelve siempre una NUEVA colección (copy semantics).
+fn eval_slice(
+    obj: &Value,
+    start: Option<&Value>,
+    end: Option<&Value>,
+    inclusive: bool,
+    span: Span,
+) -> EvalResult<Value> {
+    fn extract_int(v: Option<&Value>, name: &str, span: Span) -> EvalResult<Option<i64>> {
+        match v {
+            None => Ok(None),
+            Some(Value::Int(n)) => Ok(Some(*n)),
+            Some(other) => Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("el `{}` de un slice debe ser Int, recibió `{}`", name, other.type_name()),
+            ))),
+        }
+    }
+    fn resolve_bounds(
+        start: Option<i64>,
+        end: Option<i64>,
+        inclusive: bool,
+        len: i64,
+    ) -> (usize, usize) {
+        let s_raw = start.unwrap_or(0);
+        let e_raw = end.unwrap_or(if inclusive { len - 1 } else { len });
+        let s_wrap = if s_raw < 0 { len + s_raw } else { s_raw };
+        let e_wrap = if e_raw < 0 { len + e_raw } else { e_raw };
+        let e_excl = if inclusive { e_wrap + 1 } else { e_wrap };
+        let s_clamp = s_wrap.clamp(0, len);
+        let e_clamp = e_excl.clamp(0, len);
+        let s = s_clamp.min(e_clamp); // si start > end, slice vacío
+        (s as usize, e_clamp as usize)
+    }
+
+    let s_i = extract_int(start, "start", span)?;
+    let e_i = extract_int(end, "end", span)?;
+
+    match obj {
+        Value::List(items) => {
+            let borrowed = items.lock();
+            let len = borrowed.len() as i64;
+            let (a, b) = resolve_bounds(s_i, e_i, inclusive, len);
+            let slice: Vec<Value> = borrowed[a..b].to_vec();
+            Ok(Value::new_list(slice))
+        }
+        Value::Str(s) => {
+            let chars: Vec<char> = s.chars().collect();
+            let len = chars.len() as i64;
+            let (a, b) = resolve_bounds(s_i, e_i, inclusive, len);
+            let slice: String = chars[a..b].iter().collect();
+            Ok(Value::Str(slice))
+        }
+        other => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "List o Str".into(),
+                found: other.type_name().into(),
+            },
+            span.line, span.column,
+            format!("el tipo `{}` no soporta slicing", other.type_name()),
         ))),
     }
 }
@@ -5167,9 +5300,11 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn assign_index_list_indice_negativo_es_error() {
+    async fn assign_index_list_negativo_fuera_de_rango_es_error() {
+        // I.1: `xs[-1] = ...` ahora es válido (wrap). El error solo
+        // dispara si el wrap queda fuera de [0, len).
         let (_env, res) = parse_eval_into_env(
-            "let xs = [1, 2]\nxs[-1] = 99",
+            "let xs = [1, 2]\nxs[-99] = 99",
         )
         .await;
         let err = res.unwrap_err();
@@ -6940,20 +7075,16 @@ print(factorial(5))
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn index_list_negativo_es_error() {
-        // [1, 2][-1] — sin Python-style por ahora
-        let res = eval_expr_test(Expr::Index {
+    async fn index_list_negativo_wrappea_al_final() {
+        // I.1 (mini-tanda I): `[1, 2][-1]` ahora wrap a `[1, 2][1]` = 2.
+        let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO)),
             index: Box::new(Expr::UnaryOp {
                 op: UnaryOpKind::Neg,
                 operand: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
             }), span: Span::ZERO,
-        }).await;
-        let err = res.unwrap_err();
-        match err {
-            EvalSignal::Error(e) => assert!(e.message.contains("negativo")),
-            _ => panic!("se esperaba Error"),
-        }
+        }).await.unwrap();
+        assert_eq!(v, Value::Int(2));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -8298,6 +8429,157 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+    }
+
+    // ---- I.1: índices negativos (mini-tanda I) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_negative_index_devuelve_desde_el_final() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [10, 20, 30, 40, 50]\n\
+             let a = xs[-1]\n\
+             let b = xs[-2]\n\
+             let c = xs[-5]",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(50)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(40)));
+        assert_eq!(env.lock().get("c"), Some(Value::Int(10)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_negative_index_fuera_de_rango_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3]\n\
+             let a = xs[-4]",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("fuera de rango"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_index_devuelve_char_como_str() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"fitz\"\n\
+             let a = s[0]\n\
+             let b = s[-1]\n\
+             let c = s[2]",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("f".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("z".into())));
+        assert_eq!(env.lock().get("c"), Some(Value::Str("t".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_assign_con_negativo() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3, 4]\n\
+             xs[-1] = 99",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g[3], Value::Int(99));
+            assert_eq!(g[0], Value::Int(1));
+        } else { panic!("esperaba List"); }
+    }
+
+    // ---- I.2: slicing ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_slice_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [10, 20, 30, 40, 50]\n\
+             let a = xs[1..3]\n\
+             let b = xs[..2]\n\
+             let c = xs[3..]",
+        ).await;
+        res.unwrap();
+        for (name, expected) in [
+            ("a", vec![Value::Int(20), Value::Int(30)]),
+            ("b", vec![Value::Int(10), Value::Int(20)]),
+            ("c", vec![Value::Int(40), Value::Int(50)]),
+        ] {
+            let v = env.lock().get(name).unwrap();
+            if let Value::List(items) = v {
+                let g = items.lock();
+                assert_eq!(g.as_slice(), expected.as_slice(), "binding `{}`", name);
+            } else { panic!("binding {} esperaba List", name); }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_slice_inclusive_y_negativos() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [10, 20, 30, 40, 50]\n\
+             let a = xs[1..=3]\n\
+             let b = xs[-2..]",
+        ).await;
+        res.unwrap();
+        for (name, expected) in [
+            ("a", vec![Value::Int(20), Value::Int(30), Value::Int(40)]),
+            ("b", vec![Value::Int(40), Value::Int(50)]),
+        ] {
+            let v = env.lock().get(name).unwrap();
+            if let Value::List(items) = v {
+                let g = items.lock();
+                assert_eq!(g.as_slice(), expected.as_slice(), "binding `{}`", name);
+            } else { panic!("binding {} esperaba List", name); }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_slice_clampea_out_of_range() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3]\n\
+             let a = xs[100..]\n\
+             let b = xs[..100]\n\
+             let c = xs[2..1]",
+        ).await;
+        res.unwrap();
+        for (name, expected) in [
+            ("a", vec![]),
+            ("b", vec![Value::Int(1), Value::Int(2), Value::Int(3)]),
+            ("c", vec![]),
+        ] {
+            let v = env.lock().get(name).unwrap();
+            if let Value::List(items) = v {
+                let g = items.lock();
+                assert_eq!(g.as_slice(), expected.as_slice(), "binding `{}`", name);
+            } else { panic!("binding {} esperaba List", name); }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_slice_devuelve_copia_no_view() {
+        // Mutar el slice NO afecta el original.
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3, 4, 5]\n\
+             let mid = xs[1..4]\n\
+             mid[0] = 99",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g[1], Value::Int(2), "xs original no debe haber cambiado");
+        } else { panic!("esperaba List"); }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_slice_funciona() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"hola fitz\"\n\
+             let a = s[0..4]\n\
+             let b = s[5..]\n\
+             let c = s[-4..]",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("hola".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("fitz".into())));
+        assert_eq!(env.lock().get("c"), Some(Value::Str("fitz".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]

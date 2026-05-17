@@ -402,6 +402,12 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         Expr::Field { object, .. } | Expr::Index { object, .. } => {
             Some(end_line_of_expr(object))
         }
+        Expr::Slice { object, start, end, .. } => {
+            let mut m = end_line_of_expr(object);
+            if let Some(s) = start { m = m.max(end_line_of_expr(s)); }
+            if let Some(e) = end { m = m.max(end_line_of_expr(e)); }
+            Some(m)
+        }
         Expr::List(items, _) => items.iter().map(end_line_of_expr).max(),
         Expr::Map(entries, _) => entries
             .iter()
@@ -753,6 +759,18 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             fmt_expr(ctx, object);
             ctx.write("[");
             fmt_expr(ctx, index);
+            ctx.write("]");
+        }
+        Expr::Slice { object, start, end, inclusive, .. } => {
+            fmt_expr(ctx, object);
+            ctx.write("[");
+            if let Some(s) = start {
+                ctx.write(&expr_to_inline_string(s));
+            }
+            ctx.write(if *inclusive { "..=" } else { ".." });
+            if let Some(e) = end {
+                ctx.write(&expr_to_inline_string(e));
+            }
             ctx.write("]");
         }
         Expr::List(items, _) => {
