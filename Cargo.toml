@@ -118,6 +118,15 @@ toml_edit = "0.22"
 # en el loop, que es trivial y no agrega otra dep.
 notify = "6"
 
+# Fase 9.z.4 — terminal handling para `fitz repl` (REPL interactivo).
+# Maneja prompt + line editing (arrow keys, Home/End, history Ctrl-R),
+# multi-line continuation, persistencia de history a `~/.fitz/history`,
+# Ctrl+C (interrupted) y Ctrl+D (EOF) como eventos diferenciados.
+# Versión 14 es la actual estable; default features traen file history.
+# Más simple que rolear nuestro propio readline (raw mode terminal,
+# escape sequences, history buffer).
+rustyline = "14"
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el

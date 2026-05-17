@@ -194,6 +194,66 @@ pub async fn eval_with_base_and_deps(
     Ok(())
 }
 
+/// Fase 9.z.4 — evalúa un programa contra un env existente (compartido
+/// entre líneas del REPL). A diferencia de `eval_with_base_and_deps`,
+/// NO crea un env nuevo ni registra builtins — el caller mantiene un
+/// `EnvRef` propio que persiste entre invocaciones.
+///
+/// Devuelve el `Value` resultante del último stmt (útil para el REPL:
+/// cuando el usuario tipea `1 + 2` el parser lo convierte en
+/// `Stmt::Expr` y queremos imprimir `Value::Int(3)`). Para `Stmt::Assign`,
+/// `Stmt::FnDef`, etc. el valor es `Value::Null`. Si el programa
+/// está vacío, también `Value::Null`.
+///
+/// Sí instala/desinstala el loader (`install_loader`/`LoaderGuard`)
+/// cada vez para que `import` funcione. Cache del loader se pierde
+/// entre llamadas (deuda menor; cargas múltiples de un mismo módulo
+/// re-ejecutan). Para el caso REPL común (intérprete interactivo,
+/// pocos imports), aceptable.
+pub async fn eval_program_with_env(
+    program: Program,
+    base_dir: PathBuf,
+    env: EnvRef,
+    dep_registry: crate::manifest::DepRegistry,
+) -> FitzResult<Value> {
+    install_loader(base_dir, dep_registry);
+    let _guard = LoaderGuard;
+    let mut last = Value::Null;
+    for stmt in &program {
+        match eval_stmt(stmt, env.clone()).await {
+            Ok(v) => last = v,
+            Err(signal) => return Err(signal_to_error(signal)),
+        }
+    }
+    Ok(last)
+}
+
+/// Fase 9.z.4 — crea un env nuevo + registra builtins. Wrapper público
+/// para que el REPL (en `main.rs`) pueda armar su scope inicial sin
+/// exponer `register_builtins` por separado.
+pub fn new_repl_env() -> EnvRef {
+    let env = Environment::new();
+    register_builtins(&env);
+    env
+}
+
+/// Fase 9.z.4 — lista los nombres de los builtins registrados por
+/// `register_builtins`. El REPL los usa para filtrar `:env` (mostrar
+/// solo lo que el usuario definió, no los builtins built-in del
+/// lenguaje). Mantener sincronizado con `register_builtins`.
+pub fn builtin_names() -> &'static [&'static str] {
+    &[
+        "print",
+        "len",
+        "cors",
+        "sleep",
+        "assert",
+        "assert_eq",
+        "assert_ne",
+        "assert_throws",
+    ]
+}
+
 /// Wrapper sync de `eval_with_base` para CLI entry-points (main.rs).
 /// Arma un runtime tokio `current_thread` (single-threaded por F17)
 /// y bloquea sobre el future. Si ya estás adentro de un runtime, usá

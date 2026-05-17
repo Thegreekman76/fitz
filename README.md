@@ -537,7 +537,26 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     compile_e2e + 3 openapi** (sin cambios — dev_cmd es
     interactivo, smoke E2E pendiente). Clippy `-D warnings`
     limpio.
-  - Próximo: **9.z.4** (`fitz repl` interactivo).
+  - **9.z.4 CERRADA (2026-05-17)** — `fitz repl` interactivo.
+    Prompt `fitz> ` con env compartido entre líneas, multi-line
+    continuation automática (`... `) via balanced brackets,
+    6 comandos especiales (`:help`/`:quit`/`:env`/`:reset`/
+    `:type`/`:load`), history persistente en `~/.fitz/history`
+    con arrow up/down + Ctrl+R via crate `rustyline = "14"`,
+    pretty-print Python-style del último valor cuando es expr
+    top-level, async transparente (`sleep(100).await` funciona),
+    filtro de warning spurio del checker para vars previas
+    (substring "variable desconocida"). APIs nuevas públicas
+    `evaluator::eval_program_with_env` + `new_repl_env` +
+    `builtin_names` + `Environment::local_names`. Cap 26 nuevo
+    en `docs/guide.md`.
+  - Total al cierre 9.z.4: **1366 unit + 66 cli_e2e + 79
+    compile_e2e + 3 openapi** (sin cambios — repl_cmd es
+    interactivo, smoke E2E pendiente). Clippy `-D warnings`
+    limpio.
+  - Próximo: **9.z.5** (`fitz lint` — linter de patrones más allá
+    de tipos: unused_variable, unused_import, useless_match,
+    etc.). Cierra Fase 9.z entera.
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based), `@ws` (WebSockets tipados con
   `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM

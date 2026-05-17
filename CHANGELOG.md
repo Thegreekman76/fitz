@@ -13,20 +13,141 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
 manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS** y **9.z
-(DX) avanza con 9.z.1 + 9.z.2 + 9.z.3 CERRADAS** — fmt
-production-ready (2026-05-16), test runner built-in con
-`@test` + `fitz test` (2026-05-17), y hot reload con `fitz dev`
-(2026-05-17).
+(DX) avanza con 9.z.1 + 9.z.2 + 9.z.3 + 9.z.4 CERRADAS** — fmt
+production-ready (2026-05-16), test runner built-in
+(2026-05-17), hot reload (2026-05-17), y REPL interactivo
+(2026-05-17). Solo queda 9.z.5 (linter) para cerrar 9.z entera.
 
 **Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
 git deps cubren el caso 90% y registry implica decisiones de
 hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
 repl + lint) que no requiere infra externa.
 
-Próximo norte: **9.z.4** (`fitz repl` interactivo).
+Próximo norte: **9.z.5** (`fitz lint` — patrones más allá de tipos).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.18] — 2026-05-17 — Fase 9.z.4 CERRADA — `fitz repl` (REPL interactivo)
+
+Cuarta DX feature de Fase 9.z. Prompt interactivo donde cada línea
+se evalúa contra un env compartido, con multi-line continuation,
+comandos especiales `:nombre`, history persistente, y async
+transparente.
+
+**Implementación**:
+
+- Dep nueva: `rustyline = "14"` para terminal handling
+  (arrow keys, history Ctrl-R, line editing, Ctrl+C/D
+  diferenciados). Mismo crate que cargo-edit. Default features
+  traen file history.
+- `Commands::Repl` (sin args) en CLI. Manifest mode/single-file
+  no aplica — el REPL es siempre single-session.
+- `repl_cmd` corre adentro de `evaluator::build_runtime()`
+  (current_thread) para que `sleep(100).await` y similares
+  funcionen desde el prompt.
+- `read_complete_input` lee líneas hasta que el buffer esté
+  "completo" según heurística de balanced brackets
+  (`input_is_complete`): cuenta `{`/`(`/`[` skip-eando strings
+  literales y comments `//` y `/* */`. Si no balancea, prompt
+  cambia a `... `. Es heurística (no parser real); el parser
+  puede aún emitir un error sintáctico distinto que se muestra
+  y vuelve al prompt.
+- 6 comandos especiales (`handle_special_command`): `:help`,
+  `:quit`/`:q`/`:exit`, `:env`, `:reset`, `:type <expr>`,
+  `:load <archivo>`.
+- `:env` lista los bindings del scope raíz filtrando builtins
+  (`evaluator::builtin_names()` — array nuevo con los 8
+  builtins actuales).
+- `:type <expr>` arma un programa sintético
+  `let __repl_type = <expr>`, lo pasa por el checker, y lee el
+  tipo del span del value. Limitación conocida: no es
+  scope-aware (no ve vars previas del REPL). Documentado.
+- `:load <archivo>` lee + parsea + chequea + evalúa el archivo
+  contra el env del REPL. Los `let`/`fn` del archivo quedan
+  disponibles para las próximas líneas del prompt.
+- History persistente: `~/.fitz/history` (Linux/macOS) o
+  `%USERPROFILE%\.fitz\history` (Windows). Se carga al inicio y
+  se guarda al salir. `rustyline` maneja arrow up/down + Ctrl+R
+  + line editing nativo.
+- **Pretty-print Python-style del último valor**: cuando el
+  último stmt del input es `Stmt::Expr` y devuelve un `Value`
+  no-Null, se imprime con `= <value>`. Para `let`/`fn`/`print`
+  el output es silencioso (`print` devuelve Null y ya imprime
+  por su cuenta).
+
+**APIs nuevas en el evaluator/env** (pub):
+- `evaluator::eval_program_with_env(program, base_dir, env,
+  dep_registry) -> FitzResult<Value>`: evalúa contra un env
+  externo que persiste entre invocaciones (a diferencia de
+  `eval_with_base_and_deps`). Devuelve el `Value` del último
+  stmt para que el REPL pueda imprimir.
+- `evaluator::new_repl_env() -> EnvRef`: wrapper público que
+  crea env + registra builtins, sin exponer la fn privada.
+- `evaluator::builtin_names() -> &'static [&'static str]`:
+  lista de nombres de builtins para que el REPL los filtre del
+  `:env`. Mantener sincronizado con `register_builtins`.
+- `Environment::local_names() -> Vec<String>`: lista los nombres
+  definidos en el scope actual (sin recursar al padre).
+
+**Decisiones tomadas**:
+
+- Filtrar warning spurio del checker para "variable desconocida"
+  por **substring del mensaje** (no kind): todos los errores del
+  checker llevan `ErrorKind::TypeError` (`UndefinedVariable` es
+  kind del evaluator), y el string "variable desconocida" está
+  estable en `types::infer_expr`. Sin el filtro, cada `let x =
+  5; x + 1` emitía warning spurio del checker para `x` en la
+  segunda línea (el checker arma scope desde cero por
+  invocación).
+- `:type` scope-aware: NO en MVP. Refinable feedeando el env del
+  REPL al checker como pre-declaraciones — sub-paso futuro si
+  aparece presión real.
+- `panic(msg)` u otros builtins extras: NO en MVP. Lista
+  oficial es la de 9.z.2 (4 asserts).
+- Smoke E2E automatizado: NO — el REPL es interactivo, los tests
+  serían flaky. Smoke manual con stdin scripted valida.
+
+**Smoke manual validado**:
+- `1 + 2` → `= 3`
+- `let x = 5; x + 1` → `= 6` (sin warnings spurios)
+- `fn doble(n: Int) -> Int { return n * 2 }; doble(21)` → `= 42`
+- `async fn pausa() -> Int { return 42 }; pausa().await` → `= 42`
+- `:env` lista user-defined vars + filtra builtins
+- `:reset` limpia scope
+- `:load <archivo.fitz>` carga + define todo en el env actual
+- typo real (`xyz_typo`) → error claro del evaluator
+- Multi-line con `{` abierto cambia prompt a `... `
+
+**Cap 26 nuevo "`fitz repl` — REPL interactivo"** en
+`docs/guide.md`: features, comandos especiales con tabla, history
+persistente, async, decisión "expresiones vs statements",
+limitaciones (`:type` no scope-aware, no manifest mode, sin
+auto-completion de paths). Renumeración cap 26→27 ("Qué sigue").
+
+**Cierre formal**:
+- CHANGELOG v0.9.18.
+- `docs/roadmap.md`: 9.z.4 marcado CERRADO con detalle.
+- `docs/deudas-post-5b.md`: bloque "Fase 9.z.4 CERRADA" +
+  deudas residuales (`:type` scope-aware, smoke E2E, etc.).
+- README.md: bloque 9.z.4 + conteo final.
+- CLAUDE.md: bloque "Próximo norte" actualizado.
+- `docs/syntax-spec.md`: `fitz repl` cae adentro de "implementado".
+
+**Tests al cierre**:
+- 1366 unit / 66 cli_e2e / 79 compile_e2e / 3 openapi (sin cambios
+  — repl_cmd es interactivo, smoke E2E automatizado pendiente).
+- Clippy `-D warnings` limpio.
+
+**Deudas residuales (NO bloquean 9.z.5)**:
+- `:type` scope-aware (no ve vars previas del REPL).
+- Smoke E2E automatizado del REPL (file watchers + readline son
+  flaky en tests; el smoke manual con stdin scripted cubre el
+  caso 90%).
+- Indentación automática en multi-line continuation.
+- Comandos `:save`/`:undo`/`:debug` si aparece demanda.
+- Auto-completion de paths en `:load`.
+- Manifest mode en `fitz repl` (hoy es single-session siempre).
 
 ## [v0.9.17] — 2026-05-17 — Fase 9.z.3 CERRADA — `fitz dev` (hot reload)
 

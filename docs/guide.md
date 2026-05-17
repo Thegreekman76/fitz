@@ -63,9 +63,10 @@ abrí un issue.
 23. [`fitz fmt` — formateador automático](#23-fitz-fmt--formateador-automático)
 24. [`fitz test` — testing built-in](#24-fitz-test--testing-built-in)
 25. [`fitz dev` — hot reload](#25-fitz-dev--hot-reload)
+26. [`fitz repl` — REPL interactivo](#26-fitz-repl--repl-interactivo)
 
 **Parte 11 — Cerrando**
-26. [Qué sigue](#26-qué-sigue)
+27. [Qué sigue](#27-qué-sigue)
 
 ---
 
@@ -152,7 +153,7 @@ La guía está dividida en partes que se leen en orden:
 9. **Interop** — `from python import ...` para reusar el ecosistema
    Python.
 10. **Tooling** — LSP + extensión VSCode, formateador `fitz fmt`,
-    test runner `fitz test`, hot reload `fitz dev`.
+    test runner `fitz test`, hot reload `fitz dev`, REPL `fitz repl`.
 11. **Cerrando** — el mapa de lo que viene.
 
 ### Cómo usar los ejemplos
@@ -6195,14 +6196,186 @@ presión.
 
 ---
 
-## 26. Qué sigue
+## 26. `fitz repl` — REPL interactivo
+
+`fitz repl` abre un prompt donde podés ingresar expresiones y
+statements línea por línea, viendo el resultado de cada uno
+inmediatamente. Es el patrón "Read-Eval-Print Loop" — el mismo
+que vive en Python/Node/Ruby. Llegó con la **Fase 9.z.4**
+(cerrada el 2026-05-17).
+
+Útil para:
+- Aprender el lenguaje: probar expresiones sin armar un archivo.
+- Debuggear: cargar tu lib con `:load` y ejercer fns una por una.
+- Experimentar: ver tipos de expresiones con `:type`, listar
+  bindings con `:env`.
+
+### Cómo arrancarlo
+
+```bash
+fitz repl
+```
+
+Aparece el prompt:
+
+```text
+Fitz REPL
+Tipos: `:help` para comandos disponibles. Ctrl+D para salir.
+
+fitz>
+```
+
+Cada línea se evalúa contra un **env compartido**: lo que declarás
+en una línea sigue disponible en las siguientes.
+
+### Expresiones vs statements
+
+El REPL imprime el valor de la expresión cuando es una expresión
+top-level (Python style, sin `print` explícito):
+
+```text
+fitz> 1 + 2
+= 3
+fitz> "hola, " + "fitz"
+= "hola, fitz"
+fitz> [1, 2, 3].map(fn(n) => n * 2)
+= [2, 4, 6]
+```
+
+Los statements (`let`, `fn`, `import`, etc.) son silenciosos:
+
+```text
+fitz> let x = 5
+fitz> fn doble(n: Int) -> Int { return n * 2 }
+fitz> doble(x)
+= 10
+```
+
+### Multi-line continuation
+
+Si tu input tiene `{`/`(`/`[` sin cerrar, el prompt cambia a `... `
+y espera más:
+
+```text
+fitz> fn factorial(n: Int) -> Int {
+...       if (n <= 1) {
+...           return 1
+...       }
+...       return n * factorial(n - 1)
+...   }
+fitz> factorial(5)
+= 120
+```
+
+La detección es por balanced brackets — el parser real puede aún
+emitir un error sintáctico distinto, que se muestra y volvés al
+prompt.
+
+### Async funciona
+
+`async fn` y `.await` funcionan transparente en el prompt — el
+REPL corre adentro de un runtime tokio:
+
+```text
+fitz> async fn lento(n: Int) -> Int {
+...       let _ = sleep(10).await
+...       return n * 10
+...   }
+fitz> lento(7).await
+= 70
+```
+
+### Comandos especiales
+
+Toda línea que empieza con `:` es un comando del REPL, no código
+Fitz:
+
+| Comando | Qué hace |
+|---|---|
+| `:help`, `:h` | Lista de comandos. |
+| `:quit`, `:q`, `:exit` | Sale. También Ctrl+D. |
+| `:env` | Lista los bindings que definiste en esta sesión. |
+| `:reset` | Limpia el scope: perdés todas las vars/fns. |
+| `:type <expr>` | Muestra el tipo de una expresión. |
+| `:load <archivo.fitz>` | Evalúa un archivo en el scope actual. |
+
+Ejemplo de sesión usando casi todos:
+
+```text
+fitz> let users = [{"id": 1, "name": "Ada"}, {"id": 2, "name": "Bob"}]
+fitz> users.len()
+= 2
+fitz> :type users
+:: Map<Any, Any>... (deuda: ver "Lo que NO anda" más abajo)
+fitz> :env
+Definido en el scope:
+  users = [{"id": 1, "name": "Ada"}, ...]  // List
+fitz> :reset
+✓ scope reseteado
+fitz> :env
+(scope vacío — no definiste nada todavía)
+fitz> :quit
+👋 hasta luego!
+```
+
+### History persistente
+
+Las líneas que tipeás se guardan en `~/.fitz/history` (o
+`%USERPROFILE%\.fitz\history` en Windows). En sesiones futuras:
+
+- **Flecha ↑/↓**: navegar las líneas anteriores.
+- **Ctrl+R**: buscar incrementalmente en la history.
+- **Home/End/Ctrl+A/Ctrl+E**: mover el cursor.
+- **Ctrl+C**: cancela el buffer actual (sale del multi-line si
+  estaba abierto), volvés al prompt.
+- **Ctrl+D**: sale del REPL.
+
+(Todo esto lo aporta `rustyline`, el mismo crate que usa
+`cargo-edit` y otros REPLs Rust.)
+
+### Lo que NO anda todavía
+
+- **`:type` scope-aware**: hoy `:type x` con `let x = 5` previo
+  devuelve `Any`. El comando arma un programa sintético
+  independiente y el checker no ve las vars previas del REPL.
+  Refinable feedeando el env al checker — sub-paso futuro si
+  aparece presión real.
+- **`:load` con paths relativos**: usá paths absolutos o relativos
+  al directorio donde arrancaste `fitz repl`. No hay autocompletion
+  de paths.
+- **Manifest mode**: `fitz repl` sin args es siempre single-file
+  (sin manifest). Si querés cargar tu proyecto, usá `:load
+  src/lib.fitz`.
+- **Pretty-print por defecto**: las instancias se imprimen estilo
+  Display (que es el de `print`). Para JSON formateado, llamá
+  manualmente a tu helper.
+- **Indentación automática en multi-line**: el prompt `... ` no
+  ajusta indent. Lo tipeás vos.
+- **Comandos `:save <archivo>` (volcar la sesión a un .fitz),
+  `:undo` (deshacer última línea), `:debug` (modo verbose)**:
+  sub-pasos futuros si entra demanda.
+
+### Cuándo usar `fitz repl` vs `fitz run`
+
+| Caso | Usá |
+|---|---|
+| Probar una expresión sin armar archivo | `fitz repl` |
+| Aprender el lenguaje, experimentar | `fitz repl` |
+| Debuggear una fn aislada con varios inputs | `fitz repl` + `:load` |
+| Correr tu programa principal | `fitz run` |
+| Loop de desarrollo con auto-restart al guardar | `fitz dev` |
+| Correr los tests | `fitz test` |
+
+---
+
+## 27. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 25 podés:
+Con los capítulos 1 a 26 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -6274,6 +6447,13 @@ Con los capítulos 1 a 25 podés:
   `target/`/`.git/`/`node_modules/`, banner ANSI entre runs,
   Ctrl+C atrapa sin dejar zombies. Ver
   [cap 25](#25-fitz-dev--hot-reload).
+- **REPL interactivo** con `fitz repl` (Fase 9.z.4): prompt
+  `fitz> ` con env compartido entre líneas, multi-line
+  automático (`... `), pretty-print Python-style del último
+  valor, 5 comandos especiales (`:help`/`:env`/`:type`/`:reset`/
+  `:load`/`:quit`), history persistente en `~/.fitz/history` con
+  arrow up/down + Ctrl+R, async transparente (`sleep(100).await`
+  funciona). Ver [cap 26](#26-fitz-repl--repl-interactivo).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -6312,8 +6492,8 @@ Lo que sigue post-8:
   - **DX (9.z) — en curso**: formatter `fitz fmt` cerrado
     (9.z.1, ver cap 23). Test runner `fitz test` cerrado
     (9.z.2, ver cap 24). Hot reload `fitz dev` cerrado
-    (9.z.3, ver cap 25). Próximo: `fitz repl` (9.z.4),
-    `fitz lint` (9.z.5).
+    (9.z.3, ver cap 25). REPL interactivo `fitz repl` cerrado
+    (9.z.4, ver cap 26). Próximo: `fitz lint` (9.z.5).
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta

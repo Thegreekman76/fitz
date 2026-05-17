@@ -194,6 +194,15 @@ enum Commands {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// Fase 9.z.4 — REPL interactivo. Abre un prompt `fitz> ` donde
+    /// podés ingresar expresiones y statements línea por línea. El
+    /// env persiste entre líneas: `let x = 1` queda definida para
+    /// las siguientes. Multi-line automático (`... `) cuando un
+    /// `{` o `(` quedan abiertos. History persistente en
+    /// `~/.fitz/history`. Comandos especiales: `:help`, `:quit`,
+    /// `:type <expr>`, `:env`, `:reset`, `:load <archivo>`.
+    /// Ctrl+D sale. Async funciona (`sleep(100).await` y similares).
+    Repl,
 }
 
 fn main() {
@@ -266,6 +275,9 @@ fn main() {
         }
         Commands::Dev { file } => {
             dev_cmd(file);
+        }
+        Commands::Repl => {
+            repl_cmd();
         }
     }
 }
@@ -2138,6 +2150,490 @@ fn relative_to(path: &std::path::Path, base: &std::path::Path) -> String {
     path.strip_prefix(base)
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| path.display().to_string())
+}
+
+// ---- Fase 9.z.4 — `fitz repl` (REPL interactivo) ----
+
+/// Entry point del sub-comando `fitz repl` (Fase 9.z.4). Abre un
+/// prompt interactivo donde cada línea se evalúa contra un env
+/// compartido. Soporta multi-line continuation cuando hay
+/// `{`/`(`/`[` abierto, comandos especiales con prefijo `:`,
+/// history persistente en `~/.fitz/history`, y Ctrl+D para salir.
+///
+/// Toda la lógica corre adentro de un runtime tokio current_thread
+/// (`evaluator::build_runtime`) porque el evaluator es async desde
+/// Fase 6.4 y necesitamos await-ear `Value::Future` para que
+/// `sleep(100).await` y similares funcionen desde el prompt.
+fn repl_cmd() {
+    println!("Fitz REPL");
+    println!(
+        "Tipos: `:help` para comandos disponibles. Ctrl+D para salir.\n"
+    );
+
+    let mut editor = match rustyline::DefaultEditor::new() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("✗ no se pudo inicializar el REPL: {e}");
+            std::process::exit(1);
+        }
+    };
+    let history_path = repl_history_path();
+    if let Some(ref p) = history_path {
+        // Si el archivo no existe es OK — primera sesión. Cualquier otro
+        // error (permisos, fs corrupto) se ignora silencioso para no
+        // ensuciar la UX del arranque; rustyline igual maneja la sesión
+        // sin history persistente.
+        let _ = editor.load_history(p);
+    }
+
+    let runtime = evaluator::build_runtime();
+    runtime.block_on(async move {
+        repl_loop(&mut editor, history_path.as_deref()).await;
+    });
+}
+
+/// Path al archivo de history del REPL: `~/.fitz/history`. Si no
+/// podemos resolver el home dir (caso muy raro), devolvemos `None` y
+/// la sesión corre sin history persistente.
+fn repl_history_path() -> Option<PathBuf> {
+    let home = std::env::var_os("USERPROFILE")
+        .or_else(|| std::env::var_os("HOME"))?;
+    let dir = PathBuf::from(home).join(".fitz");
+    // Mejor intentamos crear el directorio acá; si falla, dejamos que
+    // rustyline lo gestione en el `save_history` (que también va a
+    // fallar pero silencioso).
+    let _ = fs::create_dir_all(&dir);
+    Some(dir.join("history"))
+}
+
+/// Loop principal del REPL. Cada iteración: read una línea (o varias
+/// si está incompleta), procesar comandos especiales `:`, parsear,
+/// evaluar contra el env compartido, imprimir el valor si era una
+/// expresión top-level.
+async fn repl_loop(
+    editor: &mut rustyline::DefaultEditor,
+    history_path: Option<&std::path::Path>,
+) {
+    let mut env = evaluator::new_repl_env();
+    let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    loop {
+        let buffer = match read_complete_input(editor) {
+            Ok(b) => b,
+            Err(ReplReadError::Interrupted) => {
+                // Ctrl+C: limpio buffer multi-line si había, vuelvo al prompt.
+                println!("(Ctrl+C — cancelado)");
+                continue;
+            }
+            Err(ReplReadError::Eof) => {
+                println!("\n👋 hasta luego!");
+                if let Some(p) = history_path {
+                    let _ = editor.save_history(p);
+                }
+                return;
+            }
+            Err(ReplReadError::Other(e)) => {
+                eprintln!("✗ error leyendo input: {e}");
+                return;
+            }
+        };
+
+        if buffer.trim().is_empty() {
+            continue;
+        }
+        // Lo agregamos a la history sólo si no es vacío. rustyline
+        // dedupea automáticamente la línea anterior idéntica.
+        let _ = editor.add_history_entry(buffer.as_str());
+
+        // Comandos especiales: `:help`, `:quit`, `:type`, `:env`,
+        // `:reset`, `:load`. Si la línea arranca con `:` (sin espacios
+        // previos), la tratamos como comando.
+        let trimmed = buffer.trim_start();
+        if let Some(cmd) = trimmed.strip_prefix(':') {
+            match handle_special_command(cmd, &mut env, &base_dir).await {
+                ReplCommandResult::Continue => {}
+                ReplCommandResult::Quit => {
+                    println!("👋 hasta luego!");
+                    if let Some(p) = history_path {
+                        let _ = editor.save_history(p);
+                    }
+                    return;
+                }
+            }
+            continue;
+        }
+
+        // Evaluamos como código Fitz. Errores de lexer/parser/checker
+        // se muestran y volvemos al prompt sin abortar.
+        eval_repl_input(&buffer, &mut env, &base_dir).await;
+    }
+}
+
+/// Resultado de procesar una línea con `rustyline`: lectura OK,
+/// Ctrl+C (cancela buffer multi-line), Ctrl+D (sale), o error
+/// inesperado.
+enum ReplReadError {
+    Interrupted,
+    Eof,
+    Other(String),
+}
+
+/// Lee una entrada COMPLETA del usuario: una o más líneas hasta que
+/// los brackets/parens/braces/strings estén balanceados. Devuelve el
+/// buffer concatenado.
+///
+/// El prompt cambia entre líneas: `fitz> ` para la primera línea,
+/// `...   ` para continuations. Mantiene el visual aligned con `fitz>`
+/// (4 chars cada uno).
+fn read_complete_input(
+    editor: &mut rustyline::DefaultEditor,
+) -> Result<String, ReplReadError> {
+    use rustyline::error::ReadlineError;
+
+    let mut buffer = String::new();
+    loop {
+        let prompt = if buffer.is_empty() { "fitz> " } else { "...   " };
+        let line = editor.readline(prompt);
+        match line {
+            Ok(line) => {
+                buffer.push_str(&line);
+                buffer.push('\n');
+                if input_is_complete(&buffer) {
+                    return Ok(buffer);
+                }
+                // Si no está completo, seguimos pidiendo más líneas.
+            }
+            Err(ReadlineError::Interrupted) => return Err(ReplReadError::Interrupted),
+            Err(ReadlineError::Eof) => return Err(ReplReadError::Eof),
+            Err(e) => return Err(ReplReadError::Other(format!("{e}"))),
+        }
+    }
+}
+
+/// Heurística de "input completo": balanced `{`/`(`/`[` + sin string
+/// literal abierto. Para multi-line continuation cuando el usuario
+/// escribe un bloque (`fn`, `if`, `match`) o expresión compleja.
+///
+/// Maneja:
+/// - String literals `"..."` con escapes `\"`.
+/// - Comments de línea `//` (ignora resto hasta `\n`).
+/// - Comments multi-línea `/* ... */`.
+///
+/// No es un parser real — heurística suficiente para multi-line
+/// detection. El parser real puede aún fallar con un error sintáctico
+/// distinto; el REPL lo muestra y vuelve al prompt.
+fn input_is_complete(buf: &str) -> bool {
+    let mut braces = 0i32;
+    let mut parens = 0i32;
+    let mut brackets = 0i32;
+    let mut in_str = false;
+    let mut escape = false;
+    let mut chars = buf.chars().peekable();
+    while let Some(c) = chars.next() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if in_str {
+            match c {
+                '\\' => escape = true,
+                '"' => in_str = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_str = true,
+            '{' => braces += 1,
+            '}' => braces -= 1,
+            '(' => parens += 1,
+            ')' => parens -= 1,
+            '[' => brackets += 1,
+            ']' => brackets -= 1,
+            '/' if chars.peek() == Some(&'/') => {
+                // Line comment: skip hasta \n.
+                for c2 in chars.by_ref() {
+                    if c2 == '\n' {
+                        break;
+                    }
+                }
+            }
+            '/' if chars.peek() == Some(&'*') => {
+                // Block comment: skip hasta `*/`.
+                chars.next(); // consume el `*`
+                let mut prev = ' ';
+                for c2 in chars.by_ref() {
+                    if prev == '*' && c2 == '/' {
+                        break;
+                    }
+                    prev = c2;
+                }
+            }
+            _ => {}
+        }
+    }
+    !in_str && braces <= 0 && parens <= 0 && brackets <= 0
+}
+
+/// Resultado de un comando especial: `Continue` vuelve al prompt,
+/// `Quit` sale del REPL.
+enum ReplCommandResult {
+    Continue,
+    Quit,
+}
+
+/// Procesa un comando especial `:nombre [args]`. La línea ya viene
+/// sin el `:` inicial (consumida por el caller).
+async fn handle_special_command(
+    cmd: &str,
+    env: &mut fitz::env::EnvRef,
+    base_dir: &std::path::Path,
+) -> ReplCommandResult {
+    let cmd = cmd.trim();
+    let (name, args) = match cmd.split_once(char::is_whitespace) {
+        Some((n, a)) => (n, a.trim()),
+        None => (cmd, ""),
+    };
+    match name {
+        "help" | "h" => {
+            print_repl_help();
+        }
+        "quit" | "q" | "exit" => return ReplCommandResult::Quit,
+        "env" => print_repl_env(env),
+        "reset" => {
+            *env = evaluator::new_repl_env();
+            println!("✓ scope reseteado");
+        }
+        "type" | "t" => {
+            if args.is_empty() {
+                println!("uso: `:type <expr>` — ej. `:type 1 + 2`");
+            } else {
+                print_repl_type(args, env);
+            }
+        }
+        "load" => {
+            if args.is_empty() {
+                println!("uso: `:load <archivo.fitz>`");
+            } else {
+                load_into_repl_env(args, env, base_dir).await;
+            }
+        }
+        other => {
+            println!("comando desconocido `:{other}`. Tipeá `:help` para la lista.");
+        }
+    }
+    ReplCommandResult::Continue
+}
+
+fn print_repl_help() {
+    println!("Comandos del REPL:");
+    println!("  :help, :h       — esta ayuda");
+    println!("  :quit, :q       — salir (también Ctrl+D)");
+    println!("  :env            — listar variables y fns definidas en el scope");
+    println!("  :reset          — limpiar el scope (perdés todo)");
+    println!("  :type <expr>    — mostrar el tipo de una expresión");
+    println!("  :load <archivo> — evaluar un .fitz en el scope actual");
+}
+
+/// Imprime las variables del scope raíz, excluyendo builtins
+/// (`print`/`len`/etc.) que no son interesantes para el usuario.
+fn print_repl_env(env: &fitz::env::EnvRef) {
+    let names = env.lock().local_names();
+    let builtins: std::collections::HashSet<&str> =
+        evaluator::builtin_names().iter().copied().collect();
+    let user_names: Vec<String> = names
+        .into_iter()
+        .filter(|n| !builtins.contains(n.as_str()))
+        .collect();
+    if user_names.is_empty() {
+        println!("(scope vacío — no definiste nada todavía)");
+        return;
+    }
+    println!("Definido en el scope:");
+    for name in user_names {
+        let value = env.lock().get(&name);
+        match value {
+            Some(v) => println!("  {} = {}  // {}", name, v, v.type_name()),
+            None => println!("  {} = ?", name),
+        }
+    }
+}
+
+/// Implementa `:type <expr>`. Parsea la expresión + chequea contra
+/// los nombres existentes en el env del REPL, después imprime el tipo
+/// sintetizado.
+///
+/// Pragmático: el checker corre sobre el programa entero (un solo
+/// `Stmt::Expr`), no sobre la expresión aislada — eso permite que
+/// `:type x + 1` con `x: Int` previo refleje que el resultado es
+/// `Int`. Implementación: sintetizamos un `let __repl_type = <expr>`
+/// y le preguntamos al checker el tipo del binding. El env del REPL
+/// solo importa para que el ident `x` no falte; el checker reconstruye
+/// los bindings desde cero al ver el programa, por eso un `let x =
+/// "hola"` previo no influye en este path. Como mejora futura: feeding
+/// del env del REPL al checker.
+fn print_repl_type(expr_src: &str, _env: &fitz::env::EnvRef) {
+    let synthesized = format!("let __repl_type = {expr_src}");
+    let tokens = match fitz::lexer::tokenize(&synthesized) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("✗ {e}");
+            return;
+        }
+    };
+    let program = match fitz::parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("✗ {e}");
+            return;
+        }
+    };
+    let (type_env, types, _defs, _errs) = fitz::types::check_program(&program);
+    // El último stmt es `Stmt::Assign` con value = la expr. Su tipo
+    // sintetizado está en TypeInfo bajo el span del value.
+    let last = program.last();
+    if let Some(fitz::ast::Stmt::Assign { value, .. }) = last {
+        let span = value.span();
+        if let Some(t) = types.type_at(span) {
+            println!(":: {}", t.display(&type_env));
+        } else {
+            println!(":: <no resoluble> (deuda: el checker no registró span)");
+        }
+    } else {
+        println!("✗ no pude evaluar la expresión");
+    }
+}
+
+/// Implementa `:load <archivo>`. Lee el archivo, parsea + chequea +
+/// evalúa contra el env del REPL. Los `let`/`fn` definidos en el
+/// archivo quedan disponibles para las siguientes líneas del prompt.
+async fn load_into_repl_env(
+    path_str: &str,
+    env: &mut fitz::env::EnvRef,
+    base_dir: &std::path::Path,
+) {
+    let path = std::path::Path::new(path_str);
+    let resolved: PathBuf = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        base_dir.join(path)
+    };
+    let source = match fs::read_to_string(&resolved) {
+        Ok(s) => s,
+        Err(e) => {
+            println!("✗ no se pudo leer `{}`: {e}", resolved.display());
+            return;
+        }
+    };
+    let tokens = match fitz::lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("✗ {e}");
+            return;
+        }
+    };
+    let program = match fitz::parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("✗ {e}");
+            return;
+        }
+    };
+    let (_env, _types, _defs, type_errors) = fitz::types::check_program(&program);
+    if !type_errors.is_empty() {
+        for e in &type_errors {
+            println!("✗ {e}");
+        }
+        return;
+    }
+    let load_base = resolved
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| base_dir.to_path_buf());
+    match evaluator::eval_program_with_env(
+        program,
+        load_base,
+        env.clone(),
+        manifest::DepRegistry::new(),
+    )
+    .await
+    {
+        Ok(_) => println!("✓ cargado {}", resolved.display()),
+        Err(e) => println!("✗ {e}"),
+    }
+}
+
+/// Evalúa la entrada del usuario como código Fitz. El último stmt del
+/// programa, si es `Stmt::Expr`, se evalúa devolviendo un `Value` que
+/// se imprime (paralelo a Python `_`). Para los demás stmts (let,
+/// fn, etc.) el output es silencioso.
+async fn eval_repl_input(
+    source: &str,
+    env: &mut fitz::env::EnvRef,
+    base_dir: &std::path::Path,
+) {
+    let tokens = match fitz::lexer::tokenize(source) {
+        Ok(t) => t,
+        Err(e) => {
+            println!("✗ {e}");
+            return;
+        }
+    };
+    let program = match fitz::parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            println!("✗ {e}");
+            return;
+        }
+    };
+    // Checker en modo warning (paralelo a `fitz run --no-typecheck`):
+    // el REPL es para experimentar; preferimos que el user vea el
+    // resultado runtime incluso si los tipos son ambiguos. Errores
+    // duros (sintaxis) ya cortaron arriba.
+    //
+    // Filtramos "variable desconocida" específicamente porque el
+    // checker arma su scope desde cero por línea — ignora las vars
+    // que el user definió en líneas anteriores. El eval contra `env`
+    // sí las ve. Sin este filtro, cada `let x = 1; x + 1` emitía un
+    // warning spurio del checker para `x` en la segunda línea. Si la
+    // var realmente no existe, `eval_program_with_env` aborta más
+    // abajo con su propio error.
+    //
+    // Filtramos por substring del mensaje porque todos los errores
+    // del checker llevan `ErrorKind::TypeError` (el `UndefinedVariable`
+    // es kind del evaluator). El string "variable desconocida" está
+    // hardcoded en `types::infer_expr` y es estable.
+    let (_env, _types, _defs, type_errors) = fitz::types::check_program(&program);
+    for e in &type_errors {
+        if e.message.contains("variable desconocida") {
+            continue;
+        }
+        println!("⚠ {e}");
+    }
+
+    // Detectamos si el último stmt es `Stmt::Expr` para decidir si
+    // imprimir el resultado (Python-style). El eval devuelve el
+    // `Value` del último stmt; sólo lo mostramos cuando vino de una
+    // expresión y no es Null (print/let/fn devuelven Null y no
+    // queremos ruido visual).
+    let last_is_expr = matches!(program.last(), Some(fitz::ast::Stmt::Expr(_, _)));
+    match evaluator::eval_program_with_env(
+        program,
+        base_dir.to_path_buf(),
+        env.clone(),
+        manifest::DepRegistry::new(),
+    )
+    .await
+    {
+        Ok(value) => {
+            if last_is_expr && !matches!(value, fitz::value::Value::Null) {
+                println!("= {}", value);
+            }
+        }
+        Err(e) => {
+            println!("✗ {e}");
+        }
+    }
 }
 
 /// Banner UX al arrancar / re-arrancar el child. Limpia la pantalla

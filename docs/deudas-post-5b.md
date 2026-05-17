@@ -730,6 +730,47 @@
 > **Próximo norte**: 9.z.4 (`fitz repl` interactivo con
 > rustyline + scope persistente entre líneas + comandos especiales
 > `:type`/`:env`/`:reset`/`:load`).
+>
+> **Fase 9.z.4 CERRADA (2026-05-17)** — `fitz repl` (REPL
+> interactivo). Cuarta DX feature de Fase 9.z cerrada en el día.
+> Prompt `fitz> ` con env compartido, multi-line via balanced
+> brackets, 6 comandos especiales (`:help`/`:quit`/`:env`/
+> `:reset`/`:type`/`:load`), history persistente en
+> `~/.fitz/history`, pretty-print Python-style, async transparente.
+>
+> **Implementación**: dep `rustyline = "14"` + `Commands::Repl` +
+> `repl_cmd` adentro de runtime tokio current_thread. APIs
+> públicas nuevas en evaluator (`eval_program_with_env`,
+> `new_repl_env`, `builtin_names`) y env (`local_names`). Filtro
+> de warning spurio del checker para "variable desconocida"
+> (substring match, no kind: todos los errors del checker llevan
+> `TypeError`). `:type` arma programa sintético sin scope del
+> REPL — limitación documentada.
+>
+> **Decisiones tomadas**: `:type` scope-aware NO en MVP; smoke
+> E2E automatizado NO (rustyline + readline son flaky en tests);
+> manifest mode en REPL NO (siempre single-session); auto-
+> completion NO en MVP.
+>
+> **Cap 26 nuevo "`fitz repl` — REPL interactivo"** en
+> `docs/guide.md` (renumeración cap 26→27 "Qué sigue").
+>
+> **Total al cierre 9.z.4**: 1366 unit / 66 cli_e2e / 79
+> compile_e2e / 3 openapi (sin cambios; repl_cmd interactivo no
+> agrega tests automáticos). Clippy `-D warnings` limpio.
+>
+> **Deudas residuales de 9.z.4 (NO bloquean 9.z.5)**:
+> - `:type` scope-aware (refactor checker pre-declared scope).
+> - Smoke E2E automatizado del REPL (rustyline en raw mode
+>   complica tests).
+> - Indentación automática en multi-line continuation.
+> - Comandos extras (`:save`/`:undo`/`:debug`/auto-completion).
+> - Manifest mode en `fitz repl` (single-session siempre).
+>
+> **Próximo norte**: 9.z.5 (`fitz lint` — linter de patrones más
+> allá de tipos: unused_variable, unused_import, useless_match,
+> string_concat, panic_in_test_only, redundant_clone). Cierra
+> Fase 9.z entera.
 
 ## Resumen ejecutivo
 

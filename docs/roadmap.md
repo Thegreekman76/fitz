@@ -6481,34 +6481,105 @@ cap 25→26 ("Qué sigue").
 - **Smoke E2E automatizado**: pendiente. Las pruebas de file
   watchers requieren orquestación específica.
 
-#### 9.z.4 — `fitz repl` (interactivo)
+#### 9.z.4 — `fitz repl` (REPL interactivo) — CERRADO 2026-05-17
 
-- **Sub-comando `fitz repl`** abre prompt `fitz> `.
-- **Comandos especiales**:
-  - `:help` — lista comandos.
-  - `:quit` / Ctrl+D — sale.
-  - `:type <expr>` — muestra el tipo sintetizado.
-  - `:env` — lista bindings del scope.
-  - `:reset` — limpia scope.
-  - `:load <archivo>` — eval del archivo en el scope actual.
-- **Persistencia de scope**: cada línea se evalúa en un env
-  compartido. `let x = 5` queda disponible en líneas siguientes.
-- **Multi-line**: detección automática si el statement no está
-  cerrado (`{` abierto, paréntesis pendiente). Continuation
-  prompt `... `.
-- **Histórico**: arrow up/down, persistencia en
-  `~/.fitz/history`. Crate `rustyline` para terminal handling.
-- **Decisiones**:
-  - ¿Async top-level en REPL? Sí, env tokio incluido para
-    `.await`.
-  - ¿Imports en REPL? Sí, `from utils import foo` debe funcionar
-    relativo al cwd.
-  - ¿Pretty-print del último valor (Python `_`)? Sí, muestra el
-    valor del último statement-expression sin `;`.
-- **Trade-offs**: REPL para lenguaje compilado es raro (Rust no
-  tiene oficial). Para Fitz tiene sentido porque ya hay
-  intérprete (`fitz run`). El REPL es básicamente el evaluador
-  con prompt.
+Sub-comando `fitz repl` con prompt `fitz> `. Cada línea se evalúa
+contra un env compartido, con multi-line continuation, comandos
+especiales `:nombre`, history persistente y async transparente.
+
+**Implementación**:
+
+- Dep nueva `rustyline = "14"` (terminal handling: arrow keys,
+  Ctrl+R history search, line editing, Ctrl+C/D diferenciados,
+  file history).
+- `Commands::Repl` sin args en CLI. Manifest mode/single-file no
+  aplica al REPL (siempre single-session).
+- `repl_cmd` adentro de `evaluator::build_runtime()` para que
+  `sleep(100).await` y similares funcionen desde el prompt.
+- `read_complete_input` lee líneas hasta balanced brackets
+  (`input_is_complete`: cuenta `{`/`(`/`[` skipeando strings
+  literales y comments). Heurística, no parser real — el parser
+  puede aún emitir errores sintácticos distintos que se muestran
+  y vuelven al prompt.
+- 6 comandos especiales en `handle_special_command`:
+  - `:help` / `:h` — lista comandos.
+  - `:quit` / `:q` / `:exit` (o Ctrl+D) — sale.
+  - `:env` — lista bindings del scope raíz, filtrando builtins
+    (`evaluator::builtin_names()`).
+  - `:reset` — re-crea el env (perdés todo).
+  - `:type <expr>` — arma programa sintético `let __repl_type =
+    <expr>` y lee el tipo del span del value desde `TypeInfo`.
+    Limitación: no scope-aware (no ve vars previas del REPL).
+  - `:load <archivo>` — eval del archivo contra el env actual,
+    los bindings quedan disponibles.
+- **History persistente**: `~/.fitz/history` (Linux/macOS) o
+  `%USERPROFILE%\.fitz\history` (Windows). Carga al inicio,
+  save al salir. rustyline maneja todo.
+- **Pretty-print Python-style**: si el último stmt es
+  `Stmt::Expr` y devuelve `Value != Null`, se imprime con
+  `= <value>`. Los `let`/`fn` son silenciosos. `print(...)`
+  imprime su cosa y devuelve Null (no doble línea).
+- **Filtro de warning spurio**: el checker arma scope desde cero
+  por invocación; sin filtro emitía "variable desconocida `x`"
+  cada vez que el user usaba `x` después de `let x = 5`. Filtramos
+  por substring del mensaje (no kind: todos los errors del checker
+  llevan `ErrorKind::TypeError`).
+
+**APIs nuevas (pub) en evaluator/env**:
+- `evaluator::eval_program_with_env(program, base_dir, env,
+  dep_registry) -> FitzResult<Value>`: evalúa contra un env
+  externo que persiste entre invocaciones. Devuelve el `Value`
+  del último stmt.
+- `evaluator::new_repl_env() -> EnvRef`: crea env + registra
+  builtins.
+- `evaluator::builtin_names() -> &'static [&'static str]`: lista
+  de builtins para filtrar `:env`.
+- `Environment::local_names() -> Vec<String>`: nombres del scope
+  actual sin recursar.
+
+**Decisiones tomadas**:
+
+- `:type` scope-aware: NO en MVP. Aceptado como deuda visible —
+  refinable feedeando env al checker.
+- Filtro warning checker por **substring** del mensaje (no por
+  kind — `UndefinedVariable` es kind del evaluator, no del
+  checker).
+- Smoke E2E automatizado: NO — REPL es interactivo, smoke manual
+  con stdin scripted valida. Tests automáticos serían flaky con
+  rustyline + terminal handling.
+- Manifest mode en REPL: NO — siempre single-session. `:load
+  src/lib.fitz` es el workaround.
+- Auto-completion de paths/nombres: NO en MVP.
+
+**Cap 26 nuevo "`fitz repl` — REPL interactivo"** en
+`docs/guide.md`: features (env compartido, multi-line, async,
+pretty-print), comandos especiales con tabla, history persistente
+con shortcuts (↑/↓/Ctrl+R/Ctrl+A/E), limitaciones, comparación
+"cuándo usar repl vs run vs dev vs test". Renumeración cap 26→27
+("Qué sigue").
+
+**Tests al cierre 9.z.4**:
+- 1366 unit / 66 cli_e2e / 79 compile_e2e / 3 openapi (sin
+  cambios; repl_cmd interactivo no agrega tests automáticos).
+- Smoke manual validó: literales, let/fn definitions, async
+  await, comandos especiales, multi-line, history, `:load` con
+  path absoluto, typo real produce error claro.
+- Clippy `-D warnings` limpio.
+
+**Deudas residuales (NO bloquean 9.z.5)**:
+
+- **`:type` scope-aware**: refactor del checker para aceptar
+  pre-declared scope. Sub-paso si aparece presión.
+- **Smoke E2E automatizado**: rustyline + readline + raw mode
+  son difíciles de testear sin TTY. Workaround: stdin scripted
+  + matching de stdout. Pendiente si los smokes manuales se
+  vuelven tediosos.
+- **Indentación automática en multi-line continuation**: hoy el
+  prompt `... ` no ajusta indent. El user lo tipea.
+- **Comandos extras** (`:save`/`:undo`/`:debug`/auto-completion
+  de paths/nombres): post-MVP si aparece demanda.
+- **Manifest mode en `fitz repl`**: hoy single-session. Si el
+  user quiere su proyecto cargado, usa `:load src/lib.fitz`.
 
 #### 9.z.5 — `fitz lint` (más allá de tipos)
 

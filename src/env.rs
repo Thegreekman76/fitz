@@ -92,6 +92,17 @@ impl Environment {
         self.parent.as_ref().is_some_and(|p| p.lock().has(name))
     }
 
+    /// Lista los nombres definidos en el scope actual (sin recursar al
+    /// padre). Para el REPL: muestra los bindings que el usuario creó
+    /// en su sesión, separados de los builtins (`print`, `len`, etc.)
+    /// que viven en el mismo scope raíz. El caller hace el filtrado.
+    /// Devuelve ordenado alfabéticamente para output predecible.
+    pub fn local_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self.vars.keys().cloned().collect();
+        names.sort();
+        names
+    }
+
     /// Reasigna una variable existente. Busca en la cadena de scopes y la
     /// reescribe en el scope donde fue definida. Devuelve `Err(())` si la
     /// variable no existe en ningún scope visible — el evaluador convierte
