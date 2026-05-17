@@ -41,12 +41,20 @@ use crate::value::Value;
 /// elegir entre invocar sync o await-ear el `Value::Future`
 /// resultante. `span` apunta al `@test` (no a la fn) — útil para
 /// reportes "test X declarado en línea:Y falló por ...".
+///
+/// `source_file` es `Some(path)` cuando el test se descubrió
+/// adentro de `with_test_source(path, ...)` (caso manifest mode
+/// del runner — etiqueta cada archivo cargado para que el output
+/// pueda prefijar el nombre del test con `<file>::<test>`). En
+/// single-file mode o cuando el evaluator se invoca desde un test
+/// unitario, `None`.
 #[derive(Debug, Clone)]
 pub struct TestSpec {
     pub name: String,
     pub handler: Value,
     pub is_async: bool,
     pub span: Span,
+    pub source_file: Option<String>,
 }
 
 /// Colección de tests descubiertos durante la evaluación. Preserva
@@ -88,6 +96,13 @@ impl TestRegistry {
 
 thread_local! {
     static TEST_REGISTRY: RefCell<Option<TestRegistry>> = const { RefCell::new(None) };
+
+    /// File source actual del que se están descubriendo tests. El
+    /// runner (`fitz test`) setea esto vía `with_test_source` antes
+    /// de evaluar cada archivo del proyecto; `register_test` lo lee
+    /// para etiquetar el `TestSpec`. `None` significa "no etiquetar"
+    /// (single-file mode o llamada desde tests unitarios).
+    static CURRENT_TEST_SOURCE: RefCell<Option<String>> = const { RefCell::new(None) };
 }
 
 /// Instala un registry vacío para el thread actual durante la
@@ -165,6 +180,53 @@ pub fn push_test(spec: TestSpec) {
     });
 }
 
+/// Devuelve el `source_file` actual seteado por
+/// `with_test_source`, o `None` si no estamos adentro de un scope
+/// de source tracking. El branch `@test` del evaluator lo lee al
+/// construir un `TestSpec`.
+pub fn current_test_source() -> Option<String> {
+    CURRENT_TEST_SOURCE.with(|cell| cell.borrow().clone())
+}
+
+/// Instala el `source_file` actual para el thread durante la
+/// duración del closure. El runner (`fitz test`) usa esto antes
+/// de evaluar cada archivo del proyecto: los `TestSpec` que se
+/// pushen adentro quedan etiquetados con `path`. Anida limpio
+/// (restaura el previo al salir), pero no se espera anidación
+/// real en uso normal.
+#[allow(dead_code)] // 9.z.2.b consume esta API desde el CLI
+pub fn with_test_source<F, T>(path: String, f: F) -> T
+where
+    F: FnOnce() -> T,
+{
+    let prev = CURRENT_TEST_SOURCE.with(|cell| {
+        let prev = cell.borrow_mut().take();
+        *cell.borrow_mut() = Some(path);
+        prev
+    });
+    let out = f();
+    CURRENT_TEST_SOURCE.with(|cell| *cell.borrow_mut() = prev);
+    out
+}
+
+/// Variante async de `with_test_source`. Misma semántica + tolera
+/// awaits adentro de la closure (el evaluator es async desde 6.4).
+#[allow(dead_code)] // 9.z.2.b consume esta API desde el CLI
+pub async fn with_test_source_async<F, Fut, T>(path: String, f: F) -> T
+where
+    F: FnOnce() -> Fut,
+    Fut: std::future::Future<Output = T>,
+{
+    let prev = CURRENT_TEST_SOURCE.with(|cell| {
+        let prev = cell.borrow_mut().take();
+        *cell.borrow_mut() = Some(path);
+        prev
+    });
+    let out = f().await;
+    CURRENT_TEST_SOURCE.with(|cell| *cell.borrow_mut() = prev);
+    out
+}
+
 // ---------------------------------------------------------------------------
 // Tests del registry
 // ---------------------------------------------------------------------------
@@ -199,12 +261,14 @@ mod tests {
             handler: dummy_handler(),
             is_async: false,
             span: Span::ZERO,
+            source_file: None,
         });
         reg.push(TestSpec {
             name: "segundo".into(),
             handler: dummy_handler(),
             is_async: true,
             span: Span::ZERO,
+            source_file: None,
         });
 
         assert_eq!(reg.len(), 2);
@@ -235,6 +299,7 @@ mod tests {
                 handler: dummy_handler(),
                 is_async: false,
                 span: Span::ZERO,
+                source_file: None,
             });
             42
         });
@@ -256,6 +321,7 @@ mod tests {
                 handler: dummy_handler(),
                 is_async: false,
                 span: Span::ZERO,
+                source_file: None,
             });
             let (_, inner) = with_active_test_registry(|| {
                 push_test(TestSpec {
@@ -263,6 +329,7 @@ mod tests {
                     handler: dummy_handler(),
                     is_async: false,
                     span: Span::ZERO,
+                    source_file: None,
                 });
             });
             assert_eq!(inner.len(), 1);
@@ -270,6 +337,37 @@ mod tests {
         });
         assert_eq!(outer.len(), 1);
         assert_eq!(outer.tests()[0].name, "outer");
+    }
+
+    #[test]
+    fn with_test_source_etiqueta_los_specs() {
+        // 9.z.2.b: el runner usa `with_test_source` para etiquetar
+        // los tests con el archivo del que vienen. Acá validamos el
+        // flujo: dentro del scope, `current_test_source` devuelve el
+        // path; al salir vuelve a None.
+        assert!(current_test_source().is_none());
+
+        let result = with_test_source("tests/math.fitz".to_string(), || {
+            assert_eq!(
+                current_test_source(),
+                Some("tests/math.fitz".to_string()),
+            );
+            "ok"
+        });
+        assert_eq!(result, "ok");
+        assert!(current_test_source().is_none(), "se restauró al salir");
+    }
+
+    #[test]
+    fn with_test_source_anidados_se_restauran() {
+        with_test_source("outer.fitz".to_string(), || {
+            assert_eq!(current_test_source(), Some("outer.fitz".to_string()));
+            with_test_source("inner.fitz".to_string(), || {
+                assert_eq!(current_test_source(), Some("inner.fitz".to_string()));
+            });
+            // El outer se restaura tras el inner.
+            assert_eq!(current_test_source(), Some("outer.fitz".to_string()));
+        });
     }
 
     #[tokio::test]
@@ -281,6 +379,7 @@ mod tests {
                 handler: dummy_handler(),
                 is_async: true,
                 span: Span::ZERO,
+                source_file: None,
             });
             "done"
         })

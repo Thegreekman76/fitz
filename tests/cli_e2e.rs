@@ -1286,3 +1286,267 @@ fn build_sin_args_emite_a_target_release_con_pkg_name() {
         "stdout del binario: {stdout}"
     );
 }
+
+// =================================================================
+// Fase 9.z.2.b — `fitz test` (testing built-in: runner + discovery)
+// =================================================================
+
+/// Helper: escribe `content` en `<root>/<rel>` (creando dirs si hace
+/// falta). Útil para armar mini-proyectos en cada test.
+fn write_file(root: &Path, rel: &str, content: &str) {
+    let path = root.join(rel);
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).expect("crear parent");
+    }
+    std::fs::write(&path, content).expect("escribir archivo");
+}
+
+#[test]
+fn test_single_file_corre_tests_y_reporta_ok() {
+    let tmp = tempfile::tempdir().unwrap();
+    let src = "\
+        @test fn suma_funciona() {\n\
+            assert_eq(2 + 2, 4)\n\
+        }\n\
+        @test fn resta_funciona() {\n\
+            assert_eq(10 - 3, 7)\n\
+        }\n\
+    ";
+    write_file(tmp.path(), "tests.fitz", src);
+
+    let (stdout, stderr, code) = run_fitz(
+        &["test", "--file", "tests.fitz"],
+        tmp.path(),
+    );
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(
+        stdout.contains("running 2 tests"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("test suma_funciona ... ok"));
+    assert!(stdout.contains("test resta_funciona ... ok"));
+    assert!(stdout.contains("test result"));
+    assert!(stdout.contains("2 passed"));
+    assert!(stdout.contains("0 failed"));
+}
+
+#[test]
+fn test_falla_devuelve_exit_1_con_detalle_left_right() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test fn falla() { assert_eq(5, 10) }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz(
+        &["test", "--file", "t.fitz"],
+        tmp.path(),
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.contains("test falla ... FAILED"));
+    assert!(stdout.contains("left:"));
+    assert!(stdout.contains("right:"));
+    assert!(stdout.contains("test result"));
+    assert!(stdout.contains("1 failed"));
+}
+
+#[test]
+fn test_filter_substring_matchea_solo_lo_que_contiene() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test fn suma_basica() { assert_eq(1 + 1, 2) }\n\
+         @test fn suma_negativa() { assert_eq(-1 + 1, 0) }\n\
+         @test fn resta_basica() { assert_eq(3 - 1, 2) }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz(
+        &["test", "--file", "t.fitz", "suma"],
+        tmp.path(),
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("running 2 tests (1 filtered out)"));
+    assert!(stdout.contains("suma_basica"));
+    assert!(stdout.contains("suma_negativa"));
+    assert!(!stdout.contains("resta_basica"));
+}
+
+#[test]
+fn test_filter_sin_matches_devuelve_0_tests_pero_exit_0() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test fn algo() { assert_eq(1, 1) }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz(
+        &["test", "--file", "t.fitz", "inexistente"],
+        tmp.path(),
+    );
+    // 0 matches con un test descubierto = 0 failures, exit 0.
+    assert_eq!(code, 0);
+    assert!(stdout.contains("0 tests"));
+    assert!(stdout.contains("1 filtered out"));
+}
+
+#[test]
+fn test_async_fn_funciona() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test async fn pausa() {\n\
+            let r = sleep(0).await\n\
+            assert_eq(r, null)\n\
+         }\n",
+    );
+
+    let (stdout, _stderr, code) = run_fitz(
+        &["test", "--file", "t.fitz"],
+        tmp.path(),
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("test pausa ... ok"));
+}
+
+#[test]
+fn test_manifest_mode_descubre_tests_integration() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "fitz.toml",
+        "[package]\nname = \"libproj\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [lib]\nentry = \"src/lib.fitz\"\n",
+    );
+    write_file(
+        root,
+        "src/lib.fitz",
+        "fn doble(n: Int) -> Int {\n    return n * 2\n}\n",
+    );
+    write_file(
+        root,
+        "tests/math.fitz",
+        "from libproj import doble\n\n\
+         @test fn doble_de_5_es_10() { assert_eq(doble(5), 10) }\n\
+         @test fn doble_de_0_es_0() { assert_eq(doble(0), 0) }\n",
+    );
+
+    let (stdout, stderr, code) = run_fitz(&["test"], root);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("running 2 tests"));
+    assert!(stdout.contains("tests/math.fitz::doble_de_5_es_10"));
+    assert!(stdout.contains("tests/math.fitz::doble_de_0_es_0"));
+}
+
+#[test]
+fn test_manifest_mode_solo_lib_sin_tests_carga_lib_inline() {
+    // Proyecto solo-lib con `@test` inline, sin `tests/*.fitz`. El
+    // runner debe cargar el lib directamente para descubrir esos tests.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "fitz.toml",
+        "[package]\nname = \"liblone\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [lib]\nentry = \"src/lib.fitz\"\n",
+    );
+    write_file(
+        root,
+        "src/lib.fitz",
+        "fn doble(n: Int) -> Int {\n    return n * 2\n}\n\n\
+         @test fn doble_de_21() { assert_eq(doble(21), 42) }\n",
+    );
+
+    let (stdout, stderr, code) = run_fitz(&["test"], root);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    assert!(stdout.contains("test src/lib.fitz::doble_de_21 ... ok"));
+    assert!(stdout.contains("1 passed"));
+}
+
+#[test]
+fn test_manifest_no_duplica_tests_de_lib_importada_por_tests_integration() {
+    // Regresión del bug fix: cuando `tests/*.fitz` importa el lib y el
+    // lib tiene `@test` inline, esos tests se deben registrar UNA SOLA
+    // VEZ (modo "tests integration": el runner solo carga `tests/*.fitz`
+    // direct; el lib se carga via loader cache).
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    write_file(
+        root,
+        "fitz.toml",
+        "[package]\nname = \"dupproj\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [lib]\nentry = \"src/lib.fitz\"\n",
+    );
+    write_file(
+        root,
+        "src/lib.fitz",
+        "fn doble(n: Int) -> Int { return n * 2 }\n\n\
+         @test fn doble_inline() { assert_eq(doble(3), 6) }\n",
+    );
+    write_file(
+        root,
+        "tests/integration.fitz",
+        "from dupproj import doble\n\n\
+         @test fn doble_integracion() { assert_eq(doble(7), 14) }\n",
+    );
+
+    let (stdout, stderr, code) = run_fitz(&["test"], root);
+    assert_eq!(code, 0, "stderr: {stderr}\nstdout: {stdout}");
+    // Solo 2 tests, no 3 (no duplicación):
+    assert!(stdout.contains("running 2 tests"), "stdout: {stdout}");
+    // El inline aparece con label del LIB (lib.fitz), no del importer:
+    assert!(stdout.contains("lib.fitz::doble_inline"));
+    assert!(stdout.contains("tests/integration.fitz::doble_integracion"));
+}
+
+#[test]
+fn test_sin_manifest_y_sin_file_aborta_con_mensaje_claro() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) = run_fitz(&["test"], tmp.path());
+    assert_eq!(code, 1);
+    assert!(
+        stderr.contains("no se encontró") || stderr.contains("fitz.toml"),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
+fn test_assert_throws_pasa_cuando_callback_tira() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test fn tira() { assert_throws(fn() => assert(false, \"intencional\")) }\n",
+    );
+    let (stdout, _stderr, code) = run_fitz(
+        &["test", "--file", "t.fitz"],
+        tmp.path(),
+    );
+    assert_eq!(code, 0);
+    assert!(stdout.contains("test tira ... ok"));
+}
+
+#[test]
+fn test_archivo_con_error_de_tipos_aborta_antes_de_correr() {
+    // Strict checker: si el código no compila, no hay tests que correr.
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "@test fn t() { let x: Int = \"no es int\" }\n",
+    );
+    let (stdout, stderr, code) = run_fitz(
+        &["test", "--file", "t.fitz"],
+        tmp.path(),
+    );
+    assert_eq!(code, 1, "stdout: {stdout}, stderr: {stderr}");
+    // Mensaje del checker llega via stderr (formato del runner).
+    assert!(
+        stderr.contains("error") || stderr.contains("tipo"),
+        "stderr: {stderr}"
+    );
+}

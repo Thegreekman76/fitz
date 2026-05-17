@@ -98,6 +98,64 @@ pub async fn eval(program: Program) -> FitzResult<()> {
     eval_with_base(program, base_dir).await
 }
 
+/// Fase 9.z.2.b — corre un test descubierto por `fitz test`. Invoca
+/// el handler con 0 args y, si era `async`, await-ea el `Value::Future`
+/// resultante para forzar la ejecución del body. Cualquier `FitzError`
+/// o `EvalSignal` se devuelve como `Err(FitzError)` — el runner lo
+/// formatea para reportar el test como FAILED.
+///
+/// `name` se usa cosméticamente en mensajes de error de aridad
+/// (`invoke_value` lo cita); el runner luego prefija con
+/// `<source_file>::` si aplica.
+pub async fn run_test_handler(
+    handler: Value,
+    is_async: bool,
+    name: &str,
+) -> Result<(), FitzError> {
+    let value = invoke_value(handler, vec![], name, Span::ZERO)
+        .await
+        .map_err(signal_to_error)?;
+
+    if !is_async {
+        return Ok(());
+    }
+
+    // Test era `async fn`: el invoke produjo un Future. Lo
+    // consumimos acá para que la espera real ocurra antes de que el
+    // runner reporte resultado. Política idéntica a `Expr::Await`
+    // del evaluator (consumo único vía `cell.0.lock().take()`).
+    match value {
+        Value::Future(cell) => {
+            let fut = cell.0.lock().take();
+            match fut {
+                Some(f) => f.await.map(|_| ()),
+                None => Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!(
+                        "test async `{}` produjo un Future ya consumido (bug del dispatcher)",
+                        name
+                    ),
+                )),
+            }
+        }
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Future".into(),
+                found: other.type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "test async `{}` devolvió `{}` en vez de Future — bug del dispatcher",
+                name,
+                other.type_name()
+            ),
+        )),
+    }
+}
+
 /// Versión async de `eval` que recibe explícitamente el directorio raíz
 /// para resolver `import`s relativos. Para uso desde contextos async
 /// (tests con `#[tokio::test]`, handlers HTTP, otros async fns).
@@ -159,7 +217,7 @@ pub fn eval_with_base_and_deps_sync(
 
 /// Construye el runtime tokio `current_thread` que comparten el
 /// evaluator async y el server HTTP. Single-threaded por F17.
-pub(crate) fn build_runtime() -> tokio::runtime::Runtime {
+pub fn build_runtime() -> tokio::runtime::Runtime {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -318,6 +376,7 @@ fn register_test(
         handler: handler.clone(),
         is_async,
         span: fn_def_span,
+        source_file: crate::testing::current_test_source(),
     });
     Ok(())
 }
@@ -1122,12 +1181,29 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
     // Fase 6.4: el closure sync `(|| { ... })()` quedó incompatible con
     // las llamadas async (`async closure` no es estable). Reemplazado
     // por un async block que se await-ea inmediatamente.
-    let eval_result: EvalResult<()> = async {
-        for stmt in &module_program {
-            eval_stmt(stmt, module_env.clone()).await?;
-        }
-        Ok(())
-    }
+    //
+    // Fase 9.z.2.b: durante la eval del body del módulo, sobreescribimos
+    // el `CURRENT_TEST_SOURCE` con el filename del módulo (`lib.fitz`).
+    // Así los `@test fn` declarados en módulos importados quedan
+    // etiquetados con su archivo declarante real, no con el del archivo
+    // que disparó el import. `with_test_source_async` restaura el label
+    // previo al salir, sin afectar el flujo normal cuando no hay test
+    // runner activo. Usamos `file_name()` (no canonical completo) por
+    // legibilidad — el path absoluto es ruidoso en el output.
+    let module_label = canonical
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("<modulo>")
+        .to_string();
+    let eval_result: EvalResult<()> = crate::testing::with_test_source_async(
+        module_label,
+        || async {
+            for stmt in &module_program {
+                eval_stmt(stmt, module_env.clone()).await?;
+            }
+            Ok(())
+        },
+    )
     .await;
 
     // Restaurar estado del loader.

@@ -4,7 +4,9 @@
 // lib + bin para que `fitz-lsp` pueda reusarlos sin compilación
 // duplicada). Acá solo importamos lo que el CLI consume.
 
-use fitz::{codegen, evaluator, fmt, http, lexer, lockfile, manifest, openapi, parser, types};
+use fitz::{
+    codegen, evaluator, fmt, http, lexer, lockfile, manifest, openapi, parser, testing, types,
+};
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
 #[cfg(feature = "python")]
@@ -161,6 +163,22 @@ enum Commands {
         #[arg(long)]
         check: bool,
     },
+    /// Fase 9.z.2.b — Corre todas las fns marcadas con `@test` del
+    /// proyecto. En manifest mode, descubre desde `[lib].entry` (o
+    /// `[bin].main`) + `tests/*.fitz` top-level del directorio del
+    /// manifest. En single-file mode (`fitz test archivo.fitz`),
+    /// carga ese archivo y corre sus `@test`. Filtra por substring
+    /// del nombre del test si se pasa `[filter]`. Exit code 0 si
+    /// todos pasan, 1 si alguno falla.
+    Test {
+        /// Substring del nombre del test para filtrar. Sin filter,
+        /// corre todos los descubiertos.
+        filter: Option<String>,
+        /// Archivo `.fitz` específico. Si se omite, busca
+        /// `fitz.toml` (manifest mode) y descubre desde el proyecto.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -227,6 +245,9 @@ fn main() {
         }
         Commands::Fmt { files, check } => {
             fmt_cmd(files, check);
+        }
+        Commands::Test { filter, file } => {
+            test_cmd(filter, file);
         }
     }
 }
@@ -1405,4 +1426,371 @@ fn find_local_manifest_or_exit() -> PathBuf {
             std::process::exit(1);
         }
     }
+}
+
+// ---- Fase 9.z.2.b — `fitz test` (testing built-in) ----
+
+/// Una fuente de tests para el runner. `path` es absoluto (la
+/// invocación con `fitz test archivo.fitz` lo canonicaliza). `label`
+/// es el nombre amigable que se usa para prefijar los nombres en el
+/// output (`<label>::<test>`); `None` significa no prefijar — caso
+/// típico de single-file mode.
+struct TestSource {
+    path: PathBuf,
+    label: Option<String>,
+}
+
+/// Entry point del sub-comando `fitz test` (Fase 9.z.2.b).
+///
+/// - **Single-file mode** (`fitz test --file archivo.fitz [filter]`):
+///   evalúa `archivo.fitz` con un `TestRegistry` activo, después
+///   corre los tests descubiertos.
+/// - **Manifest mode** (`fitz test [filter]`): busca `fitz.toml`,
+///   evalúa el entry de la lib (o el bin si no hay lib) + cada
+///   `tests/*.fitz` top-level del directorio del manifest. Cada
+///   archivo se evalúa con su path como `source_label` para que el
+///   output prefije los nombres.
+///
+/// El filtro es substring case-sensitive sobre el nombre del test
+/// (sin prefijo de file). Cargo style.
+fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
+    let (sources, dep_registry) = match file_arg {
+        Some(p) => {
+            // Single-file: el path tal cual; sin label en el output.
+            // Dep registry vacío (single-file no toca `fitz.toml`).
+            (
+                vec![TestSource {
+                    path: p,
+                    label: None,
+                }],
+                manifest::DepRegistry::new(),
+            )
+        }
+        None => discover_test_sources_from_manifest(),
+    };
+
+    if sources.is_empty() {
+        eprintln!(
+            "✗ no se encontraron archivos con tests.\n\
+             En manifest mode, descubrimos `[lib].entry` (o `[bin].main`) + \
+             `tests/*.fitz` top-level. En single-file, pasá `--file <archivo.fitz>`."
+        );
+        std::process::exit(1);
+    }
+
+    // Build runtime tokio current_thread + bloquear sobre toda la
+    // operación: descubrimiento (evaluar cada archivo con registry
+    // activo) + run de los tests. Una sola invocación del runtime
+    // para todo, así los TestSpec acumulan en el mismo registry.
+    let runtime = evaluator::build_runtime();
+    let registry = runtime.block_on(async {
+        let ((), reg) = testing::with_active_test_registry_async(|| async {
+            for src in &sources {
+                let res = match &src.label {
+                    Some(label) => {
+                        testing::with_test_source_async(label.clone(), || async {
+                            eval_test_source(&src.path, &dep_registry).await
+                        })
+                        .await
+                    }
+                    None => eval_test_source(&src.path, &dep_registry).await,
+                };
+                if let Err(e) = res {
+                    eprintln!(
+                        "✗ error cargando {}: {}",
+                        src.path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            }
+        })
+        .await;
+        reg
+    });
+
+    let total_failed = run_test_registry(&registry, filter.as_deref());
+    if total_failed > 0 {
+        std::process::exit(1);
+    }
+}
+
+/// Descubre las fuentes de tests en manifest mode. Lee el manifest
+/// (debe existir), arma el `dep_registry` (resolución de deps
+/// path/git), después devuelve:
+///
+/// 1. `[lib].entry` si existe; si no, `[bin].main` si existe; si no,
+///    ninguna fuente del proyecto (solo `tests/*.fitz`).
+/// 2. Todos los `tests/<nombre>.fitz` top-level del directorio del
+///    manifest (no recursivo — alineado con cómo Cargo descubre
+///    integration tests).
+///
+/// A diferencia de `resolve_entry`, NO exigimos `[bin]` — un
+/// proyecto solo-lib es válido (caso 90% de las librerías). Si no
+/// hay ni lib ni bin ni `tests/`, devolvemos lista vacía y el caller
+/// (`test_cmd`) emite el mensaje "no se encontraron archivos con
+/// tests".
+///
+/// Los `label` son paths relativos al `manifest_dir`
+/// (`"src/lib.fitz"`, `"tests/math.fitz"`) para que el output sea
+/// legible y portable entre máquinas.
+fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegistry) {
+    let manifest_path = find_local_manifest_or_exit();
+    let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    });
+    let parsed_manifest = manifest::Manifest::parse(&manifest_text).unwrap_or_else(|e| {
+        eprintln!("✗ `{}`: {e}", manifest_path.display());
+        std::process::exit(1);
+    });
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    // Resolver deps eager (fail-fast con mensaje del resolver). Sin
+    // deps, el dep_registry queda vacío y el loader solo usará paths
+    // relativos.
+    let resolved_deps = manifest::resolve_dependencies(&parsed_manifest, &manifest_dir)
+        .unwrap_or_else(|e| {
+            eprintln!("✗ no se pudieron resolver las dependencias: {e}");
+            std::process::exit(1);
+        });
+
+    // Sync lockfile (no-op si no hay deps o ya está sincronizado).
+    if !resolved_deps.is_empty() {
+        let lock = lockfile::Lockfile::from_resolved(&resolved_deps);
+        let lock_path = lockfile::lockfile_path(&manifest_dir);
+        if let Err(e) = lockfile::write_lockfile_if_changed(&lock_path, &lock) {
+            eprintln!("✗ no se pudo escribir `{}`: {e}", lock_path.display());
+            std::process::exit(1);
+        }
+    }
+    let mut dep_registry = manifest::build_dep_registry(&resolved_deps);
+
+    // Auto-self-import: si el proyecto declara `[lib].entry`,
+    // registramos el lib bajo el nombre del paquete en el
+    // `dep_registry`. Esto permite que `tests/*.fitz` haga
+    // `from <pkg-name> import X` para acceder al código de la lib —
+    // paralelo a `use my_crate::*` de Rust en tests integration.
+    // Sin esto, los tests tendrían que escribir paths fragmentados
+    // (`from ../src/lib import X`) que el loader actual no soporta.
+    if let Some(lib) = &parsed_manifest.lib {
+        let lib_path = manifest_dir.join(&lib.entry);
+        if lib_path.exists() {
+            dep_registry.insert(parsed_manifest.package.name.clone(), lib_path);
+        }
+    }
+
+    // Primero coleccionamos los `tests/*.fitz` top-level del manifest dir
+    // (no recursivo). Orden alfabético para reproducibilidad.
+    let mut integration_sources: Vec<TestSource> = Vec::new();
+    let tests_dir = manifest_dir.join("tests");
+    if tests_dir.is_dir() {
+        let mut entries: Vec<PathBuf> = fs::read_dir(&tests_dir)
+            .map(|rd| rd.flatten().map(|e| e.path()).collect())
+            .unwrap_or_default();
+        entries.sort();
+        for path in entries {
+            if path.is_file()
+                && path.extension().and_then(|e| e.to_str()) == Some("fitz")
+            {
+                let file_name = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .unwrap_or("test.fitz")
+                    .to_string();
+                integration_sources.push(TestSource {
+                    path,
+                    label: Some(format!("tests/{}", file_name)),
+                });
+            }
+        }
+    }
+
+    let mut sources: Vec<TestSource> = Vec::new();
+
+    if !integration_sources.is_empty() {
+        // **Modo "tests integration"**: SOLO cargamos los `tests/*.fitz`.
+        // El `[lib]` (o `[bin]`) se carga indirectamente cuando un test
+        // hace `from <pkg> import X` — el dep_registry tiene el auto-self
+        // registrado, y el loader cachea por path canonical, así un
+        // `@test` declarado en el lib se descubre UNA VEZ aunque varios
+        // tests importen la lib. Si no lo importa nadie, no se descubre
+        // (deuda visible para el caso degenerado).
+        sources.extend(integration_sources);
+    } else {
+        // **Modo "tests inline only"**: cargamos el `[lib]` (o `[bin]`)
+        // directamente porque es el único lugar donde puede haber `@test`.
+        let entry_rel: Option<String> = match (&parsed_manifest.lib, &parsed_manifest.bin) {
+            (Some(lib), _) => Some(lib.entry.clone()),
+            (None, Some(bin)) => Some(bin.main.clone()),
+            (None, None) => None,
+        };
+        if let Some(rel) = entry_rel {
+            let path = manifest_dir.join(&rel);
+            if path.exists() {
+                sources.push(TestSource {
+                    path,
+                    label: Some(rel),
+                });
+            }
+        }
+    }
+
+    (sources, dep_registry)
+}
+
+/// Evalúa un archivo con el `TestRegistry` (y posiblemente el
+/// `CURRENT_TEST_SOURCE`) ya activos por el caller. Hace
+/// lexer + parser + checker strict + eval. Si el checker reporta
+/// errores, los formatea y devuelve `Err` (el caller decide
+/// abortar).
+///
+/// `base_dir` se deriva del directorio del archivo — así los
+/// imports relativos (`from utils import X`) resuelven al sibling
+/// del archivo, paralelo a `fitz run` single-file.
+async fn eval_test_source(
+    path: &std::path::Path,
+    dep_registry: &manifest::DepRegistry,
+) -> Result<(), String> {
+    let source = fs::read_to_string(path)
+        .map_err(|e| format!("no se pudo leer: {e}"))?;
+
+    let tokens = lexer::tokenize(&source).map_err(|e| format!("{e}"))?;
+    let program = parser::parse(tokens).map_err(|e| format!("{e}"))?;
+
+    let (_env, _types, _defs, type_errors) = types::check_program(&program);
+    if !type_errors.is_empty() {
+        let mut msg = format!("{} error(es) de tipo:", type_errors.len());
+        for e in &type_errors {
+            msg.push_str(&format!("\n  {}", e));
+        }
+        return Err(msg);
+    }
+
+    let base_dir = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+
+    evaluator::eval_with_base_and_deps(program, base_dir, dep_registry.clone())
+        .await
+        .map_err(|e| format!("{e}"))
+}
+
+/// Corre todos los tests del registry, aplica `filter` opcional,
+/// reporta estilo cargo (`test <name> ... ok/FAILED`), summary
+/// final, y devuelve la cantidad de tests fallidos. El caller usa
+/// ese número para decidir el exit code (`>0` → 1).
+///
+/// Output:
+/// - `running N tests` (o `N (M filtered out)` si hay filter).
+/// - Por cada test: `test <full_name> ... <result>` con result
+///   coloreado (ok verde, FAILED rojo) si stdout es TTY.
+/// - Si hay failures, sección `failures:` con detalle de cada uno
+///   (mensaje del FitzError o EvalSignal).
+/// - Summary: `test result: ok|FAILED. P passed; F failed; finished in Ts`.
+fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> usize {
+    use std::io::IsTerminal;
+
+    // ANSI raw — usar colors solo si stdout es TTY (no redirigido).
+    let use_color = std::io::stdout().is_terminal();
+    let green = |s: &str| if use_color { format!("\x1b[32m{s}\x1b[0m") } else { s.into() };
+    let red = |s: &str| if use_color { format!("\x1b[31m{s}\x1b[0m") } else { s.into() };
+    let bold = |s: &str| if use_color { format!("\x1b[1m{s}\x1b[0m") } else { s.into() };
+
+    let all = registry.tests();
+    let total_discovered = all.len();
+
+    // Aplicar filtro. Tests excluidos se cuentan como "filtered out"
+    // en el output (cargo style).
+    let selected: Vec<&testing::TestSpec> = match filter {
+        Some(needle) => all.iter().filter(|t| t.name.contains(needle)).collect(),
+        None => all.iter().collect(),
+    };
+    let filtered_out = total_discovered - selected.len();
+
+    let plural = |n: usize| if n == 1 { "test" } else { "tests" };
+    if filtered_out > 0 {
+        println!(
+            "\nrunning {} {} ({} filtered out)",
+            selected.len(),
+            plural(selected.len()),
+            filtered_out
+        );
+    } else {
+        println!("\nrunning {} {}", selected.len(), plural(selected.len()));
+    }
+
+    if selected.is_empty() {
+        println!("\ntest result: {}. 0 passed; 0 failed", green("ok"));
+        return 0;
+    }
+
+    let start = std::time::Instant::now();
+    let mut failures: Vec<(String, String)> = Vec::new(); // (full_name, error_msg)
+    let runtime = evaluator::build_runtime();
+
+    for test in &selected {
+        let full_name = match &test.source_file {
+            Some(src) => format!("{}::{}", src, test.name),
+            None => test.name.clone(),
+        };
+        // Imprimimos "test <name> ..." y dejamos pendiente el OK/FAILED
+        // para imprimir después de ejecutar (cargo lo hace en la misma
+        // línea con un buffer — acá usamos print! + flush).
+        print!("test {} ... ", full_name);
+        std::io::Write::flush(&mut std::io::stdout()).ok();
+
+        let outcome = runtime.block_on(invoke_one_test(test));
+        match outcome {
+            Ok(()) => println!("{}", green("ok")),
+            Err(msg) => {
+                println!("{}", red("FAILED"));
+                failures.push((full_name, msg));
+            }
+        }
+    }
+
+    let elapsed = start.elapsed();
+    let secs = elapsed.as_secs_f64();
+
+    if !failures.is_empty() {
+        println!("\nfailures:");
+        for (name, msg) in &failures {
+            println!("\n---- {} stdout ----\n{}", name, msg);
+        }
+        println!("\nfailures:");
+        for (name, _) in &failures {
+            println!("    {}", name);
+        }
+    }
+
+    let passed = selected.len() - failures.len();
+    let result_label = if failures.is_empty() {
+        green("ok")
+    } else {
+        red("FAILED")
+    };
+    println!(
+        "\ntest result: {}. {} passed; {} failed; finished in {:.2}s",
+        result_label,
+        bold(&passed.to_string()),
+        bold(&failures.len().to_string()),
+        secs,
+    );
+
+    failures.len()
+}
+
+/// Invoca un test individual via `evaluator::run_test_handler`.
+/// Cualquier `FitzError` se devuelve como `Err(formatted_string)` —
+/// el runner lo registra en la sección `failures:` del output.
+async fn invoke_one_test(test: &testing::TestSpec) -> Result<(), String> {
+    evaluator::run_test_handler(test.handler.clone(), test.is_async, &test.name)
+        .await
+        .map_err(|e| format!("{e}"))
 }
