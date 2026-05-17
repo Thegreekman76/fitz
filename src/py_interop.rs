@@ -22,6 +22,7 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
+use std::sync::OnceLock;
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::value::{FitzFuture, PyObjectHandle, ResultVariant, Value};
@@ -185,82 +186,159 @@ fn is_coroutine<'py>(py: Python<'py>, obj: &Bound<'py, PyAny>) -> bool {
         .unwrap_or(false)
 }
 
+// ============================================================================
+// Fase 8.6-bis — Bridge asyncio con event loop persistente.
+//
+// Diseño: un único thread Python dedicado mantiene un event loop vivo
+// y procesa requests serialmente desde un canal mpsc Rust. Cada
+// `.await` desde Fitz construye una request con el `Py<PyAny>` de la
+// corutina + un `tokio::sync::oneshot::Sender`, la envía al thread
+// Python, y `.await`-ea el receiver.
+//
+// **Beneficios sobre el approach "baseline blocking" de 8.6.1**:
+//   - **Cero overhead per-call**: el loop se crea UNA vez. No hay
+//     `new_event_loop()` + `close()` por cada `.await`.
+//   - **No consume el blocking pool de tokio**: solo un thread Python
+//     dedicado. Cientos de awaits Fitz pendientes encolan pero no
+//     saturan threads.
+//   - **Reuso de estado asyncio**: DB pools, HTTP clients y otros
+//     primitives que cachean por loop sobreviven entre calls.
+//
+// **Limitación del MVP**: los requests se serializan en el thread del
+// loop (uno por vez con `run_until_complete`). Es lo mismo que pasaba
+// con 8.6.1 a causa del GIL; el approach se puede iterar a
+// concurrencia real si entra demanda (sub-loops via gather,
+// multi-process, etc.).
+//
+// **Por qué no `run_coroutine_threadsafe`**: el approach
+// "loop.run_forever en un thread + threadsafe schedule desde otros
+// threads" choca con la coordinación GIL en PyO3 0.28 cuando no se
+// usa `pyo3-asyncio` (que requiere control del runtime tokio,
+// incompatible con el setup de Fitz). El thread del loop necesita el
+// GIL para reaccionar a la tarea recién agendada, pero el thread que
+// la programa lo tiene tomado durante el call a
+// `run_coroutine_threadsafe`. Diseño descartado tras intento real.
+// ============================================================================
+
+/// Request al thread del loop: corutina a ejecutar + sender para
+/// devolver el resultado al caller.
+struct AsyncioRequest {
+    coro: Py<PyAny>,
+    response: tokio::sync::oneshot::Sender<FitzResult<Value>>,
+}
+
+// Py<PyAny> es Send-safe en PyO3 (acceso siempre via GIL). La
+// estructura entera lo es por composición. Lo marcamos explícito
+// porque el canal mpsc lo exige.
+unsafe impl Send for AsyncioRequest {}
+
+struct AsyncioBridge {
+    tx: std::sync::mpsc::Sender<AsyncioRequest>,
+}
+
+static ASYNCIO_BRIDGE: OnceLock<AsyncioBridge> = OnceLock::new();
+
+/// Garantiza que el thread del loop está corriendo y devuelve el
+/// sender para programar trabajo. Idempotente: el thread se
+/// inicializa solo la primera vez.
+fn ensure_asyncio_bridge() -> &'static AsyncioBridge {
+    ASYNCIO_BRIDGE.get_or_init(|| {
+        let (tx, rx) = std::sync::mpsc::channel::<AsyncioRequest>();
+        std::thread::Builder::new()
+            .name("fitz-asyncio".into())
+            .spawn(move || asyncio_worker_loop(rx))
+            .expect("no se pudo crear el thread fitz-asyncio");
+        AsyncioBridge { tx }
+    })
+}
+
+/// Bucle principal del thread del loop. Inicializa el event loop UNA
+/// vez (bajo `Python::attach`), después procesa requests del canal:
+/// el `recv()` se hace FUERA del attach para no holdear el GIL
+/// durante la espera (otros threads que construyen la próxima
+/// corutina necesitan el GIL para hacer marshaling Fitz → Python).
+fn asyncio_worker_loop(rx: std::sync::mpsc::Receiver<AsyncioRequest>) {
+    // Inicializar el loop. Lo guardamos como `Py<PyAny>` (Send-safe,
+    // unbound del Python<'_>) para reusarlo en cada iteration.
+    let event_loop_init: Option<Py<PyAny>> = Python::attach(|py| {
+        let asyncio = py.import("asyncio").ok()?;
+        let loop_obj = asyncio.call_method0("new_event_loop").ok()?;
+        asyncio.call_method1("set_event_loop", (&loop_obj,)).ok()?;
+        Some(loop_obj.clone().unbind())
+    });
+    let event_loop = match event_loop_init {
+        Some(o) => o,
+        None => return,
+    };
+
+    // Procesar requests. `rx.recv()` está FUERA del Python::attach
+    // → no holdea GIL durante la espera. Cuando llega una request,
+    // re-atachamos para correrla.
+    while let Ok(req) = rx.recv() {
+        let AsyncioRequest { coro, response } = req;
+        let result: FitzResult<Value> = Python::attach(|py| {
+            let bound_loop = event_loop.bind(py);
+            let bound_coro = coro.bind(py);
+            match bound_loop.call_method1("run_until_complete", (bound_coro,)) {
+                Ok(value) => py_to_value(py, &value),
+                Err(e) => Err(FitzError::new(
+                    ErrorKind::UndefinedVariable("PyError".to_string()),
+                    0, 0,
+                    py_err_to_fitz(py, e).message,
+                )),
+            }
+        });
+        // El receiver puede estar dropeado si el FitzFuture se
+        // canceló antes de completar; ignoramos el send_err.
+        let _ = response.send(result);
+    }
+    // Salimos del while → cerrar el loop. Best-effort.
+    Python::attach(|py| {
+        let bound = event_loop.bind(py);
+        let _ = bound.call_method0("close");
+    });
+}
+
 /// Fase 8.6 — convierte una corutina Python en un `FitzFuture` que
 /// el `Value::Future` Fitz puede envolver. El usuario escribe
 /// `py_async_fn().await` y el bridge es invisible.
 ///
-/// **Implementación (8.6.1, "baseline blocking")**: usamos
-/// `tokio::task::spawn_blocking` + `asyncio.run_until_complete` adentro
-/// del worker thread. Esto:
+/// **Implementación 8.6-bis ("event loop persistente"; ver doc del
+/// módulo arriba)**: encola la corutina en el thread Python
+/// dedicado via mpsc y `.await`-ea sobre un `tokio::sync::oneshot::
+/// Receiver`. El FitzFuture es asincrónico de verdad — no ocupa
+/// blocking thread del runtime tokio, solo un slot en la cola del
+/// thread asyncio.
 ///
-///   - **Es Send-safe**: el `Py<PyAny>` viaja entre threads (PyO3 lo
-///     marca como Send), el `Bound<'py, PyAny>` derivado solo existe
-///     adentro del `Python::attach` del worker thread. El FitzFuture
-///     externo solo tiene el `JoinHandle` (Send).
-///   - **No deadlockea con el runtime tokio existente**: el worker es
-///     del blocking pool de tokio, no del scheduler async.
-///   - **Serializa por GIL**: 100 awaits concurrentes a corutinas
-///     Python distintas se serializan en el GIL — comportamiento
-///     esperado y documentado en el roadmap. Para APIs DB-bound
-///     (caso típico SQLAlchemy/asyncpg), la DB es el bottleneck, no
-///     el GIL.
-///
-/// **Trade-off conocido**: cada `.await` ocupa un thread del blocking
-/// pool durante toda la duración de la corutina. Para corutinas largas
-/// (segundos) en alta concurrencia, esto es subóptimo. Una versión
-/// future-based real (compartiendo un event loop asyncio persistente)
-/// queda como deuda menor — `pyo3-async-runtimes::tokio::into_future`
-/// es la API correcta, pero requiere que pyo3-async-runtimes controle
-/// el runtime tokio, lo cual choca con el setup ya establecido de
-/// Fitz (tokio current_thread CLI / rt-multi-thread HTTP).
-///
-/// **Política de GIL**: el GIL se mantiene durante todo el
-/// `run_until_complete`. PyO3 no lo suelta automáticamente entre
-/// pasos de asyncio porque toda la coordinación es de un solo thread.
+/// **Lifetime del thread**: el thread asyncio queda vivo hasta que
+/// el proceso termine. Como no es daemon, el runtime tokio espera a
+/// terminar todos los threads — pero el thread asyncio bloquea en
+/// `rx.recv()` indefinidamente. Solución pragmática: el caller
+/// dropea el `Sender` cuando termina el `main`, el `rx.recv()`
+/// devuelve `Err`, y el thread sale del while. **En la práctica,
+/// confiamos en `process::exit` para limpiar todo** — el `Drop` del
+/// canal global no corre. No es ideal pero es lo que ya pasaba con
+/// 8.6.1 (los blocking workers tampoco se limpian).
 fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
-    // `Py<PyAny>` es Send — lo capturamos para mover al worker.
+    let bridge = ensure_asyncio_bridge();
     let coro_owned: Py<PyAny> = coro.clone().unbind();
+    let (tx, rx) = tokio::sync::oneshot::channel::<FitzResult<Value>>();
+    let request = AsyncioRequest {
+        coro: coro_owned,
+        response: tx,
+    };
+    if bridge.tx.send(request).is_err() {
+        return Err(pyo3::exceptions::PyRuntimeError::new_err(
+            "el thread asyncio de Fitz terminó inesperadamente",
+        ));
+    }
     let fitz_future: FitzFuture = Box::pin(async move {
-        // Mover el trabajo bloqueante al pool de threads tokio.
-        let join_result = tokio::task::spawn_blocking(move || {
-            Python::attach(|py| -> FitzResult<Value> {
-                let bound = coro_owned.bind(py);
-                let asyncio = py.import("asyncio").map_err(|e| {
-                    FitzError::new(
-                        ErrorKind::UndefinedVariable("PyError".to_string()),
-                        0, 0,
-                        py_err_to_fitz(py, e).message,
-                    )
-                })?;
-                // Crear un loop nuevo por call. Costo: ~ms; aceptable
-                // para 8.6.1. Optimización: pool persistente como
-                // deuda menor.
-                let event_loop = asyncio.call_method0("new_event_loop").map_err(|e| {
-                    FitzError::new(
-                        ErrorKind::UndefinedVariable("PyError".to_string()),
-                        0, 0,
-                        py_err_to_fitz(py, e).message,
-                    )
-                })?;
-                let result = event_loop.call_method1("run_until_complete", (bound,));
-                let _ = event_loop.call_method0("close"); // best-effort
-                match result {
-                    Ok(value) => py_to_value(py, &value),
-                    Err(e) => Err(FitzError::new(
-                        ErrorKind::UndefinedVariable("PyError".to_string()),
-                        0, 0,
-                        py_err_to_fitz(py, e).message,
-                    )),
-                }
-            })
-        })
-        .await;
-        match join_result {
-            Ok(inner) => inner,
-            Err(join_err) => Err(FitzError::new(
+        match rx.await {
+            Ok(result) => result,
+            Err(_) => Err(FitzError::new(
                 ErrorKind::UndefinedVariable("RuntimeError".to_string()),
                 0, 0,
-                format!("error del blocking pool al ejecutar corutina Python: {}", join_err),
+                "el thread asyncio no respondió a la corutina (loop cerrado?)".to_string(),
             )),
         }
     });

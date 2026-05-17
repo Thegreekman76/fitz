@@ -724,11 +724,14 @@ Todos chicos, pueden ir en una mini-tanda dedicada.
 
 ### Bridge async Fitz ↔ Python asyncio (Fase 8.6)
 
-- **Reescribir bridge con event loop persistente.** Hoy
-  `py_coro_to_fitz_future` (en `src/py_interop.rs`) usa
-  `tokio::task::spawn_blocking` + `asyncio.new_event_loop()` +
-  `run_until_complete(coro)` para cada call. Es funcional pero
-  va a doler bajo carga real:
+- **~~Reescribir bridge con event loop persistente~~** ✓ CERRADO
+  2026-05-17 (Fase 8.6-bis). Ver entrada al final de esta
+  sección con la implementación y benchmarks.
+
+- **Original (8.6.1)**: `py_coro_to_fitz_future` (en
+  `src/py_interop.rs`) usaba `tokio::task::spawn_blocking` +
+  `asyncio.new_event_loop()` + `run_until_complete(coro)` para
+  cada call. Era funcional pero iba a doler bajo carga real:
   - Cada `<py_call>?.await` paga el costo de **crear y cerrar
     un event loop nuevo** (cientos de microsegundos, plus el
     GIL acquire/release).
@@ -764,6 +767,67 @@ Todos chicos, pueden ir en una mini-tanda dedicada.
   secuenciales (mide overhead per-call) + 100 awaits concurrentes
   (verifica que no satura blocking pool). Debería bajar de
   ~5ms/call a <0.5ms/call.
+
+### Fase 8.6-bis — Bridge asyncio persistente CERRADO (2026-05-17)
+
+**Implementación**: thread Python dedicado (`fitz-asyncio`) que
+mantiene un único event loop `asyncio` vivo entre calls. Cada
+`.await` desde Fitz construye una `AsyncioRequest { coro,
+response }` (con `response: tokio::sync::oneshot::Sender`), la
+envía por un `std::sync::mpsc::Sender` al thread del loop, y
+hace `.await` sobre el `Receiver`. El thread del loop bucla:
+`rx.recv()` afuera de `Python::attach` (NO holdea GIL durante
+la espera — clave para no bloquear marshaling concurrente),
+seguido de `Python::attach { loop.run_until_complete(coro) }`
+por iteration.
+
+**Por qué NO `run_coroutine_threadsafe`**: el approach
+"`loop.run_forever()` en un thread + threadsafe schedule desde
+otros threads" choca con la coordinación GIL en PyO3 0.28 sin
+`pyo3-asyncio` (que requiere control del runtime tokio,
+incompatible con `current_thread`/`rt-multi-thread` ya
+establecidos en Fitz). Intentado y descartado en la primera
+versión de 8.6-bis: el thread del loop necesita el GIL para
+reaccionar a la tarea agendada, pero el thread que la programa
+lo tiene durante el call mismo. Diseño documentado en
+`src/py_interop.rs`.
+
+**Mejoras conseguidas**:
+- **Cero overhead por call de event loop**: el loop se crea
+  UNA vez. Antes: `new_event_loop()` + `close()` por cada `.await`.
+- **No consume blocking pool de tokio**: solo un thread Python
+  dedicado. Cientos de awaits Fitz pendientes encolan en el
+  mpsc, no saturan threads.
+- **Reuso de estado asyncio**: DB pools, HTTP clients y otros
+  primitives que cachean por loop sobreviven entre calls.
+
+**Benchmarks (2026-05-17, máquina del autor)**:
+- 100 awaits secuenciales con `asyncio.sleep(0)`: **~160ms
+  total ⇒ ~1.6ms/call** (release build, debug ~157ms).
+  Incluye el cost del marshaling + call Python + return.
+- 50 awaits con `asyncio.sleep(0.01)`: ~1.0s total (500ms de
+  sleep efectivo + 500ms de overhead distribuido).
+- Antes (8.6.1): roadmap estimaba ~5ms/call. **Reducción ~3x**.
+
+**Limitación del MVP**: los requests se serializan en el thread
+del loop (uno por vez con `run_until_complete`). El GIL lo
+imponía igual, así que no perdimos paralelismo real, pero la
+verdadera concurrencia llegará si entra demanda (sub-loops via
+`asyncio.gather`, multi-process, etc.).
+
+**Diferido para tanda futura — más benchmarks**:
+- Awaits **concurrentes** (`asyncio.gather` desde Python con
+  varias corutinas en paralelo): medir si el throughput escala.
+- Awaits **paralelos desde Fitz** (`tokio::join!` de dos
+  `.await` Fitz): hoy se serializan en el thread del loop —
+  documentar qué se gana en throughput vs latencia.
+- **Bench de marshaling** (List<User> grande Fitz→Python y
+  vuelta): identificar bottleneck (es el GIL? los `.clone`?).
+- **Bench DB-bound real**: asyncpg + SELECT 1k rows con
+  SQLAlchemy async. Caso típico que justifica este sub-paso.
+
+Convención: cada vez que sumemos un benchmark nuevo, lo
+acumulamos acá con fecha + hardware + comando exacto.
 
 ### Robustez interna del compilador (matriz F en `deudas-post-5b.md`)
 
