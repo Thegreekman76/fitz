@@ -521,9 +521,23 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     sub-pasos cerrados (a + b + c): infraestructura del
     lenguaje + runner CLI + cap 24 nuevo en `docs/guide.md` con
     ejemplo runnable `examples/guide/24-tests.fitz`.
-  - Total al cierre 9.z.2: **1366 unit + 66 cli_e2e + 80
+  - Total al cierre 9.z.2: **1366 unit + 66 cli_e2e + 79
     compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
-  - Próximo: **9.z.3** (`fitz dev` con file watcher + hot reload).
+  - **9.z.3 CERRADA (2026-05-17)** — `fitz dev` con hot reload.
+    File watcher cross-platform (crate `notify`) + kill/respawn
+    del child al detectar cambio en `.fitz` o `fitz.toml`.
+    Debounce 100ms para colapsar saves múltiples del editor.
+    Excluye `target/`/`.git/`/`node_modules/`/archivos ocultos.
+    Banner ANSI con clear screen + run number entre runs.
+    `tokio::signal::ctrl_c()` mata el child antes de salir
+    (evita procesos zombie). Single-file mode
+    (`fitz dev --file archivo.fitz`) y manifest mode (`fitz dev`
+    desde el proyecto). Cap 25 nuevo en `docs/guide.md`.
+  - Total al cierre 9.z.3: **1366 unit + 66 cli_e2e + 79
+    compile_e2e + 3 openapi** (sin cambios — dev_cmd es
+    interactivo, smoke E2E pendiente). Clippy `-D warnings`
+    limpio.
+  - Próximo: **9.z.4** (`fitz repl` interactivo).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based), `@ws` (WebSockets tipados con
   `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM

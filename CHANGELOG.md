@@ -13,19 +13,115 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
 manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS** y **9.z
-(DX) avanza con 9.z.1 entera + 9.z.2 entera CERRADAS** — fmt
-production-ready (2026-05-16) y test runner built-in con
-`@test` + `fitz test` (2026-05-17).
+(DX) avanza con 9.z.1 + 9.z.2 + 9.z.3 CERRADAS** — fmt
+production-ready (2026-05-16), test runner built-in con
+`@test` + `fitz test` (2026-05-17), y hot reload con `fitz dev`
+(2026-05-17).
 
 **Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
 git deps cubren el caso 90% y registry implica decisiones de
 hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
 repl + lint) que no requiere infra externa.
 
-Próximo norte: **9.z.3** (`fitz dev` con file watcher + hot reload).
+Próximo norte: **9.z.4** (`fitz repl` interactivo).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.17] — 2026-05-17 — Fase 9.z.3 CERRADA — `fitz dev` (hot reload)
+
+Modo desarrollo con file watcher + kill/respawn al detectar cambio.
+Tercera DX feature de Fase 9.z. El loop iterativo del developer
+(editar → save → ver efecto) sin re-tipear `fitz run` en cada save.
+
+**Implementación**:
+- Dep nueva: `notify = "6"` (file watcher cross-platform: FSEvents
+  en macOS, inotify en Linux, ReadDirectoryChangesW en Windows).
+  Sin layer de debouncer — el debounce 100ms lo hacemos manual con
+  un `tokio::time::timeout` + drain del canal en el loop.
+- `Commands::Dev { file }` en CLI. Sin args, manifest mode
+  (busca `fitz.toml`, watch su dir, corre `fitz run`). Con
+  `--file <archivo.fitz>`, single-file mode (watch parent del
+  archivo).
+- `dev_cmd` corre adentro de un runtime tokio current_thread
+  (reusa `evaluator::build_runtime`). El loop principal
+  `run_dev_loop` usa `tokio::select!` sobre 3 eventos: cambio
+  detectado por el watcher, exit del child, o `tokio::signal::ctrl_c()`.
+- Bridge sync→async para `notify`: un `std::thread::spawn` lee del
+  `std::sync::mpsc` (sync) y re-envía al `tokio::sync::mpsc`
+  (async). El watcher es sync; este patrón evita feature
+  `tokio` del crate `notify` para no inflar el dep tree.
+- Spawn del child con `tokio::process::Command`: `current_exe()`
+  + `target.child_args` + `current_dir(&target.watch_dir)` para
+  que `fitz run` (manifest mode, sin args) encuentre el
+  `fitz.toml` correcto. Single-file mode usa path absoluto del
+  archivo, así el cwd no importa.
+- **Path filtering** (`path_is_relevant`): sólo `*.fitz` y
+  `fitz.toml`. Excluye en cualquier nivel `target/`, `.git/`,
+  `node_modules/`, `.fitz/`, `dist/`, `build/`, y cualquier
+  componente oculto (`.algo`).
+- **Debounce 100ms**: tras detectar un evento, drain del canal
+  con `tokio::time::timeout` para colapsar saves múltiples del
+  editor (VSCode emite write tmp + rename + chmod en un save).
+- **Banner UX** (`clear_screen_and_banner`): `\x1b[2J\x1b[H` para
+  clear+home si stdout es TTY (`std::io::IsTerminal`), sino
+  separa con líneas. Cada arranque muestra "▶ fitz dev (run #N)
+  — <target>".
+- **Ctrl+C**: `tokio::signal::ctrl_c()` en el `select!` mata el
+  child + waits antes de retornar. Sin esto, en uso real
+  quedarían procesos zombie del child.
+- Caso "child terminó solo" (programa CLI corto, error de tipo):
+  no salimos del loop — esperamos un cambio en filesystem para
+  reiniciar. Pedagógicamente útil: el user fixea el error, save,
+  retry automático.
+
+**Decisiones tomadas**:
+- `[dev]` config en `fitz.toml` para customizar paths watched /
+  debounce / etc.: NO en MVP, solo defaults. Sumar si aparece
+  demanda concreta.
+- Browser auto-refresh para HTTP: NO en MVP. Quien edite HTML/CSS
+  junto puede usar Live Server o similar.
+- Print de errors del checker mientras tipeás sin disparar
+  restart: NO — el child mismo imprime los errores en arranque.
+  El LSP (cap 22) ya hace diagnostics in-editor para feedback
+  continuo.
+- `fitz dev --test` (modo "watch + run tests"): sub-paso futuro
+  si aparece presión. Workaround documentado en el cap 25
+  con dos terminales.
+
+**Tests**:
+- Smoke manual validado: arrancar `fitz dev --file`, modificar
+  archivo, observar run #2 con código nuevo. ANSI clear screen
+  + banner funcionando.
+- 1366 unit / 66 cli_e2e / 79 compile_e2e / 3 openapi (sin
+  cambios — el dev_cmd es interactivo, los tests automáticos
+  serían flaky). Clippy `-D warnings` limpio.
+
+**Bug fix colateral**: en el smoke confirmé que el child del
+`fitz dev --file` re-evalúa el archivo modificado correctamente
+(no hay cache stale).
+
+**Deudas residuales (NO bloquean 9.z.4)**:
+- Incremental rebuild (solo el archivo cambiado se re-carga):
+  hoy es kill+respawn full. Mejora futura cuando aparezca
+  modelo de módulos pre-compilados.
+- Filtrar "modify sin cambio real" (timestamps tocados sin
+  cambio de contenido): hoy cualquier evento `Modify` dispara.
+  Refinable comparando hashes si duele.
+- Auto-test mode (`fitz dev --test`): workaround documentado
+  con dos terminales.
+- Smoke E2E automatizado: por interactividad del dev_cmd y
+  flakeyness de los file watchers, los tests son manuales por
+  ahora.
+
+**Cap 25 nuevo "`fitz dev` — hot reload"** en `docs/guide.md`:
+features, CLI single-file/manifest, qué dispara restart, output
+típico, limitaciones, integración con `fitz test`. Renumeración
+cap 25→26 ("Qué sigue").
+
+**Cierre formal**: CHANGELOG v0.9.17, roadmap (9.z.3 CERRADA con
+detalle), `docs/deudas-post-5b.md` (bloque "Fase 9.z.3 CERRADA"),
+README, CLAUDE, `docs/syntax-spec.md` (nota implementado).
 
 ## [v0.9.16] — 2026-05-17 — Fase 9.z.2 entera CERRADA — `fitz test` (testing built-in)
 
@@ -106,7 +202,9 @@ el día:
 - 1366 unit (+33 vs Fase 9.z.1) — `+6 testing`, `+25 evaluator
   (decorator + asserts)`, `+2 parser regression`.
 - 66 cli_e2e (+11 vs Fase 9.z.1) — runner end-to-end.
-- 80 compile_e2e (+1 vs Fase 9.z.1) — `24-tests.fitz`.
+- 79 compile_e2e (igual cuenta que 9.z.1; `24-tests.fitz` se sumó
+  a la lista del smoke `GUIDE_EXAMPLES_COMPILE` que es 1 `#[test]`
+  único iterando, no a tests individuales).
 - 3 openapi.
 - Clippy `-D warnings` limpio.
 

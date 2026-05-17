@@ -6398,7 +6398,7 @@ Test runner integrado al lenguaje. Tres sub-pasos cerrados:
   como ident Fitz (sin hyphens). Deuda visible.
 
 **Tests al cierre**:
-- 1366 unit / 66 cli_e2e / 80 compile_e2e / 3 openapi.
+- 1366 unit / 66 cli_e2e / 79 compile_e2e / 3 openapi.
 - Clippy `-D warnings` limpio.
 
 **Deudas residuales (NO bloquean 9.z.3)**:
@@ -6414,26 +6414,72 @@ Test runner integrado al lenguaje. Tres sub-pasos cerrados:
   pero NINGÚN test integration importa la lib, esos tests no se
   descubren. Edge case raro.
 
-#### 9.z.3 — `fitz dev` (hot reload)
+#### 9.z.3 — `fitz dev` (hot reload) — CERRADO 2026-05-17
 
-- **Sub-comando `fitz dev`**: file watcher sobre el proyecto, al
-  cambio re-corre `fitz run` (o el server si hay rutas HTTP).
-- **Restart strategy**: kill+respawn del proceso. Incremental
-  rebuild es deuda (requiere modelo de módulos pre-compilados).
-- **Implementación**: crate `notify` para file watching. Debounce
-  100ms para evitar restarts en cadena.
-- **Feedback**: clear screen + banner "[restart]" + timestamp +
-  tiempo de compile.
-- **Decisiones**:
-  - ¿Watcher excluye `target/`, `.git/`, `node_modules/` por
-    default? Sí.
-  - ¿Configurable via manifest `[dev]` section o solo defaults?
-  - ¿Browser auto-refresh para HTTP? Requiere inyectar WebSocket
-    en respuestas — complejo. Lean: **NO en MVP**.
-  - ¿Print de errors del checker mientras escribís (sin
-    restart)? Sí — es la mitad del valor de `fitz dev`.
-- **Trade-offs**: kill+respawn es brutal pero simple y correcto.
-  Incremental llega cuando duela.
+Sub-comando `fitz dev` que watchea el proyecto y kill+respawnea el
+child al detectar cambio en `.fitz` o `fitz.toml`. Modo desarrollo
+con feedback inmediato sin re-tipear `fitz run` en cada save.
+
+**Implementación**:
+
+- Dep nueva `notify = "6"` (file watcher cross-platform). Bridge
+  sync→async via `std::thread::spawn` + `tokio::sync::mpsc` para
+  consumir desde un runtime tokio current_thread.
+- `Commands::Dev { file }`: sin args → manifest mode (busca
+  `fitz.toml`, watch su dir, corre `fitz run`); con `--file` →
+  single-file mode (watch parent del archivo).
+- `dev_cmd` → `run_dev_loop`: outer loop spawnea child
+  (`tokio::process::Command`) + select! sobre 3 eventos:
+  - **Cambio del watcher**: debounce 100ms + kill child + respawn.
+  - **Child terminó solo** (error de tipo, programa CLI corto):
+    no salimos — esperamos próximo cambio para reiniciar.
+  - **Ctrl+C** (`tokio::signal::ctrl_c()`): kill child +
+    return Ok. Evita procesos zombie.
+- Path filtering (`path_is_relevant`): sólo `*.fitz` y `fitz.toml`.
+  Excluye en cualquier nivel: `target/`, `.git/`, `node_modules/`,
+  `.fitz/`, `dist/`, `build/`, componentes ocultos.
+- Banner UX (`clear_screen_and_banner`): ANSI `\x1b[2J\x1b[H` si
+  stdout es TTY (`std::io::IsTerminal`), sino separa con líneas.
+  Run number incremental + display del target.
+
+**Decisiones tomadas**:
+
+- `[dev]` section en `fitz.toml` para configurar watcher: **NO
+  en MVP**, solo defaults.
+- Browser auto-refresh para HTTP (inyectar WebSocket): **NO en
+  MVP**. Live Server externo es workaround.
+- Print errors del checker live sin restart: **NO** — el child
+  imprime errors en arranque. El LSP (cap 22) ya da
+  diagnostics in-editor para feedback continuo.
+- Debounce 100ms manual con `tokio::time::timeout` (sin layer
+  separado de debouncer).
+- Smoke E2E automatizado: **NO** — el dev_cmd es interactivo y
+  los file watchers son flaky en tests. Smoke manual valida.
+
+**Cap 25 nuevo "`fitz dev` — hot reload"** en `docs/guide.md`:
+features, CLI single-file/manifest, qué dispara restart, output
+típico, limitaciones, integración con `fitz test`. Renumeración
+cap 25→26 ("Qué sigue").
+
+**Tests al cierre 9.z.3**:
+- 1366 unit / 66 cli_e2e / 79 compile_e2e / 3 openapi.
+- Smoke manual: arrancar `fitz dev --file`, modificar archivo,
+  observar run #2 con código nuevo + banner ANSI.
+- Clippy `-D warnings` limpio.
+
+**Deudas residuales (NO bloquean 9.z.4)**:
+
+- **Incremental rebuild**: kill+respawn full es el approach del
+  MVP. Modelo de módulos pre-compilados queda como sub-paso
+  futuro si los tiempos de re-eval duelen.
+- **Filter "modify sin cambio real"**: timestamps tocados sin
+  cambio de contenido disparan restart. Comparar hashes si
+  aparece presión.
+- **`fitz dev --test`**: workaround documentado con dos
+  terminales (`fitz dev` + `while true; do fitz test; sleep 2;
+  done`). Sub-paso si aparece presión.
+- **Smoke E2E automatizado**: pendiente. Las pruebas de file
+  watchers requieren orquestación específica.
 
 #### 9.z.4 — `fitz repl` (interactivo)
 

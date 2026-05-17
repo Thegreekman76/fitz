@@ -656,7 +656,7 @@
 >   v0.4 (matriz refleja interop / LSP / PM / fmt / test como
 >   implementados).
 >
-> Total al cierre de 9.z.2: **1366 unit / 66 cli_e2e / 80
+> Total al cierre de 9.z.2: **1366 unit / 66 cli_e2e / 79
 > compile_e2e / 3 openapi**. Clippy `-D warnings` limpio.
 >
 > **Deudas residuales de 9.z.2 (NO bloquean 9.z.3)**:
@@ -686,6 +686,50 @@
 >
 > **Próximo norte**: 9.z.3 (`fitz dev` con file watcher + hot
 > reload + dev experience).
+>
+> **Fase 9.z.3 CERRADA (2026-05-17)** — `fitz dev` (hot reload).
+> File watcher cross-platform via `notify` crate + kill/respawn
+> del child al detectar cambios en `.fitz` o `fitz.toml`. Tercera
+> DX feature de Fase 9.z cerrada en el día (después de 9.z.2).
+>
+> **Implementación**: `Commands::Dev { file }` con resolver
+> single-file/manifest paralelo a `fitz test`/`fitz run`. Loop
+> principal en runtime tokio current_thread con `tokio::select!`
+> sobre 3 eventos: cambio del watcher (debounce 100ms +
+> kill+respawn), child terminó solo (espera próximo cambio), o
+> `tokio::signal::ctrl_c()` (kill + clean exit). Bridge sync→async
+> entre `notify` (sync) y tokio mpsc via std::thread::spawn.
+> Path filtering: `*.fitz` + `fitz.toml`, excluye `target/`/
+> `.git/`/`node_modules/`/`.fitz/`/`dist/`/`build/` + componentes
+> ocultos. Banner ANSI clear screen si TTY.
+>
+> **Decisiones tomadas**: `[dev]` section NO en MVP; browser
+> auto-refresh NO; print errors live sin restart NO (LSP cubre);
+> smoke E2E automatizado NO (file watchers son flaky).
+>
+> **Cap 25 nuevo "`fitz dev` — hot reload"** en
+> `docs/guide.md` (renumeración cap 25→26 "Qué sigue").
+>
+> **Total al cierre 9.z.3**: 1366 unit / 66 cli_e2e / 79
+> compile_e2e / 3 openapi (sin cambios, dev_cmd es interactivo).
+> Clippy `-D warnings` limpio. Smoke manual validó arrancar →
+> modificar → ver run #2 con código nuevo.
+>
+> **Deudas residuales de 9.z.3 (NO bloquean 9.z.4)**:
+> - **Incremental rebuild**: kill+respawn full es el approach del
+>   MVP. Modelo de módulos pre-compilados queda como sub-paso
+>   futuro si los tiempos duelen.
+> - **Filter "modify sin cambio real"**: timestamps tocados sin
+>   cambio de contenido disparan restart. Comparar hashes si
+>   aparece presión.
+> - **`fitz dev --test`** (modo watch + run tests): workaround
+>   documentado con dos terminales. Sub-paso si aparece presión.
+> - **Smoke E2E automatizado**: pendiente. File watchers
+>   requieren orquestación cuidadosa para no ser flaky.
+>
+> **Próximo norte**: 9.z.4 (`fitz repl` interactivo con
+> rustyline + scope persistente entre líneas + comandos especiales
+> `:type`/`:env`/`:reset`/`:load`).
 
 ## Resumen ejecutivo
 

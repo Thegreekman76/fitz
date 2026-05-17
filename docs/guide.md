@@ -62,9 +62,10 @@ abrí un issue.
 22. [Soporte para editores](#22-soporte-para-editores)
 23. [`fitz fmt` — formateador automático](#23-fitz-fmt--formateador-automático)
 24. [`fitz test` — testing built-in](#24-fitz-test--testing-built-in)
+25. [`fitz dev` — hot reload](#25-fitz-dev--hot-reload)
 
 **Parte 11 — Cerrando**
-25. [Qué sigue](#25-qué-sigue)
+26. [Qué sigue](#26-qué-sigue)
 
 ---
 
@@ -151,7 +152,7 @@ La guía está dividida en partes que se leen en orden:
 9. **Interop** — `from python import ...` para reusar el ecosistema
    Python.
 10. **Tooling** — LSP + extensión VSCode, formateador `fitz fmt`,
-    test runner `fitz test`.
+    test runner `fitz test`, hot reload `fitz dev`.
 11. **Cerrando** — el mapa de lo que viene.
 
 ### Cómo usar los ejemplos
@@ -6077,14 +6078,131 @@ de FAILED + summary final.
 
 ---
 
-## 25. Qué sigue
+## 25. `fitz dev` — hot reload
+
+`fitz dev` mantiene tu programa corriendo y lo **re-arranca
+automáticamente** cuando guardás un cambio. Pensado para el loop
+del developer: editás, guardás, ves el efecto, repetís. Llegó
+con la **Fase 9.z.3** (cerrada el 2026-05-17).
+
+### Qué hace
+
+- **File watcher** sobre el directorio del proyecto (manifest mode)
+  o el directorio del archivo (single-file mode). Usa el backend
+  nativo del SO via la crate [`notify`](https://crates.io/crates/notify):
+  FSEvents en macOS, inotify en Linux,
+  ReadDirectoryChangesW en Windows.
+- **Kill + respawn** del proceso al detectar un cambio. Estrategia
+  simple y correcta — incremental rebuild es deuda futura.
+- **Debounce 100ms** para colapsar saves múltiples del editor
+  (VSCode emite write tmp + rename + chmod en un save).
+- **Banner** entre runs: clear screen (ANSI) + run number +
+  target. Sin TTY (output redirigido), separa con líneas.
+- **Ctrl+C** atrapado: mata el child antes de salir para evitar
+  procesos zombie.
+
+### Cómo se usa
+
+```bash
+# Single-file mode: watch el parent del archivo
+fitz dev --file mi_script.fitz
+
+# Manifest mode: watch el dir del fitz.toml, corre el [bin].main
+fitz dev
+```
+
+### Qué dispara restart
+
+Sólo archivos relevantes al lenguaje:
+
+- `*.fitz` (cualquier archivo Fitz, en cualquier subdirectorio).
+- `fitz.toml` (cambios al manifest).
+
+Se **excluyen** automáticamente:
+
+- `target/` (binarios y build artifacts de `fitz build`).
+- `.git/` (historia del repo).
+- `node_modules/` (lock para devs con tooling JS al lado).
+- `.fitz/`, `dist/`, `build/` (carpetas de output convencionales).
+- Cualquier carpeta o archivo oculto (empezado en `.`).
+
+### Output típico
+
+```text
+🔄 fitz dev — watching /path/to/mi_proyecto
+   ejecutando: proyecto `miapp`
+   (Ctrl+C para salir)
+
+▶ fitz dev (run #1) — proyecto `miapp`
+
+Hola mundo
+42
+
+✓ programa terminó OK (exit 0) — esperando cambios ...
+
+↻ cambio detectado en src/main.fitz — reiniciando ...
+
+▶ fitz dev (run #2) — proyecto `miapp`
+
+Hola mundo modificado
+84
+
+✓ programa terminó OK (exit 0) — esperando cambios ...
+```
+
+Para programas HTTP, el comportamiento es análogo: el child arranca
+el servidor; al detectar cambio, lo mata + respawnea, así el nuevo
+código toma efecto sin re-ejecutar curl o refrescar el browser por
+varios segundos.
+
+### Lo que NO anda todavía
+
+- **Incremental rebuild** (cambiar 1 archivo y re-cargar sólo eso):
+  hoy es kill+respawn full. Mejora cuando aparezca el modelo de
+  módulos pre-compilados.
+- **Browser auto-refresh para HTTP** (inyectar WebSocket en
+  respuestas): NO en MVP. Quien edite HTML/CSS junto al backend
+  Fitz puede usar herramientas separadas (Live Server, etc.).
+- **`[dev]` section en `fitz.toml`** para configurar paths
+  watched, debounce time, etc.: usamos defaults razonables. Sumar
+  config si aparece demanda concreta.
+- **Print de errors del checker mientras escribís** sin disparar
+  restart: el child es quien imprime los errores de tipo en
+  arranque. La mitad del valor del `fitz dev` es que el typecheck
+  ya estaba bloqueando los errores antes (modo strict del
+  `fitz run`). Para feedback continuo sin restart, el LSP del cap
+  22 ya hace diagnostics in-editor.
+- **Reload solo sobre cambios "significativos"** (filtrar saves
+  sin cambios reales del contenido): hoy cualquier `Modify` del
+  filesystem dispara. Si tu editor toca timestamps sin contenido
+  real, vas a ver restarts spurios. Refinable si duele.
+
+### Cómo encaja con `fitz test`
+
+Si querés ejecutar tus tests cada save, hoy hacés:
+
+```bash
+# Terminal 1: corré el programa principal
+fitz dev
+
+# Terminal 2: corré los tests con un wrapper simple
+while true; do fitz test; sleep 2; done
+```
+
+Un sub-comando `fitz dev --test` que watchee y corra `fitz test`
+en lugar de `fitz run` queda como sub-paso futuro si aparece
+presión.
+
+---
+
+## 26. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 24 podés:
+Con los capítulos 1 a 25 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -6150,6 +6268,12 @@ Con los capítulos 1 a 24 podés:
   filtrado por substring, async tests, discovery automático en
   manifest mode (`tests/*.fitz` + `[lib]` integration). Cero
   librerías. Ver [cap 24](#24-fitz-test--testing-built-in).
+- **Hot reload** con `fitz dev` (Fase 9.z.3): file watcher sobre
+  el proyecto + kill/respawn del child al detectar cambio en
+  `.fitz` o `fitz.toml`. Debounce 100ms, exclusión de
+  `target/`/`.git/`/`node_modules/`, banner ANSI entre runs,
+  Ctrl+C atrapa sin dejar zombies. Ver
+  [cap 25](#25-fitz-dev--hot-reload).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -6187,8 +6311,9 @@ Lo que sigue post-8:
     entra cuando 9.z entera cierre).
   - **DX (9.z) — en curso**: formatter `fitz fmt` cerrado
     (9.z.1, ver cap 23). Test runner `fitz test` cerrado
-    (9.z.2, ver cap 24). Próximo: `fitz dev` (9.z.3),
-    `fitz repl` (9.z.4), `fitz lint` (9.z.5).
+    (9.z.2, ver cap 24). Hot reload `fitz dev` cerrado
+    (9.z.3, ver cap 25). Próximo: `fitz repl` (9.z.4),
+    `fitz lint` (9.z.5).
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta

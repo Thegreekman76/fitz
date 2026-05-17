@@ -109,6 +109,15 @@ toml = "0.8"
 # `DocumentMut`.
 toml_edit = "0.22"
 
+# Fase 9.z.3 — file watching para `fitz dev` (hot reload). Usa el
+# backend nativo del SO (FSEvents/inotify/ReadDirectoryChangesW), con
+# fallback polling si no hay backend. Versión 6.x es la actual estable
+# y trae async-compat opcional, pero la usamos sync (con un canal mpsc)
+# porque el dev loop ya está adentro del runtime tokio. Sin debouncer
+# layer — el debounce de 100ms lo hacemos manual con `recv_timeout`
+# en el loop, que es trivial y no agrega otra dep.
+notify = "6"
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el

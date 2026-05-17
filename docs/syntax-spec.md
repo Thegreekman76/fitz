@@ -1,6 +1,6 @@
 # Especificación de Sintaxis — Fitz
 
-> Estado: BORRADOR v0.4 (actualización 2026-05-17, post Fase 9.z.2).
+> Estado: BORRADOR v0.5 (actualización 2026-05-17, post Fase 9.z.3).
 > La mayoría del diseño original ya está implementado; lo pendiente
 > queda señalado abajo.
 >
@@ -54,11 +54,12 @@
 > - Test runner `fitz test` con `@test` + 4 assertion builtins
 >   (`assert`, `assert_eq`, `assert_ne`, `assert_throws`) — Fase 9.z.2
 >   (cap 24).
+> - `fitz dev` (hot reload con file watcher + kill/respawn) — Fase
+>   9.z.3 (cap 25).
 >
 > **Diseñado pero no implementado**:
 > - `@bench` para benchmarks (post-MVP de 9.z.2).
 > - Test fixtures (`@before_all`, `@before_each`, etc.) — post-MVP.
-> - `fitz dev` (hot reload con file watcher) — Fase 9.z.3.
 > - `fitz repl` (REPL interactivo) — Fase 9.z.4.
 > - `fitz lint` (linter de patrones más allá de tipos) — Fase 9.z.5.
 > - Registry público (`fitz publish` + `fitz add foo@1.2.3`) — Fase

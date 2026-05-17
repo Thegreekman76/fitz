@@ -179,6 +179,21 @@ enum Commands {
         #[arg(long)]
         file: Option<PathBuf>,
     },
+    /// Fase 9.z.3 — Modo desarrollo con hot reload. Corre tu programa
+    /// y lo re-arranca automáticamente cuando un archivo `.fitz` (o
+    /// `fitz.toml`) cambia. Sin args, busca `fitz.toml` y corre el
+    /// `[bin].main`. Con `--file`, corre ese archivo (single-file mode).
+    ///
+    /// Estrategia: kill+respawn del proceso (incremental rebuild es
+    /// deuda). Excluye `target/`, `.git/`, `node_modules/`, archivos
+    /// ocultos. Debounce 100ms para colapsar saves múltiples del
+    /// editor. Ctrl+C mata el child antes de salir.
+    Dev {
+        /// Archivo `.fitz` específico. Si se omite, busca
+        /// `fitz.toml` (manifest mode) y corre `[bin].main`.
+        #[arg(long)]
+        file: Option<PathBuf>,
+    },
 }
 
 fn main() {
@@ -248,6 +263,9 @@ fn main() {
         }
         Commands::Test { filter, file } => {
             test_cmd(filter, file);
+        }
+        Commands::Dev { file } => {
+            dev_cmd(file);
         }
     }
 }
@@ -1793,4 +1811,353 @@ async fn invoke_one_test(test: &testing::TestSpec) -> Result<(), String> {
     evaluator::run_test_handler(test.handler.clone(), test.is_async, &test.name)
         .await
         .map_err(|e| format!("{e}"))
+}
+
+// ---- Fase 9.z.3 — `fitz dev` (hot reload) ----
+
+/// Resuelto al inicio de `dev_cmd`: qué directorio watcheamos y qué
+/// argumentos le pasamos al child `fitz run`. Single-file mode usa el
+/// parent del archivo como watch root + `fitz run <file>`; manifest
+/// mode usa `manifest_dir` como root + `fitz run` (sin args, así el
+/// child re-descubre el manifest cada arranque y respeta cambios de
+/// `[bin].main` en `fitz.toml`).
+struct DevTarget {
+    /// Directorio que el watcher monitorea recursivamente.
+    watch_dir: PathBuf,
+    /// Args adicionales para el child `fitz run ...`.
+    child_args: Vec<String>,
+    /// String corta para el banner UX ("`./mi_app.fitz`" o
+    /// "proyecto `miapp`").
+    display: String,
+}
+
+/// Entry point del sub-comando `fitz dev` (Fase 9.z.3).
+///
+/// Loop principal: spawn child `fitz run <entry>`, escucha cambios en
+/// el filesystem, y al detectar uno relevante (archivo `.fitz` o
+/// `fitz.toml`, no excluido), mata el child y respawnea. Ctrl+C mata
+/// el child antes de salir para evitar procesos zombie.
+///
+/// Toda la lógica corre adentro de un runtime tokio current_thread
+/// porque combina `tokio::process` (kill async del child),
+/// `tokio::signal::ctrl_c`, y un canal async para los eventos de
+/// `notify` (que es sync; lo reenviamos vía `std::thread::spawn` +
+/// `tokio::sync::mpsc::UnboundedSender`).
+fn dev_cmd(file_arg: Option<PathBuf>) {
+    let target = resolve_dev_target(file_arg);
+
+    eprintln!("🔄 fitz dev — watching {}", target.watch_dir.display());
+    eprintln!("   ejecutando: {}", target.display);
+    eprintln!("   (Ctrl+C para salir)\n");
+
+    let runtime = evaluator::build_runtime();
+    runtime.block_on(async move {
+        if let Err(e) = run_dev_loop(target).await {
+            eprintln!("✗ fitz dev: {e}");
+            std::process::exit(1);
+        }
+    });
+}
+
+/// Decide qué directorio watchear + qué args pasarle al child.
+fn resolve_dev_target(file_arg: Option<PathBuf>) -> DevTarget {
+    if let Some(path) = file_arg {
+        // Single-file mode: watch el parent del archivo, child con
+        // `fitz run <file>` (path absolute para evitar problemas si
+        // el cwd cambia).
+        let abs = std::fs::canonicalize(&path).unwrap_or_else(|e| {
+            eprintln!("✗ no se pudo resolver `{}`: {e}", path.display());
+            std::process::exit(1);
+        });
+        let watch_dir = abs
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+        let display = abs.display().to_string();
+        return DevTarget {
+            watch_dir,
+            child_args: vec!["run".into(), abs.to_string_lossy().into()],
+            display,
+        };
+    }
+
+    // Manifest mode: encontrar fitz.toml, watch su directorio. Child
+    // `fitz run` sin args para que re-descubra el manifest cada
+    // arranque (si el user edita `[bin].main`, se respeta).
+    let cwd = std::env::current_dir().unwrap_or_else(|e| {
+        eprintln!("✗ no se pudo leer el directorio actual: {e}");
+        std::process::exit(1);
+    });
+    let manifest_path = match manifest::find_manifest(&cwd) {
+        Some(p) => p,
+        None => {
+            eprintln!(
+                "✗ no se encontró `{}` en `{}` ni en directorios padre.\n   \
+                 Pasá un archivo explícito (`fitz dev --file archivo.fitz`) o creá \
+                 un proyecto con `fitz new <nombre>` / `fitz init`.",
+                manifest::MANIFEST_FILE,
+                cwd.display()
+            );
+            std::process::exit(1);
+        }
+    };
+    let manifest_dir = manifest_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| cwd.clone());
+    // Parsear nombre del paquete para el banner.
+    let display = match fs::read_to_string(&manifest_path)
+        .ok()
+        .and_then(|t| manifest::Manifest::parse(&t).ok())
+    {
+        Some(m) => format!("proyecto `{}`", m.package.name),
+        None => format!("proyecto en `{}`", manifest_dir.display()),
+    };
+    DevTarget {
+        watch_dir: manifest_dir,
+        child_args: vec!["run".into()],
+        display,
+    }
+}
+
+/// Loop principal del dev: spawnea child + escucha cambios + Ctrl+C.
+/// Cada iteración del outer loop = un "run" del programa. Cuando un
+/// archivo relevante cambia, kill+respawn. Cuando Ctrl+C llega,
+/// kill child y return Ok.
+async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
+    // Canal sync → async para los eventos del watcher. notify es sync;
+    // un std::thread re-envía cada evento al canal tokio.
+    let (notify_tx, notify_rx) = std::sync::mpsc::channel::<notify::Result<notify::Event>>();
+    let mut watcher = notify::recommended_watcher(notify_tx)
+        .map_err(|e| format!("no se pudo crear el file watcher: {e}"))?;
+    use notify::Watcher;
+    watcher
+        .watch(&target.watch_dir, notify::RecursiveMode::Recursive)
+        .map_err(|e| format!("no se pudo watch-ear `{}`: {e}", target.watch_dir.display()))?;
+
+    let (tokio_tx, mut tokio_rx) =
+        tokio::sync::mpsc::unbounded_channel::<notify::Event>();
+    std::thread::spawn(move || {
+        // Ignoramos errores del watcher (`Err`): el SO a veces emite
+        // ruido (paths efímeros, permisos transitorios) que no nos
+        // afecta. Si el canal tokio cierra (`send().is_err()`), el
+        // consumer murió y salimos.
+        for event in notify_rx.into_iter().flatten() {
+            if tokio_tx.send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    let bin = std::env::current_exe()
+        .map_err(|e| format!("no se pudo encontrar el binario `fitz` actual: {e}"))?;
+
+    let mut run_count: u32 = 1;
+    loop {
+        clear_screen_and_banner(&target, run_count);
+
+        // Spawn child con working dir = el watch_dir para que `fitz run`
+        // (sin args, manifest mode) encuentre el manifest. Single-file
+        // mode usa el path absoluto del archivo, así que el cwd no importa.
+        let mut child = match tokio::process::Command::new(&bin)
+            .args(&target.child_args)
+            .current_dir(&target.watch_dir)
+            .spawn()
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("✗ no se pudo spawnear el child: {e}");
+                // Si no podemos spawnear, igual queremos seguir escuchando
+                // por si el user fixea (path inexistente, permisos, etc.).
+                // Esperamos un cambio + retry.
+                drain_until_change(&mut tokio_rx, &target.watch_dir).await;
+                continue;
+            }
+        };
+
+        // Inner loop: esperamos cambio en filesystem, Ctrl+C, o child exit.
+        let restart = tokio::select! {
+            change = wait_for_relevant_change(&mut tokio_rx, &target.watch_dir) => {
+                let path = change;
+                // Debounce: 100ms drain del canal para colapsar saves múltiples.
+                let _ = tokio::time::timeout(
+                    std::time::Duration::from_millis(100),
+                    drain_pending(&mut tokio_rx),
+                )
+                .await;
+                eprintln!(
+                    "\n↻ cambio detectado en {} — reiniciando ...",
+                    relative_to(&path, &target.watch_dir)
+                );
+                true
+            }
+            _ = tokio::signal::ctrl_c() => {
+                eprintln!("\n👋 Ctrl+C recibido — matando child y saliendo");
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                return Ok(());
+            }
+            status = child.wait() => {
+                // El child terminó solo (programa CLI corto, error de tipo, etc.).
+                // Mostramos el status y esperamos un cambio para reiniciar.
+                match status {
+                    Ok(s) if s.success() => {
+                        eprintln!("\n✓ programa terminó OK (exit 0) — esperando cambios ...");
+                    }
+                    Ok(s) => {
+                        eprintln!(
+                            "\n✗ programa terminó con error (exit {}) — esperando cambios ...",
+                            s.code().unwrap_or(-1)
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("\n✗ error esperando al child: {e}");
+                    }
+                }
+                drain_until_change(&mut tokio_rx, &target.watch_dir).await;
+                eprintln!("\n↻ reiniciando ...");
+                false
+            }
+        };
+
+        // Kill del child si seguía vivo (case "restart por cambio").
+        if restart {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+        }
+        run_count += 1;
+    }
+}
+
+/// Espera el próximo evento del watcher que toque un archivo relevante
+/// (`.fitz` o `fitz.toml`, no excluido). Eventos irrelevantes se
+/// drenan silenciosamente.
+async fn wait_for_relevant_change(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Event>,
+    watch_dir: &std::path::Path,
+) -> PathBuf {
+    loop {
+        let Some(ev) = rx.recv().await else {
+            // El canal cerró (el thread del watcher murió). Esto NO debería
+            // pasar en uso normal; tratamos como cambio sintético para que
+            // el loop salga.
+            return watch_dir.to_path_buf();
+        };
+        for p in &ev.paths {
+            if path_is_relevant(p, watch_dir) {
+                return p.clone();
+            }
+        }
+    }
+}
+
+/// Drena eventos en el canal sin bloquear (poll). Usado para el
+/// debounce: tras detectar UN evento, drenamos los que llegan en los
+/// próximos 100ms para colapsar saves múltiples.
+async fn drain_pending(rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Event>) {
+    loop {
+        match rx.try_recv() {
+            Ok(_) => continue,
+            Err(_) => {
+                // Esperamos un poco para que lleguen los próximos eventos
+                // del save múltiple (típico en VSCode: write tmp, rename,
+                // chmod). El timeout exterior corta a 100ms total.
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                if rx.try_recv().is_err() {
+                    return;
+                }
+            }
+        }
+    }
+}
+
+/// Bloquea hasta que llegue un cambio relevante. Versión "loop hasta
+/// que algo pase" usada cuando el child terminó solo y esperamos al
+/// próximo save del user.
+async fn drain_until_change(
+    rx: &mut tokio::sync::mpsc::UnboundedReceiver<notify::Event>,
+    watch_dir: &std::path::Path,
+) {
+    let _ = wait_for_relevant_change(rx, watch_dir).await;
+    // Debounce post-cambio.
+    let _ = tokio::time::timeout(
+        std::time::Duration::from_millis(100),
+        drain_pending(rx),
+    )
+    .await;
+}
+
+/// Decide si un path del evento merece restart. Reglas:
+///
+/// - Sólo `.fitz` o `fitz.toml` (otras extensiones se ignoran).
+/// - Excluye paths bajo `target/`, `.git/`, `node_modules/`,
+///   `.fitz/`, archivos ocultos (`.algo`).
+fn path_is_relevant(path: &std::path::Path, watch_dir: &std::path::Path) -> bool {
+    // Filename check primero (más barato).
+    let is_fitz_file = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|ext| ext == "fitz")
+        .unwrap_or(false);
+    let is_manifest = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == manifest::MANIFEST_FILE)
+        .unwrap_or(false);
+    if !is_fitz_file && !is_manifest {
+        return false;
+    }
+
+    // Componentes excluidos en cualquier nivel.
+    let rel = path.strip_prefix(watch_dir).unwrap_or(path);
+    for component in rel.components() {
+        let std::path::Component::Normal(name) = component else {
+            continue;
+        };
+        let s = name.to_string_lossy();
+        if matches!(
+            s.as_ref(),
+            "target" | ".git" | "node_modules" | ".fitz" | "dist" | "build"
+        ) {
+            return false;
+        }
+        // Cualquier otro componente que arranca con `.` es oculto.
+        // Excepto el archivo final si es `.fitz` literal — pero ya
+        // chequeamos extensión, así que un archivo `.algo.fitz`
+        // (hidden con extensión fitz) sí dispara. Razonable.
+        if s.starts_with('.') && s != "." && s != ".." && !s.ends_with(".fitz") {
+            return false;
+        }
+    }
+    true
+}
+
+/// Para mensajes UX: muestra el path como relativo al watch_dir si
+/// está adentro, o tal cual si está afuera.
+fn relative_to(path: &std::path::Path, base: &std::path::Path) -> String {
+    path.strip_prefix(base)
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| path.display().to_string())
+}
+
+/// Banner UX al arrancar / re-arrancar el child. Limpia la pantalla
+/// (ANSI `\x1b[2J\x1b[H`) si stdout es TTY, sino solo separa con
+/// líneas. Después imprime el run number + el target.
+fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
+    use std::io::IsTerminal;
+    let use_ansi = std::io::stdout().is_terminal();
+    if use_ansi {
+        // `\x1b[2J` borra la pantalla, `\x1b[H` mueve el cursor a
+        // (1,1). Suficiente en terminals modernos (cmd, PowerShell,
+        // Windows Terminal, bash, zsh, fish).
+        print!("\x1b[2J\x1b[H");
+    } else {
+        println!("\n----------------------------------------");
+    }
+    eprintln!(
+        "▶ fitz dev (run #{}) — {}",
+        run_count,
+        target.display
+    );
+    eprintln!();
 }
