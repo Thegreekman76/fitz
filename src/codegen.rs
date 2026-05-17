@@ -4678,7 +4678,7 @@ impl<'a> CodegenCtx<'a> {
 
     // --- R.3: emitir método custom como `impl FooData { fn ... }` --------
     //
-    // El método se emite como `pub fn <name>(&self, p1: T1, ...) -> R { ... }`.
+    // El método se emite como `pub [async] fn <name>(&self, p1: T1, ...) -> R { ... }`.
     // El body se prepara pre-bindeando los fields del tipo como locales
     // (`let <field> = self.<field>.clone();`) — "opción A". Esto hace
     // que las referencias `name` (sin prefijo `self.`) adentro del body
@@ -4688,22 +4688,17 @@ impl<'a> CodegenCtx<'a> {
     //  - El método debe tener `return_type` declarado (deuda 5b.1 —
     //    inferencia de tipos no soportada). Si falta → error claro.
     //  - Params sin anotación → error claro (mismo motivo).
-    //  - async methods (`async fn ...` adentro de `type`) quedan como
-    //    deuda menor en el codegen MVP: emitiríamos `pub async fn` pero
-    //    requiere `#[async_recursion]` y manejo extra de Future.
-    //    Hoy: error explícito si llega un método async.
+    //  - async methods (`async fn ...` adentro de `type`) — habilitados
+    //    post-R.3. Emite `pub async fn`; el caller hace el `.await`
+    //    explícito como con cualquier async fn Fitz. El call site usa
+    //    el patrón "clone-out" para no holdear el MutexGuard a través
+    //    del await (ver `gen_custom_method_call`).
     fn emit_custom_method(
         &mut self,
         type_name: &str,
         sig: &TypeSig,
         method: &crate::ast::MethodDef,
     ) -> Result<(), FitzError> {
-        if method.is_async {
-            return Err(self.err(format!(
-                "método `{}.{}`: async methods en `fitz build` quedan como deuda menor (sub-paso futuro); use `fitz run`",
-                type_name, method.name
-            )));
-        }
         // Resolver firmas de params + return type. Exigimos anotación
         // (igual que fns top-level — 5b.1).
         let mut rust_params: Vec<String> = Vec::with_capacity(method.params.len());
@@ -4734,15 +4729,27 @@ impl<'a> CodegenCtx<'a> {
                 "método `{}.{}`: tipo de retorno no resoluble: {:?}",
                 type_name, method.name, e
             )))?;
+        // Para async methods, el ret type declarado por el usuario es
+        // `T`, pero el `pub async fn` Rust auto-envuelve en
+        // `impl Future<Output = T>`. El interior del body sigue
+        // produciendo `T` puro (no envuelto).
         let ret_rust = rust_type_for(&ret_ty, self.env)?;
 
         // Cabecera Rust del método.
+        // R.3-async: los métodos async toman `self` por valor (no
+        // `&self`). El Future devuelto captura `self` adentro y vive
+        // a través de `.await` sin lifetime issues. Sync sigue
+        // tomando `&self` (más barato, no clona).
+        let async_kw = if method.is_async { "async " } else { "" };
+        let self_kw = if method.is_async { "self" } else { "&self" };
         writeln!(
             &mut self.output,
-            "    pub fn {}(&self, {}) -> {} {{",
-            method.name,
-            rust_params.join(", "),
-            ret_rust
+            "    pub {async_kw}fn {name}({self_kw}, {params}) -> {ret} {{",
+            async_kw = async_kw,
+            self_kw = self_kw,
+            name = method.name,
+            params = rust_params.join(", "),
+            ret = ret_rust
         )
         .unwrap();
 
@@ -4798,16 +4805,26 @@ impl<'a> CodegenCtx<'a> {
 
     // --- R.3: método custom sobre nominal ---------------------------------
     //
-    // El método se emite como `pub fn <name>(&self, p1: T1, ...) -> R`
+    // El método se emite como `pub [async] fn <name>(&self, p1: T1, ...) -> R`
     // dentro de un `impl <Type>Data` (ver `gen_type_def`). El call
-    // sobre `Arc<Mutex<Data>>` se traduce a:
+    // sobre `Arc<Mutex<Data>>` se traduce de dos formas según el
+    // método:
     //
-    //   { let __obj = <obj>.clone(); let __g = __obj.lock().unwrap();
-    //     __g.<method>(<args coerced>) }
+    //  - **Sync**: `{ let __recv = obj.clone(); let __g = __recv.lock().unwrap();
+    //    __g.<method>(args) }`. El lock dura solo lo que dura el call;
+    //    el `&Data` no escapa el bloque.
     //
-    // Patrón "compute first, lock last" no se aplica acá porque los
-    // args se evalúan fuera del scope del lock (los pasamos vía un
-    // bloque externo).
+    //  - **Async**: el lock NO puede cruzar el `.await` porque
+    //    `MutexGuard<std::sync::Mutex<_>>` no es `Send`. Patrón
+    //    "clone-out": clonamos el `Data` adentro del lock y soltamos
+    //    el guard antes del call:
+    //    `{ let __recv = obj.clone(); let __data: Data = { let __g =
+    //    __recv.lock().unwrap(); __g.clone() }; __data.<method>(args) }`.
+    //    El Future devuelto captura `__data` por valor; las colecciones
+    //    Arc<Mutex<...>> adentro del Data siguen siendo refs compartidas,
+    //    así que mutaciones a listas/maps siguen visibles desde el
+    //    receiver original (semántica idéntica al evaluator).
+    //    El `.await` lo emite el caller (Expr::Await en el AST).
     fn gen_custom_method_call(
         &mut self,
         obj_code: &str,
@@ -4836,17 +4853,38 @@ impl<'a> CodegenCtx<'a> {
             .as_ref()
             .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
             .unwrap_or(Type::Null);
+        // Si el método es async, el "tipo de retorno" desde el punto
+        // de vista del checker Fitz es `Future<T>`. El caller hace
+        // `.await` para desempacar a T.
+        let value_ty = if method_def.is_async {
+            Type::Future(Box::new(ret_ty.clone()))
+        } else {
+            ret_ty.clone()
+        };
 
-        // Bloque: clonar el Arc fuera del lock para que el lock no
-        // viva más que un statement; tomar el lock; invocar el método.
         let _ = call_span;
-        let code = format!(
-            "{{ let __recv = ({obj}).clone(); let __g = __recv.lock().unwrap(); __g.{name}({args}) }}",
-            obj = obj_code,
-            name = method_def.name,
-            args = arg_codes.join(", ")
-        );
-        Ok((code, ret_ty))
+        let code = if method_def.is_async {
+            // Patrón clone-out: lock corto adentro del bloque inner,
+            // call al método sobre la copia (sin lock vivo).
+            let data_type = format!("{}Data", type_name);
+            format!(
+                "{{ let __recv = ({obj}).clone(); \
+                 let __data: {data} = {{ let __g = __recv.lock().unwrap(); __g.clone() }}; \
+                 __data.{name}({args}) }}",
+                obj = obj_code,
+                data = data_type,
+                name = method_def.name,
+                args = arg_codes.join(", "),
+            )
+        } else {
+            format!(
+                "{{ let __recv = ({obj}).clone(); let __g = __recv.lock().unwrap(); __g.{name}({args}) }}",
+                obj = obj_code,
+                name = method_def.name,
+                args = arg_codes.join(", "),
+            )
+        };
+        Ok((code, value_ty))
     }
 
     // --- métodos List ----------------------------------------------------

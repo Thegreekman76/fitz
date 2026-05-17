@@ -3311,16 +3311,34 @@ let p = Point { x: 3, y: 4 }
 print(p.doubled_p().show())     // (6, 8)
 ```
 
+**`async fn` adentro de `type`** funciona en `fitz run` y
+`fitz build` (cerrado post-R.3, 2026-05-17). El receiver se
+pasa por valor (clone) al método async para que el Future no
+holdee el lock del Mutex; los Arc<Mutex> internos (listas /
+maps / instancias anidadas) siguen siendo refs compartidas
+como esperás.
+
+```fitz
+type Task {
+    id: Int
+
+    async fn label(prefix: Str) -> Str {
+        sleep(10).await
+        return "{prefix}-{id}"
+    }
+}
+
+let t = Task { id: 7 }
+let l = t.label("step").await    // step-7
+```
+
 **Limitaciones del MVP** (R.3, mini-fase R):
 - Todos los métodos son públicos (sin `pub fn` / `fn` privado).
 - Sin static methods (`Counter::create(...)`).
 - Sin operator overloading (`fn +(self, other)`).
-- `async fn` adentro de `type` parsea OK y funciona con
-  `fitz run`, pero `fitz build` lo rechaza con error claro
-  (deuda menor).
 
 Ver [examples/guide/13b-metodos-custom.fitz](../examples/guide/13b-metodos-custom.fitz)
-para el ejemplo completo.
+para el ejemplo completo (incluye la sección async).
 
 ### Lo que todavía no anda
 

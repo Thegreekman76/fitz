@@ -67,3 +67,23 @@ type Point {
 let p = Point { x: 3, y: 4 }
 print(p.show())                    // (3, 4)
 print(p.doubled_p().show())        // (6, 8)
+
+// --- Métodos async (post-R.3) ---
+// Los métodos pueden ser `async fn`. El call site usa `.await`
+// igual que con cualquier async function Fitz. El método se
+// compila con `pub async fn`; el receiver se pasa por valor
+// (clone) para que el Future no holdee el lock del Mutex
+// adentro de Data, y el binario standalone funciona idéntico
+// al intérprete.
+type Task {
+    id: Int
+
+    async fn label(prefix: Str) -> Str {
+        sleep(10).await
+        return "{prefix}-{id}"
+    }
+}
+
+let t = Task { id: 7 }
+let l = t.label("step").await
+print(l)                           // step-7

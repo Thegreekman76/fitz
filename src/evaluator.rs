@@ -2881,8 +2881,28 @@ async fn invoke_custom_method(
         method_env.lock().define(p.name.clone(), v);
     }
 
-    // Ejecutar el body. `Stmt::Return` rebota como EvalSignal::Return
-    // y lo desempacamos al valor; cualquier otra señal sube.
+    // R.3-async: si el método es async, envolvemos el body en un
+    // `Value::Future` perezoso. El `.await` del caller fuerza la
+    // evaluación. Patrón paralelo a Value::Function async (línea
+    // 2670 aprox).
+    if method.is_async {
+        let owned_body = method.body;
+        let fut: crate::value::FitzFuture = Box::pin(async move {
+            for stmt in &owned_body {
+                match eval_stmt(stmt, method_env.clone()).await {
+                    Ok(_) => {}
+                    Err(EvalSignal::Return(v)) => return Ok(v),
+                    Err(signal) => return Err(signal_to_error(signal)),
+                }
+            }
+            Ok(Value::Null)
+        });
+        return Ok(Value::new_future(fut));
+    }
+
+    // Sync: ejecutar el body. `Stmt::Return` rebota como
+    // EvalSignal::Return y lo desempacamos al valor; cualquier otra
+    // señal sube.
     match eval_block(&method.body, method_env).await {
         Ok(v) => Ok(v),
         Err(EvalSignal::Return(v)) => Ok(v),

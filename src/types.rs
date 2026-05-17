@@ -155,6 +155,20 @@ pub struct NominalInfo {
     /// en la segunda vuelta una vez que todos los nominales son
     /// conocidos.
     pub fields: Option<Vec<ResolvedField>>,
+    /// R.3 — métodos custom resueltos. Cada entry tiene el nombre del
+    /// método, su firma `Function { params, ret }` resuelta a tipos
+    /// Fitz y un flag `is_async` para que `infer_method_call` pueda
+    /// envolver el ret en `Future<T>`. `Vec::new()` si el tipo no
+    /// declara métodos.
+    pub methods: Vec<NominalMethod>,
+}
+
+#[derive(Debug, Clone)]
+pub struct NominalMethod {
+    pub name: String,
+    pub params: Vec<Type>,
+    pub ret: Type,
+    pub is_async: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -197,6 +211,7 @@ impl TypeEnv {
         self.nominals.push(NominalInfo {
             name: name.clone(),
             fields: None,
+            methods: Vec::new(),
         });
         self.by_name.insert(name, id);
         Ok(id)
@@ -205,6 +220,11 @@ impl TypeEnv {
     /// Completa los fields de un nominal (segunda vuelta).
     pub fn set_fields(&mut self, id: TypeId, fields: Vec<ResolvedField>) {
         self.nominals[id.0].fields = Some(fields);
+    }
+
+    /// R.3 — Setea los métodos de un nominal (tercera vuelta).
+    pub fn set_methods(&mut self, id: TypeId, methods: Vec<NominalMethod>) {
+        self.nominals[id.0].methods = methods;
     }
 
     pub fn lookup(&self, name: &str) -> Option<TypeId> {
@@ -643,6 +663,47 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
                 }
             }
             env.set_fields(id, resolved);
+        }
+    }
+
+    // Vuelta 2.5 (R.3): resolver firmas de métodos custom. Después de
+    // tener fields, los métodos pueden referenciar nominales en sus
+    // params/return. Si un método ya tiene firma resuelta (segundo
+    // import / forward ref), saltamos.
+    for stmt in program {
+        if let Stmt::TypeDef { name, methods, .. } = stmt {
+            if methods.is_empty() {
+                continue;
+            }
+            let id = match env.lookup(name) {
+                Some(id) => id,
+                None => continue,
+            };
+            if !env.info(id).methods.is_empty() {
+                continue;
+            }
+            let mut resolved_methods: Vec<NominalMethod> = Vec::with_capacity(methods.len());
+            for m in methods {
+                let mut params = Vec::with_capacity(m.params.len());
+                for p in &m.params {
+                    let pty = match &p.type_ {
+                        Some(t) => resolve_type_expr(t, &env).unwrap_or(Type::Any),
+                        None => Type::Any,
+                    };
+                    params.push(pty);
+                }
+                let ret = match &m.return_type {
+                    Some(r) => resolve_type_expr(r, &env).unwrap_or(Type::Any),
+                    None => Type::Any,
+                };
+                resolved_methods.push(NominalMethod {
+                    name: m.name.clone(),
+                    params,
+                    ret,
+                    is_async: m.is_async,
+                });
+            }
+            env.set_methods(id, resolved_methods);
         }
     }
 
@@ -1830,11 +1891,46 @@ fn infer_method_call(
             Some(infer_map_method(ctx, &k, &v, method, args_ty, span))
         }
         Type::Str => Some(infer_str_method(ctx, method, args_ty, span)),
-        // Gradual: no aplicamos chequeo sobre Any (no sabemos
-        // nada) ni sobre Nominal (los métodos custom sobre `type`
-        // no existen todavía — deuda de 3.2). Quien llame retorna
-        // `Any`.
-        Type::Any | Type::Nominal(_) => None,
+        // R.3 — métodos custom sobre nominal. Buscamos en
+        // `NominalInfo.methods`. Si existe: validamos aridad + tipos
+        // de args, devolvemos el ret type (o `Future<T>` si async).
+        // Si no existe: gradual (None), igual que Any.
+        Type::Nominal(id) => {
+            let info = ctx.types.info(*id);
+            if let Some(nm) = info.methods.iter().find(|m| m.name == method).cloned() {
+                // Aridad.
+                if args_ty.len() != nm.params.len() {
+                    ctx.error_at(span, format!(
+                        "el método `{}.{}` espera {} argumento(s), recibió {}",
+                        info.name, method, nm.params.len(), args_ty.len()
+                    ));
+                    let ret = if nm.is_async { Type::Future(Box::new(nm.ret)) } else { nm.ret };
+                    return Some(ret);
+                }
+                // Tipos de args (compatible_with semánticamente).
+                for (i, (got, expected)) in args_ty.iter().zip(nm.params.iter()).enumerate() {
+                    if !is_compatible(got, expected) {
+                        ctx.error_at(span, format!(
+                            "el método `{}.{}` arg #{}: esperaba `{}`, recibió `{}`",
+                            info.name,
+                            method,
+                            i,
+                            expected.display(ctx.types),
+                            got.display(ctx.types)
+                        ));
+                    }
+                }
+                let ret = if nm.is_async { Type::Future(Box::new(nm.ret)) } else { nm.ret };
+                Some(ret)
+            } else {
+                // Método inexistente sobre nominal → gradual (Any).
+                // El evaluator emitirá error en runtime; el codegen
+                // también. Acá no levantamos para no duplicar.
+                None
+            }
+        }
+        // Gradual: no chequeamos sobre Any (no sabemos nada).
+        Type::Any => None,
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con

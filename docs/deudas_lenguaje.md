@@ -598,8 +598,16 @@ let profile = u.fetch_profile().await
   todavía no anda" y entra como feature implementada).
 
   **Deuda residual visible**:
-  - `async fn` adentro de `type` en `fitz build` (error
-    explícito; intérprete sí lo soporta).
+  - ~~`async fn` adentro de `type` en `fitz build`~~ ✓
+    CERRADO 2026-05-17 (post-R.3). Codegen emite `pub async fn
+    name(self, ...)` con `self` por valor (clone) para no
+    holdear el `MutexGuard` a través del `.await`. El call
+    site usa patrón "clone-out": lock corto + clone del Data
+    + invoke fuera del lock. NominalInfo del TypeEnv suma
+    `methods: Vec<NominalMethod>` para que el checker tipe
+    `instance.async_method().await` como `T` (vía `Future<T>`).
+    Bit-a-bit `fitz run` ↔ `fitz build` validado con sleep +
+    fields + múltiples calls sobre el mismo instance.
   - Visibilidad (`pub fn` / `fn` privado).
   - Static methods (`Counter::create(...)`).
   - Operator overloading.
@@ -713,6 +721,49 @@ Todos chicos, pueden ir en una mini-tanda dedicada.
 - **`Err` con valores no-Str y bindings tipados en codegen** (cap
   14) — refactor del `Result<T, String>` pinned. ~4h. Sub-paso si
   aparece presión.
+
+### Bridge async Fitz ↔ Python asyncio (Fase 8.6)
+
+- **Reescribir bridge con event loop persistente.** Hoy
+  `py_coro_to_fitz_future` (en `src/py_interop.rs`) usa
+  `tokio::task::spawn_blocking` + `asyncio.new_event_loop()` +
+  `run_until_complete(coro)` para cada call. Es funcional pero
+  va a doler bajo carga real:
+  - Cada `<py_call>?.await` paga el costo de **crear y cerrar
+    un event loop nuevo** (cientos de microsegundos, plus el
+    GIL acquire/release).
+  - El `spawn_blocking` consume un thread del blocking pool
+    de tokio (default 512) — cargas con cientos de awaits
+    concurrentes pueden saturarlo.
+  - No hay reuso de conexiones de runtime asyncio (DB pools,
+    HTTP clients) entre calls — cada call ve un loop fresco.
+
+  **Alternativa**: un event loop asyncio dedicado (singleton
+  estático) corriendo en un thread Python persistente, con
+  `asyncio.run_coroutine_threadsafe(coro, loop)` para encolar
+  la corutina desde Rust. El Future Fitz hace `.await` sobre
+  un `tokio::sync::oneshot::Receiver` que el callback del
+  asyncio future completa.
+
+  **Complejidad**: ~6-8h. Requiere:
+  - Inicializar el loop en lazy static (`OnceCell<Loop>` con
+    `Python::attach` para crearlo).
+  - Bootstrap thread Python que corre `loop.run_forever()`.
+  - `run_coroutine_threadsafe` + bridge oneshot.
+  - Cleanup graceful en shutdown del runtime Fitz.
+
+  **Por qué no se cerró en 8.6**: la crate `pyo3-async-runtimes`
+  ofrece `into_future` que hace esto, pero requiere control
+  del tokio runtime (`init_with_runtime` o `#[tokio::main]`).
+  Choca con el tokio que Fitz ya tiene corriendo (current_thread
+  CLI / rt-multi-thread HTTP). Para 8.6 elegimos el "baseline
+  blocking" como trade-off explícito; la versión persistente
+  queda comprometida acá.
+
+  **Tests de validación**: micro-benchmark de 100 awaits
+  secuenciales (mide overhead per-call) + 100 awaits concurrentes
+  (verifica que no satura blocking pool). Debería bajar de
+  ~5ms/call a <0.5ms/call.
 
 ### Robustez interna del compilador (matriz F en `deudas-post-5b.md`)
 
