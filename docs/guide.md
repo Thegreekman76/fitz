@@ -132,7 +132,6 @@ pero el intérprete aún no las ejecuta. Si las tipeás vas a ver un
 error explícito:
 
 - Tuplas (`(1, "a", true)`).
-- Asignación a índice (`xs[0] = v`).
 - Métodos custom declarados por el usuario sobre `type`
   (`type User { ... fn greet() => ... }`).
 
@@ -689,13 +688,47 @@ print(-2 * 3)        // -6
 Los lógicos `and` / `or` también participan de la precedencia (van
 *debajo* de igualdad). Los vemos en el capítulo 6.
 
+### Módulo `%`
+
+`%` calcula el resto de la división entera (R.1.2, mini-fase R).
+Solo válido entre `Int`:
+
+```fitz
+print(10 % 3)     // 1
+print(12 % 4)     // 0
+print(7 % 2)      // 1 — útil para detectar pares/impares
+
+// En condición:
+let n = 8
+if (n % 2 == 0) {
+    print("par")
+}
+```
+
+**Semántica euclidean** (mismo signo del divisor, igual que
+Python — distinto del `%` Rust que es truncate-toward-zero):
+
+```fitz
+print(-7 % 3)     // 2 (NO -1)
+print(7 % -3)     // -2
+```
+
+`n % 0` es **error runtime** (división por cero), no infinity.
+El mismo binario producido por `fitz build` tiene el mismo check
+y emite "división por cero" en lugar de panic crudo de Rust.
+
 ### Lo que todavía no anda
 
-- Módulo (`%`) y resto.
 - Operadores compuestos (`+=`, `-=`, `*=`, `/=`).
 - Operadores de bits (`&`, `|`, `^`, `<<`, `>>`).
+- `%` sobre `Float` (la ambigüedad entre `fmod` y `rem_euclid`
+  requiere decisión de diseño; sub-paso futuro si aparece presión).
 
 Estos están planeados pero el lexer no los tokeniza todavía.
+
+> Lo que **sí anda** y antes era deuda: operador `%` (módulo
+> sobre `Int` con semántica euclidean) implementado en mini-fase
+> R (R.1.2).
 
 ### Ejemplo completo
 
@@ -892,15 +925,56 @@ un string (por ejemplo, JSON inline o un fragmento de código), tenés
 que escaparla — si no, el intérprete intenta interpretar lo que hay
 entre `{` y `}` como una expresión a interpolar.
 
+### Strings multilínea con `"""..."""`
+
+Para mensajes largos, SQL, HTML, JSON inline, etc., usá
+triple-quote (R.1.5, mini-fase R):
+
+```fitz
+let sql = """
+    SELECT u.id, u.name, u.email
+    FROM users u
+    WHERE u.active = true
+    ORDER BY u.created_at DESC
+"""
+print(sql)
+
+// La interpolación sigue funcionando adentro:
+let name = "Fitz"
+let bienvenida = """
+    Hola, {name}!
+    Esta es una bienvenida
+    de varias líneas.
+"""
+```
+
+Características:
+- **Newlines literales** son válidos (no necesitás `\n`).
+- **Comillas dobles aisladas** se preservan literalmente. Solo
+  `"""` (tres seguidas) cierra el string. Útil para embeber
+  JSON con comillas:
+  ```fitz
+  let json = """{"name": "Fitz", "age": 1}"""
+  ```
+- **Mismos escapes** que strings normales (`\n`, `\t`, `\\`,
+  `\"`, `\{`, `\}`).
+- **Interpolación** `{expr}` funciona igual.
+- Indentación: el contenido se preserva tal cual; si querés
+  recortar el indent común usá `.replace(...)` o construilo sin
+  indent.
+
 ### Lo que todavía no anda
 
-- Strings multilínea con `"""..."""`.
 - Comillas simples como alternativa a las dobles.
 - Métodos como `.split(...)`, `.contains(...)`, `.starts_with(...)`
   — los tres básicos (`.upper()`, `.lower()`, `.len()`) sí están,
   y los ves en el [capítulo 13](#13-métodos-y-mutación).
 - Format specifiers dentro de la interpolación (`{ratio:.2f}` y
   similares).
+
+> Lo que **sí anda** y antes era deuda: **strings multilínea
+> `"""..."""`** — cerrado en R.1.5 (mini-fase R). Incluyendo
+> interpolación adentro y preservando newlines literales.
 
 ### Ejemplo completo
 
@@ -1067,30 +1141,46 @@ Como regla cómoda: si tenés que pensarlo dos veces, ponele
 paréntesis. Cuesta dos caracteres y le ahorra trabajo a quien lea el
 código.
 
+### Negación con `not`
+
+`not <expr>` invierte un `Bool`. Útil para hacer condiciones más
+legibles cuando el opuesto es lo que querés expresar:
+
+```fitz
+let active = false
+
+if (not active) {
+    print("inactivo")
+}
+
+// not se aplica antes que las comparaciones, así que:
+let x = 5
+if (not x == 10) {       // ← (not x) == 10 — type error si x:Int
+    print("no es 10")
+}
+
+// Para negar el resultado de una comparación, usá paréntesis:
+if (not (x == 10)) {     // ← negación del Bool resultado
+    print("no es 10")
+}
+```
+
+**`not` exige `Bool` estricto** (no truthy/falsy). `not 0` o
+`not ""` son **type error** — consistente con la decisión de
+diseño "sin truthy/falsy" del lenguaje. El checker estático lo
+caza antes de correr.
+
+Funciona idéntico en `fitz run` y `fitz build`: el codegen emite
+`!` Rust nativo.
+
 ### Lo que todavía no anda
-
-- **`not`** — la negación lógica no está implementada. El lexer la
-  trata como un identificador común, así que `not true` no parsea.
-
-  Mientras llega, podés negar de dos formas:
-
-  ```fitz
-  // Comparando contra el opuesto:
-  active = false
-  if active == false {
-      print("inactivo")
-  }
-
-  // O, mejor, invirtiendo la comparación cuando se puede:
-  age = 10
-  if age >= 18 {
-      print("mayor")
-  }
-  // ...es más claro que `if not (age < 18)`.
-  ```
 
 - **XOR lógico** — no hay `xor`. Si lo necesitás puntualmente,
   `a != b` sobre dos `Bool` te da el mismo resultado.
+
+> Lo que **sí anda** y antes era deuda: operador `not <expr>`
+> implementado en mini-fase R (R.1.1). Sin truthy/falsy, exige
+> `Bool` estricto.
 
 ### Ejemplo completo
 
@@ -1649,6 +1739,33 @@ El **extremo derecho es exclusivo**: `0..5` representa `0, 1, 2, 3, 4`
 Python. Si el rango va al revés (`10..0`), tiene longitud cero —
 nunca itera.
 
+**Rangos inclusivos** con `..=` (R.1.4, mini-fase R):
+
+```fitz
+r2 = 0..=5
+print(len(r2))   // → 6 — incluye el 5
+
+for i in 0..=10 {
+    print(i)     // 0, 1, ..., 10 (11 iteraciones)
+}
+```
+
+`..=` también funciona en patrones de `match`:
+
+```fitz
+fn nota(score: Int) -> Str {
+    return match score {
+        0..=59 => "F"
+        60..=69 => "D"
+        70..=79 => "C"
+        80..=89 => "B"
+        90..=100 => "A"   // matchea 90 hasta 100 inclusive
+        _ => "fuera de rango"
+    }
+}
+print(nota(100))   // → "A"
+```
+
 Los rangos son valores como cualquier otro: podés asignarlos, pasarlos
 a funciones, y compararlos por igualdad. Pero su uso natural es
 iterar, que viene ahora.
@@ -1741,14 +1858,51 @@ usuarios = [
 print(usuarios[0]["name"])   // → Ana
 ```
 
+### Asignación a índice
+
+Mutación posicional con `xs[i] = v` y `m["k"] = v` (R.1.3,
+mini-fase R):
+
+```fitz
+let xs = [1, 2, 3, 4]
+xs[0] = 99           // replace
+xs[2] = 77
+print(xs)            // [99, 2, 77, 4]
+
+let m = {"a": 1, "b": 2}
+m["a"] = 10          // replace existente
+m["c"] = 3           // insert nuevo al final (preserva insertion order)
+print(m)             // {"a": 10, "b": 2, "c": 3}
+```
+
+**Listas**: el índice tiene que ser `Int` en rango `[0, len)`.
+Out-of-bounds o negativo → error runtime claro
+(`índice 5 fuera de rango (lista de tamaño 2)`). Los binarios
+producidos por `fitz build` emiten el mismo error (no panic
+crudo de Rust).
+
+**Maps**: la clave puede ser cualquier tipo hashable (Str, Int,
+Bool, Float, Null). Si la clave existe, se sobreescribe sin
+mover su posición; si no existe, se inserta al final. El
+insertion order se preserva igual que en literales.
+
+Combinado con índice computado:
+
+```fitz
+let nums = [1, 2, 3]
+let i = 0
+while (i < 3) {
+    nums[i] = nums[i] * 10
+    i = i + 1
+}
+print(nums)          // [10, 20, 30]
+```
+
 ### Lo que todavía no anda
 
 - **Métodos sobre listas y mapas** — `xs.push(...)`, `xs.map(...)`,
   `m.get(...)`, etc. ya están vivos desde el paso 4 de Fase 3.
   Los ves en el [capítulo 13](#13-métodos-y-mutación).
-- **Asignación a índice** (`xs[0] = nuevo`, `m["k"] = v`) — sigue
-  siendo deuda. Por ahora la mutación posicional en listas hay que
-  hacerla con `pop`/`push` o reconstruyendo.
 - **`for` sobre mapas**: necesita el tipo `Pair`/`entry`. Si lo
   intentás, el intérprete corta:
 
@@ -1757,8 +1911,13 @@ print(usuarios[0]["name"])   // → Ana
   ```
 
 - **Índices negativos** (`xs[-1]`) al estilo Python.
-- **Rangos inclusivos** (`0..=10`).
 - **Comprehensions** (`[x * 2 for x in xs]`).
+
+> Lo que **sí anda** y antes era deuda: **asignación a índice**
+> (R.1.3) — ver sección "Asignación a índice" arriba. **Rangos
+> inclusivos** (`0..=10`) cerrado en R.1.4 (mini-fase R). Ahora
+> `for i in 0..=10` itera 0..10 inclusive, y `match n { 0..=100
+> => ... }` matchea ambos extremos.
 
 ### Ejemplo completo
 
@@ -2982,9 +3141,6 @@ print(grandes)                     // [12, 20]
 
 ### Lo que todavía no anda
 
-- **Asignación a índice** (`xs[0] = nuevo`, `m["k"] = v`). Mientras
-  tanto, usá `push`/`pop` para listas o reconstruí el mapa con un
-  literal nuevo.
 - **Métodos custom sobre `type`** (`type User { ... fn greet() => "Hola, {name}" }`).
   Hoy escribís funciones globales que reciben la instancia como
   primer argumento.
@@ -2996,8 +3152,10 @@ print(grandes)                     // [12, 20]
   semánticas.
 
 > Lo que **sí anda** y antes era deuda: encadenamiento multi-línea
-> con `.` al inicio de la siguiente línea — cerrado en PreF8.2
-> (parser tolera newlines antes de `.`). Forma idiomática:
+> (cerrado en PreF8.2), **asignación a índice** `xs[0] = v` y
+> `m["k"] = v` (cerrado en R.1.3 mini-fase R, ver
+> [cap 9 sub-sección "Asignación a índice"](#9-listas-mapas-y-rangos)).
+> Forma idiomática del chain multi-línea:
 > ```fitz
 > let nombres = users
 >     .filter(fn(u) => u.active)

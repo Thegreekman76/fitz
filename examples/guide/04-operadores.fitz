@@ -18,6 +18,14 @@ print(-5)
 let x = 10
 print(-x)
 
+// Módulo (R.1.2 mini-fase R). Solo entre Int. Semántica euclidean.
+print(10 % 3)        // 1
+print(12 % 4)        // 0
+print(-7 % 3)        // 2 (NO -1 — euclidean, mismo signo del divisor)
+if (x % 2 == 0) {
+    print("x es par")
+}
+
 // Comparación.
 print(1 < 2)
 print(3 >= 3)

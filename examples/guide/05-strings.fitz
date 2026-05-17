@@ -29,3 +29,20 @@ print("barra: \\")
 
 // Para una llave literal, escapala con \{ y \}.
 print("config: \{ port: 3000 \}")
+
+// Strings multilínea con """...""" (R.1.5, mini-fase R).
+// Newlines literales se preservan; la interpolación sigue
+// funcionando; comillas dobles aisladas adentro se preservan
+// (solo `"""` cierra).
+let sql = """
+SELECT u.id, u.name
+FROM users u
+WHERE u.active = true
+"""
+print(sql)
+
+// Las llaves externas del JSON las escapamos con \{ \} para no
+// chocar con la interpolación de Fitz; las internas {name}/{count}
+// sí se interpolan.
+let json = """\{"name": "{name}", "count": {count}\}"""
+print(json)

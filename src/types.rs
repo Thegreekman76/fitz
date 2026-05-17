@@ -1154,6 +1154,20 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         Type::Any
                     }
                 },
+                // R.1.1 — `not <expr>` exige `Bool` estricto. Sin
+                // truthy/falsy en Fitz: pasar `Int`/`Str`/etc. es
+                // error de tipo (consistente con `assert(cond)` que
+                // también exige Bool estricto).
+                UnaryOpKind::Not => match &t {
+                    Type::Bool | Type::Any => Type::Bool,
+                    other => {
+                        ctx.error_at(*span, format!(
+                            "el operador `not` espera Bool, recibió `{}`",
+                            other.display(ctx.types)
+                        ));
+                        Type::Bool
+                    }
+                },
             }
         }
 
@@ -2173,6 +2187,20 @@ fn infer_binop(
                 }
             }
         }
+        // R.1.2 — operador `%` solo Int. Float % Float queda como
+        // sub-paso futuro (la ambigüedad entre `fmod` y
+        // `rem_euclid` sobre Float requiere decisión de diseño).
+        BinOpKind::Mod => match (lt, rt) {
+            (Type::Int, Type::Int) | (Type::Any, _) | (_, Type::Any) => Type::Int,
+            _ => {
+                ctx.error_at(span, format!(
+                    "el operador `%` espera Int en ambos lados, recibió `{}` y `{}`",
+                    lt.display(ctx.types),
+                    rt.display(ctx.types)
+                ));
+                Type::Int
+            }
+        },
         BinOpKind::Lt | BinOpKind::LtEq | BinOpKind::Gt | BinOpKind::GtEq => {
             // Comparación: numéricos o ambos Str.
             let ok = matches!(
@@ -2376,6 +2404,56 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             "asignación a campo `.{}` sobre `{}`: solo se permite \
                              sobre instancias de un tipo custom",
                             field,
+                            other.display(ctx.types)
+                        ));
+                    }
+                }
+            }
+            // R.1.3 — `objeto[indice] = value` (mini-fase R).
+            // Validar receptor `List<T>` con index `Int`, RHS
+            // compatible con T. O receptor `Map<K, V>` con index
+            // compatible con K, RHS compatible con V.
+            else if let AssignTarget::Index { object, index } = target {
+                let obj_ty = infer_expr(ctx, object);
+                let idx_ty = infer_expr(ctx, index);
+                match &obj_ty {
+                    Type::Any => { /* gradual */ }
+                    Type::List(item_ty) => {
+                        if !is_compatible(&idx_ty, &Type::Int) {
+                            ctx.error_at(*span, format!(
+                                "el índice de `List<{}>` debe ser `Int`, recibió `{}`",
+                                item_ty.display(ctx.types),
+                                idx_ty.display(ctx.types)
+                            ));
+                        }
+                        if !is_compatible(&value_ty, item_ty) {
+                            ctx.error_at(*span, format!(
+                                "la lista contiene `{}`, no se puede asignar `{}`",
+                                item_ty.display(ctx.types),
+                                value_ty.display(ctx.types)
+                            ));
+                        }
+                    }
+                    Type::Map(k_ty, v_ty) => {
+                        if !is_compatible(&idx_ty, k_ty) {
+                            ctx.error_at(*span, format!(
+                                "la clave del map es `{}`, recibió `{}`",
+                                k_ty.display(ctx.types),
+                                idx_ty.display(ctx.types)
+                            ));
+                        }
+                        if !is_compatible(&value_ty, v_ty) {
+                            ctx.error_at(*span, format!(
+                                "el map contiene `{}`, no se puede asignar `{}`",
+                                v_ty.display(ctx.types),
+                                value_ty.display(ctx.types)
+                            ));
+                        }
+                    }
+                    other => {
+                        ctx.error_at(*span, format!(
+                            "asignación a índice `[...] = v` no soportada sobre `{}` \
+                             (solo `List` y `Map`)",
                             other.display(ctx.types)
                         ));
                     }
@@ -3765,6 +3843,135 @@ mod tests {
     #[test]
     fn unary_neg_str_es_error() {
         assert_error_with("let x = -\"hola\"", &["negación", "Int", "Str"]);
+    }
+
+    // ---- R.1.1 — `not` (mini-fase R) ----
+
+    #[test]
+    fn unary_not_sobre_bool_literal_es_ok() {
+        assert_ok("let x: Bool = not true");
+    }
+
+    #[test]
+    fn unary_not_sobre_bool_ident_es_ok() {
+        assert_ok("let active: Bool = false\nlet inactive: Bool = not active");
+    }
+
+    #[test]
+    fn unary_not_sobre_int_es_type_error() {
+        assert_error_with(
+            "let x = not 5",
+            &["not", "Bool", "Int"],
+        );
+    }
+
+    #[test]
+    fn unary_not_sobre_str_es_type_error() {
+        assert_error_with(
+            "let x = not \"hola\"",
+            &["not", "Bool", "Str"],
+        );
+    }
+
+    #[test]
+    fn unary_not_en_condicion_de_if_es_ok() {
+        // Bool en condición ✓.
+        assert_ok("let active = false\nif (not active) { print(\"x\") }");
+    }
+
+    #[test]
+    fn unary_not_anidado_tipa_bool() {
+        // `not not x` con x: Bool → Bool.
+        assert_ok("let x = true\nlet y: Bool = not not x");
+    }
+
+    // ---- R.1.2 — operador `%` (mini-fase R) ----
+
+    #[test]
+    fn op_modulo_int_int_es_ok() {
+        assert_ok("let r: Int = 10 % 3");
+    }
+
+    #[test]
+    fn op_modulo_con_var_int_es_ok() {
+        assert_ok("let n: Int = 100\nlet r: Int = n % 7");
+    }
+
+    #[test]
+    fn op_modulo_con_float_es_type_error() {
+        assert_error_with(
+            "let r = 10.0 % 3",
+            &["%", "Int", "Float"],
+        );
+    }
+
+    #[test]
+    fn op_modulo_con_str_es_type_error() {
+        assert_error_with(
+            "let r = \"hola\" % 3",
+            &["%", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn op_modulo_devuelve_int_no_any() {
+        // El tipo sintetizado tiene que ser Int concreto (no Any),
+        // así que un binding Bool falla — Bool no admite Int.
+        // (Float SÍ admite Int por promoción Int→Float, por eso no
+        // testeamos eso.)
+        assert_error_with(
+            "let r: Bool = 7 % 3",
+            &["Bool", "Int"],
+        );
+    }
+
+    // ---- R.1.3 — asignación a índice (mini-fase R) ----
+
+    #[test]
+    fn assign_index_list_int_int_es_ok() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\nxs[0] = 99",
+        );
+    }
+
+    #[test]
+    fn assign_index_list_str_index_es_error() {
+        // List<T> exige Int en el index.
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\nxs[\"a\"] = 99",
+            &["List", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn assign_index_list_valor_tipo_incorrecto_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\nxs[0] = \"hola\"",
+            &["lista", "Int", "Str"],
+        );
+    }
+
+    #[test]
+    fn assign_index_map_correcto_es_ok() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\nm[\"b\"] = 2",
+        );
+    }
+
+    #[test]
+    fn assign_index_map_key_tipo_incorrecto_es_error() {
+        assert_error_with(
+            "let m: Map<Str, Int> = {\"a\": 1}\nm[42] = 2",
+            &["clave", "Str", "Int"],
+        );
+    }
+
+    #[test]
+    fn assign_index_sobre_no_collection_es_error() {
+        assert_error_with(
+            "let x = 5\nx[0] = 1",
+            &["List", "Map"],
+        );
     }
 
     // ---- Range ----

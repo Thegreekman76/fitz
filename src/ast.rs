@@ -83,10 +83,14 @@ pub enum Expr {
     /// Mapa literal `{"k": v, ...}`, `{}`. Preserva orden de inserción.
     Map(Vec<(Expr, Expr)>, Span),
 
-    /// Rango exclusivo `start..end`. `span` apunta al `..`.
+    /// Rango `start..end` (exclusivo) o `start..=end` (inclusivo).
+    /// `span` apunta al `..` o `..=`. El flag `inclusive` lo aporta
+    /// R.1.4 (mini-fase R) — default `false` mantiene los call sites
+    /// existentes.
     Range {
         start: Box<Expr>,
         end: Box<Expr>,
+        inclusive: bool,
         span: Span,
     },
 
@@ -197,8 +201,7 @@ pub enum StrPart {
 ///
 /// Hasta 3.3 solo soportábamos asignación a un identificador. En 3.4
 /// abrimos asignación a campo (`user.name = "x"`) para destrabar mutación
-/// de instancias. Asignación a índice (`xs[0] = v`) sigue siendo deuda
-/// explícita: cuando entre, se suma una variante acá.
+/// de instancias.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AssignTarget {
     /// `x = ...` — declaración o reasignación de una variable.
@@ -209,6 +212,15 @@ pub enum AssignTarget {
     Field {
         object: Box<Expr>,
         field: String,
+    },
+    /// `objeto[indice] = ...` — asignación a índice de `List` o `Map`
+    /// (R.1.3, mini-fase R). Para `List`, el índice tiene que ser
+    /// `Int` en rango; out-of-bounds → error runtime. Para `Map`, la
+    /// clave puede ser cualquier tipo hashable; si ya existe se
+    /// sobreescribe, si no, se inserta preservando insertion order.
+    Index {
+        object: Box<Expr>,
+        index: Box<Expr>,
     },
 }
 
@@ -424,6 +436,12 @@ impl Stmt {
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOpKind {
     Add, Sub, Mul, Div,
+    /// R.1.2 — operador módulo (`%`). Solo válido sobre `Int`
+    /// en MVP. Semántica euclidean: el resultado tiene siempre
+    /// el mismo signo del divisor (paralelo a Python, distinto
+    /// del `%` Rust que es truncate-toward-zero). `n % 0` →
+    /// error runtime claro.
+    Mod,
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
     And, Or,
 }
@@ -432,6 +450,9 @@ pub enum BinOpKind {
 pub enum UnaryOpKind {
     /// Negación numérica: `-x`.
     Neg,
+    /// Negación lógica: `not x` (R.1.1, mini-fase R). Solo válido
+    /// sobre `Bool`; el checker rechaza cualquier otro tipo.
+    Not,
 }
 
 /// Parámetro formal de una función. El tipo es opcional (tipado gradual).
@@ -565,9 +586,11 @@ pub enum Pattern {
     OkWildcard,
     /// `Err(_)` — matchea cualquier `Result::Err(...)` sin bindear.
     ErrWildcard,
-    /// `start..end` — matchea si el valor es Int y `start <= v < end`.
+    /// `start..end` (exclusivo) o `start..=end` (inclusivo) —
+    /// matchea si el valor es Int y `start <= v < end` (o `<= end`).
     /// Solo Int por ahora (Float complica la representación discreta).
-    Range { start: i64, end: i64 },
+    /// `inclusive` aportado por R.1.4 (mini-fase R).
+    Range { start: i64, end: i64, inclusive: bool },
 }
 
 /// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args..., key=value...)`.
@@ -739,7 +762,9 @@ mod tests {
         // `0..10`
         let r = Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
-            end: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
+            end: Box::new(Expr::Int(10, Span::ZERO)),
+            inclusive: false,
+            span: Span::ZERO,
         };
         match r {
             Expr::Range { start, end, .. } => {
@@ -790,11 +815,12 @@ mod tests {
     #[test]
     fn pattern_range_guarda_extremos_como_int() {
         // `match n { 0..10 => "chico", _ => "grande" }` — solo el patrón.
-        let p = Pattern::Range { start: 0, end: 10 };
+        let p = Pattern::Range { start: 0, end: 10, inclusive: false };
         match p {
-            Pattern::Range { start, end } => {
+            Pattern::Range { start, end, inclusive } => {
                 assert_eq!(start, 0);
                 assert_eq!(end, 10);
+                assert!(!inclusive);
             }
             _ => panic!("se esperaba Range"),
         }

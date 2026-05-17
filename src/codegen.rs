@@ -471,6 +471,10 @@ fn walk_stmt_for_state_refs(
                 AssignTarget::Field { object, .. } => {
                     walk_expr_for_state_refs(object, candidates, locals, refs);
                 }
+                AssignTarget::Index { object, index } => {
+                    walk_expr_for_state_refs(object, candidates, locals, refs);
+                    walk_expr_for_state_refs(index, candidates, locals, refs);
+                }
             }
         }
         Stmt::Return(e, _) | Stmt::Expr(e, _) => {
@@ -3456,6 +3460,10 @@ impl<'a> CodegenCtx<'a> {
             AssignTarget::Field { object, field } => {
                 return self.gen_field_assign(object, field, value);
             }
+            // R.1.3 — `xs[i] = v` / `m["k"] = v` (mini-fase R).
+            AssignTarget::Index { object, index } => {
+                return self.gen_index_assign(object, index, value);
+            }
         };
 
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
@@ -3577,6 +3585,82 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         Ok(())
+    }
+
+    /// R.1.3 — `xs[i] = v` y `m["k"] = v` (mini-fase R).
+    ///
+    /// Para `List<T>`: bounds check explícito + index como `usize`.
+    /// Si index < 0 o >= len, emite panic con mensaje claro (paralelo
+    /// al runtime del intérprete).
+    ///
+    /// Para `Map<K,V>`: linear search (preserva insertion order); si
+    /// la clave existe se sobreescribe, si no, push al final.
+    fn gen_index_assign(
+        &mut self,
+        object: &Expr,
+        index: &Expr,
+        value: &Expr,
+    ) -> Result<(), FitzError> {
+        let (obj_code, obj_ty) = self.gen_expr(object)?;
+        let (idx_code, _idx_ty) = self.gen_expr(index)?;
+        let (rhs_code, rhs_ty) = self.gen_expr(value)?;
+
+        match &obj_ty {
+            Type::List(item_ty) => {
+                let coerced = coerce(&rhs_code, &rhs_ty, item_ty);
+                // **Importante**: evaluar `__idx` y `__val` ANTES de
+                // tomar el lock outer. Si `<<RHS>>` o `<<index>>`
+                // contienen un access al mismo Mutex (ej. `nums[i] =
+                // nums[i] * 10`), un `__g.lock()` outer + un
+                // `nums.lock()` adentro del RHS produciría DEADLOCK
+                // (`std::sync::Mutex` no es reentrante). El patrón
+                // "compute first, lock last" lo evita.
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "{{ \
+                     let __coll = {}.clone(); \
+                     let __idx: i64 = {}; \
+                     let __val = {}; \
+                     let mut __g = __coll.lock().unwrap(); \
+                     let __len = __g.len() as i64; \
+                     if __idx < 0 || __idx >= __len {{ \
+                     panic!(\"índice {{}} fuera de rango (lista de tamaño {{}})\", __idx, __len); \
+                     }} \
+                     __g[__idx as usize] = __val; \
+                     }}",
+                    obj_code, idx_code, coerced
+                )
+                .unwrap();
+                Ok(())
+            }
+            Type::Map(_k_ty, v_ty) => {
+                let coerced = coerce(&rhs_code, &rhs_ty, v_ty);
+                // Mismo patrón compute-first, lock-last que List.
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "{{ \
+                     let __coll = {}.clone(); \
+                     let __k = {}; \
+                     let __v = {}; \
+                     let mut __g = __coll.lock().unwrap(); \
+                     let mut __found = false; \
+                     for (__ek, __ev) in __g.iter_mut() {{ \
+                     if *__ek == __k {{ *__ev = __v.clone(); __found = true; break; }} \
+                     }} \
+                     if !__found {{ __g.push((__k, __v)); }} \
+                     }}",
+                    obj_code, idx_code, coerced
+                )
+                .unwrap();
+                Ok(())
+            }
+            other => Err(self.err_at(object.span(), format!(
+                "asignación a índice `[...] = v` no soportada sobre `{}` (solo List y Map)",
+                type_name(other)
+            ))),
+        }
     }
 
     fn gen_field_assign(
@@ -3789,13 +3873,16 @@ impl<'a> CodegenCtx<'a> {
         //     que list_map en el intérprete.
         // Map como iterable directo NO se soporta (alineado con el
         // intérprete, que también lo rechaza).
-        if let Expr::Range { start, end, .. } = iter {
+        if let Expr::Range { start, end, inclusive, .. } = iter {
             let (start_code, _) = self.gen_expr(start)?;
             let (end_code, _) = self.gen_expr(end)?;
+            // R.1.4: emite `..` o `..=` Rust según el flag. Mismo
+            // operador que el spec del lenguaje.
+            let op = if *inclusive { "..=" } else { ".." };
             self.emit_indent();
             writeln!(
                 &mut self.output,
-                "for mut {var} in ({start_code} as i64)..({end_code} as i64) {{"
+                "for mut {var} in ({start_code} as i64){op}({end_code} as i64) {{"
             )
             .unwrap();
             self.indent += 1;
@@ -4167,6 +4254,32 @@ impl<'a> CodegenCtx<'a> {
                     )))?;
                 Ok((format!("({} {} {})", l, sym, r), t))
             }
+            // R.1.2 — operador `%` con semántica euclidean. Emitimos
+            // `i64::rem_euclid` para paridad bit-a-bit con el
+            // intérprete (mismo signo del divisor). El checker
+            // garantiza ambos lados Int.
+            BinOpKind::Mod => {
+                if !matches!(lt, Type::Int) || !matches!(rt, Type::Int) {
+                    return Err(self.err_at(span, format!(
+                        "operador `%` requiere Int en ambos lados (recibió `{}` y `{}`)",
+                        type_name(&lt),
+                        type_name(&rt)
+                    )));
+                }
+                // El `{}.rem_euclid({})` paniquea si `b == 0`. Lo
+                // envolvemos en un check explícito para emitir el
+                // mismo error que el intérprete ("división por
+                // cero") en lugar de un panic crudo de Rust.
+                Ok((
+                    format!(
+                        "{{ let __a: i64 = {}; let __b: i64 = {}; \
+                         if __b == 0 {{ panic!(\"división por cero\"); }} \
+                         __a.rem_euclid(__b) }}",
+                        lc, rc
+                    ),
+                    Type::Int,
+                ))
+            }
             BinOpKind::Lt | BinOpKind::LtEq | BinOpKind::Gt | BinOpKind::GtEq => {
                 let sym = match op {
                     BinOpKind::Lt => "<",
@@ -4253,6 +4366,10 @@ impl<'a> CodegenCtx<'a> {
         let (code, ty) = self.gen_expr(operand)?;
         match op {
             UnaryOpKind::Neg => Ok((format!("(-{})", code), ty)),
+            // R.1.1 — `not <expr>` emite `!` Rust nativo. El checker
+            // garantiza que el operando tipa `Bool` (o `Any` gradual),
+            // así que `!<bool_expr>` es válido Rust.
+            UnaryOpKind::Not => Ok((format!("(!{})", code), Type::Bool)),
         }
     }
 
@@ -5214,16 +5331,14 @@ impl<'a> CodegenCtx<'a> {
             }
             Pattern::OkWildcard => Ok("Ok(_)".to_string()),
             Pattern::ErrWildcard => Ok("Err(_)".to_string()),
-            Pattern::Range { start, end } => {
-                // Rust acepta patterns `start..end` como exclusivos en
-                // `match` desde 2018, pero solo para tipos primitivos
-                // con `PartialOrd`. Para `i64`, funciona — pero el
-                // pattern requiere ser exhaustivo o tener catch-all.
-                // Para evitar conflictos con la cobertura, emitimos
-                // un guard sobre un binding fresco.
+            Pattern::Range { start, end, inclusive } => {
+                // R.1.4: emitimos `..` o `..=` Rust según el flag.
+                // Ambos `(start..end).contains(&n)` y
+                // `(start..=end).contains(&n)` están en std.
+                let op = if *inclusive { "..=" } else { ".." };
                 Ok(format!(
-                    "__n if ({}i64..{}i64).contains(&__n)",
-                    start, end
+                    "__n if ({}i64{}{}i64).contains(&__n)",
+                    start, op, end
                 ))
             }
         }

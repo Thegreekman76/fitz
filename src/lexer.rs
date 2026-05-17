@@ -46,12 +46,14 @@ pub enum Token {
     Continue,
     And,
     Or,
+    Not, // R.1.1 — `not <expr>` negación lógica prefix
 
     // Operadores
     Plus,     // +
     Minus,    // -
     Star,     // *
     Slash,    // /
+    Percent,  // % — operador módulo (R.1.2)
     Eq,       // =
     EqEq,     // ==
     NotEq,    // !=
@@ -63,6 +65,7 @@ pub enum Token {
     FatArrow, // =>
     Question, // ?
     DotDot,   // ..
+    DotDotEq, // ..= (R.1.4: rangos inclusivos)
 
     // Delimitadores
     LParen,   // (
@@ -343,10 +346,26 @@ impl Lexer {
     /// Lee un string entre comillas. Soporta escapes básicos: \n \t \r \\ \" \{ \}
     /// La interpolación `"Hola {name}"` se deja "cruda" en el contenido — el
     /// parser/evaluador la procesa más tarde.
+    ///
+    /// **R.1.5 (mini-fase R)**: además del modo "comilla simple", soporta
+    /// **triple-quote** `"""..."""` para strings multilínea. Si tras el
+    /// primer `"` vienen dos `"` más, entramos a modo triple: newlines
+    /// son válidos adentro y el cierre es `"""` (tres comillas seguidas).
+    /// Interpolación `{expr}` sigue funcionando igual.
     fn read_string(&mut self) -> FitzResult<Token> {
         let start_line = self.line;
         let start_col = self.column;
         self.advance(); // consumir comilla de apertura "
+
+        // R.1.5 — modo triple-quote. Si los próximos dos chars también
+        // son `"`, estamos en `"""..."""`. Los consumimos y delegamos
+        // a la lectura multilínea.
+        if self.peek() == Some('"') && self.peek_next() == Some('"') {
+            self.advance();
+            self.advance();
+            return self.read_triple_string(start_line, start_col);
+        }
+
         let mut s = String::new();
         loop {
             match self.peek() {
@@ -419,6 +438,92 @@ impl Lexer {
         }
     }
 
+    /// R.1.5 — lee el contenido de un string multilínea `"""..."""`.
+    /// Las tres comillas iniciales ya fueron consumidas. Diferencias
+    /// vs `read_string`:
+    ///
+    /// - **Newlines** son válidos adentro (se preservan en el
+    ///   contenido tal cual, sin requerir `\n`).
+    /// - **Cierre** es `"""` (tres comillas seguidas).
+    /// - Las **comillas simples y dobles aisladas** dentro del string
+    ///   se preservan literalmente; solo cierran cuando aparecen 3
+    ///   seguidas.
+    /// - Mismos escapes que strings normales (`\n`, `\t`, `\\`, `\"`,
+    ///   `\{`, `\}`). Útil si necesitás `"""` literal adentro:
+    ///   `\"""`.
+    /// - **Interpolación** `{expr}` sigue funcionando — el contenido
+    ///   se pasa "crudo" al parser igual que en strings normales.
+    fn read_triple_string(
+        &mut self,
+        start_line: usize,
+        start_col: usize,
+    ) -> FitzResult<Token> {
+        let mut s = String::new();
+        loop {
+            // Detectar cierre `"""`: si el char actual y los dos
+            // siguientes son `"`, terminamos.
+            if self.peek() == Some('"')
+                && self.peek_next() == Some('"')
+                && self.chars.get(self.pos + 2).copied() == Some('"')
+            {
+                self.advance();
+                self.advance();
+                self.advance();
+                return Ok(Token::Str(s));
+            }
+            match self.peek() {
+                Some('\\') => {
+                    self.advance();
+                    match self.advance() {
+                        Some('n') => s.push('\n'),
+                        Some('t') => s.push('\t'),
+                        Some('r') => s.push('\r'),
+                        Some('\\') => s.push('\\'),
+                        Some('"') => s.push('"'),
+                        Some('{') => {
+                            s.push('\\');
+                            s.push('{');
+                        }
+                        Some('}') => {
+                            s.push('\\');
+                            s.push('}');
+                        }
+                        Some(other) => {
+                            return Err(FitzError::new(
+                                ErrorKind::UnexpectedChar(other),
+                                self.line,
+                                self.column,
+                                format!("Secuencia de escape inválida: '\\{}'", other),
+                            ));
+                        }
+                        None => {
+                            return Err(FitzError::new(
+                                ErrorKind::UnterminatedString,
+                                start_line,
+                                start_col,
+                                "String multilínea sin cerrar (terminó después de '\\')",
+                            ));
+                        }
+                    }
+                }
+                // Newline LITERAL — válido adentro de triple-quote.
+                // Se preserva tal cual en el contenido.
+                Some(c) => {
+                    s.push(c);
+                    self.advance();
+                }
+                None => {
+                    return Err(FitzError::new(
+                        ErrorKind::UnterminatedString,
+                        start_line,
+                        start_col,
+                        "String multilínea sin cerrar — falta `\"\"\"` de cierre",
+                    ));
+                }
+            }
+        }
+    }
+
     /// Lee un identificador (letras + dígitos + '_') y decide si es keyword.
     fn read_identifier_or_keyword(&mut self) -> Token {
         let start_pos = self.pos;
@@ -454,6 +559,7 @@ impl Lexer {
             "continue" => Token::Continue,
             "and" => Token::And,
             "or" => Token::Or,
+            "not" => Token::Not,
             _ => Token::Ident(s),
         }
     }
@@ -493,6 +599,12 @@ impl Lexer {
             '/' => {
                 self.advance();
                 Token::Slash
+            }
+            '%' => {
+                // R.1.2 — operador módulo. Single char, sin
+                // variantes compuestas (%= llega con R.2.3).
+                self.advance();
+                Token::Percent
             }
             '=' => {
                 self.advance();
@@ -548,7 +660,15 @@ impl Lexer {
                 self.advance();
                 if self.peek() == Some('.') {
                     self.advance();
-                    Token::DotDot
+                    // R.1.4: `..=` para rangos inclusivos. El check de
+                    // `..` viene primero, después miramos si el char
+                    // siguiente es `=` para upgrade a DotDotEq.
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Token::DotDotEq
+                    } else {
+                        Token::DotDot
+                    }
                 } else {
                     Token::Dot
                 }
@@ -699,6 +819,7 @@ mod tests {
             ("continue", Token::Continue),
             ("and", Token::And),
             ("or", Token::Or),
+            ("not", Token::Not),
         ];
         for (src, expected) in cases {
             assert_eq!(toks(src), vec![expected.clone(), Token::EOF], "src = {}", src);
@@ -747,6 +868,54 @@ mod tests {
     #[test]
     fn strings_with_escape_sequences() {
         assert_eq!(toks(r#""Hola""#), vec![Token::Str("Hola".into()), Token::EOF]);
+    }
+
+    // ---- R.1.5 — strings multilínea `"""..."""` (mini-fase R) ----
+
+    #[test]
+    fn triple_string_simple() {
+        let src = "\"\"\"hola\"\"\"";
+        assert_eq!(
+            toks(src),
+            vec![Token::Str("hola".into()), Token::EOF],
+        );
+    }
+
+    #[test]
+    fn triple_string_con_newlines_los_preserva() {
+        let src = "\"\"\"linea uno\nlinea dos\"\"\"";
+        assert_eq!(
+            toks(src),
+            vec![
+                Token::Str("linea uno\nlinea dos".into()),
+                Token::EOF
+            ],
+        );
+    }
+
+    #[test]
+    fn triple_string_vacio() {
+        let src = "\"\"\"\"\"\"";
+        assert_eq!(toks(src), vec![Token::Str("".into()), Token::EOF]);
+    }
+
+    #[test]
+    fn triple_string_con_comilla_doble_interna_se_preserva() {
+        // `"""a "b" c"""` → contenido `a "b" c`. La comilla interna
+        // sola no cierra; solo `"""` consecutivas cierran.
+        let src = "\"\"\"a \"b\" c\"\"\"";
+        assert_eq!(
+            toks(src),
+            vec![Token::Str("a \"b\" c".into()), Token::EOF],
+        );
+    }
+
+    #[test]
+    fn triple_string_sin_cerrar_es_error() {
+        let src = "\"\"\"sin cerrar";
+        let res = tokenize(src);
+        let err = res.unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnterminatedString));
         assert_eq!(
             toks(r#""linea\ndos""#),
             vec![Token::Str("linea\ndos".into()), Token::EOF]

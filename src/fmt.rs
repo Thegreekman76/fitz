@@ -535,6 +535,7 @@ fn fmt_assign(
     let has_let = match target {
         AssignTarget::Ident(_) => stmt_has_let_keyword(ctx.source, span),
         AssignTarget::Field { .. } => false, // `obj.f = v` nunca lleva let
+        AssignTarget::Index { .. } => false, // `xs[i] = v` nunca lleva let
     };
 
     if has_let {
@@ -556,6 +557,12 @@ fn fmt_assign_target(ctx: &mut FmtCtx, target: &AssignTarget) {
             fmt_expr(ctx, object);
             ctx.write(".");
             ctx.write(field);
+        }
+        AssignTarget::Index { object, index } => {
+            fmt_expr(ctx, object);
+            ctx.write("[");
+            fmt_expr(ctx, index);
+            ctx.write("]");
         }
     }
 }
@@ -692,6 +699,7 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
         Expr::UnaryOp { op, operand, .. } => {
             match op {
                 UnaryOpKind::Neg => ctx.write("-"),
+                UnaryOpKind::Not => ctx.write("not "),
             }
             fmt_expr_with_parens_if_needed(ctx, operand);
         }
@@ -814,6 +822,7 @@ fn binop_str(op: &BinOpKind) -> &'static str {
         BinOpKind::Sub => "-",
         BinOpKind::Mul => "*",
         BinOpKind::Div => "/",
+        BinOpKind::Mod => "%",
         BinOpKind::Eq => "==",
         BinOpKind::NotEq => "!=",
         BinOpKind::Lt => "<",
@@ -897,9 +906,9 @@ fn fmt_pattern(ctx: &mut FmtCtx, pat: &Pattern) {
         }
         Pattern::OkWildcard => ctx.write("Ok(_)"),
         Pattern::ErrWildcard => ctx.write("Err(_)"),
-        Pattern::Range { start, end } => {
+        Pattern::Range { start, end, inclusive } => {
             ctx.write(&start.to_string());
-            ctx.write("..");
+            ctx.write(if *inclusive { "..=" } else { ".." });
             ctx.write(&end.to_string());
         }
     }

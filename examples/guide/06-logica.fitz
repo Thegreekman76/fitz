@@ -26,3 +26,18 @@ print(true and ruido())    // imprime "¡me llamaron!" y luego "true"
 // Precedencia: `and` ata más fuerte que `or`.
 print(true or false and false)     // true: (false and false) se resuelve primero
 print((true or false) and false)   // false: los paréntesis cambian el orden
+
+// Negación con `not` (R.1.1, mini-fase R). Exige Bool estricto;
+// `not 0` o `not ""` son type error (sin truthy/falsy).
+let active = false
+print(not active)                  // true
+print(not not active)              // false (doble negación)
+
+if (not active) {
+    print("inactivo — flag al revés")
+}
+
+// not se aplica antes que las comparaciones, así que para negar
+// el RESULTADO de una comparación hace falta paréntesis:
+let n = 5
+print(not (n == 10))               // true: niega el bool resultante

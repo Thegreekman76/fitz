@@ -350,16 +350,19 @@ impl Parser {
         Ok(left)
     }
 
-    /// `start..end` — rango exclusivo. `span` apunta al `..`.
+    /// `start..end` (exclusivo) o `start..=end` (inclusivo, R.1.4).
+    /// `span` apunta al `..` o `..=`.
     fn range_expr(&mut self) -> FitzResult<Expr> {
         let start = self.term()?;
-        if !matches!(self.peek(), Token::DotDot) {
-            return Ok(start);
-        }
+        let inclusive = match self.peek() {
+            Token::DotDot => false,
+            Token::DotDotEq => true,
+            _ => return Ok(start),
+        };
         let span = self.cur_span();
-        self.advance(); // consume '..'
+        self.advance(); // consume '..' o '..='
         let end = self.term()?;
-        if matches!(self.peek(), Token::DotDot) {
+        if matches!(self.peek(), Token::DotDot | Token::DotDotEq) {
             return Err(self.error(
                 ErrorKind::InvalidSyntax,
                 "los rangos no se encadenan — usá paréntesis si querés un rango de rangos",
@@ -368,6 +371,7 @@ impl Parser {
         Ok(Expr::Range {
             start: Box::new(start),
             end: Box::new(end),
+            inclusive,
             span,
         })
     }
@@ -428,6 +432,8 @@ impl Parser {
         let op = match self.peek() {
             Token::Star => BinOpKind::Mul,
             Token::Slash => BinOpKind::Div,
+            // R.1.2 — `%` tiene la misma precedencia que `*` y `/`.
+            Token::Percent => BinOpKind::Mod,
             _ => return None,
         };
         let span = self.cur_span();
@@ -435,19 +441,38 @@ impl Parser {
         Some((op, span))
     }
 
-    /// Unary prefijo `-x`. `span` apunta al `-`.
+    /// Unary prefijo: `-x` (negación numérica) o `not x` (negación
+    /// lógica, R.1.1). `span` apunta al operador. Ambos tienen la
+    /// misma precedencia (más alta que comparación, debajo de
+    /// postfix), así que `not x == 1` parsea como `not (x == 1)`
+    /// si quisiéramos eso — pero la asociatividad real es
+    /// `(not x) == 1`. Para evitar la ambigüedad, **`not` tiene
+    /// precedencia más alta que `==`/`!=`**: `not x == 1` parsea
+    /// como `(not x) == 1`. Para el otro orden, usar paréntesis:
+    /// `not (x == 1)`.
     fn unary(&mut self) -> FitzResult<Expr> {
-        if matches!(self.peek(), Token::Minus) {
-            let span = self.cur_span();
-            self.advance();
-            let operand = self.unary()?;
-            Ok(Expr::UnaryOp {
-                op: UnaryOpKind::Neg,
-                operand: Box::new(operand),
-                span,
-            })
-        } else {
-            self.postfix()
+        match self.peek() {
+            Token::Minus => {
+                let span = self.cur_span();
+                self.advance();
+                let operand = self.unary()?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOpKind::Neg,
+                    operand: Box::new(operand),
+                    span,
+                })
+            }
+            Token::Not => {
+                let span = self.cur_span();
+                self.advance();
+                let operand = self.unary()?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOpKind::Not,
+                    operand: Box::new(operand),
+                    span,
+                })
+            }
+            _ => self.postfix(),
         }
     }
 
@@ -969,11 +994,16 @@ impl Parser {
             let target = match lhs {
                 Expr::Ident(n, _) => AssignTarget::Ident(n),
                 Expr::Field { object, field, .. } => AssignTarget::Field { object, field },
+                // R.1.3 — `xs[i] = v` y `m["k"] = v` (mini-fase R).
+                // El parser ya construyó `Expr::Index { object, index }`
+                // como parte del postfix; lo "destruimos" acá para
+                // armar el `AssignTarget::Index`.
+                Expr::Index { object, index, .. } => AssignTarget::Index { object, index },
                 _ => {
                     return Err(self.error(
                         ErrorKind::InvalidSyntax,
-                        "destino de asignación no soportado (solo identificador \
-                         o expr.campo)",
+                        "destino de asignación no soportado (solo identificador, \
+                         `expr.campo` o `expr[indice]`)",
                     ));
                 }
             };
@@ -1544,15 +1574,18 @@ impl Parser {
         }
     }
 
-    /// Después de consumir un Int (posiblemente negativo), peek `..`:
-    /// si está, parsea el segundo extremo y devuelve `Pattern::Range`;
-    /// si no, devuelve `Pattern::Int(start)` sin más.
-    /// El extremo derecho admite `-Int` también.
+    /// Después de consumir un Int (posiblemente negativo), peek `..`
+    /// o `..=`: si está, parsea el segundo extremo y devuelve
+    /// `Pattern::Range`; si no, devuelve `Pattern::Int(start)` sin
+    /// más. El extremo derecho admite `-Int` también. R.1.4 sumó
+    /// soporte de `..=` (rango inclusivo).
     fn try_int_or_range(&mut self, start: i64) -> FitzResult<Pattern> {
-        if !matches!(self.peek(), Token::DotDot) {
-            return Ok(Pattern::Int(start));
-        }
-        self.advance(); // consume '..'
+        let inclusive = match self.peek() {
+            Token::DotDot => false,
+            Token::DotDotEq => true,
+            _ => return Ok(Pattern::Int(start)),
+        };
+        self.advance(); // consume '..' o '..='
         let end = match self.peek().clone() {
             Token::Int(n) => {
                 self.advance();
@@ -1580,7 +1613,7 @@ impl Parser {
                 ));
             }
         };
-        Ok(Pattern::Range { start, end })
+        Ok(Pattern::Range { start, end, inclusive })
     }
 
     /// `type Name { field: TypeExpr [= default], ... }`.
@@ -2722,6 +2755,198 @@ mod tests {
                 }), span: Span::ZERO,
             }
         );
+    }
+
+    // ---------------- R.1.1 — `not` (mini-fase R) ----------------
+
+    #[test]
+    fn unary_not_parsea_sobre_bool_literal() {
+        assert_eq!(
+            parse_expr("not true").unwrap(),
+            Expr::UnaryOp {
+                op: UnaryOpKind::Not,
+                operand: Box::new(Expr::Bool(true, Span::ZERO)),
+                span: Span::ZERO,
+            }
+        );
+    }
+
+    #[test]
+    fn unary_not_parsea_sobre_ident() {
+        assert_eq!(
+            parse_expr("not active").unwrap(),
+            Expr::UnaryOp {
+                op: UnaryOpKind::Not,
+                operand: Box::new(Expr::Ident("active".into(), Span::ZERO)),
+                span: Span::ZERO,
+            }
+        );
+    }
+
+    #[test]
+    fn double_unary_not_nests() {
+        // not not x → not(not x)
+        assert_eq!(
+            parse_expr("not not x").unwrap(),
+            Expr::UnaryOp {
+                op: UnaryOpKind::Not,
+                operand: Box::new(Expr::UnaryOp {
+                    op: UnaryOpKind::Not,
+                    operand: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
+            }
+        );
+    }
+
+    #[test]
+    fn unary_not_tiene_precedencia_mayor_que_eq() {
+        // `not x == y` → `(not x) == y` (asociatividad left-to-right
+        // del unary, mayor precedencia que ==).
+        let expr = parse_expr("not x == y").unwrap();
+        // El nodo raíz es BinOp Eq con left = UnaryOp Not.
+        match expr {
+            Expr::BinOp { op, left, .. } => {
+                assert_eq!(op, BinOpKind::Eq);
+                match *left {
+                    Expr::UnaryOp { op: UnaryOpKind::Not, .. } => {}
+                    other => panic!("esperaba UnaryOp Not, fue {:?}", other),
+                }
+            }
+            other => panic!("esperaba BinOp Eq, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn unary_not_en_condicion_de_if() {
+        // `if not active { ... }` parsea OK.
+        let stmt = parse_one_stmt("if (not active) { print(\"x\") }");
+        match stmt {
+            Stmt::Assign { .. } | Stmt::Expr(_, _) => {
+                // Stmt::If se modela como Stmt::Expr(Expr::If, _).
+            }
+            other => panic!("esperaba Stmt::Expr(If), fue {:?}", other),
+        }
+    }
+
+    // ---------------- R.1.2 — operador `%` (mini-fase R) ----------------
+
+    #[test]
+    fn op_modulo_parsea_con_misma_precedencia_que_mul() {
+        // 10 + 3 % 2 → 10 + (3 % 2)
+        let expr = parse_expr("10 + 3 % 2").unwrap();
+        match expr {
+            Expr::BinOp { op: BinOpKind::Add, right, .. } => match *right {
+                Expr::BinOp { op: BinOpKind::Mod, .. } => {}
+                other => panic!("esperaba BinOp Mod en right, fue {:?}", other),
+            },
+            other => panic!("esperaba BinOp Add raíz, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn op_modulo_left_associative_con_mul() {
+        // 10 % 3 * 2 → (10 % 3) * 2 (left-to-right entre mismos
+        // niveles de precedencia).
+        let expr = parse_expr("10 % 3 * 2").unwrap();
+        match expr {
+            Expr::BinOp { op: BinOpKind::Mul, left, .. } => match *left {
+                Expr::BinOp { op: BinOpKind::Mod, .. } => {}
+                other => panic!("esperaba BinOp Mod en left, fue {:?}", other),
+            },
+            other => panic!("esperaba BinOp Mul raíz, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn op_modulo_simple() {
+        let expr = parse_expr("7 % 3").unwrap();
+        assert!(matches!(
+            expr,
+            Expr::BinOp { op: BinOpKind::Mod, .. }
+        ));
+    }
+
+    // ---------------- R.1.3 — asignación a índice (mini-fase R) ----------------
+
+    #[test]
+    fn assign_index_list_parsea() {
+        let stmt = parse_one_stmt("xs[0] = 99");
+        match stmt {
+            Stmt::Assign { target: AssignTarget::Index { object, index }, value, .. } => {
+                assert!(matches!(*object, Expr::Ident(ref n, _) if n == "xs"));
+                assert!(matches!(*index, Expr::Int(0, _)));
+                assert!(matches!(value, Expr::Int(99, _)));
+            }
+            other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assign_index_map_str_key_parsea() {
+        let stmt = parse_one_stmt("m[\"a\"] = 10");
+        match stmt {
+            Stmt::Assign { target: AssignTarget::Index { object, index }, value, .. } => {
+                assert!(matches!(*object, Expr::Ident(ref n, _) if n == "m"));
+                assert!(matches!(*index, Expr::Str(ref s, _) if s == "a"));
+                assert!(matches!(value, Expr::Int(10, _)));
+            }
+            other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn assign_index_con_expresion_compleja_como_index() {
+        // xs[i + 1] = ...
+        let stmt = parse_one_stmt("xs[i + 1] = 99");
+        match stmt {
+            Stmt::Assign { target: AssignTarget::Index { index, .. }, .. } => {
+                assert!(matches!(*index, Expr::BinOp { op: BinOpKind::Add, .. }));
+            }
+            other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
+        }
+    }
+
+    // ---------------- R.1.4 — rangos inclusivos `..=` (mini-fase R) ----------------
+
+    #[test]
+    fn range_inclusive_expr_parsea() {
+        let expr = parse_expr("0..=10").unwrap();
+        match expr {
+            Expr::Range { start, end, inclusive, .. } => {
+                assert!(matches!(*start, Expr::Int(0, _)));
+                assert!(matches!(*end, Expr::Int(10, _)));
+                assert!(inclusive, "..= debe parsear como inclusive");
+            }
+            other => panic!("esperaba Expr::Range, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn range_exclusive_sigue_andando() {
+        let expr = parse_expr("0..10").unwrap();
+        match expr {
+            Expr::Range { inclusive, .. } => {
+                assert!(!inclusive, ".. (sin =) debe parsear como exclusive");
+            }
+            other => panic!("esperaba Expr::Range, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn range_inclusive_pattern_en_match() {
+        // 0..=59 en pattern de match.
+        let stmt = parse_one_stmt("let r = match n { 0..=59 => \"F\", _ => \"otro\" }");
+        match stmt {
+            Stmt::Assign { value: Expr::Match { arms, .. }, .. } => {
+                match &arms[0].pattern {
+                    Pattern::Range { start: 0, end: 59, inclusive: true } => {}
+                    other => panic!("esperaba Range inclusive 0..=59, fue {:?}", other),
+                }
+            }
+            other => panic!("esperaba Stmt::Assign con Match, fue {:?}", other),
+        }
     }
 
     #[test]
@@ -4457,7 +4682,7 @@ mod tests {
             parse_expr("0..10").unwrap(),
             Expr::Range {
                 start: Box::new(Expr::Int(0, Span::ZERO)),
-                end: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
+                end: Box::new(Expr::Int(10, Span::ZERO)), inclusive: false, span: Span::ZERO,
             },
         );
     }
@@ -4473,7 +4698,7 @@ mod tests {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Ident("b".into(), Span::ZERO)),
                     right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                }), inclusive: false, span: Span::ZERO,
             },
         );
     }
@@ -4488,7 +4713,7 @@ mod tests {
                 op: BinOpKind::Lt,
                 left: Box::new(Expr::Range {
                     start: Box::new(Expr::Int(0, Span::ZERO)),
-                    end: Box::new(Expr::Ident("n".into(), Span::ZERO)), span: Span::ZERO,
+                    end: Box::new(Expr::Ident("n".into(), Span::ZERO)), inclusive: false, span: Span::ZERO,
                 }),
                 right: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
             },
@@ -4510,7 +4735,7 @@ mod tests {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(3, Span::ZERO)),
                     right: Box::new(Expr::Int(4, Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                }), inclusive: false, span: Span::ZERO,
             },
         );
     }
@@ -4532,7 +4757,7 @@ mod tests {
                     op: UnaryOpKind::Neg,
                     operand: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
                 }),
-                end: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
+                end: Box::new(Expr::Int(3, Span::ZERO)), inclusive: false, span: Span::ZERO,
             },
         );
     }
@@ -4659,7 +4884,7 @@ mod tests {
                     iter,
                     Expr::Range {
                         start: Box::new(Expr::Int(0, Span::ZERO)),
-                        end: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
+                        end: Box::new(Expr::Int(10, Span::ZERO)), inclusive: false, span: Span::ZERO,
                     },
                 );
                 assert_eq!(body.len(), 1);
@@ -4720,7 +4945,7 @@ mod tests {
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
-                assert_eq!(arms[0].pattern, Pattern::Range { start: 0, end: 10 });
+                assert_eq!(arms[0].pattern, Pattern::Range { start: 0, end: 10, inclusive: false });
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -4735,8 +4960,8 @@ mod tests {
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 3);
-                assert_eq!(arms[0].pattern, Pattern::Range { start: -10, end: 0 });
-                assert_eq!(arms[1].pattern, Pattern::Range { start: 0, end: 10 });
+                assert_eq!(arms[0].pattern, Pattern::Range { start: -10, end: 0, inclusive: false });
+                assert_eq!(arms[1].pattern, Pattern::Range { start: 0, end: 10, inclusive: false });
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }
@@ -4749,7 +4974,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                assert_eq!(arms[0].pattern, Pattern::Range { start: -5, end: -1 });
+                assert_eq!(arms[0].pattern, Pattern::Range { start: -5, end: -1, inclusive: false });
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }

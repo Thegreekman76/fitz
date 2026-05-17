@@ -1419,6 +1419,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 // (la anotación del field está en el `type` declarado,
                 // que el evaluator hoy no valida en runtime — gradual).
                 AssignTarget::Field { .. } => v,
+                // Para `xs[i] = v` la anotación de tipo del binding
+                // no aplica (es indexing, no declaración).
+                AssignTarget::Index { .. } => v,
             };
             match target {
                 AssignTarget::Ident(name) => {
@@ -1470,6 +1473,78 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                                 format!(
                                     "el tipo `{}` no tiene un campo llamado `{}`",
                                     type_name, field
+                                ),
+                            )));
+                        }
+                    }
+                }
+                // R.1.3 — `xs[i] = v` / `m["k"] = v`. Dispatch sobre
+                // tipo del receptor en runtime: List (bounds check)
+                // o Map (insert/replace preservando insertion order).
+                AssignTarget::Index { object, index } => {
+                    let receiver = eval_expr(object, env.clone()).await?;
+                    let idx_value = eval_expr(index, env.clone()).await?;
+                    match receiver {
+                        Value::List(items) => {
+                            let idx = match idx_value {
+                                Value::Int(n) => n,
+                                other => {
+                                    return Err(EvalSignal::Error(FitzError::new(
+                                        ErrorKind::TypeMismatch {
+                                            expected: "Int".into(),
+                                            found: other.type_name().into(),
+                                        },
+                                        0, 0,
+                                        format!(
+                                            "el índice de una lista debe ser Int, recibió `{}`",
+                                            other.type_name()
+                                        ),
+                                    )));
+                                }
+                            };
+                            let mut borrowed = items.lock();
+                            let len = borrowed.len() as i64;
+                            if idx < 0 || idx >= len {
+                                drop(borrowed);
+                                return Err(EvalSignal::Error(FitzError::new(
+                                    ErrorKind::InvalidSyntax,
+                                    0, 0,
+                                    format!(
+                                        "índice {} fuera de rango (lista de tamaño {})",
+                                        idx, len
+                                    ),
+                                )));
+                            }
+                            borrowed[idx as usize] = v;
+                        }
+                        Value::Map(pairs) => {
+                            // Linear search por la clave (mismo modelo
+                            // que `m.get` y la igualdad de Value). Si
+                            // existe, sobreescribir el slot — preserva
+                            // insertion order. Si no, push al final.
+                            let mut borrowed = pairs.lock();
+                            let mut found = false;
+                            for (k, slot) in borrowed.iter_mut() {
+                                if *k == idx_value {
+                                    *slot = v.clone();
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                borrowed.push((idx_value, v));
+                            }
+                        }
+                        other => {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::TypeMismatch {
+                                    expected: "List o Map".into(),
+                                    found: other.type_name().into(),
+                                },
+                                0, 0,
+                                format!(
+                                    "no se puede asignar por índice a un valor de tipo `{}`",
+                                    other.type_name()
                                 ),
                             )));
                         }
@@ -2209,12 +2284,19 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // `start..end` — ambos extremos tienen que ser Int (no hay rangos
         // de Float). El rango se materializa como `Value::Range`; la
         // iteración real (cuando se usa en `for`) ocurre en Stmt::For.
-        Expr::Range { start, end, .. } => {
+        Expr::Range { start, end, inclusive, .. } => {
             let s_v = eval_expr(start, env.clone()).await?;
             let e_v = eval_expr(end, env).await?;
             let s = expect_int_for_range(&s_v, "inicio", start.span())?;
             let e = expect_int_for_range(&e_v, "fin", end.span())?;
-            Ok(Value::Range { start: s, end: e })
+            // R.1.4: para rangos inclusivos, "promovemos" a la
+            // representación exclusiva sumando 1 al end. Así
+            // `Value::Range` no necesita un flag nuevo; el for loop
+            // sigue iterando `start..end` exclusivo. Caveat: si
+            // `end == i64::MAX`, overflow — edge case raro,
+            // documentado.
+            let e_final = if *inclusive { e.saturating_add(1) } else { e };
+            Ok(Value::Range { start: s, end: e_final })
         }
 
         // `obj[idx]` — indexing. Dispatch por tipo del objeto.
@@ -2293,8 +2375,11 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     (Pattern::Null, Value::Null) => Some(None),
                     (Pattern::Wildcard, _) => Some(None),
                     (Pattern::Ident(name), _) => Some(Some((name.clone(), v.clone()))),
-                    (Pattern::Range { start, end }, Value::Int(vv))
-                        if start <= vv && vv < end => Some(None),
+                    (Pattern::Range { start, end, inclusive }, Value::Int(vv))
+                        if start <= vv && (if *inclusive { vv <= end } else { vv < end }) =>
+                    {
+                        Some(None)
+                    }
                     (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
                         Some(Some((name.clone(), (**inner).clone())))
                     }
@@ -2960,10 +3045,26 @@ fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
         Sub => arith(l, r, "-", |a, b| a - b, |a, b| a - b, span),
         Mul => arith(l, r, "*", |a, b| a * b, |a, b| a * b, span),
         Div => eval_div(l, r, span),
+        Mod => eval_mod(l, r, span),
         Eq => Ok(Value::Bool(l == r)),
         NotEq => Ok(Value::Bool(l != r)),
         Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
         And | Or => unreachable!("And/Or se manejan en eval_logical antes de llegar acá"),
+    }
+}
+
+/// R.1.2 — operador `%` con semántica euclidean. `i64::rem_euclid`
+/// garantiza resultado con el mismo signo del divisor (siempre
+/// positivo si el divisor es positivo). Paralelo a Python, distinto
+/// del `%` Rust (truncate-toward-zero).
+///
+/// `n % 0` paniquearía en Rust nativo; lo capturamos antes y
+/// emitimos `DivisionByZero` para que el evaluator no aborte.
+fn eval_mod(l: Value, r: Value, span: Span) -> EvalResult<Value> {
+    match (&l, &r) {
+        (Value::Int(_), Value::Int(0)) => div_by_zero(span),
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(a.rem_euclid(*b))),
+        _ => type_error("%", &l, &r, span),
     }
 }
 
@@ -3090,7 +3191,7 @@ fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> 
 fn op_name(op: &BinOpKind) -> &'static str {
     use BinOpKind::*;
     match op {
-        Add => "+", Sub => "-", Mul => "*", Div => "/",
+        Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "%",
         Eq => "==", NotEq => "!=",
         Lt => "<", LtEq => "<=", Gt => ">", GtEq => ">=",
         And => "and", Or => "or",
@@ -3330,8 +3431,8 @@ async fn coerce_to_annotation(
 // Operación unaria
 // ---------------------------------------------------------------------------
 //
-// Por ahora solo `Neg`: negación numérica (`-x`). Cuando el lexer emita `!`
-// como operador lógico, sumaremos `Not` acá.
+// - `Neg`: negación numérica (`-x`) sobre Int/Float.
+// - `Not` (R.1.1): negación lógica (`not x`) sobre Bool estricto.
 
 fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
     match op {
@@ -3345,6 +3446,20 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                 },
                 span.line, span.column,
                 format!("no se puede negar un valor de tipo `{}`", other.type_name()),
+            ))),
+        },
+        UnaryOpKind::Not => match v {
+            Value::Bool(b) => Ok(Value::Bool(!b)),
+            other => Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Bool".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "el operador `not` requiere Bool, recibió `{}`",
+                    other.type_name()
+                ),
             ))),
         },
     }
@@ -4477,6 +4592,215 @@ mod tests {
             eval_expr_test(e).await.unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
         ));
+    }
+
+    // ---- R.1.1 — `not` (mini-fase R) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_true_es_false() {
+        let e = Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand: Box::new(Expr::Bool(true, Span::ZERO)),
+            span: Span::ZERO,
+        };
+        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(false));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_false_es_true() {
+        let e = Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand: Box::new(Expr::Bool(false, Span::ZERO)),
+            span: Span::ZERO,
+        };
+        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn doble_not_devuelve_el_original() {
+        let inner = Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand: Box::new(Expr::Bool(true, Span::ZERO)),
+            span: Span::ZERO,
+        };
+        let outer = Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand: Box::new(inner),
+            span: Span::ZERO,
+        };
+        assert_eq!(eval_expr_test(outer).await.unwrap(), Value::Bool(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_de_int_es_type_error_en_runtime_gradual() {
+        // Sin --no-typecheck el checker corta antes. Adentro del
+        // evaluator directo, debe emitir error de tipo.
+        let e = Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand: Box::new(Expr::Int(5, Span::ZERO)),
+            span: Span::ZERO,
+        };
+        assert!(matches!(
+            eval_expr_test(e).await.unwrap_err(),
+            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn not_de_str_es_type_error_en_runtime_gradual() {
+        let e = Expr::UnaryOp {
+            op: UnaryOpKind::Not,
+            operand: Box::new(Expr::Str("hola".into(), Span::ZERO)),
+            span: Span::ZERO,
+        };
+        assert!(matches!(
+            eval_expr_test(e).await.unwrap_err(),
+            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+        ));
+    }
+
+    // ---- R.1.2 — operador `%` (mini-fase R) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mod_simple_positivo() {
+        let e = binop(BinOpKind::Mod, Expr::Int(10, Span::ZERO), Expr::Int(3, Span::ZERO));
+        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(1));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mod_exacto_da_cero() {
+        let e = binop(BinOpKind::Mod, Expr::Int(12, Span::ZERO), Expr::Int(4, Span::ZERO));
+        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(0));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mod_negativo_es_euclidean() {
+        // Semántica euclidean: -7 % 3 = 2 (no -1 como `%` Rust).
+        let e = binop(BinOpKind::Mod, Expr::Int(-7, Span::ZERO), Expr::Int(3, Span::ZERO));
+        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(2));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mod_por_cero_es_error_runtime() {
+        let e = binop(BinOpKind::Mod, Expr::Int(7, Span::ZERO), Expr::Int(0, Span::ZERO));
+        let err = eval_expr_test(e).await.unwrap_err();
+        match err {
+            EvalSignal::Error(FitzError { kind: ErrorKind::DivisionByZero, .. }) => {}
+            other => panic!("esperaba DivisionByZero, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mod_con_float_es_type_error() {
+        let e = binop(
+            BinOpKind::Mod,
+            Expr::Float(10.0, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        );
+        assert!(matches!(
+            eval_expr_test(e).await.unwrap_err(),
+            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+        ));
+    }
+
+    // ---- R.1.3 — asignación a índice (mini-fase R) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assign_index_list_replace_in_place() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3]\nxs[0] = 99",
+        )
+        .await;
+        res.unwrap();
+        let xs = env.lock().get("xs").unwrap();
+        match xs {
+            Value::List(items) => {
+                let borrowed = items.lock();
+                assert_eq!(borrowed.len(), 3);
+                assert_eq!(borrowed[0], Value::Int(99));
+                assert_eq!(borrowed[1], Value::Int(2));
+            }
+            other => panic!("xs no es List, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assign_index_map_replace() {
+        let (env, res) = parse_eval_into_env(
+            "let m = {\"a\": 1, \"b\": 2}\nm[\"a\"] = 10",
+        )
+        .await;
+        res.unwrap();
+        let m = env.lock().get("m").unwrap();
+        match m {
+            Value::Map(pairs) => {
+                let borrowed = pairs.lock();
+                // Insertion order preservado: "a" sigue siendo el primero.
+                assert_eq!(borrowed[0].0, Value::Str("a".into()));
+                assert_eq!(borrowed[0].1, Value::Int(10));
+            }
+            other => panic!("m no es Map, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assign_index_map_insert_nuevo_va_al_final() {
+        let (env, res) = parse_eval_into_env(
+            "let m = {\"a\": 1}\nm[\"b\"] = 2",
+        )
+        .await;
+        res.unwrap();
+        let m = env.lock().get("m").unwrap();
+        match m {
+            Value::Map(pairs) => {
+                let borrowed = pairs.lock();
+                assert_eq!(borrowed.len(), 2);
+                assert_eq!(borrowed[1].0, Value::Str("b".into()));
+                assert_eq!(borrowed[1].1, Value::Int(2));
+            }
+            other => panic!("m no es Map, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assign_index_list_out_of_bounds_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs = [1, 2]\nxs[5] = 99",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("fuera de rango"),
+            "mensaje inesperado: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assign_index_list_indice_negativo_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs = [1, 2]\nxs[-1] = 99",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("fuera de rango"),
+            "mensaje inesperado: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assign_index_sobre_int_es_type_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let x = 5\nx[0] = 1",
+        )
+        .await;
+        // El checker lo caza primero (type error). Para validar el
+        // runtime puro, deberíamos usar --no-typecheck via parse_eval
+        // directo; acá nos quedamos con el error sea de tipo o de
+        // runtime.
+        assert!(res.is_err());
     }
 
     // ---- Stmt::Assign ----
@@ -5812,7 +6136,9 @@ print(factorial(5))
     async fn evalua_range_simple() {
         let v = eval_expr_test(Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
-            end: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
+            end: Box::new(Expr::Int(10, Span::ZERO)),
+            inclusive: false,
+            span: Span::ZERO,
         }).await.unwrap();
         assert_eq!(v, Value::Range { start: 0, end: 10 });
     }
@@ -5822,13 +6148,65 @@ print(factorial(5))
         // 0..1.5 — float no es Int.
         let res = eval_expr_test(Expr::Range {
             start: Box::new(Expr::Int(0, Span::ZERO)),
-            end: Box::new(Expr::Float(1.5, Span::ZERO)), span: Span::ZERO,
+            end: Box::new(Expr::Float(1.5, Span::ZERO)),
+            inclusive: false,
+            span: Span::ZERO,
         }).await;
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
             _ => panic!("se esperaba Error"),
         }
+    }
+
+    // ---- R.1.4 — rangos inclusivos `..=` (mini-fase R) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn range_inclusive_evalua_a_value_range_con_end_plus_1() {
+        // 0..=10 se materializa como Value::Range { 0, 11 } por
+        // la conversión inclusive→exclusive del evaluator (no toca
+        // Value::Range).
+        let v = eval_expr_test(Expr::Range {
+            start: Box::new(Expr::Int(0, Span::ZERO)),
+            end: Box::new(Expr::Int(10, Span::ZERO)),
+            inclusive: true,
+            span: Span::ZERO,
+        }).await.unwrap();
+        assert_eq!(v, Value::Range { start: 0, end: 11 });
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn for_inclusive_itera_end_inclusive() {
+        // for i in 0..=3 → 0, 1, 2, 3 (4 iteraciones).
+        let (env, res) = parse_eval_into_env(
+            "let total = 0\nfor i in 0..=3 { total = total + i }\nlet sum = total",
+        )
+        .await;
+        res.unwrap();
+        // 0 + 1 + 2 + 3 = 6.
+        assert_eq!(env.lock().get("sum"), Some(Value::Int(6)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn match_pattern_inclusive_matchea_end() {
+        // match 100 { 0..=100 => "ok", _ => "fuera" } → "ok"
+        let (env, res) = parse_eval_into_env(
+            "let r = match 100 { 0..=100 => \"ok\", _ => \"fuera\" }",
+        )
+        .await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn match_pattern_exclusive_no_matchea_end() {
+        // match 100 { 0..100 => "in", _ => "out" } → "out" (exclusive)
+        let (env, res) = parse_eval_into_env(
+            "let r = match 100 { 0..100 => \"in\", _ => \"out\" }",
+        )
+        .await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("out".into())));
     }
 
     // ---- Indexing ----
