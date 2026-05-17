@@ -585,6 +585,18 @@ pub fn type_expr_to_schema(t: &TypeExpr) -> Value {
         TypeExpr::Function { .. } => json!({
             "description": format!("{} (función Fitz, no serializable)", t.display_name()),
         }),
+        // Tuples (mini-tanda T): JSON no tiene tuples, serializamos
+        // como array prefix-typed. Schema OpenAPI 3.1 admite
+        // `prefixItems` para esto.
+        TypeExpr::Tuple(items) => {
+            let schemas: Vec<Value> = items.iter().map(type_expr_to_schema).collect();
+            json!({
+                "type": "array",
+                "prefixItems": schemas,
+                "minItems": items.len(),
+                "maxItems": items.len(),
+            })
+        }
     }
 }
 

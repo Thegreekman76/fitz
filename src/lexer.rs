@@ -161,6 +161,12 @@ struct Lexer {
     /// comentario NO). Se resetean al consumir un `\n`.
     line_had_code: bool,
     line_had_comment: bool,
+    /// Mini-tanda T — `true` justo después de emitir `Token::Dot`.
+    /// `read_number` lo consulta para NO entrar a modo float
+    /// cuando ve `<dígitos>.<dígito>` precedido de Dot: `t.0.0`
+    /// debe tokenizar como `Ident("t") Dot Int(0) Dot Int(0)`,
+    /// no como `Ident("t") Dot Float(0.0)`.
+    prev_was_dot: bool,
 }
 
 impl Lexer {
@@ -174,6 +180,7 @@ impl Lexer {
             trivia: Trivia::default(),
             line_had_code: false,
             line_had_comment: false,
+            prev_was_dot: false,
         }
     }
 
@@ -312,7 +319,12 @@ impl Lexer {
             }
         }
 
-        let is_float = self.peek() == Some('.')
+        // Mini-tanda T — si venimos justo después de `Dot` (tuple
+        // field access encadenado como `t.0.0`), NO entramos a modo
+        // float. El `0` de `t.0` se cierra como Int, y el `.0`
+        // siguiente arrancará un nuevo Int por el mismo camino.
+        let is_float = !self.prev_was_dot
+            && self.peek() == Some('.')
             && self.peek_next().is_some_and(|c| c.is_ascii_digit());
 
         if is_float {
@@ -776,6 +788,9 @@ pub fn tokenize(source: &str) -> FitzResult<Vec<TokenWithPos>> {
     let mut lexer = Lexer::new(source);
     let mut tokens = Vec::new();
     while let Some(tok) = lexer.next_token()? {
+        // Mini-tanda T — guardar si emitimos Dot para que el próximo
+        // `read_number` no entre a modo float (caso `t.0.0`).
+        lexer.prev_was_dot = matches!(tok.token, Token::Dot);
         tokens.push(tok);
     }
     tokens.push(TokenWithPos::new(Token::EOF, lexer.line, lexer.column));
@@ -794,6 +809,7 @@ pub fn tokenize_with_trivia(source: &str) -> FitzResult<(Vec<TokenWithPos>, Triv
     let mut lexer = Lexer::new_with_trivia(source);
     let mut tokens = Vec::new();
     while let Some(tok) = lexer.next_token()? {
+        lexer.prev_was_dot = matches!(tok.token, Token::Dot);
         tokens.push(tok);
     }
     tokens.push(TokenWithPos::new(Token::EOF, lexer.line, lexer.column));

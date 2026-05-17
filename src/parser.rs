@@ -538,6 +538,25 @@ impl Parser {
                         expr = Expr::Await(Box::new(expr), span);
                         continue;
                     }
+                    // Mini-tanda T — `t.0`, `t.1`, etc. Tuple field
+                    // access. El lexer emite `Int(n)` separado del `.`,
+                    // así que detectamos `Dot Int` por lookahead.
+                    if let Token::Int(n) = self.peek_at(1).clone() {
+                        if n < 0 {
+                            return Err(self.error(
+                                ErrorKind::InvalidSyntax,
+                                "índice de tupla debe ser no-negativo",
+                            ));
+                        }
+                        self.advance(); // consume '.'
+                        self.advance(); // consume el Int
+                        expr = Expr::TupleField {
+                            tuple: Box::new(expr),
+                            index: n as usize,
+                            span,
+                        };
+                        continue;
+                    }
                     self.advance();
                     let field = self.expect_ident(
                         "se esperaba nombre de campo después de '.'",
@@ -1002,6 +1021,19 @@ impl Parser {
 
     fn parse_assign_with_let(&mut self, span: Span) -> FitzResult<Stmt> {
         self.expect(&Token::Let, "se esperaba 'let'")?;
+        // Mini-tanda T — destructuring `let (a, b) = expr`. Detectamos
+        // por peek `(`. El pattern admite nesting: `let ((x, y), z) =
+        // ...`. Sin type annotation por simplicidad MVP (el checker
+        // infiere desde el RHS).
+        if matches!(self.peek(), Token::LParen) {
+            let pattern = self.parse_pattern()?;
+            self.expect(
+                &Token::Eq,
+                "se esperaba '=' en la declaración con destructuring",
+            )?;
+            let value = self.expression()?;
+            return Ok(Stmt::Destructure { pattern, value, span });
+        }
         let name = self.expect_ident(
             "se esperaba nombre de variable después de 'let'",
         )?;
@@ -1169,6 +1201,51 @@ impl Parser {
     /// cierra consumiendo dos `Token::Gt` separados — uno por nivel de
     /// genérico.
     fn parse_type_expr(&mut self) -> FitzResult<TypeExpr> {
+        // Mini-tanda T — tipo tupla `(T1, T2, ...)`. `()` es la
+        // tupla vacía, `(T,)` una tupla de un elemento (trailing
+        // comma obligatoria), `(T)` solo paréntesis (sin tupla,
+        // delega al tipo interno).
+        if matches!(self.peek(), Token::LParen) {
+            self.advance(); // consume `(`
+            if matches!(self.peek(), Token::RParen) {
+                self.advance();
+                let mut t = TypeExpr::Tuple(Vec::new());
+                if self.eat(&Token::Question) {
+                    t = TypeExpr::Nullable(Box::new(t));
+                }
+                return Ok(t);
+            }
+            let first = self.parse_type_expr()?;
+            if matches!(self.peek(), Token::Comma) {
+                let mut items = vec![first];
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RParen) {
+                        break;
+                    }
+                    items.push(self.parse_type_expr()?);
+                }
+                self.expect(
+                    &Token::RParen,
+                    "se esperaba ')' para cerrar el tipo tupla",
+                )?;
+                let mut t = TypeExpr::Tuple(items);
+                if self.eat(&Token::Question) {
+                    t = TypeExpr::Nullable(Box::new(t));
+                }
+                return Ok(t);
+            }
+            // Sin coma → solo paréntesis de agrupación.
+            self.expect(
+                &Token::RParen,
+                "se esperaba ')' para cerrar el tipo entre paréntesis",
+            )?;
+            let mut t = first;
+            if self.eat(&Token::Question) {
+                t = TypeExpr::Nullable(Box::new(t));
+            }
+            return Ok(t);
+        }
         let name = self.expect_ident("se esperaba un nombre de tipo")?;
         // Keyword contextual: `Fn(...)` → tipo función.
         if name == "Fn" && matches!(self.peek(), Token::LParen) {
@@ -1643,6 +1720,40 @@ impl Parser {
     }
 
     fn parse_pattern(&mut self) -> FitzResult<Pattern> {
+        // Mini-tanda T — `(p1, p2, ...)` tuple pattern. Decisión
+        // del parser: si arranca con `(`, asumimos tuple pattern
+        // (no hay otro uso de `(` en posición de pattern). `()` →
+        // tupla vacía. `(p)` sin coma → en match no tiene sentido
+        // (un pattern entre paréntesis equivalente a `p`), pero
+        // lo admitimos por consistencia.
+        if matches!(self.peek(), Token::LParen) {
+            self.advance(); // consume `(`
+            if matches!(self.peek(), Token::RParen) {
+                self.advance();
+                return Ok(Pattern::Tuple(Vec::new()));
+            }
+            let first = self.parse_or_pattern()?;
+            if matches!(self.peek(), Token::Comma) {
+                let mut subs = vec![first];
+                while matches!(self.peek(), Token::Comma) {
+                    self.advance();
+                    if matches!(self.peek(), Token::RParen) {
+                        break;
+                    }
+                    subs.push(self.parse_or_pattern()?);
+                }
+                self.expect(
+                    &Token::RParen,
+                    "se esperaba ')' para cerrar el tuple pattern",
+                )?;
+                return Ok(Pattern::Tuple(subs));
+            }
+            self.expect(
+                &Token::RParen,
+                "se esperaba ')' para cerrar el pattern",
+            )?;
+            return Ok(first);
+        }
         // Literales. Clonamos el peek antes de avanzar para no chocar con
         // el borrow checker. Los Int caen en `try_int_or_range` para
         // chequear si después viene `..` y promovemos a Range.
@@ -2125,18 +2236,51 @@ impl Parser {
             Token::Null => Ok(Expr::Null(tok_span)),
             Token::Ident(name) => Ok(Expr::Ident(name, tok_span)),
             Token::LParen => {
+                // Mini-tanda T — distinguimos:
+                //   `()`        → tupla vacía.
+                //   `(e,)`      → tupla de 1 elemento (trailing comma).
+                //   `(e1, ...)` → tupla.
+                //   `(e)`       → solo paréntesis de agrupación.
+                //
                 // Adentro de paréntesis no hay ambigüedad con bloques:
-                // limpiamos el flag para permitir struct literals.
-                // Esto es lo que habilita `if (User { id: 1 }) == other`.
+                // limpiamos `no_struct_literal` para permitir struct
+                // literals (habilita `(User { id: 1 }) == other`).
                 let prev = std::mem::replace(&mut self.no_struct_literal, false);
-                let inner = self.expression();
+                // Caso: tupla vacía `()`.
+                if matches!(self.peek(), Token::RParen) {
+                    self.advance();
+                    self.no_struct_literal = prev;
+                    return Ok(Expr::Tuple(Vec::new(), tok_span));
+                }
+                let first_result = self.expression();
                 self.no_struct_literal = prev;
-                let expr = inner?;
+                let first = first_result?;
+                // Si la próxima es coma → tupla.
+                if matches!(self.peek(), Token::Comma) {
+                    let mut items = vec![first];
+                    while matches!(self.peek(), Token::Comma) {
+                        self.advance(); // consume `,`
+                        // Trailing comma admitida: `(e,)` o `(e1, e2,)`.
+                        if matches!(self.peek(), Token::RParen) {
+                            break;
+                        }
+                        let prev2 = std::mem::replace(&mut self.no_struct_literal, false);
+                        let r = self.expression();
+                        self.no_struct_literal = prev2;
+                        items.push(r?);
+                    }
+                    self.expect(
+                        &Token::RParen,
+                        "se esperaba ')' para cerrar la tupla",
+                    )?;
+                    return Ok(Expr::Tuple(items, tok_span));
+                }
+                // Sin coma → solo paréntesis de agrupación.
                 self.expect(
                     &Token::RParen,
                     "se esperaba ')' para cerrar el paréntesis",
                 )?;
-                Ok(expr)
+                Ok(first)
             }
             other => Err(FitzError::new(
                 ErrorKind::UnexpectedToken,

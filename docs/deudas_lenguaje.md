@@ -644,9 +644,16 @@ posteriores.
 
 ### Sintaxis grande (sub-fase G dedicada)
 
-- **Tuples** `(1, "a", true)` + `Pattern::Tuple` + iteración Maps
-  con Pair. Toca AST + parser + checker (incluyendo
-  exhaustividad) + codegen. ~6-8h.
+- ~~**Tuples** `(1, "a", true)` + `Pattern::Tuple`~~ ✓ CERRADO
+  2026-05-17 (mini-tanda T post-I). Incluye `Type::Tuple`,
+  acceso por índice `.0`/`.1` (lexer maneja `t.0.0` chaining
+  via flag `prev_was_dot`), destructuring `let (a, b) = expr`,
+  tuple patterns en match (con nesting). Limitaciones del MVP
+  documentadas: en `fitz build` los tuple patterns no admiten
+  literales Str/Range/Or como sub-pattern, y `let (...)` solo
+  admite Ident/Wildcard/Tuple (no literales ni Ok/Err). Iteración
+  de Maps con destructuring `for (k, v) in m` queda como
+  sub-paso futuro (requiere cambio al iterador de Map).
 - **Trait-like polymorphism** — interfaces o traits con métodos
   abstractos. Decisión grande de diseño (Rust traits? Go
   interfaces? duck typing?). ~10-15h cuando aparezca el caso de

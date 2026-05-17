@@ -1390,6 +1390,26 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
     match stmt {
         Stmt::Expr(expr, _) => eval_expr(expr, env).await,
 
+        // Mini-tanda T — destructuring de tupla. Evaluamos el RHS y
+        // validamos longitud + shape contra el pattern; si matchea,
+        // aplicamos los bindings al env actual (no scope hijo —
+        // semántica de `let` regular).
+        Stmt::Destructure { pattern, value, span } => {
+            let v = eval_expr(value, env.clone()).await?;
+            if match_pattern(pattern, &v).is_none() {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    format!(
+                        "el valor `{}` no matchea el pattern de destructuring",
+                        v.type_name()
+                    ),
+                )));
+            }
+            bind_tuple_pattern(pattern, &v, env);
+            Ok(Value::Null)
+        }
+
         // `x = value`, `x: Tipo = value`, o `obj.campo = value`. La anotación
         // de tipo se ignora en runtime — tipado gradual, los checks de tipos
         // los hará un type-checker estático más adelante.
@@ -2046,7 +2066,56 @@ fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
             }
             None
         }
+        // Tuples (mini-tanda T): matchea por longitud + cada slot.
+        // Acumula múltiples bindings — el caller fields un Vec
+        // pero la API actual solo soporta uno. Workaround: usamos
+        // un helper que aplica todos los bindings al env.
+        // Para la API actual `Option<Option<(String, Value)>>`,
+        // necesitamos representar múltiples bindings. Cambiamos
+        // el modelo: el caller ahora hace el bind via
+        // `bind_pattern_into_env` cuando es Tuple.
+        (Pattern::Tuple(subs), Value::Tuple(items)) => {
+            if subs.len() != items.len() {
+                return None;
+            }
+            // Recursamos en cada slot. Si algún sub no matchea,
+            // toda la tupla falla.
+            for (s, v) in subs.iter().zip(items.iter()) {
+                match_pattern(s, v)?;
+            }
+            // Acá devolvemos `Some(None)` porque la API solo
+            // permite un binding. Los bindings reales del tuple
+            // se aplican en el caller via `bind_tuple_pattern`.
+            Some(None)
+        }
         _ => None,
+    }
+}
+
+/// Mini-tanda T — aplica todos los bindings de un Pattern al env
+/// dado. Para tuple patterns recursea en cada slot. Para
+/// Ident/Ok/Err captura el valor. Para wildcards/literales no
+/// hace nada. Precondición: el pattern matchea el value (debe
+/// haberse chequeado con `match_pattern` antes).
+fn bind_tuple_pattern(pat: &Pattern, v: &Value, env: EnvRef) {
+    match (pat, v) {
+        (Pattern::Ident(name), _) => {
+            env.lock().define(name.clone(), v.clone());
+        }
+        (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
+            env.lock().define(name.clone(), (**inner).clone());
+        }
+        (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
+            env.lock().define(name.clone(), (**inner).clone());
+        }
+        (Pattern::Tuple(subs), Value::Tuple(items)) => {
+            for (s, v) in subs.iter().zip(items.iter()) {
+                bind_tuple_pattern(s, v, env.clone());
+            }
+        }
+        // El resto (literales, Wildcard, OkWildcard, ErrWildcard,
+        // Range, Or) no bindean.
+        _ => {}
     }
 }
 
@@ -2064,6 +2133,43 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         Expr::Str(s, _) => Ok(Value::Str(s.clone())),
         Expr::Bool(b, _) => Ok(Value::Bool(*b)),
         Expr::Null(_) => Ok(Value::Null),
+
+        // Tuples (mini-tanda T) — eval cada slot y armamos el Value.
+        Expr::Tuple(items, _) => {
+            let mut vals = Vec::with_capacity(items.len());
+            for e in items {
+                vals.push(eval_expr(e, env.clone()).await?);
+            }
+            Ok(Value::Tuple(vals))
+        }
+        Expr::TupleField { tuple, index, span } => {
+            let v = eval_expr(tuple, env).await?;
+            match v {
+                Value::Tuple(items) => {
+                    items.get(*index).cloned().ok_or_else(|| {
+                        EvalSignal::Error(FitzError::new(
+                            ErrorKind::InvalidSyntax,
+                            span.line, span.column,
+                            format!(
+                                "índice de tupla {} fuera de rango (tupla de {} elementos)",
+                                index, items.len()
+                            ),
+                        ))
+                    })
+                }
+                other => Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Tuple".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                        index, other.type_name()
+                    ),
+                ))),
+            }
+        }
 
         // Identificador — lookup encadenado en la cadena de scopes.
         Expr::Ident(name, _) => env.lock().get(name).ok_or_else(|| {
@@ -2443,7 +2549,15 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 // y evaluar la condición. Si NO matchea, pasamos al
                 // siguiente arm — el binding queda descartado con el
                 // scope.
-                let arm_env = if let Some((name, bound)) = &binding {
+                // Mini-tanda T — para tuple patterns aplicamos todos
+                // los bindings via `bind_tuple_pattern`. Para los
+                // patterns "simples" (Ident/Ok/Err binding) la API
+                // ya devolvió `Some(Some(name, value))`.
+                let arm_env = if matches!(&arm.pattern, Pattern::Tuple(_)) {
+                    let child = Environment::new_child(env.clone());
+                    bind_tuple_pattern(&arm.pattern, &v, child.clone());
+                    child
+                } else if let Some((name, bound)) = &binding {
                     let child = Environment::new_child(env.clone());
                     child.lock().define(name.clone(), bound.clone());
                     child
@@ -2470,7 +2584,10 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     }
                 }
 
-                if binding.is_some() {
+                // Mini-tanda T — para Tuple patterns el `arm_env`
+                // ya tiene los bindings aplicados; siempre evaluamos
+                // adentro.
+                if binding.is_some() || matches!(&arm.pattern, Pattern::Tuple(_)) {
                     return eval_expr(&arm.body, arm_env).await;
                 }
                 return eval_expr(&arm.body, env.clone()).await;

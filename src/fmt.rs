@@ -361,6 +361,7 @@ fn end_line_of_stmt(stmt: &Stmt) -> usize {
     let start = stmt.span().line;
     let nested = match stmt {
         Stmt::Assign { value, .. } => Some(end_line_of_expr(value)),
+        Stmt::Destructure { value, .. } => Some(end_line_of_expr(value)),
         Stmt::Return(e, _) => Some(end_line_of_expr(e)),
         Stmt::ReturnStatus { status, body, .. } => {
             let s = end_line_of_expr(status);
@@ -402,6 +403,8 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         Expr::Field { object, .. } | Expr::Index { object, .. } => {
             Some(end_line_of_expr(object))
         }
+        Expr::TupleField { tuple, .. } => Some(end_line_of_expr(tuple)),
+        Expr::Tuple(items, _) => items.iter().map(end_line_of_expr).max(),
         Expr::Slice { object, start, end, .. } => {
             let mut m = end_line_of_expr(object);
             if let Some(s) = start { m = m.max(end_line_of_expr(s)); }
@@ -457,6 +460,12 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
     match stmt {
         Stmt::Assign { target, type_, value, span } => {
             fmt_assign(ctx, target, type_.as_ref(), value, *span);
+        }
+        Stmt::Destructure { pattern, value, .. } => {
+            ctx.write("let ");
+            fmt_pattern(ctx, pattern);
+            ctx.write(" = ");
+            fmt_expr(ctx, value);
         }
         Stmt::Return(expr, _) => {
             ctx.write("return ");
@@ -773,6 +782,20 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             }
             ctx.write("]");
         }
+        Expr::Tuple(items, _) => {
+            ctx.write("(");
+            let parts: Vec<String> = items.iter().map(expr_to_inline_string).collect();
+            ctx.write(&parts.join(", "));
+            if items.len() == 1 {
+                ctx.write(",");
+            }
+            ctx.write(")");
+        }
+        Expr::TupleField { tuple, index, .. } => {
+            fmt_expr(ctx, tuple);
+            ctx.write(".");
+            ctx.write(&index.to_string());
+        }
         Expr::List(items, _) => {
             ctx.write("[");
             let parts: Vec<String> = items.iter().map(expr_to_inline_string).collect();
@@ -981,6 +1004,19 @@ fn fmt_pattern(ctx: &mut FmtCtx, pat: &Pattern) {
                 }
                 fmt_pattern(ctx, sub);
             }
+        }
+        Pattern::Tuple(subs) => {
+            ctx.write("(");
+            for (i, sub) in subs.iter().enumerate() {
+                if i > 0 {
+                    ctx.write(", ");
+                }
+                fmt_pattern(ctx, sub);
+            }
+            if subs.len() == 1 {
+                ctx.write(",");
+            }
+            ctx.write(")");
         }
     }
 }

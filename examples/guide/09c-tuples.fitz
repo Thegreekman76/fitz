@@ -1,0 +1,72 @@
+// 09c-tuples.fitz — Mini-tanda T (post-I).
+// Tuples: tipos compuestos heterogéneos de tamaño fijo.
+
+// --- T.1: tuples como valor ---
+
+// Literal — la coma distingue tuple de paréntesis de agrupación.
+let pair: (Int, Str) = (42, "fitz")
+print(pair)                       // (42, "fitz")
+
+// Acceso por índice: .0, .1, etc.
+print(pair.0)                     // 42
+print(pair.1)                     // fitz
+
+// Tupla vacía (unit)
+let unit: () = ()
+print(unit)                       // ()
+
+// Tupla de 1 elemento (trailing comma obligatoria)
+let single = (42,)
+print(single)                     // (42,)
+print(single.0)                   // 42
+
+// Heterogénea
+let mix = (1, "dos", true, 3.14)
+print(mix.3)                      // 3.14
+
+// Anidada
+let nested = ((1, 2), (3, 4))
+print(nested.0.0)                 // 1
+print(nested.1.1)                 // 4
+
+// Como retorno de fn (retornos múltiples)
+fn divmod(a: Int, b: Int) -> (Int, Int) {
+    return (a / b, a % b)
+}
+let r = divmod(17, 5)
+print(r.0)                        // 3
+print(r.1)                        // 2
+
+// Igualdad estructural
+print((1, 2) == (1, 2))           // true
+print((1, 2) == (1, 3))           // false
+
+// --- T.2: destructuring ---
+
+// let (a, b) = expr
+let (q, rem) = divmod(20, 7)
+print(q)                          // 2
+print(rem)                        // 6
+
+// Wildcard slot (ignorar)
+let (a, _, c) = (10, 20, 30)
+print(a)                          // 10
+print(c)                          // 30
+
+// Nested destructuring
+let ((x, y), z) = ((1, 2), 3)
+print(x + y + z)                  // 6
+
+// Tuple pattern en match
+fn clasif(pair: (Int, Int)) -> Str {
+    return match pair {
+        (0, 0) => "origen"
+        (0, _) => "eje Y"
+        (_, 0) => "eje X"
+        (a, b) => "({a}, {b})"
+    }
+}
+print(clasif((0, 0)))             // origen
+print(clasif((0, 5)))             // eje Y
+print(clasif((3, 0)))             // eje X
+print(clasif((4, 7)))             // (4, 7)

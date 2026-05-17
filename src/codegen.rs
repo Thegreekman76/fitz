@@ -307,6 +307,8 @@ fn program_uses_async(program: &Program) -> bool {
             }
             Expr::List(items, _) => items.iter().any(expr_uses_async),
             Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_async),
+            Expr::TupleField { tuple, .. } => expr_uses_async(tuple),
             Expr::Range { start, end, .. } => expr_uses_async(start) || expr_uses_async(end),
             Expr::If { condition, then, else_, .. } => {
                 expr_uses_async(condition)
@@ -467,6 +469,12 @@ fn walk_stmt_for_state_refs(
     refs: &mut std::collections::HashSet<String>,
 ) {
     match stmt {
+        // Mini-tanda T — destructuring. Walkear el value y registrar
+        // los names del pattern como locals.
+        Stmt::Destructure { pattern, value, .. } => {
+            walk_expr_for_state_refs(value, candidates, locals, refs);
+            collect_pattern_names(pattern, locals);
+        }
         Stmt::Assign { target, value, .. } => {
             walk_expr_for_state_refs(value, candidates, locals, refs);
             match target {
@@ -520,6 +528,27 @@ fn walk_stmt_for_state_refs(
         // Error nodes — la API strict que llama al codegen nunca los
         // produce, pero defendemos contra panic si entran.
         Stmt::Error(_) => {}
+    }
+}
+
+/// Mini-tanda T — recolecta los names bindeados por un pattern
+/// (recursivo en Tuple). Usado por los walkers que mantienen un
+/// set de locals para distinguir captures vs locales.
+fn collect_pattern_names(
+    pat: &crate::ast::Pattern,
+    locals: &mut std::collections::HashSet<String>,
+) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(name) | Pattern::OkBinding(name) | Pattern::ErrBinding(name) => {
+            locals.insert(name.clone());
+        }
+        Pattern::Tuple(subs) => {
+            for s in subs {
+                collect_pattern_names(s, locals);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -590,6 +619,14 @@ fn walk_expr_for_state_refs(
             walk_expr_for_state_refs(object, candidates, locals, refs);
             if let Some(s) = start { walk_expr_for_state_refs(s, candidates, locals, refs); }
             if let Some(e) = end { walk_expr_for_state_refs(e, candidates, locals, refs); }
+        }
+        Expr::Tuple(items, _) => {
+            for it in items {
+                walk_expr_for_state_refs(it, candidates, locals, refs);
+            }
+        }
+        Expr::TupleField { tuple, .. } => {
+            walk_expr_for_state_refs(tuple, candidates, locals, refs);
         }
         Expr::Field { object, .. } => {
             walk_expr_for_state_refs(object, candidates, locals, refs);
@@ -1197,6 +1234,7 @@ fn generate_module_rs(program: &Program, env: &TypeEnv) -> Result<String, FitzEr
 fn stmt_kind(s: &Stmt) -> &'static str {
     match s {
         Stmt::Assign { .. } => "asignación",
+        Stmt::Destructure { .. } => "destructuring",
         Stmt::Expr(..) => "expresión suelta",
         Stmt::Return(..) => "return",
         Stmt::ReturnStatus { .. } => "return con status",
@@ -3441,6 +3479,7 @@ impl<'a> CodegenCtx<'a> {
     fn gen_stmt_in_fn(&mut self, stmt: &Stmt, ret_expected: &Type) -> Result<(), FitzError> {
         match stmt {
             Stmt::Assign { target, type_, value, .. } => self.gen_assign(target, type_.as_ref(), value),
+            Stmt::Destructure { pattern, value, .. } => self.gen_destructure(pattern, value),
             Stmt::Return(e, _) => self.gen_return(e, ret_expected),
             Stmt::ReturnStatus { status, body, span } => {
                 self.gen_return_status(status, body.as_ref(), *span)
@@ -3481,6 +3520,63 @@ impl<'a> CodegenCtx<'a> {
             // compilador.
             Stmt::Error(span) => Err(self.err_at(*span,
                 "nodo `Stmt::Error` en el AST — `fitz build` usa el parser strict, no debería verlo (bug del compilador, Fase 9.0.1)",
+            )),
+        }
+    }
+
+    /// Mini-tanda T — `let (a, b) = expr`. Emite `let (a, b) = ...;`
+    /// Rust nativo. Pattern admite nesting; los slots `Pattern::
+    /// Wildcard` se emiten como `_` Rust. Solo `Ident` y `Wildcard`
+    /// y `Tuple` (recursivo) admitidos como sub-patterns en codegen
+    /// MVP — literales no tienen sentido en destructuring "let".
+    fn gen_destructure(
+        &mut self,
+        pattern: &crate::ast::Pattern,
+        value: &Expr,
+    ) -> Result<(), FitzError> {
+        // Inferir tipo del value para registrar bindings en el scope.
+        let (val_code, val_ty) = self.gen_expr(value)?;
+        let pat_code = self.destructure_pattern_to_rust(pattern, &val_ty)?;
+        self.emit_indent();
+        writeln!(&mut self.output, "let {} = {};", pat_code, val_code).unwrap();
+        Ok(())
+    }
+
+    /// Helper para `gen_destructure`. Recursea en el pattern y va
+    /// registrando bindings en el scope. Devuelve el código Rust
+    /// del pattern: `(a, _, b)`, `((x, y), z)`, etc.
+    fn destructure_pattern_to_rust(
+        &mut self,
+        pat: &crate::ast::Pattern,
+        ty: &Type,
+    ) -> Result<String, FitzError> {
+        use crate::ast::Pattern;
+        match pat {
+            Pattern::Ident(name) => {
+                self.declare_var(name.clone(), ty.clone());
+                Ok(name.clone())
+            }
+            Pattern::Wildcard => Ok("_".to_string()),
+            Pattern::Tuple(subs) => {
+                let slot_tys: Vec<Type> = match ty {
+                    Type::Tuple(items) if items.len() == subs.len() => items.clone(),
+                    _ => (0..subs.len()).map(|_| Type::Any).collect(),
+                };
+                let mut parts: Vec<String> = Vec::with_capacity(subs.len());
+                for (s, st) in subs.iter().zip(slot_tys.iter()) {
+                    parts.push(self.destructure_pattern_to_rust(s, st)?);
+                }
+                if parts.is_empty() {
+                    Ok("()".to_string())
+                } else if parts.len() == 1 {
+                    Ok(format!("({},)", parts[0]))
+                } else {
+                    Ok(format!("({})", parts.join(", ")))
+                }
+            }
+            _ => Err(self.err(
+                "destructuring solo admite Ident, Wildcard `_` y Tuple en `fitz build`"
+                    .to_string(),
             )),
         }
     }
@@ -3987,6 +4083,58 @@ impl<'a> CodegenCtx<'a> {
             }
             Expr::Str(s, _) => Ok((format!("String::from({})", rust_str_literal(s)), Type::Str)),
             Expr::Bool(b, _) => Ok((b.to_string(), Type::Bool)),
+            // Tuples (mini-tanda T) — Rust nativo `(a, b, c)`. Tupla
+            // vacía `()` y de 1 elemento `(x,)`.
+            Expr::Tuple(items, _) => {
+                let mut codes: Vec<String> = Vec::with_capacity(items.len());
+                let mut tys: Vec<Type> = Vec::with_capacity(items.len());
+                for e in items {
+                    let (c, t) = self.gen_expr(e)?;
+                    codes.push(c);
+                    tys.push(t);
+                }
+                let code = if codes.is_empty() {
+                    "()".to_string()
+                } else if codes.len() == 1 {
+                    format!("({},)", codes[0])
+                } else {
+                    format!("({})", codes.join(", "))
+                };
+                Ok((code, Type::Tuple(tys)))
+            }
+            Expr::TupleField { tuple, index, span } => {
+                let (obj_code, obj_ty) = self.gen_expr(tuple)?;
+                match &obj_ty {
+                    Type::Tuple(items) => {
+                        if let Some(t) = items.get(*index) {
+                            // `.0`, `.1`, etc. Rust nativo. Para
+                            // primitivos `Copy` no hace falta clone;
+                            // para String/Arc/etc. agregamos `.clone()`
+                            // por seguridad.
+                            let needs_clone = matches!(
+                                t,
+                                Type::Str | Type::List(_) | Type::Map(_, _) | Type::Nominal(_)
+                                    | Type::Tuple(_) | Type::Result(_) | Type::Nullable(_)
+                            );
+                            let code = if needs_clone {
+                                format!("({}).{}.clone()", obj_code, index)
+                            } else {
+                                format!("({}).{}", obj_code, index)
+                            };
+                            Ok((code, t.clone()))
+                        } else {
+                            Err(self.err_at(*span, format!(
+                                "tupla de {} elementos no tiene índice `{}`",
+                                items.len(), index
+                            )))
+                        }
+                    }
+                    other => Err(self.err_at(*span, format!(
+                        "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                        index, display_type(other, self.env)
+                    ))),
+                }
+            }
             Expr::Null(_) => Ok(("()".to_string(), Type::Null)),
 
             Expr::Ident(name, _) => {
@@ -5755,6 +5903,40 @@ impl<'a> CodegenCtx<'a> {
                 }
                 Ok(("ref __or_v".to_string(), Some(conds.join(" || "))))
             }
+            // Tuples (mini-tanda T): Rust nativo soporta `(p1, p2)`
+            // como pattern. Cada sub-pattern lo traducimos
+            // recursivamente, combinando los guards adicionales si
+            // los hay. Si un sub-pattern genera inner_guard,
+            // tenemos que renombrar `__s`/`__n`/`__or_v` adentro
+            // para que sean únicos por slot. Para mantener el MVP
+            // simple, restringimos: en codegen, los sub-patterns
+            // de un Tuple deben ser "puros" sin inner guard.
+            Pattern::Tuple(subs) => {
+                let slot_tys: Vec<Type> = match scrut_ty {
+                    Type::Tuple(items) if items.len() == subs.len() => items.clone(),
+                    _ => (0..subs.len()).map(|_| Type::Any).collect(),
+                };
+                let mut codes: Vec<String> = Vec::with_capacity(subs.len());
+                for (sub, ty) in subs.iter().zip(slot_tys.iter()) {
+                    let (code, inner_guard) = self.gen_pattern(sub, ty, ok_inner_ty)?;
+                    if inner_guard.is_some() {
+                        return Err(self.err(
+                            "tuple patterns con sub-patterns que requieren guard \
+                             (Str literal, Range, Or) no soportados en `fitz build`"
+                                .to_string(),
+                        ));
+                    }
+                    codes.push(code);
+                }
+                let pat_code = if codes.is_empty() {
+                    "()".to_string()
+                } else if codes.len() == 1 {
+                    format!("({},)", codes[0])
+                } else {
+                    format!("({})", codes.join(", "))
+                };
+                Ok((pat_code, None))
+            }
         }
     }
 
@@ -5803,6 +5985,16 @@ impl<'a> CodegenCtx<'a> {
                     crate::error::ErrorKind::InvalidSyntax,
                     0, 0,
                     "or-patterns anidados no soportados (caso degenerado)",
+                ))
+            }
+            Pattern::Tuple(_) => {
+                // Tuple patterns no admitidos como sub-pattern de Or
+                // (bindings prohibidos en Or, y tuples casi siempre
+                // bindean). Si llegan acá, error.
+                Err(FitzError::new(
+                    crate::error::ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "tuple patterns no admitidos adentro de or-patterns",
                 ))
             }
         }
@@ -8095,6 +8287,10 @@ fn collect_captures_stmt(
     out: &mut Vec<(String, Type)>,
 ) {
     match s {
+        Stmt::Destructure { pattern, value, .. } => {
+            collect_captures_expr(value, params, locals, ctx, seen, out);
+            collect_pattern_names(pattern, locals);
+        }
         Stmt::Assign { target, value, .. } => {
             collect_captures_expr(value, params, locals, ctx, seen, out);
             if let AssignTarget::Ident(name) = target {
@@ -8227,6 +8423,14 @@ fn collect_captures_expr(
             if let Some(s) = start { collect_captures_expr(s, params, locals, ctx, seen, out); }
             if let Some(e) = end { collect_captures_expr(e, params, locals, ctx, seen, out); }
         }
+        Expr::Tuple(items, _) => {
+            for it in items {
+                collect_captures_expr(it, params, locals, ctx, seen, out);
+            }
+        }
+        Expr::TupleField { tuple, .. } => {
+            collect_captures_expr(tuple, params, locals, ctx, seen, out);
+        }
         Expr::List(items, _) => {
             for it in items {
                 collect_captures_expr(it, params, locals, ctx, seen, out);
@@ -8319,6 +8523,15 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
         // Any cede al concreto. Permite que `Err("x")` (Result<Any>)
         // unifique con `Ok(42)` (Result<Int>) → Result<Int>.
         (Type::Any, other) | (other, Type::Any) => Ok(other.clone()),
+        // Tuples (mini-tanda T): mismo lub elemento por elemento si
+        // misma longitud. Distintas longitudes → Err.
+        (Type::Tuple(xs), Type::Tuple(ys)) if xs.len() == ys.len() => {
+            let mut combined = Vec::with_capacity(xs.len());
+            for (x, y) in xs.iter().zip(ys.iter()) {
+                combined.push(lub(x, y)?);
+            }
+            Ok(Type::Tuple(combined))
+        }
         _ => Err(()),
     }
 }
@@ -8343,6 +8556,9 @@ fn update_arm_coverage(
                 update_arm_coverage(sub, has_catch_all, has_ok, has_err);
             }
         }
+        // Tuples: NO cuentan para cobertura de Result. El codegen
+        // pondrá catch-all artificial si hace falta.
+        Pattern::Tuple(_) => {}
         _ => {}
     }
 }
@@ -8451,6 +8667,15 @@ fn field_eq_expr(
         // PyObjects distintos siempre dan `false`.
         Type::Function { .. } | Type::Future(_) | Type::Any | Type::PyAny => {
             Ok("false".to_string())
+        }
+        // Tuples (mini-tanda T): comparación element-wise. Rust ya
+        // implementa PartialEq para tuples si cada slot lo hace,
+        // así que `lhs == rhs` funciona directamente para tipos
+        // primitivos. Para tuples con nominales/listas/maps
+        // adentro, los elementos individuales ya tienen su impl
+        // custom, así que `==` recursea bien.
+        Type::Tuple(_) => {
+            Ok(format!("({}) == ({})", lhs, rhs))
         }
     }
 }
@@ -8591,6 +8816,22 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 inner_rs
             ))
         }
+        // Tuples (mini-tanda T) → Rust tuple type nativo.
+        // `()` (vacía) → `()` (unit). `(T,)` (un slot) → `(T,)`.
+        Type::Tuple(items) => {
+            if items.is_empty() {
+                return Ok("()".to_string());
+            }
+            let parts: Vec<String> = items
+                .iter()
+                .map(|t| rust_type_for(t, env))
+                .collect::<Result<_, _>>()?;
+            if parts.len() == 1 {
+                Ok(format!("({},)", parts[0]))
+            } else {
+                Ok(format!("({})", parts.join(", ")))
+            }
+        }
         other => Err(FitzError::new(
             ErrorKind::TypeError,
             0,
@@ -8620,6 +8861,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
+        Type::Tuple(_) => "(...)",
     }
 }
 
@@ -8649,6 +8891,14 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
                 .collect::<Vec<_>>()
                 .join(", ");
             format!("fn({}) -> {}", ps, display_type(ret, env))
+        }
+        Type::Tuple(items) => {
+            let parts: Vec<String> = items.iter().map(|t| display_type(t, env)).collect();
+            if parts.len() == 1 {
+                format!("({},)", parts[0])
+            } else {
+                format!("({})", parts.join(", "))
+            }
         }
     }
 }

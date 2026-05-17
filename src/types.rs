@@ -79,6 +79,12 @@ pub enum Type {
         ret: Box<Type>,
     },
 
+    /// Tipo tupla `(T1, T2, ...)` (mini-tanda T). Heterogénea, tamaño
+    /// fijo, posicional. Vec vacío → tupla unitaria `()`. Acceso por
+    /// `t.0`, `t.1`, etc. La identidad estructural: dos `Tuple` con
+    /// los mismos elementos en el mismo orden son iguales.
+    Tuple(Vec<Type>),
+
     /// "Sin tipo determinado". Escape gradual: aparece donde el
     /// checker no puede o no quiere inferir un tipo concreto. Param
     /// sin anotación, `let` sin anotación con RHS no inferible,
@@ -139,6 +145,14 @@ impl Type {
             Type::Function { params, ret } => {
                 let ps: Vec<String> = params.iter().map(|p| p.display(env)).collect();
                 format!("fn({}) -> {}", ps.join(", "), ret.display(env))
+            }
+            Type::Tuple(items) => {
+                let parts: Vec<String> = items.iter().map(|t| t.display(env)).collect();
+                if parts.len() == 1 {
+                    format!("({},)", parts[0])
+                } else {
+                    format!("({})", parts.join(", "))
+                }
             }
             Type::Any => "Any".into(),
             Type::PyAny => "PyAny".into(),
@@ -431,6 +445,14 @@ pub fn resolve_type_expr(t: &TypeExpr, env: &TypeEnv) -> Result<Type, FitzError>
                 params,
                 ret: Box::new(ret),
             })
+        }
+        // Tuples (mini-tanda T): resolución elemento por elemento.
+        TypeExpr::Tuple(items) => {
+            let resolved: Vec<Type> = items
+                .iter()
+                .map(|t| resolve_type_expr(t, env))
+                .collect::<Result<_, _>>()?;
+            Ok(Type::Tuple(resolved))
         }
     }
 }
@@ -1175,6 +1197,37 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         Expr::Str(_, _) => Type::Str,
         Expr::Bool(_, _) => Type::Bool,
         Expr::Null(_) => Type::Null,
+
+        // Tuples (mini-tanda T) — tipamos cada slot y armamos
+        // `Type::Tuple`.
+        Expr::Tuple(items, _) => {
+            let tys: Vec<Type> = items.iter().map(|x| infer_expr(ctx, x)).collect();
+            Type::Tuple(tys)
+        }
+        Expr::TupleField { tuple, index, span } => {
+            let ty = infer_expr(ctx, tuple);
+            match ty.base() {
+                Type::Tuple(items) => {
+                    if let Some(t) = items.get(*index) {
+                        t.clone()
+                    } else {
+                        ctx.error_at(*span, format!(
+                            "tupla de {} elementos no tiene índice `{}`",
+                            items.len(), index
+                        ));
+                        Type::Any
+                    }
+                }
+                Type::Any | Type::PyAny => Type::Any,
+                other => {
+                    ctx.error_at(*span, format!(
+                        "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                        index, other.display(ctx.types)
+                    ));
+                    Type::Any
+                }
+            }
+        }
 
         Expr::StrInterp(parts, _) => {
             // Las sub-expresiones se evalúan para errores aunque el
@@ -2302,6 +2355,10 @@ fn update_result_coverage(
                 update_result_coverage(sub, has_ok, has_err, has_catchall);
             }
         }
+        // Tuples (mini-tanda T): un Tuple pattern NO cubre Ok/Err
+        // ni es catch-all sobre Result — tipa solo contra tuples.
+        // No suma a la cobertura.
+        Pattern::Tuple(_) => {}
         _ => {}
     }
 }
@@ -2386,6 +2443,19 @@ fn bind_pattern(
             // R.2.1: or-patterns no introducen bindings por
             // contrato del parser (rechaza Ident/OkBinding/
             // ErrBinding adentro). No hace falta walkear.
+        }
+        // Tuples (mini-tanda T): recursea en cada slot con el tipo
+        // correspondiente. Si scrutinee no es `Tuple` o difiere en
+        // longitud, los sub-patterns igual se chequean con Any
+        // (gradual) — el evaluator hace el match real.
+        Pattern::Tuple(subs) => {
+            let slot_tys: Vec<Type> = match scrutinee {
+                Type::Tuple(items) if items.len() == subs.len() => items.clone(),
+                _ => (0..subs.len()).map(|_| Type::Any).collect(),
+            };
+            for (sub, ty) in subs.iter().zip(slot_tys.iter()) {
+                bind_pattern(ctx, sub, ty, arm_span);
+            }
         }
     }
 }
@@ -2554,6 +2624,13 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
                 && pa.iter().zip(pb.iter()).all(|(a, b)| is_compatible(a, b))
                 && is_compatible(ra, rb)
         }
+        // Tuples (mini-tanda T): compatible si misma longitud y cada
+        // slot es compatible. `(Int, Str)` ↔ `(Float, Str)` por la
+        // promoción Int→Float en cada slot.
+        (Type::Tuple(a), Type::Tuple(b)) => {
+            a.len() == b.len()
+                && a.iter().zip(b.iter()).all(|(x, y)| is_compatible(x, y))
+        }
         _ => actual == expected,
     }
 }
@@ -2569,6 +2646,23 @@ fn check_block(ctx: &mut CheckCtx, body: &[Stmt]) {
 /// declara variables.
 fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
     match stmt {
+        // Mini-tanda T — destructuring. Inferimos el tipo del RHS y
+        // bindeamos cada slot del pattern.
+        Stmt::Destructure { pattern, value, span } => {
+            let value_ty = infer_expr(ctx, value);
+            // Si el value tipa como Tuple, validamos arity.
+            if let Type::Tuple(items) = &value_ty {
+                if let crate::ast::Pattern::Tuple(subs) = pattern {
+                    if items.len() != subs.len() {
+                        ctx.error_at(*span, format!(
+                            "destructuring de tupla: el pattern tiene {} slots, el valor tiene {}",
+                            subs.len(), items.len()
+                        ));
+                    }
+                }
+            }
+            bind_pattern(ctx, pattern, &value_ty, *span);
+        }
         Stmt::Assign { target, type_, value, span } => {
             let value_ty = infer_expr(ctx, value);
             if let AssignTarget::Ident(name) = target {

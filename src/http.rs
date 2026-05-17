@@ -839,6 +839,17 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
             J::Array(out)
         }
 
+        // Tuples (mini-tanda T): serializamos como Array JSON (no hay
+        // tuple type en JSON). Pierde la distinción tuple/list pero
+        // es lo razonable para handlers HTTP.
+        Value::Tuple(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for v in items {
+                out.push(value_to_json(v)?);
+            }
+            J::Array(out)
+        }
+
         Value::Map(pairs) => {
             let mut out = serde_json::Map::new();
             for (k, v) in pairs.lock().iter() {

@@ -209,6 +209,13 @@ pub enum Value {
         methods: Vec<crate::ast::MethodDef>,
     },
 
+    /// Tupla en runtime (mini-tanda T). Heterogénea, tamaño fijo
+    /// conocido en compile-time. NO compartida por referencia
+    /// (semántica de valor — clonar la tupla clona cada slot). El
+    /// orden es el de declaración; el acceso es por índice
+    /// (`Expr::TupleField`) o por destructuring (Pattern::Tuple).
+    Tuple(Vec<Value>),
+
     /// Lista en runtime. Compartida por referencia (`Shared<T>` =
     /// `Arc<Mutex<>>` post-F17.2) para que `xs.push(...)`, pasar la lista
     /// a una función, o guardarla en un campo de instancia hablen del
@@ -394,6 +401,7 @@ impl Value {
             Value::Type { .. } => "Type",
             Value::List(_) => "List",
             Value::Map(_) => "Map",
+            Value::Tuple(_) => "Tuple",
             Value::Range { .. } => "Range",
             Value::Instance { .. } => "Instance",
             Value::Result(_) => "Result",
@@ -454,6 +462,23 @@ impl std::fmt::Display for Value {
                     write_inline_value(f, v)?;
                 }
                 write!(f, "}}")
+            }
+            Value::Tuple(items) => {
+                // Tupla: `(1, "x", true)`. Strings con comillas adentro
+                // (mismo criterio que List/Map/Instance). Single-element
+                // tuple lleva trailing comma: `(42,)` para distinguir
+                // de `(42)` (paréntesis de agrupación).
+                write!(f, "(")?;
+                for (i, v) in items.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write_inline_value(f, v)?;
+                }
+                if items.len() == 1 {
+                    write!(f, ",")?;
+                }
+                write!(f, ")")
             }
             Value::Range { start, end } => write!(f, "{}..{}", start, end),
             Value::Instance { type_name, fields } => {
@@ -534,6 +559,12 @@ impl PartialEq for Value {
             }
             (Value::Map(a), Value::Map(b)) => {
                 Arc::ptr_eq(a, b) || *a.lock() == *b.lock()
+            }
+            // Tuples (mini-tanda T): comparación estructural por
+            // longitud y elementos. La coerción Int↔Float vale
+            // recursivamente vía esta misma impl.
+            (Value::Tuple(a), Value::Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
             }
             (
                 Value::Range { start: s1, end: e1 },

@@ -1994,10 +1994,65 @@ Ver [examples/guide/09b-indexing-slicing.fitz](../examples/guide/09b-indexing-sl
 - **Comprehensions** (`[x * 2 for x in xs]`).
 - **Slicing con paso** (`xs[::2]`) — sin demanda concreta.
 
+### Tuples (mini-tanda T)
+
+Tipos compuestos heterogéneos de tamaño fijo, similares a Rust.
+Útil para retornos múltiples y agrupar valores ad-hoc sin
+declarar un `type`.
+
+```fitz
+// Literal — la coma distingue tuple de paréntesis de agrupación.
+let pair: (Int, Str) = (42, "fitz")
+print(pair.0)             // 42
+print(pair.1)             // fitz
+
+// Tupla vacía (unit) y de 1 elemento:
+let unit: () = ()
+let single = (42,)        // trailing comma obligatoria
+
+// Retornos múltiples:
+fn divmod(a: Int, b: Int) -> (Int, Int) {
+    return (a / b, a % b)
+}
+
+// Destructuring con `let`:
+let (q, r) = divmod(17, 5)
+print(q)                  // 3
+print(r)                  // 2
+
+// Wildcards y nesting:
+let (a, _, c) = (10, 20, 30)
+let ((x, y), z) = ((1, 2), 3)
+
+// Tuple pattern en match:
+fn clasif(p: (Int, Int)) -> Str {
+    return match p {
+        (0, 0) => "origen"
+        (0, _) => "eje Y"
+        (_, 0) => "eje X"
+        (a, b) => "({a}, {b})"
+    }
+}
+```
+
+**Limitaciones del MVP**:
+- En `fitz build`, los tuple patterns en match no admiten
+  literales `Str`/`Range`/Or como sub-pattern (`("ada", n)` no
+  compila; el intérprete sí lo acepta). Workaround: usar bind +
+  guard. `(name, n) if name == "ada"`.
+- `let (a, b) = ...` solo admite `Ident`, `_` y tuple
+  patterns anidados — no literales ni Ok/Err.
+- Tuples como llave de Map: no soportado por ahora.
+
+Ver [examples/guide/09c-tuples.fitz](../examples/guide/09c-tuples.fitz)
+para el ejemplo completo.
+
 > Lo que **sí anda** y antes era deuda (mini-tanda I post-S):
 > **índices negativos** `xs[-1]` para listas y strings + **slicing**
 > `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`, `xs[a..=b]` (con
-> clamp silencioso). Ver la sub-sección de arriba.
+> clamp silencioso). **Tuples** `(T1, T2)` con acceso `.0`/`.1`,
+> destructuring `let (a, b) = ...`, y `Pattern::Tuple` en match
+> (mini-tanda T). Ver las sub-secciones de arriba.
 
 > Lo que **sí anda** y antes era deuda: **asignación a índice**
 > (R.1.3) — ver sección "Asignación a índice" arriba. **Rangos

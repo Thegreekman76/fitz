@@ -121,6 +121,10 @@ fn collect_ident_uses(program: &Program) -> std::collections::HashSet<String> {
 
 fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut std::collections::HashSet<String>) {
     match stmt {
+        Stmt::Destructure { value, .. } => {
+            // El pattern declara names (no uses). El value SÍ es use.
+            collect_uses_in_expr(value, uses);
+        }
         Stmt::Assign { target, value, .. } => {
             // El target NO es use (es definición/reasignación). El
             // value SÍ se walkea (puede contener idents).
@@ -228,6 +232,12 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             if let Some(s) = start { collect_uses_in_expr(s, uses); }
             if let Some(e) = end { collect_uses_in_expr(e, uses); }
         }
+        Expr::Tuple(items, _) => {
+            for i in items {
+                collect_uses_in_expr(i, uses);
+            }
+        }
+        Expr::TupleField { tuple, .. } => collect_uses_in_expr(tuple, uses),
         Expr::List(items, _) => {
             for i in items {
                 collect_uses_in_expr(i, uses);
@@ -513,6 +523,7 @@ fn lint_string_concat(
 fn walk_exprs_in_stmt(stmt: &Stmt, f: &mut impl FnMut(&Expr)) {
     match stmt {
         Stmt::Assign { value, .. } => walk_expr(value, f),
+        Stmt::Destructure { value, .. } => walk_expr(value, f),
         Stmt::Return(e, _) => walk_expr(e, f),
         Stmt::ReturnStatus { status, body, .. } => {
             walk_expr(status, f);
@@ -601,6 +612,12 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             if let Some(s) = start { walk_expr(s, f); }
             if let Some(e) = end { walk_expr(e, f); }
         }
+        Expr::Tuple(items, _) => {
+            for i in items {
+                walk_expr(i, f);
+            }
+        }
+        Expr::TupleField { tuple, .. } => walk_expr(tuple, f),
         Expr::List(items, _) => {
             for i in items {
                 walk_expr(i, f);

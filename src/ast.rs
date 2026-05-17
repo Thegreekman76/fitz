@@ -97,6 +97,25 @@ pub enum Expr {
     /// Mapa literal `{"k": v, ...}`, `{}`. Preserva orden de inserción.
     Map(Vec<(Expr, Expr)>, Span),
 
+    /// Tupla literal (mini-tanda T post-I). `(e1, e2, e3, ...)`.
+    /// Casos especiales del parser:
+    ///   - `()` → tupla vacía (unidad).
+    ///   - `(e,)` → tupla de 1 elemento (trailing comma obligatoria).
+    ///   - `(e)` → solo paréntesis de agrupación, NO una tupla.
+    ///   - `(e1, e2)` y siguientes → tupla.
+    ///
+    /// Heterogéneas naturalmente: cada slot tiene su propio tipo.
+    Tuple(Vec<Expr>, Span),
+
+    /// Acceso a un campo de tupla por índice: `t.0`, `t.1`. El parser
+    /// detecta `<expr>.<int_literal>` en postfix y emite esto en lugar
+    /// de `Expr::Field` (que requiere identificador).
+    TupleField {
+        tuple: Box<Expr>,
+        index: usize,
+        span: Span,
+    },
+
     /// Rango `start..end` (exclusivo) o `start..=end` (inclusivo).
     /// `span` apunta al `..` o `..=`. El flag `inclusive` lo aporta
     /// R.1.4 (mini-fase R) — default `false` mantiene los call sites
@@ -186,6 +205,8 @@ impl Expr {
             Expr::Field { span, .. } => *span,
             Expr::Index { span, .. } => *span,
             Expr::Slice { span, .. } => *span,
+            Expr::Tuple(_, span) => *span,
+            Expr::TupleField { span, .. } => *span,
             Expr::List(_, s) => *s,
             Expr::Map(_, s) => *s,
             Expr::Range { span, .. } => *span,
@@ -300,6 +321,16 @@ pub enum Stmt {
     Assign {
         target: AssignTarget,
         type_: Option<TypeExpr>,
+        value: Expr,
+        span: Span,
+    },
+
+    /// `let (a, b) = expr` — destructuring de tupla (mini-tanda T).
+    /// Solo aplica con `let` (declaración). Evaluator declara `a` y
+    /// `b` en el env actual; cada nombre puede ser `_` (ignorar).
+    /// Pattern admite nesting: `let ((x, y), z) = ...`.
+    Destructure {
+        pattern: Pattern,
         value: Expr,
         span: Span,
     },
@@ -435,6 +466,7 @@ impl Stmt {
     pub fn span(&self) -> Span {
         match self {
             Stmt::Assign { span, .. } => *span,
+            Stmt::Destructure { span, .. } => *span,
             Stmt::Return(_, span) => *span,
             Stmt::ReturnStatus { span, .. } => *span,
             Stmt::Expr(_, span) => *span,
@@ -544,6 +576,9 @@ pub enum TypeExpr {
         params: Vec<TypeExpr>,
         ret: Box<TypeExpr>,
     },
+    /// Tipo tupla `(T1, T2, ...)` (mini-tanda T). Heterogénea por
+    /// definición. Vec vacío = tipo "unit" `()` (la tupla vacía).
+    Tuple(Vec<TypeExpr>),
 }
 
 impl TypeExpr {
@@ -568,6 +603,14 @@ impl TypeExpr {
                 let ps: Vec<String> = params.iter().map(|p| p.display_name()).collect();
                 format!("Fn({}) -> {}", ps.join(", "), ret.display_name())
             }
+            TypeExpr::Tuple(items) => {
+                let parts: Vec<String> = items.iter().map(|t| t.display_name()).collect();
+                if parts.len() == 1 {
+                    format!("({},)", parts[0])
+                } else {
+                    format!("({})", parts.join(", "))
+                }
+            }
         }
     }
 
@@ -582,6 +625,7 @@ impl TypeExpr {
             TypeExpr::Generic { name, .. } => name,
             TypeExpr::Nullable(inner) => inner.head_name(),
             TypeExpr::Function { .. } => "Fn",
+            TypeExpr::Tuple(_) => "Tuple",
         }
     }
 
@@ -639,6 +683,12 @@ pub enum Pattern {
     /// Solo Int por ahora (Float complica la representación discreta).
     /// `inclusive` aportado por R.1.4 (mini-fase R).
     Range { start: i64, end: i64, inclusive: bool },
+    /// `(p1, p2, ...)` — matchea si el valor es una tupla de la
+    /// misma longitud y cada sub-patrón matchea su slot
+    /// (mini-tanda T). Tupla vacía `()` matchea solo `Tuple([])`.
+    /// Cada sub-pattern puede ser cualquier `Pattern` (incluido
+    /// otro `Tuple` para nested destructuring).
+    Tuple(Vec<Pattern>),
     /// `pat1 | pat2 | pat3` — matchea si CUALQUIERA de los
     /// sub-patrones matchea. R.2.1 (mini-fase R).
     ///
