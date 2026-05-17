@@ -554,9 +554,26 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     compile_e2e + 3 openapi** (sin cambios — repl_cmd es
     interactivo, smoke E2E pendiente). Clippy `-D warnings`
     limpio.
-  - Próximo: **9.z.5** (`fitz lint` — linter de patrones más allá
-    de tipos: unused_variable, unused_import, useless_match,
-    etc.). Cierra Fase 9.z entera.
+  - **9.z.5 CERRADA (2026-05-17) — CIERRE FASE 9.z ENTERA**.
+    `fitz lint` con 4 lints: `unused_variable`,
+    `unused_import`, `useless_match`, `string_concat`.
+    Default warnings + exit 0; `--deny <lint>` (repetible)
+    promueve a error + exit 1 para CI. Supresión por
+    `// @allow(<lint>)` en la línea anterior. Output estilo
+    cargo-clippy (`warning:` amarillo / `error:` rojo con ANSI
+    auto via `IsTerminal`). Lints skipeados del roadmap:
+    `panic_in_test_only` (no aplica — sin `panic!` builtin) y
+    `redundant_clone` (sin análisis de movimientos). Auto-fix
+    `--fix` DIFERIDO como sub-paso futuro. Módulo nuevo
+    `src/lint.rs` (~700 LoC con 15 unit tests). Cap 27 nuevo
+    en `docs/guide.md`.
+  - Total al cierre 9.z.5: **1381 unit + 73 cli_e2e + 79
+    compile_e2e + 3 openapi** (+15 unit + 7 cli_e2e vs 9.z.4).
+    Clippy `-D warnings` limpio.
+  - **CIERRE FORMAL FASE 9.z ENTERA**: los 5 sub-pasos (fmt +
+    test + dev + repl + lint) cerrados en 2 días consecutivos
+    (16-17 de mayo). 5 capítulos nuevos en `docs/guide.md`
+    (23-27). Próximo norte: Fase 9.w (Stack web first-class).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based), `@ws` (WebSockets tipados con
   `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM

@@ -64,9 +64,10 @@ abrí un issue.
 24. [`fitz test` — testing built-in](#24-fitz-test--testing-built-in)
 25. [`fitz dev` — hot reload](#25-fitz-dev--hot-reload)
 26. [`fitz repl` — REPL interactivo](#26-fitz-repl--repl-interactivo)
+27. [`fitz lint` — linter de patrones](#27-fitz-lint--linter-de-patrones)
 
 **Parte 11 — Cerrando**
-27. [Qué sigue](#27-qué-sigue)
+28. [Qué sigue](#28-qué-sigue)
 
 ---
 
@@ -153,7 +154,8 @@ La guía está dividida en partes que se leen en orden:
 9. **Interop** — `from python import ...` para reusar el ecosistema
    Python.
 10. **Tooling** — LSP + extensión VSCode, formateador `fitz fmt`,
-    test runner `fitz test`, hot reload `fitz dev`, REPL `fitz repl`.
+    test runner `fitz test`, hot reload `fitz dev`, REPL `fitz repl`,
+    linter `fitz lint`.
 11. **Cerrando** — el mapa de lo que viene.
 
 ### Cómo usar los ejemplos
@@ -6368,14 +6370,124 @@ Las líneas que tipeás se guardan en `~/.fitz/history` (o
 
 ---
 
-## 27. Qué sigue
+## 27. `fitz lint` — linter de patrones
+
+`fitz lint` detecta patrones que **sí compilan pero son code smells**:
+vars no usadas, imports muertos, `match` con un solo arm catch-all,
+concatenación de strings con `+` en lugar de interpolación. El
+linter complementa al type checker:
+
+- `fitz check` — errores de tipo (bloqueantes, exit 1).
+- `fitz lint` — sugerencias de estilo/patrón (warnings, exit 0 por
+  default). Promovés a error con `--deny <lint>` en CI.
+
+Llegó con la **Fase 9.z.5** (cerrada el 2026-05-17). **Cierra
+Fase 9.z entera**.
+
+### Los 4 lints del MVP
+
+| Lint | Qué detecta |
+|---|---|
+| `unused_variable` | `let x = ...` cuyo nombre no aparece en ningún uso (skip prefijo `_`). |
+| `unused_import` | `import X` o `from X import Y` cuyo binding no se usa. |
+| `useless_match` | `match expr { _ => body }` con un solo arm catch-all (= un `let` directo). |
+| `string_concat` | `"a" + "b"` con ambos operandos literales (usá interpolación). |
+
+### Cómo se usa
+
+```bash
+# Lintear archivos explícitos
+fitz lint src/main.fitz src/utils.fitz
+
+# Lintear todo el proyecto (requiere fitz.toml)
+fitz lint
+
+# Tratar un lint como error (CI)
+fitz lint --deny unused_variable
+fitz lint --deny unused_variable --deny string_concat   # múltiples
+```
+
+**Default**: warnings, exit 0 incluso con findings. Solo el flag
+`--deny <name>` con un lint que aparezca convierte el exit a 1.
+
+### Supresión: `// @allow(<lint>)`
+
+Si un lint es intencional, prefijás la línea anterior con un
+comment `@allow(<name>)`:
+
+```fitz
+// @allow(unused_variable)
+let placeholder = compute_thing()  // intencional, no flagueado
+```
+
+Solo la línea inmediatamente anterior cuenta. El comment puede
+tener texto adicional (`// @allow(unused_variable) — pending fix`).
+
+### Output
+
+Estilo cargo-clippy:
+
+```text
+warning: variable `temp` declarada pero no usada [unused_variable]
+  --> src/main.fitz:7:5
+  = nota: si es intencional, prefijá con `_` (ej. `_temp`) o suprimí con
+         `// @allow(unused_variable)` en la línea anterior.
+
+warning: concatenación de strings literales — usá interpolación [string_concat]
+  --> src/main.fitz:4:24
+  = nota: reemplazá `"a" + "b"` con `"ab"` (o usá interpolación
+         `"{a}{b}"` si los lados son variables).
+
+2 findings en 1 archivo(s)
+```
+
+Colores ANSI auto cuando stdout es TTY: amarillo para `warning`,
+rojo para `error` (modo `--deny`).
+
+### Lo que NO anda todavía
+
+- **Auto-fix (`--fix`)**: el roadmap lo menciona como flag opcional.
+  En el MVP, todos los lints emiten sugerencias textuales pero no
+  modifican código. `string_concat` es el candidato natural a
+  auto-fix (sub-paso futuro).
+- **Lints adicionales**: `redundant_clone` necesita análisis de
+  movimientos que el compilador todavía no hace. `panic_in_test_only`
+  no aplica (Fitz no tiene un `panic!` distinguido — los asserts
+  son builtins normales).
+- **Catálogo extensible (plugins)**: por ahora los 4 lints viven
+  hardcoded en `src/lint.rs`. Plugins externos no son scope del MVP.
+- **Sub-stmt suppression**: el `// @allow(<name>)` solo afecta la
+  línea siguiente. No hay `// @allow(name) { ... }` para suprimir
+  un bloque entero.
+- **Análisis cross-scope estricto**: `unused_variable` usa
+  un set global de uses — no detecta shadowing (`let x = 5; let x
+  = 10; x` no reporta el primer `x` como unused aunque
+  técnicamente sí es). Refinamiento si aparece presión.
+
+### Integración con CI
+
+Patrón típico en pre-commit o pipeline:
+
+```bash
+fitz fmt --check          # exit 1 si hay diffs
+fitz check                # exit 1 si hay errores de tipo
+fitz lint --deny unused_variable --deny unused_import   # exit 1 si los hay
+fitz test                 # exit 1 si algún test falla
+```
+
+Solo `fitz lint` permite ser laxo por default (warnings sin
+romper). El resto siempre exige cero issues.
+
+---
+
+## 28. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 26 podés:
+Con los capítulos 1 a 27 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -6454,6 +6566,13 @@ Con los capítulos 1 a 26 podés:
   `:load`/`:quit`), history persistente en `~/.fitz/history` con
   arrow up/down + Ctrl+R, async transparente (`sleep(100).await`
   funciona). Ver [cap 26](#26-fitz-repl--repl-interactivo).
+- **Linter** con `fitz lint` (Fase 9.z.5): 4 lints —
+  `unused_variable`, `unused_import`, `useless_match`,
+  `string_concat`. Default warning + exit 0; `--deny <lint>`
+  promueve a error + exit 1 para CI. Supresión con
+  `// @allow(<lint>)` en la línea anterior. Output estilo
+  cargo-clippy con colores ANSI auto. Ver
+  [cap 27](#27-fitz-lint--linter-de-patrones).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -6489,11 +6608,11 @@ Lo que sigue post-8:
     cubren el 90% del caso real. **Capítulo dedicado en la guía
     pendiente** (deuda explícita en `docs/deudas-post-5b.md`,
     entra cuando 9.z entera cierre).
-  - **DX (9.z) — en curso**: formatter `fitz fmt` cerrado
-    (9.z.1, ver cap 23). Test runner `fitz test` cerrado
-    (9.z.2, ver cap 24). Hot reload `fitz dev` cerrado
-    (9.z.3, ver cap 25). REPL interactivo `fitz repl` cerrado
-    (9.z.4, ver cap 26). Próximo: `fitz lint` (9.z.5).
+  - **DX (9.z) — CERRADA ENTERA**: formatter `fitz fmt` (9.z.1,
+    cap 23), test runner `fitz test` (9.z.2, cap 24), hot
+    reload `fitz dev` (9.z.3, cap 25), REPL interactivo
+    `fitz repl` (9.z.4, cap 26), linter `fitz lint` (9.z.5,
+    cap 27). Los 5 sub-pasos cerrados en 2 días (2026-05-16/17).
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta

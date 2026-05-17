@@ -771,6 +771,75 @@
 > allá de tipos: unused_variable, unused_import, useless_match,
 > string_concat, panic_in_test_only, redundant_clone). Cierra
 > Fase 9.z entera.
+>
+> **Fase 9.z.5 CERRADA (2026-05-17) — CIERRE FASE 9.z ENTERA**.
+> `fitz lint` con 4 lints implementados:
+> - `unused_variable` — `let x = ...` sin uses, skip `_var`.
+> - `unused_import` — `import X` / `from X import Y` con binding
+>   no referenciado.
+> - `useless_match` — match con UN solo arm catch-all (Wildcard o
+>   Ident binding).
+> - `string_concat` — `BinOp Add` con ambos operandos `Str` literales.
+>
+> Lints skipeados del roadmap: `panic_in_test_only` (no aplica —
+> Fitz no tiene `panic!` builtin distinguido) y `redundant_clone`
+> (requiere análisis de movimientos no implementado).
+>
+> Módulo nuevo `src/lint.rs` (~700 LoC con 15 unit tests).
+> `Commands::Lint { files, deny }` en CLI con output cargo-clippy
+> style. Supresión por `// @allow(<lint>)` en la línea anterior
+> via inspección del source raw. Default warnings + exit 0;
+> `--deny <name>` promueve a error + exit 1.
+>
+> **Total al cierre 9.z.5**: 1381 unit + 73 cli_e2e + 79
+> compile_e2e + 3 openapi (+15 unit + 7 cli_e2e vs 9.z.4).
+> Clippy `-D warnings` limpio.
+>
+> **Cap 27 nuevo "`fitz lint`"** en `docs/guide.md`
+> (renumeración cap 27→28 "Qué sigue").
+>
+> **Decisiones tomadas**: 4 lints (no 6); auto-fix DIFERIDO;
+> análisis de uses globales (no scope-aware estricto); catálogo
+> cerrado (sin plugins); default warnings + `--deny <name>`
+> para CI.
+>
+> **Deudas residuales de 9.z.5 (NO bloquean 9.w)**:
+> - Auto-fix `--fix` (candidato natural: `string_concat`).
+> - `unused_variable` scope-aware estricto (shadowing).
+> - Suppression cross-line (`// @allow(name) { ... }` bloque).
+> - Lints adicionales (`shadowing`, `useless_clone` cuando el
+>   compilador haga análisis de movimientos).
+> - Plugins externos.
+>
+> ---
+>
+> **CIERRE FORMAL DE FASE 9.z ENTERA (2026-05-17)**: los 5
+> sub-pasos de DX (fmt + test + dev + repl + lint) cerrados en
+> 2 días consecutivos (16-17 de mayo). Suite final acumulada:
+> 1381 unit + 73 cli_e2e + 79 compile_e2e + 3 openapi. Clippy
+> limpio. 5 capítulos nuevos en `docs/guide.md` (23-27),
+> renumeración "Qué sigue" del cap 22 original al cap 28 actual.
+> Deps nuevas: `rustyline = "14"` (REPL), `notify = "6"` (dev).
+>
+> **Deudas mayores acumuladas durante 9.z** (priorizadas como
+> sub-paso dedicado de refresh masivo de docs, próximo natural
+> tras 9.z):
+> 1. **Cap "Package manager"** en la guía (heredado de Q.z).
+> 2. **`docs/architecture.md`** refresh completo con diagramas
+>    nuevos (testing/manifest/lockfile/git_dep/fmt/lsp/lint y los
+>    flujos asociados; el bridge HTTP mpsc/oneshot eliminado en
+>    F17 sigue documentado).
+> 3. **Walk completo de `docs/guide.md`** cap-by-cap para
+>    detectar texto stale derivado de las features cerradas
+>    post-fmt-style (paréntesis opcionales en decorators,
+>    builtins assertion, etc.).
+> 4. **Bug del fmt** con trailing comment al final de body
+>    seguido de otro bloque (heredado de Q.z).
+>
+> **Próximo norte**: Fase 9.w (Stack web first-class —
+> `@authenticated`/`@admin`, `@ws("/chat")`, `@cron`,
+> `@background`) o el sub-paso dedicado de refresh masivo de
+> docs.
 
 ## Resumen ejecutivo
 

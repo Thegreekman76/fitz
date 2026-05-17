@@ -13,20 +13,124 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
 manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS** y **9.z
-(DX) avanza con 9.z.1 + 9.z.2 + 9.z.3 + 9.z.4 CERRADAS** — fmt
-production-ready (2026-05-16), test runner built-in
-(2026-05-17), hot reload (2026-05-17), y REPL interactivo
-(2026-05-17). Solo queda 9.z.5 (linter) para cerrar 9.z entera.
+(DX) ENTERA CERRADA** — fmt production-ready (2026-05-16),
+test runner built-in (2026-05-17), hot reload (2026-05-17), REPL
+interactivo (2026-05-17), y linter (2026-05-17). Los 5 sub-pasos
+de DX cerrados en 2 días.
 
 **Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
 git deps cubren el caso 90% y registry implica decisiones de
 hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
 repl + lint) que no requiere infra externa.
 
-Próximo norte: **9.z.5** (`fitz lint` — patrones más allá de tipos).
+Próximo norte: **9.w** (Stack web first-class — `@authenticated`,
+`@ws`, `@cron`, `@background`). O sub-paso dedicado de refresh
+masivo de docs (cap "Package manager" + `architecture.md` +
+walk completo de la guía) acumulado en `docs/deudas-post-5b.md`.
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.19] — 2026-05-17 — Fase 9.z.5 CERRADA + cierre Fase 9.z entera — `fitz lint`
+
+Quinta y última DX feature de Fase 9.z. Linter de patrones más
+allá de tipos. **Cierra Fase 9.z entera** — los 5 sub-pasos (fmt
++ test + dev + repl + lint) cerrados en 2 días (16-17 de mayo).
+
+**Implementación**:
+
+- Módulo nuevo `src/lint.rs` (~700 LoC incluyendo 15 unit tests):
+  framework `LintFinding` con `name`/`message`/`line`/`column`/
+  `hint`/`fix` opcional, walkers `collect_uses_in_*` y
+  `walk_exprs_in_stmt` para visit recursivo del AST, supresión
+  via inspección del source raw.
+- **4 lints**:
+  - `unused_variable`: detecta `let x = ...` (target Ident) cuyo
+    nombre no aparece en `Expr::Ident` del programa. Skipea
+    prefijo `_` (convención "intencional"). Walkea fns, while,
+    loop, for. Params de fn NO se flaguean en MVP (típicamente
+    handlers HTTP / callbacks reciben params no usados, sería
+    ruido).
+  - `unused_import`: `import X` y `from X import Y` cuyo binding
+    no se referencia. Maneja alias (`import foo as f` → binding
+    `f`).
+  - `useless_match`: `match expr { _ => body }` con UN solo arm
+    catch-all (Wildcard o Ident binding) = equivalente a un
+    `let`. NO flaguea matches con múltiples arms.
+  - `string_concat`: `Expr::BinOp { op: Add, left, right }` con
+    AMBOS operandos `Expr::Str` literales. Sugiere interpolación.
+    Concat con var queda OK (puede ser intencional).
+- **Lints skipeados del roadmap original**:
+  - `panic_in_test_only`: NO aplica — Fitz no tiene `panic!`
+    builtin distinguido (los asserts son builtins normales).
+  - `redundant_clone`: requiere análisis de movimientos que el
+    compilador no hace.
+- `Commands::Lint { files, deny }` en CLI:
+  - Sin args: manifest mode, descubre `.fitz` del proyecto via
+    `discover_project_fitz_files` (heredado de `fitz fmt`).
+  - Con archivos: lintea solo esos.
+  - `--deny <name>` (repetible): trata ese lint como error
+    (exit 1 si aparece).
+- **Output cargo-clippy style**: `warning:` amarillo / `error:`
+  rojo con `--deny`, `--> <file>:<line>:<col>`, hint con `= nota:`,
+  summary final con conteo de findings + denied. ANSI colors auto
+  via `std::io::IsTerminal`.
+- **Supresión**: `// @allow(<lint>)` en la línea inmediatamente
+  anterior al stmt offending. Lookup directo sobre el source raw
+  (no trivia stream del lexer): pragmático y suficiente.
+- **Default exit code**: 0 con findings normales (warnings no
+  rompen build). Exit 1 si: error de lectura de archivo, parse
+  error, o `--deny` matchea algún finding.
+
+**Decisiones tomadas**:
+
+- 4 lints en el MVP (no 6 del roadmap original).
+- Auto-fix (`--fix`) **diferido** a sub-paso futuro: todos los
+  lints emiten sugerencias textuales pero no modifican código.
+  `string_concat` es el candidato natural a auto-fix.
+- Supresión solo en la línea INMEDIATAMENTE anterior (no
+  multi-línea, no inline).
+- Análisis de uses globales (no scope-aware estricto): shadowing
+  (`let x = 5; let x = 10; x`) no se detecta. Refinamiento si
+  aparece presión.
+- Catálogo cerrado (sin plugins externos).
+- Lints emiten warnings por default; CI usa `--deny <name>`.
+
+**Tests**:
+- 15 unit tests en `src/lint.rs::tests`: 1 caso por lint en
+  forma básica (smoke), 1 con `_var` ignorado, 1 con uso real
+  no flagueado, 1 supresión con `@allow` funciona, 1 supresión
+  solo aplica a línea inmediata anterior, 1 con fn body, 1 con
+  alias en imports, 1 con dos arms (no flaguea), 1 programa
+  limpio (cero findings), 1 ordenamiento por línea+columna.
+- 7 cli_e2e nuevos: detecta unused_variable + unused_import,
+  `--deny` exit 1, suppression silencia, archivo inexistente
+  exit 1, string_concat detecta literales, código limpio cero
+  findings, useless_match detecta un-solo-arm.
+- **Total al cierre 9.z.5**: 1381 unit (+15) / 73 cli_e2e (+7)
+  / 79 compile_e2e / 3 openapi. Clippy `-D warnings` limpio.
+
+**Cap 27 nuevo "`fitz lint` — linter de patrones"** en
+`docs/guide.md`: los 4 lints con tabla, CLI, supresión, output
+cargo-clippy, integración con CI, limitaciones (sin auto-fix,
+sin plugins, sin shadowing detection). Renumeración cap 27→28
+("Qué sigue"). Bullet sumado en "Lo que ya sabés" + "DX 9.z"
+del cap 28 marca la fase entera como CERRADA.
+
+**Cierre formal de Fase 9.z entera**: los 5 sub-pasos cerrados.
+Próximo norte: Fase 9.w (stack web first-class: `@authenticated`,
+`@ws`, `@cron`, `@background`) o sub-paso dedicado de refresh
+masivo de docs (cap "Package manager" + `architecture.md` +
+walk completo de la guía).
+
+**Deudas residuales de 9.z.5 (NO bloquean siguientes pasos)**:
+- Auto-fix `--fix` (especialmente para `string_concat`).
+- Lints adicionales si aparece demanda (`shadowing`,
+  `useless_clone` cuando el compilador haga análisis de
+  movimientos, etc.).
+- `unused_variable` scope-aware estricto (shadowing detection).
+- Suppression cross-line (`// @allow(name) { ... }` bloque).
+- Plugins externos para catálogo extensible.
 
 ## [v0.9.18] — 2026-05-17 — Fase 9.z.4 CERRADA — `fitz repl` (REPL interactivo)
 

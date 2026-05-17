@@ -1550,3 +1550,103 @@ fn test_archivo_con_error_de_tipos_aborta_antes_de_correr() {
         "stderr: {stderr}"
     );
 }
+
+// =================================================================
+// Fase 9.z.5 — `fitz lint` (linter de patrones más allá de tipos)
+// =================================================================
+
+#[test]
+fn lint_detecta_unused_variable_y_unused_import() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "import math\nlet x = 5\nprint(\"hola\")\n",
+    );
+    let (stdout, _stderr, code) =
+        run_fitz(&["lint", "t.fitz"], tmp.path());
+    assert_eq!(code, 0, "default lint exit 0 sobre warnings");
+    assert!(stdout.contains("unused_import"));
+    assert!(stdout.contains("unused_variable"));
+    assert!(stdout.contains("`math`"));
+    assert!(stdout.contains("`x`"));
+}
+
+#[test]
+fn lint_deny_promueve_a_error_y_exit_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(tmp.path(), "t.fitz", "let x = 5\nprint(\"hola\")\n");
+    let (stdout, _stderr, code) = run_fitz(
+        &["lint", "t.fitz", "--deny", "unused_variable"],
+        tmp.path(),
+    );
+    assert_eq!(code, 1);
+    assert!(stdout.contains("error"));
+    assert!(stdout.contains("unused_variable"));
+    assert!(stdout.contains("1 denied"));
+}
+
+#[test]
+fn lint_suppression_con_allow_silencia() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "// @allow(unused_variable)\nlet x = 5\nprint(\"hola\")\n",
+    );
+    let (stdout, _stderr, code) =
+        run_fitz(&["lint", "t.fitz"], tmp.path());
+    assert_eq!(code, 0);
+    assert!(stdout.contains("sin findings"), "stdout: {stdout}");
+}
+
+#[test]
+fn lint_archivo_inexistente_devuelve_exit_1() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (_stdout, stderr, code) =
+        run_fitz(&["lint", "no_existe.fitz"], tmp.path());
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no se pudo"));
+}
+
+#[test]
+fn lint_string_concat_detecta_literales() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "let m = \"a\" + \"b\"\nprint(m)\n",
+    );
+    let (stdout, _stderr, code) =
+        run_fitz(&["lint", "t.fitz"], tmp.path());
+    assert_eq!(code, 0);
+    assert!(stdout.contains("string_concat"));
+}
+
+#[test]
+fn lint_codigo_limpio_no_emite_findings() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "fn greet(name: Str) -> Str {\n    return \"Hola, {name}\"\n}\nprint(greet(\"Fitz\"))\n",
+    );
+    let (stdout, stderr, code) =
+        run_fitz(&["lint", "t.fitz"], tmp.path());
+    assert_eq!(code, 0, "stderr: {stderr}, stdout: {stdout}");
+    assert!(stdout.contains("sin findings"));
+}
+
+#[test]
+fn lint_useless_match_un_solo_arm_catchall() {
+    let tmp = tempfile::tempdir().unwrap();
+    write_file(
+        tmp.path(),
+        "t.fitz",
+        "let y = 5\nmatch y { _ => print(y) }\n",
+    );
+    let (stdout, _stderr, code) =
+        run_fitz(&["lint", "t.fitz"], tmp.path());
+    assert_eq!(code, 0);
+    assert!(stdout.contains("useless_match"));
+}

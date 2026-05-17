@@ -5,7 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    codegen, evaluator, fmt, http, lexer, lockfile, manifest, openapi, parser, testing, types,
+    codegen, evaluator, fmt, http, lexer, lint, lockfile, manifest, openapi, parser, testing,
+    types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -203,6 +204,22 @@ enum Commands {
     /// `:type <expr>`, `:env`, `:reset`, `:load <archivo>`.
     /// Ctrl+D sale. Async funciona (`sleep(100).await` y similares).
     Repl,
+    /// Fase 9.z.5 — Linter de patrones más allá de tipos. Detecta
+    /// `unused_variable`, `unused_import`, `useless_match`,
+    /// `string_concat`. Default: warnings (exit 0). `--deny <lint>`
+    /// trata ese lint como error (exit 1). Supresión por
+    /// `// @allow(<lint>)` en la línea anterior. Sin args, busca
+    /// `fitz.toml` (manifest mode) y lintea todos los `.fitz`.
+    Lint {
+        /// Archivos `.fitz` a lintear. Si se omiten, lintea todo
+        /// el proyecto (requiere `fitz.toml`).
+        files: Vec<PathBuf>,
+        /// Trata el lint nombrado como error (exit 1 si aparece).
+        /// Se puede pasar múltiples veces: `--deny unused_variable
+        /// --deny string_concat`.
+        #[arg(long)]
+        deny: Vec<String>,
+    },
 }
 
 fn main() {
@@ -278,6 +295,9 @@ fn main() {
         }
         Commands::Repl => {
             repl_cmd();
+        }
+        Commands::Lint { files, deny } => {
+            lint_cmd(files, deny);
         }
     }
 }
@@ -2632,6 +2652,139 @@ async fn eval_repl_input(
         }
         Err(e) => {
             println!("✗ {e}");
+        }
+    }
+}
+
+// ---- Fase 9.z.5 — `fitz lint` (linter de patrones más allá de tipos) ----
+
+/// Entry point del sub-comando `fitz lint`. Descubre archivos
+/// (single-file o manifest mode), corre el linter sobre cada uno,
+/// imprime findings estilo cargo-clippy, decide exit code según
+/// `--deny`.
+///
+/// Default: exit 0 incluso con findings (warnings no rompen build).
+/// Si algún finding matchea un name listado en `--deny`, exit 1.
+fn lint_cmd(files: Vec<PathBuf>, deny: Vec<String>) {
+    let targets = if files.is_empty() {
+        discover_project_fitz_files()
+    } else {
+        files
+    };
+    if targets.is_empty() {
+        eprintln!("✗ no se encontraron archivos `.fitz` para lintear.");
+        std::process::exit(1);
+    }
+
+    let deny_set: std::collections::HashSet<String> = deny.into_iter().collect();
+    let mut total_findings: usize = 0;
+    let mut denied_findings: usize = 0;
+    let mut read_errors: usize = 0;
+
+    use std::io::IsTerminal;
+    let use_color = std::io::stdout().is_terminal();
+
+    for path in &targets {
+        let source = match fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("✗ no se pudo leer `{}`: {e}", path.display());
+                read_errors += 1;
+                continue;
+            }
+        };
+        let tokens = match lexer::tokenize(&source) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("✗ `{}`: {e}", path.display());
+                read_errors += 1;
+                continue;
+            }
+        };
+        let program = match parser::parse(tokens) {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("✗ `{}`: {e}", path.display());
+                read_errors += 1;
+                continue;
+            }
+        };
+
+        let findings = lint::lint_source(&source, &program);
+        for f in &findings {
+            print_lint_finding(path, f, use_color, deny_set.contains(f.name));
+            total_findings += 1;
+            if deny_set.contains(f.name) {
+                denied_findings += 1;
+            }
+        }
+    }
+
+    // Summary final.
+    if total_findings == 0 && read_errors == 0 {
+        if use_color {
+            println!("\n\x1b[32m✓ sin findings\x1b[0m ({} archivo(s) revisado(s))", targets.len());
+        } else {
+            println!("\n✓ sin findings ({} archivo(s) revisado(s))", targets.len());
+        }
+    } else {
+        let f_word = if total_findings == 1 { "finding" } else { "findings" };
+        println!(
+            "\n{} {} en {} archivo(s){}",
+            total_findings,
+            f_word,
+            targets.len(),
+            if denied_findings > 0 {
+                format!(" ({} denied)", denied_findings)
+            } else {
+                String::new()
+            }
+        );
+    }
+
+    if read_errors > 0 || denied_findings > 0 {
+        std::process::exit(1);
+    }
+}
+
+/// Imprime un finding estilo cargo-clippy:
+/// ```text
+/// warning: variable `x` declarada pero no usada
+///   --> src/main.fitz:3:5
+///   = nota: si es intencional, prefijá con `_` ...
+/// ```
+/// Con `--deny <name>`, se usa "error:" rojo en lugar de "warning:"
+/// amarillo.
+fn print_lint_finding(
+    path: &std::path::Path,
+    finding: &lint::LintFinding,
+    use_color: bool,
+    denied: bool,
+) {
+    let (label, color_code) = if denied {
+        ("error", "\x1b[31m")
+    } else {
+        ("warning", "\x1b[33m")
+    };
+    if use_color {
+        println!(
+            "\n{}{}\x1b[0m: {} \x1b[2m[{}]\x1b[0m",
+            color_code, label, finding.message, finding.name
+        );
+        println!(
+            "  \x1b[36m-->\x1b[0m {}:{}:{}",
+            path.display(),
+            finding.line,
+            finding.column
+        );
+        if let Some(hint) = &finding.hint {
+            println!("  \x1b[2m= nota:\x1b[0m {}", hint);
+        }
+    } else {
+        println!("\n{}: {} [{}]", label, finding.message, finding.name);
+        println!("  --> {}:{}:{}", path.display(), finding.line, finding.column);
+        if let Some(hint) = &finding.hint {
+            println!("  = nota: {}", hint);
         }
     }
 }

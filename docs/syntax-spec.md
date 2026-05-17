@@ -1,6 +1,6 @@
 # Especificación de Sintaxis — Fitz
 
-> Estado: BORRADOR v0.6 (actualización 2026-05-17, post Fase 9.z.4).
+> Estado: BORRADOR v0.7 (actualización 2026-05-17, post Fase 9.z entera).
 > La mayoría del diseño original ya está implementado; lo pendiente
 > queda señalado abajo.
 >
@@ -59,10 +59,17 @@
 > - `fitz repl` (REPL interactivo con env compartido, multi-line,
 >   comandos `:type`/`:env`/`:load`, history persistente) — Fase
 >   9.z.4 (cap 26).
+> - `fitz lint` (4 lints: `unused_variable`, `unused_import`,
+>   `useless_match`, `string_concat`; supresión por
+>   `// @allow(<lint>)`) — Fase 9.z.5 (cap 27). **Cierra Fase 9.z
+>   entera**.
 >
 > **Diseñado pero no implementado**:
 > - `@bench` para benchmarks (post-MVP de 9.z.2).
 > - Test fixtures (`@before_all`, `@before_each`, etc.) — post-MVP.
+> - Auto-fix `fitz lint --fix` (post-MVP de 9.z.5).
+> - Lints adicionales (`redundant_clone` cuando aterrice análisis
+>   de movimientos).
 > - `fitz lint` (linter de patrones más allá de tipos) — Fase 9.z.5.
 > - Registry público (`fitz publish` + `fitz add foo@1.2.3`) — Fase
 >   9.y.5, diferido.
