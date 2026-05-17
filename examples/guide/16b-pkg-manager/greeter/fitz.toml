@@ -1,0 +1,10 @@
+[package]
+name = "greeter"
+version = "0.1.0"
+edition = "2026"
+
+[bin]
+main = "src/main.fitz"
+
+[dependencies]
+greetings = { path = "../greetings" }

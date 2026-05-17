@@ -1,0 +1,15 @@
+// `greeter` — bin que importa la lib `greetings` via path dep.
+//
+// El [dependencies] de fitz.toml resuelve `greetings` al
+// `../greetings/src/lib.fitz` (el `[lib].entry` del proyecto
+// vecino). El loader respeta el dep_registry: `from greetings`
+// busca primero ese path, después fallback a relativo.
+//
+// Corrélo desde la carpeta `greeter/`:
+//     fitz run
+// (fitz.toml en cwd → manifest mode → ejecuta `[bin].main`)
+
+from greetings import hola, formal
+
+print(hola("Fitz"))
+print(formal("Patagonia"))

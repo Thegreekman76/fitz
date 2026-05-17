@@ -12,21 +12,137 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS** y **9.z
-(DX) ENTERA CERRADA** — fmt production-ready (2026-05-16),
-test runner built-in (2026-05-17), hot reload (2026-05-17), REPL
-interactivo (2026-05-17), y linter (2026-05-17). Los 5 sub-pasos
-de DX cerrados en 2 días.
-
-**Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
-git deps cubren el caso 90% y registry implica decisiones de
-hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
-repl + lint) que no requiere infra externa.
+manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS**, **9.z
+(DX) ENTERA CERRADA**, y **refresh masivo de docs ENTERO CERRADO**.
 
 Próximo norte: **9.w** (Stack web first-class — `@authenticated`,
-`@ws`, `@cron`, `@background`). O sub-paso dedicado de refresh
-masivo de docs (cap "Package manager" + `architecture.md` +
-walk completo de la guía) acumulado en `docs/deudas-post-5b.md`.
+`@ws`, `@cron`, `@background`).
+
+## [v0.9.20] — 2026-05-17 — Refresh masivo de docs + cap 16b Package manager + fix bug fmt
+
+Sub-paso dedicado de refresh general de docs acumulado durante
+Fase 9.z entera. Cuatro sub-tareas (A + B + C + D) cerradas en
+una tanda:
+
+**A — Caps stale en `docs/guide.md`** refrescados:
+
+- **Cap 12 "Tipos con `type`"**: removido "Chequeo de tipos en
+  runtime" + "Tipos compuestos en campos no se validan" (ambos
+  cerrados post-Fase 5a/5.1). Sumado bloque "Lo que SÍ anda y
+  antes era deuda" con referencias a Fase 5a / 5.1 / PreF8.3.
+- **Cap 13 "Métodos"**: removido "Encadenamiento multi-línea"
+  (cerrado en PreF8.2). Sumado ejemplo idiomático.
+- **Cap 17 "HTTP nativo"**: reescrita sección "Qué pasa adentro"
+  (era stale — describía el bridge mpsc/dos-threads que F17
+  eliminó). Removidos 6 ítems de "Qué todavía no anda" todos
+  cerrados: async/await reales, status codes custom, query
+  params, headers de request, named args en decoradores,
+  middleware. Sumado bloque con referencias a sub-secciones
+  existentes del mismo cap.
+- **Cap 20 "fitz build"**: removido "Server HTTP multi-threaded
+  como deuda" (cerrado F17 — runtime tokio default multi-thread
+  con state HTTP como `LazyLock<Arc<Mutex<T>>>`). Sumado bloque
+  con state HTTP compartido + paralelismo HTTP real + interop
+  Python como features cerradas que antes eran deuda.
+
+**B — Cap 16b nuevo "Package manager"** en `docs/guide.md`:
+
+- Posición: entre cap 16 "Módulos" y cap 17 "HTTP nativo" en
+  Parte 6 "Organización" (convención `16b` paralela a
+  `17b-middleware`, `19b-paralelismo`).
+- Cubre: anatomía de `fitz.toml` (`[package]`/`[bin]`/`[lib]`/
+  `[dependencies]`), `fitz new`/`fitz init` con scaffolding,
+  manifest mode de `fitz run`/`build`/`check` (walk-up Cargo-style),
+  deps path (`{ path = "../foo" }`), deps git con tag o rev
+  (`{ git = "...", tag = "v1.0.0" }`), lockfile `fitz.lock` con
+  formato Cargo-style, `fitz add`/`remove`/`update`. "Lo que NO
+  anda todavía" lista registry público, dev-dependencies,
+  workspaces, branches en git deps, transitive deps.
+- **Ejemplo runnable** `examples/guide/16b-pkg-manager/` con
+  dos proyectos: `greetings/` (lib con dos fns) + `greeter/`
+  (bin que importa via `[dependencies] greetings = { path =
+  "../greetings" }`). README en el ejemplo explica el flujo
+  end-to-end.
+- **2 cli_e2e tests nuevos**:
+  - `cap_16b_ejemplo_greeter_corre_y_genera_lockfile` valida
+    `fitz run` + output esperado + lockfile auto-generado.
+  - `cap_16b_fitz_build_compila_greeter_a_binario_nativo`
+    valida `fitz build` + binario producido + paridad de output
+    con `fitz run`.
+
+**C — `docs/architecture.md` refresh completo**:
+
+- Reescrito de cero (287 → ~470 líneas).
+- Diagrama mermaid + ASCII fallback actualizados: muestran los
+  **15 sub-comandos** del CLI en lugar de los 3 originales
+  (check/run/build).
+- Agrupados en 5 familias: pipeline core, package manager, DX,
+  interop Python, editor support.
+- **12 módulos** nuevos documentados que faltaban: `lib.rs`,
+  `manifest.rs`, `lockfile.rs`, `git_dep.rs`, `testing.rs`,
+  `fmt.rs`, `lint.rs`, `lsp.rs`, `py_interop.rs`, `py_types.rs`,
+  `openapi.rs`. Cada uno cita su Fase de origen + APIs públicas
+  relevantes.
+- Removidas referencias stale: "tres subcomandos" (línea 90),
+  "axum + tokio en thread separado" (línea 24 del diagrama —
+  F17 lo eliminó), "Rc<RefCell<>>" en value.rs (post-F17 es
+  `Arc<parking_lot::Mutex<>>`).
+- Sumada nota explicando features opcionales (`python`, `lsp`)
+  como cargo features con bin separado para `fitz-lsp`.
+- "Por qué este orden y no otro" actualizado para reflejar
+  decisiones recientes (TypeInfo side-table en lugar de IR,
+  package manager y DX como módulos hermanos no parte del
+  pipeline core).
+
+**D — Fix bug del fmt** (deuda residual de 9.z.1.b):
+
+Bug: trailing comment al final del body de una fn seguido de
+otro bloque insertaba blank spurio adentro del body del segundo
+bloque. MRE:
+```fitz
+fn greet(name: Str) -> Str {
+    return "Hola, {name}!" // inline
+}
+
+for n in ["Ada"] {
+    print(greet(n))   // ← antes del fix, había blank line antes acá
+}
+```
+
+Root cause: `had_blank_in_source` en `fmt_stmt_list` usaba
+`after_what = max(prev_end_line, last_emitted_comment_line)`.
+Al entrar a un nuevo bloque (`in_block=true`,
+`prev_end_line=0`), `last_emitted_comment_line` arrastraba un
+valor de scope outer (el trailing comment del stmt anterior al
+bloque) y `has_blank_between` chequeaba blanks FUERA del bloque
+actual.
+
+Fix: guarda condicional. En `in_block=true`, el chequeo requiere
+`prev_end_line > 0` (paralela a la `smart_blank`). En top-level
+se preserva el behavior previo (`after_what > 0`) para no romper
+blanks legítimas entre header comments y el primer stmt del
+file.
+
+Test E2E nuevo `fmt_trailing_comment_seguido_de_bloque_no_inserta_blank_spurio`
+en `tests/cli_e2e.rs` protege contra regresión.
+
+`docs/fmt-style.md` actualizado con entry de "Historia"
+documentando el fix.
+
+**Tests al cierre del refresh**:
+- 1381 unit / 76 cli_e2e (+3 vs 9.z.5: 2 del cap 16b + 1 del
+  fix fmt) / 79 compile_e2e / 3 openapi.
+- Clippy `-D warnings` limpio.
+
+**Deudas residuales actualizadas en `docs/deudas-post-5b.md`**:
+- Bug del fmt: marcado CERRADO en los 3 lugares donde se mencionaba.
+- Cap "Package manager" en la guía: marcado CERRADO.
+- `docs/architecture.md` refresh: marcado CERRADO.
+- Walk completo de guide.md: parcialmente CERRADO (caps stale
+  refrescados; pueden quedar referencias menores).
+
+Próximo norte: Fase 9.w (Stack web first-class: `@authenticated`,
+`@ws`, `@cron`, `@background`).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).

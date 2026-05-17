@@ -150,3 +150,10 @@ después de `fitz fmt` reporta diffs, es un bug. Reportalo.
 - **9.z.1.b** (2026-05-16) — comment + blank line preservation
   vía lexer `Trivia` side-stream. Warning loud removido,
   formatter production-ready.
+- **Fix post-9.z.5** (2026-05-17) — bug en `fmt_stmt_list`:
+  trailing comment al final del body de una fn seguido de otro
+  bloque insertaba blank spurio adentro del body del segundo.
+  Root cause: `last_emitted_comment_line` de scope outer
+  contaminaba el chequeo `had_blank_in_source` al entrar a un
+  nuevo bloque. Fix: guarda `prev_end_line > 0` (in_block) /
+  `after_what > 0` (top-level) en `had_blank_in_source`.

@@ -1218,6 +1218,48 @@ fn fmt_preserva_comments_y_blank_lines() {
 }
 
 #[test]
+fn fmt_trailing_comment_seguido_de_bloque_no_inserta_blank_spurio() {
+    // Regresión del bug fixed post-9.z.5: trailing comment al final
+    // del body de un fn, seguido de OTRO bloque (for/while/if/match),
+    // insertaba un blank line spurio adentro del body del segundo
+    // bloque (ver `docs/deudas-post-5b.md` para el MRE).
+    //
+    // El fix: agregar guarda `prev_end_line > 0` al cálculo de
+    // `had_blank_in_source` en `fmt_stmt_list`, paralelo a la de
+    // `smart_blank`. Sin la guarda, `last_emitted_comment_line` de
+    // scope outer disparaba el chequeo de blank sobre líneas FUERA
+    // del bloque actual.
+    let tmp = tempfile::tempdir().unwrap();
+    let file = tmp.path().join("t.fitz");
+    let original = "fn greet(name: Str) -> Str {\n\
+                    \x20\x20\x20\x20return \"Hola, {name}!\" // inline\n\
+                    }\n\
+                    \n\
+                    for n in [\"Ada\"] {\n\
+                    \x20\x20\x20\x20print(greet(n))\n\
+                    }\n";
+    std::fs::write(&file, original).unwrap();
+
+    let output = Command::new(fitz_bin())
+        .args(["fmt"])
+        .arg(&file)
+        .output()
+        .expect("fitz fmt");
+    assert!(output.status.success());
+
+    let after = std::fs::read_to_string(&file).unwrap();
+    // No debe haber blank line spurio entre `for ... {` y `print(...)`.
+    assert!(
+        !after.contains("for n in [\"Ada\"] {\n\n"),
+        "blank spurio dentro del body del for: {after}"
+    );
+    // Smoke: trailing comment preservado, ambos bloques presentes.
+    assert!(after.contains("// inline"));
+    assert!(after.contains("for n in [\"Ada\"]"));
+    assert!(after.contains("print(greet(n))"));
+}
+
+#[test]
 fn fmt_archivo_con_error_de_sintaxis_aborta_sin_escribir() {
     let tmp = tempfile::tempdir().unwrap();
     let file = tmp.path().join("broken.fitz");
@@ -1649,4 +1691,127 @@ fn lint_useless_match_un_solo_arm_catchall() {
         run_fitz(&["lint", "t.fitz"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("useless_match"));
+}
+
+// =================================================================
+// Smoke del ejemplo del cap 16b: greeter (bin) importa greetings (lib)
+// via [dependencies] path = "../greetings", fitz run produce el output
+// esperado, fitz.lock se genera automático.
+// =================================================================
+
+#[test]
+fn cap_16b_ejemplo_greeter_corre_y_genera_lockfile() {
+    // Reproducimos `examples/guide/16b-pkg-manager/` en tempdir
+    // para que el test no toque el repo. Lockfile generado vive en
+    // el tempdir y se descarta al cerrar.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    // --- greetings/ (lib) ---
+    write_file(
+        root,
+        "greetings/fitz.toml",
+        "[package]\nname = \"greetings\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [lib]\nentry = \"src/lib.fitz\"\n",
+    );
+    write_file(
+        root,
+        "greetings/src/lib.fitz",
+        "fn hola(nombre: Str) -> Str {\n    return \"Hola, {nombre}!\"\n}\n\n\
+         fn formal(nombre: Str) -> Str {\n    return \"Buenas tardes, {nombre}.\"\n}\n",
+    );
+
+    // --- greeter/ (bin que importa greetings) ---
+    write_file(
+        root,
+        "greeter/fitz.toml",
+        "[package]\nname = \"greeter\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [bin]\nmain = \"src/main.fitz\"\n\n\
+         [dependencies]\ngreetings = { path = \"../greetings\" }\n",
+    );
+    write_file(
+        root,
+        "greeter/src/main.fitz",
+        "from greetings import hola, formal\n\n\
+         print(hola(\"Fitz\"))\nprint(formal(\"Patagonia\"))\n",
+    );
+
+    // fitz run desde greeter/ — manifest mode + dep_registry resuelto
+    let (stdout, stderr, code) = run_fitz(&["run"], &root.join("greeter"));
+    assert_eq!(code, 0, "stdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("Hola, Fitz!"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Buenas tardes, Patagonia."),
+        "stdout: {stdout}"
+    );
+
+    // El lockfile debe haberse generado en greeter/fitz.lock con la
+    // dep `greetings` registrada.
+    let lockfile = root.join("greeter").join("fitz.lock");
+    assert!(lockfile.exists(), "fitz.lock no se generó");
+    let lock_text = std::fs::read_to_string(&lockfile).expect("leer fitz.lock");
+    assert!(lock_text.contains("name = \"greetings\""), "lock: {lock_text}");
+}
+
+#[test]
+fn cap_16b_fitz_build_compila_greeter_a_binario_nativo() {
+    // Mismo setup que arriba pero compilamos a binario nativo y
+    // verificamos que el ejecutable produce el output esperado.
+    // Garantiza paridad bit-a-bit `fitz run` ↔ `fitz build` con
+    // dep path involucrada.
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+
+    write_file(
+        root,
+        "greetings/fitz.toml",
+        "[package]\nname = \"greetings\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [lib]\nentry = \"src/lib.fitz\"\n",
+    );
+    write_file(
+        root,
+        "greetings/src/lib.fitz",
+        "fn hola(nombre: Str) -> Str {\n    return \"Hola, {nombre}!\"\n}\n",
+    );
+    write_file(
+        root,
+        "greeter/fitz.toml",
+        "[package]\nname = \"greeter\"\nversion = \"0.1.0\"\nedition = \"2026\"\n\n\
+         [bin]\nmain = \"src/main.fitz\"\n\n\
+         [dependencies]\ngreetings = { path = \"../greetings\" }\n",
+    );
+    write_file(
+        root,
+        "greeter/src/main.fitz",
+        "from greetings import hola\n\nprint(hola(\"compilado\"))\n",
+    );
+
+    // Build (compila + emite a target/release/<pkg-name>{.exe}).
+    let (stdout, stderr, code) = run_fitz(&["build"], &root.join("greeter"));
+    assert_eq!(code, 0, "build stdout: {stdout}\nstderr: {stderr}");
+
+    let bin_name = if cfg!(windows) {
+        "greeter.exe"
+    } else {
+        "greeter"
+    };
+    let bin_path = root
+        .join("greeter")
+        .join("target")
+        .join("release")
+        .join(bin_name);
+    assert!(bin_path.exists(), "binario no existe: {}", bin_path.display());
+
+    // Ejecutar y comparar output.
+    let output = Command::new(&bin_path).output().expect("ejecutar binario");
+    assert!(
+        output.status.success(),
+        "exit: {:?}",
+        output.status.code()
+    );
+    let bin_stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        bin_stdout.contains("Hola, compilado!"),
+        "stdout binario: {bin_stdout}"
+    );
 }

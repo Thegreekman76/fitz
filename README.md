@@ -573,7 +573,28 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
   - **CIERRE FORMAL FASE 9.z ENTERA**: los 5 sub-pasos (fmt +
     test + dev + repl + lint) cerrados en 2 días consecutivos
     (16-17 de mayo). 5 capítulos nuevos en `docs/guide.md`
-    (23-27). Próximo norte: Fase 9.w (Stack web first-class).
+    (23-27).
+  - **Refresh masivo de docs (2026-05-17)** — sub-paso dedicado
+    posterior a 9.z entera. Cuatro sub-tareas: (A) refresh de
+    caps stale en `docs/guide.md` (caps 12/13/17/20 con menciones
+    a deuda ya cerrada — async/await, status codes, query params,
+    headers, named args, middleware, chequeo de tipos en runtime,
+    tipos compuestos en campos, encadenamiento multi-línea,
+    server HTTP single-thread); (B) **cap 16b "Package manager"**
+    nuevo entre cap 16 Módulos y cap 17 HTTP, con ejemplo
+    runnable `examples/guide/16b-pkg-manager/` (greetings lib +
+    greeter bin que importa via path dep) + 2 cli_e2e nuevos;
+    (C) **`docs/architecture.md` refresh completo** (de 287 a
+    ~470 líneas, 15 sub-comandos en lugar de 3, 12 módulos nuevos
+    documentados que faltaban — `lib.rs`/`manifest.rs`/
+    `lockfile.rs`/`git_dep.rs`/`testing.rs`/`fmt.rs`/`lint.rs`/
+    `lsp.rs`/`py_interop.rs`/`py_types.rs`/`openapi.rs`);
+    (D) **fix del bug fmt** (trailing comment al final de body
+    seguido de otro bloque insertaba blank spurio) con test E2E
+    de regresión.
+  - Total al cierre del refresh: **1381 unit + 76 cli_e2e + 79
+    compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
+  - Próximo norte: Fase 9.w (Stack web first-class).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based), `@ws` (WebSockets tipados con
   `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM

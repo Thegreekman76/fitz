@@ -46,6 +46,7 @@ abrí un issue.
 
 **Parte 6 — Organización**
 16. [Módulos](#16-módulos)
+16b. [Package manager](#16b-package-manager)
 
 **Parte 7 — HTTP nativo y concurrencia**
 17. [HTTP nativo](#17-http-nativo)
@@ -147,7 +148,8 @@ La guía está dividida en partes que se leen en orden:
 3. **Control de flujo y colecciones** — decidir, repetir, agrupar datos.
 4. **Abstracción** — funciones, tipos custom, métodos, mutación.
 5. **Errores** — `Result` y mensajes del intérprete.
-6. **Organización** — partir el código en módulos.
+6. **Organización** — partir el código en módulos + package
+   manager (`fitz.toml`, deps, lockfile).
 7. **HTTP nativo y concurrencia** — el diferencial de Fitz: decoradores
    y server automático, docs autogeneradas, async.
 8. **Compilar** — `fitz build` a binario nativo standalone.
@@ -2674,13 +2676,19 @@ print("Hola, {u.name}!")    // Hola, Fitz!
   — hoy todo método propio se hace con funciones aparte que reciben
   la instancia como parámetro. Los métodos built-in (sobre `List`,
   `Map`, `Str`) ya están vivos: ver el [próximo capítulo](#13-métodos-y-mutación).
-- **Chequeo de tipos en runtime** — las anotaciones se guardan pero
-  no se validan. Podés pasarle un Str a un campo declarado `Int` y
-  el evaluador lo acepta. El chequeo estático llega con el
-  compilador (Fase 5).
-- **Tipos compuestos en campos** (`emails: List<Str>`) — se parsea el
-  nombre del tipo pero no las anotaciones genéricas tipo `List<T>`.
-  Por ahora se anota con el nombre suelto y el contenido es libre.
+- **Herencia / composición de tipos** — un `type` no puede heredar
+  campos de otro. Los structs son planos. Para compartir campos,
+  por ahora repetirlos o anidarlos (`type Order { user: User, ... }`).
+- **Trait-like polymorphism** — no hay interfaces / traits. Si
+  necesitás polimorfismo, hoy es vía `match` sobre un enum tipo
+  `type Shape { ... }` con un campo discriminador.
+
+> Lo que **sí anda** y antes era deuda (cerrado fase tras fase):
+> chequeo estático de anotaciones contra valores (Fase 5a — `let
+> x: Int = "hola"` ahora falla en `fitz check`), genéricos
+> compuestos en campos (`List<Str>`, `Map<Str, User>`, etc.,
+> validados por el checker desde Fase 5.1), defaults que
+> referencian otros símbolos del módulo de origen (PreF8.3).
 
 ### Ejemplo completo
 
@@ -2980,15 +2988,21 @@ print(grandes)                     // [12, 20]
 - **Métodos custom sobre `type`** (`type User { ... fn greet() => "Hola, {name}" }`).
   Hoy escribís funciones globales que reciben la instancia como
   primer argumento.
-- **Encadenamiento multi-línea** — `.map(...).filter(...)` partido
-  en líneas separadas con `.` al inicio de la siguiente. Hay que
-  mantenerlo en una sola línea o usar variables intermedias.
 - **`return` adentro de un brazo de `match` como expresión** —
   como cada brazo es una expresión, no podés cortar la función
   desde adentro con `return`. Se puede pulir cuando moleste.
 - **Más métodos**: `contains`, `trim`, `split`, `starts_with`,
   `concat`, etc. Se irán sumando con la práctica; sin sorpresas
   semánticas.
+
+> Lo que **sí anda** y antes era deuda: encadenamiento multi-línea
+> con `.` al inicio de la siguiente línea — cerrado en PreF8.2
+> (parser tolera newlines antes de `.`). Forma idiomática:
+> ```fitz
+> let nombres = users
+>     .filter(fn(u) => u.active)
+>     .map(fn(u) => u.name)
+> ```
 
 ### Ejemplo completo
 
@@ -3862,9 +3876,206 @@ User { id: 7, name: "Fitz" }
 
 ---
 
-Con módulos se cierra la Fase 3. Tenés todas las piezas básicas
-del lenguaje. Lo que viene en el próximo capítulo es lo que
-hace a Fitz distinto: HTTP nativo.
+Con módulos cubrimos cómo partir el código adentro de un mismo
+proyecto. Lo que sigue es **cómo armar proyectos** — el
+[package manager](#16b-package-manager) (`fitz.toml`, deps,
+lockfile, `fitz new`/`add`/`remove`). Después de eso entramos a
+HTTP nativo, que es donde Fitz se diferencia.
+
+---
+
+## 16b. Package manager
+
+Hasta acá los ejemplos vivieron en archivos sueltos: `fitz run
+mi_archivo.fitz`. Para proyectos reales (varios archivos,
+dependencias compartidas, binarios distribuibles), Fitz tiene un
+**package manager built-in** desde la Fase 9.y. Patrón Cargo:
+manifest `fitz.toml`, lockfile `fitz.lock`, sub-comandos para
+crear/agregar/quitar/actualizar deps.
+
+### El manifest `fitz.toml`
+
+Un proyecto Fitz arranca con un archivo `fitz.toml` en su raíz:
+
+```toml
+[package]
+name = "miapp"          # ident usable en Fitz (sin hyphens)
+version = "0.1.0"
+edition = "2026"
+
+[bin]
+main = "src/main.fitz"  # entry point del binario
+
+[dependencies]
+# (vacío por ahora — agregamos después)
+```
+
+Las tres secciones obligatorias son `[package]` (metadata),
+**una de** `[bin]` (para programas) o `[lib]` (para librerías
+importables), y `[dependencies]` (puede ir vacío).
+
+### `fitz new` / `fitz init` — scaffolding
+
+```bash
+# Crea un proyecto nuevo en una carpeta nueva
+fitz new miapp
+
+# Inicializa un proyecto en el cwd actual (sin crear carpeta)
+fitz init
+```
+
+`fitz new <nombre>` arma:
+
+```text
+miapp/
+├── fitz.toml          # con [bin] main = "src/main.fitz"
+├── .gitignore
+└── src/
+    └── main.fitz      # template hello world
+```
+
+También corre `git init` (a menos que pases `--no-git`). El
+nombre debe matchear `^[a-z][a-z0-9_-]{0,63}$` (crates.io style),
+con el caveat de que **si querés que sea importable desde código
+Fitz no podés usar hyphens** (el parser no admite `-` en
+identificadores). Para una lib usable, `miapp` ✓, `mi-app` ✗.
+
+Flag `--http` cambia el template a un server HTTP mínimo
+(`@get("/")` que devuelve "Hola"). `--no-git` evita el
+`git init`.
+
+### Manifest mode: `fitz run` / `fitz build` / `fitz check` sin args
+
+Cuando estás adentro de un proyecto, el CLI **lee el `fitz.toml`
+automáticamente**:
+
+```bash
+cd miapp/
+fitz run        # corre [bin].main (o [lib].entry si no hay bin)
+fitz build      # compila a target/release/miapp{.exe}
+fitz check      # chequea tipos del [bin].main
+```
+
+El CLI hace **walk-up Cargo-style**: busca `fitz.toml` desde el
+cwd y va subiendo carpetas hasta encontrar uno. Útil si corrés el
+comando desde `src/` o subcarpetas más profundas.
+
+### Dependencias path
+
+La forma más simple de compartir código entre proyectos locales
+es **path deps**:
+
+```toml
+[dependencies]
+greetings = { path = "../greetings" }
+```
+
+`greetings` apunta a un proyecto vecino que declara `[lib]
+entry = "src/lib.fitz"`. Desde tu código Fitz:
+
+```fitz
+from greetings import hola, formal
+
+print(hola("Fitz"))
+```
+
+El loader resuelve `from greetings import X` consultando primero
+el dep_registry construido del `fitz.toml`, después fallback a
+paths relativos. Caveat: el nombre de la dep debe ser usable como
+identificador Fitz (sin hyphens) porque eso es lo que escribís
+en el `import`.
+
+### Dependencias git
+
+Para deps remotas:
+
+```toml
+[dependencies]
+fitz-foo = { git = "https://github.com/algun/foo.git", tag = "v0.2.0" }
+otra = { git = "https://github.com/algun/otra.git", rev = "abc123" }
+```
+
+Acepta `tag` (release pinned) **o** `rev` (commit SHA exacto) —
+mutuamente exclusivos. **No acepta `branch`** porque branches se
+mueven (no reproducible). El primer `fitz run` clona la dep al
+cache local (`~/.fitz/cache/git/<sanitized-url>@<ref>/`) y la
+reusa en corridas siguientes. `fitz update <name>` invalida el
+cache y re-clona (útil cuando el tag upstream se actualiza).
+
+### Lockfile `fitz.lock`
+
+Cada `fitz run`/`build`/`check` actualiza `fitz.lock` con la
+versión resuelta exacta de cada dep:
+
+```toml
+version = 1
+
+[[package]]
+name = "greetings"
+version = "0.1.0"
+
+[[package]]
+name = "fitz-foo"
+version = "0.2.0"
+source = "git+https://github.com/algun/foo.git#abc123def..."
+```
+
+Idempotente: si el manifest no cambió, no se reescribe. Para path
+deps no hay `source` (son determinísticas por path). Para git
+deps el `source` incluye el commit hash exacto, garantizando que
+re-clones siempre traen el mismo árbol.
+
+Convención: commiteás `fitz.lock` en binarios (`[bin]`), lo
+dejás fuera en librerías (`[lib]`) — igual que Cargo.
+
+### `fitz add` / `remove` / `update`
+
+Para no editar el `fitz.toml` a mano:
+
+```bash
+# Agregar dep path (relativa al manifest)
+fitz add greetings --path ../greetings
+
+# Agregar dep git con tag (o --rev <sha>)
+fitz add fitz-foo --git https://github.com/algun/foo.git --tag v0.2.0
+
+# Quitar una dep
+fitz remove greetings
+
+# Re-resolver deps (invalida cache git, re-clona)
+fitz update              # todas
+fitz update fitz-foo     # solo una
+```
+
+`fitz add` preserva comentarios y formato del `fitz.toml`
+original (vía `toml_edit`). Si la dep ya existe con el mismo
+nombre, sobreescribe sin preguntar (cargo-style). Para revertir,
+`fitz remove`.
+
+### Lo que NO anda todavía
+
+- **Registry público** (`fitz publish` / `fitz add foo@1.2.3`
+  sin path ni git) — la decisión de hosting + infra queda
+  diferida. Path + git deps cubren el 90% del caso real. Cuando
+  aparezca demanda concreta, sub-fase dedicada.
+- **Dev-dependencies** (`[dev-dependencies]`) — diferidas como
+  sub-paso futuro. Hoy todo dep va en `[dependencies]` y se
+  carga siempre.
+- **Workspaces** (multi-proyecto con `Cargo.toml` virtual del
+  root) — sub-paso futuro si aparece presión.
+- **Branches en git deps** — solo `tag` o `rev` (reproducible).
+- **Transitive deps** — el dep_registry hoy es flat: si tu lib
+  declara una dep, el bin que importa tu lib NO la ve heredada.
+  Workaround: declarar la dep también en el bin.
+
+### Ejemplo ejecutable
+
+[`examples/guide/16b-pkg-manager/`](../examples/guide/16b-pkg-manager/)
+tiene un mini-proyecto con dos paquetes — `greetings` (lib) y
+`greeter` (bin que importa via path dep). Ver el README ahí para
+el flujo completo. Test cli_e2e
+(`cap_16b_ejemplo_greeter_corre_y_genera_lockfile`) valida que
+todo el flow funciona end-to-end.
 
 ---
 
@@ -4144,62 +4355,50 @@ a funcionar.
 
 ### Qué pasa adentro
 
-Mientras corre, Fitz tiene dos threads:
+Mientras corre, Fitz tiene **un solo runtime tokio multi-thread**
+que comparte el intérprete y axum. Cada request entra como una
+task tokio independiente, axum la dispatchea a un worker, y el
+worker invoca el handler Fitz directamente. **Las requests
+corren en paralelo entre workers** — un handler lento no bloquea
+a los demás.
 
-- **El intérprete** (thread main): owns todos los handlers
-  registrados y procesa requests síncronamente, una a la vez.
-- **tokio + axum** (thread aparte): acepta conexiones, parsea
-  requests, manda un task al intérprete por un canal y espera la
-  respuesta.
+Esto es post-Fase F17 (2026-05-14). Antes Fitz tenía dos threads
+con un bridge `mpsc/oneshot` entre el intérprete sync y tokio
+async — esa indirección la metió la Fase 4 porque los `Value`
+usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
+`Arc<parking_lot::Mutex<>>`, lo que destrabó:
 
-Esto es por una restricción real: los `Value` de Fitz usan
-`Rc<RefCell<>>` por dentro, que no es `Send` (no puede cruzar
-threads). Tener el intérprete en su propio thread, dueño absoluto
-de esos `Rc`s, es la forma de mantenerlo todo síncrono adentro
-del lenguaje sin meterse en líos con tokio.
-
-En la práctica: hoy un handler lento bloquea a los siguientes.
-Para un proyecto chico o un servicio interno alcanza. Cuando
-agreguemos `async` real adentro del lenguaje, el bridge va a
-mover el handler a un pool y no vas a tener que cambiar nada.
+- **Send completo** en todo el evaluator (`Value`/`EnvRef`).
+- **Eliminación del bridge** (~269 LoC menos en `http.rs`).
+- **Paralelismo HTTP real**: 5 requests concurrentes a un
+  handler `sleep(1000).await` responden en ~1.2s en lugar de
+  ~5s (medido). Ver
+  [examples/guide/19b-paralelismo.fitz](../examples/guide/19b-paralelismo.fitz).
 
 ### Qué todavía no anda
 
-- **`async` / `await` adentro del lenguaje** — la keyword `async`
-  parsea sobre handlers HTTP, pero no aporta nada en runtime. El
-  bridge es síncrono. Cuando se sume async real, los handlers de
-  hoy van a seguir funcionando.
-- **Compilar HTTP con `fitz build`** — desde 5b.6 el compilador
-  produce servidores HTTP nativos (axum + tokio). Desde F11 (post-5b)
-  también soporta **state compartido**: cualquier `let users = [...]`
-  top-level que un handler referencia se materializa como un
-  `thread_local!` en el Rust generado, y cada handler agarra una
-  copia del Rc al inicio del body via `.with(|s| s.clone())`. El
-  ejemplo de este capítulo y `examples/server.fitz` compilan
-  end-to-end con `fitz build` y producen los mismos resultados
-  que `fitz run` (validados con curl bit-a-bit). El trade-off del
-  approach: el binario producido es **single-threaded** —
-  `#[tokio::main(flavor = "current_thread")]` para que el
-  thread_local actúe como global. Para los workloads HTTP de Fitz
-  hoy (handlers sync, sin async externo) es irrelevante. Cuando
-  Fitz sume async/await real adentro del lenguaje, este approach se
-  reemplaza por `Arc<Mutex<...>>` + `State` extractor (sub-paso
-  futuro). Una restricción visible: las fns HTTP necesitan
-  anotación de return type — la inferencia desde el body en
-  codegen es deuda 5b.1 separada.
-- **Status codes custom** — `return 401 { ... }` está en el
-  syntax-spec pero el intérprete aún no lo entiende. Hoy: Result
-  destila a 200/500 automático, o tipos no serializables → 500
-  explícito.
-- **Query params** (`?page=1&size=10`) — sin soporte.
-- **Headers de request y de respuesta** — sin acceso desde Fitz.
 - **Validación de Content-Type** — cualquier body se intenta
   parsear como JSON. Multipart o urlencoded → cuando hagan falta.
-- **Named args en decoradores** (`@server(port: 8080)`) — hoy
-  positional.
-- **Middleware** (`@auth`, `@cached`, etc.) — los decoradores se
-  apilan en el AST y el parser ya los soporta, pero el evaluator
-  solo cablea los 5 actuales. El resto entra cuando lo necesitemos.
+- **Streaming de respuestas** — hoy las respuestas se serializan
+  completas antes de mandarse. Server-sent events y descargas
+  grandes están en el roadmap.
+- **WebSockets** — `@ws("/chat")` está diseñado pero no
+  implementado (Fase 9.w).
+- **Inferencia de return type en handlers para `fitz build`** —
+  las fns HTTP compiladas necesitan anotación de return type
+  explícita. El intérprete sí infiere desde el body.
+
+> Lo que **sí anda** y antes era deuda (cerrado fase tras fase):
+> async/await reales en handlers (Fase 6), paralelismo HTTP real
+> (F17), status codes custom `return 401 { ... }` (post-F7),
+> query params `?page=1&size=10` (post-F7), headers de request
+> con `@header(name="X")` (Fase 7.6), kwargs en decoradores
+> `@server(docs=false)` (Fase 7.0), middleware `@middleware(fn)`
+> + CORS con preflight automático (mini-fase MW), state HTTP
+> compartido en `fitz build` (F11). El cap incluye sub-secciones
+> propias para [Status codes custom](#status-codes-custom),
+> [Query params](#query-params) y [Middleware y CORS](#middleware-y-cors)
+> más abajo.
 
 ### Ejemplo completo
 
@@ -4978,17 +5177,6 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
   tiene un tipo "Value" genérico tagged en runtime sin un
   refactor. Workaround: armar dos colecciones, o usar `fitz run`.
-- **Server HTTP multi-threaded** — el binario compilado corre
-  como `#[tokio::main(flavor = "current_thread")]` (single-thread),
-  porque el state compartido entre handlers vive en un
-  `thread_local!` y multi-thread haría que cada worker tuviera su
-  propia copia. Para los workloads HTTP de Fitz hoy (handlers
-  sync, sin async externo) es invisible — solo aparece si querés
-  paralelismo verdadero entre requests. Cuando aterrice async/await
-  real en el lenguaje, esto se pivota a `Arc<Mutex<...>>` + `State`
-  extractor. (State compartido **sí** compila desde F11 — el
-  intérprete y el binario producen el mismo resultado para
-  `examples/server.fitz` y `examples/guide/17-http.fitz`.)
 - **`let X = <expr>` no literal a nivel top de un módulo** — las
   constantes top-level de un módulo deben tener una RHS literal
   (`"texto"`, `42`, `3.14`, `true`, `null`). `let X = compute()`
@@ -5009,6 +5197,15 @@ cita explícitamente. La salida tiene la forma:
 ✗ codegen: Error — <descripción> ...
    (Fase 5b soporta un subset progresivo; los mensajes citan el sub-paso correspondiente.)
 ```
+
+> Lo que **sí anda** y antes era deuda: state HTTP compartido
+> (cualquier `let users = [...]` top-level que un handler
+> referencia, cerrado en F11), **paralelismo HTTP real** entre
+> requests con el binario compilado (post-F17, runtime tokio
+> multi-thread default), interop Python en `fitz build`
+> (Fase 8.7 cerrada — `from python import X` produce binarios
+> nativos con PyO3 linkeado). Ver
+> [cap 19 sub-sección "Paralelismo HTTP real"](#paralelismo-http-real).
 
 ### Ejemplo: programa CLI primitivo
 

@@ -486,33 +486,22 @@
 >   sincronizado con todo 9.y + 9.z cerrado. Si aparece presión
 >   antes (preguntas de usuarios sobre cómo crear un proyecto),
 >   acelerable como sub-paso pre-9.z.2 dedicado.
-> - **Bug del formatter: trailing comment al final del body de
->   una fn seguido de otro bloque inserta blank spurious dentro
->   del body del bloque siguiente**. MRE preciso (descubierto
->   redactando el ejemplo del cap 23):
->   ```fitz
->   fn greet(name: Str) -> Str {
->       return "Hola, {name}!" // inline
->   }
->
->   for n in ["Ada"] {
->       print(greet(n))
->   }
->   ```
->   Tras `fitz fmt`, queda blank line spurious entre el `{` del
->   `for` y `print(greet(n))`. Variante del caso edge ya
->   documentado en `docs/fmt-style.md` ("Comments entre último
->   stmt de un bloque y el `}` ... pueden terminar fuera del
->   bloque al re-formatear"), pero acá el comment está EN LA
->   MISMA LÍNEA que el último stmt (trailing), no entre stmt y
->   `}`. El bug afecta la enseñanza del cap 23 (el ejemplo
->   runnable tuvo que removerse el trailing comment final).
->   **Etapa**: sub-paso de fix-up de 9.z.1 (deuda residual
->   reconocida del closing de 9.z.1.b). Pre-9.z.2 dedicado si
->   el fix es chico (~30 min — probablemente bookkeeping del
->   estado "just emitted blank" en `fmt.rs`); si requiere
->   refactor del trivia stream, post-9.z.5 cuando 9.z entera
->   cierre. Auditoría rápida del módulo antes de decidir.
+> - ~~**Bug del formatter: trailing comment al final del body
+>   de una fn seguido de otro bloque inserta blank spurious
+>   dentro del body del bloque siguiente**~~ **CERRADO
+>   (2026-05-17, post-9.z.5)**. Root cause: `had_blank_in_source`
+>   en `fmt_stmt_list` usaba `after_what = max(prev_end_line,
+>   last_emitted_comment_line)`; cuando entrabamos a un nuevo
+>   bloque (`in_block=true`, `prev_end_line=0`), el
+>   `last_emitted_comment_line` arrastraba un valor de scope
+>   outer y `has_blank_between` chequeaba blanks FUERA del
+>   bloque actual. Fix: agregar guarda — en `in_block`, el
+>   chequeo requiere `prev_end_line > 0` (paralela a la
+>   `smart_blank`); en top-level se preserva el behavior previo
+>   (`after_what > 0`) para no romper blanks entre header
+>   comments y el primer stmt. Test E2E
+>   `fmt_trailing_comment_seguido_de_bloque_no_inserta_blank_spurio`
+>   protege contra regresión.
 >
 > **Fase 9.z.2.a (2026-05-17): CERRADA** — `@test` decorator +
 > assertion builtins + `TestRegistry`. Primer sub-paso de 9.z.2
@@ -606,8 +595,10 @@
 > agrupadas para tratamiento dedicado cuando 9.z entera cierre:
 > - **Cap "Package manager" en la guía** (heredado de Q.z) —
 >   las 6 subcomandos de 9.y.1-9.y.4 sin capítulo dedicado.
-> - **Bug del fmt con trailing comment** (heredado de Q.z) —
->   blank spurious dentro del body del bloque siguiente.
+> - ~~**Bug del fmt con trailing comment**~~ (heredado de Q.z) —
+>   **CERRADO post-9.z.5** (fix en `fmt_stmt_list` con guarda
+>   `prev_end_line > 0` en `had_blank_in_source` para
+>   `in_block=true`).
 > - **`docs/architecture.md`** — los diagramas del pipeline
 >   (lexer/parser/checker/evaluator/codegen) y los pointer de
 >   módulos están desactualizados respecto a las fases
@@ -833,8 +824,9 @@
 >    detectar texto stale derivado de las features cerradas
 >    post-fmt-style (paréntesis opcionales en decorators,
 >    builtins assertion, etc.).
-> 4. **Bug del fmt** con trailing comment al final de body
->    seguido de otro bloque (heredado de Q.z).
+> 4. ~~**Bug del fmt** con trailing comment al final de body
+>    seguido de otro bloque~~ — **CERRADO post-9.z.5** (fix en
+>    `fmt_stmt_list` con guarda condicional in_block/top-level).
 >
 > **Próximo norte**: Fase 9.w (Stack web first-class —
 > `@authenticated`/`@admin`, `@ws("/chat")`, `@cron`,

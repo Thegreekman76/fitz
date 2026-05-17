@@ -1,0 +1,14 @@
+// `greetings` lib — exporta helpers para saludar.
+//
+// Importable desde otro proyecto que tenga
+//     [dependencies]
+//     greetings = { path = "../greetings" }
+// y use `from greetings import hola, formal`.
+
+fn hola(nombre: Str) -> Str {
+    return "Hola, {nombre}!"
+}
+
+fn formal(nombre: Str) -> Str {
+    return "Buenas tardes, {nombre}."
+}

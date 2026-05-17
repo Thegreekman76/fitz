@@ -173,9 +173,30 @@ fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
         //      separarlos.
         //
         // Skip totalmente si es el primer stmt del file/block.
+        //
+        // **Bug fix (post-9.z.5)**: cuando estamos `in_block=true` y
+        // este es el primer stmt del bloque (`prev_end_line == 0`), NO
+        // chequear blanks. Sin esta guarda, `last_emitted_comment_line`
+        // puede traer un valor del scope outer (por ej. un trailing
+        // comment del stmt anterior al bloque) y `has_blank_between`
+        // reportar blanks que están FUERA del bloque actual,
+        // insertando un blank spurio adentro.
+        //
+        // Pero en top-level con leading comments (header del file),
+        // `prev_end_line == 0` y queremos preservar la blank entre
+        // los comments y el primer stmt. La condición distingue:
+        //   - In block: solo si hubo stmt previo (prev_end_line > 0).
+        //   - Top-level: si hubo stmt previo O si hubo comments
+        //     leading (last_emitted_comment_line > 0) — el header
+        //     del file puede ir seguido de blank antes del primer stmt.
         let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line(ctx));
-        let had_blank_in_source =
-            after_what > 0 && has_blank_between(ctx.trivia, after_what, stmt_start);
+        let block_allows_blank = if in_block {
+            prev_end_line > 0
+        } else {
+            after_what > 0
+        };
+        let had_blank_in_source = block_allows_blank
+            && has_blank_between(ctx.trivia, after_what, stmt_start);
         // Si el último comment emitido pertenece "al gap" entre prev_end_line
         // y stmt_start, suppress smart_blank (comment ya cumple esa función
         // de separación visual + queremos que el comment quede pegado al stmt).
