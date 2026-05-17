@@ -550,24 +550,82 @@ let profile = u.fetch_profile().await
 
 ### R.3 — Estado
 
-- [ ] R.3 — Métodos custom sobre `type`
+- [x] **R.3 — Métodos custom sobre `type`** ✓ (2026-05-17, "opción
+  A": fields como locales). Sintaxis: `type Foo { field: T,
+  fn metodo(params) -> R { body } }` con fields y métodos
+  mezclados libremente. Adentro del body, los fields del type son
+  variables locales (sin prefijo `self.`). Si un param tiene el
+  mismo nombre que un field, el param gana (shadowing
+  documentado). Implementación en 7 capas:
+  - **AST**: `Stmt::TypeDef` suma `methods: Vec<MethodDef>`;
+    `MethodDef` paralelo a `FnDef` sin decorators (los métodos no
+    aceptan `@get`/etc.).
+  - **Parser**: `parse_typedef` distingue field (`name:`) de
+    método (`[async] fn`) por lookahead trivial; `parse_method_def`
+    reusa `parse_params` + `parse_optional_return_type` +
+    sintaxis `=> expr` o bloque.
+  - **Evaluator**: `dispatch_method` extendido para receiver
+    `Value::Instance` — busca el tipo en el env por `type_name`,
+    matchea el método por nombre, delega a `invoke_custom_method`.
+    Body se ejecuta en scope hijo del env con fields pre-declarados
+    como locales + params (lookup en env hecho ANTES del `.await`
+    para no holdear el lock vía suspensión).
+  - **Codegen**: `gen_type_def` emite `impl FooData { pub fn
+    metodo(&self, ...) -> T { let mut <field>: T = self.<field>
+    .clone(); ... <body> } }`. Fields homónimos a params se
+    skipean del pre-binding para preservar shadowing.
+    `gen_method_call` para `Type::Nominal` busca en
+    `type_methods` y emite `{ let __recv = obj.clone(); let __g =
+    __recv.lock().unwrap(); __g.<m>(<args>) }`. Async methods en
+    `fitz build` quedan como deuda menor (error explícito).
+  - **Checker**: `check_custom_methods` walkea cada body de
+    método con `push_scope` + fields pre-declarados como locales
+    + params + return_stack + loop_depth reset (consistente con
+    `Stmt::FnDef`). Cazó errores de tipo, idents desconocidos,
+    return mismatch.
+  - **Fmt**: `fmt_typedef` emite fields, blank line, métodos
+    formateados con `fmt_method_def`.
+  - **Value**: `Value::Type` suma `methods: Vec<MethodDef>`;
+    `load_module` propaga los methods al rebuild del Type post-
+    pre-evaluación de defaults; `Stmt::TypeDef` los pasa al
+    construir el `Value::Type`.
+
+  **20 unit tests nuevos** (7 parser, 7 evaluator, 6 checker) +
+  smoke E2E bit-a-bit `fitz run`/`fitz build` sobre el ejemplo
+  nuevo `examples/guide/13b-metodos-custom.fitz` (sumado al
+  smoke `GUIDE_EXAMPLES_COMPILE`). Caps 13 actualizado con
+  sub-sección "Métodos custom sobre `type`" (sale de "Lo que
+  todavía no anda" y entra como feature implementada).
+
+  **Deuda residual visible**:
+  - `async fn` adentro de `type` en `fitz build` (error
+    explícito; intérprete sí lo soporta).
+  - Visibilidad (`pub fn` / `fn` privado).
+  - Static methods (`Counter::create(...)`).
+  - Operator overloading.
+
+> **R.3 CERRADA (2026-05-17)** — primer caso de polimorfismo
+> "natural" (sin traits) en el lenguaje. Próximo: cierre formal
+> de mini-fase R entera.
 
 ---
 
 ## Cierre de mini-fase R
 
-Cuando R.1 + R.2 + R.3 estén completos:
-
-1. Marcar todos los items con ~~strikethrough~~ acá.
-2. Actualizar `docs/guide.md`: caps 4/5/6/9/10/13 sacan los items
-   cerrados de "Lo que todavía no anda".
-3. Cap 13 suma sub-sección "Métodos custom" (o cap nuevo 13b).
-4. Ejemplos de la guía: actualizar al menos `13-metodos.fitz` con
-   un ejemplo de método custom.
-5. `docs/syntax-spec.md`: actualizar matriz de "implementado".
-6. `docs/architecture.md`: sumar nota de método-dispatch para
-   nominal types.
-7. CHANGELOG entry consolidado de mini-fase R.
+> **MINI-FASE R CERRADA ENTERA (2026-05-17)** — los 10 ítems
+> originales (5 de R.1 + 4 de R.2 + 1 de R.3) implementados,
+> testeados (~135 unit tests nuevos + smokes E2E bit-a-bit
+> `fitz run`/`fitz build` sobre cada ejemplo afectado),
+> documentados (5 caps de la guía + 1 ejemplo nuevo +
+> 4 ejemplos actualizados).
+>
+> **Total acumulado al cierre de R**:
+>   - 1516 unit + 76 cli_e2e + 79 compile_e2e + 3 openapi.
+>   - Clippy `-D warnings` limpio.
+>
+> Próximo norte técnico (post-R): retomar la planificación de
+> Fase 9.w (Stack web first-class: `@authenticated`/`@admin`,
+> `@ws("/chat")`, `@cron`/`@background`).
 
 ---
 

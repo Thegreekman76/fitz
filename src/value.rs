@@ -203,6 +203,10 @@ pub enum Value {
         name: String,
         fields: Vec<Field>,
         resolved_defaults: Vec<(String, Value)>,
+        /// R.3 (mini-fase R) — métodos custom declarados en el `type`.
+        /// El dispatch sobre `Value::Instance` busca primero por
+        /// nombre acá; si no existe, cae a los métodos built-in.
+        methods: Vec<crate::ast::MethodDef>,
     },
 
     /// Lista en runtime. Compartida por referencia (`Shared<T>` =

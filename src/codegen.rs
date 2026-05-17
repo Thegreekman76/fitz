@@ -1863,6 +1863,11 @@ struct CodegenCtx<'a> {
     /// importado (su TypeEnv del checker tiene el id pero sin
     /// fields — el codegen los enriquece desde el módulo cargado).
     fields_by_id: HashMap<TypeId, Vec<ResolvedField>>,
+    /// R.3 — métodos custom declarados por tipo (key = type name).
+    /// Pre-registrado durante el walk inicial de typedefs; consumido
+    /// por `gen_method_call` para resolver `instance.metodo(args)` y
+    /// por `gen_type_def` para emitir el `impl FooData { ... }`.
+    type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
     /// Consts/statics top-level del propio módulo (5b.5): nombre →
     /// tipo Fitz. Sirven para que el body de una fn del módulo pueda
     /// referenciarlas. En main mode, queda vacío (los `let` top-level
@@ -2039,6 +2044,7 @@ impl<'a> CodegenCtx<'a> {
             fn_sigs: HashMap::new(),
             type_sigs: HashMap::new(),
             fields_by_id: HashMap::new(),
+            type_methods: HashMap::new(),
             own_consts: HashMap::new(),
             module_bindings: HashMap::new(),
             loaded_modules: Vec::new(),
@@ -2805,7 +2811,11 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         for stmt in program {
-            let Stmt::TypeDef { name, fields: ast_fields, .. } = stmt else { continue };
+            let Stmt::TypeDef { name, fields: ast_fields, methods, .. } = stmt else { continue };
+            // R.3 — pre-registrar métodos custom por nombre del tipo.
+            if !methods.is_empty() {
+                self.type_methods.insert(name.clone(), methods.clone());
+            }
             let id = self.env.lookup(name).ok_or_else(|| {
                 self.err(format!("tipo `{}` no registrado en el TypeEnv (¿checker no corrió?)", name))
             })?;
@@ -3127,6 +3137,22 @@ impl<'a> CodegenCtx<'a> {
             self.emit("        write!(__f, \" }}\")\n");
             self.emit("    }\n}\n\n");
         }
+
+        // R.3 — `impl <Foo>Data { pub fn metodo(&self, ...) ... }`
+        // con los métodos custom declarados. Los fields del tipo se
+        // pre-bindean como `let <field> = self.<field>.clone();`
+        // dentro del body de cada método, para que las referencias a
+        // fields sin `self.` funcionen ("opción A": fields como
+        // locales).
+        let methods = self.type_methods.get(name).cloned().unwrap_or_default();
+        if !methods.is_empty() {
+            writeln!(&mut self.output, "impl {} {{", data_name).unwrap();
+            for m in &methods {
+                self.emit_custom_method(name, &sig, m)?;
+            }
+            self.emit("}\n\n");
+        }
+
         // Fase 8.7.2: cuando el programa usa interop Python, emit
         // `impl __FitzToPy for FooData` para que `<user>.__fitz_to_py(...)`
         // funcione (paralelo a `Instance → PyDict` del intérprete en
@@ -4621,11 +4647,25 @@ impl<'a> CodegenCtx<'a> {
                 other
             ))),
 
-            // ---- Tipos custom ----
-            (Type::Nominal(_), m) => Err(self.err_at(call_span, format!(
-                "métodos custom sobre `type` (`.{}`): primero hay que cerrar la deuda de 3.2 en el parser",
-                m
-            ))),
+            // ---- Tipos custom (R.3 mini-fase R) ----
+            (Type::Nominal(id), m) => {
+                let type_name = self.env.info(*id).name.clone();
+                let method_def = self
+                    .type_methods
+                    .get(&type_name)
+                    .and_then(|ms| ms.iter().find(|md| md.name == m))
+                    .cloned();
+                let method_def = match method_def {
+                    Some(md) => md,
+                    None => {
+                        return Err(self.err_at(call_span, format!(
+                            "el tipo `{}` no tiene un método llamado `{}`",
+                            type_name, m
+                        )));
+                    }
+                };
+                self.gen_custom_method_call(&obj_code, &type_name, &method_def, args, call_span)
+            }
 
             // ---- Otros ----
             (other, m) => Err(self.err_at(call_span, format!(
@@ -4634,6 +4674,179 @@ impl<'a> CodegenCtx<'a> {
                 display_type(other, self.env)
             ))),
         }
+    }
+
+    // --- R.3: emitir método custom como `impl FooData { fn ... }` --------
+    //
+    // El método se emite como `pub fn <name>(&self, p1: T1, ...) -> R { ... }`.
+    // El body se prepara pre-bindeando los fields del tipo como locales
+    // (`let <field> = self.<field>.clone();`) — "opción A". Esto hace
+    // que las referencias `name` (sin prefijo `self.`) adentro del body
+    // resuelvan al binding local, replicando la semántica del evaluator.
+    //
+    // Caveats:
+    //  - El método debe tener `return_type` declarado (deuda 5b.1 —
+    //    inferencia de tipos no soportada). Si falta → error claro.
+    //  - Params sin anotación → error claro (mismo motivo).
+    //  - async methods (`async fn ...` adentro de `type`) quedan como
+    //    deuda menor en el codegen MVP: emitiríamos `pub async fn` pero
+    //    requiere `#[async_recursion]` y manejo extra de Future.
+    //    Hoy: error explícito si llega un método async.
+    fn emit_custom_method(
+        &mut self,
+        type_name: &str,
+        sig: &TypeSig,
+        method: &crate::ast::MethodDef,
+    ) -> Result<(), FitzError> {
+        if method.is_async {
+            return Err(self.err(format!(
+                "método `{}.{}`: async methods en `fitz build` quedan como deuda menor (sub-paso futuro); use `fitz run`",
+                type_name, method.name
+            )));
+        }
+        // Resolver firmas de params + return type. Exigimos anotación
+        // (igual que fns top-level — 5b.1).
+        let mut rust_params: Vec<String> = Vec::with_capacity(method.params.len());
+        let mut param_types: Vec<Type> = Vec::with_capacity(method.params.len());
+        for p in &method.params {
+            let pty_expr = p.type_.as_ref().ok_or_else(|| {
+                self.err(format!(
+                    "método `{}.{}`: el parámetro `{}` necesita una anotación de tipo para el codegen (5b.1)",
+                    type_name, method.name, p.name
+                ))
+            })?;
+            let pty = crate::types::resolve_type_expr(pty_expr, self.env)
+                .map_err(|e| self.err(format!(
+                    "método `{}.{}`: tipo del parámetro `{}` no resoluble: {:?}",
+                    type_name, method.name, p.name, e
+                )))?;
+            rust_params.push(format!("{}: {}", p.name, rust_type_for(&pty, self.env)?));
+            param_types.push(pty);
+        }
+        let ret_ty_expr = method.return_type.as_ref().ok_or_else(|| {
+            self.err(format!(
+                "método `{}.{}`: falta anotación de tipo de retorno para el codegen (5b.1)",
+                type_name, method.name
+            ))
+        })?;
+        let ret_ty = crate::types::resolve_type_expr(ret_ty_expr, self.env)
+            .map_err(|e| self.err(format!(
+                "método `{}.{}`: tipo de retorno no resoluble: {:?}",
+                type_name, method.name, e
+            )))?;
+        let ret_rust = rust_type_for(&ret_ty, self.env)?;
+
+        // Cabecera Rust del método.
+        writeln!(
+            &mut self.output,
+            "    pub fn {}(&self, {}) -> {} {{",
+            method.name,
+            rust_params.join(", "),
+            ret_rust
+        )
+        .unwrap();
+
+        // Pre-bindear cada field como local. Usamos `clone()` para
+        // sacar el valor del struct y dejarlo en una var mutable
+        // (el body puede reasignar la var local sin afectar al
+        // receiver — semántica de "opción A": local gana).
+        //
+        // R.3 shadowing: si un param tiene el mismo nombre que un
+        // field, el param gana. Skipeamos esos fields para que el
+        // `let <field>` no shadowee al param (que ya está en el
+        // scope de la fn).
+        let param_names: std::collections::HashSet<&str> =
+            method.params.iter().map(|p| p.name.as_str()).collect();
+        self.push_scope();
+        for f in &sig.fields {
+            if param_names.contains(f.name.as_str()) {
+                continue;
+            }
+            let rty = rust_type_for(&f.type_, self.env)?;
+            writeln!(
+                &mut self.output,
+                "        let mut {name}: {rty} = self.{name}.clone();",
+                name = f.name,
+                rty = rty
+            )
+            .unwrap();
+            // Suppress unused-var warnings cuando el método no usa el field.
+            writeln!(&mut self.output, "        let _ = &{};", f.name).unwrap();
+            self.declare_var(f.name.clone(), f.type_.clone());
+        }
+        // Registrar params en el scope del codegen (sobreescriben
+        // homónimos por el `declare_var`).
+        for (p, pty) in method.params.iter().zip(param_types.iter()) {
+            self.declare_var(p.name.clone(), pty.clone());
+        }
+
+        // Push del return type al stack para `Stmt::Return` chequeo.
+        self.ret_stack.push(ret_ty.clone());
+
+        // Generar el body. Reusamos `gen_block_to_string` que walkea los
+        // stmts y emite el código. Indent +1 (estamos adentro de
+        // `impl { fn { ... } }`).
+        let stmt_refs: Vec<&Stmt> = method.body.iter().collect();
+        let body_code = self.gen_block_to_string(&stmt_refs)?;
+        self.emit(&body_code);
+
+        self.ret_stack.pop();
+        self.pop_scope();
+        self.emit("    }\n");
+        Ok(())
+    }
+
+    // --- R.3: método custom sobre nominal ---------------------------------
+    //
+    // El método se emite como `pub fn <name>(&self, p1: T1, ...) -> R`
+    // dentro de un `impl <Type>Data` (ver `gen_type_def`). El call
+    // sobre `Arc<Mutex<Data>>` se traduce a:
+    //
+    //   { let __obj = <obj>.clone(); let __g = __obj.lock().unwrap();
+    //     __g.<method>(<args coerced>) }
+    //
+    // Patrón "compute first, lock last" no se aplica acá porque los
+    // args se evalúan fuera del scope del lock (los pasamos vía un
+    // bloque externo).
+    fn gen_custom_method_call(
+        &mut self,
+        obj_code: &str,
+        type_name: &str,
+        method_def: &crate::ast::MethodDef,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        let _ = type_name; // disponible para mensajes de error futuros
+        check_method_arity(&method_def.name, args, method_def.params.len())?;
+
+        // Resolver tipos de params y return (con anotaciones del MethodDef).
+        let mut arg_codes: Vec<String> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let (a_code, a_ty) = self.gen_expr(arg)?;
+            let target_ty = method_def.params[i]
+                .type_
+                .as_ref()
+                .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
+                .unwrap_or(Type::Any);
+            arg_codes.push(coerce(&a_code, &a_ty, &target_ty));
+        }
+
+        let ret_ty = method_def
+            .return_type
+            .as_ref()
+            .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
+            .unwrap_or(Type::Null);
+
+        // Bloque: clonar el Arc fuera del lock para que el lock no
+        // viva más que un statement; tomar el lock; invocar el método.
+        let _ = call_span;
+        let code = format!(
+            "{{ let __recv = ({obj}).clone(); let __g = __recv.lock().unwrap(); __g.{name}({args}) }}",
+            obj = obj_code,
+            name = method_def.name,
+            args = arg_codes.join(", ")
+        );
+        Ok((code, ret_ty))
     }
 
     // --- métodos List ----------------------------------------------------

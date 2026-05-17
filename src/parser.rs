@@ -10,7 +10,8 @@
 // y deuda explícita.
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, Param, Pattern, Program, Span,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, MethodDef, Param, Pattern,
+    Program, Span,
     Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError, FitzResult};
@@ -1706,8 +1707,12 @@ impl Parser {
         Ok(Pattern::Range { start, end, inclusive })
     }
 
-    /// `type Name { field: TypeExpr [= default], ... }`.
-    /// Separador entre campos: coma o newline (ambos aceptados).
+    /// `type Name { field: TypeExpr [= default], ..., fn method(...) {...} }`.
+    /// Separador entre items: coma o newline (ambos aceptados).
+    /// Items pueden ser **fields** (`name: TypeExpr [= default]`) o
+    /// **métodos** (`[async] fn nombre(params) [-> Ret] { body }` —
+    /// R.3, mini-fase R). Lookahead trivial: `fn` o `async` →
+    /// método; cualquier otro Ident → field.
     /// El tipo del campo usa la misma gramática que el resto de las
     /// anotaciones (`parse_type_expr`): admite genéricos y el sufijo
     /// `?` para nullable. La nullabilidad queda dentro de `TypeExpr`
@@ -1720,11 +1725,12 @@ impl Parser {
             "se esperaba '{' después del nombre del tipo",
         )?;
         let mut fields: Vec<Field> = Vec::new();
+        let mut methods: Vec<MethodDef> = Vec::new();
         loop {
             self.skip_newlines();
             if matches!(self.peek(), Token::RBrace) {
                 self.advance();
-                return Ok(Stmt::TypeDef { name, fields, span });
+                return Ok(Stmt::TypeDef { name, fields, methods, span });
             }
             if self.is_at_end() {
                 return Err(self.error(
@@ -1732,28 +1738,76 @@ impl Parser {
                     "se esperaba '}' para cerrar 'type'",
                 ));
             }
-            let field_name = self.expect_ident("se esperaba nombre de campo")?;
-            self.expect(
-                &Token::Colon,
-                "se esperaba ':' después del nombre del campo",
-            )?;
-            let type_ = self.parse_type_expr()?;
-            let default = if self.eat(&Token::Eq) {
-                Some(self.expression()?)
+            // R.3 — método: `[async] fn nombre(...) [-> T] { ... }`.
+            if matches!(self.peek(), Token::Async | Token::Fn) {
+                let method_span = self.cur_span();
+                let method = self.parse_method_def(method_span)?;
+                methods.push(method);
             } else {
-                None
-            };
-            fields.push(Field {
-                name: field_name,
-                type_,
-                default,
-            });
+                let field_name = self.expect_ident("se esperaba nombre de campo o `fn`")?;
+                self.expect(
+                    &Token::Colon,
+                    "se esperaba ':' después del nombre del campo",
+                )?;
+                let type_ = self.parse_type_expr()?;
+                let default = if self.eat(&Token::Eq) {
+                    Some(self.expression()?)
+                } else {
+                    None
+                };
+                fields.push(Field {
+                    name: field_name,
+                    type_,
+                    default,
+                });
+            }
             // Separador opcional: coma. Newline se consume en la
             // próxima iteración por skip_newlines.
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
             }
         }
+    }
+
+    /// Parsea un método custom adentro del bloque `type` (R.3).
+    /// Sintaxis idéntica a `parse_fndef`, pero NO admite decoradores
+    /// (los métodos no aceptan `@get`/`@server`/etc.) y emite
+    /// `MethodDef` en lugar de `Stmt::FnDef`.
+    fn parse_method_def(&mut self, span: Span) -> FitzResult<MethodDef> {
+        let is_async = self.eat(&Token::Async);
+        self.expect(&Token::Fn, "se esperaba 'fn'")?;
+        let name = self.expect_ident(
+            "se esperaba nombre del método después de 'fn'",
+        )?;
+        self.expect(
+            &Token::LParen,
+            "se esperaba '(' después del nombre del método",
+        )?;
+        let params = self.parse_params()?;
+        let return_type = self.parse_optional_return_type()?;
+        let body = match self.peek() {
+            Token::FatArrow => {
+                self.advance();
+                let (arrow_line, arrow_col) = self.current_pos();
+                let expr = self.expression()?;
+                vec![Stmt::Return(expr, Span::new(arrow_line, arrow_col))]
+            }
+            Token::LBrace => self.parse_block()?,
+            _ => {
+                return Err(self.error(
+                    ErrorKind::UnexpectedToken,
+                    "se esperaba '{' o '=>' para el cuerpo del método",
+                ));
+            }
+        };
+        Ok(MethodDef {
+            name,
+            params,
+            return_type,
+            body,
+            is_async,
+            span,
+        })
     }
 
     // ---------- decoradores ----------
@@ -5366,6 +5420,118 @@ mod tests {
             }
             other => panic!("se esperaba Stmt::Assign con RHS compuesto, fue {:?}", other),
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Métodos custom sobre `type` (R.3, mini-fase R)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn type_def_con_solo_fields_sigue_funcionando() {
+        let src = "type User { id: Int, name: Str }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::TypeDef { name, fields, methods, .. } => {
+                assert_eq!(name, "User");
+                assert_eq!(fields.len(), 2);
+                assert!(methods.is_empty());
+            }
+            other => panic!("se esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_def_con_un_metodo_simple() {
+        let src = "type User {\n\
+                       name: Str\n\
+                       fn greet() -> Str { return \"hola\" }\n\
+                   }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::TypeDef { fields, methods, .. } => {
+                assert_eq!(fields.len(), 1);
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].name, "greet");
+                assert!(methods[0].params.is_empty());
+                assert!(methods[0].return_type.is_some());
+                assert!(!methods[0].is_async);
+            }
+            other => panic!("se esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_def_con_metodo_con_params() {
+        let src = "type User {\n\
+                       age: Int\n\
+                       fn older_than(target: Int) -> Bool { return age > target }\n\
+                   }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::TypeDef { methods, .. } => {
+                assert_eq!(methods.len(), 1);
+                assert_eq!(methods[0].params.len(), 1);
+                assert_eq!(methods[0].params[0].name, "target");
+            }
+            other => panic!("se esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_def_con_metodo_async() {
+        let src = "type User {\n\
+                       id: Int\n\
+                       async fn fetch() -> Str { return \"...\" }\n\
+                   }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::TypeDef { methods, .. } => {
+                assert!(methods[0].is_async);
+            }
+            other => panic!("se esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_def_con_metodo_flecha() {
+        // `fn greet() => "x"` se desugarea a body con Return.
+        let src = "type User {\n\
+                       fn name_str() -> Str => \"ada\"\n\
+                   }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::TypeDef { methods, .. } => {
+                assert_eq!(methods[0].body.len(), 1);
+                assert!(matches!(methods[0].body[0], Stmt::Return(_, _)));
+            }
+            other => panic!("se esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_def_mezcla_fields_y_metodos() {
+        let src = "type Counter {\n\
+                       count: Int\n\
+                       fn inc() -> Int { return count + 1 }\n\
+                       step: Int = 1\n\
+                       fn double() -> Int { return count * 2 }\n\
+                   }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::TypeDef { fields, methods, .. } => {
+                assert_eq!(fields.len(), 2, "fields: {:?}", fields);
+                assert_eq!(methods.len(), 2);
+            }
+            other => panic!("se esperaba TypeDef, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn type_def_con_metodo_sin_cuerpo_es_error() {
+        // `fn nombre()` sin body es error (no admitimos abstract methods).
+        let src = "type X { fn f() }";
+        let err = parse_program_str(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
     }
 
     // -----------------------------------------------------------------------

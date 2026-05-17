@@ -2830,10 +2830,72 @@ pub fn check_program(
         preregister_fn_signatures(&mut ctx, program);
         collect_middleware_fn_names(&mut ctx, program);
         check_block(&mut ctx, program);
+        // R.3 — chequear bodies de los métodos custom de cada
+        // `type`. Esto sucede DESPUÉS del check_block normal para
+        // que los nominales declarados como `type X { ... }` ya
+        // estén disponibles. Cada method body se chequea con:
+        //  - scope hijo del global con los fields del tipo
+        //    pre-declarados como locales (opción A).
+        //  - params del método sobre el mismo scope (locales).
+        //  - return_stack con el return_type declarado (o Any).
+        check_custom_methods(&mut ctx, program);
         errors.append(&mut ctx.errors);
         (ctx.type_info, ctx.def_info)
     };
     (env, type_info, def_info, errors)
+}
+
+/// R.3 — chequea cada body de método custom adentro de los `type`
+/// declarados en el programa. Vuelta separada de `check_block` para
+/// que los fields del tipo (ya resueltos en `resolve_program`) estén
+/// disponibles como locales en el scope del body.
+fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
+    for stmt in program {
+        let Stmt::TypeDef { name, methods, .. } = stmt else { continue };
+        if methods.is_empty() {
+            continue;
+        }
+        // Recuperar los fields resueltos del tipo (poblados por
+        // `resolve_program`). Si el tipo no existe → silencioso
+        // (ya hubo error en resolve_program).
+        let Some(id) = ctx.types.lookup(name) else { continue };
+        let resolved_fields = match &ctx.types.info(id).fields {
+            Some(fs) => fs.clone(),
+            None => continue,
+        };
+        for m in methods {
+            // Return type del método.
+            let ret_ty = match &m.return_type {
+                Some(r) => resolve_type_expr(r, ctx.types).unwrap_or(Type::Any),
+                None => Type::Any,
+            };
+            ctx.push_scope();
+            ctx.return_stack.push(ret_ty);
+            ctx.inferred_returns.push(Vec::new());
+            ctx.in_http_handler.push(false);
+            ctx.await_stack.push(m.is_async);
+            let saved_loop_depth = ctx.loop_depth;
+            ctx.loop_depth = 0;
+            // Pre-declarar fields como locales (opción A).
+            for f in &resolved_fields {
+                ctx.declare_var(f.name.clone(), f.type_.clone(), m.span);
+            }
+            // Declarar params (sobreescriben fields homónimos en el
+            // scope local — `declare_var` reemplaza el binding al
+            // entrar a la misma var).
+            for p in &m.params {
+                let pty = ann_to_type(p.type_.as_ref(), ctx.types);
+                ctx.declare_var(p.name.clone(), pty, m.span);
+            }
+            check_block(ctx, &m.body);
+            ctx.loop_depth = saved_loop_depth;
+            ctx.inferred_returns.pop();
+            ctx.return_stack.pop();
+            ctx.in_http_handler.pop();
+            ctx.await_stack.pop();
+            ctx.pop_scope();
+        }
+    }
 }
 
 /// Mini-fase MW.1: pre-scan del programa para recolectar nombres de fns
@@ -3775,6 +3837,7 @@ mod tests {
                     type_: TE::named("Int"),
                     default: None,
                 }],
+                methods: vec![],
              span: Span::ZERO },
             Stmt::FnDef {
                 name: "noop".into(),
@@ -5517,6 +5580,80 @@ mod tests {
         let break_errs = errors.iter().filter(|e| e.message.contains("break")).count();
         assert!(return_errs >= 1, "esperaba al menos 1 error de return huérfano");
         assert!(break_errs >= 1, "esperaba al menos 1 error de break huérfano");
+    }
+
+    // ---- R.3: métodos custom sobre type ----
+
+    #[test]
+    fn metodo_lee_field_como_local_es_valido() {
+        assert_ok(
+            "type U {\n\
+                 name: Str\n\
+                 fn greet() -> Str { return \"hola {name}\" }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn metodo_con_typo_en_field_es_error() {
+        assert_error_with(
+            "type U {\n\
+                 name: Str\n\
+                 fn greet() -> Str { return naem }\n\
+             }",
+            &["naem", "no"],
+        );
+    }
+
+    #[test]
+    fn metodo_con_return_type_mismatch_es_error() {
+        assert_error_with(
+            "type U {\n\
+                 count: Int\n\
+                 fn label() -> Int { return \"no soy int\" }\n\
+             }",
+            &["return", "Str", "Int"],
+        );
+    }
+
+    #[test]
+    fn metodo_con_param_no_bool_en_if_es_error() {
+        assert_error_with(
+            "type U {\n\
+                 fn check(n: Int) -> Bool {\n\
+                     if (n) { return true }\n\
+                     return false\n\
+                 }\n\
+             }",
+            &["if", "Bool", "Int"],
+        );
+    }
+
+    #[test]
+    fn metodo_param_shadowea_field_compila() {
+        // Cuando un param tiene el mismo nombre que un field, el
+        // param gana en el scope. El checker permite la combinación
+        // sin error.
+        assert_ok(
+            "type U {\n\
+                 name: Str\n\
+                 fn rename(name: Str) -> Str { return name }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn metodo_break_es_orfano_si_no_hay_loop_local() {
+        // Un `break` dentro del body de un método sin loop local es
+        // huérfano. (R.2.4 reset de loop_depth en cada fn body.)
+        assert_error_with(
+            "type U {\n\
+                 fn f() {\n\
+                     break\n\
+                 }\n\
+             }",
+            &["break", "loop"],
+        );
     }
 
     #[test]

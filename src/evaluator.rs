@@ -1291,7 +1291,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         .collect();
     for type_name in typedef_names {
         let existing = module_env.lock().get(&type_name);
-        let Some(Value::Type { name, fields, .. }) = existing else { continue };
+        let Some(Value::Type { name, fields, methods, .. }) = existing else { continue };
         let mut resolved_defaults: Vec<(String, Value)> = Vec::new();
         for f in &fields {
             if let Some(expr) = &f.default {
@@ -1303,6 +1303,7 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
             name,
             fields,
             resolved_defaults,
+            methods,
         };
         module_env.lock().define(type_name, new_type);
     }
@@ -1702,7 +1703,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // `type Name { campo1: T1, ... }`. Por ahora solo registramos el
         // tipo en el env como un valor inerte. La instanciación (`User { id: 1 }`)
         // y el field access requieren extensiones del AST (Fase 3).
-        Stmt::TypeDef { name, fields, span: _ } => {
+        Stmt::TypeDef { name, fields, methods, span: _ } => {
             // PreF8.3: tipos locales arrancan con `resolved_defaults` vacío.
             // Sus `Field.default` se siguen evaluando lazy en cada struct
             // lit con el env del call site. Solo los tipos cargados desde
@@ -1710,10 +1711,14 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // evaluados — esa pre-evaluación se hace en un post-pass al
             // terminar de ejecutar las stmts del módulo, ahí ya están
             // disponibles todos los símbolos del módulo en su env.
+            //
+            // R.3: los métodos se copian al `Value::Type` para
+            // dispatch posterior sobre `Value::Instance`.
             let t = Value::Type {
                 name: name.clone(),
                 fields: fields.clone(),
                 resolved_defaults: Vec::new(),
+                methods: methods.clone(),
             };
             env.lock().define(name.clone(), t);
             Ok(Value::Null)
@@ -2228,7 +2233,7 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                 ))
             })?;
             let (declared_type_name, declared, resolved_defaults) = match ty {
-                Value::Type { name, fields, resolved_defaults } => (name, fields, resolved_defaults),
+                Value::Type { name, fields, resolved_defaults, .. } => (name, fields, resolved_defaults),
                 other => {
                     return Err(EvalSignal::Error(FitzError::new(
                         ErrorKind::TypeMismatch {
@@ -2591,7 +2596,7 @@ async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> Eva
         for arg in args {
             arg_values.push(eval_expr(arg, env.clone()).await?);
         }
-        return dispatch_method(receiver, field, arg_values, span).await;
+        return dispatch_method(receiver, field, arg_values, env, span).await;
     }
 
     // Llamada normal.
@@ -2733,8 +2738,27 @@ async fn dispatch_method(
     receiver: Value,
     method: &str,
     args: Vec<Value>,
+    env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
+    // R.3 — método custom sobre Value::Instance. Buscamos en el
+    // Value::Type asociado (resolución por type_name en el env).
+    // El lookup se hace ANTES del .await para no mantener el lock
+    // del env vivo a través de la suspensión (Send-safe).
+    if let Value::Instance { type_name, .. } = &receiver {
+        let resolved: Option<crate::ast::MethodDef> = {
+            let env_guard = env.lock();
+            match env_guard.get(type_name) {
+                Some(Value::Type { methods, .. }) => {
+                    methods.iter().find(|m| m.name == method).cloned()
+                }
+                _ => None,
+            }
+        };
+        if let Some(m) = resolved {
+            return invoke_custom_method(receiver, m, args, env, span).await;
+        }
+    }
     match (&receiver, method) {
         // List
         (Value::List(_), "push") => list_push(receiver, args, span),
@@ -2793,6 +2817,76 @@ async fn dispatch_method(
                 method,
             ),
         ))),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// R.3 — Invocación de método custom sobre Value::Instance
+// ---------------------------------------------------------------------------
+//
+// "Opción A" — los fields del Instance son visibles como variables
+// locales en el body del método. Implementación:
+//  1. Aridad: el método NO declara `self` en sus params. La llamada
+//     `u.greet(arg1)` pasa exactamente `arg1` (no el receiver), así que
+//     `args.len() == m.params.len()`.
+//  2. Scope: scope hijo del env del call site. Adentro pre-declaramos
+//     cada field del Instance como var local (con su valor actual);
+//     después declaramos los params (si un param se llama igual que un
+//     field, el param gana — Rust hace lo mismo con shadowing).
+//  3. El body se ejecuta vía `eval_block` con `Stmt::Return` y `?`
+//     bridgeados por `EvalSignal::Return`/`Error`.
+//  4. Si es async, el body puede usar `.await`; el caller debe
+//     await-ear el `Value::Future` resultante igual que con cualquier
+//     async fn. Para MVP el `is_async` del método se honora propagando
+//     a través de `register_user_function`? — en realidad invocamos
+//     en línea acá; los `.await` adentro del body funcionan porque
+//     `eval_block` es async. El método sync devuelve `Value`
+//     directamente; el método async devuelve un Future construido por
+//     el caller (cuando aterrice async methods, hoy MVP no lo hace).
+
+async fn invoke_custom_method(
+    receiver: Value,
+    method: crate::ast::MethodDef,
+    args: Vec<Value>,
+    env: EnvRef,
+    span: Span,
+) -> EvalResult<Value> {
+    // Aridad.
+    if args.len() != method.params.len() {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: method.params.len(),
+                found: args.len(),
+            },
+            span.line, span.column,
+            format!(
+                "el método `.{}()` espera {} argumento(s), recibió {}",
+                method.name, method.params.len(), args.len(),
+            ),
+        )));
+    }
+
+    // Scope hijo del env del call site.
+    let method_env = Environment::new_child(env.clone());
+
+    // Pre-declarar fields del Instance como locales.
+    if let Value::Instance { fields, .. } = &receiver {
+        for (fname, fvalue) in fields.lock().iter() {
+            method_env.lock().define(fname.clone(), fvalue.clone());
+        }
+    }
+
+    // Declarar params (sobreescriben fields homónimos — local gana).
+    for (p, v) in method.params.iter().zip(args) {
+        method_env.lock().define(p.name.clone(), v);
+    }
+
+    // Ejecutar el body. `Stmt::Return` rebota como EvalSignal::Return
+    // y lo desempacamos al valor; cualquier otra señal sube.
+    match eval_block(&method.body, method_env).await {
+        Ok(v) => Ok(v),
+        Err(EvalSignal::Return(v)) => Ok(v),
+        Err(other) => Err(other),
     }
 }
 
@@ -3427,7 +3521,7 @@ async fn coerce_to_annotation(
     // los primitivos no se construyen desde dicts.
     let ty_value = env.lock().get(&type_name);
     let (declared_type_name, declared_fields, resolved_defaults) = match ty_value {
-        Some(Value::Type { name, fields, resolved_defaults }) => {
+        Some(Value::Type { name, fields, resolved_defaults, .. }) => {
             (name, fields, resolved_defaults)
         }
         _ => return Ok(Value::Map(map_pairs)),
@@ -5914,6 +6008,7 @@ print(_)\n";
                 make_field("id", "Int", false),
                 make_field("name", "Str", false),
             ],
+            methods: vec![],
          span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
@@ -5935,6 +6030,7 @@ print(_)\n";
             name: "Foo".into(),
             fields: vec![],
             resolved_defaults: vec![],
+            methods: vec![],
         };
         assert_eq!(t.type_name(), "Type");
     }
@@ -5947,6 +6043,7 @@ print(_)\n";
             &Stmt::TypeDef {
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
+                methods: vec![],
              span: Span::ZERO },
             env.clone(),
         ).await.unwrap();
@@ -5964,6 +6061,7 @@ print(_)\n";
             &Stmt::TypeDef {
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
+                methods: vec![],
              span: Span::ZERO },
             env.clone(),
         ).await.unwrap();
@@ -6452,6 +6550,115 @@ print(factorial(5))
         ).await;
         res.unwrap();
         assert_eq!(env.lock().get("suma"), Some(Value::Int(15)));
+    }
+
+    // ---- Métodos custom sobre type (R.3) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_sin_params_lee_field() {
+        let (env, res) = parse_eval_into_env(
+            "type U {\n\
+                 name: Str\n\
+                 fn greet() -> Str { return \"hola, {name}\" }\n\
+             }\n\
+             let u = U { name: \"Ada\" }\n\
+             let r = u.greet()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("hola, Ada".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_con_params_combina_fields_y_args() {
+        let (env, res) = parse_eval_into_env(
+            "type C {\n\
+                 count: Int\n\
+                 fn plus(n: Int) -> Int { return count + n }\n\
+             }\n\
+             let c = C { count: 10 }\n\
+             let r = c.plus(5)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(15)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_param_shadowea_field_homonimo() {
+        // R.3 — si un param tiene el mismo nombre que un field, el
+        // param gana adentro del body (documentado como caveat).
+        let (env, res) = parse_eval_into_env(
+            "type U {\n\
+                 name: Str\n\
+                 fn pick(name: Str) -> Str { return name }\n\
+             }\n\
+             let u = U { name: \"field-name\" }\n\
+             let r = u.pick(\"param-name\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("param-name".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_con_aridad_incorrecta_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "type U {\n\
+                 fn f(x: Int) -> Int { return x }\n\
+             }\n\
+             let u = U {}\n\
+             let r = u.f(1, 2)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("espera 1"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_inexistente_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "type U { name: Str }\n\
+             let u = U { name: \"x\" }\n\
+             let r = u.no_existe()",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("no_existe"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_multiples_arms_de_dispatch() {
+        // Múltiples métodos sobre el mismo type, despachados por nombre.
+        let (env, res) = parse_eval_into_env(
+            "type C {\n\
+                 a: Int\n\
+                 b: Int\n\
+                 fn suma() -> Int { return a + b }\n\
+                 fn resta() -> Int { return a - b }\n\
+                 fn mult() -> Int { return a * b }\n\
+             }\n\
+             let c = C { a: 10, b: 3 }\n\
+             let s = c.suma()\n\
+             let r = c.resta()\n\
+             let m = c.mult()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("s"), Some(Value::Int(13)));
+        assert_eq!(env.lock().get("r"), Some(Value::Int(7)));
+        assert_eq!(env.lock().get("m"), Some(Value::Int(30)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn method_chain_devuelve_instancia_ok() {
+        // Un método devuelve un nuevo Instance; encadenamos otro
+        // método sobre el resultado.
+        let (env, res) = parse_eval_into_env(
+            "type P {\n\
+                 x: Int\n\
+                 fn double_p() -> P { return P { x: x * 2 } }\n\
+                 fn show() -> Int { return x }\n\
+             }\n\
+             let p = P { x: 5 }\n\
+             let r = p.double_p().show()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(10)));
     }
 
     // ---- Indexing ----

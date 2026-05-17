@@ -472,8 +472,8 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
         } => {
             fmt_fndef(ctx, name, params, return_type.as_ref(), body, *is_async, decorators);
         }
-        Stmt::TypeDef { name, fields, .. } => {
-            fmt_typedef(ctx, name, fields);
+        Stmt::TypeDef { name, fields, methods, .. } => {
+            fmt_typedef(ctx, name, fields, methods);
         }
         Stmt::Break(_) => ctx.write("break"),
         Stmt::Continue(_) => ctx.write("continue"),
@@ -643,11 +643,16 @@ fn fmt_param_to_string(p: &Param) -> String {
     }
 }
 
-fn fmt_typedef(ctx: &mut FmtCtx, name: &str, fields: &[crate::ast::Field]) {
+fn fmt_typedef(
+    ctx: &mut FmtCtx,
+    name: &str,
+    fields: &[crate::ast::Field],
+    methods: &[crate::ast::MethodDef],
+) {
     ctx.write("type ");
     ctx.write(name);
     ctx.write(" {");
-    if fields.is_empty() {
+    if fields.is_empty() && methods.is_empty() {
         ctx.write("}");
         return;
     }
@@ -664,9 +669,38 @@ fn fmt_typedef(ctx: &mut FmtCtx, name: &str, fields: &[crate::ast::Field]) {
             }
             ctx.newline();
         }
+        // R.3 — métodos custom. Blank line entre items consecutivos:
+        // entre fields y el primer método, y entre métodos sucesivos.
+        for (i, m) in methods.iter().enumerate() {
+            let needs_blank = i > 0 || !fields.is_empty();
+            if needs_blank {
+                ctx.newline();
+            }
+            fmt_method_def(ctx, m);
+        }
     });
     ctx.write_indent();
     ctx.write("}");
+}
+
+fn fmt_method_def(ctx: &mut FmtCtx, m: &crate::ast::MethodDef) {
+    ctx.write_indent();
+    if m.is_async {
+        ctx.write("async ");
+    }
+    ctx.write("fn ");
+    ctx.write(&m.name);
+    ctx.write("(");
+    let param_strs: Vec<String> = m.params.iter().map(fmt_param_to_string).collect();
+    ctx.write(&param_strs.join(", "));
+    ctx.write(")");
+    if let Some(rt) = &m.return_type {
+        ctx.write(" -> ");
+        ctx.write(&rt.display_name());
+    }
+    ctx.write(" ");
+    fmt_block(ctx, &m.body);
+    ctx.newline();
 }
 
 fn fmt_decorator(ctx: &mut FmtCtx, deco: &Decorator) {

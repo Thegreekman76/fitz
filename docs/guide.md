@@ -3240,11 +3240,90 @@ let grandes = [1, 5, 12, 20].filter(fn(n) => n > umbral)
 print(grandes)                     // [12, 20]
 ```
 
+### Métodos custom sobre `type`
+
+Desde R.3 (mini-fase R) podés declarar métodos adentro del bloque
+`type`. Sintaxis: `fn nombre(params) -> Tipo { body }`, separado
+de los fields por newline o coma:
+
+```fitz
+type Counter {
+    count: Int = 0
+    step: Int = 1
+
+    fn current() -> Int {
+        return count
+    }
+
+    fn next_value() -> Int {
+        return count + step
+    }
+
+    fn label(prefix: Str) -> Str {
+        return "{prefix}: {count}"
+    }
+}
+
+let c = Counter { count: 10, step: 5 }
+print(c.current())          // 10
+print(c.next_value())       // 15
+print(c.label("c"))         // c: 10
+```
+
+**Decisión clave (opción A)**: los **fields del type son variables
+locales** en el body del método (sin prefijo `self.`). Es la
+convención de Python/Ruby/Crystal — menos boilerplate que `self.x`
+de Rust, y consistente con cómo Fitz expone fields adentro de
+struct literals (los defaults pueden referenciar fields previos).
+
+**Caveat de shadowing**: si un parámetro tiene el mismo nombre
+que un field, el parámetro gana. Workaround: nombrá distinto el
+local. Igual que en Rust con bindings:
+
+```fitz
+type Renamer {
+    name: Str
+
+    fn pick(name: Str) -> Str {
+        return name              // ← el PARÁM, no el field
+    }
+}
+```
+
+**Method chaining** funciona naturalmente cuando un método
+devuelve otra instancia:
+
+```fitz
+type Point {
+    x: Int
+    y: Int
+
+    fn doubled_p() -> Point {
+        return Point { x: x * 2, y: y * 2 }
+    }
+
+    fn show() -> Str {
+        return "({x}, {y})"
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+print(p.doubled_p().show())     // (6, 8)
+```
+
+**Limitaciones del MVP** (R.3, mini-fase R):
+- Todos los métodos son públicos (sin `pub fn` / `fn` privado).
+- Sin static methods (`Counter::create(...)`).
+- Sin operator overloading (`fn +(self, other)`).
+- `async fn` adentro de `type` parsea OK y funciona con
+  `fitz run`, pero `fitz build` lo rechaza con error claro
+  (deuda menor).
+
+Ver [examples/guide/13b-metodos-custom.fitz](../examples/guide/13b-metodos-custom.fitz)
+para el ejemplo completo.
+
 ### Lo que todavía no anda
 
-- **Métodos custom sobre `type`** (`type User { ... fn greet() => "Hola, {name}" }`).
-  Hoy escribís funciones globales que reciben la instancia como
-  primer argumento.
 - **`return` adentro de un brazo de `match` como expresión** —
   como cada brazo es una expresión, no podés cortar la función
   desde adentro con `return`. Se puede pulir cuando moleste.
@@ -3255,7 +3334,9 @@ print(grandes)                     // [12, 20]
 > Lo que **sí anda** y antes era deuda: encadenamiento multi-línea
 > (cerrado en PreF8.2), **asignación a índice** `xs[0] = v` y
 > `m["k"] = v` (cerrado en R.1.3 mini-fase R, ver
-> [cap 9 sub-sección "Asignación a índice"](#9-listas-mapas-y-rangos)).
+> [cap 9 sub-sección "Asignación a índice"](#9-listas-mapas-y-rangos)),
+> **métodos custom sobre `type`** (cerrado en R.3 mini-fase R,
+> ver sub-sección de arriba).
 > Forma idiomática del chain multi-línea:
 > ```fitz
 > let nombres = users

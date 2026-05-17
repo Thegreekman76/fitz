@@ -329,9 +329,13 @@ pub enum Stmt {
     },
 
     /// Definición de tipo custom: `type User { id: Int, name: Str }`.
+    /// R.3 (mini-fase R) suma `methods: Vec<MethodDef>` — métodos
+    /// custom sobre el tipo. Fields y métodos se mezclan en cualquier
+    /// orden adentro del `{}` del `type`.
     TypeDef {
         name: String,
         fields: Vec<Field>,
+        methods: Vec<MethodDef>,
         span: Span,
     },
 
@@ -470,6 +474,30 @@ pub struct Field {
     pub name: String,
     pub type_: TypeExpr,
     pub default: Option<Expr>,
+}
+
+/// Método custom adentro de un `type` (R.3, mini-fase R).
+///
+/// Diseño "opción A" — los **fields** del tipo son visibles como
+/// variables locales en el body del método (sin prefijo `self`).
+/// Más cercano a Python/Ruby/Crystal que a Rust. Trade-off: si el
+/// método declara un local con el mismo nombre que un field, el
+/// local gana (documentado como caveat).
+///
+/// MVP:
+///  - No tiene decoradores (`@get`/`@server`/etc. son para fns
+///    top-level con dispatch HTTP; los métodos no encajan).
+///  - Visibilidad: todos public en MVP. `pub fn` queda como deuda.
+///  - Sin static methods (`type::method`).
+///  - Sin operator overloading.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MethodDef {
+    pub name: String,
+    pub params: Vec<Param>,
+    pub return_type: Option<TypeExpr>,
+    pub body: Vec<Stmt>,
+    pub is_async: bool,
+    pub span: Span,
 }
 
 /// Una expresión de tipo en una anotación. Es el AST que produce el

@@ -1,0 +1,69 @@
+// 13b-metodos-custom.fitz — Métodos custom sobre `type` (R.3, mini-fase R).
+//
+// Adentro del bloque `type`, podés declarar métodos `fn nombre(...) -> T`.
+// Los **fields del type son variables locales** en el body del método
+// (sin prefijo `self.`). Más cercano a Python/Ruby/Crystal que a Rust.
+
+type Counter {
+    count: Int = 0
+    step: Int = 1
+
+    fn current() -> Int {
+        return count
+    }
+
+    fn next_value() -> Int {
+        return count + step
+    }
+
+    fn doubled() -> Int {
+        return count * 2
+    }
+
+    fn label(prefix: Str) -> Str {
+        return "{prefix}: {count}"
+    }
+}
+
+let c = Counter { count: 10, step: 5 }
+print(c.current())                 // 10
+print(c.next_value())              // 15
+print(c.doubled())                 // 20
+print(c.label("c"))                // c: 10
+
+// Defaults: si el field tiene default, se aplica al instanciar y los
+// métodos lo ven igual.
+let d = Counter { count: 3 }
+print(d.next_value())              // 3 + 1 = 4 (step default = 1)
+print(d.label("d"))                // d: 3
+
+// --- Caveat: si un param se llama igual que un field, el param gana ---
+type Renamer {
+    name: Str
+
+    fn pick(name: Str) -> Str {
+        // Adentro del body, `name` es el PARÁMETRO, no el field.
+        return name
+    }
+}
+
+let r = Renamer { name: "field-name" }
+print(r.pick("param-name"))        // param-name
+
+// --- Method chaining ---
+type Point {
+    x: Int
+    y: Int
+
+    fn doubled_p() -> Point {
+        return Point { x: x * 2, y: y * 2 }
+    }
+
+    fn show() -> Str {
+        return "({x}, {y})"
+    }
+}
+
+let p = Point { x: 3, y: 4 }
+print(p.show())                    // (3, 4)
+print(p.doubled_p().show())        // (6, 8)
