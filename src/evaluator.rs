@@ -2767,6 +2767,10 @@ async fn dispatch_method(
         (Value::List(_), "filter") => list_filter(receiver, args, span).await,
         (Value::List(_), "find") => list_find(receiver, args, span).await,
         (Value::List(_), "len") => list_len(receiver, args, span),
+        // S.3 (mini-tanda S) — métodos chicos sobre List<T>:
+        (Value::List(_), "sort") => list_sort(receiver, args, span),
+        (Value::List(_), "reverse") => list_reverse(receiver, args, span),
+        (Value::List(_), "contains") => list_contains(receiver, args, span),
         // Map
         (Value::Map(_), "get") => map_get(receiver, args, span),
         (Value::Map(_), "has") => map_has(receiver, args, span),
@@ -2777,6 +2781,15 @@ async fn dispatch_method(
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
         (Value::Str(_), "lower") => str_lower(receiver, args, span),
+        // S.1 (mini-tanda S) — métodos chicos sobre Str:
+        (Value::Str(_), "contains") => str_contains(receiver, args, span),
+        (Value::Str(_), "starts_with") => str_starts_with(receiver, args, span),
+        (Value::Str(_), "ends_with") => str_ends_with(receiver, args, span),
+        // S.2 — manipulación de strings:
+        (Value::Str(_), "split") => str_split(receiver, args, span),
+        (Value::Str(_), "trim") => str_trim(receiver, args, span),
+        (Value::Str(_), "replace") => str_replace(receiver, args, span),
+        (Value::Str(_), "repeat") => str_repeat(receiver, args, span),
         // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
         // módulo y llamándola como cualquier función. No es method
         // dispatch real — el módulo no es "el receptor", solo el lugar
@@ -3086,6 +3099,96 @@ fn list_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     Ok(Value::Int(n))
 }
 
+/// S.3 — `xs.sort()` ordena IN-PLACE. Soporta `List<T>` para T en
+/// {Int, Float, Str, Bool}. Listas heterogéneas o de tipos no
+/// comparables → error claro de runtime. `Float::NaN` ordena
+/// determinísticamente vía `partial_cmp.unwrap_or(Less)` (mismo
+/// approach que `f64::total_cmp` simplificado). Devuelve `Null`
+/// (mutación in-place, paralelo a `push`/`pop`).
+fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("sort", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let mut guard = items.lock();
+    // Tipo común: chequeamos el primer elemento y exigimos el resto
+    // igual. Para lista vacía, no-op.
+    if guard.is_empty() {
+        return Ok(Value::Null);
+    }
+    let first_kind = guard[0].type_name();
+    for v in guard.iter().skip(1) {
+        if v.type_name() != first_kind {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: first_kind.into(),
+                    found: v.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.sort()` requiere elementos del mismo tipo: vi `{}` y `{}`",
+                    first_kind, v.type_name(),
+                ),
+            )));
+        }
+    }
+    match first_kind {
+        "Int" => guard.sort_by(|a, b| match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        "Float" => guard.sort_by(|a, b| match (a, b) {
+            (Value::Float(x), Value::Float(y)) => {
+                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            _ => std::cmp::Ordering::Equal,
+        }),
+        "Str" => guard.sort_by(|a, b| match (a, b) {
+            (Value::Str(x), Value::Str(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        "Bool" => guard.sort_by(|a, b| match (a, b) {
+            (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                span.line, span.column,
+                format!("`.sort()` no soporta `List<{}>` (solo Int/Float/Str/Bool)", other),
+            )));
+        }
+    }
+    Ok(Value::Null)
+}
+
+/// S.3 — `xs.reverse()` invierte el orden IN-PLACE. Cualquier
+/// `List<T>`. Devuelve `Null`.
+fn list_reverse(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("reverse", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    items.lock().reverse();
+    Ok(Value::Null)
+}
+
+/// S.3 — `xs.contains(v)` devuelve `Bool`. Usa la igualdad
+/// estructural de `Value` (`PartialEq`), que ya hace lo correcto
+/// para primitivos, instancias, listas anidadas, etc.
+fn list_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("contains", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let needle = args.into_iter().next().unwrap();
+    let found = items.lock().contains(&needle);
+    Ok(Value::Bool(found))
+}
+
 // ---- Map ----
 
 fn map_get(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -3174,6 +3277,133 @@ fn str_lower(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         _ => unreachable!(),
     };
     Ok(Value::Str(s.to_lowercase()))
+}
+
+/// S.1 — Helper común: extrae el `receiver: Str` y el `arg: Str` para
+/// los métodos `contains`/`starts_with`/`ends_with`. Si el argumento
+/// no es `Str` (caso gradual), devuelve error de runtime claro.
+fn str_one_str_arg(
+    method: &str,
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<(String, String)> {
+    expect_arity(method, &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let needle = match args.into_iter().next().unwrap() {
+        Value::Str(s) => s,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.{}()` espera un argumento `Str`, recibió `{}`",
+                    method, other.type_name(),
+                ),
+            )));
+        }
+    };
+    Ok((s, needle))
+}
+
+fn str_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    let (s, needle) = str_one_str_arg("contains", receiver, args, span)?;
+    Ok(Value::Bool(s.contains(&needle)))
+}
+
+fn str_starts_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    let (s, needle) = str_one_str_arg("starts_with", receiver, args, span)?;
+    Ok(Value::Bool(s.starts_with(&needle)))
+}
+
+fn str_ends_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    let (s, needle) = str_one_str_arg("ends_with", receiver, args, span)?;
+    Ok(Value::Bool(s.ends_with(&needle)))
+}
+
+/// S.2 — `s.split(sep)` devuelve `List<Str>`. Sin separador especial
+/// para whitespace (`s.split()` sin args queda como deuda menor —
+/// Rust `split_whitespace` lo cubre pero la semántica es distinta).
+/// Separador empty string: replica `str::split("")` que devuelve
+/// chars individuales + empties en bordes — mismo comportamiento
+/// que Python por default.
+fn str_split(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    let (s, sep) = str_one_str_arg("split", receiver, args, span)?;
+    let parts: Vec<Value> = s
+        .split(&sep[..])
+        .map(|p| Value::Str(p.to_string()))
+        .collect();
+    Ok(Value::new_list(parts))
+}
+
+fn str_trim(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("trim", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    Ok(Value::Str(s.trim().to_string()))
+}
+
+/// S.2 — `s.replace(old, new)`. Reemplaza TODAS las ocurrencias.
+/// Mismo comportamiento que `str::replace` Rust y `str.replace`
+/// Python.
+fn str_replace(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("replace", &args, 2, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let old = match it.next().unwrap() {
+        Value::Str(x) => x,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.replace(old, new)` espera Str para el arg 1, recibió {}", other.type_name()),
+        ))),
+    };
+    let new_s = match it.next().unwrap() {
+        Value::Str(x) => x,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.replace(old, new)` espera Str para el arg 2, recibió {}", other.type_name()),
+        ))),
+    };
+    Ok(Value::Str(s.replace(&old, &new_s)))
+}
+
+/// S.2 — `s.repeat(n)` repite el string n veces. `n < 0` es error
+/// claro; `n == 0` → string vacío (igual que Rust/Python).
+fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("repeat", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Int".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.repeat()` espera Int, recibió {}", other.type_name()),
+        ))),
+    };
+    if n < 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("`.repeat()` no acepta n negativo: recibió {}", n),
+        )));
+    }
+    Ok(Value::Str(s.repeat(n as usize)))
 }
 
 // ---------------------------------------------------------------------------
@@ -7857,6 +8087,230 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("HOLA".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("mundo".into())));
+    }
+
+    // ---- S.1: contains/starts_with/ends_with ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_contains_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"hola mundo\".contains(\"mundo\")\n\
+             let b = \"hola mundo\".contains(\"xyz\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_contains_empty_string_es_true() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"hola\".contains(\"\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_starts_with_y_ends_with() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"hola.fitz\".starts_with(\"hola\")\n\
+             let b = \"hola.fitz\".ends_with(\".fitz\")\n\
+             let c = \"hola.fitz\".starts_with(\"xyz\")\n\
+             let d = \"hola.fitz\".ends_with(\".py\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("c"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("d"), Some(Value::Bool(false)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_contains_con_arg_no_str_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let a = \"hola\".contains(1)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    // ---- S.2: split/trim/replace/repeat ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_split_devuelve_list_str() {
+        let (env, res) = parse_eval_into_env(
+            "let parts = \"a,b,c\".split(\",\")",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("parts").unwrap();
+        let inner = match v {
+            Value::List(items) => items,
+            other => panic!("se esperaba List, fue {:?}", other),
+        };
+        let guard = inner.lock();
+        assert_eq!(guard.len(), 3);
+        assert_eq!(guard[0], Value::Str("a".into()));
+        assert_eq!(guard[1], Value::Str("b".into()));
+        assert_eq!(guard[2], Value::Str("c".into()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_split_sin_match_devuelve_un_elemento() {
+        let (env, res) = parse_eval_into_env(
+            "let parts = \"abc\".split(\"|\")",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("parts").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g.len(), 1);
+            assert_eq!(g[0], Value::Str("abc".into()));
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_trim_remueve_whitespace_ambos_lados() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"  hola  \".trim()\n\
+             let b = \"\\nlinea\\n\".trim()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("hola".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_replace_reemplaza_todas_las_ocurrencias() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"aaa\".replace(\"a\", \"bb\")\n\
+             let b = \"hola mundo\".replace(\"o\", \"O\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("bbbbbb".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("hOla mundO".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_repeat_funciona() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"ab\".repeat(3)\n\
+             let b = \"x\".repeat(0)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("ababab".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn str_repeat_con_negativo_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let a = \"ab\".repeat(-1)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("negativo"));
+    }
+
+    // ---- S.3: List.sort/reverse/contains ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_sort_int_ascendente() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [3, 1, 4, 1, 5, 9, 2, 6]\n\
+             xs.sort()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|v| if let Value::Int(n) = v { Some(*n) } else { None }).collect();
+            assert_eq!(nums, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_sort_str_alfabetico() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [\"zeta\", \"alfa\", \"beta\"]\n\
+             xs.sort()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g[0], Value::Str("alfa".into()));
+            assert_eq!(g[2], Value::Str("zeta".into()));
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_sort_heterogeneo_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs = [1, \"dos\", 3]\n\
+             xs.sort()",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("sort"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_reverse_invierte_orden() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3, 4, 5]\n\
+             xs.reverse()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g[0], Value::Int(5));
+            assert_eq!(g[4], Value::Int(1));
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_contains_int() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3, 4, 5]\n\
+             let a = xs.contains(3)\n\
+             let b = xs.contains(99)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_contains_str() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [\"ada\", \"bob\"]\n\
+             let a = xs.contains(\"ada\")\n\
+             let b = xs.contains(\"dan\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_empty_methods_no_panic() {
+        // Lista vacía: sort/reverse no-op, contains false.
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             xs.sort()\n\
+             xs.reverse()\n\
+             let r = xs.contains(1)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Bool(false)));
     }
 
     #[tokio::test(flavor = "current_thread")]

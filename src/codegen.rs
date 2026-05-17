@@ -4599,8 +4599,70 @@ impl<'a> CodegenCtx<'a> {
                 check_method_arity(method, args, 0)?;
                 Ok((format!("({}).to_lowercase()", obj_code), Type::Str))
             }
+            // S.1 — `contains`/`starts_with`/`ends_with` toman 1 arg
+            // `Str` y devuelven `Bool`. Rust `str::contains/starts_with/
+            // ends_with` aceptan `&str` directo. Coercionamos el arg
+            // a `&str` para uniformar.
+            (Type::Str, "contains") => {
+                check_method_arity(method, args, 1)?;
+                let (a_code, a_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                Ok((format!("({}).contains({}.as_str())", obj_code, coerced), Type::Bool))
+            }
+            (Type::Str, "starts_with") => {
+                check_method_arity(method, args, 1)?;
+                let (a_code, a_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                Ok((format!("({}).starts_with({}.as_str())", obj_code, coerced), Type::Bool))
+            }
+            (Type::Str, "ends_with") => {
+                check_method_arity(method, args, 1)?;
+                let (a_code, a_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                Ok((format!("({}).ends_with({}.as_str())", obj_code, coerced), Type::Bool))
+            }
+            // S.2 — `split` devuelve `List<Str>` = `Arc<Mutex<Vec<String>>>`.
+            // Rust `str::split` devuelve un iterator de `&str`; lo
+            // materializamos a `Vec<String>` via `.map(String::from)`.
+            (Type::Str, "split") => {
+                check_method_arity(method, args, 1)?;
+                let (a_code, a_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let code = format!(
+                    "Arc::new(Mutex::new(({}).split({}.as_str()).map(String::from).collect::<Vec<_>>()))",
+                    obj_code, coerced
+                );
+                Ok((code, Type::List(Box::new(Type::Str))))
+            }
+            (Type::Str, "trim") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).trim().to_string()", obj_code), Type::Str))
+            }
+            (Type::Str, "replace") => {
+                check_method_arity(method, args, 2)?;
+                let (old_code, old_ty) = self.gen_expr(&args[0])?;
+                let (new_code, new_ty) = self.gen_expr(&args[1])?;
+                let old_c = coerce(&old_code, &old_ty, &Type::Str);
+                let new_c = coerce(&new_code, &new_ty, &Type::Str);
+                Ok((format!("({}).replace({}.as_str(), {}.as_str())", obj_code, old_c, new_c), Type::Str))
+            }
+            // S.2 — `s.repeat(n)`: Rust `str::repeat` toma `usize`. El
+            // intérprete chequea `n < 0` y emite error claro; el
+            // binario también: si `n < 0`, panicamos con el mismo
+            // mensaje. Conversión `i64 → usize` directa (cast usize
+            // truncaría — usamos try_into con expect).
+            (Type::Str, "repeat") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&n_code, &n_ty, &Type::Int);
+                let code = format!(
+                    "({{ let __n: i64 = {}; if __n < 0 {{ panic!(\"`.repeat()` no acepta n negativo: recibió {{}}\", __n); }} ({}).repeat(__n as usize) }})",
+                    coerced, obj_code
+                );
+                Ok((code, Type::Str))
+            }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/replace/repeat)",
                 other
             ))),
 
@@ -4614,8 +4676,18 @@ impl<'a> CodegenCtx<'a> {
             (Type::List(t), "map") => self.gen_list_map(&obj_code, t, args),
             (Type::List(t), "filter") => self.gen_list_filter(&obj_code, t, args),
             (Type::List(t), "find") => self.gen_list_find(&obj_code, t, args),
+            // S.3 (mini-tanda S) — métodos chicos sobre List.
+            (Type::List(t), "sort") => self.gen_list_sort(&obj_code, t, args, call_span),
+            (Type::List(_), "reverse") => {
+                check_method_arity(method, args, 0)?;
+                Ok((
+                    format!("({}).lock().unwrap().reverse()", obj_code),
+                    Type::Null,
+                ))
+            }
+            (Type::List(t), "contains") => self.gen_list_contains(&obj_code, t, args),
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/reverse/contains)",
                 other
             ))),
 
@@ -5003,6 +5075,58 @@ impl<'a> CodegenCtx<'a> {
             obj_code, callback_code, elem_rs
         );
         Ok((code, Type::Result(Box::new(elem_ty.clone()))))
+    }
+
+    /// S.3 — `xs.sort()` IN-PLACE. Soporta `List<T>` para T en
+    /// {Int, Float, Str, Bool}. Para Float usamos `partial_cmp`
+    /// con fallback `Equal` (NaN-tolerant). Tipos no soportados →
+    /// error claro de codegen. List<Any> → error (no podemos
+    /// generar el comparator estático; el intérprete lo chequea
+    /// en runtime, pero el codegen necesita un tipo concreto).
+    fn gen_list_sort(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("sort", args, 0)?;
+        let cmp = match elem_ty {
+            Type::Int | Type::Str | Type::Bool => "a.cmp(b)".to_string(),
+            Type::Float => "a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)".to_string(),
+            other => {
+                return Err(self.err_at(call_span, format!(
+                    "`.sort()` no soporta `List<{}>` en `fitz build` (hoy: Int/Float/Str/Bool)",
+                    display_type(other, self.env),
+                )));
+            }
+        };
+        let code = format!(
+            "({}).lock().unwrap().sort_by(|a, b| {})",
+            obj_code, cmp
+        );
+        Ok((code, Type::Null))
+    }
+
+    /// S.3 — `xs.contains(v)` lineal sobre el `Vec`. Usa la
+    /// `PartialEq` derivada del tipo del elemento (que para
+    /// nominales/listas/maps es la custom impl emitida por el
+    /// codegen; para primitivos es la stdlib).
+    fn gen_list_contains(
+        &mut self,
+        obj_code: &str,
+        elem_ty: &Type,
+        args: &[Expr],
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity("contains", args, 1)?;
+        let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+        let coerced = coerce(&arg_code, &arg_ty, elem_ty);
+        let elem_rs = rust_type_for(elem_ty, self.env)?;
+        let code = format!(
+            "{{ let __needle: {} = {}; ({}).lock().unwrap().iter().any(|__v| __v == &__needle) }}",
+            elem_rs, coerced, obj_code
+        );
+        Ok((code, Type::Bool))
     }
 
     // --- métodos Map -----------------------------------------------------

@@ -1,0 +1,51 @@
+// 13c-metodos-extras.fitz — Mini-tanda S (mini-fase post-R).
+// Métodos chicos sobre Str y List que cierran deudas vivas en
+// el lenguaje base.
+
+// --- Str (S.1 + S.2) ---
+
+// contains / starts_with / ends_with → Bool
+print("hola, mundo".contains("mundo"))      // true
+print("hola.fitz".starts_with("hola"))      // true
+print("hola.fitz".ends_with(".fitz"))       // true
+print("abc".contains("xy"))                 // false
+
+// split → List<Str>
+let csv = "a,b,c,d"
+let parts = csv.split(",")
+print(parts)                                // [a, b, c, d]
+print(parts.len())                          // 4
+
+// trim — saca whitespace de ambos lados
+print("  hola  ".trim())                    // hola
+
+// replace — reemplaza TODAS las ocurrencias
+print("hola mundo".replace("o", "0"))       // h0la mund0
+
+// repeat — N copias del string
+print("ab".repeat(3))                       // ababab
+print("-".repeat(20))                       // --------------------
+
+// Chain
+let limpio = "  Hola, MUNDO!  ".trim().lower().replace("!", "")
+print(limpio)                               // hola, mundo
+
+// --- List (S.3) ---
+
+// sort → IN-PLACE, devuelve Null
+let nums: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]
+nums.sort()
+print(nums)                                 // [1, 1, 2, 3, 4, 5, 6, 9]
+
+let palabras: List<Str> = ["zeta", "alfa", "beta"]
+palabras.sort()
+print(palabras)                             // [alfa, beta, zeta]
+
+// reverse → IN-PLACE
+nums.reverse()
+print(nums)                                 // [9, 6, 5, 4, 3, 2, 1, 1]
+
+// contains → Bool
+let primes: List<Int> = [2, 3, 5, 7, 11]
+print(primes.contains(7))                   // true
+print(primes.contains(4))                   // false

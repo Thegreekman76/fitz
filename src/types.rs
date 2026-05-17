@@ -2076,6 +2076,27 @@ fn infer_list_method(
             check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool), span);
             Type::Result(Box::new(t.clone()))
         }
+        // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
+        // devuelven `Null`. `contains(v)` devuelve `Bool`. El
+        // chequeo de "tipo comparable" para sort se hace en runtime
+        // — el checker no rechaza `List<Any>.sort()` para preservar
+        // el modelo gradual.
+        "sort" | "reverse" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Null
+        }
+        "contains" => {
+            if check_method_arity(ctx, "contains", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], t)
+            {
+                ctx.error_at(span, format!(
+                    "`List<{}>.contains()` recibió `{}`",
+                    t.display(ctx.types),
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Bool
+        }
         _ => {
             ctx.error_at(span, format!(
                 "`List<{}>` no tiene el método `{}`",
@@ -2163,6 +2184,61 @@ fn infer_str_method(
         }
         "upper" | "lower" => {
             check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Str
+        }
+        // S.1 (mini-tanda S) — `contains`/`starts_with`/`ends_with`
+        // toman un `Str` y devuelven `Bool`. Mismo shape para los 3.
+        "contains" | "starts_with" | "ends_with" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Str)
+            {
+                ctx.error_at(span, format!(
+                    "`Str.{}()` espera `Str`, recibió `{}`",
+                    method,
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Bool
+        }
+        // S.2 — manipulación de strings:
+        "split" => {
+            if check_method_arity(ctx, "split", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Str)
+            {
+                ctx.error_at(span, format!(
+                    "`Str.split()` espera `Str` como separador, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::List(Box::new(Type::Str))
+        }
+        "trim" => {
+            check_method_arity(ctx, "trim", args_ty, 0, span);
+            Type::Str
+        }
+        "replace" => {
+            if check_method_arity(ctx, "replace", args_ty, 2, span) {
+                for (i, name) in ["old", "new"].iter().enumerate() {
+                    if !is_compatible(&args_ty[i], &Type::Str) {
+                        ctx.error_at(span, format!(
+                            "`Str.replace({}, ...)` espera `Str`, recibió `{}`",
+                            name,
+                            args_ty[i].display(ctx.types),
+                        ));
+                    }
+                }
+            }
+            Type::Str
+        }
+        "repeat" => {
+            if check_method_arity(ctx, "repeat", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`Str.repeat()` espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
             Type::Str
         }
         _ => {
@@ -5164,6 +5240,105 @@ mod tests {
             "let s = \"hola\"\n\
              s.upcase()",
             &["Str", "upcase"],
+        );
+    }
+
+    // ---- S.1: contains/starts_with/ends_with ----
+
+    #[test]
+    fn str_contains_devuelve_bool() {
+        assert_ok(
+            "let b: Bool = \"hola\".contains(\"ol\")",
+        );
+    }
+
+    #[test]
+    fn str_starts_with_ends_with_devuelven_bool() {
+        assert_ok(
+            "let a: Bool = \"hola\".starts_with(\"ho\")\n\
+             let b: Bool = \"hola\".ends_with(\"la\")",
+        );
+    }
+
+    #[test]
+    fn str_contains_con_arg_no_str_es_error() {
+        assert_error_with(
+            "let b = \"hola\".contains(1)",
+            &["contains", "Str"],
+        );
+    }
+
+    // ---- S.2: split/trim/replace/repeat ----
+
+    #[test]
+    fn str_split_devuelve_list_str() {
+        assert_ok(
+            "let xs: List<Str> = \"a,b,c\".split(\",\")",
+        );
+    }
+
+    #[test]
+    fn str_trim_devuelve_str() {
+        assert_ok(
+            "let s: Str = \"  hola  \".trim()",
+        );
+    }
+
+    #[test]
+    fn str_replace_devuelve_str() {
+        assert_ok(
+            "let s: Str = \"hola\".replace(\"o\", \"O\")",
+        );
+    }
+
+    #[test]
+    fn str_replace_con_int_es_error() {
+        assert_error_with(
+            "let s = \"hola\".replace(\"o\", 42)",
+            &["replace", "Str"],
+        );
+    }
+
+    #[test]
+    fn str_repeat_con_int_devuelve_str() {
+        assert_ok(
+            "let s: Str = \"ab\".repeat(3)",
+        );
+    }
+
+    #[test]
+    fn str_repeat_con_str_es_error() {
+        assert_error_with(
+            "let s = \"ab\".repeat(\"3\")",
+            &["repeat", "Int"],
+        );
+    }
+
+    // ---- S.3: List.sort/reverse/contains ----
+
+    #[test]
+    fn list_sort_y_reverse_devuelven_null() {
+        assert_ok(
+            "let xs: List<Int> = [3, 1, 2]\n\
+             xs.sort()\n\
+             xs.reverse()",
+        );
+    }
+
+    #[test]
+    fn list_contains_con_arg_compatible_devuelve_bool() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: Bool = xs.contains(2)",
+        );
+    }
+
+    #[test]
+    fn list_contains_con_arg_incompatible_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.contains(\"x\")",
+            &["contains", "Int"],
         );
     }
 

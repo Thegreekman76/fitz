@@ -670,25 +670,39 @@ posteriores.
 - **Escapes extendidos** `\u{...}`, `\x..`, `\0`, `\b` — F9.
   ASCII tabla cubre lo común.
 
-### Strings — métodos extras (cap 13)
+### ~~Strings — métodos extras~~ ✓ CERRADO 2026-05-17 (mini-tanda S.1 + S.2)
 
-- `Str.contains(s)` — útil. ~30 min.
-- `Str.split(sep)` — necesita decidir tipo de retorno (`List<Str>`).
-  ~1h.
-- `Str.trim()` / `.trim_start()` / `.trim_end()` — ~30 min.
-- `Str.starts_with(s)` / `.ends_with(s)` — ~30 min.
-- `Str.replace(old, new)` — ~30 min.
-- `Str.repeat(n)` — ~30 min.
+- ~~`Str.contains(s)`~~ ✓ (S.1)
+- ~~`Str.split(sep)`~~ ✓ (S.2). Retorna `List<Str>` materializado
+  (no iterator). Empty separator → chars individuales (igual que
+  Python por default).
+- ~~`Str.trim()`~~ ✓ (S.2). `.trim_start()` / `.trim_end()`
+  quedan como deuda menor.
+- ~~`Str.starts_with(s)` / `.ends_with(s)`~~ ✓ (S.1).
+- ~~`Str.replace(old, new)`~~ ✓ (S.2). Reemplaza TODAS las
+  ocurrencias.
+- ~~`Str.repeat(n)`~~ ✓ (S.2). `n < 0` es error; `n == 0` →
+  string vacío.
 
-Todos chicos, pueden ir en una mini-tanda dedicada.
+Implementación en 4 capas (evaluator + checker + codegen + fmt
+intact). Tests exhaustivos: ~15 unit del evaluator + ~10 del
+checker + smoke E2E bit-a-bit `fitz run` ↔ `fitz build` sobre
+`examples/guide/13c-metodos-extras.fitz` (sumado al smoke
+GUIDE_EXAMPLES_COMPILE).
 
-### Listas — métodos extras
+### ~~Listas — métodos extras~~ ✓ CERRADO 2026-05-17 (mini-tanda S.3)
 
-- `xs.sort()` / `.sort_by(fn)` — necesita comparación generic.
-- `xs.reverse()` — trivial.
-- `xs.contains(v)` — trivial.
-- `xs.flatten()` (para `List<List<T>>`).
-- `xs.zip(ys)` — necesita tuples.
+- ~~`xs.sort()`~~ ✓ (S.3). IN-PLACE, soporta List<T> para T en
+  {Int, Float, Str, Bool}. Float usa `partial_cmp` con fallback
+  `Equal` (NaN-tolerant). Heterogéneos → error de runtime claro;
+  el codegen rechaza tipos no soportados estático.
+- ~~`xs.reverse()`~~ ✓ (S.3). IN-PLACE, cualquier T.
+- ~~`xs.contains(v)`~~ ✓ (S.3). Igualdad estructural via
+  `PartialEq` (la custom emitida para nominales/listas/maps).
+- `xs.sort_by(fn)` — diferido. Necesita callback comparator.
+  Sub-paso futuro si entra demanda.
+- `xs.flatten()` para `List<List<T>>`, `xs.zip(ys)` — necesitan
+  tuples (deuda diferida grande).
 
 ### Loops
 

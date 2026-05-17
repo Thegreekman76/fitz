@@ -1787,6 +1787,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "12-type.fitz",
     "13-metodos.fitz",
     "13b-metodos-custom.fitz",
+    "13c-metodos-extras.fitz",
     "14-result.fitz",
     "16-modulos.fitz",
     "17-http.fitz",

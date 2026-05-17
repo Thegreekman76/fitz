@@ -996,15 +996,17 @@ Características:
 ### Lo que todavía no anda
 
 - Comillas simples como alternativa a las dobles.
-- Métodos como `.split(...)`, `.contains(...)`, `.starts_with(...)`
-  — los tres básicos (`.upper()`, `.lower()`, `.len()`) sí están,
-  y los ves en el [capítulo 13](#13-métodos-y-mutación).
 - Format specifiers dentro de la interpolación (`{ratio:.2f}` y
   similares).
 
 > Lo que **sí anda** y antes era deuda: **strings multilínea
 > `"""..."""`** — cerrado en R.1.5 (mini-fase R). Incluyendo
 > interpolación adentro y preservando newlines literales.
+> Métodos `.split(sep)`, `.contains(s)`, `.starts_with(s)`,
+> `.ends_with(s)`, `.trim()`, `.replace(old, new)`, `.repeat(n)`
+> — cerrados en mini-tanda S (S.1 + S.2). Vivos en `fitz run` y
+> `fitz build` (ver [cap 13](#13-métodos-y-mutación) +
+> ejemplo [13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)).
 
 ### Ejemplo completo
 
@@ -3340,21 +3342,54 @@ let l = t.label("step").await    // step-7
 Ver [examples/guide/13b-metodos-custom.fitz](../examples/guide/13b-metodos-custom.fitz)
 para el ejemplo completo (incluye la sección async).
 
+### Métodos chicos de Str y List (mini-tanda S)
+
+Resumen de los métodos cerrados en la mini-tanda S (post-R):
+
+**Sobre `Str`** (S.1 + S.2):
+
+| Método           | Args         | Retorna     | Notas |
+|------------------|--------------|-------------|-------|
+| `.contains(s)`   | `Str`        | `Bool`      | empty string siempre matchea |
+| `.starts_with(s)`| `Str`        | `Bool`      | case-sensitive |
+| `.ends_with(s)`  | `Str`        | `Bool`      | case-sensitive |
+| `.split(sep)`    | `Str`        | `List<Str>` | empty separator → chars individuales |
+| `.trim()`        | —            | `Str`       | whitespace ambos lados |
+| `.replace(o, n)` | `Str`, `Str` | `Str`       | TODAS las ocurrencias |
+| `.repeat(n)`     | `Int`        | `Str`       | `n < 0` es error |
+
+**Sobre `List<T>`** (S.3):
+
+| Método          | Args | Retorna | Notas |
+|-----------------|------|---------|-------|
+| `.sort()`       | —    | `Null`  | IN-PLACE, T ∈ {Int, Float, Str, Bool} |
+| `.reverse()`    | —    | `Null`  | IN-PLACE, cualquier T |
+| `.contains(v)`  | `T`  | `Bool`  | igualdad estructural |
+
+Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
+para el ejemplo completo.
+
 ### Lo que todavía no anda
 
 - **`return` adentro de un brazo de `match` como expresión** —
   como cada brazo es una expresión, no podés cortar la función
   desde adentro con `return`. Se puede pulir cuando moleste.
-- **Más métodos**: `contains`, `trim`, `split`, `starts_with`,
-  `concat`, etc. Se irán sumando con la práctica; sin sorpresas
-  semánticas.
+- **`xs.sort_by(fn)`** — sort con comparator custom. Si aparece
+  demanda, sub-paso futuro.
+- **`xs.zip(ys)`, `xs.flatten()`** — necesitan tuples (deuda
+  diferida) o decisión de retorno.
+- **Más métodos**: `.find()` para strings, etc. Se irán sumando
+  con la práctica.
 
 > Lo que **sí anda** y antes era deuda: encadenamiento multi-línea
 > (cerrado en PreF8.2), **asignación a índice** `xs[0] = v` y
-> `m["k"] = v` (cerrado en R.1.3 mini-fase R, ver
+> `m["k"] = v` (R.1.3 mini-fase R, ver
 > [cap 9 sub-sección "Asignación a índice"](#9-listas-mapas-y-rangos)),
-> **métodos custom sobre `type`** (cerrado en R.3 mini-fase R,
-> ver sub-sección de arriba).
+> **métodos custom sobre `type`** (R.3 mini-fase R, ver
+> sub-sección de arriba), **métodos chicos de Str y List**
+> (mini-tanda S — `.contains`/`.starts_with`/`.ends_with`/
+> `.split`/`.trim`/`.replace`/`.repeat` sobre Str;
+> `.sort`/`.reverse`/`.contains` sobre List).
 > Forma idiomática del chain multi-línea:
 > ```fitz
 > let nombres = users
