@@ -261,7 +261,14 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
 /// al Cargo.toml y si emitir un `fn main()` async.
 fn has_http_routes(program: &Program) -> bool {
     program.iter().any(|s| {
-        matches!(s, Stmt::FnDef { decorators, .. } if !decorators.is_empty())
+        matches!(
+            s,
+            Stmt::FnDef { decorators, .. }
+                if decorators.iter().any(|d| matches!(
+                    d.name.as_str(),
+                    "get" | "post" | "put" | "delete" | "server"
+                ))
+        )
     })
 }
 
@@ -1432,6 +1439,16 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                 if decorators.is_empty() {
                     top_fns.push(s);
                 } else {
+                    // Fase 9.z.2.c: `@test` se ignora silenciosamente en
+                    // codegen. La fn no se emite al output Rust (paralelo
+                    // a `#[cfg(test)]` de Rust: las fns marcadas con `@test`
+                    // pertenecen al runner de `fitz test`, no al binario
+                    // final). Si una fn tiene cualquier decorator `@test`,
+                    // saltamos el resto del análisis y NO la agregamos a
+                    // `top_fns` ni `http_fns`.
+                    if decorators.iter().any(|d| d.name == "test") {
+                        continue;
+                    }
                     // Separar `@server` de los `@get`/`@post`/etc.
                     let mut http_decos = false;
                     for d in decorators {

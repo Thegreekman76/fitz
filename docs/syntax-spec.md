@@ -1,6 +1,6 @@
 # Especificación de Sintaxis — Fitz
 
-> Estado: BORRADOR v0.3 (actualización 2026-05-14, post Fase F17).
+> Estado: BORRADOR v0.4 (actualización 2026-05-17, post Fase 9.z.2).
 > La mayoría del diseño original ya está implementado; lo pendiente
 > queda señalado abajo.
 >
@@ -42,19 +42,34 @@
 > - Codegen a binario nativo via `fitz build` (cap 20).
 > - Middleware + CORS con preflight automático y echo del Origin
 >   recibido (`cors({"allow_origin": ["a.com", "b.com"]})`).
+> - Interop con Python (`from python import sqlalchemy`) — Fase 8
+>   entera (caps 21.1 → 21.12).
+> - LSP (autocomplete + hover + go-to-def + diagnostics) + extensión
+>   VSCode — Fase 9.x entera (cap 22). Distribución multi-plataforma.
+> - Package manager: `fitz new`/`init`/`add`/`remove`/`update`,
+>   manifest `fitz.toml`, deps path/git con lockfile — Fase 9.y.1 →
+>   9.y.4. Registry (9.y.5) diferido.
+> - Formatter `fitz fmt` (cero config, preserva comments) — Fase 9.z.1
+>   (cap 23).
+> - Test runner `fitz test` con `@test` + 4 assertion builtins
+>   (`assert`, `assert_eq`, `assert_ne`, `assert_throws`) — Fase 9.z.2
+>   (cap 24).
 >
 > **Diseñado pero no implementado**:
-> - Interop con Python (`from python import sqlalchemy`) — Fase 8.
-> - Package manager, LSP (autocomplete + hover + go-to-def en VSCode/
->   Neovim/etc.), formatter — Fase 9. Pre-reqs habilitantes: F15
->   (parser error recovery) + F16 (IR tipado persistido por nodo).
+> - `@bench` para benchmarks (post-MVP de 9.z.2).
+> - Test fixtures (`@before_all`, `@before_each`, etc.) — post-MVP.
+> - `fitz dev` (hot reload con file watcher) — Fase 9.z.3.
+> - `fitz repl` (REPL interactivo) — Fase 9.z.4.
+> - `fitz lint` (linter de patrones más allá de tipos) — Fase 9.z.5.
+> - Registry público (`fitz publish` + `fitz add foo@1.2.3`) — Fase
+>   9.y.5, diferido.
 > - Bundle Scalar offline embebido (hoy CDN) — deuda menor (Q.5,
 >   postergada por trade-off de tamaño).
 > - Doc-strings sobre handlers retenidos por el parser — refactor
->   invasive lexer/parser/AST; pendiente post-F17.
-> - Aliasing en imports `from python import sqlalchemy as sa` y
->   `import foo as f` — comprometido como sub-paso adelantado de
->   Fase 8.1.
+>   invasivo lexer/parser/AST; pendiente.
+> - CLI builder nativo (`@command`/`@arg`/`@flag`) — Fase 13 del
+>   roadmap.
+> - Frontend en `.fitz` (SFC + SSR) — Fase 11+ del roadmap.
 >
 > Cuando esta especificación y la guía discrepan, **gana la guía**
 > (que solo documenta lo implementado).
@@ -493,10 +508,11 @@ fn main() {
 
 ---
 
-## Testing (futuro, Fase 9.z)
+## Testing (Fase 9.z.2 — IMPLEMENTADO)
 
-Test runner built-in con decorator `@test`. **No implementado
-todavía** — sintaxis tentativa.
+Test runner built-in con decorator `@test`. Cerrado entero el
+2026-05-17. Para detalle de uso ver
+[cap 24 de la guía](guide.md#24-fitz-test--testing-built-in).
 
 ```fitz
 @test fn suma_funciona() {
@@ -508,15 +524,12 @@ todavía** — sintaxis tentativa.
     assert(u.email == null)
 }
 
-@test async fn http_call_funciona() {
-    let res = http.get("https://api.test/users/1").await
-    match res {
-        Ok(r) => assert_eq(r.status, 200),
-        Err(e) => panic("falló: {e}"),
-    }
+@test async fn pausa_y_compara() {
+    let r = sleep(0).await
+    assert_eq(r, null)
 }
 
-// benchmarks (post-MVP de @test)
+// benchmarks (futuro post-MVP de @test, no implementado)
 @bench fn fib_es_rapido() {
     fib(20)  // medido por iteración
 }
@@ -526,7 +539,7 @@ Builtins de aserción: `assert(cond, msg?)`, `assert_eq(a, b)`,
 `assert_ne(a, b)`, `assert_throws(fn)`.
 
 Discovery: `fitz test` descubre todos los `@test` del proyecto
-(inline al final de cada archivo + carpeta `tests/`).
+(`tests/*.fitz` top-level + `[lib].entry` para tests inline solo-lib).
 
 ---
 

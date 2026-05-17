@@ -12,24 +12,103 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 ## [Sin publicar]
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
-manager con 9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4 CERRADOS** y
-**9.z (DX) arrancó con 9.z.1 entera CERRADA (a + b)** — todo el
-2026-05-16. El usuario puede hoy crear proyectos, correr/compilar/
-chequear contra el manifest, declarar deps path/git con lockfile
-reproducible, importar deps desde código, editar el manifest via
-CLI, y **formatear código** (`fitz fmt`, production-ready con
-preservación de comments + blank lines).
+manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS** y **9.z
+(DX) avanza con 9.z.1 entera + 9.z.2 entera CERRADAS** — fmt
+production-ready (2026-05-16) y test runner built-in con
+`@test` + `fitz test` (2026-05-17).
 
 **Decisión del 2026-05-16**: 9.y.5 (registry) se difiere — path +
 git deps cubren el caso 90% y registry implica decisiones de
 hosting + infra. Saltamos a 9.z (DX completo: fmt + test + dev +
 repl + lint) que no requiere infra externa.
 
-Próximo norte: **9.z.2** (`fitz test` con `@test` builtin).
-Registry queda para cuando aparezca demanda real.
+Próximo norte: **9.z.3** (`fitz dev` con file watcher + hot reload).
 
 Sub-paso separado pendiente sin presión: bundling CPython embebido
 (`fitz build --bundle-python`).
+
+## [v0.9.16] — 2026-05-17 — Fase 9.z.2 entera CERRADA — `fitz test` (testing built-in)
+
+Test runner integrado al lenguaje. Sin librerías, sin glue, sin
+elegir entre 3 frameworks. Tres sub-pasos (a + b + c) cerrados en
+el día:
+
+**9.z.2.a — `@test` decorator + assertion builtins + TestRegistry**:
+- `src/testing.rs` nuevo: `TestRegistry` + thread-local +
+  `with_active_test_registry` (sync/async). Mirror chico de
+  `http::HTTP_REGISTRY` con la asimetría clave: sin registry
+  activo, `@test` es no-op silencioso (paralelo a `#[cfg(test)]`).
+- Evaluator: branch `@test` en `process_decorator` con `register_test`.
+  Valida args/kwargs/params vacíos; empuja `TestSpec` si hay registry.
+- 4 assertion builtins: `assert(cond, msg?)`, `assert_eq(a, b)`,
+  `assert_ne(a, b)`, `assert_throws(fn)`. Estilo cargo
+  (`left`/`right`). `assert_throws` con callback async: rechazado
+  en MVP — caso especial en `invoke_value` invoca async-recursive.
+- Pre-registro en checker (`types.rs`) + completion en LSP (`lsp.rs`).
+- **Cambio retro-compatible al parser**: paréntesis opcionales en
+  decoradores (necesario para `@test fn ...`). Los demás
+  decorators siguen funcionando idéntico con/sin paréntesis.
+
+**9.z.2.b — `fitz test` runner**:
+- `Commands::Test { filter, file }` en CLI.
+- **Single-file mode** (`fitz test --file archivo.fitz`): carga
+  el archivo, descubre `@test`, los corre.
+- **Manifest mode** (`fitz test`): discovery automático. Si hay
+  `tests/*.fitz` top-level: solo carga esos (el `[lib]` se carga
+  vía import auto-self-registrado bajo `package.name` —
+  paralelo a `use my_crate::*` Rust). Si no hay tests integration:
+  carga el `[lib].entry` directo para tests inline.
+- Filtrado por **substring** del nombre del test (cargo default).
+- Output estilo cargo: `test <file>::<name> ... ok/FAILED` +
+  sección `failures:` con detalle + summary `test result: ...
+  passed; ... failed; finished in ...s`. ANSI colors auto cuando
+  stdout es TTY (`std::io::IsTerminal`, cero deps nuevas).
+- **Async tests** funcionan: `evaluator::run_test_handler`
+  encapsula invoke + await del `Future`.
+- Exit code 1 si ≥1 falla, 0 si todos pasan.
+- Loader sobrescribe `CURRENT_TEST_SOURCE` al cargar módulos
+  importados: los `@test` quedan etiquetados con su archivo
+  declarante real (no con el del importer).
+- Dedup en discovery: si hay tests integration, no se carga
+  `[lib]` direct para evitar duplicar tests inline del lib que
+  los tests importan.
+
+**9.z.2.c — guía + ejemplo + cierre formal**:
+- Cap 24 nuevo **"`fitz test` — testing built-in"** en
+  `docs/guide.md`: features, CLI single-file / manifest mode,
+  filtrado, output cargo-style, async tests, estructura típica
+  de proyecto, limitaciones. Renumeración cap 24→25 ("Qué sigue").
+- Ejemplo runnable `examples/guide/24-tests.fitz` con `factorial`
+  + 3 tests OK + 1 FAILED intencional. Sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE` (compila con `fitz build` porque
+  codegen ignora `@test`).
+- Codegen: `@test fn` se **ignora silenciosamente** en `fitz build`
+  (paralelo a `#[cfg(test)]`). Bug fix colateral en
+  `has_http_routes` (counting `@test` como HTTP disparaba
+  servidor en CLI puro — refinado a solo
+  `get`/`post`/`put`/`delete`/`server`).
+- CHANGELOG v0.9.16, roadmap (9.z.2 a/b/c marcado CERRADO),
+  `docs/deudas-post-5b.md` (bloque "Fase 9.z.2 entera CERRADA"),
+  README, CLAUDE, `docs/syntax-spec.md` (sección "Testing"
+  pasa de "futuro" a "implementado").
+
+**Decisiones tomadas durante 9.z.2**:
+- `panic(msg)` (que el syntax-spec usa en su ejemplo) **fuera de
+  scope** del MVP. Los 4 oficiales bastan; refinable si aparece
+  presión.
+- `assert_throws` solo SYNC callbacks. Async cb queda como sub-paso
+  futuro si aparece presión.
+- Discovery dedup pragmática: lib vs tests integration.
+- Auto-self-import bajo `package.name`: requiere nombre usable
+  como ident Fitz (sin hyphens). Deuda visible.
+
+**Tests al cierre**:
+- 1366 unit (+33 vs Fase 9.z.1) — `+6 testing`, `+25 evaluator
+  (decorator + asserts)`, `+2 parser regression`.
+- 66 cli_e2e (+11 vs Fase 9.z.1) — runner end-to-end.
+- 80 compile_e2e (+1 vs Fase 9.z.1) — `24-tests.fitz`.
+- 3 openapi.
+- Clippy `-D warnings` limpio.
 
 ## [v0.9.14] — 2026-05-16 — Fase 9.z.1.b + cierre de 9.z.1 entera: comment + blank preservation
 

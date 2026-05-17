@@ -1,0 +1,38 @@
+// Ejemplo del cap 24 — `fitz test`. Mostramos los 4 assertion builtins
+// + una falla intencional para que veas cómo se reporta.
+//
+// Corrélo con:
+//   fitz test --file examples/guide/24-tests.fitz
+//
+// Salida esperada: 3 OK + 1 FAILED + summary con exit code 1.
+// Sacá el ` _falla_intencional` (o ajustá el assert_eq adentro) si
+// querés exit 0.
+//
+// Las fns `@test` NO se ejecutan con `fitz run` ni `fitz build` —
+// son no-op silencioso fuera del runner. Las usás como
+// documentación ejecutable del comportamiento esperado.
+
+fn factorial(n: Int) -> Int {
+    if (n <= 1) {
+        return 1
+    }
+    return n * factorial(n - 1)
+}
+
+@test fn factorial_de_0_es_1() {
+    assert_eq(factorial(0), 1)
+}
+
+@test fn factorial_de_5_es_120() {
+    assert_eq(factorial(5), 120)
+}
+
+@test fn factorial_distinto_de_cero() {
+    assert_ne(factorial(3), 0)
+}
+
+@test fn factorial_de_4_falla_intencional() {
+    // Demuestra el output de FAILED: left/right + el test queda
+    // listado en `failures:` al final.
+    assert_eq(factorial(4), 25)
+}

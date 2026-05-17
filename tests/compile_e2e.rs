@@ -1795,6 +1795,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "19b-paralelismo.fitz",
     "20-build.fitz",
     "23-fmt-ejemplo.fitz",
+    "24-tests.fitz",
 ];
 
 #[test]

@@ -632,6 +632,60 @@
 > texto stale; (d) `docs/syntax-spec.md` actualizar matriz al
 > estado de cierre 9.z (refresh recurrente, ya marcado como
 > deuda continua). ~4-6h estimadas para hacerlo bien.
+>
+> **Fase 9.z.2 ENTERA CERRADA (2026-05-17)** — `fitz test`
+> (testing built-in). Tres sub-pasos cerrados en el día:
+>
+> - **9.z.2.a — decorator + asserts + registry** (ver bloque
+>   anterior en este archivo).
+> - **9.z.2.b — runner cargo-style + discovery** (`Commands::Test`
+>   + `discover_test_sources_from_manifest` con dedup lib/tests +
+>   auto-self-import bajo `package.name` + `run_test_registry`
+>   con output cargo-style + ANSI auto via `IsTerminal` + exit
+>   code 1 si falla; 11 cli_e2e nuevos).
+> - **9.z.2.c — cap guía + ejemplo + cierre formal** (este
+>   sub-paso): cap 24 nuevo "`fitz test` — testing built-in"
+>   en `docs/guide.md` (renumeración 24→25), ejemplo runnable
+>   `examples/guide/24-tests.fitz` con factorial + 3 tests OK
+>   + 1 FAILED intencional sumado al smoke
+>   `GUIDE_EXAMPLES_COMPILE`, codegen ignora `@test fn`
+>   silenciosamente (paralelo a `#[cfg(test)]` Rust), bug fix
+>   colateral en `has_http_routes` (counting `@test` como HTTP
+>   disparaba server en CLI puros), CHANGELOG v0.9.16,
+>   roadmap, README, CLAUDE, syntax-spec actualizado a
+>   v0.4 (matriz refleja interop / LSP / PM / fmt / test como
+>   implementados).
+>
+> Total al cierre de 9.z.2: **1366 unit / 66 cli_e2e / 80
+> compile_e2e / 3 openapi**. Clippy `-D warnings` limpio.
+>
+> **Deudas residuales de 9.z.2 (NO bloquean 9.z.3)**:
+> - **`assert_throws` con callback async**: rechazado en runtime
+>   (FitzError claro). Sub-paso futuro si aparece presión —
+>   posiblemente `assert_throws_async` o flag dedicado.
+> - **Span del fallo en assertion builtins**: el `FitzError`
+>   lleva `line: 0, column: 0` porque los builtins son sync y
+>   no reciben el span del call site. Útil para reportar la
+>   línea exacta de la aserción fallida. Refactor: el caller
+>   de `Value::Builtin { func, .. }` en `invoke_value` ya
+>   tiene el span; el wrapper podría enriquecer el error
+>   después-del-fact con `e.line = span.line` si `line==0`.
+>   ~30 min de trabajo.
+> - **Nombres de paquete con hyphens**: `package.name = "my-pkg"`
+>   no es importable desde Fitz (`from my-pkg import X` no
+>   parsea — `-` no es ident válido). Workaround: usar
+>   underscores. Documentado en cap 24 de la guía. Refinable
+>   en lexer/parser si aparece presión.
+> - **Tests inline en `[lib]` sin tests integration que lo
+>   importen**: si el proyecto tiene tests/ + `[lib]` con
+>   `@test` inline, pero ningún `tests/*.fitz` importa la lib,
+>   esos tests del lib NO se descubren (modo "tests integration"
+>   solo carga `tests/*.fitz` direct). Edge case raro;
+>   workaround: agregar un `from <pkg> import _` decorativo a
+>   algún test integration.
+>
+> **Próximo norte**: 9.z.3 (`fitz dev` con file watcher + hot
+> reload + dev experience).
 
 ## Resumen ejecutivo
 

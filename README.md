@@ -508,7 +508,22 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     completa de convenciones.
   - Total al cierre 9.z.1: 1333 unit + 55 cli_e2e + 79 compile_e2e
     + 3 openapi. Clippy `-D warnings` limpio.
-  - Próximo: **9.z.2** (`fitz test` con `@test` builtin).
+  - **9.z.2 entera CERRADA (2026-05-17)** — test runner built-in.
+    Decorator `@test` sobre fns sin args + 4 assertion builtins
+    (`assert`, `assert_eq`, `assert_ne`, `assert_throws`) +
+    sub-comando `fitz test` con discovery automático
+    (single-file mode + manifest mode con `tests/*.fitz` +
+    auto-self-import bajo `package.name`) + filtrado por
+    substring + async tests + output cargo-style (ok/FAILED +
+    failures + summary + exit code 1 si falla) + ANSI colors
+    auto cuando stdout es TTY. Codegen ignora `@test`
+    silenciosamente (paralelo a `#[cfg(test)]` Rust). Tres
+    sub-pasos cerrados (a + b + c): infraestructura del
+    lenguaje + runner CLI + cap 24 nuevo en `docs/guide.md` con
+    ejemplo runnable `examples/guide/24-tests.fitz`.
+  - Total al cierre 9.z.2: **1366 unit + 66 cli_e2e + 80
+    compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
+  - Próximo: **9.z.3** (`fitz dev` con file watcher + hot reload).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based), `@ws` (WebSockets tipados con
   `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM

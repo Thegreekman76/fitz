@@ -6306,40 +6306,113 @@ Archivos:
 **9.z.2 — `fitz test`** — decorator `@test` sobre fn sin args +
 builtins de aserción (`assert`, `assert_eq`, `assert_ne`,
 `assert_throws`) + sub-comando `fitz test` con discovery por
-proyecto (inline + carpeta `tests/`).
+proyecto (inline + carpeta `tests/`). **CERRADO entero el
+2026-05-17** (a + b + c).
 
-#### 9.z.2 — `fitz test` (testing built-in)
+#### 9.z.2 — `fitz test` (testing built-in) — CERRADO 2026-05-17
 
-- **Decorator `@test`** sobre fn sin args:
-  ```fitz
-  @test fn suma_funciona() {
-      assert_eq(2 + 2, 4)
-  }
-  ```
-- **Builtins de aserción**: `assert(cond, msg?)`, `assert_eq(a, b)`,
-  `assert_ne(a, b)`, `assert_throws(fn)`.
-- **Sub-comando `fitz test`** — descubre todos los `@test` en el
-  proyecto, los ejecuta, reporta. Output estilo cargo test:
-  nombre + ✓/✗ + summary.
-- **Filtrado**: `fitz test suma` ejecuta solo tests cuyo nombre
-  contiene "suma".
-- **Tests inline** en el mismo archivo del código (Rust-style
-  con `#[cfg(test)]` equivalente — los `@test` se compilan solo
-  en modo test).
-- **Tests integration** en `tests/*.fitz` del proyecto.
-- **Decisiones**:
-  - ¿`@bench` para benchmarks llega en el MVP o en sub-paso
-    futuro? Lean: **post-MVP**.
-  - ¿Test fixtures (`@before_all`, `@before_each`)? Lean:
-    **post-MVP**, empezar minimal.
-  - ¿Mocks/spies built-in? Lean: **NO**, problema de ecosistema.
-  - ¿Async tests? `@test async fn ...` — debe funcionar con
-    runtime tokio.
-  - ¿Coverage? Sub-paso futuro, complejo (requiere
-    instrumentación).
-- **Trade-offs**: tener test runner en el lenguaje vs ecosistema
-  (Python tiene pytest/unittest/nose). El lenguaje gana en
-  consistencia + zero-config.
+Test runner integrado al lenguaje. Tres sub-pasos cerrados:
+
+##### 9.z.2.a — `@test` decorator + assertion builtins + TestRegistry ✓
+
+- `src/testing.rs` nuevo: `TestRegistry`, `TestSpec`,
+  thread-local + `with_active_test_registry` (sync/async).
+  Mirror chico de `http::HTTP_REGISTRY` con la asimetría clave:
+  sin registry activo, `@test` es **no-op silencioso** (paralelo
+  a `#[cfg(test)]` Rust).
+- `evaluator.rs::process_decorator` branch `@test` con
+  `register_test`: valida args/kwargs/params vacíos, empuja
+  `TestSpec` al registry activo.
+- 4 assertion builtins en `register_builtins`: `assert(cond: Bool,
+  msg: Str?)`, `assert_eq(a, b)`, `assert_ne(a, b)`,
+  `assert_throws(fn)`. Estilo cargo (`left`/`right` en
+  `assert_eq`). Igualdad estructural recursiva con coerción
+  Int↔Float (reusa `PartialEq` de Value).
+- `assert_throws` **caso especial** en `invoke_value`: los
+  builtins son sync pero invocar el callback Fitz requiere
+  async-recurse. Solo SYNC callbacks en MVP — async cb
+  rechazado en runtime (deuda visible).
+- Pre-registro en checker (`types.rs::register_builtins`) +
+  completion en LSP (`lsp.rs`).
+- **Cambio retro-compatible al parser**: paréntesis opcionales en
+  decorators (`@test fn ...`). Los demás siguen funcionando con
+  o sin paréntesis.
+- Tests: +6 testing.rs (registry), +7 evaluator (@test decorator),
+  +18 evaluator (asserts), +2 parser (regression). Total +33 unit.
+
+##### 9.z.2.b — `Commands::Test` + discovery + runner cargo-style ✓
+
+- `Commands::Test { filter, file }` en CLI.
+- **Single-file mode** (`fitz test --file archivo.fitz`): carga
+  el archivo, descubre `@test`, los corre.
+- **Manifest mode** (`fitz test`): discovery automático con
+  estrategia de dedup:
+  - Si hay `tests/*.fitz` top-level: solo carga esos. El `[lib]`
+    se carga vía import (auto-self-registrado en `dep_registry`
+    bajo `package.name` — paralelo a `use my_crate::*` Rust).
+  - Si NO hay tests integration: carga el `[lib].entry` direct
+    para soportar tests inline solo-lib.
+- **Filtrado**: substring case-sensitive del nombre del test
+  (cargo default). Tests excluidos cuentan como "filtered out"
+  en el output.
+- **Output estilo cargo**: `running N tests` + por test
+  `test <file>::<name> ... ok/FAILED` + sección `failures:` con
+  detalle + summary `test result: ... passed; ... failed;
+  finished in Ts`. ANSI colors auto cuando stdout es TTY
+  (`std::io::IsTerminal`, **cero deps nuevas**).
+- **Async tests**: `evaluator::run_test_handler` encapsula
+  invoke + await del `Future` resultante.
+- Exit code 1 si ≥1 falla, 0 si todos pasan.
+- El loader sobrescribe `CURRENT_TEST_SOURCE` al cargar módulos
+  importados: los `@test` quedan etiquetados con su archivo
+  declarante real (no con el del importer).
+- Tests: +11 cli_e2e nuevos.
+
+##### 9.z.2.c — Guía + ejemplo + cierre formal ✓
+
+- Cap 24 nuevo **"`fitz test` — testing built-in"** en
+  `docs/guide.md`: features, CLI (single-file / manifest),
+  filtrado, output cargo-style, async tests, estructura típica
+  de proyecto, limitaciones. Renumeración cap 24→25 ("Qué sigue").
+- Ejemplo runnable `examples/guide/24-tests.fitz` con `factorial`
+  + 3 tests OK + 1 FAILED intencional. Sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE` (compila con `fitz build` porque
+  codegen ignora `@test`).
+- Codegen: `@test fn` se **ignora silenciosamente** en
+  `fitz build` (paralelo a `#[cfg(test)]`). Bug fix colateral
+  en `has_http_routes`: contar `@test` como HTTP disparaba
+  servidor en CLI puros — refinado a solo `get`/`post`/`put`/
+  `delete`/`server`.
+- CHANGELOG v0.9.16, este archivo (este bloque), `docs/deudas-
+  post-5b.md` (bloque "Fase 9.z.2 entera CERRADA"), README,
+  CLAUDE, `docs/syntax-spec.md` (sección "Testing" pasa de
+  "futuro" a "implementado").
+
+**Decisiones tomadas durante 9.z.2**:
+- `panic(msg)` (mencionado en el ejemplo del syntax-spec) NO entra
+  al MVP. Los 4 oficiales bastan.
+- `assert_throws` solo SYNC callbacks. Async cb es sub-paso
+  futuro si aparece presión.
+- Discovery dedup: lib direct solo si NO hay tests integration.
+- Auto-self-import bajo `package.name`: requiere nombre usable
+  como ident Fitz (sin hyphens). Deuda visible.
+
+**Tests al cierre**:
+- 1366 unit / 66 cli_e2e / 80 compile_e2e / 3 openapi.
+- Clippy `-D warnings` limpio.
+
+**Deudas residuales (NO bloquean 9.z.3)**:
+- `assert_throws` con callback async.
+- Span del fallo en builtins (el `FitzError` lleva `line: 0,
+  column: 0` — los builtins son sync y no reciben el span del
+  call site). Refinamiento útil; necesita propagar el span al
+  builtin via wrapper en `invoke_value`.
+- Nombres de paquete con hyphens (`my-pkg`) no son importables
+  desde Fitz (`from my-pkg import X` no parsea). Workaround:
+  usar underscores. Documentado en cap 24.
+- En modo "tests integration", si el `[lib]` tiene `@test` inline
+  pero NINGÚN test integration importa la lib, esos tests no se
+  descubren. Edge case raro.
 
 #### 9.z.3 — `fitz dev` (hot reload)
 

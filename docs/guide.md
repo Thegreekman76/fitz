@@ -61,9 +61,10 @@ abrí un issue.
 **Parte 10 — Tooling**
 22. [Soporte para editores](#22-soporte-para-editores)
 23. [`fitz fmt` — formateador automático](#23-fitz-fmt--formateador-automático)
+24. [`fitz test` — testing built-in](#24-fitz-test--testing-built-in)
 
 **Parte 11 — Cerrando**
-24. [Qué sigue](#24-qué-sigue)
+25. [Qué sigue](#25-qué-sigue)
 
 ---
 
@@ -149,7 +150,8 @@ La guía está dividida en partes que se leen en orden:
 8. **Compilar** — `fitz build` a binario nativo standalone.
 9. **Interop** — `from python import ...` para reusar el ecosistema
    Python.
-10. **Tooling** — LSP + extensión VSCode, formateador `fitz fmt`.
+10. **Tooling** — LSP + extensión VSCode, formateador `fitz fmt`,
+    test runner `fitz test`.
 11. **Cerrando** — el mapa de lo que viene.
 
 ### Cómo usar los ejemplos
@@ -5856,14 +5858,233 @@ difiere. Sin escribir nada.
 
 ---
 
-## 24. Qué sigue
+## 24. `fitz test` — testing built-in
+
+Fitz trae **test runner integrado**: marcás una fn con `@test`, la
+corrés con `fitz test`, y obtenés output estilo cargo con
+ok/FAILED + exit code. Sin librerías, sin glue, sin elegir entre
+3 frameworks. Llegó con la **Fase 9.z.2** (cerrada el 2026-05-17).
+
+### Cuatro aserciones built-in
+
+Disponibles globalmente, igual que `print` y `len`:
+
+| Builtin | Qué hace | Falla si... |
+|---|---|---|
+| `assert(cond, msg?)` | Pasa si `cond` es `true` | `cond` es `false` (mensaje opcional al final) |
+| `assert_eq(a, b)` | Pasa si `a == b` | distintos (output con `left:`/`right:` estilo cargo) |
+| `assert_ne(a, b)` | Pasa si `a != b` | iguales |
+| `assert_throws(fn)` | Pasa si el callback **tira** un error | el callback retornó normal |
+
+La igualdad de `assert_eq`/`assert_ne` es **estructural recursiva**:
+funciona sobre primitivos, `List`, `Map`, `Instance`, `Result`. Coerciona
+`Int` ↔ `Float` (igual que el `==` del lenguaje).
+
+### El decorator `@test`
+
+```fitz
+@test fn suma_funciona() {
+    assert_eq(2 + 2, 4)
+}
+```
+
+Tres reglas del MVP:
+
+1. **Sin args, sin kwargs**: `@test fn foo() { ... }` (sin paréntesis
+   después de `@test`). `@test() fn foo()` también parsea por
+   simetría con otros decorators.
+2. **La fn no recibe parámetros**: `@test fn foo() { ... }`. Si pasás
+   params (fixtures), el evaluator aborta con mensaje claro. Las
+   fixtures (`@before_all`, `@before_each`, etc.) son sub-paso futuro
+   si aparece presión.
+3. **Async OK**: `@test async fn carga() { let r = sleep(0).await }`.
+   El runner detecta `is_async` y `await`-ea el `Future` resultante
+   antes de reportar el test.
+
+Fuera del runner (`fitz run`, `fitz build`), las `@test fn` son
+**no-op silencioso**: no se ejecutan, no aparecen en el output.
+Paralelo a `#[cfg(test)]` de Rust — el código de tests vive
+junto al de producción, pero solo corre cuando lo pedís.
+
+### `fitz test` — el sub-comando
+
+Dos modos de uso:
+
+#### Single-file
+
+```bash
+fitz test --file mis_tests.fitz
+```
+
+Carga el archivo, descubre sus `@test fn`, las corre serie, reporta.
+
+#### Manifest mode (proyecto)
+
+```bash
+fitz test
+```
+
+Sin args, busca `fitz.toml` en el cwd o ancestros y descubre tests
+automáticamente. Dos casos:
+
+- **Proyecto con `tests/*.fitz`**: carga cada archivo top-level de
+  `tests/` (no recursivo, ordenado alfabéticamente). Estos
+  archivos típicamente importan la lib con
+  `from <package-name> import X` — el package se auto-registra en
+  el resolver de deps (similar a `use my_crate::*` de Rust).
+- **Proyecto solo con `[lib]` (sin `tests/`)**: carga el `[lib].entry`
+  directamente para descubrir `@test` inline. Útil para
+  librerías pequeñas con tests pegados al código que prueban.
+
+Si en un proyecto con tests integration el lib tiene `@test`
+inline, esos tests se descubren solo si **al menos un**
+`tests/*.fitz` importa la lib. El loader cachea por path
+canonical, así que se ejecutan una sola vez aunque varios tests
+los importen.
+
+### Filtrado por substring
+
+```bash
+fitz test suma           # corre solo tests cuyo nombre contiene "suma"
+fitz test --file t.fitz filtro
+```
+
+Cargo style: substring case-sensitive sobre el nombre del test
+(sin el prefijo del archivo). Los tests filtered out aparecen en
+el output como `running N tests (M filtered out)`.
+
+### Output
+
+Estilo cargo:
+
+```text
+running 3 tests
+test src/lib.fitz::doble_funciona ... ok
+test tests/math.fitz::doble_de_5 ... ok
+test tests/math.fitz::doble_de_cero ... FAILED
+
+failures:
+
+---- tests/math.fitz::doble_de_cero stdout ----
+Error — assert_eq falló:
+  left:  0
+  right: 1
+
+failures:
+    tests/math.fitz::doble_de_cero
+
+test result: FAILED. 2 passed; 1 failed; finished in 0.00s
+```
+
+Características:
+
+- **Prefijo del archivo**: en manifest mode, cada test aparece como
+  `<file>::<nombre>` para localizar fallos rápido. En single-file
+  mode, solo `<nombre>`.
+- **Colores ANSI**: verde para `ok`, rojo para `FAILED`. Se autodetecta
+  si stdout es un TTY (`std::io::IsTerminal`); cuando redirigís a
+  archivo o pipe, se omiten los códigos de color.
+- **Exit code**: 0 si todos pasan, 1 si al menos uno falla. Útil
+  para CI.
+
+### Async tests
+
+Las fns async funcionan transparente. El runner detecta `is_async`,
+invoca, y `await`-ea el `Future` resultante antes de reportar el
+test como ok/FAILED.
+
+```fitz
+@test async fn la_pausa_pasa() {
+    let r = sleep(100).await
+    assert_eq(r, null)
+}
+```
+
+Restricción: `assert_throws` con callback async no funciona en el
+MVP — el callback `async fn` produce un `Future` suelto que no es
+equivalente a "tirar". Para casos async, usá `match` directo
+sobre el `Result` de tu fn.
+
+### Estructura típica de un proyecto con tests
+
+```text
+mi-proyecto/
+├── fitz.toml
+├── src/
+│   └── lib.fitz          # código de producción + opcional `@test` inline
+└── tests/
+    ├── math.fitz         # integration tests, importan la lib
+    └── strings.fitz
+```
+
+`fitz.toml`:
+
+```toml
+[package]
+name = "miproyecto"      # ← sin hyphens, usable como ident en Fitz
+version = "0.1.0"
+edition = "2026"
+
+[lib]
+entry = "src/lib.fitz"
+```
+
+`tests/math.fitz`:
+
+```fitz
+from miproyecto import doble
+
+@test fn doble_de_5() {
+    assert_eq(doble(5), 10)
+}
+```
+
+> Nota sobre el nombre del paquete: el resolver de deps registra
+> el `[lib].entry` bajo `package.name` para que los tests integration
+> puedan importarlo con `from <pkg> import X`. Como Fitz no admite
+> hyphens en identificadores, **el nombre del paquete debe ser
+> usable como identifier** (`miproyecto`, no `mi-proyecto`).
+> Refinamiento futuro si aparece presión.
+
+### Lo que NO anda todavía
+
+- **Fixtures** (`@before_all`, `@before_each`, `@after_all`,
+  `@after_each`): post-MVP si aparece presión real.
+- **`@bench` para benchmarks**: post-MVP.
+- **Mocks/spies built-in**: NO — problema de ecosistema, no del
+  lenguaje.
+- **`assert_throws` con callback async**: rechazado en runtime;
+  workaround con `match`.
+- **Coverage**: sub-paso futuro complejo (requiere instrumentación).
+- **Tests en paralelo**: el runner corre serie. La paralelización
+  llega si los tiempos de la suite duelen.
+- **Reporte de span del fallo**: los errores de `assert*` reportan
+  el mensaje pero no la línea exacta de la aserción fallida.
+  Refinamiento útil; necesita propagar el span del call site al
+  builtin.
+
+### Ejemplo ejecutable
+
+`examples/guide/24-tests.fitz` tiene un mini-set de tests sobre una
+función `factorial` que podés correr así:
+
+```bash
+fitz test --file examples/guide/24-tests.fitz
+```
+
+Tres tests pasan, uno falla intencional para que veas el formato
+de FAILED + summary final.
+
+---
+
+## 25. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 23 podés:
+Con los capítulos 1 a 24 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -5922,6 +6143,13 @@ Con los capítulos 1 a 23 podés:
   estilo gofmt, preserva comments y blank lines del usuario.
   Modo `--check` para CI / pre-commit hooks. Ver
   [cap 23](#23-fitz-fmt--formateador-automático).
+- **Tests built-in** con `@test` + `fitz test` (Fase 9.z.2):
+  decorator `@test` sobre fns sin args, 4 assertion builtins
+  (`assert`, `assert_eq`, `assert_ne`, `assert_throws`), runner
+  con output estilo cargo (ok/FAILED + summary + exit code),
+  filtrado por substring, async tests, discovery automático en
+  manifest mode (`tests/*.fitz` + `[lib]` integration). Cero
+  librerías. Ver [cap 24](#24-fitz-test--testing-built-in).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se
@@ -5958,9 +6186,9 @@ Lo que sigue post-8:
     pendiente** (deuda explícita en `docs/deudas-post-5b.md`,
     entra cuando 9.z entera cierre).
   - **DX (9.z) — en curso**: formatter `fitz fmt` cerrado
-    (9.z.1, ver cap 23). Próximo: `fitz test` (9.z.2),
-    `fitz dev` (9.z.3), `fitz repl` (9.z.4), `fitz lint`
-    (9.z.5).
+    (9.z.1, ver cap 23). Test runner `fitz test` cerrado
+    (9.z.2, ver cap 24). Próximo: `fitz dev` (9.z.3),
+    `fitz repl` (9.z.4), `fitz lint` (9.z.5).
 - **Sub-paso futuro separado: bundling CPython embebido** —
   `fitz build --bundle-python` produce un binario standalone que
   NO requiere Python en el destino. Decisión de herramienta
