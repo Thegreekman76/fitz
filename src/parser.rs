@@ -1699,23 +1699,30 @@ impl Parser {
         }
     }
 
-    /// Parsea un único decorador (`@ Ident ( args )`), con el `@` aún
-    /// sin consumir. Devuelve el `Decorator` listo; el caller decide
-    /// si seguir acumulando.
+    /// Parsea un único decorador (`@ Ident ( args )?`), con el `@`
+    /// aún sin consumir. Devuelve el `Decorator` listo; el caller
+    /// decide si seguir acumulando.
+    ///
+    /// Los paréntesis son **opcionales** desde 9.z.2.a (necesario
+    /// para `@test fn ...` que no toma args). Decoradores sin paréntesis
+    /// son equivalentes a `@nombre()` (args = kwargs = vacíos). Cambio
+    /// retro-compatible: `@server()` y `@get("/x")` siguen funcionando
+    /// idéntico.
     fn parse_one_decorator(&mut self) -> FitzResult<Decorator> {
         self.expect(&Token::At, "se esperaba '@'")?;
         let name = self.expect_ident(
             "se esperaba nombre de decorador después de '@'",
         )?;
-        // Args entre paréntesis. Por simetría con llamadas a función,
-        // los paréntesis son obligatorios incluso sin args: `@server()`
-        // y no `@server`. Mantenemos la sintaxis predecible; si más
-        // adelante queremos `@server` sin args se relaja.
-        self.expect(
-            &Token::LParen,
-            "se esperaba '(' después del nombre de decorador",
-        )?;
-        let (args, kwargs) = self.parse_decorator_args()?;
+        // Si viene `(`, parseamos args; si no, decorator sin args.
+        // El próximo significativo determina la rama (saltando newlines
+        // no — el `(` debe venir en la misma línea que el nombre, para
+        // evitar ambigüedades con el próximo stmt).
+        let (args, kwargs) = if matches!(self.peek(), Token::LParen) {
+            self.advance();
+            self.parse_decorator_args()?
+        } else {
+            (Vec::new(), Vec::new())
+        };
         Ok(Decorator { name, args, kwargs })
     }
 
@@ -4072,10 +4079,37 @@ mod tests {
     }
 
     #[test]
-    fn decorator_sin_parens_errores() {
-        // `@get fn h() => 0` — falta `(`. Reportamos error claro.
-        let err = parse_program_str("@get\nfn h() => 0").unwrap_err();
-        assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    fn decorator_sin_parens_parsea_con_args_vacios() {
+        // Fase 9.z.2.a — paréntesis opcionales en decorators
+        // (necesario para `@test fn ...`). `@get fn h() => 0` parsea
+        // con `args = kwargs = vacíos`. La validación semántica de
+        // que `@get` necesita un path la hace el evaluator, no el
+        // parser.
+        let stmt = parse_one_stmt("@get\nfn h() => 0");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators.len(), 1);
+                assert_eq!(decorators[0].name, "get");
+                assert!(decorators[0].args.is_empty());
+                assert!(decorators[0].kwargs.is_empty());
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn test_decorator_sin_parens_parsea() {
+        // Caso canónico de 9.z.2.a: `@test fn nombre() { ... }` sin
+        // paréntesis después de `@test`. Forma idiomática del spec.
+        let stmt = parse_one_stmt("@test\nfn suma_funciona() { let x = 1 }");
+        match stmt {
+            Stmt::FnDef { decorators, .. } => {
+                assert_eq!(decorators[0].name, "test");
+                assert!(decorators[0].args.is_empty());
+                assert!(decorators[0].kwargs.is_empty());
+            }
+            other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
+        }
     }
 
     #[test]

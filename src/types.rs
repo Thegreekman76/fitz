@@ -935,6 +935,55 @@ impl<'a> CheckCtx<'a> {
                 def_span: Span::ZERO,
             },
         );
+        // Fase 9.z.2.a — assertion builtins. `assert` queda como `Any`
+        // porque tiene aridad variable (1 o 2 args, msg opcional); el
+        // runtime valida tipos y aridad. `assert_eq`/`assert_ne` tienen
+        // aridad fija con args `Any` (estructural equality maneja
+        // cualquier tipo). `assert_throws` exige `Function` aridad 0.
+        self.scopes[0].insert(
+            "assert".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+            },
+        );
+        self.scopes[0].insert(
+            "assert_eq".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Any, Type::Any],
+                    ret: Box::new(Type::Null),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+            },
+        );
+        self.scopes[0].insert(
+            "assert_ne".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Any, Type::Any],
+                    ret: Box::new(Type::Null),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+            },
+        );
+        self.scopes[0].insert(
+            "assert_throws".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Function {
+                        params: vec![],
+                        ret: Box::new(Type::Any),
+                    }],
+                    ret: Box::new(Type::Null),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+            },
+        );
     }
 
     fn push_scope(&mut self) {

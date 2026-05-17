@@ -25,6 +25,7 @@ pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
 pub mod git_dep; // Fase 9.y.3.c — git deps + cache local
 pub mod fmt; // Fase 9.z.1 — formatter `fitz fmt` (pretty-printer del AST)
+pub mod testing; // Fase 9.z.2 — testing built-in (registry + @test + asserts)
 
 // Fase 8.1.2 — interop Python via PyO3 (feature opt-in `python`).
 // El módulo envuelve `Python::with_gil` + `py.import(...)` y produce

@@ -583,6 +583,10 @@ fn scope_level_completions(program: &Program, type_env: &TypeEnv) -> Vec<Complet
         ("len", "fn(x) -> Int"),
         ("sleep", "fn(Int) -> Future<Null>"),
         ("cors", "fn(config: Map?) -> CorsConfig"),
+        ("assert", "fn(cond: Bool, msg: Str?) -> Null"),
+        ("assert_eq", "fn(a, b) -> Null"),
+        ("assert_ne", "fn(a, b) -> Null"),
+        ("assert_throws", "fn(callback: fn() -> Any) -> Null"),
     ] {
         items.push(CompletionItem {
             label: name.into(),

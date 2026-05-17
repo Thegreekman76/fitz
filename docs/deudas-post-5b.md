@@ -513,6 +513,125 @@
 >   estado "just emitted blank" en `fmt.rs`); si requiere
 >   refactor del trivia stream, post-9.z.5 cuando 9.z entera
 >   cierre. Auditoría rápida del módulo antes de decidir.
+>
+> **Fase 9.z.2.a (2026-05-17): CERRADA** — `@test` decorator +
+> assertion builtins + `TestRegistry`. Primer sub-paso de 9.z.2
+> (testing built-in). Total al cierre: **1364 unit + 55 cli_e2e
+> + 79 compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
+>
+> **Cambios técnicos**:
+> - `src/testing.rs` nuevo: `TestRegistry`, `TestSpec`,
+>   `with_active_test_registry` (+ variante async) +
+>   thread-local. Mirror chico de `http::HTTP_REGISTRY` con la
+>   asimetría clave: si no hay registry activo, `@test` es no-op
+>   silencioso (paralelo a `#[cfg(test)]` de Rust), no error.
+> - `evaluator.rs::process_decorator` suma branch `@test` con
+>   helper `register_test`: valida args/kwargs/params vacíos y
+>   empuja `TestSpec` al registry si hay uno. Sin registry,
+>   sigue normal.
+> - 4 assertion builtins nuevos: `assert(cond: Bool, msg: Str?)`,
+>   `assert_eq(a, b)`, `assert_ne(a, b)`, `assert_throws(fn)`.
+>   Estilo cargo test: mensaje `left/right` para `assert_eq`,
+>   `iguales (val)` para `assert_ne`. Igualdad estructural
+>   recursiva (reusa `PartialEq` de Value que coerciona Int↔Float).
+> - `assert_throws` **caso especial** en `invoke_value`:
+>   `Value::Builtin { name: "assert_throws", .. }` se intercepta
+>   antes del despacho genérico (necesario porque los builtins
+>   son sync pero invocar un callback Fitz requiere async-recurse
+>   con `invoke_value`). El stub registrado emite `unreachable!`
+>   si llegara a invocarse — sentinel de bug del dispatcher.
+> - **Restricción MVP de `assert_throws`**: callback debe ser
+>   `Function` aridad 0 NO async. Async cb produce `Value::Future`
+>   suelto (no equivalente a "tirar"); cubrirlo requiere
+>   `assert_throws_async` o flag — sub-paso futuro si aparece
+>   presión.
+> - Pre-registro en el checker (`types.rs::register_builtins`):
+>   `assert` como `Type::Any` (aridad variable 1-2); el resto con
+>   firmas estructuradas. `assert_throws` exige `Function {
+>   params: [], ret: Any }` (chequeo estático de aridad del cb).
+> - Completion en LSP (`lsp.rs`) suma los 4 builtins nuevos al
+>   listado de builtins detectables vía scope-level autocomplete.
+> - **Cambio retro-compatible al parser**: paréntesis opcionales
+>   en decoradores. `@test fn ...` (sin `()`) parsea con args
+>   vacíos. Antes el parser exigía `(` siempre. Cambio
+>   retro-compatible (todos los `@server()`/`@get("/x")` siguen
+>   funcionando idéntico). Test `decorator_sin_parens_errores`
+>   reescrito como `decorator_sin_parens_parsea_con_args_vacios`.
+>
+> **Decisiones que tomaron forma durante 9.z.2.a**:
+> - `panic(msg)` (que el syntax-spec usa en el ejemplo del test
+>   runner, línea 515) **NO entra** al MVP. Los 4 builtins
+>   oficiales (`assert*`) son la lista cerrada de 9.z.2. Si
+>   aparece presión, sub-paso 9.z.2.a.bis o post-MVP.
+> - **Sintaxis `@test fn` sin paréntesis**: confirmada como
+>   forma canónica (matchea el spec). `@test()` también parsea
+>   por simetría — el parser es agnóstico, la decisión es del
+>   evaluator.
+> - **`assert` exige `Bool` estricto** en el primer arg (no
+>   truthy/falsy). Consistente con la decisión de diseño "sin
+>   truthy/falsy" del cap 6 de la guía.
+> - **Tests con feedback inmediato del decorator**: los 4 errores
+>   de validación (`@test` sobre fn con params, con args, con
+>   kwargs, sobre tipo no-Function) levantan en eval-time, no
+>   cuando el runner los invoca — sigue el patrón de `@server`
+>   y `@get`.
+>
+> **Tests nuevos**: 6 en `testing.rs` (registry empty/push/
+> with_active/with_active_async/aislamiento entre anidados),
+> 6 en `evaluator.rs::tests` (decorator sin registry no-op,
+> con registry registra, async fn → is_async true, preserva
+> orden, params error, args error, kwargs error), 18 en
+> `evaluator.rs::tests` (los 4 builtins con happy/falla/type
+> errors/aridad/coerción Int↔Float/estructural en listas), 2
+> en `parser.rs::tests` (decorator sin parens parsea OK, `@test`
+> sin parens parsea OK). Total: **+32 unit tests**.
+>
+> **Deudas residuales (NO bloquean 9.z.2.b)**:
+> - **`assert_throws` con callback async**: rechazado
+>   explícitamente en runtime. `assert_throws_async(fn)` o
+>   variante del builtin queda como sub-paso futuro si aparece
+>   presión.
+> - **Reporte de span del fallo**: cuando un `assert*` falla, el
+>   `FitzError` lleva `line: 0, column: 0` (los builtins son
+>   sync y no reciben el span del call site). El span del call
+>   sí está disponible en `invoke_value`; podríamos enriquecer
+>   el error después del fact. Refinamiento útil pero NO MVP.
+> - **9.z.2.b (runner CLI)**: este sub-paso cerró solo la
+>   infraestructura del lenguaje (decorator + registry +
+>   builtins). El sub-comando `fitz test`, discovery
+>   (lib/bin + `tests/*.fitz`), output estilo cargo, filtrado,
+>   exit codes — todo entra en 9.z.2.b.
+>
+> **Deudas de docs acumuladas (NO bloquean 9.z.2.b)** —
+> agrupadas para tratamiento dedicado cuando 9.z entera cierre:
+> - **Cap "Package manager" en la guía** (heredado de Q.z) —
+>   las 6 subcomandos de 9.y.1-9.y.4 sin capítulo dedicado.
+> - **Bug del fmt con trailing comment** (heredado de Q.z) —
+>   blank spurious dentro del body del bloque siguiente.
+> - **`docs/architecture.md`** — los diagramas del pipeline
+>   (lexer/parser/checker/evaluator/codegen) y los pointer de
+>   módulos están desactualizados respecto a las fases
+>   cerradas post-5b (sumar `testing.rs`, `manifest.rs`,
+>   `lockfile.rs`, `git_dep.rs`, `fmt.rs`, `lsp.rs`,
+>   `py_interop.rs`, `py_types.rs`; sumar el flujo del LSP +
+>   PM + interop Python en los diagramas).
+> - **Refresh general de `docs/guide.md` + ejemplos** — varios
+>   capítulos arrastran texto stale por fases cerradas
+>   posteriormente. Algunas secciones de "Lo que todavía no
+>   anda" todavía citan features ya implementadas; algunos
+>   capítulos no mencionan cambios derivados (paréntesis
+>   opcionales en decorators, builtins assertion).
+>   Sincronización masiva pendiente.
+>
+> **Etapa propuesta para las deudas de docs**: sub-paso
+> dedicado "Refresh masivo de docs" cuando 9.z entera cierre
+> (post-9.z.5), antes del salto a 9.w. Sub-pasos sugeridos:
+> (a) cap "Package manager" nuevo + ejemplos runnables;
+> (b) `docs/architecture.md` refresh completo con diagramas
+> nuevos; (c) walk del cap-by-cap de `guide.md` para detectar
+> texto stale; (d) `docs/syntax-spec.md` actualizar matriz al
+> estado de cierre 9.z (refresh recurrente, ya marcado como
+> deuda continua). ~4-6h estimadas para hacerlo bien.
 
 ## Resumen ejecutivo
 

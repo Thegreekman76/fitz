@@ -195,6 +195,7 @@ fn process_decorator(
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
     handler: &Value,
     env: &EnvRef,
+    fn_def_span: Span,
 ) -> Result<(), EvalSignal> {
     // ¿Es un decorator HTTP conocido?
     if let Some(method) = HttpMethod::from_decorator_name(&deco.name) {
@@ -219,6 +220,20 @@ fn process_decorator(
         return register_server_config(deco, fn_name);
     }
 
+    // `@test`: registra la fn en el `TestRegistry` activo (Fase
+    // 9.z.2.a). **Diseño asimétrico vs `@server`**: si no hay
+    // registry activo (caso típico de `fitz run`), el decorator es
+    // **no-op silencioso** — paralelo a `#[cfg(test)]` de Rust, las
+    // fns `@test` se ignoran fuera del runner. El sub-comando
+    // `fitz test` (9.z.2.b) instala el registry vía
+    // `with_active_test_registry` antes de evaluar.
+    //
+    // Validaciones acá: sin args, sin kwargs, sin params. Cualquiera
+    // de los 3 viola la firma del MVP (`@test fn nombre() { ... }`).
+    if deco.name == "test" {
+        return register_test(deco, fn_name, params, handler, fn_def_span);
+    }
+
     // Decorador desconocido. Mensaje listo para guiar al usuario.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -226,10 +241,85 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test.",
             deco.name, fn_name,
         ),
     )))
+}
+
+/// Procesa `@test` sobre una `Stmt::FnDef` (Fase 9.z.2.a). Valida la
+/// firma del MVP (sin args, sin kwargs, sin params) y, si hay un
+/// `TestRegistry` activo, empuja un `TestSpec`. Sin registry activo
+/// (caso `fitz run`), no-op silencioso — los tests se descubren solo
+/// cuando el sub-comando `fitz test` instala el registry.
+///
+/// El `is_async` viaja en el `handler` (que es siempre
+/// `Value::Function` construido por `Stmt::FnDef` arriba). Lo
+/// extraemos para que el runner de 9.z.2.b sepa si invocar sync o
+/// await-ear el `Value::Future` resultante.
+fn register_test(
+    deco: &Decorator,
+    fn_name: &str,
+    params: &[Param],
+    handler: &Value,
+    fn_def_span: Span,
+) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            fn_def_span.line,
+            fn_def_span.column,
+            msg,
+        ))
+    };
+
+    if !deco.args.is_empty() {
+        return Err(err(format!(
+            "@test sobre fn '{}': no admite args posicionales en el MVP, \
+             recibió {}. Sintaxis: `@test fn {}() {{ ... }}`.",
+            fn_name,
+            deco.args.len(),
+            fn_name,
+        )));
+    }
+    if !deco.kwargs.is_empty() {
+        return Err(err(format!(
+            "@test sobre fn '{}': no admite kwargs en el MVP. Sintaxis: \
+             `@test fn {}() {{ ... }}`.",
+            fn_name, fn_name,
+        )));
+    }
+    if !params.is_empty() {
+        return Err(err(format!(
+            "@test sobre fn '{}': la fn debe tener 0 params (recibió {}). \
+             Los tests no reciben fixtures en el MVP — usá variables \
+             locales o helpers para preparar estado.",
+            fn_name,
+            params.len(),
+        )));
+    }
+
+    // Sin registry activo → no-op silencioso (modo `fitz run`).
+    // `fitz test` instala el registry antes de evaluar para capturar.
+    if !crate::testing::has_active_test_registry() {
+        return Ok(());
+    }
+
+    // Extraer `is_async` del handler. El handler siempre es
+    // `Value::Function` (construido por `Stmt::FnDef`); cualquier
+    // otra cosa es bug del evaluator.
+    let is_async = match handler {
+        Value::Function { is_async, .. } => *is_async,
+        _ => unreachable!("@test sobre fn '{}': handler no es Value::Function", fn_name),
+    };
+
+    crate::testing::push_test(crate::testing::TestSpec {
+        name: fn_name.to_string(),
+        handler: handler.clone(),
+        is_async,
+        span: fn_def_span,
+    });
+    Ok(())
 }
 
 /// Recolecta los `@header(name="X")` declarados sobre un handler
@@ -1316,7 +1406,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // — los tests y el REPL evalúan sin HTTP. Cualquier decorator no
         // HTTP también es error: `@server` (4.4) y otros entran cuando
         // los implementemos.
-        Stmt::FnDef { name, params, return_type, body, is_async, decorators, span: _ } => {
+        Stmt::FnDef { name, params, return_type, body, is_async, decorators, span } => {
             let func = Value::Function {
                 params: params.clone(),
                 body: body.clone(),
@@ -1390,6 +1480,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     &collected_cors,
                     &func,
                     &env,
+                    *span,
                 )?;
             }
 
@@ -2263,6 +2354,15 @@ async fn invoke_value(
     value: Value, arg_values: Vec<Value>, display_name: &str, span: Span,
 ) -> EvalResult<Value> {
     match value {
+        // Fase 9.z.2.a: `assert_throws` necesita invocar el callback
+        // async-recursive (el `invoke_value` genérico es async, los
+        // builtins son sync). Se intercepta acá antes del despacho
+        // genérico de builtins; cualquier otro builtin va por la
+        // rama de abajo. El stub `builtin_assert_throws_stub` emite
+        // unreachable! si llegara a ejecutarse — sentinel del bug.
+        Value::Builtin { name: "assert_throws", .. } => {
+            assert_throws_impl(arg_values, span).await
+        }
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
 
         Value::Function { params, body, closure, is_async } => {
@@ -3170,6 +3270,46 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_sleep,
         },
     );
+    // Fase 9.z.2.a — assertion builtins. Siempre disponibles (igual
+    // que `print`/`len`/`sleep`/`cors`); su semántica es la misma
+    // dentro o fuera de `@test`. Una aserción fallida emite
+    // `FitzError` que aborta la ejecución del programa — el runner
+    // de `fitz test` (9.z.2.b) atrapará ese error y lo reportará
+    // como fallo del test.
+    env.lock().define(
+        "assert",
+        Value::Builtin {
+            name: "assert",
+            func: builtin_assert,
+        },
+    );
+    env.lock().define(
+        "assert_eq",
+        Value::Builtin {
+            name: "assert_eq",
+            func: builtin_assert_eq,
+        },
+    );
+    env.lock().define(
+        "assert_ne",
+        Value::Builtin {
+            name: "assert_ne",
+            func: builtin_assert_ne,
+        },
+    );
+    // `assert_throws(fn)` es **caso especial** en `invoke_value`:
+    // necesita invocar el callback async-recursive (el `invoke_value`
+    // genérico es async, los builtins son sync). El stub `func` acá
+    // emite un `unreachable!` — el dispatcher debería interceptar
+    // antes de invocarlo. Si llegás a ver "assert_throws stub", el
+    // dispatcher tiene un bug.
+    env.lock().define(
+        "assert_throws",
+        Value::Builtin {
+            name: "assert_throws",
+            func: builtin_assert_throws_stub,
+        },
+    );
 }
 
 /// `print(arg1, arg2, ...)` — imprime los args convertidos a string,
@@ -3432,6 +3572,233 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
         }
     };
     Ok(Value::Int(n))
+}
+
+// ---------------------------------------------------------------------------
+// Assertion builtins (Fase 9.z.2.a)
+//
+// Los 4 builtins de aserción del testing built-in. Diseñados para ser
+// llamados desde adentro de fns `@test`, pero NO son privilegiados —
+// se pueden usar en cualquier contexto. Una aserción fallida emite
+// `FitzError` que aborta la ejecución; el runner (9.z.2.b) atrapa el
+// error y reporta el test como FAILED.
+//
+// Formato de los mensajes: estilo cargo test (`left: <val>` / `right:
+// <val>`). Los valores se formatean con `Value::Display`, que produce
+// la misma representación que `print` (cargo usa `Debug`; en Fitz la
+// representación canónica vive en `Display`).
+// ---------------------------------------------------------------------------
+
+/// `assert(cond: Bool, msg: Str?) -> Null` — la aserción base. Si
+/// `cond` es `false`, emite `FitzError`. Sin `msg`, mensaje genérico
+/// "aserción falló"; con `msg`, lo incluye al final.
+///
+/// Decisión: el primer arg debe ser `Bool` estrictamente (no
+/// "truthy"/"falsy" estilo Python/JS). Pasar `Int`/`Str`/etc. emite
+/// type error claro — consistente con la decisión de diseño "sin
+/// truthy/falsy" del cap 6 de la guía.
+fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
+    if args.is_empty() || args.len() > 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0, 0,
+            format!(
+                "`assert` espera 1 o 2 argumentos (cond: Bool, msg: Str?), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let cond = match &args[0] {
+        Value::Bool(b) => *b,
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Bool".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!(
+                    "`assert` espera `Bool` como primer argumento, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let msg = match args.get(1) {
+        Some(Value::Str(s)) => Some(s.clone()),
+        Some(other) => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!(
+                    "`assert` espera `Str` como segundo argumento (mensaje), recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+        None => None,
+    };
+    if cond {
+        return Ok(Value::Null);
+    }
+    let detail = match msg {
+        Some(m) => format!("aserción falló: {}", m),
+        None => "aserción falló".to_string(),
+    };
+    Err(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, detail))
+}
+
+/// `assert_eq(a, b) -> Null` — falla si `a != b`. Usa la igualdad
+/// estructural de `Value` (la misma de `BinOp::Eq`), que coerciona
+/// `Int↔Float` y recurre adentro de `List`/`Map`/`Instance`/`Result`.
+fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0, 0,
+            format!(
+                "`assert_eq` espera 2 argumentos (left, right), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    if args[0] == args[1] {
+        return Ok(Value::Null);
+    }
+    Err(FitzError::new(
+        ErrorKind::InvalidSyntax,
+        0, 0,
+        format!(
+            "assert_eq falló:\n  left:  {}\n  right: {}",
+            args[0], args[1]
+        ),
+    ))
+}
+
+/// `assert_ne(a, b) -> Null` — falla si `a == b`. Inverso exacto de
+/// `assert_eq`.
+fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0, 0,
+            format!(
+                "`assert_ne` espera 2 argumentos (left, right), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    if args[0] != args[1] {
+        return Ok(Value::Null);
+    }
+    Err(FitzError::new(
+        ErrorKind::InvalidSyntax,
+        0, 0,
+        format!(
+            "assert_ne falló: ambos lados son iguales ({})",
+            args[0]
+        ),
+    ))
+}
+
+/// Stub del `assert_throws` builtin. NO debería invocarse jamás —
+/// el dispatcher (`invoke_value`) intercepta `Value::Builtin {
+/// name: "assert_throws", .. }` antes del despacho normal y lo
+/// resuelve async via `assert_throws_impl`. Si llegás a ver el
+/// mensaje del unreachable, es un bug del dispatcher.
+fn builtin_assert_throws_stub(_args: &[Value]) -> FitzResult<Value> {
+    Err(FitzError::new(
+        ErrorKind::InvalidSyntax,
+        0, 0,
+        "bug del evaluator: `assert_throws` stub invocado directamente. \
+         El dispatcher debería haberlo interceptado."
+            .to_string(),
+    ))
+}
+
+/// `assert_throws(fn) -> Null` async impl. Invoca el callback Fitz
+/// y atrapa el `FitzError`. Si el callback retorna sin error,
+/// `assert_throws` falla ("se esperaba que tirara"). Si el
+/// callback tira, `assert_throws` pasa.
+///
+/// **Restricción MVP**: el callback debe ser una `Value::Function`
+/// con aridad 0 y NO async. Async callbacks devuelven un
+/// `Value::Future` suelto (no equivalente a "tirar"); el chequeo
+/// de "tiró" requeriría await-ear el Future, lo cual cambia la
+/// semántica. Si aparece presión, sub-paso futuro
+/// `assert_throws_async(fn)` o flag dedicado.
+async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    if args.len() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line, span.column,
+            format!(
+                "`assert_throws` espera 1 argumento (callback: fn), recibió {}",
+                args.len()
+            ),
+        )));
+    }
+    let callback = &args[0];
+    let (param_count, is_async) = match callback {
+        Value::Function { params, is_async, .. } => (params.len(), *is_async),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Function".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`assert_throws` espera una función como argumento, recibió `{}`",
+                    other.type_name()
+                ),
+            )));
+        }
+    };
+    if param_count != 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!(
+                "`assert_throws` espera una función con 0 params, recibió una con {}",
+                param_count
+            ),
+        )));
+    }
+    if is_async {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            "`assert_throws` no soporta callbacks `async fn` en el MVP. \
+             Usá `match` sobre el `Result` o un helper sync."
+                .to_string(),
+        )));
+    }
+    match invoke_value(callback.clone(), vec![], "callback de assert_throws", span).await {
+        Ok(_) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            "assert_throws falló: se esperaba que la fn tirara un error, \
+             pero retornó normalmente"
+                .to_string(),
+        ))),
+        Err(_) => Ok(Value::Null),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -9097,6 +9464,284 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("cors") && err.message.contains("uno por ruta"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // Fase 9.z.2.a — `@test` decorator + assertion builtins
+    // ---------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_sin_registry_es_no_op_silencioso() {
+        // `fitz run` con un `@test` presente NO debe abortar — el
+        // decorator es no-op silencioso. La fn queda definida en el
+        // env normalmente (paralelo a `#[cfg(test)]` Rust: fuera del
+        // runner, el código existe pero no se ejecuta).
+        let (env, res) = parse_eval_into_env(
+            "@test fn dummy() { let x = 1 }\nlet y = 42",
+        )
+        .await;
+        res.expect("@test sin registry no debe abortar");
+        // `y` debe estar definida (la evaluación siguió).
+        assert_eq!(env.lock().get("y"), Some(Value::Int(42)));
+        // `dummy` también queda en el env (es una fn normal).
+        assert!(matches!(
+            env.lock().get("dummy"),
+            Some(Value::Function { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_con_registry_registra_la_fn() {
+        // Con un `TestRegistry` activo, `@test fn` empuja un `TestSpec`
+        // al registry. La fn también queda en el env.
+        let src = "@test fn suma() { assert_eq(2 + 2, 4) }";
+        let ((), registry) =
+            crate::testing::with_active_test_registry_async(|| async {
+                let (_env, res) = parse_eval_into_env(src).await;
+                res.expect("evaluación OK");
+            })
+            .await;
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.tests()[0].name, "suma");
+        assert!(!registry.tests()[0].is_async);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_async_fn_registra_is_async_true() {
+        let src = "@test async fn carga() { let x = sleep(0).await }";
+        let ((), registry) =
+            crate::testing::with_active_test_registry_async(|| async {
+                let (_env, res) = parse_eval_into_env(src).await;
+                res.expect("evaluación OK");
+            })
+            .await;
+        assert_eq!(registry.len(), 1);
+        assert_eq!(registry.tests()[0].name, "carga");
+        assert!(registry.tests()[0].is_async);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_preserva_orden_de_declaracion() {
+        let src = "\
+            @test fn primero() { let x = 1 }\n\
+            @test fn segundo() { let y = 2 }\n\
+            @test fn tercero() { let z = 3 }\n\
+        ";
+        let ((), registry) =
+            crate::testing::with_active_test_registry_async(|| async {
+                let (_env, res) = parse_eval_into_env(src).await;
+                res.expect("evaluación OK");
+            })
+            .await;
+        assert_eq!(registry.len(), 3);
+        assert_eq!(registry.tests()[0].name, "primero");
+        assert_eq!(registry.tests()[1].name, "segundo");
+        assert_eq!(registry.tests()[2].name, "tercero");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_con_params_es_error() {
+        // El MVP no admite fixtures: `@test fn t(ctx) { ... }` → error.
+        let (_, res) = parse_eval_into_env("@test fn t(x: Int) { let y = x }").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("0 params") || err.message.contains("debe tener"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_con_args_es_error() {
+        // `@test("nombre")` no soportado en MVP.
+        let (_, res) = parse_eval_into_env("@test(\"slow\") fn t() { let x = 1 }").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("args posicionales") || err.message.contains("no admite"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_decorator_con_kwargs_es_error() {
+        // `@test(slow=true)` no soportado en MVP.
+        let (_, res) = parse_eval_into_env("@test(slow=true) fn t() { let x = 1 }").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("kwargs") || err.message.contains("no admite"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_true_no_falla() {
+        let (_, res) = parse_eval_into_env("assert(true)").await;
+        res.expect("assert(true) no debe fallar");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_true_con_msg_no_falla() {
+        let (_, res) = parse_eval_into_env("assert(true, \"no aplica\")").await;
+        res.expect("assert(true, msg) no debe fallar");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_false_falla_con_mensaje_generico() {
+        let (_, res) = parse_eval_into_env("assert(false)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("aserción falló"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_false_con_msg_incluye_la_razon() {
+        let (_, res) = parse_eval_into_env("assert(false, \"x debe ser positivo\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("x debe ser positivo"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_con_no_bool_es_type_error() {
+        // El primer arg de `assert` debe ser `Bool` estrictamente (no
+        // truthy/falsy). `assert(1)` da type error claro.
+        let (_, res) = parse_eval_into_env("assert(1)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("Bool"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_eq_iguales_no_falla() {
+        let (_, res) = parse_eval_into_env("assert_eq(2 + 2, 4)").await;
+        res.expect("assert_eq(4, 4) no debe fallar");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_eq_distintos_falla_con_left_right() {
+        let (_, res) = parse_eval_into_env("assert_eq(2, 3)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("left") && err.message.contains("right"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+        assert!(err.message.contains('2') && err.message.contains('3'));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_eq_int_y_float_coerciona() {
+        // `Value::PartialEq` coerciona Int↔Float. assert_eq lo refleja.
+        let (_, res) = parse_eval_into_env("assert_eq(2, 2.0)").await;
+        res.expect("assert_eq(2, 2.0) OK por coerción Int↔Float");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_eq_listas_estructural() {
+        // Igualdad estructural recursiva en listas.
+        let (_, res) = parse_eval_into_env("assert_eq([1, 2, 3], [1, 2, 3])").await;
+        res.expect("listas estructuralmente iguales");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_eq_aridad_1_es_error() {
+        let (_, res) = parse_eval_into_env("assert_eq(1)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("2 argumentos") || err.message.contains("espera"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_ne_distintos_no_falla() {
+        let (_, res) = parse_eval_into_env("assert_ne(1, 2)").await;
+        res.expect("assert_ne(1, 2) OK");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_ne_iguales_falla() {
+        let (_, res) = parse_eval_into_env("assert_ne(\"x\", \"x\")").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("iguales"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_throws_callback_que_tira_pasa() {
+        // El callback levanta vía `assert(false)`. assert_throws lo
+        // atrapa y devuelve Null.
+        let (_, res) = parse_eval_into_env(
+            "assert_throws(fn() => assert(false, \"intencional\"))",
+        )
+        .await;
+        res.expect("assert_throws debería pasar (callback tira)");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_throws_callback_que_no_tira_falla() {
+        // El callback retorna normal — assert_throws debe fallar.
+        let (_, res) = parse_eval_into_env("assert_throws(fn() => 1 + 1)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("tirara") && err.message.contains("retornó normalmente"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_throws_callback_con_params_es_error() {
+        let (_, res) = parse_eval_into_env("assert_throws(fn(x) => x)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("0 params"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_throws_callback_async_es_error_en_mvp() {
+        // Async callbacks generan Future suelto que rompe la semántica
+        // de "tirar". Restricción explícita del MVP.
+        let src = "\
+            async fn lazy() -> Int { return 1 }\n\
+            assert_throws(lazy)\n\
+        ";
+        let (_, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("async") || err.message.contains("MVP"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn assert_throws_arg_no_funcion_es_type_error() {
+        let (_, res) = parse_eval_into_env("assert_throws(42)").await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("función") || err.message.contains("Function"),
             "mensaje inesperado: {}",
             err.message,
         );
