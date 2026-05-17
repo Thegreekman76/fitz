@@ -1995,6 +1995,55 @@ async fn run_loop_body(body: &[Stmt], env: EnvRef) -> LoopControl {
 }
 
 // ---------------------------------------------------------------------------
+// match_pattern — chequea si un Pattern matchea un Value.
+//
+// Resultado:
+//   None             → no matcheó, probar el siguiente arm.
+//   Some(None)       → matcheó sin binding (literal/wildcard/range/Or
+//                      cuyo branch ganador no bindea).
+//   Some(Some((n, v))) → matcheó y bindea `v` a `n` (Ident/Ok/Err).
+//
+// Para `Pattern::Or`, probamos cada sub-pattern en orden y devolvemos el
+// primer match. Los sub-patterns de un Or no bindean por contrato del
+// parser (rechaza Ident/OkBinding/ErrBinding adentro), así que el
+// resultado siempre es `Some(None)` cuando alguno matchea.
+// ---------------------------------------------------------------------------
+
+fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
+    match (pat, v) {
+        (Pattern::Int(p), Value::Int(vv)) if p == vv => Some(None),
+        (Pattern::Float(p), Value::Float(vv)) if p == vv => Some(None),
+        (Pattern::Str(p), Value::Str(vv)) if p == vv => Some(None),
+        (Pattern::Bool(p), Value::Bool(vv)) if p == vv => Some(None),
+        (Pattern::Null, Value::Null) => Some(None),
+        (Pattern::Wildcard, _) => Some(None),
+        (Pattern::Ident(name), _) => Some(Some((name.clone(), v.clone()))),
+        (Pattern::Range { start, end, inclusive }, Value::Int(vv))
+            if start <= vv && (if *inclusive { vv <= end } else { vv < end }) =>
+        {
+            Some(None)
+        }
+        (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
+            Some(Some((name.clone(), (**inner).clone())))
+        }
+        (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
+            Some(Some((name.clone(), (**inner).clone())))
+        }
+        (Pattern::OkWildcard, Value::Result(ResultVariant::Ok(_))) => Some(None),
+        (Pattern::ErrWildcard, Value::Result(ResultVariant::Err(_))) => Some(None),
+        (Pattern::Or(subs), _) => {
+            for sub in subs {
+                if let Some(b) = match_pattern(sub, v) {
+                    return Some(b);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // eval_expr — evalúa una expresión a un Value.
 // ---------------------------------------------------------------------------
 
@@ -2360,46 +2409,43 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             let v = eval_expr(value, env.clone()).await?;
 
             for arm in arms {
-                // Resultado del intento de match para este arm:
-                //   None             → no matcheó, probar el siguiente.
-                //   Some(None)       → matcheó sin binding.
-                //   Some(Some((n, val))) → matcheó y bindea `val` a `n`.
-                //
-                // Esto unifica patrones literales (sin binding) con los que
-                // bindean (`Ident`, `OkBinding`, `ErrBinding`).
-                let outcome: Option<Option<(String, Value)>> = match (&arm.pattern, &v) {
-                    (Pattern::Int(p), Value::Int(vv)) if p == vv => Some(None),
-                    (Pattern::Float(p), Value::Float(vv)) if p == vv => Some(None),
-                    (Pattern::Str(p), Value::Str(vv)) if p == vv => Some(None),
-                    (Pattern::Bool(p), Value::Bool(vv)) if p == vv => Some(None),
-                    (Pattern::Null, Value::Null) => Some(None),
-                    (Pattern::Wildcard, _) => Some(None),
-                    (Pattern::Ident(name), _) => Some(Some((name.clone(), v.clone()))),
-                    (Pattern::Range { start, end, inclusive }, Value::Int(vv))
-                        if start <= vv && (if *inclusive { vv <= end } else { vv < end }) =>
-                    {
-                        Some(None)
-                    }
-                    (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
-                        Some(Some((name.clone(), (**inner).clone())))
-                    }
-                    (Pattern::ErrBinding(name), Value::Result(ResultVariant::Err(inner))) => {
-                        Some(Some((name.clone(), (**inner).clone())))
-                    }
-                    // Wildcards sobre Ok/Err: matchean la variante
-                    // sin bindear el inner. No ensucian el scope.
-                    (Pattern::OkWildcard, Value::Result(ResultVariant::Ok(_))) => Some(None),
-                    (Pattern::ErrWildcard, Value::Result(ResultVariant::Err(_))) => Some(None),
-                    _ => None,
-                };
-
-                let Some(binding) = outcome else {
+                let Some(binding) = match_pattern(&arm.pattern, &v) else {
                     continue;
                 };
 
-                if let Some((name, bound)) = binding {
-                    let arm_env = Environment::new_child(env.clone());
-                    arm_env.lock().define(name, bound);
+                // R.2.2 — guard `if cond`. Crear un scope hijo (para
+                // que el binding del pattern sea visible en el guard)
+                // y evaluar la condición. Si NO matchea, pasamos al
+                // siguiente arm — el binding queda descartado con el
+                // scope.
+                let arm_env = if let Some((name, bound)) = &binding {
+                    let child = Environment::new_child(env.clone());
+                    child.lock().define(name.clone(), bound.clone());
+                    child
+                } else {
+                    env.clone()
+                };
+                if let Some(guard_expr) = &arm.guard {
+                    let cond = eval_expr(guard_expr, arm_env.clone()).await?;
+                    let cond_bool = match cond {
+                        Value::Bool(b) => b,
+                        other => {
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::TypeError,
+                                span.line, span.column,
+                                format!(
+                                    "el guard de un arm debe ser Bool, recibí {}",
+                                    other.type_name()
+                                ),
+                            )));
+                        }
+                    };
+                    if !cond_bool {
+                        continue;
+                    }
+                }
+
+                if binding.is_some() {
                     return eval_expr(&arm.body, arm_env).await;
                 }
                 return eval_expr(&arm.body, env.clone()).await;
@@ -5346,7 +5392,7 @@ mod tests {
     use crate::ast::MatchArm;
 
     fn match_arm(pattern: Pattern, body: Expr) -> MatchArm {
-        MatchArm { pattern, body }
+        MatchArm { pattern, guard: None, body }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6207,6 +6253,205 @@ print(factorial(5))
         .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("out".into())));
+    }
+
+    // ---- Or-patterns (R.2.1) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_literal_int_matchea_primero() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match 1 { 1 | 2 | 3 => \"ok\", _ => \"no\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_literal_int_matchea_segundo() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match 2 { 1 | 2 | 3 => \"ok\", _ => \"no\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_literal_int_no_matchea() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match 4 { 1 | 2 | 3 => \"ok\", _ => \"no\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("no".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_strings() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match \"lun\" { \"lun\" | \"mar\" => \"laboral\", _ => \"x\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("laboral".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_mezcla_int_y_range() {
+        // 7 → matchea Range 5..=10 (segundo sub-pattern)
+        let (env, res) = parse_eval_into_env(
+            "let r = match 7 { 0 | 5..=10 => \"ok\", _ => \"x\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_ok_y_err_wildcard() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match Ok(42) { Ok(_) | Err(_) => \"cualquier\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("cualquier".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn or_pattern_no_introduce_binding_en_scope() {
+        // Si el body de un arm con or-pattern intentara usar una var
+        // bindeada por el pattern, fallaría. Verificamos que NO se
+        // bindee nada usando un literal y un body que no referencia
+        // ninguna var del pattern.
+        let (env, res) = parse_eval_into_env(
+            "let r = match 5 { 1 | 2 => \"chico\", 3 | 4 | 5 => \"medio\", _ => \"x\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("medio".into())));
+    }
+
+    // ---- Guards en match (R.2.2) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_true_dispara_arm() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match 10 { x if x > 5 => \"alto\", _ => \"bajo\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("alto".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_false_pasa_al_siguiente_arm() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match 3 { x if x > 5 => \"alto\", _ => \"bajo\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("bajo".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_sobre_ok_binding_filtra_por_valor() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match Ok(5) { Ok(v) if v > 0 => \"pos\", Ok(_) => \"neg\", Err(_) => \"err\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("pos".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_sobre_ok_binding_falla_y_cae_al_siguiente_ok_arm() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match Ok(-3) { Ok(v) if v > 0 => \"pos\", Ok(_) => \"neg\", Err(_) => \"err\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("neg".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_con_or_pattern_dispara_si_cond_true() {
+        let (env, res) = parse_eval_into_env(
+            "let r = match 4 { 1 | 2 | 3 | 4 if true => \"any\", _ => \"otro\" }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("any".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn guard_no_bool_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let r = match 1 { x if x => \"x\", _ => \"y\" }",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("guard"));
+    }
+
+    // ---- Operadores compuestos +=/-=/*=//= (R.2.3) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compound_plus_eq_sobre_ident() {
+        let (env, res) = parse_eval_into_env(
+            "let total = 0\n\
+             total += 5\n\
+             total += 10",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(15)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compound_minus_eq_sobre_ident() {
+        let (env, res) = parse_eval_into_env(
+            "let n = 100\n\
+             n -= 30",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("n"), Some(Value::Int(70)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compound_star_eq_sobre_ident() {
+        let (env, res) = parse_eval_into_env(
+            "let x = 6\n\
+             x *= 7",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compound_slash_eq_sobre_ident_int() {
+        let (env, res) = parse_eval_into_env(
+            "let q = 20\n\
+             q /= 4",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("q"), Some(Value::Int(5)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compound_plus_eq_sobre_index_lista() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = [1, 2, 3]\n\
+             xs[0] += 10",
+        ).await;
+        res.unwrap();
+        let xs = env.lock().get("xs").unwrap();
+        match xs {
+            Value::List(inner) => {
+                let g = inner.lock();
+                assert_eq!(g[0], Value::Int(11));
+                assert_eq!(g[1], Value::Int(2));
+                assert_eq!(g[2], Value::Int(3));
+            }
+            other => panic!("se esperaba List, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn compound_acumulado_en_loop() {
+        // Test típico: acumular en un loop.
+        let (env, res) = parse_eval_into_env(
+            "let suma = 0\n\
+             for i in 1..=5 { suma += i }",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("suma"), Some(Value::Int(15)));
     }
 
     // ---- Indexing ----

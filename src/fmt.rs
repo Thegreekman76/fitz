@@ -875,6 +875,12 @@ fn fmt_match(ctx: &mut FmtCtx, value: &Expr, arms: &[MatchArm]) {
         for arm in arms {
             ctx.write_indent();
             fmt_pattern(ctx, &arm.pattern);
+            // R.2.2 — guard opcional `if <cond>` entre pattern y `=>`.
+            if let Some(guard) = &arm.guard {
+                ctx.write(" if ");
+                let inline = expr_to_inline_string(guard);
+                ctx.write(&inline);
+            }
             ctx.write(" => ");
             fmt_expr(ctx, &arm.body);
             ctx.write(",");
@@ -910,6 +916,19 @@ fn fmt_pattern(ctx: &mut FmtCtx, pat: &Pattern) {
             ctx.write(&start.to_string());
             ctx.write(if *inclusive { "..=" } else { ".." });
             ctx.write(&end.to_string());
+        }
+        Pattern::Or(subs) => {
+            // R.2.1 — or-pattern. Emitimos `p1 | p2 | p3` con espacios
+            // alrededor del separador. Cada sub-pattern se formatea
+            // con la misma fn (no hay or-patterns anidados en el AST
+            // real porque el parser aplana, pero esto los maneja
+            // bien si llegan).
+            for (i, sub) in subs.iter().enumerate() {
+                if i > 0 {
+                    ctx.write(" | ");
+                }
+                fmt_pattern(ctx, sub);
+            }
         }
     }
 }

@@ -717,18 +717,48 @@ print(7 % -3)     // -2
 El mismo binario producido por `fitz build` tiene el mismo check
 y emite "división por cero" en lugar de panic crudo de Rust.
 
+### Asignación compuesta
+
+`+=`, `-=`, `*=`, `/=` aplican la operación al destino sin tener
+que escribirlo dos veces (R.2.3, mini-fase R). Se *desugar* en el
+parser a `target = target <op> rhs`, así que valen sobre cualquier
+destino de asignación: identificador, campo, índice:
+
+```fitz
+let total = 0
+total += 5            // total = total + 5
+total -= 2
+total *= 3
+total /= 2
+
+let xs = [10, 20, 30]
+xs[0] += 100          // xs[0] = xs[0] + 100
+
+type Counter { count: Int = 0 }
+let c = Counter {}
+c.count += 1          // c.count = c.count + 1
+```
+
+Patrón típico: acumular adentro de un loop:
+
+```fitz
+let suma = 0
+for i in 1..=5 {
+    suma += i
+}
+print(suma)           // 15
+```
+
 ### Lo que todavía no anda
 
-- Operadores compuestos (`+=`, `-=`, `*=`, `/=`).
 - Operadores de bits (`&`, `|`, `^`, `<<`, `>>`).
+- `%=` (módulo compuesto) — sub-paso menor si aparece presión.
 - `%` sobre `Float` (la ambigüedad entre `fmod` y `rem_euclid`
   requiere decisión de diseño; sub-paso futuro si aparece presión).
 
-Estos están planeados pero el lexer no los tokeniza todavía.
-
 > Lo que **sí anda** y antes era deuda: operador `%` (módulo
-> sobre `Int` con semántica euclidean) implementado en mini-fase
-> R (R.1.2).
+> sobre `Int` con semántica euclidean, R.1.2); operadores
+> compuestos `+=`/`-=`/`*=`/`/=` (R.2.3 mini-fase R).
 
 ### Ejemplo completo
 
@@ -2190,16 +2220,87 @@ match find_user(1) {
 
 Lo cubrimos en detalle en [el próximo capítulo](#13-result-y-manejo-de-errores).
 
+### Or-patterns `pat1 | pat2 | pat3`
+
+Cuando varios patrones llevan al mismo body, escribilos separados
+por `|` en un solo arm (R.2.1, mini-fase R). El arm matchea si
+**cualquiera** de los sub-patrones matchea:
+
+```fitz
+match dia {
+    "lun" | "mar" | "mie" | "jue" | "vie" => "laboral"
+    "sab" | "dom" => "fin de semana"
+    _ => "?"
+}
+```
+
+Funciona con literales, rangos y wildcards de Result:
+
+```fitz
+match n {
+    0 | 1 | 2 => "muy chico"
+    3..=10 | 100..=1000 => "medio o muy grande"
+    _ => "otro"
+}
+
+match r {
+    Ok(_) | Err(_) => "cualquier resultado"
+}
+```
+
+**Restricción**: los sub-patrones de un or-pattern **no pueden
+bindear** (igual que Rust). `1 | x => ...` y `Ok(v) | Err(_) =>
+...` son errores de parser; usá `_` o desdoblá el arm si necesitás
+binding distinto por caso.
+
+### Guards `pat if cond =>`
+
+Un guard es una condición extra que se chequea **después** de que
+el pattern matchee (R.2.2, mini-fase R). El arm matchea si el
+pattern matchea Y el guard evalúa a `true`:
+
+```fitz
+match age {
+    a if a < 0 => "edad inválida"
+    a if a < 13 => "niño"
+    a if a < 18 => "adolescente"
+    a if a < 65 => "adulto"
+    _ => "mayor"
+}
+```
+
+El binding del pattern es visible adentro del guard:
+
+```fitz
+match r {
+    Ok(v) if v > 0 => "positivo"
+    Ok(v) if v == 0 => "cero"
+    Ok(_) => "negativo"
+    Err(_) => "error"
+}
+```
+
+**Exhaustividad**: los arms con guard NO cuentan para la
+exhaustividad de `Result` — el guard puede ser `false` y dejar el
+match incompleto. Si todos tus arms tienen guard, el checker te
+exige un catch-all (`_` o ident) al final:
+
+```fitz
+// Error de checker: match no exhaustivo, falta el caso Err
+let s = match r { Ok(_) if true => "x" }
+```
+
 ### Lo que todavía no anda
 
 - **Tuples y listas como patrón** — `(a, b)`, `[head, ...rest]`,
   etc. Cuando lleguen los tipos compuestos.
-- **Guards** (`patrón if condición => ...`).
-- **Or-patterns** (`1 | 2 | 3 => ...`).
 - **Exhaustividad para tipos no-Result** — desde Fase 5.3.3
   `fitz check` exige exhaustividad sobre `Result<T>`. Para Int,
   Str y otros tipos no acotados sigue siendo responsabilidad
   tuya cerrar con `_`.
+
+> Lo que **sí anda** y antes era deuda: or-patterns (R.2.1) y
+> guards (R.2.2), ambos en mini-fase R.
 
 ### Ejemplo completo
 

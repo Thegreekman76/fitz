@@ -293,7 +293,7 @@ let html = """
 
 ## R.2 — Match más expresivo + operadores compuestos (~1 día)
 
-### R.2.1 — Or-patterns `1 | 2 | 3 =>` (cap 10)
+### ~~R.2.1 — Or-patterns `1 | 2 | 3 =>`~~ ✓ CERRADO 2026-05-17 (cap 10)
 
 **Hoy**: hay que repetir el body para cada caso o usar guard manual.
 
@@ -318,7 +318,7 @@ match dia {
 
 **Tests**: ~5 unit.
 
-### R.2.2 — Guards en match `pat if cond =>` (cap 10)
+### ~~R.2.2 — Guards en match `pat if cond =>`~~ ✓ CERRADO 2026-05-17 (cap 10)
 
 **Hoy**: condiciones extra se manejan con `if` adentro del body o
 descomponiendo el match. Menos expresivo.
@@ -345,7 +345,7 @@ match user {
 
 **Tests**: ~5 unit.
 
-### R.2.3 — Operadores compuestos `+=`/`-=`/`*=`/`/=` (cap 4)
+### ~~R.2.3 — Operadores compuestos `+=`/`-=`/`*=`/`/=`~~ ✓ CERRADO 2026-05-17 (cap 4)
 
 **Hoy**: `x = x + 1`, `total = total + amount`.
 
@@ -368,7 +368,7 @@ for item in items {
 
 **Tests**: ~4 unit.
 
-### R.2.4 — F3: checker rechaza `return`/`break`/`continue` huérfanos
+### ~~R.2.4 — F3: checker rechaza `return`/`break`/`continue` huérfanos~~ ✓ CERRADO 2026-05-17
 
 **Hoy**: el checker permite `return` en top-level; el evaluator
 emite error en runtime. Mejor cazarlo estáticamente.
@@ -389,10 +389,58 @@ break       // ✗ error de check: "break solo dentro de loop/while/for"
 
 ### R.2 — Estado
 
-- [ ] R.2.1 — Or-patterns
-- [ ] R.2.2 — Guards
-- [ ] R.2.3 — Operadores compuestos
-- [ ] R.2.4 — F3 checker huérfanos
+- [x] **R.2.1 — Or-patterns** ✓ (2026-05-17). `pat1 | pat2 | pat3
+  =>` con sub-patterns sin bindings (vetados por el parser, igual
+  que Rust). Implementación en 6 capas (lexer Token::Pipe, AST
+  `Pattern::Or(Vec<Pattern>)`, parser `parse_or_pattern` con
+  rechazo claro de Ident/Ok/Err bindings, checker
+  `update_result_coverage` recursivo, evaluator `match_pattern`
+  helper extraído + caso Or, codegen estrategia uniforme
+  `ref __or_v if cond1 || cond2 || ...` con catch-all artificial
+  forzado porque Rust no infiere exhaustividad de guards, fmt
+  con separador `|`). **19 unit tests nuevos** (7 parser, 7
+  evaluator, 5 checker) + smoke E2E bit-a-bit `fitz run`/`fitz
+  build`. Cap 10 + ejemplo `examples/guide/10-match.fitz`
+  actualizados.
+- [x] **R.2.2 — Guards en match** ✓ (2026-05-17). `pat if cond =>`
+  con cond visible para el binding del pattern. Arms con guard
+  NO cuentan para exhaustividad de Result (paralelo a Rust) — el
+  checker exige catch-all explícito. AST suma `MatchArm.guard:
+  Option<Expr>`; parser parsea `if <expr>` entre pattern y `=>`;
+  checker valida `Type::Bool`; evaluator chequea cond después
+  del pattern (scope con binding) y avanza al siguiente arm si
+  false; codegen refactoreado `gen_pattern` devuelve
+  `(pattern_code, Option<inner_guard>)` y combina con
+  outer_guard usando `&&`; fmt emite ` if cond` entre pattern y
+  `=>`. **14 unit tests nuevos** (5 parser, 6 evaluator, 5
+  checker) + smoke E2E bit-a-bit. Cap 10 + ejemplo
+  `examples/guide/10-match.fitz` actualizados.
+- [x] **R.2.3 — Operadores compuestos `+=`/`-=`/`*=`/`/=`** ✓
+  (2026-05-17). Desugar en el parser: `x += rhs` → `x = x + rhs`.
+  Lexer suma 4 tokens (`PlusEq`/`MinusEq`/`StarEq`/`SlashEq`)
+  con manejo del overlap `->` (Arrow vs MinusEq). Parser
+  detecta el compound op después de `parse_expr_or_assign_stmt`,
+  arma `AssignTarget` apropiado (Ident/Field/Index) y sintetiza
+  `BinOp(target, op, rhs)` como value. Como es desugar en el
+  parser, el resto del pipeline (checker, evaluator, codegen)
+  trabaja sin cambios. **13 unit tests nuevos** (7 parser, 6
+  evaluator) + smoke E2E bit-a-bit. Cap 4 + ejemplo
+  `examples/guide/04-operadores.fitz` actualizados.
+- [x] **R.2.4 — F3: checker rechaza `return`/`break`/`continue`
+  huérfanos** ✓ (2026-05-17). `CheckCtx` gana `loop_depth:
+  usize` (incrementa en While/Loop/For body, decrementa al
+  salir, resetea a 0 al entrar a FnDef/FnExpr y restaura al
+  salir — break/continue NO escapan funciones). `Stmt::Return`
+  emite error si `return_stack` vacío. `Stmt::Break`/`Continue`
+  emite error si `loop_depth == 0`. **10 unit tests nuevos**
+  del checker. Test viejo `return_huerfano_no_chequea`
+  reapuntado a `return_huerfano_chequea` (contrato cambió).
+
+> **R.2 CERRADA ENTERA (2026-05-17)** — los 4 ítems
+> implementados, testeados (56 unit tests nuevos + 4 smokes E2E
+> manuales bit-a-bit `fitz run`/`fitz build`), documentados
+> (caps 4 y 10 de la guía + 2 ejemplos actualizados). Próximo:
+> R.3 (métodos custom sobre `type`).
 
 ---
 

@@ -5212,22 +5212,40 @@ impl<'a> CodegenCtx<'a> {
         let mut has_catch_all = false;
         let mut has_ok = false;
         let mut has_err = false;
+        // R.2.1: or-patterns emiten `ref __or_v if cond1 || cond2`.
+        // Rust no infiere exhaustividad a partir de guards, así que
+        // si HAY algún or-pattern, forzamos un catch-all artificial
+        // al final, aunque conceptualmente esté cubierto.
+        let mut has_or_arm = false;
 
         for arm in arms {
             self.push_scope();
-            let pat_code = self.gen_pattern(&arm.pattern, &scrut_ty, &inner_ok_ty)?;
-            match &arm.pattern {
-                crate::ast::Pattern::Ident(_) | crate::ast::Pattern::Wildcard => {
-                    has_catch_all = true;
-                }
-                crate::ast::Pattern::OkBinding(_) | crate::ast::Pattern::OkWildcard => {
-                    has_ok = true;
-                }
-                crate::ast::Pattern::ErrBinding(_) | crate::ast::Pattern::ErrWildcard => {
-                    has_err = true;
-                }
-                _ => {}
+            let (pat_code, inner_guard) = self.gen_pattern(&arm.pattern, &scrut_ty, &inner_ok_ty)?;
+            if matches!(&arm.pattern, crate::ast::Pattern::Or(_)) {
+                has_or_arm = true;
             }
+            // R.2.2: arms con guard NO cuentan para coverage (el
+            // guard puede fallar en runtime). Forzamos catch-all
+            // artificial igual que con or-patterns y no actualizamos
+            // las flags.
+            if arm.guard.is_some() {
+                has_or_arm = true; // reuso el flag "forzar catch-all"
+            } else {
+                update_arm_coverage(
+                    &arm.pattern,
+                    &mut has_catch_all,
+                    &mut has_ok,
+                    &mut has_err,
+                );
+            }
+            // R.2.2 — el guard explícito del arm se gen-expr-ea en el
+            // scope con los bindings del pattern visibles.
+            let outer_guard = if let Some(guard_expr) = &arm.guard {
+                let (g_code, _g_ty) = self.gen_expr(guard_expr)?;
+                Some(g_code)
+            } else {
+                None
+            };
             // `print(...)` adentro del arm no es una expresión Fitz (es
             // statement). Lo emitimos como bloque `{ println!(...); }`
             // que evalúa a `()`. Para el resto delegamos a `gen_expr`.
@@ -5238,7 +5256,15 @@ impl<'a> CodegenCtx<'a> {
                 self.gen_expr(&arm.body)?
             };
             self.pop_scope();
-            arm_pieces.push(format!("{} => {}", pat_code, body_code));
+
+            // Combinar inner_guard (Str/Range/Or) con outer_guard (R.2.2)
+            // usando `&&`. Si los dos están, paréntesis envuelven cada uno.
+            let guard_combined = match (inner_guard, outer_guard) {
+                (None, None) => String::new(),
+                (Some(g), None) | (None, Some(g)) => format!(" if {}", g),
+                (Some(g1), Some(g2)) => format!(" if ({}) && ({})", g1, g2),
+            };
+            arm_pieces.push(format!("{}{} => {}", pat_code, guard_combined, body_code));
             arm_tys.push(body_ty);
         }
 
@@ -5248,7 +5274,7 @@ impl<'a> CodegenCtx<'a> {
         //   - el scrutinee es Result<T> y tenemos al menos un Ok y un Err.
         let result_exhaustive =
             inner_ok_ty.is_some() && has_ok && has_err;
-        if !has_catch_all && !result_exhaustive {
+        if !has_catch_all && (!result_exhaustive || has_or_arm) {
             arm_pieces.push(
                 "_ => panic!(\"el `match` no matcheó ningún brazo\")".to_string(),
             );
@@ -5275,70 +5301,119 @@ impl<'a> CodegenCtx<'a> {
 
     /// Traduce un `Pattern` Fitz a su equivalente como pattern Rust,
     /// declarando en el scope actual cualquier binding que el pattern
-    /// introduzca. `scrut_ty` ayuda con literales (negativos, Str con
-    /// comillas correctas); `ok_inner_ty` da el tipo del binding `x`
-    /// en `Ok(x)` cuando el scrutinee es `Result<T>`.
+    /// introduzca. Devuelve `(pattern_code, optional_inner_guard)`:
+    /// algunos patterns Fitz (Str/Range/Or) no se traducen 1:1 a un
+    /// pattern Rust puro y necesitan guard adicional. El caller
+    /// combina ese guard con el guard explícito del arm (R.2.2)
+    /// usando `&&`.
     fn gen_pattern(
         &mut self,
         pat: &crate::ast::Pattern,
         scrut_ty: &Type,
         ok_inner_ty: &Option<Type>,
-    ) -> Result<String, FitzError> {
+    ) -> Result<(String, Option<String>), FitzError> {
         use crate::ast::Pattern;
         match pat {
-            Pattern::Int(n) => Ok(format!("{}i64", n)),
-            Pattern::Float(f) => Ok(format!("{}f64", f)),
+            Pattern::Int(n) => Ok((format!("{}i64", n), None)),
+            Pattern::Float(f) => Ok((format!("{}f64", f), None)),
             Pattern::Str(s) => {
-                // Comparamos con literal `&str` adentro del match
-                // contra `String`. Como Rust no acepta `"x"` como
-                // pattern contra `String` directo, usamos un guard:
-                // `_ if x.as_str() == "..."`. Esto descarta el
-                // scrutinee del binding, pero es válido. Emitimos un
-                // pattern fresco que matchea y el guard hace el check.
-                Ok(format!("ref __s if __s.as_str() == {}", rust_str_literal(s)))
+                // Rust no acepta literal `&str` como pattern contra
+                // `String`. Bindeamos como `ref __s` y comparamos en
+                // el guard.
+                Ok((
+                    "ref __s".to_string(),
+                    Some(format!("__s.as_str() == {}", rust_str_literal(s))),
+                ))
             }
-            Pattern::Bool(b) => Ok(b.to_string()),
+            Pattern::Bool(b) => Ok((b.to_string(), None)),
             Pattern::Null => {
-                // `Null` Fitz se mapea a `()` Rust; el pattern `()`
-                // matchea sólo `()`. Si el scrutinee no es Null/() el
-                // caso es inalcanzable, pero rustc lo acepta.
                 if matches!(scrut_ty, Type::Null) {
-                    Ok("()".to_string())
+                    Ok(("()".to_string(), None))
                 } else {
-                    // Para Option<T> u otros: dejamos `_` con guard
-                    // estructural — pero el patrón Null sobre tipos
-                    // que no son Null es raro y el checker lo veta;
-                    // por simplicidad lo dejamos pasar como `_` que
-                    // nunca matchea correctamente. (Caso teórico.)
-                    Ok("_".to_string())
+                    Ok(("_".to_string(), None))
                 }
             }
             Pattern::Ident(name) => {
                 self.declare_var(name.clone(), scrut_ty.clone());
-                Ok(name.clone())
+                Ok((name.clone(), None))
             }
-            Pattern::Wildcard => Ok("_".to_string()),
+            Pattern::Wildcard => Ok(("_".to_string(), None)),
             Pattern::OkBinding(name) => {
                 let bind_ty = ok_inner_ty.clone().unwrap_or(Type::Any);
                 self.declare_var(name.clone(), bind_ty);
-                Ok(format!("Ok({})", name))
+                Ok((format!("Ok({})", name), None))
             }
             Pattern::ErrBinding(name) => {
-                // El Err side está pinned a `String` en el código
-                // generado, así que el binding es siempre String.
                 self.declare_var(name.clone(), Type::Str);
-                Ok(format!("Err({})", name))
+                Ok((format!("Err({})", name), None))
             }
-            Pattern::OkWildcard => Ok("Ok(_)".to_string()),
-            Pattern::ErrWildcard => Ok("Err(_)".to_string()),
+            Pattern::OkWildcard => Ok(("Ok(_)".to_string(), None)),
+            Pattern::ErrWildcard => Ok(("Err(_)".to_string(), None)),
             Pattern::Range { start, end, inclusive } => {
-                // R.1.4: emitimos `..` o `..=` Rust según el flag.
-                // Ambos `(start..end).contains(&n)` y
-                // `(start..=end).contains(&n)` están en std.
                 let op = if *inclusive { "..=" } else { ".." };
-                Ok(format!(
-                    "__n if ({}i64{}{}i64).contains(&__n)",
-                    start, op, end
+                Ok((
+                    "__n".to_string(),
+                    Some(format!("({}i64{}{}i64).contains(&__n)", start, op, end)),
+                ))
+            }
+            Pattern::Or(subs) => {
+                // R.2.1 — or-pattern como `ref __or_v` + guard que es
+                // la OR de cada condición. Sub-patterns no bindean
+                // (contrato del parser).
+                let mut conds: Vec<String> = Vec::with_capacity(subs.len());
+                for sub in subs {
+                    conds.push(self.pattern_to_or_cond(sub, scrut_ty)?);
+                }
+                Ok(("ref __or_v".to_string(), Some(conds.join(" || "))))
+            }
+        }
+    }
+
+    /// Helper para `Pattern::Or` (R.2.1). Traduce cada sub-pattern
+    /// a una expresión Bool que checkea si `__or_v` matchea. Los
+    /// patrones con binding están vetados por el parser, así que
+    /// acá no hay que declarar nada en el scope.
+    fn pattern_to_or_cond(
+        &self,
+        pat: &crate::ast::Pattern,
+        scrut_ty: &Type,
+    ) -> Result<String, FitzError> {
+        use crate::ast::Pattern;
+        match pat {
+            Pattern::Int(n) => Ok(format!("*__or_v == {}i64", n)),
+            Pattern::Float(n) => Ok(format!("*__or_v == {}f64", n)),
+            Pattern::Str(s) => Ok(format!("__or_v.as_str() == {}", rust_str_literal(s))),
+            Pattern::Bool(b) => Ok(format!("*__or_v == {}", b)),
+            Pattern::Null => {
+                if matches!(scrut_ty, Type::Null) {
+                    Ok("true".to_string())
+                } else {
+                    Ok("false".to_string())
+                }
+            }
+            Pattern::Wildcard => Ok("true".to_string()),
+            Pattern::Range { start, end, inclusive } => {
+                let op = if *inclusive { "..=" } else { ".." };
+                Ok(format!("({}i64{}{}i64).contains(__or_v)", start, op, end))
+            }
+            Pattern::OkWildcard => Ok("matches!(__or_v, Ok(_))".to_string()),
+            Pattern::ErrWildcard => Ok("matches!(__or_v, Err(_))".to_string()),
+            // Los siguientes están vetados por el parser para
+            // or-patterns. Si llegan acá, es un bug del parser.
+            Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_) => {
+                Err(FitzError::new(
+                    crate::error::ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "or-patterns no admiten bindings (bug interno: el parser debería haberlo rechazado)",
+                ))
+            }
+            Pattern::Or(_) => {
+                // Or anidado: el parser lo aplana en un solo Vec, pero
+                // por seguridad, recursamos.
+                Err(FitzError::new(
+                    crate::error::ErrorKind::InvalidSyntax,
+                    0, 0,
+                    "or-patterns anidados no soportados (caso degenerado)",
                 ))
             }
         }
@@ -7716,6 +7791,30 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
         // unifique con `Ok(42)` (Result<Int>) → Result<Int>.
         (Type::Any, other) | (other, Type::Any) => Ok(other.clone()),
         _ => Err(()),
+    }
+}
+
+/// Actualiza las flags de cobertura de arm para el chequeo
+/// "necesitamos catch-all artificial?" en `gen_match`. Recursea
+/// en `Pattern::Or` para que `Ok(_) | Err(_)` cuente como
+/// ambos lados del Result (R.2.1).
+fn update_arm_coverage(
+    pat: &crate::ast::Pattern,
+    has_catch_all: &mut bool,
+    has_ok: &mut bool,
+    has_err: &mut bool,
+) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(_) | Pattern::Wildcard => *has_catch_all = true,
+        Pattern::OkBinding(_) | Pattern::OkWildcard => *has_ok = true,
+        Pattern::ErrBinding(_) | Pattern::ErrWildcard => *has_err = true,
+        Pattern::Or(subs) => {
+            for sub in subs {
+                update_arm_coverage(sub, has_catch_all, has_ok, has_err);
+            }
+        }
+        _ => {}
     }
 }
 

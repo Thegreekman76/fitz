@@ -40,3 +40,28 @@ print(null == null)
 // la comparación entre Int y Str directamente — Rust exige operandos
 // del mismo tipo para `==`. Si querés probarlo, corré este archivo
 // con `fitz run`.
+
+// --- Operadores compuestos (R.2.3, mini-fase R) ---
+// `+=`, `-=`, `*=`, `/=` aplican la operación al destino. Se desugar
+// a `target = target <op> rhs` en el parser, así que valen sobre
+// cualquier destino de asignación: identificador, campo (`obj.x`),
+// índice (`xs[0]`).
+let total = 0
+total += 5
+total += 10
+total -= 2
+total *= 3
+total /= 2
+print(total)           // 19
+
+let xs = [10, 20, 30]
+xs[0] += 100
+xs[2] *= 2
+print(xs)              // [110, 20, 60]
+
+// Patrón típico: acumular adentro de un loop.
+let suma = 0
+for i in 1..=5 {
+    suma += i
+}
+print(suma)            // 15

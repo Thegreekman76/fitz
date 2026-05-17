@@ -1010,6 +1010,55 @@ impl Parser {
             return Ok(Stmt::Assign { target, type_: None, value, span });
         }
 
+        // Caso 3b — R.2.3: operadores compuestos `+=`/`-=`/`*=`/`/=`.
+        // Desugar a `target = target <op> rhs` en el parser. Esto deja
+        // el resto del pipeline (checker, evaluator, codegen) sin tocar
+        // — trabajan con `Stmt::Assign` regulares. El target se evalúa
+        // DOS veces: una como Expr (RHS del BinOp) y otra como
+        // AssignTarget (destino). El evaluator de índice usa el
+        // patrón "compute first, lock last" (R.1.3) así que la doble
+        // evaluación del index también va segura.
+        let compound_op = match self.peek() {
+            Token::PlusEq => Some(BinOpKind::Add),
+            Token::MinusEq => Some(BinOpKind::Sub),
+            Token::StarEq => Some(BinOpKind::Mul),
+            Token::SlashEq => Some(BinOpKind::Div),
+            _ => None,
+        };
+        if let Some(op) = compound_op {
+            let op_span = self.cur_span();
+            self.advance(); // consume el token `+=`/etc.
+            let rhs = self.expression()?;
+            let (target, target_as_expr) = match lhs {
+                Expr::Ident(n, ispan) => (
+                    AssignTarget::Ident(n.clone()),
+                    Expr::Ident(n, ispan),
+                ),
+                Expr::Field { object, field, span: fspan } => (
+                    AssignTarget::Field { object: object.clone(), field: field.clone() },
+                    Expr::Field { object, field, span: fspan },
+                ),
+                Expr::Index { object, index, span: ispan } => (
+                    AssignTarget::Index { object: object.clone(), index: index.clone() },
+                    Expr::Index { object, index, span: ispan },
+                ),
+                _ => {
+                    return Err(self.error(
+                        ErrorKind::InvalidSyntax,
+                        "destino de asignación compuesta no soportado (solo identificador, \
+                         `expr.campo` o `expr[indice]`)",
+                    ));
+                }
+            };
+            let value = Expr::BinOp {
+                op,
+                left: Box::new(target_as_expr),
+                right: Box::new(rhs),
+                span: op_span,
+            };
+            return Ok(Stmt::Assign { target, type_: None, value, span });
+        }
+
         // Caso 1: sentencia-expresión.
         Ok(Stmt::Expr(lhs, span))
     }
@@ -1444,13 +1493,20 @@ impl Parser {
                     "se esperaba '}' para cerrar match",
                 ));
             }
-            let pattern = self.parse_pattern()?;
+            let pattern = self.parse_or_pattern()?;
+            // R.2.2 — guard opcional `if <cond>` entre pattern y `=>`.
+            let guard = if matches!(self.peek(), Token::If) {
+                self.advance(); // consume `if`
+                Some(self.expression()?)
+            } else {
+                None
+            };
             self.expect(
                 &Token::FatArrow,
                 "se esperaba '=>' después del patrón",
             )?;
             let body = self.expression()?;
-            arms.push(MatchArm { pattern, body });
+            arms.push(MatchArm { pattern, guard, body });
             // Separador entre brazos: coma o newline. RBrace y EOF se
             // dejan pasar — el siguiente iter del loop los maneja:
             // RBrace termina el match, EOF cae a MissingClosingBrace.
@@ -1485,6 +1541,40 @@ impl Parser {
     ///   0..10       → Range (solo Int; extremos pueden ser negativos)
     ///   Ok(name)    → OkBinding(name)      (bloqueado runtime hasta Fase 3)
     ///   Err(name)   → ErrBinding(name)     (bloqueado runtime hasta Fase 3)
+    /// Parsea uno o más patterns separados por `|` (or-pattern,
+    /// R.2.1). Si solo hay uno, devuelve el pattern simple sin
+    /// envolver en `Or`. Si hay 2+, devuelve `Pattern::Or(...)`.
+    ///
+    /// Restricciones del MVP (paralelas a Rust):
+    ///  - **Sin bindings** adentro de or-patterns. `Ident(x)`,
+    ///    `OkBinding(name)` y `ErrBinding(name)` se rechazan con
+    ///    error claro citando el caveat. Workaround sugerido al
+    ///    usuario: usar `Wildcard` / `OkWildcard` / `ErrWildcard`,
+    ///    o desdoblar el arm.
+    fn parse_or_pattern(&mut self) -> FitzResult<Pattern> {
+        let first = self.parse_pattern()?;
+        if !matches!(self.peek(), Token::Pipe) {
+            return Ok(first);
+        }
+        let mut subs = vec![first];
+        while matches!(self.peek(), Token::Pipe) {
+            self.advance(); // consume `|`
+            let next = self.parse_pattern()?;
+            subs.push(next);
+        }
+        // Validar restricciones del MVP: sin bindings en
+        // sub-patterns. Mirá el doc comment de `Pattern::Or`.
+        for sub in &subs {
+            if matches!(sub, Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_)) {
+                return Err(self.error(
+                    ErrorKind::InvalidSyntax,
+                    "or-patterns no admiten bindings (usá '_' o desdoblá el arm)",
+                ));
+            }
+        }
+        Ok(Pattern::Or(subs))
+    }
+
     fn parse_pattern(&mut self) -> FitzResult<Pattern> {
         // Literales. Clonamos el peek antes de avanzar para no chocar con
         // el borrow checker. Los Int caen en `try_int_or_range` para
@@ -4999,6 +5089,283 @@ mod tests {
         let src = "match n { 0..1.5 => \"x\", _ => \"y\" }";
         let err = parse_program_str(src).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Or-patterns (R.2.1, mini-fase R)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn or_pattern_dos_literales() {
+        // match n { 1 | 2 => "ok", _ => "x" }
+        let src = "match n { 1 | 2 => \"ok\", _ => \"x\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Or(vec![Pattern::Int(1), Pattern::Int(2)])
+                );
+                assert_eq!(arms[1].pattern, Pattern::Wildcard);
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn or_pattern_tres_strings() {
+        let src = "match d { \"a\" | \"b\" | \"c\" => 1, _ => 0 }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Or(vec![
+                        Pattern::Str("a".into()),
+                        Pattern::Str("b".into()),
+                        Pattern::Str("c".into()),
+                    ])
+                );
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn or_pattern_un_solo_pat_sin_pipe_no_envuelve() {
+        // Sanity: pattern simple sin `|` no se envuelve en Or.
+        let src = "match n { 1 => \"x\", _ => \"y\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(arms[0].pattern, Pattern::Int(1));
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn or_pattern_mezcla_range_y_literal() {
+        // match n { 0 | 5..=10 => "ok", _ => "no" }
+        let src = "match n { 0 | 5..=10 => \"ok\", _ => \"no\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Or(vec![
+                        Pattern::Int(0),
+                        Pattern::Range { start: 5, end: 10, inclusive: true },
+                    ])
+                );
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn or_pattern_con_ok_err_wildcard() {
+        // match r { Ok(_) | Err(_) => "siempre" }
+        let src = "match r { Ok(_) | Err(_) => \"siempre\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Or(vec![Pattern::OkWildcard, Pattern::ErrWildcard])
+                );
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn or_pattern_con_binding_ident_es_error() {
+        // match n { 1 | x => "x" } — `x` es Ident binding, vetado.
+        let src = "match n { 1 | x => \"x\" }";
+        let err = parse_program_str(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+        assert!(err.message.contains("or-patterns no admiten bindings"));
+    }
+
+    #[test]
+    fn or_pattern_con_ok_binding_es_error() {
+        // match r { Ok(x) | Err(_) => "x" } — `Ok(x)` binding, vetado.
+        let src = "match r { Ok(x) | Err(_) => \"x\" }";
+        let err = parse_program_str(src).unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::InvalidSyntax));
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Guards en match (R.2.2)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn guard_simple_sobre_ident_pattern() {
+        let src = "match n { x if x > 10 => \"grande\", _ => \"chico\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(arms[0].pattern, Pattern::Ident("x".into()));
+                assert!(arms[0].guard.is_some());
+                assert!(arms[1].guard.is_none());
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn guard_sobre_ok_binding() {
+        let src = "match r { Ok(v) if v > 0 => \"pos\", _ => \"x\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert_eq!(arms[0].pattern, Pattern::OkBinding("v".into()));
+                assert!(arms[0].guard.is_some());
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn guard_combinado_con_range_pattern() {
+        let src = "match n { 0..=10 if n > 5 => \"alto\", _ => \"x\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert!(matches!(arms[0].pattern, Pattern::Range { start: 0, end: 10, inclusive: true }));
+                assert!(arms[0].guard.is_some());
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn guard_combinado_con_or_pattern() {
+        let src = "match n { 1 | 2 | 3 if n > 1 => \"x\", _ => \"y\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert!(matches!(arms[0].pattern, Pattern::Or(_)));
+                assert!(arms[0].guard.is_some());
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    #[test]
+    fn guard_es_expresion_compleja() {
+        // El guard puede ser una expresión booleana arbitraria.
+        let src = "match n { x if x > 0 and x < 100 => \"ok\", _ => \"x\" }";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Expr(Expr::Match { arms, .. }, _) => {
+                assert!(arms[0].guard.is_some());
+            }
+            other => panic!("se esperaba Match, se obtuvo {:?}", other),
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests — Operadores compuestos +=/-=/*=//= (R.2.3)
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn compound_plus_eq_sobre_ident() {
+        // `x += 5` debe desugar a `x = x + 5`.
+        let src = "x += 5";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { target: AssignTarget::Ident(name), value, .. } => {
+                assert_eq!(name, "x");
+                match value {
+                    Expr::BinOp { op, left, right, .. } => {
+                        assert_eq!(op, BinOpKind::Add);
+                        assert!(matches!(*left, Expr::Ident(ref n, _) if n == "x"));
+                        assert!(matches!(*right, Expr::Int(5, _)));
+                    }
+                    other => panic!("se esperaba BinOp, fue {:?}", other),
+                }
+            }
+            other => panic!("se esperaba Stmt::Assign, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_minus_eq_sobre_ident() {
+        let src = "x -= 3";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::BinOp { op, .. }, .. } => {
+                assert_eq!(op, BinOpKind::Sub);
+            }
+            other => panic!("se esperaba Stmt::Assign con BinOp Sub, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_star_eq_sobre_ident() {
+        let src = "x *= 7";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::BinOp { op, .. }, .. } => {
+                assert_eq!(op, BinOpKind::Mul);
+            }
+            other => panic!("se esperaba Stmt::Assign con BinOp Mul, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_slash_eq_sobre_ident() {
+        let src = "x /= 2";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::BinOp { op, .. }, .. } => {
+                assert_eq!(op, BinOpKind::Div);
+            }
+            other => panic!("se esperaba Stmt::Assign con BinOp Div, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_plus_eq_sobre_field() {
+        // `c.count += 1` desugar a `c.count = c.count + 1`.
+        let src = "c.count += 1";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { target: AssignTarget::Field { field, .. }, value, .. } => {
+                assert_eq!(field, "count");
+                assert!(matches!(value, Expr::BinOp { op: BinOpKind::Add, .. }));
+            }
+            other => panic!("se esperaba Stmt::Assign Field, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_plus_eq_sobre_index() {
+        // `xs[0] += 10` desugar a `xs[0] = xs[0] + 10`.
+        let src = "xs[0] += 10";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { target: AssignTarget::Index { .. }, value, .. } => {
+                assert!(matches!(value, Expr::BinOp { op: BinOpKind::Add, .. }));
+            }
+            other => panic!("se esperaba Stmt::Assign Index, fue {:?}", other),
+        }
+    }
+
+    #[test]
+    fn compound_rhs_expresion_completa() {
+        // El RHS debe parsear como expresión completa, no solo literal.
+        let src = "x += a + b * 2";
+        let stmt = parse_one_stmt(src);
+        match stmt {
+            Stmt::Assign { value: Expr::BinOp { op: BinOpKind::Add, right, .. }, .. } => {
+                // right es `a + b * 2` también
+                assert!(matches!(*right, Expr::BinOp { .. }));
+            }
+            other => panic!("se esperaba Stmt::Assign con RHS compuesto, fue {:?}", other),
+        }
     }
 
     // -----------------------------------------------------------------------

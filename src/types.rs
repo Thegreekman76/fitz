@@ -838,6 +838,14 @@ struct CheckCtx<'a> {
     /// `Stmt::ReturnStatus` (un middleware puede hacer `return 401 { ... }`
     /// para short-circuitear el handler). Introducido en mini-fase MW.1.
     middleware_fn_names: std::collections::HashSet<String>,
+    /// Profundidad de loops adentro de la función actual (R.2.4 — F3).
+    /// `Stmt::Break`/`Continue` exige que este valor sea > 0; si es 0,
+    /// el statement está huérfano (top-level o adentro de fn sin loop).
+    /// `While`/`Loop`/`For` incrementan al entrar y decrementan al
+    /// salir; `FnDef`/`FnExpr` guardan el valor previo, lo resetean a
+    /// 0, y lo restauran al salir (un break adentro de una closure NO
+    /// rompe el loop externo, igual que Rust).
+    loop_depth: usize,
     errors: Vec<FitzError>,
     /// Side-table de tipos sintetizados por nodo `Expr` (Fase 9.0 — F16).
     /// Poblado por el wrapper `infer_expr` al salir de cada llamada; se
@@ -861,6 +869,7 @@ impl<'a> CheckCtx<'a> {
             in_http_handler: Vec::new(),
             await_stack: Vec::new(),
             middleware_fn_names: std::collections::HashSet::new(),
+            loop_depth: 0,
             errors: Vec::new(),
             type_info: TypeInfo::new(),
             def_info: DefinitionInfo::new(),
@@ -1473,6 +1482,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(false);
             ctx.await_stack.push(false);
+            // R.2.4 (F3): break/continue NO escapan FnExpr (closures).
+            let saved_loop_depth = ctx.loop_depth;
+            ctx.loop_depth = 0;
             let param_types: Vec<Type> = params
                 .iter()
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
@@ -1485,6 +1497,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ctx.declare_var(p.name.clone(), t.clone(), *span);
             }
             check_block(ctx, body);
+            ctx.loop_depth = saved_loop_depth;
             let returns = ctx.inferred_returns.pop().unwrap_or_default();
             ctx.return_stack.pop();
             ctx.in_http_handler.pop();
@@ -1556,6 +1569,17 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // el AST actual. go-to-def sobre el uso del binding
                 // salta al body del arm.
                 bind_pattern(ctx, &arm.pattern, &scrutinee, arm.body.span());
+                // R.2.2 — el guard tipa adentro del scope del binding.
+                // Debe sintetizar Bool; otro tipo es error.
+                if let Some(guard_expr) = &arm.guard {
+                    let guard_ty = infer_expr(ctx, guard_expr);
+                    if !matches!(guard_ty, Type::Bool | Type::Any) {
+                        ctx.error_at(guard_expr.span(), format!(
+                            "el guard de un arm debe ser Bool, recibí {}",
+                            guard_ty.display(ctx.types)
+                        ));
+                    }
+                }
                 let t = infer_expr(ctx, &arm.body);
                 ctx.pop_scope();
                 if first.is_none() {
@@ -2052,6 +2076,29 @@ fn infer_str_method(
     }
 }
 
+/// Actualiza las flags de cobertura `Result` walkando el patrón.
+/// Para `Pattern::Or` recursea en cada sub-pattern (cualquier
+/// branch que cubra Ok cuenta para Ok, etc.). R.2.1 (mini-fase R).
+fn update_result_coverage(
+    pat: &crate::ast::Pattern,
+    has_ok: &mut bool,
+    has_err: &mut bool,
+    has_catchall: &mut bool,
+) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::OkBinding(_) | Pattern::OkWildcard => *has_ok = true,
+        Pattern::ErrBinding(_) | Pattern::ErrWildcard => *has_err = true,
+        Pattern::Wildcard | Pattern::Ident(_) => *has_catchall = true,
+        Pattern::Or(subs) => {
+            for sub in subs {
+                update_result_coverage(sub, has_ok, has_err, has_catchall);
+            }
+        }
+        _ => {}
+    }
+}
+
 /// Chequea exhaustividad de un `match` sobre `Result<T>`. Los arms
 /// deben cubrir tanto `Ok` como `Err`, o tener un catch-all
 /// (wildcard `_` o ident binding). Patrones literales/de rango
@@ -2063,17 +2110,17 @@ fn check_result_match_exhaustiveness(
     arms: &[crate::ast::MatchArm],
     span: Span,
 ) {
-    use crate::ast::Pattern;
     let mut has_ok = false;
     let mut has_err = false;
     let mut has_catchall = false;
     for arm in arms {
-        match &arm.pattern {
-            Pattern::OkBinding(_) | Pattern::OkWildcard => has_ok = true,
-            Pattern::ErrBinding(_) | Pattern::ErrWildcard => has_err = true,
-            Pattern::Wildcard | Pattern::Ident(_) => has_catchall = true,
-            _ => {}
+        // R.2.2: arms con guard NO cuentan para exhaustividad
+        // (paralelo a Rust). El guard puede fallar en runtime y
+        // dejar el match incompleto.
+        if arm.guard.is_some() {
+            continue;
         }
+        update_result_coverage(&arm.pattern, &mut has_ok, &mut has_err, &mut has_catchall);
     }
     if has_catchall || (has_ok && has_err) {
         return;
@@ -2127,6 +2174,11 @@ fn bind_pattern(
         | Pattern::Null
         | Pattern::Range { .. } => {
             // No introducen bindings.
+        }
+        Pattern::Or(_) => {
+            // R.2.1: or-patterns no introducen bindings por
+            // contrato del parser (rechaza Ident/OkBinding/
+            // ErrBinding adentro). No hace falta walkear.
         }
     }
 }
@@ -2464,10 +2516,17 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         Stmt::Return(e, span) => {
             // Inferimos siempre para que los errores adentro afloren.
             let ret_ty = infer_expr(ctx, e);
+            // R.2.4 (F3): `return` huérfano (fuera de fn) → error
+            // estático claro. El evaluator también lo emitía en
+            // runtime, pero el checker lo caza antes.
+            if ctx.return_stack.is_empty() {
+                ctx.error_at(*span,
+                    "`return` solo puede usarse adentro de una función".to_string(),
+                );
+            }
             // Si estamos adentro de una función con return_type
             // declarado (y resoluble), validamos. Fuera de fn o con
-            // return_type ausente (Any), no chequeamos — el evaluator
-            // ya emite error en runtime si `return` está huérfano.
+            // return_type ausente (Any), no chequeamos.
             if let Some(expected) = ctx.return_stack.last().cloned() {
                 if !is_compatible(&ret_ty, &expected) {
                     ctx.error_at(*span, format!(
@@ -2558,6 +2617,11 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(is_http_handler);
             ctx.await_stack.push(*is_async);
+            // R.2.4 (F3): break/continue NO escapan funciones. Guardamos
+            // el loop_depth previo, reseteamos a 0 para el body, y
+            // restauramos al salir.
+            let saved_loop_depth = ctx.loop_depth;
+            ctx.loop_depth = 0;
             for p in params {
                 let pty = ann_to_type(p.type_.as_ref(), ctx.types);
                 // Sin span propio en `Param` (deuda S1), aproximamos
@@ -2566,6 +2630,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 ctx.declare_var(p.name.clone(), pty, *fn_span);
             }
             check_block(ctx, body);
+            ctx.loop_depth = saved_loop_depth;
             ctx.inferred_returns.pop();
             ctx.return_stack.pop();
             ctx.in_http_handler.pop();
@@ -2586,13 +2651,17 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 ));
             }
             ctx.push_scope();
+            ctx.loop_depth += 1;
             check_block(ctx, body);
+            ctx.loop_depth -= 1;
             ctx.pop_scope();
         }
 
         Stmt::Loop { body, .. } => {
             ctx.push_scope();
+            ctx.loop_depth += 1;
             check_block(ctx, body);
+            ctx.loop_depth -= 1;
             ctx.pop_scope();
         }
 
@@ -2611,15 +2680,32 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 }
             };
             ctx.push_scope();
+            ctx.loop_depth += 1;
             // `For.var` no tiene span propio (deuda S1) — aproximamos
             // con el span del Stmt::For. go-to-def sobre el uso del
             // var salta al `for ... in ...`.
             ctx.declare_var(var.clone(), elem_ty, *span);
             check_block(ctx, body);
+            ctx.loop_depth -= 1;
             ctx.pop_scope();
         }
 
-        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::Break(span) => {
+            // R.2.4 (F3): `break` huérfano (fuera de loop) → error.
+            if ctx.loop_depth == 0 {
+                ctx.error_at(*span,
+                    "`break` solo puede usarse adentro de un loop (`while`, `loop`, `for`)".to_string(),
+                );
+            }
+        }
+        Stmt::Continue(span) => {
+            // R.2.4 (F3): `continue` huérfano (fuera de loop) → error.
+            if ctx.loop_depth == 0 {
+                ctx.error_at(*span,
+                    "`continue` solo puede usarse adentro de un loop (`while`, `loop`, `for`)".to_string(),
+                );
+            }
+        }
 
         Stmt::Import { path, alias, span } => {
             // `import a.b.c` bindea `c` (o `alias` si está) como Module.
@@ -4452,11 +4538,12 @@ mod tests {
     }
 
     #[test]
-    fn return_huerfano_no_chequea() {
-        // `return` fuera de una función — el checker no se queja;
-        // el evaluator emite error en runtime.
+    fn return_huerfano_chequea() {
+        // R.2.4 (F3): `return` fuera de fn ahora es error estático
+        // del checker. Antes pasaba al evaluator y se reportaba en
+        // runtime; ahora lo cazamos antes.
         let (_, errors) = check_str("return 1");
-        assert!(errors.is_empty(), "{:?}", errors);
+        assert!(errors.iter().any(|e| e.message.contains("return") && e.message.contains("función")));
     }
 
     // ---- is_compatible recursivo en generics ----
@@ -5222,6 +5309,214 @@ mod tests {
              }",
             &["match", "Result", "exhaustivo", "Err"],
         );
+    }
+
+    // ---- R.2.1: or-patterns en exhaustividad ----
+
+    #[test]
+    fn or_pattern_ok_wildcard_y_err_wildcard_juntos_es_exhaustivo() {
+        // `Ok(_) | Err(_)` en un solo arm cubre ambas variantes —
+        // el `update_result_coverage` recursea en `Pattern::Or`.
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { Ok(_) | Err(_) => \"siempre\" }",
+        );
+    }
+
+    #[test]
+    fn or_pattern_solo_ok_wildcards_combinados_falta_err() {
+        // `Ok(_) | Ok(_) =>` solo cubre Ok, falta Err.
+        assert_error_with(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { Ok(_) | Ok(_) => \"x\" }",
+            &["match", "Result", "exhaustivo", "Err"],
+        );
+    }
+
+    #[test]
+    fn or_pattern_con_literales_int_no_dispara_exhaustividad() {
+        // Scrutinee `Int`, no `Result`. `1 | 2 | 3` está OK con `_`.
+        assert_ok(
+            "let s = match 1 { 1 | 2 | 3 => \"chico\", _ => \"otro\" }",
+        );
+    }
+
+    #[test]
+    fn or_pattern_strings_homogeneo() {
+        assert_ok(
+            "let d = \"lun\"\n\
+             let s = match d { \"lun\" | \"mar\" | \"mie\" => \"laboral\", _ => \"x\" }",
+        );
+    }
+
+    #[test]
+    fn or_pattern_con_wildcard_subcase_es_catchall() {
+        // Si un sub-pattern del Or es `_`, el arm es catch-all
+        // (cubre cualquier cosa). Aunque en la práctica el usuario
+        // no escribiría `Ok(_) | _`, validamos que recursea correcto.
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { 1 | _ => \"x\" }",
+        );
+    }
+
+    // ---- R.2.2: guards en match ----
+
+    #[test]
+    fn guard_bool_es_valido() {
+        assert_ok(
+            "let s = match 5 { x if x > 0 => \"pos\", _ => \"neg\" }",
+        );
+    }
+
+    #[test]
+    fn guard_no_bool_es_error() {
+        // `x if x` con x: Int → guard no es Bool.
+        assert_error_with(
+            "let s = match 5 { x if x => \"y\", _ => \"z\" }",
+            &["guard", "Bool", "Int"],
+        );
+    }
+
+    #[test]
+    fn guard_referencia_binding_del_pattern() {
+        // El binding del pattern (`v` de `Ok(v)`) debe ser visible
+        // en el guard.
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { Ok(v) if v > 0 => \"pos\", Ok(_) => \"neg\", Err(_) => \"err\" }",
+        );
+    }
+
+    #[test]
+    fn arm_con_guard_no_cuenta_para_exhaustividad_result() {
+        // Solo `Ok(_) if true` cubre Ok con guard; no cuenta como Ok
+        // y falta Err.
+        assert_error_with(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { Ok(_) if true => \"x\" }",
+            &["match", "Result", "exhaustivo"],
+        );
+    }
+
+    #[test]
+    fn arm_con_guard_no_cuenta_como_catchall() {
+        // `_ if cond` no es catch-all real (cond puede ser false).
+        assert_error_with(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { _ if true => \"x\" }",
+            &["match", "Result", "exhaustivo"],
+        );
+    }
+
+    #[test]
+    fn arm_con_guard_seguido_de_catchall_es_exhaustivo() {
+        // Con un catch-all sin guard al final, el match es exhaustivo.
+        assert_ok(
+            "let r: Result<Int> = Ok(1)\n\
+             let s = match r { Ok(v) if v > 0 => \"pos\", _ => \"otro\" }",
+        );
+    }
+
+    // ---- R.2.4 (F3): return/break/continue huérfanos ----
+
+    #[test]
+    fn return_huerfano_top_level_es_error() {
+        assert_error_with(
+            "return 42",
+            &["return", "función"],
+        );
+    }
+
+    #[test]
+    fn return_adentro_de_fn_es_valido() {
+        assert_ok(
+            "fn f() -> Int { return 42 }\n\
+             let x = f()",
+        );
+    }
+
+    #[test]
+    fn break_huerfano_top_level_es_error() {
+        assert_error_with(
+            "break",
+            &["break", "loop"],
+        );
+    }
+
+    #[test]
+    fn continue_huerfano_top_level_es_error() {
+        assert_error_with(
+            "continue",
+            &["continue", "loop"],
+        );
+    }
+
+    #[test]
+    fn break_adentro_de_for_es_valido() {
+        assert_ok(
+            "for i in 0..5 {\n\
+                 if i == 3 { break }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn continue_adentro_de_while_es_valido() {
+        assert_ok(
+            "let x = 0\n\
+             while (x < 10) {\n\
+                 x = x + 1\n\
+                 if x == 5 { continue }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn break_adentro_de_loop_es_valido() {
+        assert_ok(
+            "loop {\n\
+                 break\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn break_anidado_dos_loops_es_valido() {
+        assert_ok(
+            "for i in 0..3 {\n\
+                 for j in 0..3 {\n\
+                     if j == 1 { break }\n\
+                 }\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn break_adentro_de_fn_interna_no_escapa_loop_externo() {
+        // El parser de Fitz NO permite fns nested (top-level only),
+        // pero FnExpr (closures) sí. break adentro de un closure
+        // que aparece adentro de un loop NO está adentro de un loop
+        // para fines del checker.
+        assert_error_with(
+            "for i in 0..3 {\n\
+                 let f = fn() => 0\n\
+                 let g = fn() {\n\
+                     break\n\
+                 }\n\
+             }",
+            &["break", "loop"],
+        );
+    }
+
+    #[test]
+    fn return_huerfano_y_break_huerfano_ambos_reportados() {
+        // Ambos errores deberían aparecer en el mismo programa.
+        let (_, errors) = check_str("return 42\nbreak");
+        let return_errs = errors.iter().filter(|e| e.message.contains("return")).count();
+        let break_errs = errors.iter().filter(|e| e.message.contains("break")).count();
+        assert!(return_errs >= 1, "esperaba al menos 1 error de return huérfano");
+        assert!(break_errs >= 1, "esperaba al menos 1 error de break huérfano");
     }
 
     #[test]

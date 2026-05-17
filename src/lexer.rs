@@ -54,6 +54,10 @@ pub enum Token {
     Star,     // *
     Slash,    // /
     Percent,  // % — operador módulo (R.1.2)
+    PlusEq,   // += (R.2.3)
+    MinusEq,  // -= (R.2.3)
+    StarEq,   // *= (R.2.3)
+    SlashEq,  // /= (R.2.3)
     Eq,       // =
     EqEq,     // ==
     NotEq,    // !=
@@ -78,6 +82,7 @@ pub enum Token {
     Colon,    // :
     Dot,      // .
     At,       // @ — prefijo de decoradores: @get, @post, @server, ...
+    Pipe,     // | — separador de or-patterns en `match` (R.2.1)
 
     // Especiales
     Newline,
@@ -580,25 +585,49 @@ impl Lexer {
                 Token::Newline
             }
             '+' => {
+                // R.2.3 — `+=` para asignación compuesta.
                 self.advance();
-                Token::Plus
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::PlusEq
+                } else {
+                    Token::Plus
+                }
             }
             '-' => {
                 self.advance();
-                if self.peek() == Some('>') {
-                    self.advance();
-                    Token::Arrow
-                } else {
-                    Token::Minus
+                match self.peek() {
+                    Some('>') => {
+                        self.advance();
+                        Token::Arrow
+                    }
+                    // R.2.3 — `-=` para asignación compuesta.
+                    Some('=') => {
+                        self.advance();
+                        Token::MinusEq
+                    }
+                    _ => Token::Minus,
                 }
             }
             '*' => {
+                // R.2.3 — `*=` para asignación compuesta.
                 self.advance();
-                Token::Star
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::StarEq
+                } else {
+                    Token::Star
+                }
             }
             '/' => {
+                // R.2.3 — `/=` para asignación compuesta.
                 self.advance();
-                Token::Slash
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::SlashEq
+                } else {
+                    Token::Slash
+                }
             }
             '%' => {
                 // R.1.2 — operador módulo. Single char, sin
@@ -704,6 +733,13 @@ impl Lexer {
             ':' => {
                 self.advance();
                 Token::Colon
+            }
+            '|' => {
+                // R.2.1 — separador de or-patterns en `match`. Single char
+                // por ahora; `||` (or lógico) usa la keyword `or` y NO
+                // entra acá.
+                self.advance();
+                Token::Pipe
             }
             '@' => {
                 self.advance();

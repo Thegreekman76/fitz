@@ -558,6 +558,11 @@ impl std::fmt::Display for TypeExpr {
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchArm {
     pub pattern: Pattern,
+    /// Guard opcional `if <cond>` después del pattern (R.2.2). El
+    /// arm matchea si el pattern matchea Y el guard evalúa a `true`.
+    /// Arms con guard NO cuentan para exhaustividad de Result
+    /// (paralelo a Rust) — el checker exige catch-all explícito.
+    pub guard: Option<Expr>,
     pub body: Expr,
 }
 
@@ -591,7 +596,19 @@ pub enum Pattern {
     /// Solo Int por ahora (Float complica la representación discreta).
     /// `inclusive` aportado por R.1.4 (mini-fase R).
     Range { start: i64, end: i64, inclusive: bool },
+    /// `pat1 | pat2 | pat3` — matchea si CUALQUIERA de los
+    /// sub-patrones matchea. R.2.1 (mini-fase R).
+    ///
+    /// Restricciones del MVP (paralelas a Rust):
+    ///  - **Sin bindings** adentro de or-patterns. Ni `Ident(x)`,
+    ///    ni `Ok(x)`, ni `Err(e)` — el parser los rechaza con
+    ///    error claro. `Pattern::Wildcard`, `OkWildcard` y
+    ///    `ErrWildcard` sí están permitidos.
+    ///  - Garantía: la lista tiene 2+ elementos; un único `pat`
+    ///    se mantiene como pattern simple, no envuelto en `Or`.
+    Or(Vec<Pattern>),
 }
+
 
 /// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args..., key=value...)`.
 ///

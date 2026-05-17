@@ -49,3 +49,62 @@ match null {
     null => print("vacío")
     _    => print("algo")
 }
+
+// --- Or-patterns (R.2.1, mini-fase R) ---
+// Un arm puede listar varios patrones con `|`. Matchea si CUALQUIERA
+// de ellos matchea el valor. Sin bindings adentro del or-pattern
+// (igual que Rust).
+fn dia(d: Str) -> Str {
+    return match d {
+        "lun" | "mar" | "mie" | "jue" | "vie" => "laboral"
+        "sab" | "dom" => "fin de semana"
+        _ => "?"
+    }
+}
+print(dia("lun"))   // laboral
+print(dia("dom"))   // fin de semana
+print(dia("xxx"))   // ?
+
+// Or-patterns con rangos y literales mezclados.
+fn cat(n: Int) -> Str {
+    return match n {
+        0 | 1 | 2 => "muy chico"
+        3..=10 | 100..=1000 => "medio o muy grande"
+        _ => "otro"
+    }
+}
+print(cat(0))    // muy chico
+print(cat(5))    // medio o muy grande
+print(cat(500))  // medio o muy grande
+print(cat(50))   // otro
+
+// --- Guards en match (R.2.2, mini-fase R) ---
+// Un arm puede tener un `if cond` entre el pattern y el `=>`.
+// El arm matchea si el pattern matchea Y el guard evalúa a true.
+// Los arms con guard NO cuentan para exhaustividad — el checker
+// exige un catch-all explícito.
+fn grado(age: Int) -> Str {
+    return match age {
+        a if a < 0 => "edad inválida"
+        a if a < 13 => "niño"
+        a if a < 18 => "adolescente"
+        a if a < 65 => "adulto"
+        _ => "mayor"
+    }
+}
+print(grado(-5))   // edad inválida
+print(grado(10))   // niño
+print(grado(80))   // mayor
+
+// Guards sobre bindings de Result.
+fn parse_ok(r: Result<Int>) -> Str {
+    return match r {
+        Ok(v) if v > 0 => "positivo"
+        Ok(v) if v == 0 => "cero"
+        Ok(_) => "negativo"
+        Err(_) => "error"
+    }
+}
+print(parse_ok(Ok(5)))      // positivo
+print(parse_ok(Ok(-3)))     // negativo
+print(parse_ok(Err("x")))   // error
