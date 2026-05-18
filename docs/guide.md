@@ -4073,35 +4073,71 @@ print(e)            // Err("boom")
 La igualdad es estructural: dos `Ok(1)` son iguales, dos `Err("x")`
 también, y `Ok(1) == Err(1)` da `false`.
 
+### Err con tipos custom (mini-tanda Err+)
+
+El `Err` acepta cualquier value, no solo `Str`. En `fitz run`
+preserva el tipo exacto al desempacar:
+
+```fitz
+type ApiError { status: Int, msg: Str }
+
+fn fetch(url: Str) -> Result<Int> {
+    if url == "/health" {
+        return Ok(200)
+    }
+    return Err(ApiError { status: 503, msg: "service unavailable" })
+}
+
+match fetch("/users") {
+    Ok(c) => print("status: {c}"),
+    Err(e) => print("err: {e}")
+}
+// err: ApiError { status: 503, msg: "service unavailable" }
+```
+
+En `fitz build`, el `Err` se coerce a `String` via Display
+(el codegen sigue con `Result<T, String>` pinned). El value se
+imprime igual, pero **acceder a fields del Err** (`Err(e) => e.status`)
+solo funciona en `fitz run`; en `fitz build` el `e` tipa `Str` y
+da error de "field access sobre Str". Workaround portable: imprimir
+el Err completo (vía Display) o usar `Err(Int)` con códigos
+numéricos.
+
+### `?` fuera de fn — mensaje propio
+
+Cuando un `?` en top-level (o adentro de una fn sin `-> Result<T>`)
+recibe un `Err`, el programa aborta con un mensaje específico
+mostrando el contenido del Err:
+
+```text
+Error — operación `?` falló con Err: ApiError { status: 503, msg: "..." }
+```
+
+Antes de Err+ daba `` `return` solo puede usarse adentro de una
+función `` — frío y engañoso (el `?` reusaba el mecanismo de
+`return` internamente). Ahora el usuario ve **qué** falló.
+
+Ver [examples/guide/14b-errores-tipados.fitz](../examples/guide/14b-errores-tipados.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
-- **`?` fuera de una función** — la implementación reutiliza el
-  mecanismo de `return` del lenguaje: cuando `?` ve un `Err`, emite
-  un `return` con ese `Err`. Si lo usás en top-level, vas a ver el
-  mensaje genérico `` `return` solo puede usarse adentro de una
-  función ``. Vamos a darle un mensaje propio más adelante.
 - **Chequeo estático de `?`** — desde Fase 5.3.3, `fitz check`
   exige que el operando de `?` sea `Result<T>` y que la función
   contenedora declare `-> Result<...>` (a menos que la función
   esté sin anotación de retorno, donde queda en modo gradual).
-  En runtime, si `?` ve un `Err` adentro de una función que no
-  estaba pensada para devolver `Result`, vas a tener un
-  `Value::Result(Err(...))` saliendo por la puerta de retorno —
-  por eso conviene anotar el retorno y dejar que el checker te
-  avise antes.
-- **Compilar con `fitz build`** — desde 5b.4 el compilador
-  soporta `Result`, `Ok`/`Err`, `?` y `match` enteros, así que
-  el ejemplo de abajo compila a binario nativo *si las funciones
-  anotan sus parámetros* (la inferencia de tipos de params en el
-  codegen es deuda residual de 5b.1). El `Err` side se modela
-  como `String` Rust pinned: si construís `Err(42)` o similar,
-  el codegen lo coerce a String con `format!`. En la práctica
-  todos los `Err(...)` útiles llevan mensajes, así que no
-  cambia nada — pero queda anotado.
-- **`Err` con valores no-Str y bindings tipados** — el binding
-  `e` del pattern `Err(e)` siempre tipa `Str` en el código
-  compilado, porque el Err side está pinned. En el intérprete
-  conserva el tipo original del inner.
+- **`Err` con bindings tipados en codegen** — el binding `e` del
+  pattern `Err(e)` siempre tipa `Str` en el código compilado,
+  porque el Err side sigue pinned a `Result<T, String>`. En el
+  intérprete conserva el tipo original del inner. Refactorear
+  `Type::Result` para llevar también el tipo del Err es deuda
+  residual — toca 10+ sitios del checker.
+
+> Lo que **sí anda** y antes era deuda (mini-tanda Err+):
+> **`Err(<no-Str>)`** preserva el tipo en `fitz run` (Int, Instance,
+> Tuple, etc. al desempacar con match); **`?` en top-level**
+> aborta con mensaje específico mostrando el contenido del Err en
+> lugar del genérico "return fuera de función".
 
 ### Ejemplo completo
 

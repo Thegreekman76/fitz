@@ -1366,6 +1366,16 @@ pub async fn call_handler(
 fn signal_to_error(signal: EvalSignal) -> FitzError {
     match signal {
         EvalSignal::Error(e) => e,
+        // Mini-tanda Err+ — el operador `?` produce `Return(Result(Err))`
+        // para propagar al contenedor. Cuando ese signal escapa hasta el
+        // top-level (no hay fn que lo capture), damos un mensaje
+        // específico mostrando el value del Err. Mucho más útil que el
+        // genérico "`return` fuera de función".
+        EvalSignal::Return(Value::Result(ResultVariant::Err(e))) => FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            format!("operación `?` falló con Err: {}", *e),
+        ),
         EvalSignal::Return(_) => FitzError::new(
             ErrorKind::ReturnOutsideFunction,
             0, 0,
@@ -7838,6 +7848,70 @@ let first_y = zs[0].1
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(0b1110)));
+    }
+
+    // ---- Mini-tanda Err+ — `?` fuera de fn + Err con tipos no-Str ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn err_plus_try_en_top_level_con_err_str_da_mensaje_especifico() {
+        // `?` en top-level con Err debe mostrar mensaje claro
+        // (no el genérico "return fuera de función").
+        let src = "fn fail() -> Result<Int> { return Err(\"boom\") }\nlet r: Int = fail()?\n";
+        let (_, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("operación `?` falló") && err.message.contains("boom"),
+            "esperaba mensaje específico de `?`: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn err_plus_try_top_level_con_err_int_preserva_value_en_mensaje() {
+        let src = "fn fail() -> Result<Int> { return Err(404) }\nlet r: Int = fail()?\n";
+        let (_, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("operación `?` falló") && err.message.contains("404"),
+            "esperaba 404 en el mensaje: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn err_plus_match_desempaca_err_con_tipo_custom() {
+        // Sumar caveats: el `e` del `Err(e)` matchea como Any (gradual),
+        // así que acceder a fields requiere conocer el shape. Uso de
+        // `match` como expresión en el RHS de un let para evitar
+        // assignments en arm bodies.
+        let src = "\
+            type ApiError { status: Int }\n\
+            fn fetch() -> Result<Int> { return Err(ApiError { status: 503 }) }\n\
+            let captured: Int = match fetch() {\n\
+                Ok(v) => v,\n\
+                Err(e) => e.status\n\
+            }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("captured"), Some(Value::Int(503)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn err_plus_err_int_se_preserva_en_value_no_se_convierte_a_str() {
+        // El Err(Int) sigue siendo Int en el value, no se string-ifica
+        // (a diferencia del codegen que sí lo coerce a Str para
+        // compatibilidad con Result<T, String>).
+        let src = "\
+            fn op() -> Result<Int> { return Err(42) }\n\
+            let r: Int = match op() {\n\
+                Ok(v) => v,\n\
+                Err(e) => e\n\
+            }\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(42)));
     }
 
     #[tokio::test(flavor = "current_thread")]

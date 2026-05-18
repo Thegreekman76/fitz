@@ -1023,13 +1023,55 @@ por type. Ejemplos:
 - Spec dinámico `{x:.{n}f}` (precision determinada en runtime)
   no soportado — Python lo tiene, pero requiere doble parse.
 
-### Result avanzado
+### ~~Result avanzado~~ ✓ CERRADO 2026-05-18 (mini-tanda Err+)
 
-- **`?` fuera de fn con mensaje propio** (cap 14) — ~30 min.
-  Cambio cosmético del mensaje de error.
-- **`Err` con valores no-Str y bindings tipados en codegen** (cap
-  14) — refactor del `Result<T, String>` pinned. ~4h. Sub-paso si
-  aparece presión.
+- ~~**`?` fuera de fn con mensaje propio**~~ ✓ (cap 14). El `?`
+  internamente reutilizaba el mecanismo de `return`, así que al
+  escapar a top-level daba el genérico "return fuera de función".
+  Fix: `signal_to_error` detecta `Return(Value::Result(Err(...)))`
+  y devuelve un FitzError específico mostrando el contenido del
+  Err con `Display`. Mensaje nuevo: `operación `?` falló con Err:
+  <value>`. Funciona end-to-end en `fitz run` con cualquier tipo
+  del Err (Str/Int/Instance/Tuple).
+
+- ~~**`Err` con valores no-Str en `fitz run`**~~ ✓ (cap 14). El
+  evaluator ya aceptaba `Err(any_value)` por design — Err+ valida
+  que funcione end-to-end con tipos custom: `Err(Int)` preserva
+  el number, `Err(MiError { ... })` preserva la Instance con su
+  Display canónico, etc. Al desempacar con `match Err(e)`, el
+  binding `e` mantiene el tipo exacto.
+
+- **Codegen** sigue con **`Result<T, String>` pinned** — el `Err`
+  se coerce a String. Mejoras del codegen en Err+:
+  - `Err(Int)`/`Err(Float)`/`Err(Bool)`/`Err(Null)` → `format!("{{}}",
+    code)` (ya funcionaba).
+  - `Err(Instance)` → `format!("{{}}", *(code).lock().unwrap())`
+    deref del `Arc<Mutex<TData>>` antes del format!, porque
+    `Mutex<T>` no implementa Display aunque `TData` adentro sí.
+    Paridad bit-a-bit con el Display del intérprete.
+  - `Err(List<T>)`/`Err(Map<K, V>)` → error claro de codegen
+    citando `fitz run` como workaround (el wrap es más profundo
+    y requiere helpers que no tenemos hoy).
+
+Implementación: ~85 LoC entre evaluator (`signal_to_error`) +
+codegen (`gen_err`). **6 unit tests nuevos** (4 evaluator + 2
+sobre mensajes específicos) + 2 compile_e2e bit-a-bit
+(`Err(Int)` y `Err(Instance)` con Display). Ejemplo
+`examples/guide/14b-errores-tipados.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`. Cap 14 de la guía suma dos sub-secciones:
+"Err con tipos custom (mini-tanda Err+)" y "`?` fuera de fn —
+mensaje propio".
+
+**Deuda residual** (NO bloquea próximas tandas):
+- **`Result<T, E>` con E tipado en codegen**: el binding `Err(e)`
+  en codegen siempre tipa `Str`, así que acceder a fields del
+  Err (`Err(e) => e.status`) no funciona en `fitz build`. Refactor:
+  `Type::Result(Box<Type>)` → `Type::Result { ok, err }` con
+  inferencia del E. Toca 10+ sitios del checker. ~3-4h cuando
+  aparezca demanda concreta.
+- **`Err(List<T>)`/`Err(Map<K, V>)` en codegen**: requieren
+  helpers de format para el wrap Arc<Mutex<Vec<...>>>. Sin
+  presión real.
 
 ### Bridge async Fitz ↔ Python asyncio (Fase 8.6)
 

@@ -6019,11 +6019,34 @@ impl<'a> CodegenCtx<'a> {
     /// la práctica de "Err con mensaje" del intérprete y de los ejemplos.
     /// El tipo Fitz sintetizado es `Result<Any>` — no conocemos el T del
     /// Ok side, el contexto destino lo refinará.
+    ///
+    /// Mini-tanda Err+ — `Err(<no-Str>)` se coerce a `String` para
+    /// mantener el shape `Result<T, String>` pinned del codegen. Para
+    /// `Nominal`, deref del `Arc<Mutex<TData>>` antes del `format!`
+    /// porque `Mutex<T>` no implementa `Display` aunque el `TData`
+    /// adentro sí (vía `impl Display for FooData` emitido por
+    /// `gen_type_def`). Para `List`/`Map`, el wrap es más profundo y
+    /// requiere helpers que no tenemos — error claro citando `fitz
+    /// run` como workaround.
     fn gen_err(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
         let (code, ty) = self.gen_expr(inner)?;
-        let as_string = match ty {
+        let as_string = match &ty {
             Type::Str => code,
-            _ => format!("format!(\"{{}}\", {})", code),
+            Type::Int | Type::Float | Type::Bool | Type::Null => {
+                format!("format!(\"{{}}\", {})", code)
+            }
+            Type::Nominal(_) => {
+                // Deref el Arc<Mutex<TData>> para conseguir un TData
+                // que SÍ implementa Display (el codegen emite
+                // `impl Display for FooData` por cada `type`).
+                format!("format!(\"{{}}\", *({}).lock().unwrap())", code)
+            }
+            other => {
+                return Err(self.err_at(inner.span(), format!(
+                    "`Err({})` no soportado en `fitz build` — el codegen sigue con `Result<T, String>` pinned. Usá `fitz run` para preservar el value, o convertí explícitamente con interpolación: `Err(\"...{{x}}...\")`",
+                    display_type(other, self.env)
+                )));
+            }
         };
         Ok((format!("Err({})", as_string), Type::Result(Box::new(Type::Any))))
     }

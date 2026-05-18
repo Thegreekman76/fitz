@@ -1,0 +1,77 @@
+// Mini-tanda Err+ — `?` con mensaje propio + Err con tipos no-Str.
+//
+// Dos features que mejoran la UX del modelo de errores:
+//
+// 1) `?` fuera de fn da mensaje claro mostrando el contenido del Err.
+// 2) `Err(<no-Str>)` permite carry de tipos como Int o Instance.
+//    El value se preserva al desempacar con match en `fitz run`. En
+//    `fitz build` el Err se coerce a String via Display (paralelo a
+//    cómo Rust trata Result<T, String> pinned).
+
+// --- Caso 1: Err con Int (códigos de error simples) ---
+
+fn try_parse(s: Str) -> Result<Int> {
+    if s == "uno" {
+        return Ok(1)
+    }
+    return Err(404)
+}
+
+let r1 = match try_parse("uno") {
+    Ok(n) => "ok: {n}",
+    Err(e) => "err: {e}"
+}
+print(r1)                         // ok: 1
+
+let r2 = match try_parse("dos") {
+    Ok(n) => "ok: {n}",
+    Err(e) => "err: {e}"
+}
+print(r2)                         // err: 404
+
+// --- Caso 2: Err con tipo custom (estructurado) ---
+
+type ApiError {
+    status: Int
+    msg: Str
+}
+
+fn fetch(url: Str) -> Result<Int> {
+    if url == "/health" {
+        return Ok(200)
+    }
+    return Err(ApiError { status: 503, msg: "service unavailable" })
+}
+
+// El Err se imprime con Display canónico de la Instance (paridad
+// bit-a-bit en `fitz run` y `fitz build`).
+match fetch("/users") {
+    Ok(c) => print("status: {c}"),
+    Err(e) => print("err: {e}")
+}
+// err: ApiError { status: 503, msg: "service unavailable" }
+
+// --- Caso 3: `?` adentro de fn que devuelve Result ---
+
+fn pipeline(url: Str) -> Result<Str> {
+    let code: Int = fetch(url)?  // si fetch devuelve Err, propaga
+    return Ok("OK ({code})")
+}
+
+match pipeline("/health") {
+    Ok(s) => print(s),            // OK (200)
+    Err(_) => print("falló")
+}
+
+// --- Caveat: acceso a fields del Err en `fitz build` ---
+//
+// En `fitz run` el Err preserva la Instance completa, así que podés
+// hacer `match fetch(...) { Err(e) => e.status, ... }` y acceder
+// a sus fields. En `fitz build` el Err se coerce a String (el codegen
+// sigue con `Result<T, String>` pinned), así que ese mismo patrón
+// falla en build con "field access sobre Str".
+//
+// Workaround portable: imprimir el Err completo (vía Display), o
+// usar `Err(Int)` con códigos numéricos cuando necesites destructurar.
+//
+// Refactorear `Result<T, E>` con E tipado es deuda residual de Err+.

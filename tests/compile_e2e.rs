@@ -1799,6 +1799,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13c-metodos-extras.fitz",
     "13d-iteradores.fitz",
     "14-result.fitz",
+    "14b-errores-tipados.fitz",
     "16-modulos.fitz",
     "17-http.fitz",
     "17b-middleware.fitz",
@@ -2671,6 +2672,42 @@ fn mini_tanda_bits_and_or_xor_y_shifts() {
     assert_eq!(exit, 0);
     // lo=0xCD=205, hi=0xAB=171, recombined=0xABCD=43981, xored=0xFFFF^0xABCD=0x5432=21554.
     assert_eq!(stdout.trim(), "205\n171\n43981\n21554");
+}
+
+// ---- Mini-tanda Err+ — `Err` con tipos no-Str + `?` mensaje propio ----
+
+#[test]
+fn mini_tanda_err_plus_err_int_compila_y_corre() {
+    // `Err(Int)` se coerce a Str via `format!("{}", n)` en codegen.
+    // El value se preserva en el mensaje pero pierde el tipo (Result
+    // sigue siendo Result<T, String> pinned).
+    let src = "fn fail() -> Result<Int> {\n\
+                 return Err(404)\n\
+               }\n\
+               match fail() {\n\
+                 Ok(v) => print(\"ok\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mini_tanda_err_plus_int", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err: 404");
+}
+
+#[test]
+fn mini_tanda_err_plus_err_instance_compila_y_preserva_display() {
+    // `Err(Instance)` deref del Arc<Mutex<TData>> antes del format!
+    // — paridad bit-a-bit con el Display del intérprete.
+    let src = "type ApiError { status: Int, msg: Str }\n\
+               fn fetch() -> Result<Int> {\n\
+                 return Err(ApiError { status: 503, msg: \"unavailable\" })\n\
+               }\n\
+               match fetch() {\n\
+                 Ok(v) => print(\"ok\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mini_tanda_err_plus_instance", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err: ApiError { status: 503, msg: \"unavailable\" }");
 }
 
 #[test]
