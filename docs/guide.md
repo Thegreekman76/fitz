@@ -4000,8 +4000,57 @@ site `Counter.of(5)` se traduce a `CounterData::of(5i64)`.
 Ver [examples/guide/13g-static-methods.fitz](../examples/guide/13g-static-methods.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
-**Limitaciones del MVP** (R.3 + St):
-- Todos los métodos son públicos (sin `pub fn` / `fn` privado).
+### Campos privados (mini-tanda Vp)
+
+Convención estilo Python pero validada por el checker estático: los
+**campos cuyo nombre arranca con `_`** son privados — solo accesibles
+desde adentro de los métodos del propio `type`. Desde afuera son
+error de tipo.
+
+```fitz
+type Account {
+    name: Str = "anon"
+    _balance: Int = 0           // ← privado
+
+    static fn new(name: Str) -> Account {
+        return Account { name: name, _balance: 0 }
+    }
+
+    fn deposit(n: Int) -> Account {
+        return Account { name: name, _balance: _balance + n }
+    }
+
+    fn balance() -> Int { return _balance }
+}
+
+let a = Account.new("Ada").deposit(100)
+print(a.balance())               // 100 — vía getter público
+print(a._balance)                // ERROR: campo `_balance` es privado
+```
+
+Reglas del checker:
+
+| Operación                              | Desde afuera | Desde método del mismo type |
+|----------------------------------------|--------------|------------------------------|
+| `instance._field` (acceso)             | error        | ok                           |
+| `Type { _field: v }` (struct lit)      | error        | ok (constructor)             |
+| `instance._field = v` (asignación)     | error        | ok                           |
+| `other._field` (otra instancia del mismo type) | error | ok                           |
+
+El patrón canónico para inicializar un tipo con campos privados es
+un constructor estático (`Type.new(...)`) — la combinación con
+mini-tanda St es natural.
+
+El LSP autocomplete también respeta la regla: después de `instance.`
+NO sugiere campos `_field`. Adentro de un método del propio type
+siguen apareciendo (como locales).
+
+Ver [examples/guide/13i-campos-privados.fitz](../examples/guide/13i-campos-privados.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+**Limitaciones del MVP** (R.3 + St + Vp):
+- Métodos siguen siendo todos públicos (no hay `_method` privado todavía;
+  solo aplica a fields).
 - Sin operator overloading (`fn +(self, other)`).
 
 Ver [examples/guide/13b-metodos-custom.fitz](../examples/guide/13b-metodos-custom.fitz)

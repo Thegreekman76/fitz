@@ -1959,6 +1959,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13f-range-iteradores.fitz",
     "13g-static-methods.fitz",
     "13h-predicados-list.fitz",
+    "13i-campos-privados.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el

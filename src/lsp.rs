@@ -450,10 +450,18 @@ fn after_dot_completions(
         Type::Nominal(id) => {
             // Fields del type + métodos custom (R.3). `info()` panics
             // si el id no existe — no debería pasar (el checker valida).
+            //
+            // Mini-tanda Vp — los campos privados (`_field`) NO aparecen
+            // en `instance.`: solo son accesibles desde adentro del
+            // type body, donde el LSP no necesita sugerirlos aparte
+            // porque ya son locales de la fn.
             let info = type_env.info(*id);
             let mut items = Vec::new();
             if let Some(fs) = info.fields.as_ref() {
                 for f in fs {
+                    if f.name.starts_with('_') {
+                        continue;
+                    }
                     items.push(CompletionItem {
                         label: f.name.clone(),
                         kind: Some(CompletionItemKind::FIELD),
@@ -1265,6 +1273,27 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn vp_after_dot_oculta_fields_privados() {
+        // Mini-tanda Vp: campos `_field` NO aparecen en `instance.`
+        // — son convención de privado y solo accesibles desde
+        // métodos del mismo type.
+        let src = "type C { name: Str = \"\", _balance: Int = 0 }\n\
+                   let c = C {}\n\
+                   c.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 2, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"name"),
+            "esperaba `name` (público) en completion, dio: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"_balance"),
+            "campo `_balance` (privado) NO debería aparecer en completion, dio: {labels:?}"
+        );
     }
 
     #[test]

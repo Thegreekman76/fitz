@@ -542,7 +542,50 @@ let profile = u.fetch_profile().await
 ### Deuda derivada (NO blocker de R.3)
 
 - Métodos con visibilidad (`pub fn`/`fn` privado) — todos public
-  en MVP.
+  en MVP. **Nota**: la deuda de campos privados ya se cerró
+  (mini-tanda Vp, ver entrada dedicada abajo). Métodos privados
+  sigue siendo deuda.
+- ~~Visibility en campos (`_field` privado)~~ ✓ CERRADO 2026-05-18
+  (mini-tanda Vp). Convención estilo Python pero validada por el
+  checker estático: los campos cuyo nombre arranca con `_` son
+  privados — solo accesibles desde adentro de los métodos del
+  propio `type`. Implementación en 3 capas:
+  - **Checker**: `CheckCtx.current_type: Option<TypeId>` se
+    setea/limpia en `check_custom_methods` alrededor de cada
+    method body. Helper `is_private_field(name)` = nombre
+    arranca con `_`. Tres call sites validan: `Expr::Field`
+    (acceso desde fuera), `Expr::StructLit` (setear `_field`),
+    `AssignTarget::Field` (asignar via `obj._field = v`). Todos
+    chequean `current_type == Some(receiver_type)` y emiten
+    error claro citando que es privado + sugerencia (usar
+    constructor estático).
+  - **LSP**: `after_dot_completions` para `Type::Nominal`
+    filtra fields que arrancan con `_` — no aparecen en
+    autocomplete sobre `instance.`. Adentro de un método del
+    propio type siguen apareciendo (como locales del scope).
+  - **Sin cambios al codegen**: Rust acepta cualquier
+    identifier, incluido `_field`. El checker se encarga del
+    enforcement; el codegen es transparente.
+  - **Drive-by fix de St**: alineé el checker con la semántica
+    de St — los métodos estáticos NO reciben fields como
+    locales (paralelo al evaluator y codegen). Antes de Vp el
+    checker pre-declaraba fields para todos los métodos
+    incluido `static`, dejando un agujero entre check y
+    runtime.
+  Tests: 7 unit nuevos en types (acceso desde afuera = error,
+  acceso desde adentro = ok, acceso desde otro tipo = error,
+  struct lit afuera = error, struct lit adentro = ok via
+  constructor estático, asignar afuera = error, campos públicos
+  no afectados) + 1 LSP unit (filter en autocomplete).
+  Ejemplo `examples/guide/13i-campos-privados.fitz` con `type
+  Account { name, _balance }` + `static fn new`/`fn deposit`/
+  `fn balance` + caveats comentados. Cap 13 sub-sección nueva
+  "Campos privados (mini-tanda Vp)" con tabla de reglas +
+  combinación natural con St (constructor estático).
+  **Decisión de diseño**: encapsulamiento opt-in, sin keyword
+  nueva — solo convención de nombres (`_`) validada
+  estáticamente. Más liviano que añadir `pub`/`private` y
+  consistente con la estética Python.
 - ~~Static methods (`type::method`) — no implementado~~ ✓ CERRADO
   2026-05-18 (mini-tanda St). `static fn` adentro del `type` body
   declara un método sin receiver, invocado como `Type.method(args)`.

@@ -1,0 +1,61 @@
+// Mini-tanda Vp — visibility en `type`: campos privados (`_field`).
+//
+// Convención (estilo Python pero validada por el checker estático):
+// los campos cuyo nombre arranca con `_` son **privados** y solo
+// son accesibles desde adentro de los métodos del propio `type`.
+//
+// Desde afuera, tanto `instance._field` como `Type { _field: ... }`
+// son errores de tipo claros. El patrón canónico: usar un
+// constructor estático (`Type.new(...)`) para encapsular la
+// construcción.
+
+type Account {
+    name: Str = "anon"
+    _balance: Int = 0
+
+    // Constructor estático — único punto que setea `_balance`.
+    static fn new(name: Str) -> Account {
+        return Account { name: name, _balance: 0 }
+    }
+
+    // Método de instancia: ve `_balance` como local (opción A de R.3).
+    // Para "mutar", devolvemos una nueva instancia (Fitz tiene
+    // semántica funcional para los métodos custom).
+    fn deposit(n: Int) -> Account {
+        return Account { name: name, _balance: _balance + n }
+    }
+
+    // Getter público que expone el campo privado de forma controlada.
+    fn balance() -> Int {
+        return _balance
+    }
+
+    // Métodos del MISMO type pueden acceder a `_field` de OTRA
+    // instancia del tipo (no solo el receptor).
+    fn richer_than(other: Account) -> Bool {
+        return _balance > other._balance
+    }
+}
+
+// Uso público: solo `Account.new(...)`, métodos públicos, y campos
+// no-`_`. El campo `_balance` queda encapsulado.
+let ada: Account = Account.new("Ada").deposit(100).deposit(50)
+let bob: Account = Account.new("Bob").deposit(80)
+
+print(ada.name)                       // Ada
+print(ada.balance())                  // 150
+print(ada.richer_than(bob))           // true
+print(bob.balance())                  // 80
+
+// --- Caveats (todos validados por el checker) ---
+//
+// 1) `ada._balance` desde afuera → error.
+// 2) `Account { name: "x", _balance: 999 }` desde afuera → error.
+// 3) `ada._balance = 999` desde afuera → error.
+//
+// Para verlo en vivo: descomentá una de las líneas y corré
+// `fitz check examples/guide/13i-campos-privados.fitz`.
+//
+// print(ada._balance)
+// let hack = Account { name: "Hack", _balance: 99999 }
+// ada._balance = 0

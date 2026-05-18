@@ -984,6 +984,14 @@ struct CheckCtx<'a> {
     /// `lookup_binding` y la binding tiene `def_span` conocido (no
     /// builtin). Mismo flujo de exposición que `type_info`.
     def_info: DefinitionInfo,
+    /// Mini-tanda Vp — `Some(id)` cuando estamos chequeando el body
+    /// de un método del tipo `id`. Se usa para validar acceso a campos
+    /// privados (prefijo `_`): el checker rechaza `instance._field` o
+    /// struct lits con `_field` desde afuera del type body, pero los
+    /// permite adentro (incluido cuando un método accede a otro
+    /// `instancia._field` de la misma clase). `None` en top-level
+    /// (script global, fn top-level, fn anónima escapada).
+    current_type: Option<TypeId>,
 }
 
 impl<'a> CheckCtx<'a> {
@@ -1001,6 +1009,7 @@ impl<'a> CheckCtx<'a> {
             errors: Vec::new(),
             type_info: TypeInfo::new(),
             def_info: DefinitionInfo::new(),
+            current_type: None,
         };
         ctx.register_builtins();
         ctx
@@ -1547,6 +1556,17 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             type_name, n
                         ));
                     }
+                    // Mini-tanda Vp — struct lit no puede setear campos
+                    // privados desde afuera del type body. Útil para
+                    // forzar uso de constructores estáticos (mini-tanda St).
+                    if is_private_field(n)
+                        && ctx.current_type != Some(id)
+                    {
+                        ctx.error_at(*fs, format!(
+                            "el campo `{}.{}` es privado: no se puede setear desde un struct lit afuera de los métodos del tipo `{}` (usá un constructor estático como `{}.new(...)`)",
+                            type_name, n, type_name, type_name
+                        ));
+                    }
                 }
                 // Faltantes y compatibilidad de los provistos.
                 let provided_map: std::collections::HashMap<&str, (&Type, Span)> = provided_types
@@ -1583,13 +1603,25 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Nominal(id)
         }
 
-        Expr::Field { object, field, .. } => {
+        Expr::Field { object, field, span } => {
             let obj_ty = infer_expr(ctx, object);
             match &obj_ty {
                 Type::Nominal(id) => {
                     let info = ctx.types.info(*id);
+                    let type_name = info.name.clone();
                     if let Some(declared) = &info.fields {
                         if let Some(f) = declared.iter().find(|f| f.name == *field) {
+                            // Mini-tanda Vp — campos privados (`_*`)
+                            // solo accesibles desde adentro del body
+                            // de un método del MISMO type.
+                            if is_private_field(field)
+                                && ctx.current_type != Some(*id)
+                            {
+                                ctx.error_at(*span, format!(
+                                    "el campo `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
+                                    type_name, field, type_name
+                                ));
+                            }
                             return f.type_.clone();
                         }
                         // Campo desconocido. En 5.3.4 cuando entren
@@ -2240,6 +2272,16 @@ fn infer_range_method(
 /// aridad coincide (para que el caller pueda saltarse validaciones
 /// extra sobre argumentos que no existen). Si falla, acumula error
 /// y devuelve `false`.
+/// Mini-tanda Vp — predicado de visibilidad: un campo se considera
+/// **privado** si su nombre arranca con `_`. La convención es la de
+/// Python (no enforced en runtime), pero Fitz la valida estáticamente
+/// en el checker: `instance._field` y struct lits `{ _field: ... }`
+/// desde afuera del type body son errores. Adentro de métodos del
+/// MISMO tipo (`current_type == Some(id)`) todo es accesible.
+fn is_private_field(name: &str) -> bool {
+    name.starts_with('_')
+}
+
 fn check_method_arity(
     ctx: &mut CheckCtx,
     method: &str,
@@ -3230,6 +3272,17 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                         if let Some(declared_fields) = info.fields.clone() {
                             match declared_fields.iter().find(|f| &f.name == field) {
                                 Some(f) => {
+                                    // Mini-tanda Vp — asignar a un campo
+                                    // privado solo se permite desde
+                                    // métodos del propio tipo.
+                                    if is_private_field(field)
+                                        && ctx.current_type != Some(*id)
+                                    {
+                                        ctx.error_at(*span, format!(
+                                            "el campo `{}.{}` es privado (prefijo `_`); no se puede asignar desde afuera del tipo `{}`",
+                                            type_name, field, type_name
+                                        ));
+                                    }
                                     if !is_compatible(&value_ty, &f.type_) {
                                         ctx.error_at(*span, format!(
                                             "el campo `{}.{}` espera `{}`, recibió `{}`",
@@ -3686,9 +3739,18 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
             ctx.await_stack.push(m.is_async);
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
-            // Pre-declarar fields como locales (opción A).
-            for f in &resolved_fields {
-                ctx.declare_var(f.name.clone(), f.type_.clone(), m.span);
+            // Mini-tanda Vp — marcamos que estamos adentro del body
+            // de un método del tipo `id`. Habilita acceso a campos
+            // privados (`_field`) desde acá.
+            let saved_current_type = ctx.current_type;
+            ctx.current_type = Some(id);
+            // Pre-declarar fields como locales (opción A). Mini-tanda
+            // St: los static methods NO reciben fields como locales,
+            // así que skipeamos cuando `is_static`.
+            if !m.is_static {
+                for f in &resolved_fields {
+                    ctx.declare_var(f.name.clone(), f.type_.clone(), m.span);
+                }
             }
             // Declarar params (sobreescriben fields homónimos en el
             // scope local — `declare_var` reemplaza el binding al
@@ -3698,6 +3760,7 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
                 ctx.declare_var(p.name.clone(), pty, m.span);
             }
             check_block(ctx, &m.body);
+            ctx.current_type = saved_current_type;
             ctx.loop_depth = saved_loop_depth;
             ctx.inferred_returns.pop();
             ctx.return_stack.pop();
@@ -6983,6 +7046,106 @@ mod tests {
         // tipado a Float pasa por gradual sin error.
         let (_, errors) = check_str(
             "import utils\nlet f: Float = utils.something(1)\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
+    }
+
+    // -----------------------------------------------------------------
+    // Mini-tanda Vp — campos privados (`_field`) en `type`.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn vp_field_access_desde_afuera_es_error() {
+        let (_, errors) = check_str(
+            "type C { _x: Int = 0 }\nlet c = C {}\nprint(c._x)\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("privado") && e.message.contains("_x")),
+            "esperaba error sobre `_x` privado, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vp_field_access_desde_adentro_de_metodo_es_ok() {
+        // El método ya tiene `_x` como local (opción A), pero si el
+        // método recibe otra instancia del mismo tipo y accede a
+        // `other._x`, también debe permitirse.
+        let (_, errors) = check_str(
+            "type C {\n\
+                 _x: Int = 0\n\
+                 fn merge(other: C) -> Int { return _x + other._x }\n\
+             }\n",
+        );
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores adentro de método del mismo tipo, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vp_field_access_desde_metodo_de_otro_tipo_es_error() {
+        let (_, errors) = check_str(
+            "type A { _x: Int = 0 }\n\
+             type B {\n\
+                 fn spy(a: A) -> Int { return a._x }\n\
+             }\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("privado")),
+            "esperaba error de acceso desde otro tipo, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vp_struct_lit_con_field_privado_desde_afuera_es_error() {
+        let (_, errors) = check_str(
+            "type C { name: Str = \"\", _balance: Int = 0 }\n\
+             let c = C { name: \"x\", _balance: 100 }\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("privado") && e.message.contains("_balance")),
+            "esperaba error sobre struct lit con `_balance`, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vp_struct_lit_con_field_privado_desde_adentro_es_ok() {
+        // Patrón canónico: `static fn new(...)` construye via struct lit
+        // con los `_field` privados. Adentro del type body es legítimo.
+        let (_, errors) = check_str(
+            "type C {\n\
+                 _x: Int = 0\n\
+                 static fn make(n: Int) -> C { return C { _x: n } }\n\
+             }\n",
+        );
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores en constructor estático, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vp_field_assign_a_field_privado_desde_afuera_es_error() {
+        let (_, errors) = check_str(
+            "type C { _x: Int = 0 }\nlet c = C {}\nc._x = 5\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("privado")),
+            "esperaba error de asignación a campo privado, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vp_field_publico_no_se_afecta_por_la_regla() {
+        // Sanity: campos sin prefijo `_` siguen siendo públicos.
+        let (_, errors) = check_str(
+            "type C { x: Int = 0 }\nlet c = C { x: 5 }\nprint(c.x)\n",
         );
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
