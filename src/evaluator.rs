@@ -3110,6 +3110,9 @@ async fn dispatch_method(
         (Value::List(_), "enumerate") => list_enumerate(receiver, args, span),
         (Value::List(_), "zip") => list_zip(receiver, args, span),
         (Value::List(_), "chain") => list_chain(receiver, args, span),
+        // Mini-tanda Mb — flatten + sort_by con callback comparator.
+        (Value::List(_), "flatten") => list_flatten(receiver, args, span),
+        (Value::List(_), "sort_by") => list_sort_by(receiver, args, span).await,
         // Map
         (Value::Map(_), "get") => map_get(receiver, args, span),
         (Value::Map(_), "has") => map_has(receiver, args, span),
@@ -3127,6 +3130,9 @@ async fn dispatch_method(
         // S.2 — manipulación de strings:
         (Value::Str(_), "split") => str_split(receiver, args, span),
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
+        // Mini-tanda Mb — variantes parciales de trim.
+        (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
+        (Value::Str(_), "trim_end") => str_trim_end(receiver, args, span),
         (Value::Str(_), "replace") => str_replace(receiver, args, span),
         (Value::Str(_), "repeat") => str_repeat(receiver, args, span),
         // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
@@ -3603,6 +3609,121 @@ fn list_chain(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     Ok(Value::new_list(out))
 }
 
+/// Mini-tanda Mb — `xss.flatten()` aplana `List<List<T>>` → `List<T>`.
+/// Concatena los elementos de cada sub-lista en orden. Si los elementos
+/// no son listas, error de runtime claro. Para listas vacías o con
+/// sub-listas vacías, no-op (resultado vacío).
+fn list_flatten(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("flatten", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot = items.lock().clone();
+    let mut out: Vec<Value> = Vec::new();
+    for (i, v) in snapshot.into_iter().enumerate() {
+        match v {
+            Value::List(inner) => {
+                out.extend(inner.lock().clone());
+            }
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "List".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "`.flatten()` requiere `List<List<T>>`: el elemento [{}] es `{}`",
+                        i, other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb — `xs.sort_by(cmp)` ordena IN-PLACE usando un
+/// callback comparator. El callback recibe `(a, b)` y devuelve un
+/// `Int` siguiendo la convención `cmp` de Rust/JS:
+///   - negativo si `a < b`,
+///   - cero si `a == b`,
+///   - positivo si `a > b`.
+///
+/// El callback puede ser sync o async — invocamos via `invoke_value`
+/// que ya maneja ambos casos. Usamos selection sort (O(n²)) en lugar
+/// de `Vec::sort_by` porque este último toma un closure sync; con
+/// callbacks async tendríamos que bloquear o re-implementar
+/// internamente. Para listas chicas (<1000) está bien; sub-paso
+/// futuro si aparece presión real.
+async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("sort_by", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let cmp_fn = args.into_iter().next().unwrap();
+
+    // Snapshot del Vec para evitar re-entrancia con el callback.
+    // Después de comparar todo y ordenar el snapshot, volcamos al
+    // original. Patrón paralelo a `list_map`/`list_filter`.
+    let snapshot = items.lock().clone();
+    let n = snapshot.len();
+    if n < 2 {
+        return Ok(Value::Null);
+    }
+
+    // Materializamos los pares de comparación que necesitamos. Pre-
+    // computamos `cmp(a, b)` para cada par solicitado por sort_by; el
+    // approach pragmático es invocar el callback adentro de `sort_by`
+    // de Rust pero `sort_by` toma un closure SYNC y nuestro `invoke_value`
+    // es async. Solución: pre-construir un Vec<usize> de índices,
+    // ordenarlos con sort_by que hace lookup a una matriz de
+    // comparación pre-computada... O más simple: implementamos
+    // selection sort O(n²) acá, invocando el callback async en cada
+    // par. Para listas chicas (<1000 elementos) está bien. Sub-paso
+    // futuro si aparece presión: spawn_blocking + sync invoke.
+    let mut indexed: Vec<(usize, Value)> = snapshot.into_iter().enumerate().collect();
+    // Selection sort sobre `indexed`.
+    for i in 0..n - 1 {
+        let mut min_idx = i;
+        for j in (i + 1)..n {
+            let a = indexed[j].1.clone();
+            let b = indexed[min_idx].1.clone();
+            let cmp_result =
+                invoke_value(cmp_fn.clone(), vec![a, b], "sort_by", span).await?;
+            let cmp_int = match cmp_result {
+                Value::Int(n) => n,
+                other => {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Int".into(),
+                            found: other.type_name().into(),
+                        },
+                        span.line, span.column,
+                        format!(
+                            "`.sort_by(cmp)` espera que cmp devuelva `Int`, recibió `{}`",
+                            other.type_name(),
+                        ),
+                    )));
+                }
+            };
+            if cmp_int < 0 {
+                min_idx = j;
+            }
+        }
+        if min_idx != i {
+            indexed.swap(i, min_idx);
+        }
+    }
+
+    // Volcamos al original (drop el orden anterior, escribir el nuevo).
+    let mut guard = items.lock();
+    *guard = indexed.into_iter().map(|(_, v)| v).collect();
+    Ok(Value::Null)
+}
+
 // ---- Map ----
 
 fn map_get(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -3763,6 +3884,28 @@ fn str_trim(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
         _ => unreachable!(),
     };
     Ok(Value::Str(s.trim().to_string()))
+}
+
+/// Mb — `s.trim_start()`: solo recorta whitespace del inicio. Paralelo
+/// a `str::trim_start` Rust / `str.lstrip` Python (default whitespace).
+fn str_trim_start(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("trim_start", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    Ok(Value::Str(s.trim_start().to_string()))
+}
+
+/// Mb — `s.trim_end()`: solo recorta whitespace del final. Paralelo
+/// a `str::trim_end` Rust / `str.rstrip` Python (default whitespace).
+fn str_trim_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("trim_end", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    Ok(Value::Str(s.trim_end().to_string()))
 }
 
 /// S.2 — `s.replace(old, new)`. Reemplaza TODAS las ocurrencias.
@@ -9026,6 +9169,120 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("hola".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
+    }
+
+    // ---- Mini-tanda Mb: trim_start / trim_end ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_str_trim_start_recorta_solo_inicio() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"  hola  \".trim_start()\n\
+             let b = \"\\n\\tlinea\".trim_start()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("hola  ".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_str_trim_end_recorta_solo_final() {
+        let (env, res) = parse_eval_into_env(
+            "let a = \"  hola  \".trim_end()\n\
+             let b = \"linea\\n\\t\".trim_end()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Str("  hola".into())));
+        assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
+    }
+
+    // ---- Mini-tanda Mb: List.flatten ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_list_flatten_concatena_sublistas_en_orden() {
+        let (env, res) = parse_eval_into_env(
+            "let xss: List<List<Int>> = [[1, 2], [3], [4, 5, 6]]\n\
+             let flat = xss.flatten()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("flat").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let vals: Vec<Value> = g.clone();
+            assert_eq!(
+                vals,
+                vec![
+                    Value::Int(1), Value::Int(2), Value::Int(3),
+                    Value::Int(4), Value::Int(5), Value::Int(6),
+                ]
+            );
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_list_flatten_lista_vacia_es_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "let xss: List<List<Int>> = []\n\
+             let flat = xss.flatten()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("flat").unwrap();
+        if let Value::List(items) = v {
+            assert!(items.lock().is_empty());
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    // ---- Mini-tanda Mb: List.sort_by con callback ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_list_sort_by_ascendente() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]\n\
+             xs.sort_by(fn(a, b) => a - b)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            assert_eq!(nums, vec![1, 1, 2, 3, 4, 5, 6, 9]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_list_sort_by_descendente() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [3, 1, 4]\n\
+             xs.sort_by(fn(a, b) => b - a)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            assert_eq!(nums, vec![4, 3, 1]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb_list_sort_by_callback_no_int_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [3, 1]\n\
+             xs.sort_by(fn(a, b) => \"oops\")",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("Int") || err.message.contains("sort_by"),
+            "esperaba mensaje sobre Int / sort_by, fue: {}",
+            err.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

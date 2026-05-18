@@ -515,6 +515,15 @@ fn after_dot_completions(
                     t.display(type_env),
                     t.display(type_env)
                 )),
+                // Mini-tanda Mb — flatten + sort_by.
+                ("flatten", format!(
+                    "fn() -> List<U>  // requiere List<List<U>>"
+                )),
+                ("sort_by", format!(
+                    "fn(fn({}, {}) -> Int) -> Null",
+                    t.display(type_env),
+                    t.display(type_env)
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -543,6 +552,8 @@ fn after_dot_completions(
             ("ends_with", "fn(s: Str) -> Bool".into()),
             ("split", "fn(sep: Str) -> List<Str>".into()),
             ("trim", "fn() -> Str".into()),
+            ("trim_start", "fn() -> Str".into()),
+            ("trim_end", "fn() -> Str".into()),
             ("replace", "fn(old: Str, new: Str) -> Str".into()),
             ("repeat", "fn(n: Int) -> Str".into()),
         ]),
@@ -1182,12 +1193,14 @@ mod tests {
             "ends_with",
             "split",
             "trim",
+            "trim_start",
+            "trim_end",
             "replace",
             "repeat",
         ] {
             assert!(
                 labels.contains(&expected),
-                "falta método `{expected}` (mini-tanda S) en Str: {labels:?}"
+                "falta método en Str: `{expected}` (S+Mb): {labels:?}"
             );
         }
         // Sanity: los 3 originales siguen.
@@ -1231,6 +1244,27 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn after_dot_sobre_list_incluye_flatten_y_sort_by() {
+        // Mini-tanda Mb: flatten + sort_by se suman a List.
+        let src = "let xs = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["flatten", "sort_by"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb) en List: {labels:?}"
+            );
+        }
+        let item_sort_by = items.iter().find(|i| i.label == "sort_by").unwrap();
+        assert!(
+            item_sort_by.detail.as_deref().unwrap_or("").contains("fn(Int, Int)"),
+            "esperaba firma con `fn(Int, Int)`, dio: {:?}",
+            item_sort_by.detail
+        );
     }
 
     #[test]

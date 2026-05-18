@@ -3914,19 +3914,25 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.ends_with(s)`  | `Str`        | `Bool`      | case-sensitive |
 | `.split(sep)`    | `Str`        | `List<Str>` | empty separator → chars individuales |
 | `.trim()`        | —            | `Str`       | whitespace ambos lados |
+| `.trim_start()`  | —            | `Str`       | whitespace solo al inicio (Mb) |
+| `.trim_end()`    | —            | `Str`       | whitespace solo al final (Mb) |
 | `.replace(o, n)` | `Str`, `Str` | `Str`       | TODAS las ocurrencias |
 | `.repeat(n)`     | `Int`        | `Str`       | `n < 0` es error |
 
-**Sobre `List<T>`** (S.3):
+**Sobre `List<T>`** (S.3 + Mb):
 
 | Método          | Args | Retorna | Notas |
 |-----------------|------|---------|-------|
 | `.sort()`       | —    | `Null`  | IN-PLACE, T ∈ {Int, Float, Str, Bool} |
+| `.sort_by(cmp)` | `fn(T, T) -> Int` | `Null` | IN-PLACE, callback estilo Rust/JS `cmp` (Mb) |
 | `.reverse()`    | —    | `Null`  | IN-PLACE, cualquier T |
 | `.contains(v)`  | `T`  | `Bool`  | igualdad estructural |
+| `.flatten()`    | —    | `List<U>` | requiere `List<List<U>>`, aplana un nivel (Mb) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
-para el ejemplo completo.
+para los métodos S y
+[examples/guide/13e-mini-bundle-metodos.fitz](../examples/guide/13e-mini-bundle-metodos.fitz)
+para los de Mb.
 
 ### Iteradores: `enumerate` / `zip` / `chain` (mini-tanda It)
 

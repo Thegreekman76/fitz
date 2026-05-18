@@ -1954,6 +1954,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13b-metodos-custom.fitz",
     "13c-metodos-extras.fitz",
     "13d-iteradores.fitz",
+    "13e-mini-bundle-metodos.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3041,6 +3042,77 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Mb — trim_start/trim_end + flatten + sort_by ----
+
+#[test]
+fn mb_str_trim_start_y_end_compilan() {
+    let src = "print(\"  hola  \".trim_start())\n\
+               print(\"  hola  \".trim_end())\n\
+               print(\"\\n\\tlinea\\n\\t\".trim_start())\n\
+               print(\"\\n\\tlinea\\n\\t\".trim_end())\n";
+    let (stdout, exit) = build_and_run("mb_trim_start_end", src);
+    assert_eq!(exit, 0);
+    // trim_start: recorta inicio, deja el sufijo intacto.
+    // trim_end: recorta final, deja el prefijo intacto.
+    assert_eq!(
+        stdout,
+        "hola  \n  hola\nlinea\n\t\n\n\tlinea\n"
+    );
+}
+
+#[test]
+fn mb_list_flatten_concatena_sublistas() {
+    let src = "let xss: List<List<Int>> = [[1, 2], [3], [4, 5, 6]]\n\
+               let flat: List<Int> = xss.flatten()\n\
+               print(flat)\n\
+               print(flat.len())\n";
+    let (stdout, exit) = build_and_run("mb_list_flatten", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 2, 3, 4, 5, 6]\n6");
+}
+
+#[test]
+fn mb_list_flatten_de_listas_vacias_es_vacio() {
+    let src = "let xss: List<List<Int>> = [[], [], []]\n\
+               let flat: List<Int> = xss.flatten()\n\
+               print(flat)\n\
+               print(flat.len())\n";
+    let (stdout, exit) = build_and_run("mb_list_flatten_empty", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[]\n0");
+}
+
+#[test]
+fn mb_list_sort_by_ascendente_y_descendente() {
+    let src = "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]\n\
+               xs.sort_by(fn(a: Int, b: Int) => a - b)\n\
+               print(xs)\n\
+               let ys: List<Int> = [3, 1, 4]\n\
+               ys.sort_by(fn(a: Int, b: Int) => b - a)\n\
+               print(ys)\n";
+    let (stdout, exit) = build_and_run("mb_list_sort_by", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 1, 2, 3, 4, 5, 6, 9]\n[4, 3, 1]");
+}
+
+#[test]
+fn mb_list_sort_by_comparator_compuesto() {
+    // Ordenar por valor absoluto (caso típico).
+    let src = "fn abs_diff(a: Int, b: Int) -> Int {\n\
+                   let aa: Int = if a < 0 { 0 - a } else { a }\n\
+                   let bb: Int = if b < 0 { 0 - b } else { b }\n\
+                   return aa - bb\n\
+               }\n\
+               let xs: List<Int> = [-3, 1, -4, 1, 5, -9, 2, 6]\n\
+               xs.sort_by(fn(a: Int, b: Int) => abs_diff(a, b))\n\
+               print(xs)\n";
+    let (stdout, exit) = build_and_run("mb_list_sort_by_abs", src);
+    assert_eq!(exit, 0);
+    // Por valor absoluto ascendente: |1|=|1|=1, |2|=2, |-3|=3, |-4|=4,
+    // |5|=5, |6|=6, |-9|=9 → orden estable: [1, 1, 2, -3, -4, 5, 6, -9]
+    assert_eq!(stdout.trim(), "[1, 1, 2, -3, -4, 5, 6, -9]");
 }
 
 // ---- Mini-tanda Lt — let-destructure con sub-patterns ricos ----

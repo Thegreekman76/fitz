@@ -2368,6 +2368,69 @@ fn infer_list_method(
             }
             Type::List(Box::new(t.clone()))
         }
+        // Mini-tanda Mb — `flatten()` requiere `List<List<U>>` y
+        // devuelve `List<U>`. Si T no es List (o no Any), error claro.
+        "flatten" => {
+            if !check_method_arity(ctx, "flatten", args_ty, 0, span) {
+                return Type::Any;
+            }
+            match t {
+                Type::List(inner) => Type::List(inner.clone()),
+                Type::Any => Type::List(Box::new(Type::Any)),
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.flatten()` requiere `List<List<U>>`, el receptor es `List<{}>`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            }
+        }
+        // Mini-tanda Mb — `sort_by(cmp)`. El callback es `fn(T, T) -> Int`.
+        // Muta in-place, devuelve Null (paralelo a `sort`).
+        "sort_by" => {
+            if !check_method_arity(ctx, "sort_by", args_ty, 1, span) {
+                return Type::Null;
+            }
+            let cb_ty = &args_ty[0];
+            match cb_ty {
+                Type::Function { params, ret } => {
+                    if params.len() != 2 {
+                        ctx.error_at(span, format!(
+                            "`.sort_by(cmp)` espera `fn(T, T) -> Int` (2 params); el callback tiene {} params",
+                            params.len(),
+                        ));
+                    } else {
+                        for (i, p) in params.iter().enumerate() {
+                            if !is_compatible(p, t) && !is_compatible(t, p) {
+                                ctx.error_at(span, format!(
+                                    "`.sort_by(cmp)`: param[{}] del callback es `{}`, esperaba `{}`",
+                                    i,
+                                    p.display(ctx.types),
+                                    t.display(ctx.types),
+                                ));
+                            }
+                        }
+                        if !is_compatible(ret, &Type::Int) {
+                            ctx.error_at(span, format!(
+                                "`.sort_by(cmp)`: el callback debe retornar `Int`, retorna `{}`",
+                                ret.display(ctx.types),
+                            ));
+                        }
+                    }
+                }
+                Type::Any => {
+                    // Gradual: callback sin tipo concreto, no chequeo.
+                }
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.sort_by(cmp)` espera `fn(T, T) -> Int`, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                }
+            }
+            Type::Null
+        }
         _ => {
             ctx.error_at(span, format!(
                 "`List<{}>` no tiene el método `{}`",
@@ -2485,6 +2548,11 @@ fn infer_str_method(
         }
         "trim" => {
             check_method_arity(ctx, "trim", args_ty, 0, span);
+            Type::Str
+        }
+        // Mini-tanda Mb — trim_start / trim_end (variantes parciales).
+        "trim_start" | "trim_end" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
             Type::Str
         }
         "replace" => {

@@ -5535,6 +5535,15 @@ impl<'a> CodegenCtx<'a> {
                 check_method_arity(method, args, 0)?;
                 Ok((format!("({}).trim().to_string()", obj_code), Type::Str))
             }
+            // Mini-tanda Mb — trim_start / trim_end.
+            (Type::Str, "trim_start") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).trim_start().to_string()", obj_code), Type::Str))
+            }
+            (Type::Str, "trim_end") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).trim_end().to_string()", obj_code), Type::Str))
+            }
             (Type::Str, "replace") => {
                 check_method_arity(method, args, 2)?;
                 let (old_code, old_ty) = self.gen_expr(&args[0])?;
@@ -5559,7 +5568,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/replace/repeat)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat)",
                 other
             ))),
 
@@ -5638,8 +5647,65 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::List(Box::new((**t).clone()))))
             }
+            // Mini-tanda Mb — `flatten()` requiere `List<List<U>>`.
+            // Emite `Vec::iter().cloned().flat_map(|inner|
+            // inner.lock().unwrap().clone()).collect()`.
+            (Type::List(t), "flatten") => {
+                check_method_arity(method, args, 0)?;
+                let inner = match &**t {
+                    Type::List(inner) => inner.clone(),
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.flatten()` requiere `List<List<U>>`, el receptor es `List<{}>`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let inner_rs = rust_type_for(&inner, self.env)?;
+                // Cada elemento del outer es `Arc<Mutex<Vec<U>>>`; clonamos
+                // el lock para extraer los elementos sin colgar el guard
+                // afuera del map. Output: `Arc<Mutex<Vec<U>>>`.
+                let code = format!(
+                    "Arc::new(Mutex::new(({obj_code}).lock().unwrap().iter().cloned().flat_map(|__sub| __sub.lock().unwrap().clone()).collect::<Vec<{inner_rs}>>()))"
+                );
+                Ok((code, Type::List(Box::new(*inner))))
+            }
+            // Mini-tanda Mb — `sort_by(cmp)` con callback `fn(T, T) -> Int`.
+            // Muta IN-PLACE. El callback se invoca via FnExpr inline (igual
+            // que map/filter/find); Rust `sort_by` espera `FnMut(&T, &T) ->
+            // Ordering`, así que envolvemos el Fn de Fitz convirtiendo el
+            // Int devuelto a `std::cmp::Ordering`.
+            (Type::List(t), "sort_by") => {
+                check_method_arity(method, args, 1)?;
+                // El callback de Fitz toma DOS args (a, b). Hay que pasarlo
+                // distinto de `gen_callback_inline` (que asume 1 arg).
+                // Estrategia: si es FnExpr inline con 2 params, emitimos
+                // una closure Rust idiomática con los nombres tal cual.
+                let cb_code = self.gen_binary_callback_inline(&args[0], t, t, "sort_by")?;
+                let t_rust = rust_type_for(t, self.env)?;
+                // Bindeamos el `obj_code` a un local antes de tomar el
+                // lock — sin esto, `(xs.clone()).lock()` produce un
+                // temporario que rustc dropea al fin del stmt, fallando
+                // E0716 "borrow later used here".
+                let code = format!(
+                    "{{ \
+                        let __cb = {cb_code}; \
+                        let __list = {obj_code}; \
+                        let mut __guard = __list.lock().unwrap(); \
+                        let mut __vec: Vec<{t_rust}> = std::mem::take(&mut *__guard); \
+                        __vec.sort_by(|__a, __b| {{ \
+                            let __r: i64 = __cb(__a.clone(), __b.clone()); \
+                            if __r < 0 {{ std::cmp::Ordering::Less }} \
+                            else if __r > 0 {{ std::cmp::Ordering::Greater }} \
+                            else {{ std::cmp::Ordering::Equal }} \
+                        }}); \
+                        *__guard = __vec; \
+                    }}"
+                );
+                Ok((code, Type::Null))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/reverse/contains/enumerate/zip/chain)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten)",
                 other
             ))),
 
@@ -6227,6 +6293,74 @@ impl<'a> CodegenCtx<'a> {
             param_name, param_ty_rs, ret_ty_rs, body_str
         );
         Ok((code, ret_ty))
+    }
+
+    /// Mini-tanda Mb — variante de `gen_callback_inline` para
+    /// callbacks de 2 parámetros (caso canónico: `sort_by(cmp)`).
+    /// Devuelve el código Rust del closure binario con tipo
+    /// inferido para el ret. Espera que ambos params tipen como T
+    /// (el `sort_by` de `List<T>` los pasa con el mismo tipo).
+    fn gen_binary_callback_inline(
+        &mut self,
+        arg: &Expr,
+        param0_ty: &Type,
+        param1_ty: &Type,
+        method: &str,
+    ) -> Result<String, FitzError> {
+        let arg_span = arg.span();
+        let (params, body) = match arg {
+            Expr::FnExpr { params, body, .. } => (params, body),
+            _ => {
+                return Err(self.err_at(arg_span, format!(
+                    "`.{}(...)` exige un callback inline `fn(a, b) => ...` o `fn(a, b) {{ ... }}`. \
+                     Pasar una fn nombrada como callback (higher-order) llega en un sub-paso \
+                     posterior de 5b.",
+                    method
+                )));
+            }
+        };
+        if params.len() != 2 {
+            return Err(self.err_at(arg_span, format!(
+                "el callback de `.{}` toma 2 parámetros, recibió {}",
+                method,
+                params.len()
+            )));
+        }
+        let p0_name = params[0].name.clone();
+        let p1_name = params[1].name.clone();
+
+        // Para `sort_by` el ret esperado es Int. No ofrecemos la opción
+        // de inferir otro tipo (es el único caller hoy).
+        let ret_ty = Type::Int;
+        let p0_rs = rust_type_for(param0_ty, self.env)?;
+        let p1_rs = rust_type_for(param1_ty, self.env)?;
+        let ret_rs = rust_type_for(&ret_ty, self.env)?;
+
+        self.ret_stack.push(ret_ty.clone());
+        let saved_response_mode = self.response_mode;
+        self.response_mode = false;
+        self.push_scope();
+        self.declare_var(p0_name.clone(), param0_ty.clone());
+        self.declare_var(p1_name.clone(), param1_ty.clone());
+        let saved_indent = self.indent;
+        self.indent = 0;
+        let ret_ty_for_body = ret_ty.clone();
+        let (body_str, result) = self.with_temp_output(|ctx| {
+            for s in body {
+                ctx.gen_stmt_in_fn(s, &ret_ty_for_body)?;
+            }
+            Ok::<(), FitzError>(())
+        });
+        self.indent = saved_indent;
+        self.pop_scope();
+        self.response_mode = saved_response_mode;
+        self.ret_stack.pop();
+        result?;
+
+        Ok(format!(
+            "|{}: {}, {}: {}| -> {} {{ {} }}",
+            p0_name, p0_rs, p1_name, p1_rs, ret_rs, body_str
+        ))
     }
 
     /// Emite un `FnExpr` "suelto" (no callback inline de

@@ -887,8 +887,17 @@ posteriores.
 - ~~`Str.split(sep)`~~ ✓ (S.2). Retorna `List<Str>` materializado
   (no iterator). Empty separator → chars individuales (igual que
   Python por default).
-- ~~`Str.trim()`~~ ✓ (S.2). `.trim_start()` / `.trim_end()`
-  quedan como deuda menor.
+- ~~`Str.trim()`~~ ✓ (S.2). ~~`.trim_start()` / `.trim_end()`
+  quedan como deuda menor~~ ✓ CERRADO 2026-05-18 (mini-tanda Mb).
+  Ambas variantes parciales agregadas en 4 capas: `str_trim_start`/
+  `str_trim_end` en evaluator (delegan a `String::trim_start`/
+  `trim_end` de Rust); branch nuevo `"trim_start" | "trim_end"`
+  en checker (signature `fn() -> Str`, arity 0); 2 ramas
+  `(Type::Str, "trim_start")` y `(Type::Str, "trim_end")` en
+  codegen (emite `({}).trim_start().to_string()`/`.trim_end()`).
+  LSP autocomplete suma las 2 entradas con detail `fn() -> Str`.
+  Grammar TextMate sin cambios (los métodos comparten el pattern
+  general de identifiers).
 - ~~`Str.starts_with(s)` / `.ends_with(s)`~~ ✓ (S.1).
 - ~~`Str.replace(old, new)`~~ ✓ (S.2). Reemplaza TODAS las
   ocurrencias.
@@ -910,12 +919,30 @@ GUIDE_EXAMPLES_COMPILE).
 - ~~`xs.reverse()`~~ ✓ (S.3). IN-PLACE, cualquier T.
 - ~~`xs.contains(v)`~~ ✓ (S.3). Igualdad estructural via
   `PartialEq` (la custom emitida para nominales/listas/maps).
-- `xs.sort_by(fn)` — diferido. Necesita callback comparator.
-  Sub-paso futuro si entra demanda.
+- ~~`xs.sort_by(fn)` — diferido. Necesita callback comparator~~
+  ✓ CERRADO 2026-05-18 (mini-tanda Mb). Callback estilo Rust/JS
+  `cmp(a, b) -> Int` (negativo si a<b, cero si igual, positivo si
+  a>b). 4 capas: `list_sort_by` async en evaluator con selection
+  sort O(n²) (callback es async, no podemos pasarlo a `Vec::sort_by`
+  que es sync; aceptable hasta que aparezca presión real); rama
+  `"sort_by"` en checker validando que el callback sea
+  `fn(T, T) -> Int`; rama codegen que emite `sort_by` Rust nativo
+  con closure binaria que mapea Int → Ordering. Nuevo helper
+  `gen_binary_callback_inline` para callbacks con 2 params
+  (paralelo a `gen_callback_inline`). LSP autocomplete suma
+  `("sort_by", "fn(T, T) -> Int) -> Null")`. Bindeo del receptor
+  a un local antes del lock para evitar E0716 con temporaries.
 - ~~`xs.zip(ys)`~~ ✓ CERRADO 2026-05-18 (mini-tanda It). Ver
   entrada dedicada abajo.
-- `xs.flatten()` para `List<List<T>>` — diferido. Sub-paso
-  futuro si entra demanda.
+- ~~`xs.flatten()` para `List<List<T>>` — diferido~~ ✓ CERRADO
+  2026-05-18 (mini-tanda Mb). Aplana un nivel: `List<List<U>>`
+  → `List<U>`. 4 capas: `list_flatten` en evaluator (snapshot +
+  loop con type-check; error de runtime claro si un elemento no
+  es List); rama `"flatten"` en checker valida `T == List<U>` y
+  devuelve `List<U>`, `Any` recipient pasa gradual; codegen emite
+  `Arc::new(Mutex::new(...iter().cloned().flat_map(|sub|
+  sub.lock().unwrap().clone())...))`; LSP autocomplete suma la
+  entrada con detail `fn() -> List<U>  // requiere List<List<U>>`.
 
 ### ~~Iteradores estilo Python — `enumerate`/`zip`/`chain`~~ ✓ CERRADO 2026-05-18 (mini-tanda It)
 

@@ -1,0 +1,63 @@
+// Mini-tanda Mb — bundle de métodos chicos pendientes.
+//
+// Tres métodos que faltaban en S.2/S.3 y completan la API útil
+// para limpiar strings, aplanar listas anidadas, y ordenar con
+// comparators custom:
+//
+//  - `Str.trim_start()` / `Str.trim_end()`: recortes parciales.
+//  - `List<List<T>>.flatten()`: aplana una nivel.
+//  - `xs.sort_by(cmp)`: orden con callback comparator.
+//
+
+// --- trim_start / trim_end ---
+
+print("[{\"  hola  \".trim_start()}]")        // [hola  ]
+print("[{\"  hola  \".trim_end()}]")          // [  hola]
+
+// Caso típico: limpiar prefijos / sufijos de file paths.
+let path: Str = "/home/user/file.txt"
+print(path.trim_start())                       // /home/user/file.txt (no recorta)
+
+// Composición — trim_start + trim_end = trim normal.
+let raw: Str = "  línea con espacios  "
+let limpio: Str = raw.trim_start().trim_end()
+print("[{limpio}]")                            // [línea con espacios]
+
+// --- flatten: List<List<T>> → List<T> ---
+
+let pages: List<List<Str>> = [
+    ["intro", "índice"],
+    ["cap 1"],
+    ["cap 2", "cap 3", "cap 4"]
+]
+let toc: List<Str> = pages.flatten()
+print(toc)
+// → ["intro", "índice", "cap 1", "cap 2", "cap 3", "cap 4"]
+print(toc.len())                               // 6
+
+// Listas vacías intermedias se ignoran transparente.
+let mixto: List<List<Int>> = [[1, 2], [], [3], []]
+print(mixto.flatten())                         // [1, 2, 3]
+
+// --- sort_by con callback comparator ---
+
+// Convención: cmp(a, b) devuelve Int < 0 si a < b, > 0 si a > b,
+// 0 si son iguales. Paralelo a Rust `cmp` / JS `compareFn`.
+
+let nums: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]
+
+// Ascendente con resta directa
+nums.sort_by(fn(a: Int, b: Int) => a - b)
+print(nums)                                    // [1, 1, 2, 3, 4, 5, 6, 9]
+
+// Descendente — invertir el orden de la resta
+nums.sort_by(fn(a: Int, b: Int) => b - a)
+print(nums)                                    // [9, 6, 5, 4, 3, 2, 1, 1]
+
+// Comparator compuesto — ordenar por valor absoluto
+fn abs(x: Int) -> Int => if x < 0 { 0 - x } else { x }
+
+let signed: List<Int> = [-3, 1, -4, 1, 5, -9, 2, 6]
+signed.sort_by(fn(a: Int, b: Int) => abs(a) - abs(b))
+print(signed)
+// → [1, 1, 2, -3, -4, 5, 6, -9]
