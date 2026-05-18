@@ -3712,6 +3712,7 @@ print(xs)                          // [1, 2, 3]
 | `len()`             | Cantidad de pares.                                      |
 | `filter(fn(k, v))`  | Map nuevo con los pares donde el callback devuelve true (Ex). |
 | `map_values(fn(v))` | Map nuevo: aplica `fn` a cada value, mantiene las keys (Ex).  |
+| `merge(other)`      | Combina dos `Map<K, V>` (last-write-wins, paralelo a `{**m, **other}`) (Ex2). |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -4125,6 +4126,9 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.all(pred)`        | `fn(T) -> Bool`   | `Bool`        | ¿todos? Vacía → `true` (vacuously) (Lx) |
 | `.count(pred)`      | `fn(T) -> Bool`   | `Int`         | cuántos cumplen (Lx) |
 | `.find_index(pred)` | `fn(T) -> Bool`   | `Result<Int>` | índice del primero o `Err` (Lx) |
+| `.flat_map(fn)`     | `fn(T) -> List<U>` | `List<U>`    | map + flatten en un paso (Ex2) |
+| `.first()`          | —                 | `Result<T>`   | primer elemento o `Err("lista vacía")` (Ex2) |
+| `.last()`           | —                 | `Result<T>`   | último elemento o `Err` (Ex2) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,

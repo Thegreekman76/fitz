@@ -1961,6 +1961,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13h-predicados-list.fitz",
     "13i-campos-privados.fitz",
     "13j-extras-str-map.fitz",
+    "13k-flat-map-first-last-merge.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3050,6 +3051,53 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Ex2 — List.flat_map/first/last + Map.merge ----
+
+#[test]
+fn ex2_list_flat_map_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3]\n\
+               let r: List<Int> = xs.flat_map(fn(n: Int) => [n, n * 10])\n\
+               print(r)\n";
+    let (stdout, exit) = build_and_run("ex2_flat_map", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 10, 2, 20, 3, 30]");
+}
+
+#[test]
+fn ex2_list_first_y_last_devuelven_result() {
+    let src = "let xs: List<Int> = [42, 7, 100]\n\
+               match xs.first() {\n\
+                 Ok(v) => print(\"first: {v}\"),\n\
+                 Err(_) => print(\"empty\")\n\
+               }\n\
+               match xs.last() {\n\
+                 Ok(v) => print(\"last: {v}\"),\n\
+                 Err(_) => print(\"empty\")\n\
+               }\n\
+               let empty: List<Int> = []\n\
+               match empty.first() {\n\
+                 Ok(v) => print(\"first: {v}\"),\n\
+                 Err(_) => print(\"empty list\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("ex2_first_last", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "first: 42\nlast: 100\nempty list");
+}
+
+#[test]
+fn ex2_map_merge_compila() {
+    let src = "let m1: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n\
+               let m2: Map<Str, Int> = {\"b\": 20, \"c\": 3}\n\
+               let r: Map<Str, Int> = m1.merge(m2)\n\
+               print(r.len())\n\
+               print(r[\"a\"])\n\
+               print(r[\"b\"])\n\
+               print(r[\"c\"])\n";
+    let (stdout, exit) = build_and_run("ex2_map_merge", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "3\n1\n20\n3");
 }
 
 // ---- Mini-tanda Ex — extras: Str search + Map filter/map_values ----

@@ -550,6 +550,13 @@ fn after_dot_completions(
                     "fn(fn({}) -> Bool) -> Result<Int>",
                     t.display(type_env)
                 )),
+                // Mini-tanda Ex2 — flat_map + first / last.
+                ("flat_map", format!(
+                    "fn(fn({}) -> List<U>) -> List<U>",
+                    t.display(type_env),
+                )),
+                ("first", format!("fn() -> Result<{}>", t.display(type_env))),
+                ("last", format!("fn() -> Result<{}>", t.display(type_env))),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -575,6 +582,14 @@ fn after_dot_completions(
                     "fn(fn({}) -> U) -> Map<{}, U>",
                     v.display(type_env),
                     k.display(type_env),
+                )),
+                // Mini-tanda Ex2 — merge (last-write-wins).
+                ("merge", format!(
+                    "fn(Map<{}, {}>) -> Map<{}, {}>",
+                    k.display(type_env),
+                    v.display(type_env),
+                    k.display(type_env),
+                    v.display(type_env),
                 )),
             ],
         ),
@@ -1296,6 +1311,32 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn ex2_after_dot_list_incluye_flat_map_first_last() {
+        let src = "let xs = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["flat_map", "first", "last"] {
+            assert!(
+                labels.contains(&expected),
+                "falta `{expected}` (mini-tanda Ex2): {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ex2_after_dot_map_incluye_merge() {
+        let src = "let m = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"merge"),
+            "falta `merge` (mini-tanda Ex2): {labels:?}"
+        );
     }
 
     #[test]

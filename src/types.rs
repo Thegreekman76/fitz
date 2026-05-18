@@ -2438,6 +2438,56 @@ fn infer_list_method(
             }
             Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }
         }
+        // Mini-tanda Ex2 — `flat_map(fn(T) -> List<U>)` → `List<U>`.
+        // El callback debe devolver una lista; inferimos U del ret type.
+        "flat_map" => {
+            if !check_method_arity(ctx, "flat_map", args_ty, 1, span) {
+                return Type::List(Box::new(Type::Any));
+            }
+            let inner_u = match &args_ty[0] {
+                Type::Function { params, ret } => {
+                    if params.len() != 1 {
+                        ctx.error_at(span, format!(
+                            "`.flat_map()`: el callback toma 1 param, tiene {}",
+                            params.len(),
+                        ));
+                        return Type::List(Box::new(Type::Any));
+                    }
+                    if !is_compatible(t, &params[0]) && !is_compatible(&params[0], t) {
+                        ctx.error_at(span, format!(
+                            "`.flat_map()`: param del callback es `{}`, esperaba `{}`",
+                            params[0].display(ctx.types),
+                            t.display(ctx.types),
+                        ));
+                    }
+                    match &**ret {
+                        Type::List(u) => (**u).clone(),
+                        Type::Any => Type::Any,
+                        other => {
+                            ctx.error_at(span, format!(
+                                "`.flat_map()`: el callback debe retornar `List<U>`, retorna `{}`",
+                                other.display(ctx.types),
+                            ));
+                            Type::Any
+                        }
+                    }
+                }
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.flat_map()` espera un callback, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            };
+            Type::List(Box::new(inner_u))
+        }
+        // Mini-tanda Ex2 — `first()` / `last()` → `Result<T>`.
+        "first" | "last" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -2656,6 +2706,39 @@ fn infer_map_method(
                     Some(&Type::Bool),
                     span,
                 );
+            }
+            Type::Map(Box::new(k.clone()), Box::new(v.clone()))
+        }
+        // Mini-tanda Ex2 — `merge(other)` combina dos `Map<K, V>` en
+        // uno nuevo con política last-write-wins. Devuelve `Map<K, V>`.
+        "merge" => {
+            if !check_method_arity(ctx, "merge", args_ty, 1, span) {
+                return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
+            }
+            match args_ty[0].base() {
+                Type::Map(k2, v2) => {
+                    if !is_compatible(k2, k) {
+                        ctx.error_at(span, format!(
+                            "`Map.merge()`: las keys deben coincidir, recibió `Map<{}, _>` vs `Map<{}, _>`",
+                            k2.display(ctx.types),
+                            k.display(ctx.types),
+                        ));
+                    }
+                    if !is_compatible(v2, v) {
+                        ctx.error_at(span, format!(
+                            "`Map.merge()`: los values deben coincidir, recibió `Map<_, {}>` vs `Map<_, {}>`",
+                            v2.display(ctx.types),
+                            v.display(ctx.types),
+                        ));
+                    }
+                }
+                Type::Any => {}
+                other => {
+                    ctx.error_at(span, format!(
+                        "`Map.merge()` espera otro `Map`, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                }
             }
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }

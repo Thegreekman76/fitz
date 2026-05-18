@@ -1131,6 +1131,39 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Extras de API 2: List.flat_map/first/last + Map.merge~~ ✓ CERRADO 2026-05-18 (mini-tanda Ex2)
+
+Bundle siguiente al de Ex, cierra deudas chicas adicionales:
+
+- ~~**`xs.flat_map(fn(T) -> List<U>) -> List<U>`**~~ ✓ Combina
+  map + flatten en un paso. Cierra la deuda diferida de S.3
+  ("flat_map combinación de map + flatten"). Implementación en
+  evaluator (snapshot + loop con type-check del ret del callback)
+  + checker (inferencia de U del ret del callback) + codegen
+  (snapshot + for-loop + flatten via `.extend(__sub.lock()...)`).
+- ~~**`xs.first()` / `xs.last()` → `Result<T>`**~~ ✓ Accessors
+  seguros que devuelven `Err("lista vacía")` en vez de panic.
+  Codegen reusa el bindeo del receptor a un local antes del lock
+  para evitar E0716 con temporaries (mismo patrón que sort_by).
+- ~~**`m.merge(other)` → `Map<K, V>`**~~ ✓ Combina dos Maps con
+  política last-write-wins (paralelo a Python `{**m, **other}` /
+  JS spread / Rust `extend`). Preserva orden: keys del receiver
+  primero, keys nuevas de `other` al final. Implementación en
+  evaluator (clone del receiver + loop buscando keys existentes
+  para sobreescribir) + checker (valida `Map<K2, V2>` compatible
+  con `Map<K, V>`) + codegen (mismo patrón).
+
+Implementación en 4 capas cada uno (eval + checker + codegen +
+LSP). 5 unit tests evaluator + 2 LSP unit + 3 compile_e2e
+bit-a-bit. Ejemplo `examples/guide/13k-flat-map-first-last-merge.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE` con casos típicos
+(`Order` con flat_map sobre items, config con merge). Cap 13
+tablas de List + Map extendidas con 4 filas nuevas.
+
+VSCode extension: grammar TextMate sin cambios (los nombres son
+identifiers genéricos). LSP autocomplete actualizado con las 4
+firmas — `flat_map`/`first`/`last` en List, `merge` en Map.
+
 ### ~~Extras de API: Str search + Map transforms~~ ✓ CERRADO 2026-05-18 (mini-tanda Ex)
 
 Mini-tanda bundle que cierra 3 deudas chicas relacionadas:
@@ -1227,8 +1260,8 @@ evaluator + 5 checker) + 1 LSP test + 2 E2E compile bit-a-bit
   directo no funciona (chain espera `List<Int>` — workaround:
   materializar el segundo con list comprehension), y `Range` no
   expone `map`/`filter`/`find`/`sort` (usar List materializada).
-- `xs.flat_map(fn)` (combinación de map + flatten) — diferido
-  con `flatten`.
+- ~~`xs.flat_map(fn)` (combinación de map + flatten)~~ ✓ CERRADO
+  2026-05-18 (mini-tanda Ex2). Ver entrada dedicada abajo.
 
 ### ~~Loops~~ ✓ CERRADO 2026-05-17 (mini-tanda L post-T)
 

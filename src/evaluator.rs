@@ -3162,6 +3162,10 @@ async fn dispatch_method(
         (Value::List(_), "all") => list_all(receiver, args, span).await,
         (Value::List(_), "count") => list_count(receiver, args, span).await,
         (Value::List(_), "find_index") => list_find_index(receiver, args, span).await,
+        // Mini-tanda Ex2 — flat_map + first / last accessors.
+        (Value::List(_), "flat_map") => list_flat_map(receiver, args, span).await,
+        (Value::List(_), "first") => list_first(receiver, args, span),
+        (Value::List(_), "last") => list_last(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3198,6 +3202,8 @@ async fn dispatch_method(
         // Mini-tanda Ex — transformaciones funcionales sobre Map.
         (Value::Map(_), "filter") => map_filter(receiver, args, span).await,
         (Value::Map(_), "map_values") => map_map_values(receiver, args, span).await,
+        // Mini-tanda Ex2 — merge: combina dos Maps (last-write-wins).
+        (Value::Map(_), "merge") => map_merge(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3685,6 +3691,79 @@ async fn list_count(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
     Ok(Value::Int(n))
 }
 
+/// Mini-tanda Ex2 — `xs.flat_map(fn(T) -> List<U>)`: aplica `fn` a
+/// cada elemento y aplana el resultado. Combinación de map + flatten
+/// en un solo paso (paralelo a Rust `Iterator::flat_map` y Python
+/// `[y for x in xs for y in fn(x)]`).
+///
+/// Si el callback NO devuelve List, error de runtime claro.
+#[async_recursion]
+async fn list_flat_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("flat_map", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut out: Vec<Value> = Vec::new();
+    for (i, item) in snapshot.into_iter().enumerate() {
+        let mapped = invoke_callback(callback, item, "flat_map", span).await?;
+        match mapped {
+            Value::List(inner) => out.extend(inner.lock().clone()),
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "List".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "`.flat_map()` requiere callback que devuelva `List`: el elemento [{}] devolvió `{}`",
+                        i, other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Ex2 — `xs.first()`: primer elemento o `Err("no encontrado")`
+/// si la lista está vacía. Devuelve `Result<T>` para ser consistente con
+/// `find`/`find_index` (todos los accessors que pueden fallar devuelven
+/// Result).
+fn list_first(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("first", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let g = items.lock();
+    match g.first() {
+        Some(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v.clone())))),
+        None => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "lista vacía".into(),
+        ))))),
+    }
+}
+
+/// Mini-tanda Ex2 — `xs.last()`: último elemento o `Err`.
+fn list_last(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("last", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let g = items.lock();
+    match g.last() {
+        Some(v) => Ok(Value::Result(ResultVariant::Ok(Box::new(v.clone())))),
+        None => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "lista vacía".into(),
+        ))))),
+    }
+}
+
 /// Mini-tanda Lx — `xs.find_index(pred)`: índice del primer elemento
 /// que satisface el predicado. Devuelve `Result<Int>`: `Ok(i)` si lo
 /// encuentra, `Err("no encontrado")` si no. Paralelo a `find` (que
@@ -4132,6 +4211,38 @@ async fn map_map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
     for (k, v) in snapshot {
         let new_v = invoke_callback(&callback, v, "map_values", span).await?;
         out.push((k, new_v));
+    }
+    Ok(Value::new_map(out))
+}
+
+/// Mini-tanda Ex2 — `m.merge(other)`: combina dos Maps en uno nuevo.
+/// Política last-write-wins (paralelo a Python `{**m, **other}` /
+/// JS spread / Rust `extend`): keys de `other` sobrescriben las de
+/// `m`. Devuelve un Map nuevo (no muta `m` ni `other`).
+fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("merge", &args, 1, span)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let other_pairs = match args.into_iter().next().unwrap() {
+        Value::Map(p) => p,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Map".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.merge()` espera Map, recibió {}", other.type_name()),
+        ))),
+    };
+    let mut out: Vec<(Value, Value)> = pairs.lock().clone();
+    for (k, v) in other_pairs.lock().iter() {
+        // Buscar si la key ya existe — si sí, sobreescribir;
+        // si no, push al final (preserva orden de inserción para
+        // pares nuevos).
+        if let Some(slot) = out.iter_mut().find(|(existing_k, _)| existing_k == k) {
+            slot.1 = v.clone();
+        } else {
+            out.push((k.clone(), v.clone()));
+        }
     }
     Ok(Value::new_map(out))
 }
@@ -9899,6 +10010,96 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(10)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
+    }
+
+    // ---- Mini-tanda Ex2: List.flat_map/first/last + Map.merge ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex2_list_flat_map_concatena_callback_lists() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.flat_map(fn(n) => [n, n * 10])",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            assert_eq!(nums, vec![1, 10, 2, 20, 3, 30]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex2_list_flat_map_callback_no_list_es_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2]\n\
+             let r = xs.flat_map(fn(n) => n)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("List") || err.message.contains("flat_map"),
+            "esperaba mensaje sobre callback que no devuelve List, fue: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex2_list_first_last_ok_y_err() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [10, 20, 30]\n\
+             let a = xs.first()\n\
+             let b = xs.last()\n\
+             let empty: List<Int> = []\n\
+             let c = empty.first()",
+        ).await;
+        res.unwrap();
+        let a = env.lock().get("a").unwrap();
+        let b = env.lock().get("b").unwrap();
+        let c = env.lock().get("c").unwrap();
+        if let Value::Result(ResultVariant::Ok(inner)) = a { assert_eq!(*inner, Value::Int(10)); } else { panic!(); }
+        if let Value::Result(ResultVariant::Ok(inner)) = b { assert_eq!(*inner, Value::Int(30)); } else { panic!(); }
+        assert!(matches!(c, Value::Result(ResultVariant::Err(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex2_map_merge_last_write_wins() {
+        let (env, res) = parse_eval_into_env(
+            "let m1: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n\
+             let m2: Map<Str, Int> = {\"b\": 20, \"c\": 3}\n\
+             let r = m1.merge(m2)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 3);
+            // b debe ser 20 (m2 gana).
+            let b_value = g.iter().find(|(k, _)| k == &Value::Str("b".into()));
+            assert_eq!(b_value.map(|(_, v)| v.clone()), Some(Value::Int(20)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex2_map_merge_preserva_orden_para_pares_nuevos() {
+        let (env, res) = parse_eval_into_env(
+            "let m1: Map<Str, Int> = {\"a\": 1}\n\
+             let m2: Map<Str, Int> = {\"b\": 2, \"c\": 3}\n\
+             let r = m1.merge(m2)\n\
+             let ks: List<Str> = r.keys()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("ks").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let keys: Vec<String> = g.iter().filter_map(|x| if let Value::Str(s) = x { Some(s.clone()) } else { None }).collect();
+            assert_eq!(keys, vec!["a", "b", "c"]);
+        } else {
+            panic!("esperaba List");
+        }
     }
 
     // ---- Mini-tanda Ex: Str.find/index_of/last_index_of, Map.filter/map_values ----

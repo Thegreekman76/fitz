@@ -5877,8 +5877,63 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }))
             }
+            // Mini-tanda Ex2 — flat_map: map + flatten en un paso.
+            // El callback devuelve `List<U>`; el output es `List<U>`
+            // (concatenación de todas las sub-listas).
+            (Type::List(t), "flat_map") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, cb_ret_ty) = self.gen_callback_inline(&args[0], t, None, "flat_map")?;
+                let u_ty = match &cb_ret_ty {
+                    Type::List(u) => (**u).clone(),
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.flat_map()`: el callback debe retornar `List<U>`, retorna `{}`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let u_rs = rust_type_for(&u_ty, self.env)?;
+                let code = format!(
+                    "{{ let __items: Vec<_> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __out: Vec<{u_rs}> = Vec::new(); \
+                       for __it in __items.into_iter() {{ \
+                           let __sub = __cb(__it); \
+                           __out.extend(__sub.lock().unwrap().clone()); \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new(u_ty))))
+            }
+            // Mini-tanda Ex2 — first() / last() devuelven `Result<T>`.
+            // Bindeamos el `obj_code` a un local antes del lock para
+            // evitar E0716 con temporaries de `(xs.clone()).lock()`.
+            (Type::List(t), "first") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
+                       match __g.first().cloned() {{ \
+                           Some(__v) => Ok::<{t_rs}, String>(__v), \
+                           None => Err(String::from(\"lista vacía\")) \
+                       }} }}"
+                );
+                Ok((code, Type::Result { ok: Box::new((**t).clone()), err: Box::new(Type::Str) }))
+            }
+            (Type::List(t), "last") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
+                       match __g.last().cloned() {{ \
+                           Some(__v) => Ok::<{t_rs}, String>(__v), \
+                           None => Err(String::from(\"lista vacía\")) \
+                       }} }}"
+                );
+                Ok((code, Type::Result { ok: Box::new((**t).clone()), err: Box::new(Type::Str) }))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last)",
                 other
             ))),
 
@@ -5940,8 +5995,36 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Map(k.clone(), Box::new(u_ty))))
             }
+            // Mini-tanda Ex2 — merge: combina dos Maps last-write-wins.
+            // Iteramos los pares de `other` y actualizamos/insertamos en
+            // un clone del `obj`. Devuelve Map nuevo.
+            (Type::Map(k, v), "merge") => {
+                check_method_arity(method, args, 1)?;
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                if !matches!(&other_ty, Type::Map(_, _) | Type::Any) {
+                    return Err(self.err_at(call_span, format!(
+                        "`.merge()` espera otro `Map`, recibió `{}`",
+                        display_type(&other_ty, self.env)
+                    )));
+                }
+                let k_rs = rust_type_for(k, self.env)?;
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let mut __out: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let __other = ({other_code}).lock().unwrap().clone(); \
+                       for (__k, __v) in __other.into_iter() {{ \
+                           if let Some(__slot) = __out.iter_mut().find(|(__ek, _)| *__ek == __k) {{ \
+                               __slot.1 = __v; \
+                           }} else {{ \
+                               __out.push((__k, __v)); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::Map(k.clone(), v.clone())))
+            }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge)",
                 other
             ))),
 

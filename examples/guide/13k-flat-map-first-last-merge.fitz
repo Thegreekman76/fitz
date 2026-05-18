@@ -1,0 +1,62 @@
+// Mini-tanda Ex2 — métodos extras: flat_map + first/last + Map.merge.
+//
+// Tres métodos que cierran patrones canónicos que faltaban:
+//
+//  - `xs.flat_map(fn(T) -> List<U>) -> List<U>`: map + flatten en
+//    un paso. Paralelo a Rust `Iterator::flat_map` y Python
+//    `[y for x in xs for y in fn(x)]`.
+//  - `xs.first()` / `xs.last()` → `Result<T>`: accessors chicos
+//    que devuelven `Err("lista vacía")` si la lista está vacía.
+//  - `m.merge(other) -> Map<K, V>`: combina dos Maps con política
+//    last-write-wins. Paralelo a Python `{**m, **other}` / JS spread.
+
+// --- flat_map: map + flatten en un paso ---
+let xs: List<Int> = [1, 2, 3]
+let pairs: List<Int> = xs.flat_map(fn(n: Int) => [n, n * 10])
+print(pairs)                                  // [1, 10, 2, 20, 3, 30]
+
+// Caso típico: expandir cada elemento a varios items
+type Order {
+    id: Int = 0
+    items: List<Str> = []
+}
+
+let orders: List<Order> = [
+    Order { id: 1, items: ["a", "b"] },
+    Order { id: 2, items: ["c"] },
+    Order { id: 3, items: ["d", "e", "f"] }
+]
+
+let all_items: List<Str> = orders.flat_map(fn(o: Order) => o.items)
+print(all_items)                              // ["a", "b", "c", "d", "e", "f"]
+
+// --- first / last: accessors seguros ---
+let nums: List<Int> = [42, 7, 100]
+match nums.first() {
+    Ok(v) => print("first: {v}"),             // first: 42
+    Err(_) => print("vacía")
+}
+match nums.last() {
+    Ok(v) => print("last: {v}"),              // last: 100
+    Err(_) => print("vacía")
+}
+
+// Vacía: devuelve Err en lugar de panic.
+let empty: List<Int> = []
+match empty.first() {
+    Ok(v) => print("first: {v}"),
+    Err(msg) => print("err: {msg}")           // err: lista vacía
+}
+
+// --- Map.merge: combinar Maps last-write-wins ---
+let defaults: Map<Str, Int> = {"timeout": 30, "retries": 3}
+let overrides: Map<Str, Int> = {"timeout": 60, "max_size": 1024}
+
+let config: Map<Str, Int> = defaults.merge(overrides)
+print(config["timeout"])                      // 60 (override gana)
+print(config["retries"])                      // 3 (de defaults)
+print(config["max_size"])                     // 1024 (nuevo)
+
+// Merge preserva orden: keys de `defaults` primero, después las
+// nuevas de `overrides`. Útil para configs encadenadas.
+print(config.keys())                          // ["timeout", "retries", "max_size"]
