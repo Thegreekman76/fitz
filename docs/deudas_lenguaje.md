@@ -758,8 +758,51 @@ GUIDE_EXAMPLES_COMPILE).
   `PartialEq` (la custom emitida para nominales/listas/maps).
 - `xs.sort_by(fn)` — diferido. Necesita callback comparator.
   Sub-paso futuro si entra demanda.
-- `xs.flatten()` para `List<List<T>>`, `xs.zip(ys)` — necesitan
-  tuples (deuda diferida grande).
+- ~~`xs.zip(ys)`~~ ✓ CERRADO 2026-05-18 (mini-tanda It). Ver
+  entrada dedicada abajo.
+- `xs.flatten()` para `List<List<T>>` — diferido. Sub-paso
+  futuro si entra demanda.
+
+### ~~Iteradores estilo Python — `enumerate`/`zip`/`chain`~~ ✓ CERRADO 2026-05-18 (mini-tanda It)
+
+Tres métodos canónicos sobre `List<T>` que componen listas sin
+loops manuales. Encajan natural con Md (tuple destructuring del
+for) — el caso canónico es `for (i, x) in xs.enumerate()`.
+
+- ~~`xs.enumerate()`~~ → `List<(Int, T)>` con pares (índice,
+  elemento). Checker: signature directa. Evaluator: snapshot
+  con `iter().enumerate().map(...)`. Codegen: emite Rust nativo
+  `.iter().cloned().enumerate().map(|(__i, __v)| (__i as i64, __v))`
+  con `Vec<(i64, T)>` final.
+- ~~`xs.zip(ys)`~~ → `List<(T, U)>`, paramétrica en U. Trunca al
+  más corto (paralelo a Python). El checker permite U arbitrario.
+  Codegen: `.iter().cloned().zip(...).collect::<Vec<(T, U)>>`.
+- ~~`xs.chain(ys)`~~ → `List<T>` concatenada. `ys` debe ser
+  `List<T>` (mismo tipo). Codegen: `.iter().cloned().chain(...)`.
+
+**Cambio colateral al codegen del for** para soportar el caso
+canónico: cuando el iter es `List<Tuple(...)>` y el var del `for`
+es `Pattern::Tuple` del mismo aridad, emite destructuring nativo
+Rust `for (a, b) in xs.lock()...`. Paralelo a cómo Map ya lo
+hacía. Esto destraba `for (i, x) in xs.enumerate() { ... }` en
+`fitz build` con paridad bit-a-bit.
+
+Implementación: ~210 LoC en `src/types.rs` (3 signatures
+nuevas) + `src/evaluator.rs` (3 fns) + `src/codegen.rs` (3
+ramas + refactor del for sobre List<Tuple>) + `src/lsp.rs`
+(autocomplete suma 3 entries). **8 unit tests nuevos** (3
+evaluator + 5 checker) + 1 LSP test + 2 E2E compile bit-a-bit
+(`fitz run` ↔ `fitz build`). Ejemplo
+`examples/guide/13d-iteradores.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`. Cap 13 de la guía suma sub-sección
+"Iteradores: enumerate / zip / chain (mini-tanda It)".
+
+**Deuda residual menor**:
+- Iteradores sobre `Range` (`(0..10).enumerate()`) — workaround
+  hoy: materializar a List primero, o usar `for i in 0..10`
+  que ya da el índice. Sin demanda real.
+- `xs.flat_map(fn)` (combinación de map + flatten) — diferido
+  con `flatten`.
 
 ### ~~Loops~~ ✓ CERRADO 2026-05-17 (mini-tanda L post-T)
 

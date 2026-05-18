@@ -2256,6 +2256,63 @@ fn infer_list_method(
             }
             Type::Bool
         }
+        // Mini-tanda It — `enumerate()` devuelve `List<(Int, T)>` con
+        // pares (índice, elemento). Encaja natural con tuple
+        // destructuring del for (Md): `for (i, x) in xs.enumerate()`.
+        "enumerate" => {
+            check_method_arity(ctx, "enumerate", args_ty, 0, span);
+            Type::List(Box::new(Type::Tuple(vec![Type::Int, t.clone()])))
+        }
+        // Mini-tanda It — `zip(ys)` empareja dos listas, truncando al
+        // más corto. `ys: List<U>` con U arbitrario; devuelve
+        // `List<(T, U)>`.
+        "zip" => {
+            if !check_method_arity(ctx, "zip", args_ty, 1, span) {
+                return Type::List(Box::new(Type::Tuple(vec![t.clone(), Type::Any])));
+            }
+            let u = match args_ty[0].base() {
+                Type::List(inner) => (**inner).clone(),
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`List<{}>.zip()` espera `List<U>`, recibió `{}`",
+                        t.display(ctx.types),
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            };
+            Type::List(Box::new(Type::Tuple(vec![t.clone(), u])))
+        }
+        // Mini-tanda It — `chain(ys)` concatena. `ys` debe ser
+        // `List<T>` (mismo tipo). Devuelve `List<T>`.
+        "chain" => {
+            if !check_method_arity(ctx, "chain", args_ty, 1, span) {
+                return Type::List(Box::new(t.clone()));
+            }
+            match args_ty[0].base() {
+                Type::List(inner) => {
+                    if !is_compatible(inner, t) {
+                        ctx.error_at(span, format!(
+                            "`List<{}>.chain()` espera `List<{}>`, recibió `List<{}>`",
+                            t.display(ctx.types),
+                            t.display(ctx.types),
+                            inner.display(ctx.types),
+                        ));
+                    }
+                }
+                Type::Any => {}
+                other => {
+                    ctx.error_at(span, format!(
+                        "`List<{}>.chain()` espera `List<{}>`, recibió `{}`",
+                        t.display(ctx.types),
+                        t.display(ctx.types),
+                        other.display(ctx.types),
+                    ));
+                }
+            }
+            Type::List(Box::new(t.clone()))
+        }
         _ => {
             ctx.error_at(span, format!(
                 "`List<{}>` no tiene el método `{}`",
@@ -7284,5 +7341,56 @@ print(total)
             "esperaba error sobre pattern no admitido: {:?}",
             errors
         );
+    }
+
+    // ---- Mini-tanda It — iteradores enumerate/zip/chain ----
+
+    #[test]
+    fn checker_list_enumerate_tipa_como_list_tuple_int_t() {
+        // `xs.enumerate()` con xs: List<Int> debe tipar `List<(Int, Int)>`.
+        let src = "let xs: List<Int> = [1, 2, 3]\nlet ys: List<(Int, Int)> = xs.enumerate()\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_list_zip_con_tipos_distintos_tipa_list_tuple_t_u() {
+        // `xs.zip(ys)` con xs: List<Int>, ys: List<Str> debe tipar
+        // `List<(Int, Str)>`.
+        let src =
+            "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\", \"b\"]\nlet pairs: List<(Int, Str)> = xs.zip(ys)\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_list_chain_con_tipos_iguales_compila() {
+        // `xs.chain(ys)` con ambos List<Int> debe tipar `List<Int>`.
+        let src =
+            "let xs: List<Int> = [1, 2]\nlet ys: List<Int> = [3, 4]\nlet zs: List<Int> = xs.chain(ys)\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_list_chain_con_tipos_incompatibles_es_error() {
+        // `xs.chain(ys)` con xs: List<Int>, ys: List<Str> → error.
+        let src =
+            "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\"]\nlet zs = xs.chain(ys)\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("chain")
+                && e.message.contains("List<Int>")),
+            "esperaba error sobre chain con tipos incompatibles: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_list_enumerate_se_compone_con_for_destructuring_de_md() {
+        // El caso canónico que motiva la mini-tanda: `for (i, x) in xs.enumerate()`.
+        let src = "let xs: List<Str> = [\"a\", \"b\"]\nfor (i, x) in xs.enumerate() {\n    let idx: Int = i\n    let val: Str = x\n}\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 }

@@ -1,0 +1,55 @@
+// Mini-tanda It — iteradores enumerate / zip / chain sobre List.
+//
+// Tres métodos canónicos para componer listas sin loops manuales.
+
+// enumerate — pares (índice, elemento). Encaja natural con el
+// tuple destructuring del for (mini-tanda Md).
+let nombres: List<Str> = ["ada", "bea", "cam"]
+for (i, n) in nombres.enumerate() {
+    print("{i}: {n}")
+}
+// 0: ada
+// 1: bea
+// 2: cam
+
+// zip — empareja dos listas, trunca al más corto.
+let valores: List<Int> = [10, 20, 30]
+let pesos: List<Int> = [1, 2]
+let pares: List<(Int, Int)> = valores.zip(pesos)
+print(pares.len())               // 2 (trunca al menor)
+
+for (v, w) in pares {
+    print("v={v}, w={w}")
+}
+// v=10, w=1
+// v=20, w=2
+
+// chain — concatena dos listas del mismo tipo. Devuelve nueva,
+// no muta las originales.
+let primeras: List<Int> = [1, 2, 3]
+let segundas: List<Int> = [4, 5]
+let todo: List<Int> = primeras.chain(segundas)
+print(todo.len())                // 5
+print(todo[0])                   // 1
+print(todo[4])                   // 5
+
+// Composición — enumerate sobre el resultado de chain.
+let etiquetadas: List<(Int, Int)> = todo.enumerate()
+for (idx, val) in etiquetadas {
+    print("idx={idx} val={val}")
+}
+// idx=0 val=1
+// idx=1 val=2
+// idx=2 val=3
+// idx=3 val=4
+// idx=4 val=5
+
+// zip + tipos heterogéneos.
+let ids: List<Int> = [101, 102]
+let users: List<Str> = ["ada", "bea"]
+let registro: List<(Int, Str)> = ids.zip(users)
+for (id, name) in registro {
+    print("user {id}: {name}")
+}
+// user 101: ada
+// user 102: bea

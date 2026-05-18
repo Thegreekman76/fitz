@@ -3721,6 +3721,51 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para el ejemplo completo.
 
+### Iteradores: `enumerate` / `zip` / `chain` (mini-tanda It)
+
+Tres métodos canónicos para componer listas sin loops manuales,
+inspirados en Python/Rust. Todos devuelven una **lista nueva**
+(no mutan el receptor).
+
+| Método              | Args         | Retorna           | Notas |
+|---------------------|--------------|-------------------|-------|
+| `.enumerate()`      | —            | `List<(Int, T)>`  | Pares (índice, elemento). |
+| `.zip(ys)`          | `List<U>`    | `List<(T, U)>`    | Empareja dos listas; trunca al más corto. |
+| `.chain(ys)`        | `List<T>`    | `List<T>`         | Concatena dos listas del mismo tipo. |
+
+El caso canónico de `enumerate` combina con el tuple destructuring
+del `for` (mini-tanda Md):
+
+```fitz
+let nombres: List<Str> = ["ada", "bea", "cam"]
+for (i, n) in nombres.enumerate() {
+    print("{i}: {n}")
+}
+// 0: ada / 1: bea / 2: cam
+```
+
+`zip` permite recorrer dos listas en paralelo. Si los tamaños
+difieren, trunca al menor (paralelo a Python):
+
+```fitz
+let valores: List<Int> = [10, 20, 30]
+let pesos: List<Int> = [1, 2]
+let pares: List<(Int, Int)> = valores.zip(pesos)
+print(pares.len())               // 2 (no 3 — `pesos` tiene 2 items)
+```
+
+`chain` concatena (sin mutar):
+
+```fitz
+let primeras: List<Int> = [1, 2, 3]
+let segundas: List<Int> = [4, 5]
+let todo: List<Int> = primeras.chain(segundas)
+print(todo.len())                // 5
+```
+
+Ver [examples/guide/13d-iteradores.fitz](../examples/guide/13d-iteradores.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
 - **`return` adentro de un brazo de `match` como expresión** —
@@ -3728,8 +3773,8 @@ para el ejemplo completo.
   desde adentro con `return`. Se puede pulir cuando moleste.
 - **`xs.sort_by(fn)`** — sort con comparator custom. Si aparece
   demanda, sub-paso futuro.
-- **`xs.zip(ys)`, `xs.flatten()`** — necesitan tuples (deuda
-  diferida) o decisión de retorno.
+- **`xs.flatten()`** — `List<List<T>>` → `List<T>`. Sin demanda
+  concreta.
 - **Más métodos**: `.find()` para strings, etc. Se irán sumando
   con la práctica.
 
@@ -3741,7 +3786,9 @@ para el ejemplo completo.
 > sub-sección de arriba), **métodos chicos de Str y List**
 > (mini-tanda S — `.contains`/`.starts_with`/`.ends_with`/
 > `.split`/`.trim`/`.replace`/`.repeat` sobre Str;
-> `.sort`/`.reverse`/`.contains` sobre List).
+> `.sort`/`.reverse`/`.contains` sobre List), **iteradores
+> `.enumerate()`/`.zip()`/`.chain()`** (mini-tanda It — ver
+> sub-sección de arriba).
 > Forma idiomática del chain multi-línea:
 > ```fitz
 > let nombres = users

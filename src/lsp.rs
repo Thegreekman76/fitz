@@ -507,6 +507,14 @@ fn after_dot_completions(
                 ("sort", "fn() -> Null".into()),
                 ("reverse", "fn() -> Null".into()),
                 ("contains", format!("fn({}) -> Bool", t.display(type_env))),
+                // Mini-tanda It — iteradores estilo Python.
+                ("enumerate", format!("fn() -> List<(Int, {})>", t.display(type_env))),
+                ("zip", format!("fn(List<U>) -> List<({}, U)>", t.display(type_env))),
+                ("chain", format!(
+                    "fn(List<{}>) -> List<{}>",
+                    t.display(type_env),
+                    t.display(type_env)
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -1205,6 +1213,24 @@ mod tests {
         // El detail de `contains` debe reflejar el tipo del elemento.
         let item_contains = items.iter().find(|i| i.label == "contains").unwrap();
         assert_eq!(item_contains.detail.as_deref(), Some("fn(Int) -> Bool"));
+    }
+
+    #[test]
+    fn after_dot_sobre_list_incluye_enumerate_zip_y_chain() {
+        // Mini-tanda It: enumerate, zip, chain se suman a List.
+        let src = "let xs = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["enumerate", "zip", "chain"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda It) en List: {labels:?}"
+            );
+        }
+        // El detail de `enumerate` debe reflejar el tipo del elemento.
+        let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
+        assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
     }
 
     #[test]

@@ -1795,6 +1795,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13-metodos.fitz",
     "13b-metodos-custom.fitz",
     "13c-metodos-extras.fitz",
+    "13d-iteradores.fitz",
     "14-result.fitz",
     "16-modulos.fitz",
     "17-http.fitz",
@@ -2632,4 +2633,35 @@ fn mini_tanda_md_for_wildcard_pattern_compila() {
     let (stdout, exit) = build_and_run("mini_tanda_md_wildcard", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "5");
+}
+
+// ---- Mini-tanda It — enumerate / zip / chain ----
+
+#[test]
+fn mini_tanda_it_enumerate_con_for_destructuring() {
+    // `for (i, x) in xs.enumerate() { ... }` — caso canónico que
+    // motiva la mini-tanda. Encaja con Md (tuple destructuring).
+    let src = "let xs: List<Str> = [\"a\", \"b\", \"c\"]\n\
+               for (i, x) in xs.enumerate() {\n\
+                 print(\"{i}={x}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mini_tanda_it_enumerate", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "0=a\n1=b\n2=c");
+}
+
+#[test]
+fn mini_tanda_it_zip_trunca_y_chain_concatena() {
+    let src = "let xs: List<Int> = [1, 2, 3]\n\
+               let ys: List<Int> = [10, 20]\n\
+               let zipped: List<(Int, Int)> = xs.zip(ys)\n\
+               print(zipped.len())\n\
+               let chained: List<Int> = xs.chain(ys)\n\
+               print(chained.len())\n\
+               print(chained[4])\n";
+    let (stdout, exit) = build_and_run("mini_tanda_it_zip_chain", src);
+    assert_eq!(exit, 0);
+    // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
+    // último elemento del chain es 20.
+    assert_eq!(stdout.trim(), "2\n5\n20");
 }

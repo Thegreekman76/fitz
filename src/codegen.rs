@@ -4158,6 +4158,48 @@ impl<'a> CodegenCtx<'a> {
                             .to_string(),
                     ));
                 }
+                // Mini-tanda It — si el elem es Tuple y el var es Pattern::Tuple
+                // del mismo aridad, emitimos destructuring nativo Rust (paralelo
+                // a Map). Caso canónico: `for (i, x) in xs.enumerate()`.
+                if let (Pattern::Tuple(subs), Type::Tuple(item_tys)) = (var, &elem_ty) {
+                    if subs.len() == item_tys.len() {
+                        let mut bindings: Vec<(String, Vec<(String, Type)>)> = Vec::with_capacity(subs.len());
+                        for (sub, ty) in subs.iter().zip(item_tys.iter()) {
+                            let bnd = pattern_to_simple_binding(sub, ty)
+                                .map_err(|msg| self.err_at(iter.span(), msg))?;
+                            bindings.push(bnd);
+                        }
+                        let parts: Vec<String> = bindings
+                            .iter()
+                            .map(|(name, _)| {
+                                let prefix = if name == "_" { "" } else { "mut " };
+                                format!("{prefix}{name}")
+                            })
+                            .collect();
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for ({}) in ({iter_code}).lock().unwrap().clone().into_iter() {{",
+                            parts.join(", ")
+                        )
+                        .unwrap();
+                        self.indent += 1;
+                        self.push_scope();
+                        for (_, declared) in &bindings {
+                            for (name, ty) in declared {
+                                self.declare_var(name.clone(), ty.clone());
+                            }
+                        }
+                        for s in body {
+                            self.gen_stmt_in_fn(s, ret_expected)?;
+                        }
+                        self.pop_scope();
+                        self.indent -= 1;
+                        self.emit_indent();
+                        self.emit("}\n");
+                        return Ok(());
+                    }
+                }
                 let (binding, declared) = pattern_to_simple_binding(var, &elem_ty)
                     .map_err(|msg| self.err_at(iter.span(), msg))?;
                 let mut_prefix = if binding == "_" { "" } else { "mut " };
@@ -5074,8 +5116,63 @@ impl<'a> CodegenCtx<'a> {
                 ))
             }
             (Type::List(t), "contains") => self.gen_list_contains(&obj_code, t, args),
+            // Mini-tanda It — iteradores enumerate/zip/chain.
+            (Type::List(t), "enumerate") => {
+                check_method_arity(method, args, 0)?;
+                let elem_rust = rust_type_for(t, self.env)?;
+                // Emite Vec<(i64, T)> y lo envuelve en Arc<Mutex<>> igual
+                // que cualquier List literal.
+                let code = format!(
+                    "Arc::new(Mutex::new(({obj_code}).lock().unwrap().iter().cloned().enumerate().map(|(__i, __v)| (__i as i64, __v)).collect::<Vec<(i64, {elem_rust})>>()))"
+                );
+                Ok((
+                    code,
+                    Type::List(Box::new(Type::Tuple(vec![Type::Int, (**t).clone()]))),
+                ))
+            }
+            (Type::List(t), "zip") => {
+                check_method_arity(method, args, 1)?;
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                let u_ty = match &other_ty {
+                    Type::List(inner) => (**inner).clone(),
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`zip` espera `List<U>`, recibió `{}`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let t_rust = rust_type_for(t, self.env)?;
+                let u_rust = rust_type_for(&u_ty, self.env)?;
+                let code = format!(
+                    "Arc::new(Mutex::new(({obj_code}).lock().unwrap().iter().cloned().zip(({other_code}).lock().unwrap().iter().cloned()).collect::<Vec<({t_rust}, {u_rust})>>()))"
+                );
+                Ok((
+                    code,
+                    Type::List(Box::new(Type::Tuple(vec![(**t).clone(), u_ty]))),
+                ))
+            }
+            (Type::List(t), "chain") => {
+                check_method_arity(method, args, 1)?;
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                match &other_ty {
+                    Type::List(inner) if lub(t, inner).is_ok() => {}
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`chain` espera `List<{}>`, recibió `{}`",
+                            display_type(t, self.env),
+                            display_type(other, self.env)
+                        )));
+                    }
+                }
+                let t_rust = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "Arc::new(Mutex::new(({obj_code}).lock().unwrap().iter().cloned().chain(({other_code}).lock().unwrap().iter().cloned()).collect::<Vec<{t_rust}>>()))"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/reverse/contains)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/reverse/contains/enumerate/zip/chain)",
                 other
             ))),
 

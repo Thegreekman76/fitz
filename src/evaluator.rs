@@ -3096,6 +3096,10 @@ async fn dispatch_method(
         (Value::List(_), "sort") => list_sort(receiver, args, span),
         (Value::List(_), "reverse") => list_reverse(receiver, args, span),
         (Value::List(_), "contains") => list_contains(receiver, args, span),
+        // Mini-tanda It — iteradores estilo Python:
+        (Value::List(_), "enumerate") => list_enumerate(receiver, args, span),
+        (Value::List(_), "zip") => list_zip(receiver, args, span),
+        (Value::List(_), "chain") => list_chain(receiver, args, span),
         // Map
         (Value::Map(_), "get") => map_get(receiver, args, span),
         (Value::Map(_), "has") => map_has(receiver, args, span),
@@ -3512,6 +3516,81 @@ fn list_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
     let needle = args.into_iter().next().unwrap();
     let found = items.lock().contains(&needle);
     Ok(Value::Bool(found))
+}
+
+/// Mini-tanda It — `xs.enumerate()` → `List<(Int, T)>` con pares
+/// (índice, elemento). Snapshot del Vec para evitar re-entrancia.
+fn list_enumerate(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("enumerate", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot = items.lock().clone();
+    let out: Vec<Value> = snapshot
+        .into_iter()
+        .enumerate()
+        .map(|(i, v)| Value::Tuple(vec![Value::Int(i as i64), v]))
+        .collect();
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda It — `xs.zip(ys)` → `List<(T, U)>` truncado al más
+/// corto. Si los tipos son distintos, igual funciona — los pares son
+/// tuples heterogéneas.
+fn list_zip(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("zip", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let other_items = match args.into_iter().next().unwrap() {
+        Value::List(other) => other,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`zip` espera otra `List`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let a = items.lock().clone();
+    let b = other_items.lock().clone();
+    let out: Vec<Value> = a
+        .into_iter()
+        .zip(b)
+        .map(|(x, y)| Value::Tuple(vec![x, y]))
+        .collect();
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda It — `xs.chain(ys)` → `List<T>` concatenado. Snapshot
+/// de ambas listas para evitar re-entrancia.
+fn list_chain(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("chain", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let other_items = match args.into_iter().next().unwrap() {
+        Value::List(other) => other,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`chain` espera otra `List`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let mut out: Vec<Value> = items.lock().clone();
+    out.extend(other_items.lock().clone());
+    Ok(Value::new_list(out))
 }
 
 // ---- Map ----
@@ -7589,6 +7668,63 @@ for x in 42 {
         let res = parse_and_eval(src).await;
         let err = res.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
+    }
+
+    // ---- Mini-tanda It — iteradores enumerate/zip/chain ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_enumerate_emite_pares_indice_elem() {
+        // `[10, 20, 30].enumerate()` → `[(0, 10), (1, 20), (2, 30)]`.
+        let src = r#"
+let xs = [10, 20, 30]
+let pairs = xs.enumerate()
+let first_idx = pairs[0].0
+let first_val = pairs[0].1
+let last_idx = pairs[2].0
+let last_val = pairs[2].1
+let total_len = pairs.len()
+"#;
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("first_idx"), Some(Value::Int(0)));
+        assert_eq!(env.lock().get("first_val"), Some(Value::Int(10)));
+        assert_eq!(env.lock().get("last_idx"), Some(Value::Int(2)));
+        assert_eq!(env.lock().get("last_val"), Some(Value::Int(30)));
+        assert_eq!(env.lock().get("total_len"), Some(Value::Int(3)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_zip_trunca_al_mas_corto() {
+        // `[1, 2, 3].zip(["a", "b"])` → `[(1, "a"), (2, "b")]` (len 2).
+        let src = r#"
+let xs = [1, 2, 3]
+let ys = ["a", "b"]
+let zs = xs.zip(ys)
+let total = zs.len()
+let first_x = zs[0].0
+let first_y = zs[0].1
+"#;
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(2)));
+        assert_eq!(env.lock().get("first_x"), Some(Value::Int(1)));
+        assert_eq!(env.lock().get("first_y"), Some(Value::Str("a".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_chain_concatena_dos_listas() {
+        // `[1, 2].chain([3, 4, 5])` → `[1, 2, 3, 4, 5]`.
+        let src = r#"
+let result = [1, 2].chain([3, 4, 5])
+let total = result.len()
+let first = result[0]
+let last = result[4]
+"#;
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("first"), Some(Value::Int(1)));
+        assert_eq!(env.lock().get("last"), Some(Value::Int(5)));
     }
 
     #[tokio::test(flavor = "current_thread")]
