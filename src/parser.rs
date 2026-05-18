@@ -282,16 +282,26 @@ impl Parser {
         true
     }
 
-    /// `a or b or c` — `or` es izquierda-asociativo y tiene menor
-    /// precedencia que `and`. Esto da `a and b or c` = `(a and b) or c`.
+    /// `a or b or c` — `or` y `xor` son izquierda-asociativos y
+    /// comparten precedencia (más baja que `and`, paralelo a Python
+    /// para `or`). Esto da `a and b or c` = `(a and b) or c` y
+    /// `a or b xor c` = `(a or b) xor c` (left-fold).
+    ///
+    /// Mini-tanda Xor: `xor` se sumó al mismo nivel para que
+    /// `a xor b xor c` chain natural sin paréntesis.
     fn logic_or(&mut self) -> FitzResult<Expr> {
         let mut left = self.logic_and()?;
-        while matches!(self.peek(), Token::Or) {
+        loop {
+            let op = match self.peek() {
+                Token::Or => BinOpKind::Or,
+                Token::Xor => BinOpKind::Xor,
+                _ => break,
+            };
             let span = self.cur_span();
             self.advance();
             let right = self.logic_and()?;
             left = Expr::BinOp {
-                op: BinOpKind::Or,
+                op,
                 left: Box::new(left),
                 right: Box::new(right),
                 span,
@@ -4312,6 +4322,75 @@ mod tests {
                 right: Box::new(Expr::Ident("y".into(), Span::ZERO)), span: Span::ZERO,
             }, Span::ZERO),
         );
+    }
+
+    // ---- Mini-tanda Xor ----
+
+    #[test]
+    fn xor_basic_parses() {
+        assert_eq!(
+            parse_one_stmt("x xor y"),
+            Stmt::Expr(Expr::BinOp {
+                op: BinOpKind::Xor,
+                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
+                span: Span::ZERO,
+            }, Span::ZERO),
+        );
+    }
+
+    #[test]
+    fn xor_misma_precedencia_que_or_left_assoc() {
+        // `a xor b xor c` → `(a xor b) xor c`
+        let stmt = parse_one_stmt("a xor b xor c");
+        let expected = Stmt::Expr(Expr::BinOp {
+            op: BinOpKind::Xor,
+            left: Box::new(Expr::BinOp {
+                op: BinOpKind::Xor,
+                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
+            span: Span::ZERO,
+        }, Span::ZERO);
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn xor_y_or_chain_libremente_misma_precedencia() {
+        // `a or b xor c` → `(a or b) xor c` (mismo nivel, left-assoc).
+        let stmt = parse_one_stmt("a or b xor c");
+        let expected = Stmt::Expr(Expr::BinOp {
+            op: BinOpKind::Xor,
+            left: Box::new(Expr::BinOp {
+                op: BinOpKind::Or,
+                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
+            span: Span::ZERO,
+        }, Span::ZERO);
+        assert_eq!(stmt, expected);
+    }
+
+    #[test]
+    fn and_tiene_mayor_precedencia_que_xor() {
+        // `a and b xor c` → `(a and b) xor c`
+        let stmt = parse_one_stmt("a and b xor c");
+        let expected = Stmt::Expr(Expr::BinOp {
+            op: BinOpKind::Xor,
+            left: Box::new(Expr::BinOp {
+                op: BinOpKind::And,
+                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
+            span: Span::ZERO,
+        }, Span::ZERO);
+        assert_eq!(stmt, expected);
     }
 
     #[test]

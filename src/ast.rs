@@ -686,6 +686,10 @@ pub enum BinOpKind {
     Mod,
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
     And, Or,
+    /// Mini-tanda Xor — `a xor b` lógico (paralelo a `and`/`or`).
+    /// Solo válido sobre `Bool`. Equivalente a `a != b` sobre Bool
+    /// pero más declarativo.
+    Xor,
     /// Mini-tanda Bits — operadores bit-a-bit sobre `Int`. El
     /// checker rechaza cualquier otro tipo. Shifts `<<`/`>>` con
     /// RHS negativo o >= 64 → error de runtime.

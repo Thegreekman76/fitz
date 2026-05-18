@@ -1638,7 +1638,7 @@ fn is_const_eval_expr(e: &Expr) -> bool {
             matches!(
                 op,
                 Add | Sub | Mul | Div | Mod | Eq | NotEq | Lt | LtEq | Gt | GtEq
-                | And | Or | BitAnd | BitOr | BitXor | Shl | Shr
+                | And | Or | Xor | BitAnd | BitOr | BitXor | Shl | Shr
             ) && is_const_eval_expr(left)
                 && is_const_eval_expr(right)
         }
@@ -5251,6 +5251,10 @@ impl<'a> CodegenCtx<'a> {
             }
             BinOpKind::And => Ok((format!("({} && {})", lc, rc), Type::Bool)),
             BinOpKind::Or => Ok((format!("({} || {})", lc, rc), Type::Bool)),
+            // Mini-tanda Xor — `a xor b` = `a != b` sobre Bool.
+            // Sin short-circuit (paralelo al evaluator); emite `!=`
+            // directo entre dos `bool` Rust.
+            BinOpKind::Xor => Ok((format!("({} != {})", lc, rc), Type::Bool)),
             // Mini-tanda Bits — operadores bit-a-bit sobre Int. Emit
             // Rust nativo. Para shifts, el RHS de Rust requiere `u32`
             // (i64 no implementa Shl<i64>), así que cast explícito.

@@ -41,3 +41,23 @@ if (not active) {
 // el RESULTADO de una comparación hace falta paréntesis:
 let n = 5
 print(not (n == 10))               // true: niega el bool resultante
+
+// `xor` (mini-tanda Xor): "exactamente uno de los dos". Equivale a
+// `a != b` sobre Bool pero se lee más declarativo. NO short-circuita.
+print(true xor true)               // false
+print(true xor false)              // true
+print(false xor true)              // true
+print(false xor false)             // false
+
+// Caso típico: validar que se pasó EXACTAMENTE una de dos opciones.
+fn solo_uno(p: Bool, q: Bool) -> Bool {
+    return p xor q
+}
+
+print(solo_uno(true, false))       // true — solo uno activo
+print(solo_uno(true, true))        // false — ambos activos
+
+// Chain: `xor` y `or` tienen la misma precedencia, left-associative.
+// `a or b xor c` parsea como `(a or b) xor c`.
+print(true or false xor true)      // false — (true or false)=true, xor true=false
+print(true xor false xor true)     // false — ((T xor F)=T xor T)=F

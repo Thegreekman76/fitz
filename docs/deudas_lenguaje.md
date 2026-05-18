@@ -782,8 +782,26 @@ posteriores.
   sin cambios al checker/evaluator/codegen (reusan `Stmt::Assign`
   regular). 4 unit tests (lexer) + 4 evaluator + 1 E2E bit-a-bit.
 
-- **`xor` lógico** — `a != b` sobre `Bool` cubre. Sumar si aparece
-  presión.
+- ~~**`xor` lógico**~~ ✓ CERRADO 2026-05-18 (mini-tanda Xor).
+  Operador binario `a xor b` sobre Bool: equivale a `a != b` pero
+  más declarativo. Mismo nivel de precedencia que `or` (left-assoc),
+  más bajo que `and`. NO hace short-circuit (necesita ambos lados).
+  Implementación en 5 capas: **lexer** suma `Token::Xor` + keyword
+  `"xor"`; **AST** suma `BinOpKind::Xor`; **parser** `logic_or`
+  refactor para aceptar tanto `Token::Or` como `Token::Xor` con
+  loop genérico; **checker** rama `And | Or | Xor` exige Bool en
+  ambos lados; **evaluator** route via `eval_logical` (que ya valida
+  tipos, pero sin short-circuit para Xor) y devuelve `lb != rb`;
+  **codegen** emite `({} != {})` Rust directo. `fmt.rs` suma `xor`
+  al `binop_str`. Grammar TextMate suma `xor` al pattern de
+  `keyword.operator.logical.fitz`. F14 `is_const_eval_expr` también
+  acepta `Xor` en operands const-eval. Tests: 4 parser (basic,
+  chain misma precedencia, mix con or, mix con and) + 3 evaluator
+  (tabla de verdad, sin short-circuit, no-Bool type error) + 3
+  compile_e2e bit-a-bit (tabla, chain, mix and+or+xor). Ejemplo
+  `examples/guide/06-logica.fitz` extendido con sección xor;
+  cap 6 actualizado (tabla + sub-sección de chain + nota sobre
+  no-short-circuit).
 
 ### Lexer / tokenización
 

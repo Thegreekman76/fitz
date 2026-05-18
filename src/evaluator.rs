@@ -2306,7 +2306,9 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
         // And/Or hacen short-circuit: no evaluamos `right` salvo que haga
         // falta. El resto de BinOps evalúan ambos lados antes de combinar.
-        Expr::BinOp { op, left, right, span } if matches!(op, BinOpKind::And | BinOpKind::Or) => {
+        Expr::BinOp { op, left, right, span }
+            if matches!(op, BinOpKind::And | BinOpKind::Or | BinOpKind::Xor) =>
+        {
             eval_logical(op, left, right, env, *span).await
         }
         Expr::BinOp { op, left, right, span } => {
@@ -4032,7 +4034,7 @@ fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
         Eq => Ok(Value::Bool(l == r)),
         NotEq => Ok(Value::Bool(l != r)),
         Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
-        And | Or => unreachable!("And/Or se manejan en eval_logical antes de llegar acá"),
+        And | Or | Xor => unreachable!("And/Or/Xor se manejan en eval_logical antes de llegar acá"),
         // Mini-tanda Bits — solo Int. El checker rechaza otros tipos
         // estáticamente; el runtime emite TypeError si por modo
         // gradual llega un valor no-Int.
@@ -4198,6 +4200,8 @@ async fn eval_logical(
     let lb = expect_bool(&lv, op_name(op), "izquierdo", left.span())?;
 
     // Short-circuit: `false and ...` → false, `true or ...` → true.
+    // `xor` NO tiene short-circuit (necesita ambos lados para saber el
+    // resultado), así que cae directo al eval del RHS.
     match op {
         BinOpKind::And if !lb => return Ok(Value::Bool(false)),
         BinOpKind::Or if lb => return Ok(Value::Bool(true)),
@@ -4207,7 +4211,11 @@ async fn eval_logical(
     let rv = eval_expr(right, env).await?;
     let rb = expect_bool(&rv, op_name(op), "derecho", right.span())?;
     let _ = span; // mantenido por consistencia de firma con eval_binop
-    Ok(Value::Bool(rb))
+    // Mini-tanda Xor — `a xor b` = `a != b` sobre Bool.
+    match op {
+        BinOpKind::Xor => Ok(Value::Bool(lb != rb)),
+        _ => Ok(Value::Bool(rb)),
+    }
 }
 
 /// Helper para chequear que un Value sea Bool. Devuelve el bool o un
@@ -4233,7 +4241,7 @@ fn op_name(op: &BinOpKind) -> &'static str {
         Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "%",
         Eq => "==", NotEq => "!=",
         Lt => "<", LtEq => "<=", Gt => ">", GtEq => ">=",
-        And => "and", Or => "or",
+        And => "and", Or => "or", Xor => "xor",
         BitAnd => "&", BitOr => "|", BitXor => "^",
         Shl => "<<", Shr => ">>",
     }
@@ -5689,6 +5697,50 @@ mod tests {
     async fn and_con_no_bool_derecha_es_type_error() {
         // Para que el lado derecho se evalúe, el izquierdo debe ser true.
         let e = binop(BinOpKind::And, Expr::Bool(true, Span::ZERO), Expr::Int(1, Span::ZERO));
+        assert!(matches!(
+            eval_expr_test(e).await.unwrap_err(),
+            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+        ));
+    }
+
+    // ---- Mini-tanda Xor ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn xor_tabla_de_verdad_completa() {
+        // T xor T → F, T xor F → T, F xor T → T, F xor F → F.
+        for (l, r, expected) in [(true, true, false), (true, false, true), (false, true, true), (false, false, false)] {
+            let e = binop(
+                BinOpKind::Xor,
+                Expr::Bool(l, Span::ZERO),
+                Expr::Bool(r, Span::ZERO),
+            );
+            assert_eq!(
+                eval_expr_test(e).await.unwrap(),
+                Value::Bool(expected),
+                "xor({}, {}) esperaba {}",
+                l,
+                r,
+                expected
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn xor_evalua_ambos_lados_sin_short_circuit() {
+        // Si `false xor <bad>` cortara como `and` lo haría, no
+        // emitiría error. Como xor NO short-circuita, evalua el RHS
+        // y dispara TypeError sobre el Ident no definido.
+        let e = binop(
+            BinOpKind::Xor,
+            Expr::Bool(false, Span::ZERO),
+            Expr::Ident("no_existe".into(), Span::ZERO),
+        );
+        assert!(eval_expr_test(e).await.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn xor_con_no_bool_es_type_error() {
+        let e = binop(BinOpKind::Xor, Expr::Int(1, Span::ZERO), Expr::Bool(true, Span::ZERO));
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
             EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })

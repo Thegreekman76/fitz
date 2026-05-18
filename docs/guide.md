@@ -1297,7 +1297,7 @@ cómo se conecta con la comparación que vimos en el cap. 4.
 de comparación e igualdad del cap. 4 ya devuelven `Bool`. Acá los
 combinamos con los operadores lógicos `and` y `or`.
 
-### `and` y `or`
+### `and`, `or` y `xor`
 
 Como palabras, no como símbolos. (Fitz no usa `&&` ni `||`.) Operan
 sobre `Bool` y devuelven `Bool`:
@@ -1312,6 +1312,10 @@ sobre `Bool` y devuelven `Bool`:
 | `true or false`    | `true`    |
 | `false or true`    | `true`    |
 | `false or false`   | `false`   |
+| `true xor true`    | `false`   |
+| `true xor false`   | `true`    |
+| `false xor true`   | `true`    |
+| `false xor false`  | `false`   |
 
 El uso real casi siempre es combinando con comparaciones:
 
@@ -1321,13 +1325,32 @@ print(age >= 18 and age < 65)   // true
 print(age < 13 or age >= 65)    // false
 ```
 
+`xor` (mini-tanda Xor) es útil cuando querés "exactamente uno de los
+dos" — equivale a `a != b` sobre Bool pero se lee más declarativo:
+
+```fitz
+fn solo_uno(p: Bool, q: Bool) -> Bool {
+    return p xor q
+}
+
+print(solo_uno(true, false))    // true — solo uno
+print(solo_uno(true, true))     // false — ambos
+print(solo_uno(false, false))   // false — ninguno
+```
+
+`xor` y `or` comparten precedencia (más baja que `and`), y son
+left-associative: `a or b xor c` parsea como `(a or b) xor c`.
+
 ### Short-circuit
 
-Igual que Python, JavaScript y Rust, los operadores lógicos en Fitz
-hacen **short-circuit**:
+Igual que Python, JavaScript y Rust, los operadores `and` y `or` en
+Fitz hacen **short-circuit**:
 
 - `a or b` — si `a` ya es `true`, `b` no se evalúa.
 - `a and b` — si `a` ya es `false`, `b` no se evalúa.
+
+`xor` **NO** hace short-circuit: necesita ambos lados para saber el
+resultado (paralelo a las operaciones aritméticas).
 
 Esto importa cuando el lado derecho tiene side effects, o cuando
 hace algo costoso:

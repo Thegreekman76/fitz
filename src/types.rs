@@ -2995,7 +2995,7 @@ fn infer_binop(
             // adentro de listas/mapas/etc. No emitimos warning.
             Type::Bool
         }
-        BinOpKind::And | BinOpKind::Or => {
+        BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
             if !matches!(lt, Type::Bool) {
                 ctx.error_at(span, format!(
                     "el operador lógico espera Bool, lado izquierdo es `{}`",

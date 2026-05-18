@@ -46,6 +46,7 @@ pub enum Token {
     Continue,
     And,
     Or,
+    Xor, // Mini-tanda Xor — `a xor b` lógico (Bool ^ Bool, paralelo a `or`/`and`)
     Not, // R.1.1 — `not <expr>` negación lógica prefix
 
     // Operadores
@@ -876,6 +877,7 @@ impl Lexer {
             "continue" => Token::Continue,
             "and" => Token::And,
             "or" => Token::Or,
+            "xor" => Token::Xor,
             "not" => Token::Not,
             _ => Token::Ident(s),
         }
@@ -1244,6 +1246,7 @@ mod tests {
             ("continue", Token::Continue),
             ("and", Token::And),
             ("or", Token::Or),
+            ("xor", Token::Xor),
             ("not", Token::Not),
         ];
         for (src, expected) in cases {

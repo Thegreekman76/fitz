@@ -953,6 +953,7 @@ fn binop_str(op: &BinOpKind) -> &'static str {
         BinOpKind::GtEq => ">=",
         BinOpKind::And => "and",
         BinOpKind::Or => "or",
+        BinOpKind::Xor => "xor",
         // Mini-tanda Bits — operadores bit-a-bit.
         BinOpKind::BitAnd => "&",
         BinOpKind::BitOr => "|",

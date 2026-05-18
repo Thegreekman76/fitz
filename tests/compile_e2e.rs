@@ -3047,6 +3047,42 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     assert_eq!(stdout.trim(), "2\n5\n20");
 }
 
+// ---- Mini-tanda Xor — operador `xor` lógico sobre Bool ----
+
+#[test]
+fn xor_tabla_de_verdad_bit_a_bit() {
+    let src = "print(true xor true)\n\
+               print(true xor false)\n\
+               print(false xor true)\n\
+               print(false xor false)\n";
+    let (stdout, exit) = build_and_run("xor_tabla", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "false\ntrue\ntrue\nfalse");
+}
+
+#[test]
+fn xor_chain_misma_precedencia_que_or() {
+    // `true xor true xor true` left-assoc → ((T xor T) xor T) = (F xor T) = T.
+    let src = "print(true xor true xor true)\n\
+               print(true xor false xor true)\n";
+    let (stdout, exit) = build_and_run("xor_chain", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+#[test]
+fn xor_combina_con_and_y_or() {
+    // `a and b xor c` → `(a and b) xor c`. And precedencia mayor.
+    let src = "let a: Bool = true\n\
+               let b: Bool = false\n\
+               let c: Bool = true\n\
+               print(a and b xor c)\n";
+    let (stdout, exit) = build_and_run("xor_and_or", src);
+    assert_eq!(exit, 0);
+    // (true and false) xor true = false xor true = true.
+    assert_eq!(stdout.trim(), "true");
+}
+
 // ---- Mini-tanda Mln — from import multi-línea con paréntesis ----
 
 #[test]
