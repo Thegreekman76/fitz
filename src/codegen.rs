@@ -328,7 +328,7 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_async),
             Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => expr_uses_async(inner),
             Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
-                StrPart::Expr(e) => expr_uses_async(e),
+                StrPart::Expr(e, _) => expr_uses_async(e),
                 StrPart::Lit(_) => false,
             }),
             _ => false,
@@ -573,7 +573,7 @@ fn walk_expr_for_state_refs(
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
-                if let StrPart::Expr(inner) = p {
+                if let StrPart::Expr(inner, _) = p {
                     walk_expr_for_state_refs(inner, candidates, locals, refs);
                 }
             }
@@ -4484,19 +4484,28 @@ impl<'a> CodegenCtx<'a> {
                         }
                     }
                 }
-                StrPart::Expr(e) => {
-                    fmt.push_str("{}");
+                StrPart::Expr(e, spec) => {
                     let (code, ty) = self.gen_expr(e)?;
-                    // Para tipos formateables nativos (Int/Bool/Str),
-                    // pasamos la expresión directo. Para el resto
-                    // (Float con `.0`, Null como `null`, instancias
-                    // por Display, Option desempacando) usamos
-                    // `show_expr` que devuelve un `String`.
-                    let piece = match &ty {
-                        Type::Int | Type::Bool | Type::Str => code,
-                        _ => show_expr(&code, &ty),
-                    };
-                    args.push(piece);
+                    // Mini-tanda Fm — si hay spec, traducimos a `format!`
+                    // de Rust nativo. Para los casos que Rust no soporta
+                    // directo (g/G, c, %, grouping `,`/`_`) emitimos error
+                    // de codegen claro citando `fitz run` como workaround.
+                    match spec {
+                        None => {
+                            fmt.push_str("{}");
+                            let piece = match &ty {
+                                Type::Int | Type::Bool | Type::Str => code,
+                                _ => show_expr(&code, &ty),
+                            };
+                            args.push(piece);
+                        }
+                        Some(s) => {
+                            let (rust_spec, coerced) = format_spec_to_rust(s, &code, &ty)
+                                .map_err(|msg| self.err_at(e.span(), msg))?;
+                            fmt.push_str(&format!("{{{}}}", rust_spec));
+                            args.push(coerced);
+                        }
+                    }
                 }
             }
         }
@@ -7876,12 +7885,12 @@ fn parse_http_path_legacy(expr: &Expr) -> Result<String, FitzError> {
             for part in parts {
                 match part {
                     StrPart::Lit(s) => buf.push_str(s),
-                    StrPart::Expr(Expr::Ident(name, _)) => {
+                    StrPart::Expr(Expr::Ident(name, _), _) => {
                         buf.push('{');
                         buf.push_str(name);
                         buf.push('}');
                     }
-                    StrPart::Expr(_) => {
+                    StrPart::Expr(_, _) => {
                         return Err(FitzError::new(
                             ErrorKind::TypeError,
                             0,
@@ -8564,7 +8573,7 @@ fn collect_captures_expr(
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
-                if let crate::ast::StrPart::Expr(inner) = p {
+                if let crate::ast::StrPart::Expr(inner, _) = p {
                     collect_captures_expr(inner, params, locals, ctx, seen, out);
                 }
             }
@@ -9288,6 +9297,117 @@ fn show_expr_inline(code: &str, ty: &Type) -> String {
         Type::Str => format!("format!(\"\\\"{{}}\\\"\", {})", code),
         _ => show_expr(code, ty),
     }
+}
+
+/// Mini-tanda Fm — traduce un `FormatSpec` Fitz a un format spec Rust
+/// (el contenido adentro de `{:...}` en `format!`). Devuelve también
+/// el código del valor coercionado al tipo que el spec exige.
+///
+/// Casos no soportados en `fitz build`:
+///
+/// - `,`/`_` grouping (Rust no tiene equivalente nativo).
+/// - `g`/`G` general format.
+/// - `c` char codepoint.
+/// - `%` percent.
+///
+/// Para esos, error claro citando `fitz run` como workaround.
+fn format_spec_to_rust(
+    spec: &crate::ast::FormatSpec,
+    code: &str,
+    ty: &Type,
+) -> Result<(String, String), String> {
+    use crate::ast::FormatKind;
+    if spec.grouping.is_some() {
+        return Err(
+            "format spec con `,`/`_` (grouping) no soportado en `fitz build`; usá `fitz run`".into(),
+        );
+    }
+    let kind_str = match spec.kind {
+        None => "",
+        Some(FormatKind::String) => "",
+        Some(FormatKind::Decimal) => "",
+        Some(FormatKind::FixedLower) | Some(FormatKind::FixedUpper) => "",
+        Some(FormatKind::Binary) => "b",
+        Some(FormatKind::Octal) => "o",
+        Some(FormatKind::HexLower) => "x",
+        Some(FormatKind::HexUpper) => "X",
+        Some(FormatKind::ExponentLower) => "e",
+        Some(FormatKind::ExponentUpper) => "E",
+        Some(FormatKind::GeneralLower) | Some(FormatKind::GeneralUpper) => {
+            return Err(
+                "format spec `g`/`G` no soportado en `fitz build`; usá `fitz run`".into(),
+            );
+        }
+        Some(FormatKind::Char) => {
+            return Err(
+                "format spec `c` (codepoint) no soportado en `fitz build`; usá `fitz run`".into(),
+            );
+        }
+        Some(FormatKind::Percent) => {
+            return Err(
+                "format spec `%` (percent) no soportado en `fitz build`; usá `fitz run`".into(),
+            );
+        }
+    };
+
+    // Coerción del value según el kind. Float kinds exigen f64; los
+    // otros aceptan el value tal cual.
+    let needs_float = matches!(
+        spec.kind,
+        Some(
+            FormatKind::FixedLower
+                | FormatKind::FixedUpper
+                | FormatKind::ExponentLower
+                | FormatKind::ExponentUpper
+        )
+    );
+    let coerced = if needs_float {
+        match ty {
+            Type::Int => format!("({} as f64)", code),
+            Type::Float => code.to_string(),
+            other => {
+                return Err(format!(
+                    "format spec `{}` espera Float o Int, recibió `{}`",
+                    spec.kind.unwrap().to_char(),
+                    display_type(other, &crate::types::TypeEnv::new())
+                ));
+            }
+        }
+    } else {
+        code.to_string()
+    };
+
+    // Armado del rust spec.
+    let mut out = String::new();
+    if let (Some(fill), Some(align)) = (spec.fill, spec.align) {
+        out.push(fill);
+        out.push(align.to_char());
+    } else if let Some(align) = spec.align {
+        out.push(align.to_char());
+    }
+    if let Some(sign) = spec.sign {
+        match sign {
+            crate::ast::FormatSign::Plus => out.push('+'),
+            crate::ast::FormatSign::Space => out.push(' '),
+            crate::ast::FormatSign::Minus => {}
+        }
+    }
+    if spec.alternate {
+        out.push('#');
+    }
+    if spec.zero_pad {
+        out.push('0');
+    }
+    if let Some(w) = spec.width {
+        out.push_str(&w.to_string());
+    }
+    if let Some(p) = spec.precision {
+        out.push_str(&format!(".{}", p));
+    }
+    if !kind_str.is_empty() {
+        out.push_str(kind_str);
+    }
+    Ok((format!(":{}", out), coerced))
 }
 
 /// Devuelve **una o más sentencias Rust** que escriben `code` (de tipo

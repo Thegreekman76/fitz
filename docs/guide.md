@@ -993,11 +993,67 @@ Características:
   recortar el indent común usá `.replace(...)` o construilo sin
   indent.
 
+### Format specifiers (mini-tanda Fm)
+
+Los `{...}` de interpolación aceptan un `:spec` opcional después del
+expr, con la misma sintaxis que Python:
+
+```fitz
+let pi: Float = 3.14159
+print("pi: {pi:.2f}")              // "pi: 3.14"
+
+let n: Int = 42
+print("[{n:05d}]")                  // "[00042]"
+print("[{n:>5}]")                   // "[   42]"
+
+let byte: Int = 255
+print("hex: {byte:#x}")             // "hex: 0xff"
+
+let big: Int = 1000000
+print("con coma: {big:,}")          // "con coma: 1,000,000"
+
+let ratio: Float = 0.42
+print("pct: {ratio:.1%}")           // "pct: 42.0%"
+```
+
+Gramática del spec: `[[fill]align][sign][#][0][width][grouping][.precision][type]`.
+
+| Componente   | Valores                | Función |
+|--------------|-----------------------|---------|
+| `fill`       | cualquier char         | Caracter de relleno. Solo válido si va con `align`. |
+| `align`      | `<` `>` `^` `=`        | Alineación left / right / center / after-sign. |
+| `sign`       | `+` `-` ` `            | Signo: siempre / solo negativos / espacio en positivos. |
+| `#`          | (flag)                 | Alternate form (`0x` en hex, etc.). |
+| `0`          | (flag)                 | Zero-pad (atajo para `fill='0'`). |
+| `width`      | dígitos                | Ancho mínimo total. |
+| `grouping`   | `,` o `_`              | Separador de miles. |
+| `.precision` | `.N`                   | Decimales (Float) o longitud máx (Str). |
+| `type`       | `b`/`c`/`d`/`e`/`E`/`f`/`F`/`g`/`G`/`o`/`s`/`x`/`X`/`%` | Forma de presentación. |
+
+**Compatibilidad por type**:
+- `f`/`F`/`e`/`E`/`g`/`G`/`%` — Float (Int promueve transparente).
+- `d`/`b`/`o`/`x`/`X`/`c` — Int estricto.
+- `s` — cualquier tipo (vía Display).
+- Sin type — Display por default.
+
+El checker valida la compatibilidad: `{x:.2f}` con `x: Str` da error
+de tipo antes de runtime.
+
+**Subset compilable con `fitz build`** (subset que mapea directo a
+`format!` de Rust): precisión Float, width/zero-pad de Int, alineación,
+fill custom, sign, alternate (`#`), hex/binario/octal. **Solo `fitz
+run`** (Rust no tiene equivalente nativo): grouping (`,`/`_`),
+percent (`%`), exponente (`e`/`E`), general (`g`/`G`), char (`c`).
+El codegen emite error claro citando `fitz run` como workaround.
+
+Ver [examples/guide/05b-format-specs.fitz](../examples/guide/05b-format-specs.fitz)
+(subset compilable, validado bit-a-bit `fitz run` ↔ `fitz build`) y
+[examples/guide/05c-format-specs-advanced.fitz](../examples/guide/05c-format-specs-advanced.fitz)
+(full Python, solo `fitz run`).
+
 ### Lo que todavía no anda
 
 - Comillas simples como alternativa a las dobles.
-- Format specifiers dentro de la interpolación (`{ratio:.2f}` y
-  similares).
 
 > Lo que **sí anda** y antes era deuda: **strings multilínea
 > `"""..."""`** — cerrado en R.1.5 (mini-fase R). Incluyendo
@@ -1007,6 +1063,8 @@ Características:
 > — cerrados en mini-tanda S (S.1 + S.2). Vivos en `fitz run` y
 > `fitz build` (ver [cap 13](#13-métodos-y-mutación) +
 > ejemplo [13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)).
+> **Format specifiers** `{x:.2f}`, `{n:05d}`, etc. cerrados en
+> mini-tanda Fm (ver sub-sección "Format specifiers" arriba).
 
 ### Ejemplo completo
 

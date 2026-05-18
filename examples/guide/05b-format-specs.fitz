@@ -1,0 +1,38 @@
+// Mini-tanda Fm — format specifiers (subset compilable con `fitz build`).
+//
+// Para los specs que requieren `fitz run` (grouping `,`/`_`, percent
+// `%`, científica `e`/`E`, general `g`/`G`, char `c`), ver el ejemplo
+// `05c-format-specs-advanced.fitz`.
+
+// Precisión decimal en Float — `.Nf`.
+let pi: Float = 3.14159
+print("pi a 2 decimales: {pi:.2f}")     // 3.14
+print("pi a 4 decimales: {pi:.4f}")     // 3.1416
+
+// Int con width mínimo.
+let n: Int = 42
+print("[{n:5d}]")                        // [   42]
+print("[{n:<5d}]")                       // [42   ]
+print("[{n:^5d}]")                       // [ 42  ]
+
+// Int con zero-pad.
+print("zero-padded: {n:05d}")            // 00042
+
+// Hex/binario/octal.
+let byte: Int = 255
+print("hex: {byte:x}")                   // ff
+print("HEX: {byte:X}")                   // FF
+print("bin: {byte:b}")                   // 11111111
+print("hex con prefijo: {byte:#x}")      // 0xff
+
+// Signo explícito.
+let positive: Int = 42
+let negative: Int = -7
+print("signo plus: {positive:+}")        // +42
+print("signo neg : {negative:+}")        // -7
+
+// Alineación con fill custom.
+let titulo: Str = "Hola"
+print("[{titulo:*>10}]")                 // [******Hola]
+print("[{titulo:-^10}]")                 // [---Hola---]
+print("[{titulo:.>10}]")                 // [......Hola]

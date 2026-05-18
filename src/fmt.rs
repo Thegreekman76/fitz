@@ -453,7 +453,7 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         Expr::StrInterp(parts, _) => parts
             .iter()
             .filter_map(|p| match p {
-                StrPart::Expr(e) => Some(end_line_of_expr(e)),
+                StrPart::Expr(e, _) => Some(end_line_of_expr(e)),
                 StrPart::Lit(_) => None,
             })
             .max(),
@@ -970,10 +970,17 @@ fn fmt_str_interp(ctx: &mut FmtCtx, parts: &[StrPart]) {
                     }
                 }
             }
-            StrPart::Expr(e) => {
+            StrPart::Expr(e, spec) => {
                 ctx.write("{");
                 let inline = expr_to_inline_string(e);
                 ctx.write(&inline);
+                // Mini-tanda Fm — re-emitir el spec si está presente.
+                // `FormatSpec::to_source()` reconstruye la sintaxis
+                // canónica `[fill]align[sign]#0width,prec_type`.
+                if let Some(s) = spec {
+                    ctx.write(":");
+                    ctx.write(&s.to_source());
+                }
                 ctx.write("}");
             }
         }

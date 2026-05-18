@@ -268,13 +268,145 @@ impl Expr {
 
 /// Pieza de un string con interpolación.
 /// Ej: `"Hola, {name}!"` se descompone en
-/// `[Lit("Hola, "), Expr(Ident("name")), Lit("!")]`.
+/// `[Lit("Hola, "), Expr(Ident("name"), None), Lit("!")]`.
+///
+/// Mini-tanda Fm — el segundo campo de `Expr` es el `FormatSpec` opcional
+/// extraído del `:spec` tras el expr en `{x:.2f}`. `None` indica "usar
+/// formato Display por default".
 #[derive(Debug, Clone, PartialEq)]
 pub enum StrPart {
     /// Texto literal.
     Lit(String),
-    /// Expresión cuyo resultado se convierte a string e inserta.
-    Expr(Expr),
+    /// Expresión interpolada con formato opcional.
+    Expr(Expr, Option<FormatSpec>),
+}
+
+/// Mini-tanda Fm — Format spec inspirado en Python `{x:[fill]align[sign]
+/// [#][0][width][grouping][.precision][type]}`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FormatSpec {
+    pub fill: Option<char>,
+    pub align: Option<FormatAlign>,
+    pub sign: Option<FormatSign>,
+    pub alternate: bool,
+    pub zero_pad: bool,
+    pub width: Option<usize>,
+    pub grouping: Option<char>,
+    pub precision: Option<usize>,
+    pub kind: Option<FormatKind>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatAlign {
+    Left,
+    Right,
+    Center,
+    Pad,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatSign {
+    Plus,
+    Minus,
+    Space,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FormatKind {
+    Binary,
+    Char,
+    Decimal,
+    ExponentLower,
+    ExponentUpper,
+    FixedLower,
+    FixedUpper,
+    GeneralLower,
+    GeneralUpper,
+    Octal,
+    String,
+    HexLower,
+    HexUpper,
+    Percent,
+}
+
+impl FormatSpec {
+    /// Reconstruye la sintaxis source del spec: `[fill]align[sign]
+    /// [#][0][width][grouping][.prec][type]`. Usado por `fitz fmt`
+    /// para preservar el spec en el output.
+    pub fn to_source(&self) -> String {
+        use std::fmt::Write;
+        let mut out = String::new();
+        if let (Some(fill), Some(align)) = (self.fill, self.align) {
+            out.push(fill);
+            out.push(align.to_char());
+        } else if let Some(align) = self.align {
+            out.push(align.to_char());
+        }
+        if let Some(sign) = self.sign {
+            out.push(sign.to_char());
+        }
+        if self.alternate {
+            out.push('#');
+        }
+        if self.zero_pad {
+            out.push('0');
+        }
+        if let Some(w) = self.width {
+            let _ = write!(out, "{}", w);
+        }
+        if let Some(g) = self.grouping {
+            out.push(g);
+        }
+        if let Some(p) = self.precision {
+            let _ = write!(out, ".{}", p);
+        }
+        if let Some(k) = self.kind {
+            out.push(k.to_char());
+        }
+        out
+    }
+}
+
+impl FormatAlign {
+    pub fn to_char(self) -> char {
+        match self {
+            FormatAlign::Left => '<',
+            FormatAlign::Right => '>',
+            FormatAlign::Center => '^',
+            FormatAlign::Pad => '=',
+        }
+    }
+}
+
+impl FormatSign {
+    pub fn to_char(self) -> char {
+        match self {
+            FormatSign::Plus => '+',
+            FormatSign::Minus => '-',
+            FormatSign::Space => ' ',
+        }
+    }
+}
+
+impl FormatKind {
+    pub fn to_char(self) -> char {
+        match self {
+            FormatKind::Binary => 'b',
+            FormatKind::Char => 'c',
+            FormatKind::Decimal => 'd',
+            FormatKind::ExponentLower => 'e',
+            FormatKind::ExponentUpper => 'E',
+            FormatKind::FixedLower => 'f',
+            FormatKind::FixedUpper => 'F',
+            FormatKind::GeneralLower => 'g',
+            FormatKind::GeneralUpper => 'G',
+            FormatKind::Octal => 'o',
+            FormatKind::String => 's',
+            FormatKind::HexLower => 'x',
+            FormatKind::HexUpper => 'X',
+            FormatKind::Percent => '%',
+        }
+    }
 }
 
 /// Destino de una asignación: a qué se le está asignando.
@@ -829,7 +961,7 @@ mod tests {
                 callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
                 args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
                     StrPart::Lit("!".into()),
                 ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO),
@@ -874,10 +1006,10 @@ mod tests {
     fn strpart_distinguishes_literal_from_expression() {
         let parts = [
             StrPart::Lit("Edad: ".into()),
-            StrPart::Expr(Expr::Ident("age".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("age".into(), Span::ZERO), None),
         ];
         assert_eq!(parts[0], StrPart::Lit("Edad: ".into()));
-        assert!(matches!(parts[1], StrPart::Expr(Expr::Ident(_, _))));
+        assert!(matches!(parts[1], StrPart::Expr(Expr::Ident(_, _), _)));
     }
 
     #[test]

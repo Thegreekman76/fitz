@@ -1,0 +1,23 @@
+// Mini-tanda Fm — format specs avanzados (solo `fitz run`, no `fitz build`).
+//
+// Estos specs no tienen equivalente directo en `format!` de Rust y
+// requieren código auxiliar. Por simplicidad, `fitz build` los rechaza
+// con error claro. Para subset compilable con `fitz build`, ver
+// `05b-format-specs.fitz`.
+
+// Separador de miles — `,` o `_`.
+let big: Int = 1000000
+print("con coma: {big:,}")               // 1,000,000
+print("con underscore: {big:_}")         // 1_000_000
+
+// Notación científica.
+let small: Float = 0.00012345
+print("sci: {small:.2e}")                // 1.23e-4
+
+// Porcentaje — multiplica por 100.
+let ratio: Float = 0.42
+print("porcentaje: {ratio:.1%}")         // 42.0%
+
+// Combinaciones — grouping + precision.
+let monto: Float = 1234567.89
+print("monto: {monto:,.2f}")             // 1,234,567.89

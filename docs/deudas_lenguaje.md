@@ -794,10 +794,59 @@ compile bit-a-bit `fitz run` ↔ `fitz build` sobre
   podría ser útil si entra demanda; el grammar lo destrabaría
   con un patrón paralelo.
 
-### Format specifiers
+### ~~Format specifiers~~ ✓ CERRADO 2026-05-18 (mini-tanda Fm)
 
-- `{ratio:.2f}` en interpolación — ~2-3h. Cambio menor al parser
-  de StrInterp.
+- ~~`{ratio:.2f}` en interpolación~~ ✓ — full Python-compatible
+  subset implementado en 7 capas (ast + parser + evaluator +
+  checker + codegen + fmt + módulo runtime nuevo `src/format.rs`).
+- **AST**: `StrPart::Expr` cambió shape de `Expr(Expr)` a
+  `Expr(Expr, Option<FormatSpec>)`. Nueva struct `FormatSpec` con
+  enums `FormatAlign`/`FormatSign`/`FormatKind`. Helpers `to_char()`
+  y `FormatSpec::to_source()` para reconstruir la sintaxis.
+- **Parser**: `build_string_expr` separa `{expr:spec}` por el
+  primer `:` a depth 0 (no adentro de paréntesis/brackets/braces
+  balanceados). Helper `parse_format_spec` con gramática Python
+  `[[fill]align][sign][#][0][width][grouping][.precision][type]`.
+- **Evaluator**: módulo nuevo `src/format.rs` con
+  `format_value_with_spec(value, spec) -> Result<String, String>`.
+  Aplica width/align/fill/sign/alternate/grouping/precision/kind
+  con la semántica Python. Cubre todos los kinds: `b`/`c`/`d`/`e`/
+  `E`/`f`/`F`/`g`/`G`/`o`/`s`/`x`/`X`/`%`.
+- **Checker**: `validate_format_spec_for_type` valida que el tipo
+  del expr sea compatible con el `kind`. `{x:.2f}` con `x: Str` da
+  error antes de runtime. `{x:d}` con `x: Float` también. Sin
+  `kind`, cualquier tipo pasa.
+- **Codegen** (`fitz build`): `format_spec_to_rust` traduce el
+  spec Fitz a un format string Rust nativo (`:.2`, `:#x`, `:05d`,
+  `:*>5`, etc.). El binario nativo produce output **bit-a-bit
+  idéntico** al evaluator para el subset que Rust soporta directo.
+  Specs sin equivalente directo en Rust (`,`/`_` grouping, `g`/`G`,
+  `c`, `%`) → error de codegen claro citando `fitz run` como
+  workaround.
+- **Fmt**: `FormatSpec::to_source()` reconstruye la sintaxis
+  source del spec para que `fitz fmt` la preserve en el output.
+
+Implementación: ~530 LoC en `src/format.rs` + cambios en 7 archivos
+del compiler. **24 unit tests nuevos** (12 format runtime + 7
+parser + 5 checker) + 4 E2E compile bit-a-bit `fitz run` ↔ `fitz
+build` sobre Float precision, Int zero-pad, hex alternate, alignment.
+Cap 5 de la guía suma sub-sección "Format specifiers (mini-tanda
+Fm)" con tabla de gramática completa y matriz de compatibilidad
+por type. Ejemplos:
+- `examples/guide/05b-format-specs.fitz` (subset compilable,
+  sumado al smoke `GUIDE_EXAMPLES_COMPILE`).
+- `examples/guide/05c-format-specs-advanced.fitz` (full Python,
+  solo `fitz run`).
+
+**Deuda residual** (NO bloquea mini-tandas siguientes):
+- Subset reducido en `fitz build`: `,`/`_` grouping, `g`/`G`,
+  `c`, `%` requieren `fitz run`. Refactor para soportarlos en
+  binario nativo requeriría emitir el código del runtime
+  `format_value_with_spec` adentro del binario o helpers manuales
+  per-spec. Trade-off aceptado.
+- `n` (locale-aware) — Fitz no tiene locale; sin sentido.
+- Spec dinámico `{x:.{n}f}` (precision determinada en runtime)
+  no soportado — Python lo tiene, pero requiere doble parse.
 
 ### Result avanzado
 

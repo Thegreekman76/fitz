@@ -16,6 +16,7 @@ pub mod parser; // Fase 2.3 — construcción del AST
 pub mod value; // Fase 2.4 — valores en runtime
 pub mod env; // Fase 2.4 — entornos / scopes
 pub mod evaluator; // Fase 2.4 — ejecución
+pub mod format; // Mini-tanda Fm — aplicación de FormatSpec en runtime
 pub mod error; // manejo de errores del compilador
 pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
 pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base

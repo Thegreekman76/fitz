@@ -1779,6 +1779,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "03-variables.fitz",
     "04-operadores.fitz",
     "05-strings.fitz",
+    "05b-format-specs.fitz",
     "06-logica.fitz",
     "07-if.fitz",
     "08-loops.fitz",
@@ -2561,4 +2562,43 @@ fn mini_tanda_c_comprehension_sobre_range_con_filter() {
     let (stdout, exit) = build_and_run("mini_tanda_c_comp_filter", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "[0, 2, 4, 6, 8]");
+}
+
+// ---- Mini-tanda Fm — format specifiers ----
+
+#[test]
+fn mini_tanda_fm_float_con_precision_decimal() {
+    // `{ratio:.2f}` debe producir el mismo output bit-a-bit que
+    // `fitz run` (es decir "0.50" para 0.5).
+    let src = "let ratio: Float = 0.5\nprint(\"{ratio:.2f}\")\n";
+    let (stdout, exit) = build_and_run("mini_tanda_fm_float_precision", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "0.50");
+}
+
+#[test]
+fn mini_tanda_fm_int_con_width_y_zero_pad() {
+    // `{n:05d}` produce "00042".
+    let src = "let n: Int = 42\nprint(\"{n:05d}\")\n";
+    let (stdout, exit) = build_and_run("mini_tanda_fm_int_zero_pad", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "00042");
+}
+
+#[test]
+fn mini_tanda_fm_hex_con_alternate() {
+    // `{n:#x}` produce "0xff".
+    let src = "let n: Int = 255\nprint(\"{n:#x}\")\n";
+    let (stdout, exit) = build_and_run("mini_tanda_fm_hex_alt", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "0xff");
+}
+
+#[test]
+fn mini_tanda_fm_alignment_right_con_fill_default() {
+    // `{x:>5}` padding con espacios a la derecha (right alignment).
+    let src = "let x: Int = 42\nprint(\"[{x:>5}]\")\n";
+    let (stdout, exit) = build_and_run("mini_tanda_fm_align_right", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[   42]");
 }

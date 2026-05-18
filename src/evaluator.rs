@@ -31,6 +31,7 @@ use crate::ast::{
 };
 use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
+use crate::format::format_value_with_spec;
 use crate::http::{
     has_active_registry, parse_path_template, push_route, set_server_config, BodyParam,
     HeaderSpec, HttpMethod, MiddlewareSpec, RouteSpec, ServerConfig,
@@ -2253,14 +2254,30 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
 
         // String con interpolación: cada `StrPart::Expr` se evalúa y se
         // convierte a string vía `Display`. Los `Lit` van tal cual.
+        // Mini-tanda Fm: si la parte tiene `FormatSpec`, lo aplicamos
+        // con `format_value_with_spec`; sino usamos el Display default.
         Expr::StrInterp(parts, _) => {
             let mut result = String::new();
             for part in parts {
                 match part {
                     StrPart::Lit(s) => result.push_str(s),
-                    StrPart::Expr(e) => {
+                    StrPart::Expr(e, spec) => {
                         let v = eval_expr(e, env.clone()).await?;
-                        result.push_str(&v.to_string());
+                        match spec {
+                            None => result.push_str(&v.to_string()),
+                            Some(s) => {
+                                let formatted = format_value_with_spec(&v, s)
+                                    .map_err(|msg| EvalSignal::Error(FitzError::new(
+                                        ErrorKind::TypeMismatch {
+                                            expected: "tipo compatible con format spec".into(),
+                                            found: v.type_name().into(),
+                                        },
+                                        e.span().line, e.span().column,
+                                        msg,
+                                    )))?;
+                                result.push_str(&formatted);
+                            }
+                        }
                     }
                 }
             }
@@ -5710,7 +5727,7 @@ mod tests {
 
         let e = Expr::StrInterp(vec![
             StrPart::Lit("Hola, ".into()),
-            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
             StrPart::Lit("!".into()),
         ], Span::ZERO);
         assert_eq!(
@@ -5726,7 +5743,7 @@ mod tests {
 
         let e = Expr::StrInterp(vec![
             StrPart::Lit("x es ".into()),
-            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
         ], Span::ZERO);
         assert_eq!(eval_expr(&e, env).await.unwrap(), Value::Str("x es 42".into()));
     }
@@ -5739,7 +5756,7 @@ mod tests {
                 op: BinOpKind::Add,
                 left: Box::new(Expr::Int(1, Span::ZERO)),
                 right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }),
+            }, None),
         ], Span::ZERO);
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("3".into()));
     }
@@ -6144,7 +6161,7 @@ mod tests {
                     Pattern::Ident("x".into()),
                     Expr::StrInterp(vec![
                         StrPart::Lit("primer arm: ".into()),
-                        StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                        StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
                     ], Span::ZERO),
                 ),
                 match_arm(Pattern::Wildcard, Expr::Str("segundo arm".into(), Span::ZERO)),
@@ -6372,7 +6389,7 @@ print(_)\n";
                     Pattern::Ident("n".into()),
                     Expr::StrInterp(vec![
                         StrPart::Lit("default ".into()),
-                        StrPart::Expr(Expr::Ident("n".into(), Span::ZERO)),
+                        StrPart::Expr(Expr::Ident("n".into(), Span::ZERO), None),
                     ], Span::ZERO),
                 ),
             ], span: Span::ZERO,
@@ -6725,9 +6742,9 @@ print(_)\n";
              span: Span::ZERO },
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
                     StrPart::Lit(", x es ".into()),
-                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
                 ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO),
             fn_def(
@@ -6797,7 +6814,7 @@ print(factorial(5))
              span: Span::ZERO },
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
                     StrPart::Lit("!".into()),
                 ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO),

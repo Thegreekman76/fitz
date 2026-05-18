@@ -1256,10 +1256,15 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
 
         Expr::StrInterp(parts, _) => {
             // Las sub-expresiones se evalúan para errores aunque el
-            // resultado siempre sea Str.
+            // resultado siempre sea Str. Mini-tanda Fm: el spec se
+            // valida en `validate_format_spec_for_type` — el filter de
+            // tipos numéricos vs `f`, etc.
             for p in parts {
-                if let StrPart::Expr(inner) = p {
-                    let _ = infer_expr(ctx, inner);
+                if let StrPart::Expr(inner, spec) = p {
+                    let ty = infer_expr(ctx, inner);
+                    if let Some(s) = spec {
+                        validate_format_spec_for_type(ctx, s, &ty, inner.span());
+                    }
                 }
             }
             Type::Str
@@ -2426,6 +2431,66 @@ fn update_result_coverage(
         // No suma a la cobertura.
         Pattern::Tuple(_) => {}
         _ => {}
+    }
+}
+
+/// Mini-tanda Fm — valida que un `FormatSpec` sea aplicable al tipo
+/// del expr interpolado. Reglas (paralelas a Python):
+///   - `f`/`F`/`e`/`E`/`g`/`G`/`%` exigen Float o Int (promoción
+///     transparente).
+///   - `d`/`b`/`o`/`x`/`X`/`c` exigen Int (sin promoción de Float).
+///   - `s` acepta Str (o cualquier tipo via Display).
+///   - Sin `kind`, cualquier tipo es válido (uses Display por default).
+///   - Alineación, fill, width, sign, alternate y precision son válidos
+///     para cualquier tipo (precision con Str es longitud máxima).
+fn validate_format_spec_for_type(
+    ctx: &mut CheckCtx,
+    spec: &crate::ast::FormatSpec,
+    ty: &Type,
+    span: Span,
+) {
+    use crate::ast::FormatKind;
+    let Some(kind) = spec.kind else { return };
+    let is_num_int = matches!(ty.base(), Type::Int | Type::Any);
+    let is_num_float = matches!(ty.base(), Type::Int | Type::Float | Type::Any);
+    let ok = match kind {
+        FormatKind::FixedLower
+        | FormatKind::FixedUpper
+        | FormatKind::ExponentLower
+        | FormatKind::ExponentUpper
+        | FormatKind::GeneralLower
+        | FormatKind::GeneralUpper
+        | FormatKind::Percent => is_num_float,
+        FormatKind::Decimal
+        | FormatKind::Binary
+        | FormatKind::Octal
+        | FormatKind::HexLower
+        | FormatKind::HexUpper
+        | FormatKind::Char => is_num_int,
+        FormatKind::String => true,
+    };
+    if !ok {
+        ctx.error_at(span, format!(
+            "format spec `{}` no es compatible con tipo `{}` (esperaba {})",
+            kind.to_char(),
+            ty.display(ctx.types),
+            match kind {
+                FormatKind::FixedLower
+                | FormatKind::FixedUpper
+                | FormatKind::ExponentLower
+                | FormatKind::ExponentUpper
+                | FormatKind::GeneralLower
+                | FormatKind::GeneralUpper
+                | FormatKind::Percent => "Float o Int",
+                FormatKind::Decimal
+                | FormatKind::Binary
+                | FormatKind::Octal
+                | FormatKind::HexLower
+                | FormatKind::HexUpper
+                | FormatKind::Char => "Int",
+                FormatKind::String => "cualquier tipo",
+            },
+        ));
     }
 }
 
@@ -7075,5 +7140,53 @@ print(total)
             "esperaba error sobre `x` no definida: {:?}",
             errors
         );
+    }
+
+    // ---- Mini-tanda Fm — format spec compatibilidad ----
+
+    #[test]
+    fn checker_fm_spec_f_con_float_compila_limpio() {
+        let src = "let x: Float = 3.14\nlet s = \"{x:.2f}\"\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_fm_spec_f_con_int_compila_limpio() {
+        // Promoción Int → Float transparente.
+        let src = "let n: Int = 42\nlet s = \"{n:.2f}\"\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_fm_spec_f_con_str_es_error() {
+        let src = "let s: Str = \"hola\"\nlet r = \"{s:.2f}\"\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("`f`")
+                && e.message.contains("Float o Int")),
+            "esperaba error de compatibilidad: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_fm_spec_d_con_float_es_error() {
+        let src = "let x: Float = 3.14\nlet r = \"{x:d}\"\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("`d`") && e.message.contains("Int")),
+            "esperaba error de compatibilidad: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_fm_spec_string_es_compatible_con_cualquier_tipo() {
+        // El kind `s` acepta cualquier tipo (vía Display).
+        let src = "let n: Int = 42\nlet r = \"{n:s}\"\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 }

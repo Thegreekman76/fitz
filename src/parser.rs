@@ -10,9 +10,8 @@
 // y deuda explícita.
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Decorator, Expr, Field, MatchArm, MethodDef, Param, Pattern,
-    Program, Span,
-    Stmt, StrPart, TypeExpr, UnaryOpKind,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, FormatSpec, MatchArm, MethodDef, Param,
+    Pattern, Program, Span, Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::lexer::{tokenize, Token, TokenWithPos};
@@ -2634,10 +2633,16 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                     "Interpolación de string sin '}' de cierre",
                 ));
             }
-            let expr_src: String = chars[expr_start..i].iter().collect();
+            let interp_src: String = chars[expr_start..i].iter().collect();
 
             // La subexpresión empieza un char después del `{` en el source.
             let sub_col_base = interp_col + 1;
+
+            // Mini-tanda Fm — separar `expr` de `:spec` por el primer `:`
+            // a depth 0 (no adentro de paréntesis/brackets/braces). Esto
+            // permite que `{m["k"]:.2f}` distinga el `:` del spec del
+            // de un map literal anidado.
+            let (expr_src, spec_src) = split_expr_and_format_spec(&interp_src);
 
             // Re-tokenizamos. Cualquier error del sub-lexer lleva la
             // posición relativa al inicio de expr_src — la trasladamos al
@@ -2663,7 +2668,20 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
                     format!("Tokens extra dentro de interpolación: '{}'", expr_src),
                 ));
             }
-            parts.push(StrPart::Expr(expr));
+            // Mini-tanda Fm — si había `:spec`, parsearlo a FormatSpec.
+            let format_spec = if let Some(spec) = spec_src {
+                Some(parse_format_spec(&spec).map_err(|msg| {
+                    FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        line,
+                        sub_col_base + expr_src.len() + 1,
+                        format!("Format spec inválido `{}`: {}", spec, msg),
+                    )
+                })?)
+            } else {
+                None
+            };
+            parts.push(StrPart::Expr(expr, format_spec));
             i += 1; // saltar '}'
             continue;
         }
@@ -2689,7 +2707,7 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
     // Si todas las partes son literales (o no hay partes), devolvemos
     // un `Expr::Str` simple — nada que interpolar. Si hay al menos
     // una `StrPart::Expr`, va a `Expr::StrInterp`.
-    let has_interp = parts.iter().any(|p| matches!(p, StrPart::Expr(_)));
+    let has_interp = parts.iter().any(|p| matches!(p, StrPart::Expr(_, _)));
     if has_interp {
         Ok(Expr::StrInterp(parts, str_span))
     } else {
@@ -2697,10 +2715,141 @@ fn build_string_expr(raw: &str, line: usize, column: usize) -> FitzResult<Expr> 
             .into_iter()
             .map(|p| match p {
                 StrPart::Lit(s) => s,
-                StrPart::Expr(_) => unreachable!(),
+                StrPart::Expr(_, _) => unreachable!(),
             })
             .collect();
         Ok(Expr::Str(combined, str_span))
+    }
+}
+
+/// Mini-tanda Fm — separa `{expr:spec}` en `(expr_src, Some(spec))`,
+/// o `(expr_src, None)` si no hay spec. El split toma el primer `:`
+/// que NO está adentro de paréntesis/brackets/braces balanceados.
+fn split_expr_and_format_spec(s: &str) -> (String, Option<String>) {
+    let mut depth: i32 = 0;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ':' if depth == 0 => {
+                return (s[..i].to_string(), Some(s[i + 1..].to_string()));
+            }
+            _ => {}
+        }
+    }
+    (s.to_string(), None)
+}
+
+/// Mini-tanda Fm — parsea un format spec estilo Python.
+/// Gramática: `[[fill]align][sign][#][0][width][grouping][.precision][type]`.
+fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
+    use crate::ast::{FormatKind, FormatSign};
+    let mut spec = FormatSpec::default();
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+
+    // fill + align: 2 chars donde el segundo es align.
+    if chars.len() >= 2 {
+        if let Some(a) = align_from_char(chars[1]) {
+            spec.fill = Some(chars[0]);
+            spec.align = Some(a);
+            i = 2;
+        }
+    }
+    // align solo.
+    if spec.align.is_none() && i < chars.len() {
+        if let Some(a) = align_from_char(chars[i]) {
+            spec.align = Some(a);
+            i += 1;
+        }
+    }
+    // sign.
+    if i < chars.len() {
+        match chars[i] {
+            '+' => { spec.sign = Some(FormatSign::Plus); i += 1; }
+            '-' => { spec.sign = Some(FormatSign::Minus); i += 1; }
+            ' ' => { spec.sign = Some(FormatSign::Space); i += 1; }
+            _ => {}
+        }
+    }
+    if i < chars.len() && chars[i] == '#' {
+        spec.alternate = true;
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '0' {
+        spec.zero_pad = true;
+        i += 1;
+    }
+    let width_start = i;
+    while i < chars.len() && chars[i].is_ascii_digit() {
+        i += 1;
+    }
+    if i > width_start {
+        let width_str: String = chars[width_start..i].iter().collect();
+        spec.width = Some(
+            width_str
+                .parse::<usize>()
+                .map_err(|_| format!("width inválido: `{}`", width_str))?,
+        );
+    }
+    if i < chars.len() && (chars[i] == ',' || chars[i] == '_') {
+        spec.grouping = Some(chars[i]);
+        i += 1;
+    }
+    if i < chars.len() && chars[i] == '.' {
+        i += 1;
+        let prec_start = i;
+        while i < chars.len() && chars[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == prec_start {
+            return Err("precision tras `.` requiere al menos un dígito".into());
+        }
+        let prec_str: String = chars[prec_start..i].iter().collect();
+        spec.precision = Some(
+            prec_str
+                .parse::<usize>()
+                .map_err(|_| format!("precision inválida: `{}`", prec_str))?,
+        );
+    }
+    if i < chars.len() {
+        let k = match chars[i] {
+            'b' => FormatKind::Binary,
+            'c' => FormatKind::Char,
+            'd' => FormatKind::Decimal,
+            'e' => FormatKind::ExponentLower,
+            'E' => FormatKind::ExponentUpper,
+            'f' => FormatKind::FixedLower,
+            'F' => FormatKind::FixedUpper,
+            'g' => FormatKind::GeneralLower,
+            'G' => FormatKind::GeneralUpper,
+            'o' => FormatKind::Octal,
+            's' => FormatKind::String,
+            'x' => FormatKind::HexLower,
+            'X' => FormatKind::HexUpper,
+            '%' => FormatKind::Percent,
+            other => return Err(format!("type char desconocido: `{}`", other)),
+        };
+        spec.kind = Some(k);
+        i += 1;
+    }
+    if i != chars.len() {
+        return Err(format!(
+            "caracteres sobrantes tras el type char: `{}`",
+            &s[i..]
+        ));
+    }
+    Ok(spec)
+}
+
+fn align_from_char(c: char) -> Option<crate::ast::FormatAlign> {
+    use crate::ast::FormatAlign;
+    match c {
+        '<' => Some(FormatAlign::Left),
+        '>' => Some(FormatAlign::Right),
+        '^' => Some(FormatAlign::Center),
+        '=' => Some(FormatAlign::Pad),
+        _ => None,
     }
 }
 
@@ -4325,7 +4474,7 @@ mod tests {
             parse_expr(r#""Hola, {name}!""#).unwrap(),
             Expr::StrInterp(vec![
                 StrPart::Lit("Hola, ".into()),
-                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
                 StrPart::Lit("!".into()),
             ], Span::ZERO),
         );
@@ -4337,7 +4486,7 @@ mod tests {
         assert_eq!(
             parse_expr(r#""{x} es el valor""#).unwrap(),
             Expr::StrInterp(vec![
-                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
                 StrPart::Lit(" es el valor".into()),
             ], Span::ZERO),
         );
@@ -4350,7 +4499,7 @@ mod tests {
             parse_expr(r#""valor: {x}""#).unwrap(),
             Expr::StrInterp(vec![
                 StrPart::Lit("valor: ".into()),
-                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
             ], Span::ZERO),
         );
     }
@@ -4360,7 +4509,7 @@ mod tests {
         // "{x}" — sin literales alrededor.
         assert_eq!(
             parse_expr(r#""{x}""#).unwrap(),
-            Expr::StrInterp(vec![StrPart::Expr(Expr::Ident("x".into(), Span::ZERO))], Span::ZERO),
+            Expr::StrInterp(vec![StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None)], Span::ZERO),
         );
     }
 
@@ -4371,9 +4520,9 @@ mod tests {
             parse_expr(r#""Hola {name}, tenés {n} mensajes""#).unwrap(),
             Expr::StrInterp(vec![
                 StrPart::Lit("Hola ".into()),
-                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
                 StrPart::Lit(", tenés ".into()),
-                StrPart::Expr(Expr::Ident("n".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("n".into(), Span::ZERO), None),
                 StrPart::Lit(" mensajes".into()),
             ], Span::ZERO),
         );
@@ -4390,7 +4539,7 @@ mod tests {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(40, Span::ZERO)),
                     right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }),
+                }, None),
             ], Span::ZERO),
         );
     }
@@ -4411,7 +4560,7 @@ mod tests {
             parse_expr(r#""\{ {x} \}""#).unwrap(),
             Expr::StrInterp(vec![
                 StrPart::Lit("{ ".into()),
-                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
                 StrPart::Lit(" }".into()),
             ], Span::ZERO),
         );
@@ -4728,7 +4877,7 @@ mod tests {
                 assert!(matches!(decorators[0].args[0], Expr::StrInterp(_, _)));
                 if let Expr::StrInterp(parts, _) = &decorators[0].args[0] {
                     assert_eq!(parts[0], StrPart::Lit("/users/".into()));
-                    assert_eq!(parts[1], StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)));
+                    assert_eq!(parts[1], StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None));
                 }
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
@@ -4994,7 +5143,7 @@ mod tests {
             program[2],
             Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
                     StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO)),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
                     StrPart::Lit("!".into()),
                 ], Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO)
@@ -6919,6 +7068,78 @@ mod tests {
         match v {
             Expr::List(items, _) => assert_eq!(items.len(), 1),
             other => panic!("se esperaba List, recibió {:?}", other),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Mini-tanda Fm — format specs en interpolación.
+    // ---------------------------------------------------------------
+
+    fn extract_first_strinterp_spec(src: &str) -> Option<crate::ast::FormatSpec> {
+        match parse_first_let_value(src) {
+            Expr::StrInterp(parts, _) => parts.into_iter().find_map(|p| match p {
+                StrPart::Expr(_, spec) => spec,
+                _ => None,
+            }),
+            other => panic!("se esperaba StrInterp, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn format_spec_precision_float_se_parsea() {
+        let spec = extract_first_strinterp_spec(r#"let r = "{x:.2f}""#).unwrap();
+        assert_eq!(spec.precision, Some(2));
+        assert!(matches!(spec.kind, Some(crate::ast::FormatKind::FixedLower)));
+    }
+
+    #[test]
+    fn format_spec_width_int_zero_pad() {
+        let spec = extract_first_strinterp_spec(r#"let r = "{n:05d}""#).unwrap();
+        assert_eq!(spec.width, Some(5));
+        assert!(spec.zero_pad);
+        assert!(matches!(spec.kind, Some(crate::ast::FormatKind::Decimal)));
+    }
+
+    #[test]
+    fn format_spec_align_right_con_width() {
+        let spec = extract_first_strinterp_spec(r#"let r = "{x:>10}""#).unwrap();
+        assert!(matches!(spec.align, Some(crate::ast::FormatAlign::Right)));
+        assert_eq!(spec.width, Some(10));
+    }
+
+    #[test]
+    fn format_spec_fill_align_custom() {
+        let spec = extract_first_strinterp_spec(r#"let r = "{x:*>5}""#).unwrap();
+        assert_eq!(spec.fill, Some('*'));
+        assert!(matches!(spec.align, Some(crate::ast::FormatAlign::Right)));
+        assert_eq!(spec.width, Some(5));
+    }
+
+    #[test]
+    fn format_spec_grouping_y_precision_juntos() {
+        // `,.2f` — coma para miles + 2 decimales.
+        let spec = extract_first_strinterp_spec(r#"let r = "{x:,.2f}""#).unwrap();
+        assert_eq!(spec.grouping, Some(','));
+        assert_eq!(spec.precision, Some(2));
+    }
+
+    #[test]
+    fn format_spec_hex_alternate() {
+        let spec = extract_first_strinterp_spec(r#"let r = "{n:#x}""#).unwrap();
+        assert!(spec.alternate);
+        assert!(matches!(spec.kind, Some(crate::ast::FormatKind::HexLower)));
+    }
+
+    #[test]
+    fn interpolation_sin_spec_sigue_funcionando_compat() {
+        // Caso clásico sin `:` — el segundo campo de StrPart::Expr es None.
+        let value = parse_first_let_value(r#"let r = "hola {name}""#);
+        match value {
+            Expr::StrInterp(parts, _) => {
+                let has_none = parts.iter().any(|p| matches!(p, StrPart::Expr(_, None)));
+                assert!(has_none, "esperaba StrPart::Expr(_, None) sin spec");
+            }
+            other => panic!("se esperaba StrInterp, recibió {:?}", other),
         }
     }
 }

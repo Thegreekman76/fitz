@@ -580,7 +580,7 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
             for part in parts {
                 match part {
                     StrPart::Lit(s) => buf.push_str(s),
-                    StrPart::Expr(Expr::Ident(name, _)) => {
+                    StrPart::Expr(Expr::Ident(name, _), _) => {
                         if params.contains(name) {
                             return Err(PathError::DuplicateParam(name.clone()));
                         }
@@ -589,7 +589,7 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
                         buf.push_str(name);
                         buf.push('}');
                     }
-                    StrPart::Expr(other) => {
+                    StrPart::Expr(other, _) => {
                         return Err(PathError::UnsupportedInterpolation(
                             format!("{:?}", other),
                         ));
@@ -1970,7 +1970,7 @@ mod tests {
         // `"/users/{id}"` → StrInterp([Lit("/users/"), Expr(Ident("id"))])
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/users/".into()),
-            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
         ], Span::ZERO);
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/users/{id}");
@@ -1982,9 +1982,9 @@ mod tests {
         // `"/orgs/{org}/users/{id}"`
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/orgs/".into()),
-            StrPart::Expr(Expr::Ident("org".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("org".into(), Span::ZERO), None),
             StrPart::Lit("/users/".into()),
-            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
         ], Span::ZERO);
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/orgs/{org}/users/{id}");
@@ -2006,7 +2006,7 @@ mod tests {
                 op: crate::ast::BinOpKind::Add,
                 left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
                 right: Box::new(Expr::Ident("b".into(), Span::ZERO)), span: Span::ZERO,
-            }),
+            }, None),
         ], Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
         assert!(matches!(err, PathError::UnsupportedInterpolation(_)));
@@ -2017,9 +2017,9 @@ mod tests {
         // `"/a/{x}/b/{x}"`
         let e = Expr::StrInterp(vec![
             StrPart::Lit("/a/".into()),
-            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
             StrPart::Lit("/b/".into()),
-            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO)),
+            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
         ], Span::ZERO);
         let err = parse_path_template(&e).unwrap_err();
         assert_eq!(err, PathError::DuplicateParam("x".into()));
@@ -2041,9 +2041,9 @@ mod tests {
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/items?limit=".into()),
-                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO), None),
                 StrPart::Lit("&offset=".into()),
-                StrPart::Expr(Expr::Ident("offset".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("offset".into(), Span::ZERO), None),
             ],
             Span::ZERO,
         );
@@ -2063,9 +2063,9 @@ mod tests {
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/users/".into()),
-                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
                 StrPart::Lit("/posts?limit=".into()),
-                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO), None),
             ],
             Span::ZERO,
         );
@@ -2081,7 +2081,7 @@ mod tests {
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/x?l=".into()),
-                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("limit".into(), Span::ZERO), None),
             ],
             Span::ZERO,
         );
@@ -2111,9 +2111,9 @@ mod tests {
         let e = Expr::StrInterp(
             vec![
                 StrPart::Lit("/users/".into()),
-                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
                 StrPart::Lit("?id=".into()),
-                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO)),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
             ],
             Span::ZERO,
         );

@@ -201,7 +201,7 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
         | Expr::Error(_) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
-                if let StrPart::Expr(e) = p {
+                if let StrPart::Expr(e, _) = p {
                     collect_uses_in_expr(e, uses);
                 }
             }
@@ -597,7 +597,7 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         | Expr::Error(_) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
-                if let StrPart::Expr(e) = p {
+                if let StrPart::Expr(e, _) = p {
                     walk_expr(e, f);
                 }
             }
