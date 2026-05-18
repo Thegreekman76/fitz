@@ -2091,6 +2091,14 @@ struct CodegenCtx<'a> {
     /// usuario los escribió (matchea posibles side-effects al import
     /// de un módulo Python que registra hooks globales).
     python_imports_ordered: Vec<PythonImport>,
+    /// Mini-tanda Rt — contador para nombres únicos de bindings
+    /// sintéticos en patterns (`__s_<n>`/`__n_<n>`/`__or_v_<n>`).
+    /// Cada vez que `gen_pattern` necesita uno, lo incrementa. Sin
+    /// reset entre arms — los nombres son scope-local del arm de
+    /// todas formas, lo que importa es que sean únicos dentro del
+    /// pattern del arm (especialmente cuando dos sub-patterns de un
+    /// Tuple necesitan bindings sintéticos a la vez).
+    pattern_slot_counter: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -2180,6 +2188,7 @@ impl<'a> CodegenCtx<'a> {
             uses_python: false,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
+            pattern_slot_counter: 0,
         }
     }
 
@@ -6229,11 +6238,15 @@ impl<'a> CodegenCtx<'a> {
             Pattern::Float(f) => Ok((format!("{}f64", f), None)),
             Pattern::Str(s) => {
                 // Rust no acepta literal `&str` como pattern contra
-                // `String`. Bindeamos como `ref __s` y comparamos en
-                // el guard.
+                // `String`. Bindeamos como `ref __s_<n>` y comparamos
+                // en el guard. Mini-tanda Rt: counter en CodegenCtx
+                // garantiza nombres únicos cuando hay varios Str
+                // patterns adentro de un Tuple.
+                let id = self.pattern_slot_counter;
+                self.pattern_slot_counter += 1;
                 Ok((
-                    "ref __s".to_string(),
-                    Some(format!("__s.as_str() == {}", rust_str_literal(s))),
+                    format!("ref __s_{}", id),
+                    Some(format!("__s_{}.as_str() == {}", id, rust_str_literal(s))),
                 ))
             }
             Pattern::Bool(b) => Ok((b.to_string(), None)),
@@ -6268,46 +6281,45 @@ impl<'a> CodegenCtx<'a> {
             Pattern::OkWildcard => Ok(("Ok(_)".to_string(), None)),
             Pattern::ErrWildcard => Ok(("Err(_)".to_string(), None)),
             Pattern::Range { start, end, inclusive } => {
+                // Mini-tanda Rt — counter para nombre único.
                 let op = if *inclusive { "..=" } else { ".." };
+                let id = self.pattern_slot_counter;
+                self.pattern_slot_counter += 1;
                 Ok((
-                    "__n".to_string(),
-                    Some(format!("({}i64{}{}i64).contains(&__n)", start, op, end)),
+                    format!("__n_{}", id),
+                    Some(format!("({}i64{}{}i64).contains(&__n_{})", start, op, end, id)),
                 ))
             }
             Pattern::Or(subs) => {
-                // R.2.1 — or-pattern como `ref __or_v` + guard que es
-                // la OR de cada condición. Sub-patterns no bindean
-                // (contrato del parser).
+                // R.2.1 — or-pattern como `ref __or_v_<n>` + guard que
+                // es la OR de cada condición. Mini-tanda Rt: counter
+                // para nombre único cuando hay Or adentro de Tuple.
+                let id = self.pattern_slot_counter;
+                self.pattern_slot_counter += 1;
+                let bind_name = format!("__or_v_{}", id);
                 let mut conds: Vec<String> = Vec::with_capacity(subs.len());
                 for sub in subs {
-                    conds.push(self.pattern_to_or_cond(sub, scrut_ty)?);
+                    conds.push(self.pattern_to_or_cond(sub, scrut_ty, &bind_name)?);
                 }
-                Ok(("ref __or_v".to_string(), Some(conds.join(" || "))))
+                Ok((format!("ref {}", bind_name), Some(conds.join(" || "))))
             }
-            // Tuples (mini-tanda T): Rust nativo soporta `(p1, p2)`
-            // como pattern. Cada sub-pattern lo traducimos
-            // recursivamente, combinando los guards adicionales si
-            // los hay. Si un sub-pattern genera inner_guard,
-            // tenemos que renombrar `__s`/`__n`/`__or_v` adentro
-            // para que sean únicos por slot. Para mantener el MVP
-            // simple, restringimos: en codegen, los sub-patterns
-            // de un Tuple deben ser "puros" sin inner guard.
+            // Mini-tanda Rt — Tuple patterns con sub-patterns que
+            // requieren guards (Str/Range/Or) ahora se soportan
+            // combinando los inner_guards de cada slot con `&&`.
+            // Antes de Rt esto era error de codegen explícito.
             Pattern::Tuple(subs) => {
                 let slot_tys: Vec<Type> = match scrut_ty {
                     Type::Tuple(items) if items.len() == subs.len() => items.clone(),
                     _ => (0..subs.len()).map(|_| Type::Any).collect(),
                 };
                 let mut codes: Vec<String> = Vec::with_capacity(subs.len());
+                let mut guards: Vec<String> = Vec::new();
                 for (sub, ty) in subs.iter().zip(slot_tys.iter()) {
                     let (code, inner_guard) = self.gen_pattern(sub, ty, ok_inner_ty)?;
-                    if inner_guard.is_some() {
-                        return Err(self.err(
-                            "tuple patterns con sub-patterns que requieren guard \
-                             (Str literal, Range, Or) no soportados en `fitz build`"
-                                .to_string(),
-                        ));
-                    }
                     codes.push(code);
+                    if let Some(g) = inner_guard {
+                        guards.push(g);
+                    }
                 }
                 let pat_code = if codes.is_empty() {
                     "()".to_string()
@@ -6316,26 +6328,38 @@ impl<'a> CodegenCtx<'a> {
                 } else {
                     format!("({})", codes.join(", "))
                 };
-                Ok((pat_code, None))
+                let combined_guard = if guards.is_empty() {
+                    None
+                } else if guards.len() == 1 {
+                    Some(guards.remove(0))
+                } else {
+                    Some(guards.join(" && "))
+                };
+                Ok((pat_code, combined_guard))
             }
         }
     }
 
     /// Helper para `Pattern::Or` (R.2.1). Traduce cada sub-pattern
-    /// a una expresión Bool que checkea si `__or_v` matchea. Los
+    /// a una expresión Bool que checkea si `bind_name` matchea. Los
     /// patrones con binding están vetados por el parser, así que
     /// acá no hay que declarar nada en el scope.
+    ///
+    /// Mini-tanda Rt: `bind_name` ahora es parámetro (en lugar de
+    /// `__or_v` hardcoded) para que la versión sintetizada por
+    /// `gen_pattern` (con counter `__or_v_<n>`) pueda llegar acá.
     fn pattern_to_or_cond(
         &self,
         pat: &crate::ast::Pattern,
         scrut_ty: &Type,
+        bind_name: &str,
     ) -> Result<String, FitzError> {
         use crate::ast::Pattern;
         match pat {
-            Pattern::Int(n) => Ok(format!("*__or_v == {}i64", n)),
-            Pattern::Float(n) => Ok(format!("*__or_v == {}f64", n)),
-            Pattern::Str(s) => Ok(format!("__or_v.as_str() == {}", rust_str_literal(s))),
-            Pattern::Bool(b) => Ok(format!("*__or_v == {}", b)),
+            Pattern::Int(n) => Ok(format!("*{} == {}i64", bind_name, n)),
+            Pattern::Float(n) => Ok(format!("*{} == {}f64", bind_name, n)),
+            Pattern::Str(s) => Ok(format!("{}.as_str() == {}", bind_name, rust_str_literal(s))),
+            Pattern::Bool(b) => Ok(format!("*{} == {}", bind_name, b)),
             Pattern::Null => {
                 if matches!(scrut_ty, Type::Null) {
                     Ok("true".to_string())
@@ -6346,10 +6370,10 @@ impl<'a> CodegenCtx<'a> {
             Pattern::Wildcard => Ok("true".to_string()),
             Pattern::Range { start, end, inclusive } => {
                 let op = if *inclusive { "..=" } else { ".." };
-                Ok(format!("({}i64{}{}i64).contains(__or_v)", start, op, end))
+                Ok(format!("({}i64{}{}i64).contains({})", start, op, end, bind_name))
             }
-            Pattern::OkWildcard => Ok("matches!(__or_v, Ok(_))".to_string()),
-            Pattern::ErrWildcard => Ok("matches!(__or_v, Err(_))".to_string()),
+            Pattern::OkWildcard => Ok(format!("matches!({}, Ok(_))", bind_name)),
+            Pattern::ErrWildcard => Ok(format!("matches!({}, Err(_))", bind_name)),
             // Los siguientes están vetados por el parser para
             // or-patterns. Si llegan acá, es un bug del parser.
             Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_) => {

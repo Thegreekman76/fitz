@@ -648,10 +648,23 @@ posteriores.
   2026-05-17 (mini-tanda T post-I). Incluye `Type::Tuple`,
   acceso por índice `.0`/`.1` (lexer maneja `t.0.0` chaining
   via flag `prev_was_dot`), destructuring `let (a, b) = expr`,
-  tuple patterns en match (con nesting). Limitaciones del MVP
-  documentadas: en `fitz build` los tuple patterns no admiten
-  literales Str/Range/Or como sub-pattern, y `let (...)` solo
-  admite Ident/Wildcard/Tuple (no literales ni Ok/Err).
+  tuple patterns en match (con nesting). Limitaciones residuales
+  del MVP (originalmente):
+  - ~~en `fitz build` los tuple patterns no admiten literales
+    Str/Range/Or como sub-pattern~~ ✓ CERRADO 2026-05-18
+    (mini-tanda Rt). Counter `pattern_slot_counter` en
+    `CodegenCtx` sintetiza nombres únicos `__s_<n>`/`__n_<n>`/
+    `__or_v_<n>` por slot. Pattern::Tuple en `gen_pattern`
+    ahora combina los inner_guards de todos los sub-patterns
+    con `&&`. `pattern_to_or_cond` toma el `bind_name` como
+    parámetro (antes era `__or_v` hardcoded) para que coincida
+    con el counter. 3 unit tests + 3 compile_e2e nuevos. Ejemplo
+    `examples/guide/10b-match-tuple-subpatterns.fitz` sumado al
+    smoke `GUIDE_EXAMPLES_COMPILE`. Cap 10 de la guía suma
+    sub-sección "Tuple patterns con sub-patterns ricos
+    (mini-tanda Rt)".
+  - `let (...)` solo admite Ident/Wildcard/Tuple (no literales
+    ni Ok/Err). Sigue como deuda residual menor.
 - ~~**For sobre Map con destructuring** `for (k, v) in m`~~ ✓
   CERRADO 2026-05-18 (mini-tanda Md). `Stmt::For.var` cambió de
   `String` a `Pattern`. El parser usa `parse_pattern` general

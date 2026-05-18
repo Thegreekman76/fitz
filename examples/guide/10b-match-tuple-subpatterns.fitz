@@ -1,0 +1,72 @@
+// Mini-tanda Rt — tuple patterns con sub-patterns ricos en match.
+//
+// Antes de Rt, los tuple patterns en `fitz build` solo aceptaban
+// Ident/Wildcard como sub-pattern (`(a, b)`, `(_, b)`). Sub-patterns
+// con guards (Str literal, Range, Or) fallaban con error de codegen
+// y obligaban a usar bind + guard manual:
+//
+//   (a, b) if a == "ada"        // workaround pre-Rt
+//   ("ada", b)                  // ahora funciona en build (post-Rt)
+//
+// Rt sintetiza nombres únicos `__s_<n>`/`__n_<n>`/`__or_v_<n>` por
+// slot del tuple, así varios sub-patterns con guard no chocan.
+
+// --- Str literal como sub-pattern ---
+
+fn saludar(p: (Str, Int)) -> Str {
+    return match p {
+        ("ada", 1)       => "ada uno!",
+        ("ada", n)       => "ada otro: {n}",
+        (name, n)        => "{name}: {n}"
+    }
+}
+
+print(saludar(("ada", 1)))     // ada uno!
+print(saludar(("ada", 7)))     // ada otro: 7
+print(saludar(("bob", 5)))     // bob: 5
+
+// --- Or-pattern como sub-pattern ---
+
+fn clasif(p: (Str, Int)) -> Str {
+    return match p {
+        (n, 1 | 2)       => "{n}: chico",
+        (n, 3 | 4 | 5)   => "{n}: medio",
+        (n, m)           => "{n}: {m}"
+    }
+}
+
+print(clasif(("a", 1)))         // a: chico
+print(clasif(("b", 4)))         // b: medio
+print(clasif(("c", 42)))        // c: 42
+
+// --- Range como sub-pattern ---
+
+fn band(p: (Str, Int)) -> Str {
+    return match p {
+        (n, 0..10)       => "{n}: dig",
+        (n, 10..100)     => "{n}: dec",
+        (n, 100..=999)   => "{n}: hund",
+        (n, _)           => "{n}: big"
+    }
+}
+
+print(band(("a", 5)))           // a: dig
+print(band(("b", 42)))          // b: dec
+print(band(("c", 200)))         // c: hund
+print(band(("d", 5000)))        // d: big
+
+// --- Sub-patterns combinados + guards explícitos ---
+// Los guards explícitos (`if cond`) siguen andando paralelo a Rt.
+fn match_rico(p: (Str, Int)) -> Str {
+    return match p {
+        ("zero", 0)                    => "exacto cero",
+        ("ada", n) if n > 100          => "ada gigante: {n}",
+        (name, 1 | 2 | 3)              => "{name} chico",
+        (name, n)                      => "{name} = {n}"
+    }
+}
+
+print(match_rico(("zero", 0)))             // exacto cero
+print(match_rico(("ada", 500)))            // ada gigante: 500
+print(match_rico(("bob", 2)))              // bob chico
+print(match_rico(("cam", 42)))             // cam = 42

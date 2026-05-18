@@ -2756,17 +2756,50 @@ exige un catch-all (`_` o ident) al final:
 let s = match r { Ok(_) if true => "x" }
 ```
 
+### Tuple patterns con sub-patterns ricos (mini-tanda Rt)
+
+Adentro de un tuple pattern (`(a, b)`), los sub-patterns ahora
+admiten Str literal, Range, y Or-pattern. Antes de Rt, los
+sub-patterns con guard no andaban en `fitz build` (el workaround
+era bind + guard manual):
+
+```fitz
+fn clasif(p: (Str, Int)) -> Str {
+    return match p {
+        ("ada", 1)        => "ada uno",       // Str + Int literal
+        ("ada", n)        => "ada otro: {n}", // Str literal + bind
+        (name, 1 | 2)     => "{name} chico",  // Bind + Or-pattern
+        (name, 0..10)     => "{name} dig",    // Bind + Range
+        (name, n) if n > 100 => "{name} grande: {n}",
+        (name, n)         => "{name}: {n}"
+    }
+}
+```
+
+Funciona bit-a-bit en `fitz run` y `fitz build`. El codegen
+sintetiza nombres únicos `__s_<n>`/`__n_<n>`/`__or_v_<n>` por
+slot del tuple para que dos sub-patterns con guard no choquen.
+
+Combinable con guards explícitos (`if cond`) en el mismo arm,
+con paréntesis anidados (`((a, b), c)`), y con cualquier
+combinación de Ident/Wildcard/literal/Range/Or.
+
+Ver [examples/guide/10b-match-tuple-subpatterns.fitz](../examples/guide/10b-match-tuple-subpatterns.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
-- **Tuples y listas como patrón** — `(a, b)`, `[head, ...rest]`,
-  etc. Cuando lleguen los tipos compuestos.
+- **Listas como patrón** — `[head, ...rest]`, etc. Sin demanda
+  concreta.
 - **Exhaustividad para tipos no-Result** — desde Fase 5.3.3
   `fitz check` exige exhaustividad sobre `Result<T>`. Para Int,
   Str y otros tipos no acotados sigue siendo responsabilidad
   tuya cerrar con `_`.
 
-> Lo que **sí anda** y antes era deuda: or-patterns (R.2.1) y
-> guards (R.2.2), ambos en mini-fase R.
+> Lo que **sí anda** y antes era deuda: or-patterns (R.2.1),
+> guards (R.2.2), tuple patterns (mini-tanda T), y **tuple
+> patterns con sub-patterns Str/Range/Or en `fitz build`**
+> (mini-tanda Rt — ver sub-sección de arriba).
 
 ### Ejemplo completo
 

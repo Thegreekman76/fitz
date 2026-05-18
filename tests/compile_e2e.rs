@@ -1793,6 +1793,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "09d-comprehensions.fitz",
     "09e-for-map.fitz",
     "10-match.fitz",
+    "10b-match-tuple-subpatterns.fitz",
     "11-funciones.fitz",
     "12-type.fitz",
     "13-metodos.fitz",
@@ -2693,6 +2694,59 @@ fn mini_tanda_err_plus_err_int_compila_y_corre() {
     let (stdout, exit) = build_and_run("mini_tanda_err_plus_int", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "err: 404");
+}
+
+// ---- Mini-tanda Rt — tuple patterns con sub-pattern Str/Range/Or ----
+
+#[test]
+fn mini_tanda_rt_tuple_con_str_literal_subpattern() {
+    // `("ada", n)` en codegen: Str literal como sub-pattern de Tuple.
+    let src = "fn name(p: (Str, Int)) -> Str {\n\
+                 return match p {\n\
+                   (\"ada\", n) => \"ada n={n}\",\n\
+                   (other, n) => \"{other} n={n}\"\n\
+                 }\n\
+               }\n\
+               print(name((\"ada\", 5)))\n\
+               print(name((\"bob\", 7)))\n";
+    let (stdout, exit) = build_and_run("mini_tanda_rt_str_sub", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "ada n=5\nbob n=7");
+}
+
+#[test]
+fn mini_tanda_rt_tuple_con_or_pattern_subpattern() {
+    // `(name, 1 | 2)` en codegen: Or-pattern como sub-pattern.
+    let src = "fn clasif(p: (Str, Int)) -> Str {\n\
+                 return match p {\n\
+                   (n, 1 | 2) => \"{n}: chico\",\n\
+                   (n, m) => \"{n}: {m}\"\n\
+                 }\n\
+               }\n\
+               print(clasif((\"ada\", 1)))\n\
+               print(clasif((\"ada\", 2)))\n\
+               print(clasif((\"bob\", 42)))\n";
+    let (stdout, exit) = build_and_run("mini_tanda_rt_or_sub", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "ada: chico\nada: chico\nbob: 42");
+}
+
+#[test]
+fn mini_tanda_rt_tuple_con_range_subpattern() {
+    // `(name, 0..10)` en codegen: Range como sub-pattern.
+    let src = "fn band(p: (Str, Int)) -> Str {\n\
+                 return match p {\n\
+                   (n, 0..10) => \"{n}: dig\",\n\
+                   (n, 10..100) => \"{n}: dec\",\n\
+                   (n, _) => \"{n}: big\"\n\
+                 }\n\
+               }\n\
+               print(band((\"a\", 5)))\n\
+               print(band((\"b\", 42)))\n\
+               print(band((\"c\", 500)))\n";
+    let (stdout, exit) = build_and_run("mini_tanda_rt_range_sub", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "a: dig\nb: dec\nc: big");
 }
 
 // ---- Mini-tanda Cmp — ops compuestos bit-a-bit + prefijos mayúscula ----
