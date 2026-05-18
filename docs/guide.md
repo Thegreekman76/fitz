@@ -2142,6 +2142,22 @@ Los rangos son valores como cualquier otro: podés asignarlos, pasarlos
 a funciones, y compararlos por igualdad. Pero su uso natural es
 iterar, que viene ahora.
 
+**Step con `step_by(n)`** (mini-tanda Rg) — útil para saltear
+elementos al iterar, materializa el rango con paso:
+
+```fitz
+let evens: List<Int> = (0..10).step_by(2)
+print(evens)                    // [0, 2, 4, 6, 8]
+
+// step_by también funciona sobre rangos inclusivos.
+let by_three: List<Int> = (0..=20).step_by(3)
+print(by_three)                 // [0, 3, 6, 9, 12, 15, 18]
+```
+
+`n` debe ser `Int > 0` — el runtime corta con error claro si pasás
+0 o negativo. Ver cap 13 para los métodos completos sobre Range
+(`enumerate`/`zip`/`chain`/`len`/`step_by`).
+
 ### `for ... in`
 
 `for var in iterable { body }` recorre los elementos de la lista o
@@ -3715,6 +3731,7 @@ print(xs)                          // [1, 2, 3]
 | `map_values(fn(v))` | Map nuevo: aplica `fn` a cada value, mantiene las keys (Ex).  |
 | `merge(other)`      | Combina dos `Map<K, V>` (last-write-wins, paralelo a `{**m, **other}`) (Ex2). |
 | `update(k, fn(v))`  | Map nuevo: aplica `fn` al value de `k` si existe, no-op si no (Up). |
+| `keys_sorted()`     | `List<K>` con las keys ordenadas; K ∈ {Int, Float, Str, Bool} (Mb2). |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -4114,6 +4131,8 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.find(s)`          | `Str`        | `Result<Int>` | índice (en chars) de la 1ra ocurrencia (Ex) |
 | `.index_of(s)`      | `Str`        | `Result<Int>` | alias de `find` (estilo JS/TS) (Ex) |
 | `.last_index_of(s)` | `Str`        | `Result<Int>` | índice de la ÚLTIMA ocurrencia (Ex) |
+| `.pad_start(w, c)`  | `Int`, `Str` | `Str`         | padding a la izquierda; `c` debe ser 1 char (Mb2) |
+| `.pad_end(w, c)`    | `Int`, `Str` | `Str`         | padding a la derecha; `c` debe ser 1 char (Mb2) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 
@@ -4131,6 +4150,9 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.flat_map(fn)`     | `fn(T) -> List<U>` | `List<U>`    | map + flatten en un paso (Ex2) |
 | `.first()`          | —                 | `Result<T>`   | primer elemento o `Err("lista vacía")` (Ex2) |
 | `.last()`           | —                 | `Result<T>`   | último elemento o `Err` (Ex2) |
+| `.min()`            | —                 | `Result<T>`   | mínimo numérico; `T ∈ {Int, Float}`; vacía → `Err` (Mb2) |
+| `.max()`            | —                 | `Result<T>`   | máximo numérico; `T ∈ {Int, Float}`; vacía → `Err` (Mb2) |
+| `.sum()`            | —                 | `T`           | suma numérica; `T ∈ {Int, Float}`; vacía → `0` (Mb2) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4231,6 +4253,76 @@ adentro del wrap `Arc<Mutex<>>`.
   con el comprehension primero.
 
 Ver [examples/guide/13f-range-iteradores.fitz](../examples/guide/13f-range-iteradores.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+### Reducciones + padding + keys ordenadas + Range con step (mini-tanda Mb2 + Rg)
+
+Bundle de polish ergonómico que cubre cuatro frentes chicos:
+
+**`List.min()` / `List.max()` / `List.sum()`** — reducciones
+numéricas sobre `List<Int>` o `List<Float>`. `min` y `max` devuelven
+`Result<T>` porque la lista puede estar vacía; `sum` devuelve `T`
+(con `0`/`0.0` como sentinel para vacío). Tipos no numéricos
+disparan error.
+
+```fitz
+let nums: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]
+match nums.min() {
+    Ok(v) => print("min: {v}"),                  // min: 1
+    Err(_) => print("vacía")
+}
+print("sum: {nums.sum()}")                       // sum: 31
+
+let temps: List<Float> = [22.5, 21.0, 23.8]
+print("máxima: {temps.max()}")                   // máxima: Ok(23.8)
+```
+
+**`Str.pad_start(width, ch)` / `Str.pad_end(width, ch)`** — padding
+estilo Python `str.rjust(width, ch)` / `str.ljust(width, ch)`. `ch`
+debe ser **exactamente 1 char** (validado en runtime). Si `len(s) >=
+width`, devuelve `s` sin cambios.
+
+```fitz
+print("42".pad_start(5, "0"))                    // 00042
+print("hi".pad_end(5, "."))                      // hi...
+print("hola, mundo".pad_start(5, "*"))           // hola, mundo
+```
+
+**`Map.keys_sorted()`** — devuelve `List<K>` con las keys
+ordenadas. Solo para K en {Int, Float, Str, Bool} (mismas reglas
+que `list.sort`). Map vacío → lista vacía. Maps preservan insertion
+order por diseño; `keys_sorted` es el escape cuando querés orden
+canónico para iterar.
+
+```fitz
+let scores: Map<Str, Int> = {"banana": 3, "apple": 1, "cherry": 5}
+print(scores.keys_sorted())                      // ["apple", "banana", "cherry"]
+
+for k in scores.keys_sorted() {
+    match scores.get(k) {
+        Ok(v) => print("{k.pad_end(8, \".\")}: {v}"),
+        Err(_) => {}
+    }
+}
+// apple...: 1 / banana..: 3 / cherry..: 5
+```
+
+**`Range.step_by(n)`** — materializa el rango con step `n` (debe
+ser `Int > 0`). Encadena natural con los otros métodos de List —
+útil para iterar saltando elementos.
+
+```fitz
+let evens: List<Int> = (0..10).step_by(2)
+print(evens)                                     // [0, 2, 4, 6, 8]
+
+let by_three: List<Int> = (0..=20).step_by(3)
+print(by_three)                                  // [0, 3, 6, 9, 12, 15, 18]
+
+let suma_pares: Int = (0..100).step_by(2).sum()
+print(suma_pares)                                // 2450
+```
+
+Ver [examples/guide/13m-min-max-sum-pad-keys-step.fitz](../examples/guide/13m-min-max-sum-pad-keys-step.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda

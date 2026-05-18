@@ -5530,6 +5530,34 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
+        // Mini-tanda Rg — `(start..end).step_by(n)` se emite SIN
+        // materializar el rango primero (eso desperdiciaría memoria
+        // y derrotaría el sentido de `step_by`). Detectamos el caso
+        // antes que el bloque general de Range que materializa a
+        // `Vec<i64>` para enumerate/zip/chain.
+        if method == "step_by" {
+            if let Expr::Range { start, end, inclusive, .. } = object {
+                check_method_arity(method, args, 1)?;
+                let (start_code, start_ty) = self.gen_expr(start)?;
+                let (end_code, end_ty) = self.gen_expr(end)?;
+                let start_c = coerce(&start_code, &start_ty, &Type::Int);
+                let end_c = coerce(&end_code, &end_ty, &Type::Int);
+                let end_final = if *inclusive {
+                    format!("({}) + 1i64", end_c)
+                } else {
+                    end_c
+                };
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let code = format!(
+                    "{{ let __step: i64 = {n_c}; \
+                       if __step <= 0 {{ panic!(\"`Range.step_by()` requiere n > 0, recibió {{}}\", __step); }} \
+                       Arc::new(Mutex::new(({start_c}..{end_final}).step_by(__step as usize).collect::<Vec<i64>>())) }}"
+                );
+                return Ok((code, Type::List(Box::new(Type::Int))));
+            }
+        }
+
         // Mini-tanda Ir — `(start..end).enumerate()`/`zip()`/`chain()`/
         // `len()`. El `Range` NO está soportado como valor general en
         // codegen (`gen_expr` lo rechaza), pero como receptor de un
@@ -5690,8 +5718,39 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }))
             }
+            // Mini-tanda Mb2 — `pad_start(width, ch)` / `pad_end(width, ch)`.
+            // El padding usa `repeat` en runtime; `ch.chars().count() != 1`
+            // panicamos con mensaje claro (paralelo al evaluator). Output:
+            // `String`. Si `len(s) >= width`, devolvemos `s` sin cambios.
+            (Type::Str, "pad_start") | (Type::Str, "pad_end") => {
+                check_method_arity(method, args, 2)?;
+                let at_start = method == "pad_start";
+                let (w_code, w_ty) = self.gen_expr(&args[0])?;
+                let (ch_code, ch_ty) = self.gen_expr(&args[1])?;
+                let w_c = coerce(&w_code, &w_ty, &Type::Int);
+                let ch_c = coerce(&ch_code, &ch_ty, &Type::Str);
+                let pad_concat = if at_start {
+                    "format!(\"{}{}\", __pad, __s)"
+                } else {
+                    "format!(\"{}{}\", __s, __pad)"
+                };
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let __width: i64 = {w_c}; \
+                       let __ch: String = {ch_c}; \
+                       if __ch.chars().count() != 1 {{ \
+                           panic!(\"`.{method}(width, ch)`: el char de relleno debe ser exactamente 1 caracter, recibió `\\\"{{}}\\\"` ({{}} chars)\", __ch, __ch.chars().count()); \
+                       }} \
+                       let __len: i64 = __s.chars().count() as i64; \
+                       if __len >= __width {{ __s }} else {{ \
+                           let __pad = __ch.repeat((__width - __len) as usize); \
+                           {pad_concat} \
+                       }} }}"
+                );
+                Ok((code, Type::Str))
+            }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end)",
                 other
             ))),
 
@@ -5941,8 +6000,79 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Result { ok: Box::new((**t).clone()), err: Box::new(Type::Str) }))
             }
+            // Mini-tanda Mb2 — `min` / `max` sobre `List<Int>` o
+            // `List<Float>`. Devuelven `Result<T>`; lista vacía → Err.
+            // Para Float usamos `partial_cmp` con NaN handling (paralelo
+            // a evaluator y `sort`). Para Int, usamos `iter().min()` /
+            // `iter().max()` directos (Ord trait).
+            (Type::List(t), "min") | (Type::List(t), "max") => {
+                check_method_arity(method, args, 0)?;
+                let is_min = method == "min";
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = match &**t {
+                    Type::Int => {
+                        let cmp_fn = if is_min { "min" } else { "max" };
+                        format!(
+                            "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
+                               match __g.iter().{cmp_fn}().copied() {{ \
+                                   Some(__v) => Ok::<{t_rs}, String>(__v), \
+                                   None => Err(String::from(\"lista vacía\")) \
+                               }} }}"
+                        )
+                    }
+                    Type::Float => {
+                        let cmp_branch = if is_min {
+                            "Some(std::cmp::Ordering::Less) => Some(__v)"
+                        } else {
+                            "Some(std::cmp::Ordering::Greater) => Some(__v)"
+                        };
+                        format!(
+                            "{{ let __list = {obj_code}; let __g = __list.lock().unwrap(); \
+                               let mut __best: Option<{t_rs}> = None; \
+                               for __v in __g.iter().copied() {{ \
+                                   __best = match __best {{ \
+                                       None => Some(__v), \
+                                       Some(__b) => match __v.partial_cmp(&__b) {{ \
+                                           {cmp_branch}, \
+                                           _ => Some(__b), \
+                                       }}, \
+                                   }}; \
+                               }} \
+                               match __best {{ \
+                                   Some(__v) => Ok::<{t_rs}, String>(__v), \
+                                   None => Err(String::from(\"lista vacía\")) \
+                               }} }}"
+                        )
+                    }
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                            method, display_type(other, self.env)
+                        )));
+                    }
+                };
+                Ok((code, Type::Result { ok: Box::new((**t).clone()), err: Box::new(Type::Str) }))
+            }
+            // Mini-tanda Mb2 — `sum` sobre `List<Int>` o `List<Float>`.
+            // Lista vacía → 0/0.0 (Rust `Iterator::sum` lo hace nativo).
+            (Type::List(t), "sum") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = match &**t {
+                    Type::Int | Type::Float => rust_type_for(t, self.env)?,
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.sum()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let code = format!(
+                    "({obj_code}).lock().unwrap().iter().copied().sum::<{t_rs}>()"
+                );
+                Ok((code, (**t).clone()))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum)",
                 other
             ))),
 
@@ -6026,6 +6156,35 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
+            // Mini-tanda Mb2 — `keys_sorted()`: devuelve `List<K>` con
+            // las keys ordenadas. Solo válido para K en {Int, Float,
+            // Str, Bool} (mismas reglas que `list_sort`). Map vacío →
+            // lista vacía. Para Float usamos `partial_cmp` con NaN
+            // handling (paralelo al evaluator).
+            (Type::Map(k, _), "keys_sorted") => {
+                check_method_arity(method, args, 0)?;
+                let k_rs = rust_type_for(k, self.env)?;
+                let sort_line = match &**k {
+                    Type::Int | Type::Str | Type::Bool => "__keys.sort();".to_string(),
+                    Type::Float => "__keys.sort_by(|__a, __b| __a.partial_cmp(__b).unwrap_or(std::cmp::Ordering::Equal));".to_string(),
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.keys_sorted()` solo soporta keys `Int`/`Float`/`Str`/`Bool`, recibió `Map<{}, _>`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                // Bindeamos `obj_code` a un local primero (paralelo a
+                // first/last) — sin esto, `(m.clone()).lock()` produce
+                // un temporario que rustc dropea al fin del stmt.
+                let code = format!(
+                    "{{ let __map = {obj_code}; \
+                       let mut __keys: Vec<{k_rs}> = __map.lock().unwrap().iter().map(|(__k, _)| __k.clone()).collect(); \
+                       {sort_line} \
+                       Arc::new(Mutex::new(__keys)) }}"
+                );
+                Ok((code, Type::List(Box::new((**k).clone()))))
+            }
             // Mini-tanda Ex2 — merge: combina dos Maps last-write-wins.
             // Iteramos los pares de `other` y actualizamos/insertamos en
             // un clone del `obj`. Devuelve Map nuevo.
@@ -6055,7 +6214,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted)",
                 other
             ))),
 

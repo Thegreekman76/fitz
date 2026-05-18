@@ -2276,9 +2276,22 @@ fn infer_range_method(
             check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
+        // Mini-tanda Rg — `step_by(n)`: materializa el rango con step `n`.
+        // `n: Int` (> 0 validado en runtime). Devuelve `List<Int>`.
+        "step_by" => {
+            if check_method_arity(ctx, "step_by", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`Range.step_by()` espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::List(Box::new(Type::Int))
+        }
         _ => {
             ctx.error_at(span, format!(
-                "`Range` no tiene el método `{}` (hoy: enumerate/zip/chain/len)",
+                "`Range` no tiene el método `{}` (hoy: enumerate/zip/chain/len/step_by)",
                 method,
             ));
             Type::Any
@@ -2497,6 +2510,40 @@ fn infer_list_method(
             check_method_arity(ctx, method, args_ty, 0, span);
             Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
         }
+        // Mini-tanda Mb2 — reducciones numéricas sobre `List<Int>`
+        // o `List<Float>`. `min`/`max` devuelven `Result<T>` porque
+        // la lista puede estar vacía. `sum` devuelve `T` (0/0.0
+        // como sentinel para vacío). Tipos no numéricos → error.
+        // `List<Any>` pasa gradual (Any).
+        "min" | "max" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            match t {
+                Type::Int | Type::Float | Type::Any => {
+                    Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
+                }
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                        method, other.display(ctx.types),
+                    ));
+                    Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) }
+                }
+            }
+        }
+        "sum" => {
+            check_method_arity(ctx, "sum", args_ty, 0, span);
+            match t {
+                Type::Int | Type::Float => t.clone(),
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.sum()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            }
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -2690,6 +2737,14 @@ fn infer_map_method(
         }
         "keys" => {
             check_method_arity(ctx, "keys", args_ty, 0, span);
+            Type::List(Box::new(k.clone()))
+        }
+        // Mini-tanda Mb2 — `keys_sorted()`: igual que `keys()` pero
+        // ordenadas. La validación de "K es comparable" (Int/Float/
+        // Str/Bool) se hace en runtime (paralelo a `list_sort`); el
+        // checker no rechaza para preservar el modelo gradual.
+        "keys_sorted" => {
+            check_method_arity(ctx, "keys_sorted", args_ty, 0, span);
             Type::List(Box::new(k.clone()))
         }
         "values" => {
@@ -2952,6 +3007,27 @@ fn infer_str_method(
                     "`Str.repeat()` espera `Int`, recibió `{}`",
                     args_ty[0].display(ctx.types),
                 ));
+            }
+            Type::Str
+        }
+        // Mini-tanda Mb2 — `pad_start(width, ch)` / `pad_end(width, ch)`.
+        // `width: Int`, `ch: Str` (1 char). Devuelven `Str`. La
+        // validación de "ch es 1 char" se hace en runtime (no en
+        // static, paralelo a Python).
+        "pad_start" | "pad_end" => {
+            if check_method_arity(ctx, method, args_ty, 2, span) {
+                if !is_compatible(&args_ty[0], &Type::Int) {
+                    ctx.error_at(span, format!(
+                        "`Str.{}(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
+                        method, args_ty[0].display(ctx.types),
+                    ));
+                }
+                if !is_compatible(&args_ty[1], &Type::Str) {
+                    ctx.error_at(span, format!(
+                        "`Str.{}(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
+                        method, args_ty[1].display(ctx.types),
+                    ));
+                }
             }
             Type::Str
         }
@@ -6290,6 +6366,107 @@ mod tests {
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.contains(\"x\")",
             &["contains", "Int"],
+        );
+    }
+
+    // ---- Mini-tanda Mb2 + Rg ----
+
+    #[test]
+    fn mb2_list_min_max_sobre_list_int_devuelve_result_int() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let lo: Result<Int> = xs.min()\n\
+             let hi: Result<Int> = xs.max()",
+        );
+    }
+
+    #[test]
+    fn mb2_list_min_max_sobre_list_float_devuelve_result_float() {
+        assert_ok(
+            "let xs: List<Float> = [1.0, 2.0]\n\
+             let lo: Result<Float> = xs.min()",
+        );
+    }
+
+    #[test]
+    fn mb2_list_min_sobre_list_str_es_error() {
+        assert_error_with(
+            "let xs: List<Str> = [\"a\", \"b\"]\n\
+             let r = xs.min()",
+            &["min", "Int", "Float"],
+        );
+    }
+
+    #[test]
+    fn mb2_list_sum_int_devuelve_int() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let total: Int = xs.sum()",
+        );
+    }
+
+    #[test]
+    fn mb2_list_sum_float_devuelve_float() {
+        assert_ok(
+            "let xs: List<Float> = [1.5, 2.5]\n\
+             let total: Float = xs.sum()",
+        );
+    }
+
+    #[test]
+    fn mb2_list_sum_sobre_str_es_error() {
+        assert_error_with(
+            "let xs: List<Str> = [\"a\"]\n\
+             let total = xs.sum()",
+            &["sum", "Int", "Float"],
+        );
+    }
+
+    #[test]
+    fn mb2_str_pad_start_end_devuelven_str() {
+        assert_ok(
+            "let s = \"42\"\n\
+             let a: Str = s.pad_start(5, \"0\")\n\
+             let b: Str = s.pad_end(5, \".\")",
+        );
+    }
+
+    #[test]
+    fn mb2_str_pad_start_con_width_no_int_es_error() {
+        assert_error_with(
+            "let r = \"42\".pad_start(\"5\", \"0\")",
+            &["pad_start", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb2_str_pad_end_con_ch_no_str_es_error() {
+        assert_error_with(
+            "let r = \"42\".pad_end(5, 0)",
+            &["pad_end", "Str"],
+        );
+    }
+
+    #[test]
+    fn mb2_map_keys_sorted_devuelve_list_de_keys() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"b\": 2, \"a\": 1}\n\
+             let ks: List<Str> = m.keys_sorted()",
+        );
+    }
+
+    #[test]
+    fn rg_range_step_by_devuelve_list_int() {
+        assert_ok(
+            "let xs: List<Int> = (0..10).step_by(2)",
+        );
+    }
+
+    #[test]
+    fn rg_range_step_by_con_arg_no_int_es_error() {
+        assert_error_with(
+            "let xs = (0..10).step_by(\"x\")",
+            &["step_by", "Int"],
         );
     }
 

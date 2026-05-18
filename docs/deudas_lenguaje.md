@@ -1131,6 +1131,66 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos chicos + Range step (List.min/max/sum + Str.pad_start/pad_end + Map.keys_sorted + Range.step_by)~~ ✓ CERRADO 2026-05-18 (mini-tanda Mb2 + Rg)
+
+Bundle de polish ergonómico chico, todos en 4 capas (evaluator +
+checker + codegen + LSP autocomplete). Cierra deudas residuales
+del prompt de cierre de sesión anterior ("Más métodos chicos:
+`List.min`/`max`/`sum` (homogéneos), `Str.pad_start`/`pad_end`,
+`Map.keys_sorted`" + "Range step `(0..10 step 2)`").
+
+- ~~**`List.min()` / `List.max()`**~~ ✓ Devuelven `Result<T>` —
+  `Err("lista vacía")` cuando no hay elementos. Solo válidos sobre
+  `List<Int>` o `List<Float>` homogéneos; otros tipos → error del
+  checker (estático) o del evaluator (gradual). Float usa
+  `partial_cmp` con NaN handling (Equal como fallback, paralelo a
+  `list_sort`).
+- ~~**`List.sum()`**~~ ✓ Devuelve `T` (`Int` o `Float`). Lista vacía
+  → `Int(0)` sentinel (sin info de tipo declarado en runtime).
+  Mismo chequeo de homogeneidad que min/max. Codegen emite
+  `.iter().copied().sum::<T>()` directo (Rust nativo).
+- ~~**`Str.pad_start(width, ch)` / `Str.pad_end(width, ch)`**~~ ✓
+  Padding paralelo a Python `str.rjust`/`ljust`. `ch` debe ser
+  exactamente 1 char (validado en runtime; runtime error con
+  mensaje claro si tiene 0 o ≥2). Si `len(s) >= width`, devuelve
+  `s` sin cambios.
+- ~~**`Map.keys_sorted()`**~~ ✓ Devuelve `List<K>` con keys ordenadas.
+  K en {Int, Float, Str, Bool} (validado runtime). Map vacío →
+  lista vacía. Útil para iterar en orden canónico cuando insertion
+  order no es lo deseado. El codegen bindea el receptor a `__map`
+  antes del lock (paralelo a `first`/`last`) para evitar E0716.
+- ~~**`Range.step_by(n)`**~~ ✓ Materializa el rango con step.
+  `n: Int > 0` (validado runtime — 0 o negativo → error claro).
+  Devuelve `List<Int>`. El codegen detecta el patrón
+  `Expr::Range.step_by(n)` ANTES del bloque general de Range
+  (que materializa todo el rango) y emite directo
+  `(start..end).step_by(n).collect()` Rust nativo — evita
+  materializar el rango entero primero.
+
+Implementación: ~250 LoC entre evaluator (helpers + 7 fns nuevas
+`list_min`/`list_max`/`list_sum`/`require_numeric_list`/
+`str_pad_args`/`str_pad_start`/`str_pad_end`/`map_keys_sorted`/
+`range_step_by`), types (`infer_list_method` suma 3 ramas,
+`infer_str_method` suma 1, `infer_map_method` suma 1,
+`infer_range_method` suma 1), codegen (4 ramas nuevas + caso
+especial para Range.step_by), LSP (4 entries nuevos en
+`after_dot_completions`).
+
+**14 unit tests** del evaluator + **12 unit tests** del checker
++ **8 compile_e2e** bit-a-bit `fitz run` ↔ `fitz build`. Ejemplo
+runnable `examples/guide/13m-min-max-sum-pad-keys-step.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE` (con casos canónicos
+para los 4 métodos + edge cases vacíos + chain con sum).
+
+Cap 13 de la guía: 3 filas nuevas en tabla `List<T>` (min/max/
+sum), 2 en tabla `Str` (pad_start/pad_end), 1 en tabla `Map<K,V>`
+(keys_sorted), sub-sección dedicada "Reducciones + padding + keys
+ordenadas + Range con step (mini-tanda Mb2 + Rg)" con ejemplos
+inline. Cap 9 sumó sub-sección "Step con `step_by(n)`" en la
+parte de rangos. VSCode extension: grammar TextMate sin cambios
+(identifiers genéricos); LSP autocomplete refleja todo
+automáticamente via rebuild del `fitz-lsp` binary.
+
 ### ~~Updates + Polish ergonómico (Map.update + comp tuple destruct + LSP param names)~~ ✓ CERRADO 2026-05-18 (mini-tanda Up)
 
 Bundle de 3 deudas residuales chicas, todas relacionadas a "ergonomía"

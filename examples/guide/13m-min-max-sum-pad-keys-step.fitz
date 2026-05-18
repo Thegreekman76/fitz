@@ -1,0 +1,106 @@
+// Mini-tanda Mb2 + Rg — polish ergonómico chico, bundle de cuatro
+// métodos chicos que cubren reducciones numéricas, padding de
+// strings, ordenación de keys y materialización con paso de Range.
+//
+//   - `List.min()` / `List.max()` / `List.sum()` sobre List<Int>
+//     y List<Float>. min/max devuelven `Result<T>`; sum devuelve T.
+//   - `Str.pad_start(width, ch)` / `Str.pad_end(width, ch)`: padding
+//     paralelo a `str.rjust`/`ljust` de Python.
+//   - `Map.keys_sorted()` devuelve `List<K>` con las keys ordenadas.
+//   - `(0..10).step_by(2)` materializa el rango con step.
+
+// --- Reducciones numéricas sobre List<Int> ----------------------
+let nums: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]
+
+match nums.min() {
+    Ok(v) => print("min: {v}"),                  // min: 1
+    Err(_) => print("vacía")
+}
+match nums.max() {
+    Ok(v) => print("max: {v}"),                  // max: 9
+    Err(_) => print("vacía")
+}
+print("sum: {nums.sum()}")                       // sum: 31
+
+// Lista vacía: min/max → Err, sum → 0 (sentinel).
+let empty: List<Int> = []
+match empty.min() {
+    Ok(_) => print("imposible"),
+    Err(e) => print("vacía: {e}")                // vacía: lista vacía
+}
+print("sum vacía: {empty.sum()}")                // sum vacía: 0
+
+// Float también soportado.
+let temps: List<Float> = [22.5, 21.0, 23.8, 20.1]
+match temps.max() {
+    Ok(t) => print("máxima: {t:.1f}"),           // máxima: 23.8
+    Err(_) => print("vacía")
+}
+print("promedio: {temps.sum() / 4.0:.2f}")        // promedio: 21.85
+
+// --- Padding de strings -----------------------------------------
+//
+// Útil para alinear tabla, padear IDs con ceros, columnas fijas.
+
+// Padear IDs con ceros a la izquierda.
+let ids: List<Int> = [1, 12, 123, 1234]
+for id in ids {
+    print("ID: {id}".pad_end(12, " "))           // "ID: 1       "
+}
+
+let labels: List<Str> = ["nombre", "edad", "rol"]
+for label in labels {
+    let padded: Str = label.pad_end(10, ".")
+    print(padded)
+}
+// nombre....
+// edad......
+// rol.......
+
+// pad_start con un solo char (paralelo a Python `str.rjust`):
+print("42".pad_start(5, "0"))                    // 00042
+print("hi".pad_start(3, "*"))                    // *hi
+// Si el string ya es más largo que el width, devuelve sin cambios.
+print("hola, mundo".pad_start(5, "*"))           // hola, mundo
+
+// --- Ordenar las keys de un Map ---------------------------------
+//
+// Los Maps preservan insertion order (decisión de diseño), pero a
+// veces queremos las keys en orden lexicográfico/numérico. Usar
+// `m.keys()` + sort manual era torpe; `keys_sorted()` lo hace en
+// un paso.
+
+let scores: Map<Str, Int> = {"banana": 3, "apple": 1, "cherry": 5}
+let ordered: List<Str> = scores.keys_sorted()
+print(ordered)                                   // ["apple", "banana", "cherry"]
+
+// Int keys también ordenan numéricamente.
+let by_id: Map<Int, Str> = {30: "Cam", 10: "Ada", 20: "Bob"}
+let ids_ordered: List<Int> = by_id.keys_sorted()
+print(ids_ordered)                               // [10, 20, 30]
+
+// Pipeline natural: keys ordenadas + values con get.
+for k in scores.keys_sorted() {
+    match scores.get(k) {
+        Ok(v) => print("{k.pad_end(8, \".\")}: {v}"),
+        Err(_) => print("missing: {k}")
+    }
+}
+// apple...: 1
+// banana..: 3
+// cherry..: 5
+
+// --- Rangos con step -------------------------------------------
+//
+// Útil para iterar saltando elementos: índices pares, cada 5
+// minutos, etc.
+
+let evens: List<Int> = (0..10).step_by(2)
+print(evens)                                     // [0, 2, 4, 6, 8]
+
+let by_three: List<Int> = (0..=20).step_by(3)
+print(by_three)                                  // [0, 3, 6, 9, 12, 15, 18]
+
+// step_by encadena natural con los otros métodos de List.
+let suma_pares: Int = (0..100).step_by(2).sum()
+print("suma de pares 0..100: {suma_pares}")      // suma de pares 0..100: 2450

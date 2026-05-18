@@ -3169,6 +3169,10 @@ async fn dispatch_method(
         (Value::List(_), "flat_map") => list_flat_map(receiver, args, span).await,
         (Value::List(_), "first") => list_first(receiver, args, span),
         (Value::List(_), "last") => list_last(receiver, args, span),
+        // Mini-tanda Mb2 — min/max/sum sobre List<Int>/List<Float>.
+        (Value::List(_), "min") => list_min(receiver, args, span),
+        (Value::List(_), "max") => list_max(receiver, args, span),
+        (Value::List(_), "sum") => list_sum(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3184,6 +3188,10 @@ async fn dispatch_method(
             let materialized = range_to_list(*start, *end);
             list_chain(materialized, args, span)
         }
+        // Mini-tanda Rg — `step_by(n)` materializa el rango con step.
+        // No materializa el rango entero primero — usamos `step_by`
+        // nativo de Rust al construir la List<Int>.
+        (Value::Range { start, end }, "step_by") => range_step_by(*start, *end, args, span),
         // Mini-tanda Ir — `len` sobre Range. Devuelve `(end - start)`
         // como Int, igual que `(start..end).count()` de Rust.
         (Value::Range { start, end }, "len") => {
@@ -3210,6 +3218,8 @@ async fn dispatch_method(
         // Mini-tanda Up — update inmutable: aplica `fn(V) -> V` al
         // value asociado a `k` y devuelve un Map nuevo.
         (Value::Map(_), "update") => map_update(receiver, args, span).await,
+        // Mini-tanda Mb2 — keys_sorted: keys ordenadas (Int/Float/Str/Bool).
+        (Value::Map(_), "keys_sorted") => map_keys_sorted(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3230,6 +3240,9 @@ async fn dispatch_method(
         (Value::Str(_), "find") => str_find(receiver, args, span),
         (Value::Str(_), "index_of") => str_index_of(receiver, args, span),
         (Value::Str(_), "last_index_of") => str_last_index_of(receiver, args, span),
+        // Mini-tanda Mb2 — padding (alineación de strings).
+        (Value::Str(_), "pad_start") => str_pad_start(receiver, args, span),
+        (Value::Str(_), "pad_end") => str_pad_end(receiver, args, span),
         // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
         // módulo y llamándola como cualquier función. No es method
         // dispatch real — el módulo no es "el receptor", solo el lugar
@@ -3770,6 +3783,174 @@ fn list_last(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     }
 }
 
+/// Mini-tanda Mb2 — Helper común para `min`/`max`/`sum`: extrae el
+/// receptor, valida que sea homogéneo Int o Float. Devuelve
+/// `Err` con `lista vacía` cuando corresponde a min/max; sum lo
+/// maneja con sentinel cero adentro de cada rama. Devuelve
+/// `(items_snapshot, "Int"|"Float")` o un error claro.
+fn require_numeric_list(
+    receiver: Value,
+    method: &str,
+    span: Span,
+) -> EvalResult<(Vec<Value>, &'static str)> {
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    if snapshot.is_empty() {
+        return Ok((snapshot, "Int"));
+    }
+    let first_kind: &'static str = match snapshot[0] {
+        Value::Int(_) => "Int",
+        Value::Float(_) => "Float",
+        _ => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int|Float".into(),
+                    found: snapshot[0].type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                    method, snapshot[0].type_name(),
+                ),
+            )));
+        }
+    };
+    for v in snapshot.iter().skip(1) {
+        let kind = match v {
+            Value::Int(_) => "Int",
+            Value::Float(_) => "Float",
+            _ => v.type_name(),
+        };
+        if kind != first_kind {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: first_kind.into(),
+                    found: kind.into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.{}()` requiere elementos del mismo tipo: vi `{}` y `{}`",
+                    method, first_kind, kind,
+                ),
+            )));
+        }
+    }
+    Ok((snapshot, first_kind))
+}
+
+/// Mini-tanda Mb2 — `xs.min()` / `xs.max()` sobre `List<Int>` o
+/// `List<Float>`. Devuelven `Result<T>`: `Err("lista vacía")` si la
+/// lista no tiene elementos. Para `Float` usamos `partial_cmp`
+/// devolviendo `Equal` ante NaN (determinístico, paralelo a `sort`).
+fn list_min(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("min", &args, 0, span)?;
+    let (snapshot, kind) = require_numeric_list(receiver, "min", span)?;
+    if snapshot.is_empty() {
+        return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "lista vacía".into(),
+        )))));
+    }
+    let best = match kind {
+        "Int" => {
+            let mut best = i64::MAX;
+            for v in snapshot {
+                if let Value::Int(n) = v {
+                    if n < best { best = n; }
+                }
+            }
+            Value::Int(best)
+        }
+        "Float" => {
+            let mut best: Option<f64> = None;
+            for v in snapshot {
+                if let Value::Float(n) = v {
+                    best = match best {
+                        None => Some(n),
+                        Some(b) if n.partial_cmp(&b) == Some(std::cmp::Ordering::Less) => Some(n),
+                        Some(b) => Some(b),
+                    };
+                }
+            }
+            Value::Float(best.unwrap())
+        }
+        _ => unreachable!(),
+    };
+    Ok(Value::Result(ResultVariant::Ok(Box::new(best))))
+}
+
+fn list_max(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("max", &args, 0, span)?;
+    let (snapshot, kind) = require_numeric_list(receiver, "max", span)?;
+    if snapshot.is_empty() {
+        return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "lista vacía".into(),
+        )))));
+    }
+    let best = match kind {
+        "Int" => {
+            let mut best = i64::MIN;
+            for v in snapshot {
+                if let Value::Int(n) = v {
+                    if n > best { best = n; }
+                }
+            }
+            Value::Int(best)
+        }
+        "Float" => {
+            let mut best: Option<f64> = None;
+            for v in snapshot {
+                if let Value::Float(n) = v {
+                    best = match best {
+                        None => Some(n),
+                        Some(b) if n.partial_cmp(&b) == Some(std::cmp::Ordering::Greater) => Some(n),
+                        Some(b) => Some(b),
+                    };
+                }
+            }
+            Value::Float(best.unwrap())
+        }
+        _ => unreachable!(),
+    };
+    Ok(Value::Result(ResultVariant::Ok(Box::new(best))))
+}
+
+/// Mini-tanda Mb2 — `xs.sum()` sobre `List<Int>` o `List<Float>`.
+/// Lista vacía → `Int(0)` (sentinel; el tipo Float vacío también
+/// devuelve `Int(0)` porque sin elementos el runtime no sabe cuál
+/// usar — el checker declara el tipo, pero el evaluator es gradual).
+fn list_sum(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("sum", &args, 0, span)?;
+    let (snapshot, kind) = require_numeric_list(receiver, "sum", span)?;
+    if snapshot.is_empty() {
+        return Ok(Value::Int(0));
+    }
+    let total = match kind {
+        "Int" => {
+            let mut total: i64 = 0;
+            for v in snapshot {
+                if let Value::Int(n) = v {
+                    total = total.wrapping_add(n);
+                }
+            }
+            Value::Int(total)
+        }
+        "Float" => {
+            let mut total: f64 = 0.0;
+            for v in snapshot {
+                if let Value::Float(n) = v {
+                    total += n;
+                }
+            }
+            Value::Float(total)
+        }
+        _ => unreachable!(),
+    };
+    Ok(total)
+}
+
 /// Mini-tanda Lx — `xs.find_index(pred)`: índice del primer elemento
 /// que satisface el predicado. Devuelve `Result<Int>`: `Ok(i)` si lo
 /// encuentra, `Err("no encontrado")` si no. Paralelo a `find` (que
@@ -3909,6 +4090,39 @@ fn list_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
 fn range_to_list(start: i64, end: i64) -> Value {
     let items: Vec<Value> = (start..end).map(Value::Int).collect();
     Value::new_list(items)
+}
+
+/// Mini-tanda Rg — `(start..end).step_by(n)` materializa el rango con
+/// step `n`. `n` debe ser un `Int > 0`. Si `n <= 0`, error claro de
+/// runtime. Output: `List<Int>` (paralelo a cómo enumerate/zip/chain
+/// se materializan desde Range — destino final es siempre una List).
+fn range_step_by(start: i64, end: i64, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("step_by", &args, 1, span)?;
+    let step = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`Range.step_by()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    if step <= 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("`Range.step_by()` requiere n > 0, recibió {}", step),
+        )));
+    }
+    let items: Vec<Value> = (start..end)
+        .step_by(step as usize)
+        .map(Value::Int)
+        .collect();
+    Ok(Value::new_list(items))
 }
 
 fn list_enumerate(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -4282,6 +4496,73 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_map(out))
 }
 
+/// Mini-tanda Mb2 — `m.keys_sorted()`: devuelve `List<K>` con las
+/// keys ordenadas. Solo válido para K en {Int, Float, Str, Bool}
+/// (mismas reglas que `list_sort`). Map vacío → lista vacía. Tipos
+/// no comparables o heterogéneos → error de runtime claro.
+fn map_keys_sorted(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("keys_sorted", &args, 0, span)?;
+    let pairs = match receiver {
+        Value::Map(p) => p,
+        _ => unreachable!(),
+    };
+    let mut keys: Vec<Value> = pairs.lock().iter().map(|(k, _)| k.clone()).collect();
+    if keys.is_empty() {
+        return Ok(Value::new_list(vec![]));
+    }
+    let first_kind = keys[0].type_name();
+    if !matches!(first_kind, "Int" | "Float" | "Str" | "Bool") {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int|Float|Str|Bool".into(),
+                found: first_kind.into(),
+            },
+            span.line, span.column,
+            format!(
+                "`.keys_sorted()` solo soporta keys `Int`/`Float`/`Str`/`Bool`, recibió `{}`",
+                first_kind,
+            ),
+        )));
+    }
+    for k in keys.iter().skip(1) {
+        if k.type_name() != first_kind {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: first_kind.into(),
+                    found: k.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.keys_sorted()` requiere keys del mismo tipo: vi `{}` y `{}`",
+                    first_kind, k.type_name(),
+                ),
+            )));
+        }
+    }
+    match first_kind {
+        "Int" => keys.sort_by(|a, b| match (a, b) {
+            (Value::Int(x), Value::Int(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        "Float" => keys.sort_by(|a, b| match (a, b) {
+            (Value::Float(x), Value::Float(y)) => {
+                x.partial_cmp(y).unwrap_or(std::cmp::Ordering::Equal)
+            }
+            _ => std::cmp::Ordering::Equal,
+        }),
+        "Str" => keys.sort_by(|a, b| match (a, b) {
+            (Value::Str(x), Value::Str(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        "Bool" => keys.sort_by(|a, b| match (a, b) {
+            (Value::Bool(x), Value::Bool(y)) => x.cmp(y),
+            _ => std::cmp::Ordering::Equal,
+        }),
+        _ => unreachable!(),
+    }
+    Ok(Value::new_list(keys))
+}
+
 // ---- Str ----
 
 fn str_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -4459,6 +4740,94 @@ fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
         )));
     }
     Ok(Value::Str(s.repeat(n as usize)))
+}
+
+/// Mini-tanda Mb2 — Helper: para `pad_start`/`pad_end`. Extrae
+/// `(s, width, ch)` con validaciones: width `Int`, ch `Str` de
+/// exactamente 1 char (paralelo a Python `str.rjust(width, ch)`).
+fn str_pad_args(
+    method: &str,
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<(String, i64, String)> {
+    expect_arity(method, &args, 2, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let width = match it.next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.{}(width, ch)`: arg 0 espera `Int`, recibió `{}`",
+                    method, other.type_name(),
+                ),
+            )));
+        }
+    };
+    let ch = match it.next().unwrap() {
+        Value::Str(x) => x,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.{}(width, ch)`: arg 1 espera `Str`, recibió `{}`",
+                    method, other.type_name(),
+                ),
+            )));
+        }
+    };
+    if ch.chars().count() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!(
+                "`.{}(width, ch)`: el char de relleno debe ser exactamente 1 caracter, recibió `\"{}\"` ({} chars)",
+                method, ch, ch.chars().count(),
+            ),
+        )));
+    }
+    Ok((s, width, ch))
+}
+
+/// Mini-tanda Mb2 — `s.pad_start(width, ch)`: prefija el string con
+/// copias de `ch` hasta alcanzar `width` chars. Si `len(s) >= width`,
+/// devuelve `s` sin cambios. Paralelo a Python `str.rjust(width, ch)`.
+fn str_pad_start(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    let (s, width, ch) = str_pad_args("pad_start", receiver, args, span)?;
+    let len = s.chars().count() as i64;
+    if len >= width {
+        return Ok(Value::Str(s));
+    }
+    let n_pad = (width - len) as usize;
+    let pad = ch.repeat(n_pad);
+    Ok(Value::Str(format!("{}{}", pad, s)))
+}
+
+/// Mini-tanda Mb2 — `s.pad_end(width, ch)`: sufija el string con
+/// copias de `ch` hasta alcanzar `width` chars. Paralelo a Python
+/// `str.ljust(width, ch)`.
+fn str_pad_end(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    let (s, width, ch) = str_pad_args("pad_end", receiver, args, span)?;
+    let len = s.chars().count() as i64;
+    if len >= width {
+        return Ok(Value::Str(s));
+    }
+    let n_pad = (width - len) as usize;
+    let pad = ch.repeat(n_pad);
+    Ok(Value::Str(format!("{}{}", s, pad)))
 }
 
 /// Mini-tanda Ex — `s.find(sub)`: posición de la primera ocurrencia.
@@ -13586,6 +13955,271 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("iterable") || err.message.contains("List o Range"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---- Mini-tanda Mb2: métodos chicos List/Str/Map + Rg ----
+    //
+    // Bundle de polish ergonómico: min/max/sum sobre List numérico,
+    // pad_start/pad_end sobre Str, keys_sorted sobre Map, step_by
+    // sobre Range. Tests por método cubren happy path + edge cases
+    // (vacío, heterogéneo, tipo equivocado).
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_min_max_int() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]\n\
+             let lo = xs.min()\n\
+             let hi = xs.max()",
+        ).await;
+        res.unwrap();
+        let lo = env.lock().get("lo").unwrap();
+        let hi = env.lock().get("hi").unwrap();
+        match lo {
+            Value::Result(ResultVariant::Ok(b)) => assert_eq!(*b, Value::Int(1)),
+            other => panic!("esperaba Ok(Int), vi {:?}", other),
+        }
+        match hi {
+            Value::Result(ResultVariant::Ok(b)) => assert_eq!(*b, Value::Int(9)),
+            other => panic!("esperaba Ok(Int), vi {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_min_max_float() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Float> = [1.5, 0.5, 2.5]\n\
+             let lo = xs.min()",
+        ).await;
+        res.unwrap();
+        let lo = env.lock().get("lo").unwrap();
+        match lo {
+            Value::Result(ResultVariant::Ok(b)) => assert_eq!(*b, Value::Float(0.5)),
+            other => panic!("esperaba Ok(Float), vi {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_min_vacia_es_err() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let r = xs.min()",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(b)) => {
+                assert_eq!(*b, Value::Str("lista vacía".into()))
+            }
+            other => panic!("esperaba Err, vi {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_sum_int() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let total = xs.sum()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(15)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_sum_float() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Float> = [1.5, 2.5, 3.0]\n\
+             let total = xs.sum()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Float(7.0)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_sum_vacia_es_cero() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let total = xs.sum()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(0)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_list_sum_str_es_error_runtime() {
+        // El checker rechaza estáticamente (sum no acepta List<Str>),
+        // pero como `fitz run` no es strict aún en este wrap helper,
+        // verificamos directamente que el runtime aborte si se cuela
+        // una List<Str> sin anotación (escape gradual).
+        let (_, res) = parse_eval_into_env(
+            "let xs = [\"a\", \"b\"]\n\
+             let r = xs.sum()",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("List<Int>") || err.message.contains("Int|Float"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_str_pad_start_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"42\"\n\
+             let p = s.pad_start(5, \"0\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("p"), Some(Value::Str("00042".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_str_pad_end_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"hi\"\n\
+             let p = s.pad_end(5, \".\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("p"), Some(Value::Str("hi...".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_str_pad_no_op_si_mas_largo() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"hola, mundo\"\n\
+             let p = s.pad_start(5, \"*\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("p"), Some(Value::Str("hola, mundo".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_str_pad_ch_multi_char_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "let s = \"42\"\n\
+             let p = s.pad_start(5, \"ab\")",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("1 caracter") || err.message.contains("1 char"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_map_keys_sorted_str() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"b\": 2, \"a\": 1, \"c\": 3}\n\
+             let ks = m.keys_sorted()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("ks").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let names: Vec<String> = g.iter().filter_map(|v| {
+                if let Value::Str(s) = v { Some(s.clone()) } else { None }
+            }).collect();
+            assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_map_keys_sorted_int() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Int, Str> = {3: \"c\", 1: \"a\", 2: \"b\"}\n\
+             let ks = m.keys_sorted()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("ks").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|v| {
+                if let Value::Int(n) = v { Some(*n) } else { None }
+            }).collect();
+            assert_eq!(nums, vec![1, 2, 3]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb2_map_keys_sorted_vacio() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {}\n\
+             let ks = m.keys_sorted()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("ks").unwrap();
+        if let Value::List(items) = v {
+            assert_eq!(items.lock().len(), 0);
+        } else {
+            panic!("esperaba List vacía");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rg_range_step_by_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = (0..10).step_by(2)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|v| {
+                if let Value::Int(n) = v { Some(*n) } else { None }
+            }).collect();
+            assert_eq!(nums, vec![0, 2, 4, 6, 8]);
+        } else {
+            panic!("esperaba List<Int>");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rg_range_step_by_inclusivo() {
+        let (env, res) = parse_eval_into_env(
+            "let xs = (0..=10).step_by(3)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("xs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|v| {
+                if let Value::Int(n) = v { Some(*n) } else { None }
+            }).collect();
+            // 0..=10 con step 3 → [0, 3, 6, 9]
+            assert_eq!(nums, vec![0, 3, 6, 9]);
+        } else {
+            panic!("esperaba List<Int>");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rg_range_step_by_cero_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "let xs = (0..10).step_by(0)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("n > 0"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn rg_range_step_by_negativo_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "let xs = (0..10).step_by(-1)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("n > 0"),
             "mensaje inesperado: {}",
             err.message,
         );

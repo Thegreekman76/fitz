@@ -567,6 +567,10 @@ fn after_dot_completions(
                 )),
                 ("first", format!("fn() -> Result<{}>", t.display(type_env))),
                 ("last", format!("fn() -> Result<{}>", t.display(type_env))),
+                // Mini-tanda Mb2 — reducciones numéricas.
+                ("min", format!("fn() -> Result<{}>  // List<Int> o List<Float>", t.display(type_env))),
+                ("max", format!("fn() -> Result<{}>  // List<Int> o List<Float>", t.display(type_env))),
+                ("sum", format!("fn() -> {}  // List<Int> o List<Float>", t.display(type_env))),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -611,6 +615,11 @@ fn after_dot_completions(
                     k.display(type_env),
                     v.display(type_env),
                 )),
+                // Mini-tanda Mb2 — keys_sorted: keys ordenadas.
+                ("keys_sorted", format!(
+                    "fn() -> List<{}>  // K comparable (Int/Float/Str/Bool)",
+                    k.display(type_env),
+                )),
             ],
         ),
         Type::Str => method_items(&[
@@ -634,6 +643,9 @@ fn after_dot_completions(
             ("find", "fn(sub: Str) -> Result<Int>".into()),
             ("index_of", "fn(sub: Str) -> Result<Int>".into()),
             ("last_index_of", "fn(sub: Str) -> Result<Int>".into()),
+            // Mini-tanda Mb2 — padding.
+            ("pad_start", "fn(width: Int, ch: Str) -> Str".into()),
+            ("pad_end", "fn(width: Int, ch: Str) -> Str".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -658,6 +670,8 @@ fn after_dot_completions(
             ("zip", "fn(List<U>) -> List<(Int, U)>".into()),
             ("chain", "fn(List<Int>) -> List<Int>".into()),
             ("len", "fn() -> Int".into()),
+            // Mini-tanda Rg — step_by(n) materializa con step.
+            ("step_by", "fn(n: Int) -> List<Int>".into()),
         ]),
         // Any, PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
@@ -1528,6 +1542,66 @@ mod tests {
         }
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn mb2_after_dot_sobre_list_incluye_min_max_sum() {
+        // Mini-tanda Mb2: List suma 3 métodos numéricos.
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["min", "max", "sum"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb2) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb2_after_dot_sobre_str_incluye_pad_start_y_pad_end() {
+        let src = "let s: Str = \"x\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["pad_start", "pad_end"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb2) en Str: {labels:?}"
+            );
+        }
+        let pad_start = items.iter().find(|i| i.label == "pad_start").unwrap();
+        assert_eq!(
+            pad_start.detail.as_deref(),
+            Some("fn(width: Int, ch: Str) -> Str"),
+        );
+    }
+
+    #[test]
+    fn mb2_after_dot_sobre_map_incluye_keys_sorted() {
+        let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"keys_sorted"),
+            "falta `keys_sorted` (mini-tanda Mb2) en Map: {labels:?}",
+        );
+    }
+
+    #[test]
+    fn rg_after_dot_sobre_range_incluye_step_by() {
+        let src = "let r = 0..10\nr.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"step_by"),
+            "falta `step_by` (mini-tanda Rg) en Range: {labels:?}",
+        );
+        let step_by = items.iter().find(|i| i.label == "step_by").unwrap();
+        assert_eq!(step_by.detail.as_deref(), Some("fn(n: Int) -> List<Int>"));
     }
 
     #[test]

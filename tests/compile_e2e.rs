@@ -1963,6 +1963,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13j-extras-str-map.fitz",
     "13k-flat-map-first-last-merge.fitz",
     "13l-update-comp-tuple-paramnames.fitz",
+    "13m-min-max-sum-pad-keys-step.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3676,4 +3677,112 @@ fn f9_escapes_extendidos_paridad_bit_a_bit() {
     assert_eq!(exit, 0);
     // café, ☃, A-<DEL>, nul.len() = 3 chars (x + NUL + y).
     assert_eq!(stdout.trim(), "café\n☃\nA-\u{007F}\n3");
+}
+
+// ---- Mini-tanda Mb2 + Rg ---------------------------------------
+// Métodos chicos: List.min/max/sum, Str.pad_start/pad_end,
+// Map.keys_sorted, Range.step_by. Cada test valida que `fitz build`
+// produce un binario standalone con output bit-a-bit idéntico al
+// intérprete (`fitz run`).
+
+#[test]
+fn mb2_list_min_max_sum_int_compila() {
+    let src = "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5]\n\
+               match xs.min() {\n\
+                 Ok(v) => print(\"min: {v}\"),\n\
+                 Err(_) => print(\"vacía\")\n\
+               }\n\
+               match xs.max() {\n\
+                 Ok(v) => print(\"max: {v}\"),\n\
+                 Err(_) => print(\"vacía\")\n\
+               }\n\
+               let total: Int = xs.sum()\n\
+               print(\"sum: {total}\")\n";
+    let (stdout, exit) = build_and_run("mb2_list_min_max_sum_int", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "min: 1\nmax: 9\nsum: 44");
+}
+
+#[test]
+fn mb2_list_min_max_sum_float_compila() {
+    let src = "let xs: List<Float> = [1.5, 0.5, 2.25, 1.0]\n\
+               match xs.min() {\n\
+                 Ok(v) => print(\"min: {v}\"),\n\
+                 Err(_) => print(\"vacía\")\n\
+               }\n\
+               let total: Float = xs.sum()\n\
+               print(\"sum: {total}\")\n";
+    let (stdout, exit) = build_and_run("mb2_list_min_max_sum_float", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "min: 0.5\nsum: 5.25");
+}
+
+#[test]
+fn mb2_list_min_vacia_devuelve_err_paridad() {
+    let src = "let xs: List<Int> = []\n\
+               match xs.min() {\n\
+                 Ok(v) => print(\"min: {v}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n\
+               let total: Int = xs.sum()\n\
+               print(\"sum: {total}\")\n";
+    let (stdout, exit) = build_and_run("mb2_list_min_vacia_err", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err: lista vacía\nsum: 0");
+}
+
+#[test]
+fn mb2_str_pad_start_end_compilan() {
+    let src = "let s: Str = \"42\"\n\
+               let a: Str = s.pad_start(5, \"0\")\n\
+               let b: Str = s.pad_end(5, \".\")\n\
+               let c: Str = \"hello\".pad_start(3, \"*\")\n\
+               print(a)\n\
+               print(b)\n\
+               print(c)\n";
+    let (stdout, exit) = build_and_run("mb2_str_pad", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "00042\n42...\nhello");
+}
+
+#[test]
+fn mb2_map_keys_sorted_str_compila() {
+    let src = "let m: Map<Str, Int> = {\"banana\": 2, \"apple\": 1, \"cherry\": 3}\n\
+               let ks: List<Str> = m.keys_sorted()\n\
+               print(ks)\n";
+    let (stdout, exit) = build_and_run("mb2_map_keys_sorted_str", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[\"apple\", \"banana\", \"cherry\"]");
+}
+
+#[test]
+fn mb2_map_keys_sorted_int_compila() {
+    let src = "let m: Map<Int, Str> = {30: \"c\", 10: \"a\", 20: \"b\"}\n\
+               let ks: List<Int> = m.keys_sorted()\n\
+               print(ks)\n";
+    let (stdout, exit) = build_and_run("mb2_map_keys_sorted_int", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[10, 20, 30]");
+}
+
+#[test]
+fn rg_range_step_by_exclusivo_compila() {
+    let src = "let xs: List<Int> = (0..10).step_by(2)\n\
+               print(xs)\n\
+               let total: Int = xs.sum()\n\
+               print(total)\n";
+    let (stdout, exit) = build_and_run("rg_range_step_by_excl", src);
+    assert_eq!(exit, 0);
+    // 0..10 step 2 → [0, 2, 4, 6, 8], sum = 20.
+    assert_eq!(stdout.trim(), "[0, 2, 4, 6, 8]\n20");
+}
+
+#[test]
+fn rg_range_step_by_inclusivo_compila() {
+    let src = "let xs: List<Int> = (0..=10).step_by(3)\n\
+               print(xs)\n";
+    let (stdout, exit) = build_and_run("rg_range_step_by_incl", src);
+    assert_eq!(exit, 0);
+    // 0..=10 step 3 → [0, 3, 6, 9].
+    assert_eq!(stdout.trim(), "[0, 3, 6, 9]");
 }
