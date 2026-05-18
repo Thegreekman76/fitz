@@ -521,6 +521,144 @@ impl Lexer {
     /// primer `"` vienen dos `"` más, entramos a modo triple: newlines
     /// son válidos adentro y el cierre es `"""` (tres comillas seguidas).
     /// Interpolación `{expr}` sigue funcionando igual.
+    /// F9 — Procesa `\u{XXXX}`: 1 a 6 dígitos hex entre llaves,
+    /// interpretados como un codepoint Unicode escalar. Rechaza
+    /// surrogates (D800-DFFF) y valores > U+10FFFF. La `\` y la `u`
+    /// ya fueron consumidas por el caller.
+    fn read_unicode_escape(&mut self) -> FitzResult<char> {
+        let start_line = self.line;
+        let start_col = self.column;
+        if self.advance() != Some('{') {
+            return Err(FitzError::new(
+                ErrorKind::UnexpectedChar('?'),
+                start_line,
+                start_col,
+                "Secuencia `\\u` requiere `{` (formato: \\u{XXXX})",
+            ));
+        }
+        let mut hex = String::new();
+        loop {
+            match self.peek() {
+                Some('}') => {
+                    self.advance();
+                    break;
+                }
+                Some(c) if c.is_ascii_hexdigit() => {
+                    hex.push(c);
+                    self.advance();
+                    if hex.len() > 6 {
+                        return Err(FitzError::new(
+                            ErrorKind::UnexpectedChar(c),
+                            self.line,
+                            self.column,
+                            "\\u{...} acepta hasta 6 dígitos hex (codepoint máximo U+10FFFF)",
+                        ));
+                    }
+                }
+                Some(other) => {
+                    return Err(FitzError::new(
+                        ErrorKind::UnexpectedChar(other),
+                        self.line,
+                        self.column,
+                        format!("Dígito hex inválido en \\u{{...}}: `{}`", other),
+                    ));
+                }
+                None => {
+                    return Err(FitzError::new(
+                        ErrorKind::UnterminatedString,
+                        start_line,
+                        start_col,
+                        "Secuencia `\\u{` sin cerrar",
+                    ));
+                }
+            }
+        }
+        if hex.is_empty() {
+            return Err(FitzError::new(
+                ErrorKind::UnexpectedChar('}'),
+                start_line,
+                start_col,
+                "\\u{} vacío — requiere al menos un dígito hex",
+            ));
+        }
+        let codepoint = u32::from_str_radix(&hex, 16).map_err(|_| {
+            FitzError::new(
+                ErrorKind::UnexpectedChar('?'),
+                start_line,
+                start_col,
+                format!("`\\u{{{}}}`: hex inválido", hex),
+            )
+        })?;
+        char::from_u32(codepoint).ok_or_else(|| {
+            FitzError::new(
+                ErrorKind::UnexpectedChar('?'),
+                start_line,
+                start_col,
+                format!(
+                    "`\\u{{{}}}` (0x{:X}) no es un codepoint Unicode escalar válido (surrogates D800-DFFF rechazados, máximo 10FFFF)",
+                    hex, codepoint
+                ),
+            )
+        })
+    }
+
+    /// F9 — Procesa `\xXX`: exactamente 2 dígitos hex, interpretados
+    /// como un byte ASCII (0x00-0x7F). Codepoints > 0x7F se rechazan
+    /// (paralelo a Rust). Caller ya consumió `\` y `x`.
+    fn read_hex_byte_escape(&mut self) -> FitzResult<char> {
+        let start_line = self.line;
+        let start_col = self.column;
+        let mut hex = String::new();
+        for _ in 0..2 {
+            match self.peek() {
+                Some(c) if c.is_ascii_hexdigit() => {
+                    hex.push(c);
+                    self.advance();
+                }
+                Some(other) => {
+                    return Err(FitzError::new(
+                        ErrorKind::UnexpectedChar(other),
+                        self.line,
+                        self.column,
+                        format!(
+                            "\\x requiere 2 dígitos hex, se encontró `{}` (después de {} dígitos)",
+                            other,
+                            hex.len()
+                        ),
+                    ));
+                }
+                None => {
+                    return Err(FitzError::new(
+                        ErrorKind::UnterminatedString,
+                        start_line,
+                        start_col,
+                        "\\x sin cerrar",
+                    ));
+                }
+            }
+        }
+        let byte = u8::from_str_radix(&hex, 16).map_err(|_| {
+            FitzError::new(
+                ErrorKind::UnexpectedChar('?'),
+                start_line,
+                start_col,
+                format!("`\\x{}`: hex inválido", hex),
+            )
+        })?;
+        if byte > 0x7F {
+            return Err(FitzError::new(
+                ErrorKind::UnexpectedChar('?'),
+                start_line,
+                start_col,
+                format!(
+                    "`\\x{}` (0x{:X}) está fuera del rango ASCII (0x00-0x7F). Usá \\u{{...}} para chars no-ASCII.",
+                    hex, byte
+                ),
+            ));
+        }
+        Ok(byte as char)
+    }
+
     fn read_string(&mut self) -> FitzResult<Token> {
         let start_line = self.line;
         let start_col = self.column;
@@ -550,6 +688,11 @@ impl Lexer {
                         Some('r') => s.push('\r'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
+                        // F9 — escapes extendidos:
+                        Some('0') => s.push('\0'),
+                        Some('b') => s.push('\u{0008}'), // backspace
+                        Some('u') => s.push(self.read_unicode_escape()?),
+                        Some('x') => s.push(self.read_hex_byte_escape()?),
                         // '\{' y '\}' se PRESERVAN literalmente en el
                         // contenido del Token::Str (con la barra).
                         // El parser, al construir la expresión de
@@ -649,6 +792,11 @@ impl Lexer {
                         Some('r') => s.push('\r'),
                         Some('\\') => s.push('\\'),
                         Some('"') => s.push('"'),
+                        // F9 — escapes extendidos (paralelos a read_string):
+                        Some('0') => s.push('\0'),
+                        Some('b') => s.push('\u{0008}'),
+                        Some('u') => s.push(self.read_unicode_escape()?),
+                        Some('x') => s.push(self.read_hex_byte_escape()?),
                         Some('{') => {
                             s.push('\\');
                             s.push('{');
@@ -1209,6 +1357,133 @@ mod tests {
         assert_eq!(
             toks(r#""Hola, {name}!""#),
             vec![Token::Str("Hola, {name}!".into()), Token::EOF]
+        );
+    }
+
+    // ---- F9 — escapes extendidos (\u, \x, \0, \b) ----
+
+    #[test]
+    fn f9_escape_null_y_backspace() {
+        // `\0` → NUL (U+0000). `\b` → backspace (U+0008).
+        assert_eq!(
+            toks(r#""a\0b""#),
+            vec![Token::Str("a\0b".into()), Token::EOF]
+        );
+        assert_eq!(
+            toks(r#""a\bb""#),
+            vec![Token::Str("a\u{0008}b".into()), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn f9_escape_unicode_basic_y_extendido() {
+        // BMP: `\u{00E9}` = 'é'. Suplementario: `\u{1F600}` = 😀.
+        assert_eq!(
+            toks(r#""caf\u{00E9}""#),
+            vec![Token::Str("café".into()), Token::EOF]
+        );
+        assert_eq!(
+            toks(r#""\u{1F600}""#),
+            vec![Token::Str("😀".into()), Token::EOF]
+        );
+        // Lowercase hex también vale.
+        assert_eq!(
+            toks(r#""\u{00e9}""#),
+            vec![Token::Str("é".into()), Token::EOF]
+        );
+        // 1 dígito hex es suficiente.
+        assert_eq!(
+            toks(r#""\u{A}""#),
+            vec![Token::Str("\n".into()), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn f9_escape_unicode_vacio_es_error() {
+        let err = tokenize(r#""\u{}""#).unwrap_err();
+        assert!(
+            err.message.contains("vacío"),
+            "esperaba mensaje sobre `\\u{{}}` vacío, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f9_escape_unicode_sin_cerrar_es_error() {
+        // `"` aparece antes del `}` → el lexer pega contra un char no-hex
+        // (la `"`) y reporta dígito inválido en `\u{...}`.
+        let err = tokenize(r#""\u{ABC""#).unwrap_err();
+        assert!(
+            err.message.contains("hex inválido") || err.message.contains("Dígito hex inválido"),
+            "esperaba mensaje sobre dígito hex inválido, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f9_escape_unicode_surrogate_rechazado() {
+        // U+D800 es el primer code point surrogate alto, inválido como
+        // escalar Unicode.
+        let err = tokenize(r#""\u{D800}""#).unwrap_err();
+        assert!(
+            err.message.contains("escalar"),
+            "esperaba mensaje sobre codepoint escalar, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f9_escape_unicode_too_long_es_error() {
+        // 7 dígitos hex exceden el máximo permitido (6, hasta 10FFFF).
+        let err = tokenize(r#""\u{1234567}""#).unwrap_err();
+        assert!(
+            err.message.contains("6 dígitos") || err.message.contains("10FFFF"),
+            "esperaba mensaje sobre límite de dígitos, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f9_escape_hex_byte_ascii() {
+        // `\x41` = 'A', `\x7F` = DEL (límite ASCII).
+        assert_eq!(
+            toks(r#""\x41BC""#),
+            vec![Token::Str("ABC".into()), Token::EOF]
+        );
+        assert_eq!(
+            toks(r#""\x7F""#),
+            vec![Token::Str("\u{007F}".into()), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn f9_escape_hex_byte_fuera_de_ascii_rechazado() {
+        // `\x80` y arriba no son ASCII; rechazo explícito sugerendo \u{...}.
+        let err = tokenize(r#""\x80""#).unwrap_err();
+        assert!(
+            err.message.contains("ASCII") && err.message.contains("\\u"),
+            "esperaba mensaje sobre rango ASCII + sugerencia \\u, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f9_escape_hex_byte_pocos_digitos_es_error() {
+        let err = tokenize(r#""\x4""#).unwrap_err();
+        assert!(
+            err.message.contains("2 dígitos"),
+            "esperaba mensaje sobre 2 dígitos, fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn f9_escapes_extendidos_funcionan_en_triple_string() {
+        // Los mismos escapes (\u/\x/\0/\b) funcionan en `"""..."""`.
+        let src = "\"\"\"\\u{00E9}-\\x41-\\0\"\"\"";
+        assert_eq!(
+            toks(src),
+            vec![Token::Str("é-A-\0".into()), Token::EOF]
         );
     }
 

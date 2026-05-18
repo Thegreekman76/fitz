@@ -1,0 +1,51 @@
+// Mini-tanda F9 — escapes extendidos en strings.
+//
+// Antes de F9, los strings de Fitz solo aceptaban escapes básicos:
+// \n, \t, \r, \", \\, \{, \}. Para chars no-ASCII había que pegar
+// el carácter literal (lo cual funciona pero es invisible para
+// tooling con encoding raro).
+//
+// F9 abre cuatro escapes adicionales:
+//
+//  - `\0`        → NUL (U+0000)
+//  - `\b`        → backspace (U+0008)
+//  - `\xXX`      → byte ASCII (XX = 2 dígitos hex, 0x00-0x7F)
+//  - `\u{X...}`  → codepoint Unicode (1 a 6 dígitos hex, hasta U+10FFFF)
+//
+// Procesado en el lexer: el Token::Str ya viene con los chars
+// resueltos. Cero cambios al parser / checker / evaluator / codegen.
+
+// --- Unicode escapes ---
+
+print("\u{00E9}")                // é
+print("caf\u{00E9}")             // café
+print("\u{2603}")                // ☃ (snowman)
+print("\u{1F600}")               // 😀 (suplementario, 5 dígitos)
+print("\u{A}".len() == 1)        // true — \u{A} = U+000A = '\n'
+
+// --- ASCII hex escapes ---
+
+print("\x41")                    // A
+print("\x4E\x6F\x21")            // No!
+print("\x7F".len())              // 1 — un solo char DEL
+
+// --- Null y backspace ---
+
+let nul: Str = "x\0y"
+print(nul.len())                 // 3 — x + NUL + y (NUL es un char válido)
+
+let back: Str = "x\by"
+print(back.len())                // 3 — x + BS + y
+
+// --- Combinación con interpolación ---
+
+let user: Str = "Fitz"
+print("Bienvenido, {user}! \u{1F44B}")
+// Bienvenido, Fitz! 👋
+
+// --- En triple-quote también funcionan ---
+
+print("""
+    JSON: \{"name": "\u{00C1}lvaro"\}
+""")
+// JSON: {"name": "Álvaro"}

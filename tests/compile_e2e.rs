@@ -1936,6 +1936,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "04c-asignacion-compuesta-bit.fitz",
     "05-strings.fitz",
     "05b-format-specs.fitz",
+    "05d-escapes-extendidos.fitz",
     "06-logica.fitz",
     "07-if.fitz",
     "08-loops.fitz",
@@ -3039,4 +3040,26 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda F9 — escapes extendidos en strings ----
+
+#[test]
+fn f9_escapes_extendidos_paridad_bit_a_bit() {
+    // `\u{...}` Unicode (BMP + suplementario), `\x..` ASCII hex, `\0`,
+    // `\b`. El lexer produce un Token::Str con los chars resueltos,
+    // así que el codegen no necesita lógica extra — `rust_str_literal`
+    // emite el literal Rust correcto vía `format!("{:?}", s)`.
+    let src = "let cafe: Str = \"caf\\u{00E9}\"\n\
+               let snow: Str = \"\\u{2603}\"\n\
+               let a: Str = \"\\x41-\\x7F\"\n\
+               let nul: Str = \"x\\0y\"\n\
+               print(cafe)\n\
+               print(snow)\n\
+               print(a)\n\
+               print(nul.len())\n";
+    let (stdout, exit) = build_and_run("f9_escapes_extendidos", src);
+    assert_eq!(exit, 0);
+    // café, ☃, A-<DEL>, nul.len() = 3 chars (x + NUL + y).
+    assert_eq!(stdout.trim(), "café\n☃\nA-\u{007F}\n3");
 }

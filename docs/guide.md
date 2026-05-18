@@ -1070,10 +1070,15 @@ Adentro de un string, el backslash (`\`) introduce un escape:
 |--------|-----------|
 | `\n`   | Salto de línea |
 | `\t`   | Tab |
+| `\r`   | Carriage return |
 | `\"`   | Comilla doble literal |
 | `\\`   | Backslash literal |
 | `\{`   | Llave de apertura literal (sin interpolar) |
 | `\}`   | Llave de cierre literal |
+| `\0`   | NUL (U+0000) |
+| `\b`   | Backspace (U+0008) |
+| `\xXX` | Byte ASCII (XX = 2 dígitos hex, 0x00-0x7F) |
+| `\u{X...}` | Codepoint Unicode (1 a 6 dígitos hex, hasta U+10FFFF) |
 
 ```fitz
 print("línea 1\nlínea 2")
@@ -1091,12 +1096,34 @@ print("barra: \\")
 
 print("config: \{ port: 3000 \}")
 // config: { port: 3000 }
+
+// F9 — escapes extendidos
+print("\x41 == A")              // A == A
+print("caf\u{00E9}")             // café (BMP, 4 dígitos)
+print("\u{2603}")                // ☃ (snowman)
+print("\u{1F600}")               // 😀 (emoji suplementario, 5 dígitos)
 ```
 
-El último caso es importante: si querés mostrar una llave literal en
-un string (por ejemplo, JSON inline o un fragmento de código), tenés
-que escaparla — si no, el intérprete intenta interpretar lo que hay
-entre `{` y `}` como una expresión a interpolar.
+El caso de las llaves es importante: si querés mostrar una llave
+literal en un string (por ejemplo, JSON inline o un fragmento de
+código), tenés que escaparla — si no, el intérprete intenta
+interpretar lo que hay entre `{` y `}` como una expresión a
+interpolar.
+
+Reglas de los escapes extendidos (mini-tanda **F9**):
+
+- **`\xXX`** exige exactamente 2 dígitos hex. Valores >0x7F se
+  rechazan al lex-time con sugerencia de usar `\u{...}` (paralelo
+  a Rust). Para chars no-ASCII usá Unicode escapes.
+- **`\u{...}`** acepta entre 1 y 6 dígitos hex, con o sin
+  zero-padding. Surrogates (`D800`-`DFFF`) y valores >`10FFFF`
+  se rechazan al lex-time. Lowercase y uppercase hex valen igual.
+- **`\u{}`** vacío es error.
+- Si la `\` aparece seguida de un char que no es escape válido
+  (`\q`, `\d`, etc.), el lex-time aborta con mensaje claro.
+
+[examples/guide/05d-escapes-extendidos.fitz](../examples/guide/05d-escapes-extendidos.fitz)
+ejercita los 4 escapes nuevos + interpolación + triple-quote.
 
 ### Strings multilínea con `"""..."""`
 
@@ -1130,7 +1157,7 @@ Características:
   let json = """{"name": "Fitz", "age": 1}"""
   ```
 - **Mismos escapes** que strings normales (`\n`, `\t`, `\\`,
-  `\"`, `\{`, `\}`).
+  `\"`, `\{`, `\}`, `\0`, `\b`, `\xXX`, `\u{...}`).
 - **Interpolación** `{expr}` funciona igual.
 - Indentación: el contenido se preserva tal cual; si querés
   recortar el indent común usá `.replace(...)` o construilo sin

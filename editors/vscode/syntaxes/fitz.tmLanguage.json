@@ -37,6 +37,14 @@
       "end": "\"\"\"",
       "patterns": [
         {
+          "name": "constant.character.escape.unicode.fitz",
+          "match": "\\\\u\\{[0-9A-Fa-f]{1,6}\\}"
+        },
+        {
+          "name": "constant.character.escape.hex.fitz",
+          "match": "\\\\x[0-9A-Fa-f]{2}"
+        },
+        {
           "name": "constant.character.escape.fitz",
           "match": "\\\\."
         },
@@ -61,6 +69,14 @@
       "begin": "\"",
       "end": "\"",
       "patterns": [
+        {
+          "name": "constant.character.escape.unicode.fitz",
+          "match": "\\\\u\\{[0-9A-Fa-f]{1,6}\\}"
+        },
+        {
+          "name": "constant.character.escape.hex.fitz",
+          "match": "\\\\x[0-9A-Fa-f]{2}"
+        },
         {
           "name": "constant.character.escape.fitz",
           "match": "\\\\."

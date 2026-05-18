@@ -825,8 +825,36 @@ posteriores.
 
 - **Identificadores no-ASCII** (`π`, `función`) — F8. Bajo
   impacto.
-- **Escapes extendidos** `\u{...}`, `\x..`, `\0`, `\b` — F9.
-  ASCII tabla cubre lo común.
+- ~~**Escapes extendidos** `\u{...}`, `\x..`, `\0`, `\b` — F9~~ ✓
+  CERRADO 2026-05-18 (mini-tanda F9). Cuatro escapes adicionales en
+  strings normales y triple-quote: `\0` (NUL), `\b` (backspace),
+  `\xXX` (byte ASCII 0x00-0x7F), `\u{X...}` (Unicode escalar
+  1-6 dígitos hex, hasta U+10FFFF). Implementación acotada al
+  **lexer** (cero cambios al parser/checker/evaluator/codegen —
+  el `Token::Str` ya viene con los chars resueltos). Helpers
+  privados `read_unicode_escape` y `read_hex_byte_escape` con
+  validaciones: codepoint > 10FFFF rechazado, surrogates D800-DFFF
+  rechazados, `\u{}` vacío rechazado, `\u{...}` con >6 dígitos
+  rechazado, `\xXX` con value >0x7F rechazado (sugerencia: usar
+  `\u{...}`), `\xX` con <2 dígitos rechazado. Los nuevos escapes
+  funcionan en strings simples y en `"""..."""` (lógica duplicada
+  intencionalmente por simetría — ambos paths quedan auditables).
+  Grammar TextMate actualizado con 2 patterns nuevos
+  (`constant.character.escape.unicode.fitz` y
+  `constant.character.escape.hex.fitz`) colocados ANTES del
+  `\\.` genérico para que tengan precedencia. **10 unit tests
+  nuevos** del lexer (null+backspace, unicode BMP+suplementario+
+  lowercase+1-dígito, errores: vacío/sin-cerrar/surrogate/
+  too-long, hex ASCII, hex fuera-de-rango rechazado, hex pocos
+  dígitos, triple-quote con escapes extendidos) + 1 compile_e2e
+  bit-a-bit. Ejemplo
+  `examples/guide/05d-escapes-extendidos.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 5 de la guía sumó tabla
+  completa de escapes con los 4 nuevos + sub-sección de reglas
+  + referencia al ejemplo. **Decisión de diseño**: `\xXX` se
+  restringe a ASCII (paralelo a Rust); para chars no-ASCII hay
+  que usar `\u{...}`. Esto evita ambigüedad con Latin-1 que
+  Python sí acepta.
 
 ### ~~Strings — métodos extras~~ ✓ CERRADO 2026-05-17 (mini-tanda S.1 + S.2)
 
