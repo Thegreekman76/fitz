@@ -3946,13 +3946,66 @@ let t = Task { id: 7 }
 let l = t.label("step").await    // step-7
 ```
 
-**Limitaciones del MVP** (R.3, mini-fase R):
+### Métodos estáticos (mini-tanda St)
+
+Desde St podés declarar métodos sin receiver con `static fn` adentro
+del `type` body. Se invocan como `Type.method(args)` y son útiles
+para constructores y factories estilo Rust `User::new(...)` o
+Python classmethods:
+
+```fitz
+type Counter {
+    value: Int = 0
+
+    // Constructor por defaults — `Counter.zero()` es más claro
+    // que `Counter { value: 0 }` cuando el caller lee.
+    static fn zero() -> Counter {
+        return Counter { value: 0 }
+    }
+
+    // Factory parametrizado.
+    static fn of(n: Int) -> Counter {
+        return Counter { value: n }
+    }
+
+    // Métodos de instancia siguen funcionando igual.
+    fn incremented() -> Counter {
+        return Counter { value: value + 1 }
+    }
+}
+
+let c0 = Counter.zero()                // Counter { value: 0 }
+let c5 = Counter.of(5)                 // Counter { value: 5 }
+let c6 = c5.incremented()              // Counter { value: 6 }
+
+// Pipelines: factory estático + instance methods encadenados.
+let p = Counter.of(1).incremented().incremented()
+```
+
+Diferencias con métodos de instancia:
+- **NO reciben los fields del `type` como locales**: el body solo ve
+  sus params + globals. Si necesitás los defaults del type,
+  inicializás vía struct literal (`return Counter {}` o
+  `return Counter { value: n }`).
+- Se invocan **sobre el tipo**, no sobre una instancia. Llamar a
+  un `static fn` con una instancia (`c.zero()`) o un `fn` regular
+  con el tipo (`Counter.incremented()`) da error con mensaje
+  sugiriendo la forma correcta.
+- Pueden ser `async`: `static async fn fetch_default()`.
+
+Implementación: el codegen emite el static como `pub fn` adentro
+del `impl <Type>Data { ... }` (Rust associated function), y el call
+site `Counter.of(5)` se traduce a `CounterData::of(5i64)`.
+
+Ver [examples/guide/13g-static-methods.fitz](../examples/guide/13g-static-methods.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+**Limitaciones del MVP** (R.3 + St):
 - Todos los métodos son públicos (sin `pub fn` / `fn` privado).
-- Sin static methods (`Counter::create(...)`).
 - Sin operator overloading (`fn +(self, other)`).
 
 Ver [examples/guide/13b-metodos-custom.fitz](../examples/guide/13b-metodos-custom.fitz)
-para el ejemplo completo (incluye la sección async).
+para el ejemplo completo de métodos de instancia (incluye async).
 
 ### Métodos chicos de Str y List (mini-tanda S)
 

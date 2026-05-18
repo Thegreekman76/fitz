@@ -2142,8 +2142,9 @@ impl Parser {
                     "se esperaba '}' para cerrar 'type'",
                 ));
             }
-            // R.3 — método: `[async] fn nombre(...) [-> T] { ... }`.
-            if matches!(self.peek(), Token::Async | Token::Fn) {
+            // R.3 — método de instancia: `[async] fn nombre(...) [-> T] { ... }`.
+            // Mini-tanda St — método estático: `static [async] fn nombre(...)`.
+            if matches!(self.peek(), Token::Async | Token::Fn | Token::Static) {
                 let method_span = self.cur_span();
                 let method = self.parse_method_def(method_span)?;
                 methods.push(method);
@@ -2178,6 +2179,10 @@ impl Parser {
     /// (los métodos no aceptan `@get`/`@server`/etc.) y emite
     /// `MethodDef` en lugar de `Stmt::FnDef`.
     fn parse_method_def(&mut self, span: Span) -> FitzResult<MethodDef> {
+        // Mini-tanda St — `static [async] fn ...` declara un método
+        // estático (sin receiver `self`). `static` debe preceder a
+        // `async`/`fn`.
+        let is_static = self.eat(&Token::Static);
         let is_async = self.eat(&Token::Async);
         self.expect(&Token::Fn, "se esperaba 'fn'")?;
         let name = self.expect_ident(
@@ -2210,6 +2215,7 @@ impl Parser {
             return_type,
             body,
             is_async,
+            is_static,
             span,
         })
     }

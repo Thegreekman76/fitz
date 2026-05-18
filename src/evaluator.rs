@@ -3093,8 +3093,50 @@ async fn dispatch_method(
             }
         };
         if let Some(m) = resolved {
+            // Mini-tanda St — un método estático no se puede invocar
+            // sobre una instancia (no recibe los fields como locales).
+            if m.is_static {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    format!(
+                        "`{}` es un método estático: invocá como `{}.{}({})`, no como `<instancia>.{}({})`",
+                        m.name, type_name, m.name,
+                        m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                        m.name,
+                        m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                    ),
+                )));
+            }
             return invoke_custom_method(receiver, m, args, env, span).await;
         }
+    }
+    // Mini-tanda St — método estático sobre Value::Type: `Type.make()`.
+    if let Value::Type { name: type_name, methods, .. } = &receiver {
+        let resolved = methods.iter().find(|m| m.name == method).cloned();
+        if let Some(m) = resolved {
+            if !m.is_static {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    format!(
+                        "`{}.{}()` es un método de instancia: invocá como `<instancia>.{}({})`, no como `{}.{}({})`",
+                        type_name, m.name, m.name,
+                        m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                        type_name, m.name,
+                        m.params.iter().map(|p| p.name.as_str()).collect::<Vec<_>>().join(", "),
+                    ),
+                )));
+            }
+            return invoke_static_method(m, args, env, span).await;
+        }
+        // Si no existe el método pero el receptor es un Type, error
+        // específico (mejor que el genérico "tipo X no tiene método").
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("el tipo `{}` no tiene un método estático llamado `{}`", type_name, method),
+        )));
     }
     match (&receiver, method) {
         // List
@@ -3290,6 +3332,58 @@ async fn invoke_custom_method(
     // Sync: ejecutar el body. `Stmt::Return` rebota como
     // EvalSignal::Return y lo desempacamos al valor; cualquier otra
     // señal sube.
+    match eval_block(&method.body, method_env).await {
+        Ok(v) => Ok(v),
+        Err(EvalSignal::Return(v)) => Ok(v),
+        Err(other) => Err(other),
+    }
+}
+
+/// Mini-tanda St — invoca un método estático declarado en el `type`
+/// body. Diferencia clave con `invoke_custom_method`: NO pre-declara
+/// los fields del tipo como locales (no hay receiver instance). Es
+/// más parecido a invocar una fn top-level: solo los params son
+/// locales del scope hijo.
+async fn invoke_static_method(
+    method: crate::ast::MethodDef,
+    args: Vec<Value>,
+    env: EnvRef,
+    span: Span,
+) -> EvalResult<Value> {
+    if args.len() != method.params.len() {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: method.params.len(),
+                found: args.len(),
+            },
+            span.line, span.column,
+            format!(
+                "el método estático `{}` espera {} argumento(s), recibió {}",
+                method.name, method.params.len(), args.len(),
+            ),
+        )));
+    }
+
+    let method_env = Environment::new_child(env.clone());
+    for (p, v) in method.params.iter().zip(args) {
+        method_env.lock().define(p.name.clone(), v);
+    }
+
+    if method.is_async {
+        let owned_body = method.body;
+        let fut: crate::value::FitzFuture = Box::pin(async move {
+            for stmt in &owned_body {
+                match eval_stmt(stmt, method_env.clone()).await {
+                    Ok(_) => {}
+                    Err(EvalSignal::Return(v)) => return Ok(v),
+                    Err(signal) => return Err(signal_to_error(signal)),
+                }
+            }
+            Ok(Value::Null)
+        });
+        return Ok(Value::new_future(fut));
+    }
+
     match eval_block(&method.body, method_env).await {
         Ok(v) => Ok(v),
         Err(EvalSignal::Return(v)) => Ok(v),
@@ -7670,6 +7764,85 @@ print(factorial(5))
         ).await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(15)));
+    }
+
+    // ---- Mini-tanda St — métodos estáticos ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn st_static_method_se_invoca_como_type_method() {
+        let (env, res) = parse_eval_into_env(
+            "type C {\n\
+                 value: Int = 0\n\
+                 static fn zero() -> C { return C { value: 0 } }\n\
+                 static fn of(n: Int) -> C { return C { value: n } }\n\
+             }\n\
+             let z = C.zero()\n\
+             let c = C.of(42)",
+        ).await;
+        res.unwrap();
+        // Ambos son instancias de C. Verificamos via Display.
+        let z = env.lock().get("z").unwrap();
+        let c = env.lock().get("c").unwrap();
+        assert_eq!(z.to_string(), "C { value: 0 }");
+        assert_eq!(c.to_string(), "C { value: 42 }");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn st_static_method_no_accede_a_fields_como_locales() {
+        // Un método estático NO recibe los fields como locales. Si el
+        // body intenta usar `value` (un field del tipo), debe fallar
+        // con "variable no definida".
+        let (_env, res) = parse_eval_into_env(
+            "type C {\n\
+                 value: Int = 0\n\
+                 static fn broken() -> Int { return value }\n\
+             }\n\
+             let r = C.broken()",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("no definida") || err.message.contains("value"),
+            "esperaba mensaje sobre `value` no definida, fue: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn st_static_method_invocado_sobre_instancia_es_error() {
+        // `instance.static_method()` debe fallar con mensaje claro
+        // sugiriendo la forma correcta.
+        let (_env, res) = parse_eval_into_env(
+            "type C {\n\
+                 value: Int = 0\n\
+                 static fn make() -> C { return C { value: 1 } }\n\
+             }\n\
+             let c = C { value: 5 }\n\
+             let r = c.make()",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("estático") && err.message.contains("C.make"),
+            "esperaba mensaje sugiriendo `C.make()`, fue: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn st_instance_method_invocado_como_static_es_error() {
+        // `Type.instance_method()` debe fallar.
+        let (_env, res) = parse_eval_into_env(
+            "type C {\n\
+                 value: Int = 0\n\
+                 fn show() -> Int { return value }\n\
+             }\n\
+             let r = C.show()",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("instancia"),
+            "esperaba mensaje sobre método de instancia, fue: {}",
+            err.message,
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

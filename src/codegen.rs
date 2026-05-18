@@ -5468,6 +5468,25 @@ impl<'a> CodegenCtx<'a> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
+        // Mini-tanda St — static method dispatch: `Type.method(args)`.
+        // El object es `Expr::Ident("Type")` que NO es un valor sino un
+        // tipo. Lo detectamos antes que `gen_expr(object)` falle y
+        // emitimos `<Type>::<method>(args)` Rust nativo si el método
+        // existe y es estático.
+        if let Expr::Ident(name, _) = object {
+            if let Some(methods) = self.type_methods.get(name).cloned() {
+                if let Some(m) = methods.iter().find(|md| md.name == method).cloned() {
+                    if !m.is_static {
+                        return Err(self.err_at(call_span, format!(
+                            "`{}.{}()` es método de instancia; invocá como `<instancia>.{}(...)`, no como `{}.{}(...)`",
+                            name, method, method, name, method,
+                        )));
+                    }
+                    return self.gen_static_method_call(name, &m, args, call_span);
+                }
+            }
+        }
+
         // Mini-tanda Ir — `(start..end).enumerate()`/`zip()`/`chain()`/
         // `len()`. El `Range` NO está soportado como valor general en
         // codegen (`gen_expr` lo rechaza), pero como receptor de un
@@ -5859,18 +5878,51 @@ impl<'a> CodegenCtx<'a> {
         // `&self`). El Future devuelto captura `self` adentro y vive
         // a través de `.await` sin lifetime issues. Sync sigue
         // tomando `&self` (más barato, no clona).
+        //
+        // Mini-tanda St: los métodos estáticos NO toman receiver — se
+        // emiten como `pub fn <name>(params...) -> R` (associated fn).
         let async_kw = if method.is_async { "async " } else { "" };
-        let self_kw = if method.is_async { "self" } else { "&self" };
-        writeln!(
-            &mut self.output,
-            "    pub {async_kw}fn {name}({self_kw}, {params}) -> {ret} {{",
-            async_kw = async_kw,
-            self_kw = self_kw,
-            name = method.name,
-            params = rust_params.join(", "),
-            ret = ret_rust
-        )
-        .unwrap();
+        let header = if method.is_static {
+            // Sin self: associated function. Si no hay params, omitimos
+            // la coma intermedia para no producir `fn foo(, )`.
+            if rust_params.is_empty() {
+                format!(
+                    "    pub {async_kw}fn {name}() -> {ret} {{",
+                    async_kw = async_kw,
+                    name = method.name,
+                    ret = ret_rust,
+                )
+            } else {
+                format!(
+                    "    pub {async_kw}fn {name}({params}) -> {ret} {{",
+                    async_kw = async_kw,
+                    name = method.name,
+                    params = rust_params.join(", "),
+                    ret = ret_rust,
+                )
+            }
+        } else {
+            let self_kw = if method.is_async { "self" } else { "&self" };
+            if rust_params.is_empty() {
+                format!(
+                    "    pub {async_kw}fn {name}({self_kw}) -> {ret} {{",
+                    async_kw = async_kw,
+                    self_kw = self_kw,
+                    name = method.name,
+                    ret = ret_rust,
+                )
+            } else {
+                format!(
+                    "    pub {async_kw}fn {name}({self_kw}, {params}) -> {ret} {{",
+                    async_kw = async_kw,
+                    self_kw = self_kw,
+                    name = method.name,
+                    params = rust_params.join(", "),
+                    ret = ret_rust,
+                )
+            }
+        };
+        writeln!(&mut self.output, "{}", header).unwrap();
 
         // Pre-bindear cada field como local. Usamos `clone()` para
         // sacar el valor del struct y dejarlo en una var mutable
@@ -5881,9 +5933,13 @@ impl<'a> CodegenCtx<'a> {
         // field, el param gana. Skipeamos esos fields para que el
         // `let <field>` no shadowee al param (que ya está en el
         // scope de la fn).
+        //
+        // Mini-tanda St: los métodos estáticos NO tienen receiver, así
+        // que NO pre-bindean fields (no hay `self.field` que clonar).
         let param_names: std::collections::HashSet<&str> =
             method.params.iter().map(|p| p.name.as_str()).collect();
         self.push_scope();
+        if !method.is_static {
         for f in &sig.fields {
             if param_names.contains(f.name.as_str()) {
                 continue;
@@ -5900,6 +5956,7 @@ impl<'a> CodegenCtx<'a> {
             writeln!(&mut self.output, "        let _ = &{};", f.name).unwrap();
             self.declare_var(f.name.clone(), f.type_.clone());
         }
+        } // cierre de `if !method.is_static`
         // Registrar params en el scope del codegen (sobreescriben
         // homónimos por el `declare_var`).
         for (p, pty) in method.params.iter().zip(param_types.iter()) {
@@ -5944,6 +6001,50 @@ impl<'a> CodegenCtx<'a> {
     //    así que mutaciones a listas/maps siguen visibles desde el
     //    receiver original (semántica idéntica al evaluator).
     //    El `.await` lo emite el caller (Expr::Await en el AST).
+    /// Mini-tanda St — emite `<Type>Data::<method>(args)` para una
+    /// invocación de método estático. Sin receiver (sin `&self`), sin
+    /// lock — paralelo a una fn top-level pero scope-namespaced.
+    fn gen_static_method_call(
+        &mut self,
+        type_name: &str,
+        method_def: &crate::ast::MethodDef,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        check_method_arity(&method_def.name, args, method_def.params.len())?;
+
+        let mut arg_codes: Vec<String> = Vec::with_capacity(args.len());
+        for (i, arg) in args.iter().enumerate() {
+            let (a_code, a_ty) = self.gen_expr(arg)?;
+            let target_ty = method_def.params[i]
+                .type_
+                .as_ref()
+                .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
+                .unwrap_or(Type::Any);
+            arg_codes.push(coerce(&a_code, &a_ty, &target_ty));
+        }
+
+        let ret_ty = method_def
+            .return_type
+            .as_ref()
+            .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
+            .unwrap_or(Type::Null);
+        let value_ty = if method_def.is_async {
+            Type::Future(Box::new(ret_ty.clone()))
+        } else {
+            ret_ty.clone()
+        };
+
+        let _ = call_span;
+        let code = format!(
+            "{type_name}Data::{name}({args})",
+            type_name = type_name,
+            name = method_def.name,
+            args = arg_codes.join(", "),
+        );
+        Ok((code, value_ty))
+    }
+
     fn gen_custom_method_call(
         &mut self,
         obj_code: &str,

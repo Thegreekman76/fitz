@@ -1,0 +1,62 @@
+// Mini-tanda St — métodos estáticos en `type`.
+//
+// Hasta St, los métodos custom siempre tenían receiver implícito
+// (los fields del `type` quedaban como vars locales del body).
+//
+// St habilita `static fn` adentro del `type` body. Los estáticos:
+//  - NO reciben los fields como locales (no hay instance).
+//  - Se invocan como `Type.method(args)`, no `instance.method(args)`.
+//  - Son perfectos para constructores y factories (`User.zero()`,
+//    `Point.origin()`, `Config.default()`).
+//  - Pueden coexistir con métodos de instancia en el mismo `type`.
+
+type Counter {
+    value: Int = 0
+
+    // Constructor / factory por defaults.
+    static fn zero() -> Counter {
+        return Counter { value: 0 }
+    }
+
+    // Factory parametrizado.
+    static fn of(n: Int) -> Counter {
+        return Counter { value: n }
+    }
+
+    // Método de instancia clásico (usa `value` del receiver).
+    fn incremented() -> Counter {
+        return Counter { value: value + 1 }
+    }
+
+    // Método de instancia con arg.
+    fn plus(n: Int) -> Counter {
+        return Counter { value: value + n }
+    }
+}
+
+// Uso típico de constructores estáticos:
+let c0: Counter = Counter.zero()
+print(c0)                              // Counter { value: 0 }
+
+let c5: Counter = Counter.of(5)
+print(c5)                              // Counter { value: 5 }
+
+// Métodos de instancia se siguen invocando sobre la instancia:
+let c6: Counter = c5.incremented()
+print(c6)                              // Counter { value: 6 }
+
+let c10: Counter = c5.plus(5)
+print(c10)                             // Counter { value: 10 }
+
+// Caso típico: pipelines con factory + instance methods encadenados.
+let pipeline: Counter = Counter.of(1).plus(2).plus(3).incremented()
+print(pipeline)                         // Counter { value: 7 }
+
+// --- Caveats ---
+//
+// `instance.static_method()` → error con mensaje claro.
+// `Type.instance_method()` → error con mensaje claro.
+//
+// Los métodos estáticos no pueden referenciar fields del `type` en
+// su body (no hay receiver). Si necesitás los defaults, los inicializás
+// vía struct literal: `return Counter {}` o `return Counter { value: n }`.

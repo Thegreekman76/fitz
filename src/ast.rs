@@ -736,8 +736,13 @@ pub struct Field {
 ///  - No tiene decoradores (`@get`/`@server`/etc. son para fns
 ///    top-level con dispatch HTTP; los métodos no encajan).
 ///  - Visibilidad: todos public en MVP. `pub fn` queda como deuda.
-///  - Sin static methods (`type::method`).
 ///  - Sin operator overloading.
+///
+/// **Mini-tanda St**: `is_static` distingue métodos estáticos
+/// (`static fn make() -> X` invocados como `X.make()`) de métodos
+/// de instancia (`fn greet()` invocados como `instance.greet()`).
+/// Los estáticos no reciben los fields como locales — son
+/// constructores / factories / utilidades del tipo.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MethodDef {
     pub name: String,
@@ -745,6 +750,9 @@ pub struct MethodDef {
     pub return_type: Option<TypeExpr>,
     pub body: Vec<Stmt>,
     pub is_async: bool,
+    /// Mini-tanda St — `true` si el método es estático
+    /// (`static fn ...` declarado en el `type` body).
+    pub is_static: bool,
     pub span: Span,
 }
 

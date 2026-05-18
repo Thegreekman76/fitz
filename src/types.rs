@@ -196,6 +196,10 @@ pub struct NominalMethod {
     pub params: Vec<Type>,
     pub ret: Type,
     pub is_async: bool,
+    /// Mini-tanda St — `true` si el método es estático
+    /// (`static fn` adentro del `type` body). Se invoca como
+    /// `Type.method(args)` en lugar de `instance.method(args)`.
+    pub is_static: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -754,6 +758,7 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
                     params,
                     ret,
                     is_async: m.is_async,
+                    is_static: m.is_static,
                 });
             }
             env.set_methods(id, resolved_methods);

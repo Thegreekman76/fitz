@@ -543,7 +543,41 @@ let profile = u.fetch_profile().await
 
 - Métodos con visibilidad (`pub fn`/`fn` privado) — todos public
   en MVP.
-- Static methods (`type::method`) — no implementado.
+- ~~Static methods (`type::method`) — no implementado~~ ✓ CERRADO
+  2026-05-18 (mini-tanda St). `static fn` adentro del `type` body
+  declara un método sin receiver, invocado como `Type.method(args)`.
+  Útil para constructores y factories (paralelo a Rust `User::new`
+  y Python `@classmethod`). Implementación en 7 capas:
+  - **Lexer**: `Token::Static` + keyword `"static"`.
+  - **AST**: `MethodDef.is_static: bool`.
+  - **Parser**: `parse_method_def` detecta `static` ANTES de
+    `async`/`fn` y setea el flag. `parse_typedef` reconoce `Static`
+    como otro inicio de método válido junto a `Async`/`Fn`.
+  - **Checker**: `NominalMethod` suma `is_static: bool`; el
+    resolver lo propaga desde el AST.
+  - **Evaluator**: `dispatch_method` agrega rama para
+    `Value::Type` que busca un método estático y lo invoca via
+    `invoke_static_method` (paralelo a `invoke_custom_method` pero
+    SIN pre-declarar fields del tipo como locales — no hay
+    receiver). Errores claros si se invoca `instance.static_fn()`
+    o `Type.instance_fn()` con sugerencia de la forma correcta.
+  - **Codegen**: `emit_custom_method` emite static como
+    `pub fn <name>(params)` (associated fn Rust, sin `&self` ni
+    pre-bindings de fields). Nuevo helper `gen_static_method_call`
+    para el call site: `Counter.of(5)` → `CounterData::of(5i64)`.
+    `gen_method_call` intercepta `Expr::Ident(TypeName).method()`
+    al inicio para detectar el patrón antes que `gen_expr(object)`
+    falle ("variable desconocida").
+  - **LSP**: `after_dot_completions` para `Type::Nominal` filtra
+    static methods (no aparecen en `instance.`).
+  - **Grammar**: `static` sumado al pattern de declaration keywords.
+  4 unit tests evaluator (constructor + factory, sin acceso a
+  fields como locales, instance-call de static = error,
+  static-call de instance = error) + 2 compile_e2e bit-a-bit
+  (constructores, coexistencia static + instance). Ejemplo
+  `examples/guide/13g-static-methods.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 13 sub-sección nueva "Métodos
+  estáticos (mini-tanda St)" con explicación + caveats.
 - Operator overloading (`fn +(self, other)`) — no implementado.
 - Métodos sobre tipos importados desde otro módulo — verificar
   que el dispatch siga al tipo cross-module.

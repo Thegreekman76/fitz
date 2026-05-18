@@ -468,7 +468,11 @@ fn after_dot_completions(
             // `fn(Int) -> Float` y no `fn(x: Int) -> Float`. Trade-off
             // consistente con cómo Map/List exponen sus signatures
             // genéricas. `async fn` se prefija explícitamente.
-            for m in &info.methods {
+            //
+            // Mini-tanda St — los métodos estáticos NO aparecen acá:
+            // se invocan como `Type.method()`, no como
+            // `instance.method()`. Filtramos `is_static`.
+            for m in info.methods.iter().filter(|m| !m.is_static) {
                 let params_str = m
                     .params
                     .iter()

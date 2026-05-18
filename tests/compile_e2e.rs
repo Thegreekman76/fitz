@@ -1957,6 +1957,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13d-iteradores.fitz",
     "13e-mini-bundle-metodos.fitz",
     "13f-range-iteradores.fitz",
+    "13g-static-methods.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3046,6 +3047,43 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda St — métodos estáticos en `type` ----
+
+#[test]
+fn st_static_methods_constructores_y_factories() {
+    // `static fn zero()` y `static fn of(n)` como constructores.
+    let src = "type C {\n\
+                   value: Int = 0\n\n\
+                   static fn zero() -> C { return C { value: 0 } }\n\
+                   static fn of(n: Int) -> C { return C { value: n } }\n\
+               }\n\
+               let z: C = C.zero()\n\
+               let c: C = C.of(42)\n\
+               print(z)\n\
+               print(c)\n";
+    let (stdout, exit) = build_and_run("st_static_constructors", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "C { value: 0 }\nC { value: 42 }");
+}
+
+#[test]
+fn st_static_e_instance_methods_coexisten() {
+    // El mismo `type` puede tener ambos tipos de método. Test que
+    // static + instance no se pisan.
+    let src = "type C {\n\
+                   value: Int = 0\n\n\
+                   static fn make(n: Int) -> C { return C { value: n } }\n\n\
+                   fn double() -> C { return C { value: value * 2 } }\n\
+               }\n\
+               let c: C = C.make(7)\n\
+               let d: C = c.double()\n\
+               print(c)\n\
+               print(d)\n";
+    let (stdout, exit) = build_and_run("st_static_y_instance", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "C { value: 7 }\nC { value: 14 }");
 }
 
 // ---- Mini-tanda F8 — identificadores no-ASCII (Unicode) ----

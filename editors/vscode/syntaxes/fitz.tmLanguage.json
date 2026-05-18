@@ -138,7 +138,7 @@
         },
         {
           "name": "keyword.declaration.fitz",
-          "match": "\\b(let|fn|type|import|from|as)\\b"
+          "match": "\\b(let|fn|type|import|from|as|static)\\b"
         },
         {
           "name": "keyword.operator.logical.fitz",

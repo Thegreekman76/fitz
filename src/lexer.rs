@@ -48,6 +48,7 @@ pub enum Token {
     Or,
     Xor, // Mini-tanda Xor — `a xor b` lógico (Bool ^ Bool, paralelo a `or`/`and`)
     Not, // R.1.1 — `not <expr>` negación lógica prefix
+    Static, // Mini-tanda St — `static fn ...` adentro de `type` body
 
     // Operadores
     Plus,     // +
@@ -879,6 +880,7 @@ impl Lexer {
             "or" => Token::Or,
             "xor" => Token::Xor,
             "not" => Token::Not,
+            "static" => Token::Static,
             _ => Token::Ident(s),
         }
     }
@@ -1248,6 +1250,7 @@ mod tests {
             ("or", Token::Or),
             ("xor", Token::Xor),
             ("not", Token::Not),
+            ("static", Token::Static),
         ];
         for (src, expected) in cases {
             assert_eq!(toks(src), vec![expected.clone(), Token::EOF], "src = {}", src);
