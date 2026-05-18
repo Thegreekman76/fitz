@@ -1961,6 +1961,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     // como String, así que `fitz build` falla. Documentado en el
     // ejemplo como deuda residual de Err+. Sí corre en `fitz run`.
     "14c-result-tipado.fitz",
+    "14d-err-compuestos.fitz",
     "16-modulos.fitz",
     "16b-modulos-let-expr.fitz",
     "16c-modulos-transitivos.fitz",
@@ -3043,6 +3044,75 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda El — Err(List<T>) / Err(Map<K,V>) en codegen ----
+
+#[test]
+fn el_err_list_compila_y_preserva_value() {
+    // Err(List<Int>): el binding `Err(xs)` tipa con List<Int>, así
+    // métodos como `.len()` funcionan sobre el value.
+    let src = "fn fail() -> Result<Int, List<Int>> {\n\
+                 return Err([1, 2, 3])\n\
+               }\n\
+               match fail() {\n\
+                 Ok(v) => print(\"ok: {v}\"),\n\
+                 Err(xs) => print(\"err con {xs.len()} items\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("el_err_list", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err con 3 items");
+}
+
+#[test]
+fn el_err_list_print_directo_matches_interprete() {
+    // Print directo del Err con List preserva el formato canónico
+    // (matchea el evaluator).
+    let src = "fn fail() -> Result<Int, List<Int>> {\n\
+                 return Err([10, 20, 30])\n\
+               }\n\
+               match fail() {\n\
+                 Ok(v) => print(\"ok\"),\n\
+                 Err(xs) => print(\"{xs}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("el_err_list_print", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[10, 20, 30]");
+}
+
+#[test]
+fn el_err_map_compila_y_preserva_value() {
+    // Err(Map<Str, Int>): el binding `Err(m)` tipa con Map<Str, Int>,
+    // así `.len()` y `.has(k)` funcionan sobre el value.
+    let src = "fn fail() -> Result<Int, Map<Str, Int>> {\n\
+                 return Err({\"a\": 1, \"b\": 2})\n\
+               }\n\
+               match fail() {\n\
+                 Ok(v) => print(\"ok: {v}\"),\n\
+                 Err(m) => print(\"err size: {m.len()}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("el_err_map", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err size: 2");
+}
+
+#[test]
+fn el_err_propagation_con_list_via_try_operator() {
+    // `?` propaga el Err(List<T>) intacto.
+    let src = "fn inner() -> Result<Int, List<Int>> {\n\
+                 return Err([1, 2])\n\
+               }\n\
+               fn outer() -> Result<Int, List<Int>> {\n\
+                 let v = inner()?\n\
+                 return Ok(v)\n\
+               }\n\
+               match outer() {\n\
+                 Ok(v) => print(\"ok: {v}\"),\n\
+                 Err(xs) => print(\"pipe err: {xs.len()}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("el_err_list_try", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "pipe err: 2");
 }
 
 // ---- Mini-tanda Ir — iteradores sobre Range ----

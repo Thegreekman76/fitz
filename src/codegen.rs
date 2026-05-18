@@ -6625,18 +6625,23 @@ impl<'a> CodegenCtx<'a> {
     /// `Result<T, E>` se resuelve cuando el contexto destino lo
     /// determina (anotación del let, return de fn, etc.).
     ///
-    /// Casos no soportados: `Err(List<...>)` y `Err(Map<...>)` siguen
-    /// requiriendo helpers que no tenemos — error claro citando `fitz
-    /// run` como workaround.
+    /// Mini-tanda El — `Err(List<T>)` / `Err(Map<K,V>)` ahora también
+    /// se soportan. El codegen emite `Err(<code>)` directo con el E
+    /// inferido como `List<T>` o `Map<K,V>`; el binding `Err(e)` en
+    /// match arms recupera el tipo concreto y permite usar métodos
+    /// `.len()`, `.get(k)`, etc. sobre el value. El `print` de un
+    /// `Result<T, List<U>>` ya pasaba por `show_expr` recursivo, que
+    /// maneja Result/List/Map nativamente.
     fn gen_err(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
         let (code, ty) = self.gen_expr(inner)?;
         match &ty {
-            // Str/Int/Float/Bool/Null/Nominal — emit `Err(<code>)`
+            // Primitivos + nominal + List + Map — emit `Err(<code>)`
             // directo, sin coerción a String. El tipo del Result
             // resultante lleva el E real para que el binding `Err(e)`
-            // pueda tipar como ese E (no como String).
+            // pueda tipar como ese E.
             Type::Str | Type::Int | Type::Float | Type::Bool | Type::Null
-            | Type::Nominal(_) => {
+            | Type::Nominal(_)
+            | Type::List(_) | Type::Map(_, _) => {
                 Ok((
                     format!("Err({})", code),
                     Type::Result { ok: Box::new(Type::Any), err: Box::new(ty) },
@@ -6644,7 +6649,7 @@ impl<'a> CodegenCtx<'a> {
             }
             other => {
                 Err(self.err_at(inner.span(), format!(
-                    "`Err({})` no soportado en `fitz build` — los tipos compuestos (`List`/`Map`/etc.) requieren helpers de format. Usá `fitz run` para preservar el value, o convertí explícitamente con interpolación: `Err(\"...{{x}}...\")`",
+                    "`Err({})` no soportado en `fitz build` — el tipo del Err debe ser primitivo, nominal, List o Map. Usá `fitz run` para preservar el value, o convertí explícitamente con interpolación: `Err(\"...{{x}}...\")`",
                     display_type(other, self.env)
                 )))
             }
@@ -14346,6 +14351,59 @@ mod tests {
         assert!(
             code.contains("let mut x = match"),
             "esperaba `let mut x = match ...` (sin paréntesis), got:\n{}",
+            code
+        );
+    }
+
+    // ---- Mini-tanda El — Err(List<T>) / Err(Map<K,V>) en codegen ----
+
+    #[test]
+    fn el_err_list_se_emite_sin_coercion_a_string() {
+        // Pre-El: `Err([1,2,3])` con `Result<Int, List<Int>>` se
+        // rechazaba con error de codegen. Post-El: emite `Err(<list>)`
+        // directo con el `Arc<Mutex<Vec<i64>>>` intacto, sin coerción
+        // a String.
+        let code = gen(
+            "fn fail() -> Result<Int, List<Int>> {\n\
+                 return Err([1, 2, 3])\n\
+             }\n\
+             fail()",
+        )
+        .unwrap();
+        assert!(
+            !code.contains("Err(format!"),
+            "esperaba que el List se emita directo, no via format!; got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Err(Arc::new(Mutex::new(vec!["),
+            "esperaba `Err(Arc::new(Mutex::new(vec![...])))`, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Result<i64, Arc<Mutex<Vec<i64>>>>"),
+            "esperaba return type `Result<i64, Arc<Mutex<Vec<i64>>>>`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn el_err_map_se_emite_directo() {
+        let code = gen(
+            "fn fail() -> Result<Int, Map<Str, Int>> {\n\
+                 return Err({\"a\": 1, \"b\": 2})\n\
+             }\n\
+             fail()",
+        )
+        .unwrap();
+        assert!(
+            !code.contains("Err(format!"),
+            "Map no debería ir por format!; got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Result<i64, Arc<Mutex<Vec<(String, i64)>>>>"),
+            "esperaba return type `Result<i64, Map>`, got:\n{}",
             code
         );
     }

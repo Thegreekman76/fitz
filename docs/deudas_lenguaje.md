@@ -1182,9 +1182,23 @@ mensaje propio".
 **Deuda residual** (NO bloquea próximas tandas):
 - ~~**`Result<T, E>` con E tipado en codegen**~~ ✓ CERRADO
   2026-05-18 (mini-tanda Re+). Ver entrada dedicada a continuación.
-- **`Err(List<T>)`/`Err(Map<K, V>)` en codegen**: requieren
-  helpers de format para el wrap Arc<Mutex<Vec<...>>>. Sin
-  presión real.
+- ~~**`Err(List<T>)`/`Err(Map<K, V>)` en codegen**~~ ✓ CERRADO
+  2026-05-18 (mini-tanda El). Post-Re+ el codegen ya emite
+  `Err(<code>)` directo con el E tipado; solo faltaba quitar el
+  guard de `gen_err` que rechazaba List/Map explícitamente. La
+  match arm de tipos aceptados sumó `Type::List(_) | Type::Map(_,
+  _)` (paralelo a los primitivos + nominal). El value se preserva
+  como `Arc<Mutex<Vec<U>>>` (List) o `Arc<Mutex<Vec<(K, V)>>>`
+  (Map); el binding `Err(e)` tipa con el E real, y métodos
+  `.len()`, `.get(k)`, indexing, etc. funcionan sobre el value.
+  Print del `Err(<list>)`/`Err(<map>)` ya pasaba por `show_expr`
+  recursivo (que maneja Result/List/Map nativamente), bit-a-bit
+  con el evaluator. 2 unit nuevos en codegen + 4 compile_e2e
+  (List preserva value, List print directo, propagación con `?`,
+  Map preserva value). Ejemplo
+  `examples/guide/14d-err-compuestos.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 14 sub-sección nueva "Err con
+  tipos compuestos: List y Map (mini-tanda El)".
 
 ### ~~`Result<T, E>` con E tipado~~ ✓ CERRADO 2026-05-18 (mini-tanda Re+)
 
@@ -1236,11 +1250,8 @@ Ejemplo `examples/guide/14c-result-tipado.fitz` sumado al smoke
 "`Result<T, E>` con E tipado (mini-tanda Re+)".
 
 **Deuda residual menor** (NO bloquea):
-- `Err(List<T>)`/`Err(Map<K, V>)`: el codegen ya no rechaza
-  estos tipos en `gen_err` (los acepta como cualquier otro tipo
-  ahora que no hay coerción a String), PERO el codegen del
-  Result Rust para listas requeriría wrappers `Arc<Mutex<>>` en
-  ambos lados, todavía no validado end-to-end. Sin presión real.
+- ~~`Err(List<T>)`/`Err(Map<K, V>)`~~ ✓ CERRADO 2026-05-18
+  (mini-tanda El). Ver entrada de El en la sub-sección anterior.
 
 ### Bridge async Fitz ↔ Python asyncio (Fase 8.6)
 

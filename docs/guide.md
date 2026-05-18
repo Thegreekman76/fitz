@@ -4283,6 +4283,50 @@ anotá explícitamente el E.
 Ver [examples/guide/14c-result-tipado.fitz](../examples/guide/14c-result-tipado.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Err con tipos compuestos: List y Map (mini-tanda El)
+
+Hasta la mini-tanda **El**, el E del Result podía ser primitivo o
+una instancia de un tipo custom (mini-tanda Re+), pero `List<T>` y
+`Map<K,V>` se rechazaban con error de codegen citando deuda. El
+cierra ese caso: `Err(List)` y `Err(Map)` ahora funcionan
+bit-a-bit en `fitz run` y `fitz build`. Útil para devolver
+**stacks de errores** o **errores estructurados por campo**.
+
+```fitz
+// Errores como lista: stack de validaciones acumuladas
+fn validar(input: Str) -> Result<Int, List<Str>> {
+    let errs: List<Str> = []
+    if input == "" { errs.push("input vacío") }
+    if input.len() > 10 { errs.push("input demasiado largo") }
+    if errs.len() > 0 { return Err(errs) }
+    return Ok(input.len())
+}
+
+match validar("") {
+    Ok(n) => print("ok: {n}"),
+    Err(errs) => print("{errs.len()} error(es): {errs}")
+}
+// → 1 error(es): ["input vacío"]
+```
+
+```fitz
+// Errores como map: estructurados por campo
+fn validar_obj(name: Str, age: Int) -> Result<Int, Map<Str, Str>> {
+    let errs: Map<Str, Str> = {}
+    if name == "" { errs["name"] = "no puede estar vacío" }
+    if age < 0 { errs["age"] = "debe ser >= 0" }
+    if errs.len() > 0 { return Err(errs) }
+    return Ok(age)
+}
+```
+
+El binding `Err(e)` mantiene el tipo concreto, así que podés llamar
+`.len()`, `.get(k)`, indexar, iterar, etc. — toda la API de `List`/
+`Map` está disponible sobre el value del error.
+
+Ver [examples/guide/14d-err-compuestos.fitz](../examples/guide/14d-err-compuestos.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Err con tipos custom (mini-tanda Err+)
 
 El `Err` acepta cualquier value, no solo `Str`. En `fitz run`

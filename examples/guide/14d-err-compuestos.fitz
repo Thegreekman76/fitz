@@ -1,0 +1,73 @@
+// Mini-tanda El — Err con tipos compuestos (List/Map).
+//
+// Antes de El, `fitz build` rechazaba `Err(List(...))` y `Err(Map(...))`
+// con error de codegen citando como deuda residual del Re+. Solo
+// primitivos + nominales se aceptaban como E del `Result<T, E>`.
+//
+// El completa el círculo: el codegen ahora emite `Err(<arc>)` directo
+// con el tipo Rust real (`Arc<Mutex<Vec<U>>>` para List, equivalente
+// para Map). El binding `Err(e)` en match arms recupera el value
+// con todos sus métodos (`.len()`, `.get(k)`, etc.).
+
+// --- Err(List<T>): errores con stack/breadcrumb ---
+
+fn validar(input: Str) -> Result<Int, List<Str>> {
+    let errs: List<Str> = []
+    if input == "" {
+        errs.push("input vacío")
+    }
+    if input.len() > 10 {
+        errs.push("input demasiado largo")
+    }
+    if errs.len() > 0 {
+        return Err(errs)
+    }
+    return Ok(input.len())
+}
+
+match validar("") {
+    Ok(n) => print("ok: len = {n}"),
+    Err(errs) => print("{errs.len()} error(es): {errs}")
+}
+// → 1 error(es): ["input vacío"]
+
+match validar("hola") {
+    Ok(n) => print("ok: len = {n}"),
+    Err(errs) => print("{errs.len()} error(es): {errs}")
+}
+// → ok: len = 4
+
+// --- Err(Map<K,V>): errores estructurados por campo ---
+
+fn validar_obj(name: Str, age: Int) -> Result<Int, Map<Str, Str>> {
+    let errs: Map<Str, Str> = {}
+    if name == "" {
+        errs["name"] = "no puede estar vacío"
+    }
+    if age < 0 {
+        errs["age"] = "debe ser >= 0"
+    }
+    if errs.len() > 0 {
+        return Err(errs)
+    }
+    return Ok(age)
+}
+
+match validar_obj("", -1) {
+    Ok(a) => print("ok: age = {a}"),
+    Err(m) => print("{m.len()} campos con error: {m}")
+}
+// → 2 campos con error: {"name": "no puede estar vacío", "age": "debe ser >= 0"}
+
+// --- Propagación con `?` preserva el tipo del Err ---
+
+fn pipeline(s: Str) -> Result<Int, List<Str>> {
+    let n = validar(s)?
+    return Ok(n * 2)
+}
+
+match pipeline("muy_largo_para_esto") {
+    Ok(n) => print("pipe ok: {n}"),
+    Err(errs) => print("pipe err: {errs}")
+}
+// → pipe err: ["input demasiado largo"]
