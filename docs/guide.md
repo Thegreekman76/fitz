@@ -3979,15 +3979,60 @@ print(todo.len())                // 5
 Ver [examples/guide/13d-iteradores.fitz](../examples/guide/13d-iteradores.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Iteradores sobre Range (mini-tanda Ir)
+
+`Range` también expone `enumerate`/`zip`/`chain`/`len` desde Ir.
+Antes había que materializar con un list comprehension (`[n for n
+in 0..10].enumerate()`) o caer a un loop manual con counter.
+
+```fitz
+// enumerate sobre Range — el caso canónico
+for (i, n) in (0..5).enumerate() {
+    print("{i}: cuadrado de {n} = {n * n}")
+}
+
+// zip Range + List — el Range "infinito" 1..100 se trunca por la lista
+let usuarios: List<Str> = ["ada", "bea", "cam"]
+for (id, name) in (1..100).zip(usuarios) {
+    print("user#{id}: {name}")
+}
+
+// chain Range + List — concatena
+let extras: List<Int> = [100, 200]
+print((0..3).chain(extras))                  // [0, 1, 2, 100, 200]
+
+// len sin materializar
+print((0..10).len())                          // 10
+print((0..=10).len())                         // 11 (inclusive)
+```
+
+| Método              | Args         | Retorna             | Notas |
+|---------------------|--------------|---------------------|-------|
+| `.enumerate()`      | —            | `List<(Int, Int)>`  | Pares (índice, valor). |
+| `.zip(ys)`          | `List<U>`    | `List<(Int, U)>`    | Trunca al más corto. |
+| `.chain(ys)`        | `List<Int>`  | `List<Int>`         | Concatena con otra `List<Int>`. |
+| `.len()`            | —            | `Int`               | Cantidad de elementos. |
+
+Implementación: el runtime materializa el Range a `List<Int>` y
+delega; el codegen inline-a `(start..end).collect::<Vec<i64>>()`
+adentro del wrap `Arc<Mutex<>>`.
+
+**Caveats**:
+- `Range.chain(Range)` directo NO funciona: `chain` espera
+  `List<Int>`. Materializá con un list comprehension:
+  `[n for n in 0..3].chain([n for n in 5..8])`.
+- `Range` no expone `map`/`filter`/`find`/`sort`/etc. — son
+  métodos que mutan/transforman; usá la lista materializada
+  con el comprehension primero.
+
+Ver [examples/guide/13f-range-iteradores.fitz](../examples/guide/13f-range-iteradores.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
 - **`return` adentro de un brazo de `match` como expresión** —
   como cada brazo es una expresión, no podés cortar la función
   desde adentro con `return`. Se puede pulir cuando moleste.
-- **`xs.sort_by(fn)`** — sort con comparator custom. Si aparece
-  demanda, sub-paso futuro.
-- **`xs.flatten()`** — `List<List<T>>` → `List<T>`. Sin demanda
-  concreta.
 - **Más métodos**: `.find()` para strings, etc. Se irán sumando
   con la práctica.
 

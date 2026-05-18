@@ -5464,7 +5464,32 @@ impl<'a> CodegenCtx<'a> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        let (obj_code, obj_ty) = self.gen_expr(object)?;
+        // Mini-tanda Ir — `(start..end).enumerate()`/`zip()`/`chain()`/
+        // `len()`. El `Range` NO está soportado como valor general en
+        // codegen (`gen_expr` lo rechaza), pero como receptor de un
+        // método podemos materializarlo inline a un `Vec<i64>` y dejar
+        // que el resto del dispatch lo trate como `List<Int>`. Habilita
+        // el patrón canónico `for (i, n) in (0..10).enumerate()`.
+        let (obj_code, obj_ty) = if let Expr::Range { start, end, inclusive, .. } = object {
+            let (start_code, start_ty) = self.gen_expr(start)?;
+            let (end_code, end_ty) = self.gen_expr(end)?;
+            let start_c = coerce(&start_code, &start_ty, &Type::Int);
+            let end_c = coerce(&end_code, &end_ty, &Type::Int);
+            // Inclusivo: sumamos 1 al end (paralelo a parser R.1.4 que
+            // materializa el rango inclusivo así).
+            let end_final = if *inclusive {
+                format!("({}) + 1i64", end_c)
+            } else {
+                end_c
+            };
+            let code = format!(
+                "Arc::new(Mutex::new(({}..{}).collect::<Vec<i64>>()))",
+                start_c, end_final
+            );
+            (code, Type::List(Box::new(Type::Int)))
+        } else {
+            self.gen_expr(object)?
+        };
         // Fase 8.7.2: method call sobre PyAny es realmente un call
         // Python (`math.sqrt(16.0)` = `math.sqrt` getattr + invocación).
         // Emitimos `__fitz_py_invoke(&__fitz_py_get_attr_obj(&obj, "name"), ...)`

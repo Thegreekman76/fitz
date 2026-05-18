@@ -1,0 +1,56 @@
+// Mini-tanda Ir — iteradores sobre Range.
+//
+// Antes de Ir, los métodos `enumerate`/`zip`/`chain` solo andaban
+// sobre `List<T>`. Para iterar un rango con índice, había que
+// materializar primero (`[n for n in 0..10].enumerate()`) o caer a
+// un loop manual con counter.
+//
+// Ir abre los 3 métodos + `len()` sobre `Range`. El runtime
+// materializa el rango como `List<Int>` y delega; el codegen
+// inline-a `(start..end).collect::<Vec<i64>>()` adentro del wrap
+// `Arc<Mutex<>>`.
+
+// --- enumerate: el caso canónico ---
+
+for (i, n) in (0..5).enumerate() {
+    print("{i}: cuadrado de {n} = {n * n}")
+}
+// 0: cuadrado de 0 = 0
+// 1: cuadrado de 1 = 1
+// 2: cuadrado de 2 = 4
+// 3: cuadrado de 3 = 9
+// 4: cuadrado de 4 = 16
+
+// --- zip: emparejar Range con otra colección ---
+
+let usuarios: List<Str> = ["ada", "bea", "cam", "dru"]
+for (id, name) in (1..100).zip(usuarios) {
+    print("user#{id}: {name}")
+}
+// user#1: ada
+// user#2: bea
+// user#3: cam
+// user#4: dru
+// (zip trunca al más corto — el Range "infinito" 1..100 se corta
+// en 4 elementos por la lista)
+
+// --- chain: concatenar Range + List ---
+
+let extras: List<Int> = [100, 200, 300]
+let combo: List<Int> = (0..3).chain(extras)
+print(combo)                                  // [0, 1, 2, 100, 200, 300]
+
+// --- len: cantidad de elementos sin materializar ---
+
+print((0..10).len())                          // 10
+print((0..=10).len())                         // 11 (inclusive)
+print((5..5).len())                           // 0 (rango vacío)
+
+// --- chain de rangos vía materialización intermedia ---
+//
+// `(0..3).chain(5..8)` directo NO funciona porque chain espera
+// `List<T>`. Workaround: materializar uno con un list comprehension.
+
+let primero: List<Int> = [n for n in 0..3]
+let segundo: List<Int> = [n for n in 5..8]
+print(primero.chain(segundo))                 // [0, 1, 2, 5, 6, 7]

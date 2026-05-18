@@ -2143,6 +2143,10 @@ fn infer_method_call(
                 None
             }
         }
+        // Mini-tanda Ir — métodos sobre Range. Range expone el subset
+        // de iteradores que tiene sentido (enumerate/zip/chain) + `len`.
+        // El evaluator materializa el Range a List<Int> y delega.
+        Type::Range => Some(infer_range_method(ctx, method, args_ty, span)),
         // Gradual: no chequeamos sobre Any (no sabemos nada).
         Type::Any => None,
         other => {
@@ -2155,6 +2159,74 @@ fn infer_method_call(
                 method
             ));
             Some(Type::Any)
+        }
+    }
+}
+
+/// Mini-tanda Ir — signatures de métodos built-in sobre `Range`. El
+/// Range conceptualmente es un `List<Int>` lazy; los métodos coinciden
+/// con los de `List<Int>` para enumerate/zip/chain, más `len`.
+fn infer_range_method(
+    ctx: &mut CheckCtx,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    match method {
+        "enumerate" => {
+            check_method_arity(ctx, "enumerate", args_ty, 0, span);
+            Type::List(Box::new(Type::Tuple(vec![Type::Int, Type::Int])))
+        }
+        "zip" => {
+            if !check_method_arity(ctx, "zip", args_ty, 1, span) {
+                return Type::List(Box::new(Type::Tuple(vec![Type::Int, Type::Any])));
+            }
+            let u = match args_ty[0].base() {
+                Type::List(inner) => (**inner).clone(),
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`Range.zip()` espera `List<U>`, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            };
+            Type::List(Box::new(Type::Tuple(vec![Type::Int, u])))
+        }
+        "chain" => {
+            if !check_method_arity(ctx, "chain", args_ty, 1, span) {
+                return Type::List(Box::new(Type::Int));
+            }
+            match args_ty[0].base() {
+                Type::List(inner) => {
+                    if !is_compatible(inner, &Type::Int) {
+                        ctx.error_at(span, format!(
+                            "`Range.chain()` espera `List<Int>`, recibió `List<{}>`",
+                            inner.display(ctx.types),
+                        ));
+                    }
+                }
+                Type::Any => {}
+                other => {
+                    ctx.error_at(span, format!(
+                        "`Range.chain()` espera `List<Int>`, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                }
+            }
+            Type::List(Box::new(Type::Int))
+        }
+        "len" => {
+            check_method_arity(ctx, "len", args_ty, 0, span);
+            Type::Int
+        }
+        _ => {
+            ctx.error_at(span, format!(
+                "`Range` no tiene el método `{}` (hoy: enumerate/zip/chain/len)",
+                method,
+            ));
+            Type::Any
         }
     }
 }

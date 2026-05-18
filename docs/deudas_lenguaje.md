@@ -979,9 +979,27 @@ evaluator + 5 checker) + 1 LSP test + 2 E2E compile bit-a-bit
 "Iteradores: enumerate / zip / chain (mini-tanda It)".
 
 **Deuda residual menor**:
-- Iteradores sobre `Range` (`(0..10).enumerate()`) — workaround
-  hoy: materializar a List primero, o usar `for i in 0..10`
-  que ya da el índice. Sin demanda real.
+- ~~Iteradores sobre `Range` (`(0..10).enumerate()`)~~ ✓ CERRADO
+  2026-05-18 (mini-tanda Ir). Habilita `enumerate`/`zip`/`chain`/
+  `len` sobre `Type::Range` además de `List<T>`. 4 capas:
+  evaluator dispatcha 4 ramas nuevas `(Value::Range, "...")` que
+  materializan via helper `range_to_list(start, end)` y delegan a
+  los métodos de List; checker añade `infer_range_method` con
+  signatures fijas (enumerate → `List<(Int, Int)>`, zip → con U
+  paramétrico, chain → `List<Int>`, len → `Int`); codegen
+  intercepta `Expr::Range` como receptor de method call y
+  materializa inline a `Arc<Mutex<Vec<i64>>>` con
+  `(start..end).collect::<Vec<i64>>()` (inclusivo suma 1 al end
+  paralelo al parser de R.1.4), luego delega al dispatch de
+  `List<Int>` natural; LSP autocomplete suma `Type::Range` con
+  los 4 métodos. 4 unit tests evaluator + 1 LSP unit + 4
+  compile_e2e bit-a-bit. Ejemplo
+  `examples/guide/13f-range-iteradores.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 13 sub-sección nueva "Iteradores
+  sobre Range". **Caveats documentados**: `Range.chain(Range)`
+  directo no funciona (chain espera `List<Int>` — workaround:
+  materializar el segundo con list comprehension), y `Range` no
+  expone `map`/`filter`/`find`/`sort` (usar List materializada).
 - `xs.flat_map(fn)` (combinación de map + flatten) — diferido
   con `flatten`.
 

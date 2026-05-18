@@ -1955,6 +1955,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13c-metodos-extras.fitz",
     "13d-iteradores.fitz",
     "13e-mini-bundle-metodos.fitz",
+    "13f-range-iteradores.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3042,6 +3043,48 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Ir — iteradores sobre Range ----
+
+#[test]
+fn ir_range_enumerate_compila_y_corre() {
+    let src = "for (i, n) in (0..3).enumerate() {\n\
+                 print(\"{i}-{n}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("ir_range_enumerate", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "0-0\n1-1\n2-2");
+}
+
+#[test]
+fn ir_range_zip_con_list_str_trunca() {
+    let src = "let nombres: List<Str> = [\"ada\", \"bea\"]\n\
+               for (i, n) in (1..100).zip(nombres) {\n\
+                 print(\"{i}-{n}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("ir_range_zip", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1-ada\n2-bea");
+}
+
+#[test]
+fn ir_range_chain_con_list_int_concatena() {
+    let src = "let extra: List<Int> = [100, 200]\n\
+               let combo: List<Int> = (0..3).chain(extra)\n\
+               print(combo)\n";
+    let (stdout, exit) = build_and_run("ir_range_chain", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[0, 1, 2, 100, 200]");
+}
+
+#[test]
+fn ir_range_len_exclusivo_e_inclusivo_compila() {
+    let src = "print((10..20).len())\n\
+               print((10..=20).len())\n";
+    let (stdout, exit) = build_and_run("ir_range_len", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "10\n11");
 }
 
 // ---- Mini-tanda Mb — trim_start/trim_end + flatten + sort_by ----

@@ -572,6 +572,15 @@ fn after_dot_completions(
                 ..CompletionItem::default()
             })
             .collect(),
+        // Mini-tanda Ir — Range expone enumerate/zip/chain/len. Es el
+        // subset que tiene sentido para un iterable numérico; el resto
+        // requiere materializar primero a `List<Int>`.
+        Type::Range => method_items(&[
+            ("enumerate", "fn() -> List<(Int, Int)>".into()),
+            ("zip", "fn(List<U>) -> List<(Int, U)>".into()),
+            ("chain", "fn(List<Int>) -> List<Int>".into()),
+            ("len", "fn() -> Int".into()),
+        ]),
         // Any, PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }
@@ -1265,6 +1274,25 @@ mod tests {
             "esperaba firma con `fn(Int, Int)`, dio: {:?}",
             item_sort_by.detail
         );
+    }
+
+    #[test]
+    fn after_dot_sobre_range_lista_iteradores_y_len() {
+        // Mini-tanda Ir: después de `r.` sobre un Range, sugerimos
+        // enumerate/zip/chain/len (subset que tiene sentido para un
+        // iterable numérico).
+        let src = "let r = 0..10\nr.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["enumerate", "zip", "chain", "len"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Ir) en Range: {labels:?}"
+            );
+        }
+        let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
+        assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
     }
 
     #[test]

@@ -3113,6 +3113,33 @@ async fn dispatch_method(
         // Mini-tanda Mb — flatten + sort_by con callback comparator.
         (Value::List(_), "flatten") => list_flatten(receiver, args, span),
         (Value::List(_), "sort_by") => list_sort_by(receiver, args, span).await,
+        // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
+        // como `List<Int>` y delega a los métodos de List. Más simple
+        // que duplicar la lógica; el overhead es solo el `Vec` extra.
+        (Value::Range { start, end }, "enumerate") => {
+            let materialized = range_to_list(*start, *end);
+            list_enumerate(materialized, args, span)
+        }
+        (Value::Range { start, end }, "zip") => {
+            let materialized = range_to_list(*start, *end);
+            list_zip(materialized, args, span)
+        }
+        (Value::Range { start, end }, "chain") => {
+            let materialized = range_to_list(*start, *end);
+            list_chain(materialized, args, span)
+        }
+        // Mini-tanda Ir — `len` sobre Range. Devuelve `(end - start)`
+        // como Int, igual que `(start..end).count()` de Rust.
+        (Value::Range { start, end }, "len") => {
+            if !args.is_empty() {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    format!("`Range.len()` no toma args, recibió {}", args.len()),
+                )));
+            }
+            Ok(Value::Int((end - start).max(0)))
+        }
         // Map
         (Value::Map(_), "get") => map_get(receiver, args, span),
         (Value::Map(_), "has") => map_has(receiver, args, span),
@@ -3536,6 +3563,15 @@ fn list_contains(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
 
 /// Mini-tanda It — `xs.enumerate()` → `List<(Int, T)>` con pares
 /// (índice, elemento). Snapshot del Vec para evitar re-entrancia.
+/// Mini-tanda Ir — Helper: materializa un Range a un `Value::List` con
+/// los Ints del rango (semánticas exclusivas — `end` no incluido). Los
+/// rangos inclusivos (`0..=N`) se construyen con `end = N + 1` por el
+/// parser (R.1.4) así que ya quedan inclusivos al materializar.
+fn range_to_list(start: i64, end: i64) -> Value {
+    let items: Vec<Value> = (start..end).map(Value::Int).collect();
+    Value::new_list(items)
+}
+
 fn list_enumerate(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("enumerate", &args, 0, span)?;
     let items = match receiver {
@@ -9269,6 +9305,74 @@ let r = match n {
         } else {
             panic!("esperaba List");
         }
+    }
+
+    // ---- Mini-tanda Ir — iteradores sobre Range ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ir_range_enumerate_devuelve_pares_indice_valor() {
+        let (env, res) = parse_eval_into_env(
+            "let r = (0..3).enumerate()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g.len(), 3);
+            // Cada elemento es Tuple([Int, Int]) con (i, n).
+            for (idx, item) in g.iter().enumerate() {
+                if let Value::Tuple(t) = item {
+                    assert_eq!(t.len(), 2);
+                    assert_eq!(t[0], Value::Int(idx as i64));
+                    assert_eq!(t[1], Value::Int(idx as i64));
+                } else {
+                    panic!("esperaba Tuple, vio {:?}", item);
+                }
+            }
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ir_range_zip_trunca_al_mas_corto() {
+        let (env, res) = parse_eval_into_env(
+            "let r = (0..10).zip([\"a\", \"b\", \"c\"])",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            assert_eq!(items.lock().len(), 3, "esperaba 3 pares (trunca al más corto)");
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ir_range_chain_concatena_con_list_int() {
+        let (env, res) = parse_eval_into_env(
+            "let r = (0..3).chain([100, 200])",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            assert_eq!(nums, vec![0, 1, 2, 100, 200]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ir_range_len_exclusivo_e_inclusivo() {
+        let (env, res) = parse_eval_into_env(
+            "let a = (0..10).len()\n\
+             let b = (0..=10).len()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(10)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
     }
 
     #[tokio::test(flavor = "current_thread")]
