@@ -1,0 +1,12 @@
+// import_multilinea_utils.fitz — módulo auxiliar para 16d.
+
+fn greet(name: Str) -> Str => "hola, {name}"
+
+fn shout(s: Str) -> Str => s.upper()
+
+let PREFIX: Str = "saludos"
+
+type User {
+    id: Int = 0
+    name: Str = "anon"
+}

@@ -850,6 +850,29 @@ posteriores.
 
 - **Identificadores no-ASCII** (`π`, `función`) — F8. Bajo
   impacto.
+- ~~**Multi-línea en `from import (...)` con paréntesis**~~ ✓
+  CERRADO 2026-05-18 (mini-tanda Mln). Habilita la forma estilo
+  Python: `from foo import (a, b, c,)` con items en líneas
+  separadas y trailing comma opcional. Implementación acotada al
+  **parser**: `parse_from_import` detecta `(` después de
+  `import`, entra a modo multi-línea con helper
+  `skip_newlines_inside_parens` que consume newlines entre
+  items, parsea names + aliases con la misma lógica que
+  single-line, y expecta `)` al final. Sin cambios al
+  lexer/AST/checker/evaluator/codegen (el AST resultante es
+  idéntico al de la forma single-line). Aliases (`as`)
+  funcionan igual; mezclables. Grammar TextMate ya manejaba
+  todos los tokens (`from`/`import` keywords + parens + commas
+  + newlines), sin cambios. 5 unit tests parser (single-line
+  con parens, multi-línea canónico, aliases mixtos, sin
+  trailing comma, sin cerrar es error) + 2 compile_e2e
+  bit-a-bit. Ejemplo
+  `examples/guide/16d-import-multilinea.fitz` + módulo aux
+  `import_multilinea_utils.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 16 sub-sección nueva "Forma
+  multi-línea con paréntesis (mini-tanda Mln)" + bullet stale
+  "Multi-línea no soportado" removido de "Qué no se puede
+  hacer todavía".
 - ~~**Escapes extendidos** `\u{...}`, `\x..`, `\0`, `\b` — F9~~ ✓
   CERRADO 2026-05-18 (mini-tanda F9). Cuatro escapes adicionales en
   strings normales y triple-quote: `\0` (NUL), `\b` (backspace),

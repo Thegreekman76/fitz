@@ -1965,6 +1965,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "16-modulos.fitz",
     "16b-modulos-let-expr.fitz",
     "16c-modulos-transitivos.fitz",
+    "16d-import-multilinea.fitz",
     "17-http.fitz",
     "17b-middleware.fitz",
     "18-docs.fitz",
@@ -3044,6 +3045,73 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Mln — from import multi-línea con paréntesis ----
+
+#[test]
+fn mln_from_import_parens_multi_linea_compila_y_corre() {
+    // Caso canónico: importar varios items en forma multi-línea con
+    // paréntesis. Cada item en su línea, trailing comma opcional.
+    let main = "from utils import (\n\
+                    greet,\n\
+                    shout,\n\
+                    User,\n\
+                )\n\
+                print(greet(\"Mln\"))\n\
+                print(shout(\"Mln\"))\n\
+                print(User { id: 1, name: \"Fitz\" })\n";
+    let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"\n\
+                 fn shout(s: Str) -> Str => s.upper()\n\
+                 type User { id: Int = 0, name: Str = \"anon\" }\n";
+    let (stdout, exit) = build_and_run_multi(
+        "mln-parens-multilinea",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "hola, Mln",
+            "MLN",
+            "User { id: 1, name: \"Fitz\" }",
+        ],
+    );
+}
+
+#[test]
+fn mln_from_import_parens_con_aliases_mixtos_compila() {
+    // Aliases dentro de los paréntesis funcionan igual que en
+    // single-line; el binding local se hace bajo el alias.
+    let main = "from utils import (\n\
+                    greet,\n\
+                    shout as scream,\n\
+                    User as Persona,\n\
+                )\n\
+                print(greet(\"Mln\"))\n\
+                print(scream(\"Mln\"))\n\
+                print(Persona { id: 1, name: \"Fitz\" })\n";
+    let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"\n\
+                 fn shout(s: Str) -> Str => s.upper()\n\
+                 type User { id: Int = 0, name: Str = \"anon\" }\n";
+    let (stdout, exit) = build_and_run_multi(
+        "mln-parens-aliases",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(
+        &stdout,
+        &[
+            "hola, Mln",
+            "MLN",
+            // Aliases locales: pero el Display del struct usa el
+            // type_name canónico ("User"), no el alias ("Persona") —
+            // paridad bit-a-bit con el evaluator (PreF8.4).
+            "User { id: 1, name: \"Fitz\" }",
+        ],
+    );
 }
 
 // ---- Mini-tanda El — Err(List<T>) / Err(Map<K,V>) en codegen ----

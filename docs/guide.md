@@ -4777,9 +4777,37 @@ Diferencias con `import utils`:
   evaluar el `from`.
 
 Trailing comma admitida: `from utils import greet, PREFIX,` (la
-coma final se ignora). La forma multi-línea con paréntesis
-(`from utils import (\ngreet,\nPREFIX\n)`) todavía no se soporta;
-si la lista se hace larga, mantenela en una línea.
+coma final se ignora).
+
+#### Forma multi-línea con paréntesis (mini-tanda Mln)
+
+Si la lista de imports se hace larga, los paréntesis habilitan la
+forma multi-línea estilo Python — cada item en su propia línea:
+
+```fitz
+from utils import (
+    greet,
+    shout,
+    PREFIX,
+    User,
+)
+```
+
+Trailing comma antes del `)` opcional. Aliases (`as`) funcionan
+igual que en single-line, también mezclables:
+
+```fitz
+from utils import (
+    greet,
+    shout as scream,
+    PREFIX as P,
+    User as Persona,
+)
+```
+
+Ver [examples/guide/16d-import-multilinea.fitz](../examples/guide/16d-import-multilinea.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔
+`fitz build`).
 
 ### Alias con `as`
 
@@ -5077,8 +5105,6 @@ Detalles del loader:
 - **`stdlib`** (`from fitz import http`) — el prefijo `fitz/` se
   reserva para Fase 4 cuando entre HTTP nativo. Hoy todo es código
   de usuario.
-- **Multi-línea en `from import (...)` con paréntesis** — sin
-  soporte. Una línea sola.
 - **`fitz build`** soporta módulos con la única restricción de
   inferencia: las funciones del módulo **deben anotar tipos** de
   parámetros y retorno (limitación heredada de codegen 5b.1; la

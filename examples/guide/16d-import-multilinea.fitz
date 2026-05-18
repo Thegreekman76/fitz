@@ -1,0 +1,45 @@
+// Mini-tanda Mln — `from foo import ( ... )` multi-línea.
+//
+// Antes de Mln, el `from import` debía ir en una sola línea — si
+// importabas muchos items, la línea crecía y se hacía ilegible.
+//
+// Mln habilita la sintaxis con paréntesis estilo Python: los items
+// pueden separarse por newlines, cada uno en su línea, con trailing
+// comma opcional. El binding y el resolver del módulo no cambian —
+// es solo azúcar sintáctica del parser.
+
+from import_multilinea_utils import (
+    greet,
+    shout,
+    PREFIX,
+    User,
+)
+
+print(greet("Mln"))                            // hola, Mln
+print(shout("Mln"))                            // MLN
+print(PREFIX)                                   // saludos
+print(User { id: 1, name: "Fitz" })            // User { id: 1, name: "Fitz" }
+
+// Los aliases funcionan igual que en single-line.
+from import_multilinea_utils import (
+    greet as saludar,
+    shout as gritar,
+    PREFIX as P,
+    User as Persona,
+)
+
+print(saludar("aliased"))
+print(gritar("aliased"))
+print(P)
+print(Persona { id: 2, name: "Roy" })
+
+// Mixto: algunos con alias, otros sin.
+from import_multilinea_utils import (
+    greet,
+    shout as scream,
+    PREFIX,
+)
+
+print(greet("mix"))
+print(scream("mix"))
+print(PREFIX)

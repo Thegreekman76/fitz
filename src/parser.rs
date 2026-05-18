@@ -1095,6 +1095,35 @@ impl Parser {
             &Token::Import,
             "se esperaba 'import' después del path en 'from ... import ...'",
         )?;
+
+        // Mini-tanda Mln — multi-línea con paréntesis. Si después del
+        // `import` viene un `(`, entramos a modo multi-línea: newlines
+        // entre nombres se toleran (los consumimos), y cerramos con
+        // `)`. Sin paréntesis sigue el comportamiento single-line.
+        let multiline = matches!(self.peek(), Token::LParen);
+        if multiline {
+            self.advance(); // consume '('
+            self.skip_newlines_inside_parens();
+            let mut names: Vec<(String, Option<String>)> = Vec::new();
+            names.push(self.parse_from_import_name(/*is_first=*/ true)?);
+            self.skip_newlines_inside_parens();
+            while matches!(self.peek(), Token::Comma) {
+                self.advance();
+                self.skip_newlines_inside_parens();
+                // Trailing comma antes del `)` es OK.
+                if matches!(self.peek(), Token::RParen) {
+                    break;
+                }
+                names.push(self.parse_from_import_name(/*is_first=*/ false)?);
+                self.skip_newlines_inside_parens();
+            }
+            self.expect(
+                &Token::RParen,
+                "se esperaba ')' para cerrar `from ... import (...)`",
+            )?;
+            return Ok(Stmt::FromImport { path, names, span });
+        }
+
         let mut names: Vec<(String, Option<String>)> = Vec::new();
         names.push(self.parse_from_import_name(/*is_first=*/ true)?);
         while matches!(self.peek(), Token::Comma) {
@@ -1106,6 +1135,16 @@ impl Parser {
             names.push(self.parse_from_import_name(/*is_first=*/ false)?);
         }
         Ok(Stmt::FromImport { path, names, span })
+    }
+
+    /// Mini-tanda Mln — Helper para `from foo import (...)` multi-línea.
+    /// Consume newlines consecutivos hasta encontrar un token de
+    /// contenido. Sin checks de profundidad — el caller ya está adentro
+    /// del paréntesis.
+    fn skip_newlines_inside_parens(&mut self) {
+        while matches!(self.peek(), Token::Newline) {
+            self.advance();
+        }
     }
 
     /// Helper: parsea un binding de `from ... import`: `Ident [as Ident]`.
@@ -6607,6 +6646,100 @@ mod tests {
                 path: vec!["utils".into()],
                 names: vec![("a".into(), None), ("b".into(), None)],
              span: Span::ZERO },
+        );
+    }
+
+    // ---- Mini-tanda Mln — from foo import ( ... ) multi-línea ----
+
+    #[test]
+    fn mln_from_import_parens_single_line() {
+        // `from utils import (a, b, c)` — paréntesis sin newlines.
+        assert_eq!(
+            parse_one_stmt("from utils import (a, b, c)"),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec![
+                    ("a".into(), None),
+                    ("b".into(), None),
+                    ("c".into(), None),
+                ],
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn mln_from_import_parens_multi_linea_canonico() {
+        // Forma idiomática Python: `(`/`)` rodeando una lista de
+        // nombres separados por comas y newlines.
+        let src = "from utils import (\n\
+                       a,\n\
+                       b,\n\
+                       c,\n\
+                   )";
+        assert_eq!(
+            parse_one_stmt(src),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec![
+                    ("a".into(), None),
+                    ("b".into(), None),
+                    ("c".into(), None),
+                ],
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn mln_from_import_parens_con_aliases_mixtos() {
+        // Aliases dentro de los paréntesis multi-línea funcionan
+        // igual que en single-line.
+        let src = "from utils import (\n\
+                       greet,\n\
+                       shout as scream,\n\
+                       PREFIX as P,\n\
+                       User as Persona,\n\
+                   )";
+        assert_eq!(
+            parse_one_stmt(src),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec![
+                    ("greet".into(), None),
+                    ("shout".into(), Some("scream".into())),
+                    ("PREFIX".into(), Some("P".into())),
+                    ("User".into(), Some("Persona".into())),
+                ],
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn mln_from_import_parens_sin_trailing_comma() {
+        // El último nombre antes del `)` no requiere coma.
+        let src = "from utils import (\n\
+                       a,\n\
+                       b\n\
+                   )";
+        assert_eq!(
+            parse_one_stmt(src),
+            Stmt::FromImport {
+                path: vec!["utils".into()],
+                names: vec![("a".into(), None), ("b".into(), None)],
+                span: Span::ZERO,
+            },
+        );
+    }
+
+    #[test]
+    fn mln_from_import_parens_sin_cerrar_es_error() {
+        let err = parse_program_str("from utils import (a, b\n").unwrap_err();
+        assert!(
+            err.message.contains("')'") || err.message.contains("import"),
+            "esperaba mensaje sobre `)` o import, fue: {}",
+            err.message
         );
     }
 
