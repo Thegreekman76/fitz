@@ -711,12 +711,26 @@ GUIDE_EXAMPLES_COMPILE).
 - `xs.flatten()` para `List<List<T>>`, `xs.zip(ys)` — necesitan
   tuples (deuda diferida grande).
 
-### Loops
+### ~~Loops~~ ✓ CERRADO 2026-05-17 (mini-tanda L post-T)
 
-- **`loop` como expresión con valor** (`let x = loop { break v }`).
-  ~2h.
-- **Labels** en break/continue (`break 'outer`). ~3h, parser más
-  complejo.
+- ~~**`loop` como expresión con valor** `let x = loop { break v }`~~
+  ✓ (L.1). Nuevo `Expr::Loop { body, label, span }` paralelo a
+  `Stmt::Loop`. `EvalSignal::Break(Value, Option<String>)`. El
+  tipo del Expr::Loop es el lub de todos los `break <v>`
+  adentro; sin break con valor → Null. Codegen emite Rust nativo
+  `loop { break <v> }`.
+- ~~**Labels** en break/continue `break 'outer`~~ ✓ (L.2).
+  Lexer suma `Token::Label(String)` para `'name`. AST suma
+  `label: Option<String>` a Loop/While/For/Expr::Loop +
+  `Stmt::Break(value, label, span)`/`Stmt::Continue(label,
+  span)`. Evaluator usa `label_matches()` para decidir si
+  capturar o propagar signal. Codegen emite Rust nativo:
+  `'name: loop { ... break 'name <v>; }`.
+
+Implementación en 6 capas (ast, lexer, parser, evaluator,
+checker, codegen). Cap 8 de la guía actualizado con
+sub-secciones "Loop como expresión" y "Labels". Ejemplo nuevo
+`examples/guide/08b-loops-avanzados.fitz` sumado al smoke.
 
 ### ~~Index / slicing~~ ✓ CERRADO 2026-05-17 (mini-tanda I post-S)
 

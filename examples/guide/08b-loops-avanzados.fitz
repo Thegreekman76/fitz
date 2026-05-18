@@ -1,0 +1,79 @@
+// 08b-loops-avanzados.fitz — Mini-tanda L (post-T).
+// loop como expresión con valor + labels en break/continue.
+
+// --- L.1: loop como expresión ---
+
+// Patrón: retry hasta cumplir condición, devolver valor del break.
+let counter = 0
+let result = loop {
+    counter = counter + 1
+    if counter == 5 {
+        break counter * 10
+    }
+}
+print(result)             // 50
+
+// break sin valor → Null
+let nothing = loop {
+    break
+}
+print(nothing)            // null
+
+// loop como statement (sin asignar) — backward compat
+let i = 0
+loop {
+    i = i + 1
+    if i == 3 {
+        break
+    }
+}
+print(i)                  // 3
+
+// --- L.2: labels en break/continue ---
+
+// break 'outer escapa del loop externo aunque estemos en uno interno
+let found = (-1, -1)
+'outer: for i in 0..5 {
+    for j in 0..5 {
+        if i * j == 6 {
+            found = (i, j)
+            break 'outer
+        }
+    }
+}
+print(found)              // (2, 3)
+
+// continue 'outer salta a la próxima iteración del externo
+let total = 0
+'outer: for i in 0..3 {
+    for j in 0..3 {
+        if j == 2 {
+            continue 'outer
+        }
+        total = total + 1
+    }
+    total = total + 100   // nunca se ejecuta
+}
+print(total)              // 6
+
+// loop como expresión con label
+let r = 'top: loop {
+    let inner = 0
+    loop {
+        inner = inner + 1
+        if inner == 3 {
+            break 'top inner * 100
+        }
+    }
+}
+print(r)                  // 300
+
+// while con label
+let count = 0
+'main: while (true) {
+    count = count + 1
+    if count == 4 {
+        break 'main
+    }
+}
+print(count)              // 4

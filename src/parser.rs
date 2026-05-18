@@ -921,15 +921,55 @@ impl Parser {
             Token::At => self.parse_decorated_fndef(span),
             Token::Break => {
                 self.advance();
-                Ok(Stmt::Break(span))
+                // Mini-tanda L — sintaxis `break ['label] [<expr>]`.
+                // Label primero (si está), después value opcional.
+                // Rust usa el mismo orden: `break 'outer 42`.
+                let label = if let Token::Label(l) = self.peek().clone() {
+                    self.advance();
+                    Some(l)
+                } else {
+                    None
+                };
+                let value = match self.peek() {
+                    Token::Newline | Token::RBrace | Token::EOF => None,
+                    _ => Some(self.expression()?),
+                };
+                Ok(Stmt::Break(value, label, span))
             }
             Token::Continue => {
                 self.advance();
-                Ok(Stmt::Continue(span))
+                let label = if let Token::Label(l) = self.peek().clone() {
+                    self.advance();
+                    Some(l)
+                } else {
+                    None
+                };
+                Ok(Stmt::Continue(label, span))
             }
             Token::While => self.parse_while(span),
             Token::Loop => self.parse_loop(span),
             Token::For => self.parse_for(span),
+            // Mini-tanda L — `'label: <loop>` declara label antes del
+            // loop. Soporta loop/while/for. El parser consume el
+            // Label + Colon y delega al parse_*_with_label.
+            Token::Label(_) => {
+                let label = if let Token::Label(l) = self.peek().clone() {
+                    l
+                } else {
+                    unreachable!()
+                };
+                self.advance();
+                self.expect(&Token::Colon, "se esperaba ':' después del label")?;
+                match self.peek() {
+                    Token::Loop => self.parse_loop_with_label(span, Some(label)),
+                    Token::While => self.parse_while_with_label(span, Some(label)),
+                    Token::For => self.parse_for_with_label(span, Some(label)),
+                    _ => Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        "se esperaba `loop`, `while` o `for` después del label",
+                    )),
+                }
+            }
             Token::Import => self.parse_import(span),
             Token::From => self.parse_from_import(span),
             _ => self.parse_expr_or_assign_stmt(span),
@@ -1547,25 +1587,48 @@ impl Parser {
     /// `while cond { body }`. Iteración condicional. La condición se evalúa
     /// antes de cada iteración; si es `false`, termina el loop.
     fn parse_while(&mut self, span: Span) -> FitzResult<Stmt> {
+        self.parse_while_with_label(span, None)
+    }
+
+    fn parse_while_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
         self.expect(&Token::While, "se esperaba 'while'")?;
         // La condición no permite struct literal a primer nivel — el `{`
         // siguiente arranca el cuerpo del while. Adentro de paréntesis sí.
         let condition = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
-        Ok(Stmt::While { condition, body, span })
+        Ok(Stmt::While { condition, body, label, span })
     }
 
     /// `loop { body }` — loop infinito. Solo se sale con `break` o `return`.
     fn parse_loop(&mut self, span: Span) -> FitzResult<Stmt> {
+        self.parse_loop_with_label(span, None)
+    }
+
+    fn parse_loop_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
         self.expect(&Token::Loop, "se esperaba 'loop'")?;
         let body = self.parse_block()?;
-        Ok(Stmt::Loop { body, span })
+        Ok(Stmt::Loop { body, label, span })
+    }
+
+    /// Mini-tanda L — `loop { body }` como expresión. Versión
+    /// idéntica a `parse_loop` pero devuelve `Expr::Loop`.
+    /// Usada cuando `loop` aparece como RHS de let, arg de
+    /// call, etc. `label` opcional para `'name: loop { ... }`.
+    fn parse_loop_expr(&mut self, label: Option<String>) -> FitzResult<Expr> {
+        let span = self.cur_span();
+        self.expect(&Token::Loop, "se esperaba 'loop'")?;
+        let body = self.parse_block()?;
+        Ok(Expr::Loop { body, label, span })
     }
 
     /// `for var in iter { body }`. Iteración sobre listas y rangos
     /// (mapas todavía no, hasta que tengamos el tipo `Pair`).
     /// `var` se define en cada iteración en el scope del body.
     fn parse_for(&mut self, span: Span) -> FitzResult<Stmt> {
+        self.parse_for_with_label(span, None)
+    }
+
+    fn parse_for_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
         self.expect(&Token::For, "se esperaba 'for'")?;
         let var = self.expect_ident(
             "se esperaba nombre de variable después de 'for'",
@@ -1576,7 +1639,7 @@ impl Parser {
         // listas sí: `for u in [User { id: 1 }]`.
         let iter = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
-        Ok(Stmt::For { var, iter, body, span })
+        Ok(Stmt::For { var, iter, body, label, span })
     }
 
     // ---------- if / match / type ----------
@@ -2215,6 +2278,26 @@ impl Parser {
         match self.peek() {
             Token::If => return self.parse_if_expr(),
             Token::Match => return self.parse_match_expr(),
+            // Mini-tanda L — `loop { body }` como expresión. En
+            // statement position, `parse_stmt` ya intercepta
+            // Token::Loop antes; este branch solo aplica en RHS de
+            // let, args, etc. Devuelve `Expr::Loop { body }`.
+            Token::Loop => return self.parse_loop_expr(None),
+            // Mini-tanda L.2 — `'label: loop { ... }` como expresión.
+            // Detectamos Label + lookahead Colon + Loop.
+            Token::Label(_)
+                if matches!(self.peek_at(1), Token::Colon)
+                    && matches!(self.peek_at(2), Token::Loop) =>
+            {
+                let label = if let Token::Label(l) = self.peek().clone() {
+                    l
+                } else {
+                    unreachable!()
+                };
+                self.advance(); // consume label
+                self.advance(); // consume `:`
+                return self.parse_loop_expr(Some(label));
+            }
             Token::LBracket => return self.parse_list_literal(),
             Token::LBrace => return self.parse_map_literal(),
             // `fn(...)` o `fn(...) => expr` — función anónima en posición
@@ -3807,12 +3890,12 @@ mod tests {
 
     #[test]
     fn break_statement() {
-        assert!(matches!(parse_one_stmt("break"), Stmt::Break(_)));
+        assert!(matches!(parse_one_stmt("break"), Stmt::Break(_, _, _)));
     }
 
     #[test]
     fn continue_statement() {
-        assert!(matches!(parse_one_stmt("continue"), Stmt::Continue(_)));
+        assert!(matches!(parse_one_stmt("continue"), Stmt::Continue(_, _)));
     }
 
     #[test]
@@ -3833,7 +3916,7 @@ mod tests {
         let stmt = parse_one_stmt("while true { break }");
         match stmt {
             Stmt::While { body, .. } => {
-                assert!(matches!(body[..], [Stmt::Break(_)]));
+                assert!(matches!(body[..], [Stmt::Break(_, _, _)]));
             }
             _ => panic!("se esperaba while"),
         }
@@ -5223,6 +5306,7 @@ mod tests {
                 iter: Expr::Ident("xs".into(), Span::ZERO),
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
                 }, Span::ZERO)],
+                label: None,
              span: Span::ZERO },
         );
     }

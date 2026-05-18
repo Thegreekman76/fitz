@@ -309,6 +309,7 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
             Expr::Tuple(items, _) => items.iter().any(expr_uses_async),
             Expr::TupleField { tuple, .. } => expr_uses_async(tuple),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_async),
             Expr::Range { start, end, .. } => expr_uses_async(start) || expr_uses_async(end),
             Expr::If { condition, then, else_, .. } => {
                 expr_uses_async(condition)
@@ -522,7 +523,7 @@ fn walk_stmt_for_state_refs(
                 // approach (mejor sobre-detectar que sub-detectar).
             }
         }
-        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::Break(_, _, _) | Stmt::Continue(_, _) => {}
         Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
         // Fase 9.0.1 (F15): walkers estáticos del codegen ignoran
         // Error nodes — la API strict que llama al codegen nunca los
@@ -627,6 +628,11 @@ fn walk_expr_for_state_refs(
         }
         Expr::TupleField { tuple, .. } => {
             walk_expr_for_state_refs(tuple, candidates, locals, refs);
+        }
+        Expr::Loop { body, .. } => {
+            for s in body {
+                walk_stmt_for_state_refs(s, candidates, locals, refs);
+            }
         }
         Expr::Field { object, .. } => {
             walk_expr_for_state_refs(object, candidates, locals, refs);
@@ -1241,8 +1247,8 @@ fn stmt_kind(s: &Stmt) -> &'static str {
         Stmt::While { .. } => "while",
         Stmt::Loop { .. } => "loop",
         Stmt::For { .. } => "for",
-        Stmt::Break(_) => "break",
-        Stmt::Continue(_) => "continue",
+        Stmt::Break(_, _, _) => "break",
+        Stmt::Continue(_, _) => "continue",
         Stmt::FnDef { .. } => "fn",
         Stmt::TypeDef { .. } => "type",
         Stmt::Import { .. } | Stmt::FromImport { .. } => "import",
@@ -1942,6 +1948,12 @@ struct CodegenCtx<'a> {
     /// claros del codegen, lo replicamos. Vacío fuera de toda fn
     /// (top-level del archivo, donde `?` no aplica).
     ret_stack: Vec<Type>,
+    /// Mini-tanda L — stack paralelo a `Expr::Loop` actualmente
+    /// siendo emitido. Cada frame recolecta los tipos de los
+    /// `break <v>` adentro. `Expr::Loop` consume el frame para
+    /// devolver el tipo unificado. Statement-mode loops NO empujan
+    /// — sus `break <v>` se descartan.
+    break_value_stack: Vec<Vec<Type>>,
     /// F11: nombres de vars top-level que el codegen detectó como
     /// **state HTTP compartido** (referenciadas desde al menos una fn
     /// con decorator HTTP). Indexado por nombre → tipo resuelto.
@@ -2097,6 +2109,7 @@ impl<'a> CodegenCtx<'a> {
             module_bindings: HashMap::new(),
             loaded_modules: Vec::new(),
             ret_stack: Vec::new(),
+            break_value_stack: Vec::new(),
             state_var_types: HashMap::new(),
             fn_state_deps: HashMap::new(),
             response_mode: false,
@@ -3490,17 +3503,42 @@ impl<'a> CodegenCtx<'a> {
                 self.emit(";\n");
                 Ok(())
             }
-            Stmt::While { condition, body, .. } => self.gen_while(condition, body, ret_expected),
-            Stmt::Loop { body, .. } => self.gen_loop(body, ret_expected),
-            Stmt::For { var, iter, body, .. } => self.gen_for(var, iter, body, ret_expected),
-            Stmt::Break(_) => {
+            Stmt::While { condition, body, label, .. } => self.gen_while(condition, body, label.as_deref(), ret_expected),
+            Stmt::Loop { body, label, .. } => self.gen_loop(body, label.as_deref(), ret_expected),
+            Stmt::For { var, iter, body, label, .. } => self.gen_for(var, iter, body, label.as_deref(), ret_expected),
+            Stmt::Break(value, label, _) => {
+                // Mini-tanda L: `break ['label] [<expr>]` emite
+                // `break ['label] [code];` Rust nativo. Rust soporta
+                // ambas formas con label antes del valor (igual que
+                // nuestra sintaxis). Adicionalmente alimentamos el
+                // `break_value_stack` del frame activo (si hay) para
+                // que el `Expr::Loop` contenedor sepa el tipo del v.
                 self.emit_indent();
-                self.emit("break;\n");
+                let label_str = label
+                    .as_ref()
+                    .map(|l| format!(" '{}", l))
+                    .unwrap_or_default();
+                if let Some(e) = value {
+                    let (code, ty) = self.gen_expr(e)?;
+                    if let Some(frame) = self.break_value_stack.last_mut() {
+                        frame.push(ty);
+                    }
+                    writeln!(&mut self.output, "break{} {};", label_str, code).unwrap();
+                } else {
+                    if let Some(frame) = self.break_value_stack.last_mut() {
+                        frame.push(Type::Null);
+                    }
+                    writeln!(&mut self.output, "break{};", label_str).unwrap();
+                }
                 Ok(())
             }
-            Stmt::Continue(_) => {
+            Stmt::Continue(label, _) => {
                 self.emit_indent();
-                self.emit("continue;\n");
+                if let Some(l) = label {
+                    writeln!(&mut self.output, "continue '{};", l).unwrap();
+                } else {
+                    self.emit("continue;\n");
+                }
                 Ok(())
             }
             Stmt::FnDef { name, .. } => Err(self.err_at(stmt.span(), format!(
@@ -3957,10 +3995,14 @@ impl<'a> CodegenCtx<'a> {
         &mut self,
         condition: &Expr,
         body: &[Stmt],
+        label: Option<&str>,
         ret_expected: &Type,
     ) -> Result<(), FitzError> {
         let (cond_code, _) = self.gen_expr(condition)?;
         self.emit_indent();
+        if let Some(l) = label {
+            self.emit(&format!("'{}: ", l));
+        }
         self.emit("while ");
         self.emit(&cond_code);
         self.emit(" {\n");
@@ -3976,8 +4018,11 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
-    fn gen_loop(&mut self, body: &[Stmt], ret_expected: &Type) -> Result<(), FitzError> {
+    fn gen_loop(&mut self, body: &[Stmt], label: Option<&str>, ret_expected: &Type) -> Result<(), FitzError> {
         self.emit_indent();
+        if let Some(l) = label {
+            self.emit(&format!("'{}: ", l));
+        }
         self.emit("loop {\n");
         self.indent += 1;
         self.push_scope();
@@ -3996,6 +4041,7 @@ impl<'a> CodegenCtx<'a> {
         var: &str,
         iter: &Expr,
         body: &[Stmt],
+        label: Option<&str>,
         ret_expected: &Type,
     ) -> Result<(), FitzError> {
         // Dos iterables soportados hoy:
@@ -4006,6 +4052,7 @@ impl<'a> CodegenCtx<'a> {
         //     que list_map en el intérprete.
         // Map como iterable directo NO se soporta (alineado con el
         // intérprete, que también lo rechaza).
+        let label_prefix = label.map(|l| format!("'{}: ", l)).unwrap_or_default();
         if let Expr::Range { start, end, inclusive, .. } = iter {
             let (start_code, _) = self.gen_expr(start)?;
             let (end_code, _) = self.gen_expr(end)?;
@@ -4015,7 +4062,7 @@ impl<'a> CodegenCtx<'a> {
             self.emit_indent();
             writeln!(
                 &mut self.output,
-                "for mut {var} in ({start_code} as i64){op}({end_code} as i64) {{"
+                "{label_prefix}for mut {var} in ({start_code} as i64){op}({end_code} as i64) {{"
             )
             .unwrap();
             self.indent += 1;
@@ -4052,7 +4099,7 @@ impl<'a> CodegenCtx<'a> {
         self.emit_indent();
         writeln!(
             &mut self.output,
-            "for mut {var} in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+            "{label_prefix}for mut {var} in ({iter_code}).lock().unwrap().clone().into_iter() {{"
         )
         .unwrap();
         self.indent += 1;
@@ -4083,6 +4130,39 @@ impl<'a> CodegenCtx<'a> {
             }
             Expr::Str(s, _) => Ok((format!("String::from({})", rust_str_literal(s)), Type::Str)),
             Expr::Bool(b, _) => Ok((b.to_string(), Type::Bool)),
+            // Mini-tanda L — `loop { body }` como expresión. Rust
+            // nativo soporta `break <value>` adentro de `loop` y
+            // produce el valor de la expresión. Emitimos el body
+            // dentro de un bloque `loop { ... }`. El tipo lo
+            // sintetizamos como `Any` por simplicidad MVP (rustc
+            // infiere desde el `break <v>` adentro).
+            Expr::Loop { body, label, .. } => {
+                // Mini-tanda L — emitir body con un frame de
+                // `break_value_stack` activo para que los
+                // `Stmt::Break(Some(v), _)` adentro reporten su
+                // tipo. Después unificar con `lub` para el tipo
+                // del Expr::Loop. `label` opcional emite
+                // `'name: loop { ... }` Rust nativo.
+                self.break_value_stack.push(Vec::new());
+                let stmt_refs: Vec<&Stmt> = body.iter().collect();
+                let body_code = self.gen_block_to_string(&stmt_refs)?;
+                let values = self.break_value_stack.pop().unwrap_or_default();
+                let result_ty = if values.is_empty() {
+                    Type::Null
+                } else {
+                    let mut acc = values[0].clone();
+                    for t in &values[1..] {
+                        acc = lub(&acc, t).unwrap_or(Type::Any);
+                    }
+                    acc
+                };
+                let label_prefix = label
+                    .as_ref()
+                    .map(|l| format!("'{}: ", l))
+                    .unwrap_or_default();
+                let code = format!("({}loop {{ {} }})", label_prefix, body_code);
+                Ok((code, result_ty))
+            }
             // Tuples (mini-tanda T) — Rust nativo `(a, b, c)`. Tupla
             // vacía `()` y de 1 elemento `(x,)`.
             Expr::Tuple(items, _) => {
@@ -8331,7 +8411,7 @@ fn collect_captures_stmt(
                 collect_captures_stmt(s, params, locals, ctx, seen, out);
             }
         }
-        Stmt::Break(_) | Stmt::Continue(_) => {}
+        Stmt::Break(_, _, _) | Stmt::Continue(_, _) => {}
         Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
         // Fase 9.0.1 (F15): walker estático no-op.
         Stmt::Error(_) => {}
@@ -8430,6 +8510,11 @@ fn collect_captures_expr(
         }
         Expr::TupleField { tuple, .. } => {
             collect_captures_expr(tuple, params, locals, ctx, seen, out);
+        }
+        Expr::Loop { body, .. } => {
+            for s in body {
+                collect_captures_stmt(s, params, locals, ctx, seen, out);
+            }
         }
         Expr::List(items, _) => {
             for it in items {

@@ -1782,6 +1782,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "06-logica.fitz",
     "07-if.fitz",
     "08-loops.fitz",
+    "08b-loops-avanzados.fitz",
     "09b-indexing-slicing.fitz",
     "09c-tuples.fitz",
     "10-match.fitz",

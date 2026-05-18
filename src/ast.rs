@@ -116,6 +116,22 @@ pub enum Expr {
         span: Span,
     },
 
+    /// `loop { body }` como expresión (mini-tanda L). El valor de
+    /// la expresión es el `<v>` del primer `break <v>` que dispara.
+    /// `break` sin valor → `Null`. Útil para retry loops y polling:
+    /// `let result = loop { if cond { break value } }`.
+    /// Distinto de `Stmt::Loop` (statement) — el evaluator descarta
+    /// el value en statement-mode.
+    Loop {
+        body: Vec<Stmt>,
+        /// Mini-tanda L — label opcional `'outer:` antes de `loop`.
+        /// Si está, `break 'outer` adentro lo targetea
+        /// específicamente. Sin label, break matchea este loop solo
+        /// si es el más cercano.
+        label: Option<String>,
+        span: Span,
+    },
+
     /// Rango `start..end` (exclusivo) o `start..=end` (inclusivo).
     /// `span` apunta al `..` o `..=`. El flag `inclusive` lo aporta
     /// R.1.4 (mini-fase R) — default `false` mantiene los call sites
@@ -207,6 +223,7 @@ impl Expr {
             Expr::Slice { span, .. } => *span,
             Expr::Tuple(_, span) => *span,
             Expr::TupleField { span, .. } => *span,
+            Expr::Loop { span, .. } => *span,
             Expr::List(_, s) => *s,
             Expr::Map(_, s) => *s,
             Expr::Range { span, .. } => *span,
@@ -385,23 +402,33 @@ pub enum Stmt {
         span: Span,
     },
 
-    /// `break` dentro de loop/while/for.
-    Break(Span),
+    /// `break [label] [<expr>]` dentro de loop/while/for.
+    /// Mini-tanda L:
+    ///   - `value` opcional para `loop` como expresión (`break v`).
+    ///   - `label` opcional para targetear un loop específico
+    ///     anidado (`break 'outer`). Sin label → matchea el loop
+    ///     más cercano.
+    Break(Option<Expr>, Option<String>, Span),
 
-    /// `continue` dentro de loop/while/for.
-    Continue(Span),
+    /// `continue [label]` dentro de loop/while/for. Sin label →
+    /// continúa el loop más cercano.
+    Continue(Option<String>, Span),
 
     /// `while cond { body }`. Itera mientras `cond` evalúe a `Bool(true)`.
     /// `break` corta el loop; `continue` salta a la próxima iteración.
+    /// `label` (mini-tanda L) opcional para `break 'outer`.
     While {
         condition: Expr,
         body: Vec<Stmt>,
+        label: Option<String>,
         span: Span,
     },
 
     /// `loop { body }` — loop infinito. Solo se sale con `break` (o `return`).
+    /// `label` (mini-tanda L) opcional para `break 'outer`.
     Loop {
         body: Vec<Stmt>,
+        label: Option<String>,
         span: Span,
     },
 
@@ -409,10 +436,12 @@ pub enum Stmt {
     /// y debe ser iterable (List o Range; Map iterable cuando exista
     /// el tipo `Pair`). `var` se define en el scope del body en cada
     /// iteración. `break`/`continue` funcionan igual que en `while`.
+    /// `label` (mini-tanda L) opcional para `break 'outer`.
     For {
         var: String,
         iter: Expr,
         body: Vec<Stmt>,
+        label: Option<String>,
         span: Span,
     },
 
@@ -472,8 +501,8 @@ impl Stmt {
             Stmt::Expr(_, span) => *span,
             Stmt::FnDef { span, .. } => *span,
             Stmt::TypeDef { span, .. } => *span,
-            Stmt::Break(span) => *span,
-            Stmt::Continue(span) => *span,
+            Stmt::Break(_, _, span) => *span,
+            Stmt::Continue(_, span) => *span,
             Stmt::While { span, .. } => *span,
             Stmt::Loop { span, .. } => *span,
             Stmt::For { span, .. } => *span,
@@ -827,9 +856,9 @@ mod tests {
     #[test]
     fn ast_supports_break_and_continue_inside_loops() {
         // Stmt::Break y Stmt::Continue son sentencias por sí mismas.
-        let stmts: Vec<Stmt> = vec![Stmt::Break(Span::ZERO), Stmt::Continue(Span::ZERO)];
-        assert_eq!(stmts[0], Stmt::Break(Span::ZERO));
-        assert_eq!(stmts[1], Stmt::Continue(Span::ZERO));
+        let stmts: Vec<Stmt> = vec![Stmt::Break(None, None, Span::ZERO), Stmt::Continue(None, Span::ZERO)];
+        assert_eq!(stmts[0], Stmt::Break(None, None, Span::ZERO));
+        assert_eq!(stmts[1], Stmt::Continue(None, Span::ZERO));
     }
 
     #[test]
@@ -911,6 +940,7 @@ mod tests {
                 callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
                 args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
             }, Span::ZERO)],
+            label: None,
          span: Span::ZERO };
         match f {
             Stmt::For { var, iter, body, .. } => {

@@ -921,6 +921,14 @@ struct CheckCtx<'a> {
     /// `Stmt::ReturnStatus` (un middleware puede hacer `return 401 { ... }`
     /// para short-circuitear el handler). Introducido en mini-fase MW.1.
     middleware_fn_names: std::collections::HashSet<String>,
+    /// Mini-tanda L — stack paralelo a los `Expr::Loop` actualmente
+    /// siendo chequeados. Cada frame recolecta los tipos de los
+    /// valores de `break <v>` adentro. `Expr::Loop` consume el
+    /// frame al salir para inferir el tipo de la expresión via
+    /// `unify_returns`. Loops como statement (`Stmt::Loop`,
+    /// `Stmt::While`, `Stmt::For`) NO empujan al stack — los
+    /// `break <v>` adentro tipan el value pero NO se propagan.
+    break_value_stack: Vec<Vec<Type>>,
     /// Profundidad de loops adentro de la función actual (R.2.4 — F3).
     /// `Stmt::Break`/`Continue` exige que este valor sea > 0; si es 0,
     /// el statement está huérfano (top-level o adentro de fn sin loop).
@@ -953,6 +961,7 @@ impl<'a> CheckCtx<'a> {
             await_stack: Vec::new(),
             middleware_fn_names: std::collections::HashSet::new(),
             loop_depth: 0,
+            break_value_stack: Vec::new(),
             errors: Vec::new(),
             type_info: TypeInfo::new(),
             def_info: DefinitionInfo::new(),
@@ -1197,6 +1206,22 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         Expr::Str(_, _) => Type::Str,
         Expr::Bool(_, _) => Type::Bool,
         Expr::Null(_) => Type::Null,
+
+        // Mini-tanda L — `loop { body }` como expresión. El tipo es
+        // el `lub` de los valores de `break <v>` adentro. Sin
+        // breaks con valor → `Null`. Recolectar los tipos de break
+        // requiere walkear el body; usamos un side-channel
+        // `break_value_stack` que `Stmt::Break(Some(e), _)` alimenta.
+        Expr::Loop { body, .. } => {
+            ctx.loop_depth += 1;
+            ctx.break_value_stack.push(Vec::new());
+            for s in body {
+                check_stmt(ctx, s);
+            }
+            let values = ctx.break_value_stack.pop().unwrap_or_default();
+            ctx.loop_depth -= 1;
+            unify_returns(&values)
+        }
 
         // Tuples (mini-tanda T) — tipamos cada slot y armamos
         // `Type::Tuple`.
@@ -2943,7 +2968,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // Ya validada por resolve_program.
         }
 
-        Stmt::While { condition, body, span } => {
+        Stmt::While { condition, body, span, .. } => {
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
                 ctx.error_at(*span, format!(
@@ -2966,7 +2991,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.pop_scope();
         }
 
-        Stmt::For { var, iter, body, span } => {
+        Stmt::For { var, iter, body, span, .. } => {
             let iter_ty = infer_expr(ctx, iter);
             let elem_ty = match &iter_ty {
                 Type::List(t) => (**t).clone(),
@@ -2991,7 +3016,18 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.pop_scope();
         }
 
-        Stmt::Break(span) => {
+        Stmt::Break(value, _label, span) => {
+            // Mini-tanda L: chequear el valor si está y empujarlo
+            // al `break_value_stack` para que el `Expr::Loop`
+            // contenedor lo unifique como tipo de retorno.
+            let v_ty = if let Some(e) = value {
+                infer_expr(ctx, e)
+            } else {
+                Type::Null
+            };
+            if let Some(frame) = ctx.break_value_stack.last_mut() {
+                frame.push(v_ty);
+            }
             // R.2.4 (F3): `break` huérfano (fuera de loop) → error.
             if ctx.loop_depth == 0 {
                 ctx.error_at(*span,
@@ -2999,7 +3035,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 );
             }
         }
-        Stmt::Continue(span) => {
+        Stmt::Continue(_label, span) => {
             // R.2.4 (F3): `continue` huérfano (fuera de loop) → error.
             if ctx.loop_depth == 0 {
                 ctx.error_at(*span,

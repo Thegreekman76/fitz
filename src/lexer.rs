@@ -83,6 +83,7 @@ pub enum Token {
     Dot,      // .
     At,       // @ — prefijo de decoradores: @get, @post, @server, ...
     Pipe,     // | — separador de or-patterns en `match` (R.2.1)
+    Label(String),  // 'name — labels en break/continue (mini-tanda L)
 
     // Especiales
     Newline,
@@ -752,6 +753,31 @@ impl Lexer {
                 // entra acá.
                 self.advance();
                 Token::Pipe
+            }
+            '\'' => {
+                // Mini-tanda L — label `'name` para break/continue.
+                // Fitz no tiene char literales con `'x'`, así que el
+                // apóstrofe siempre arranca una label. Después del
+                // apóstrofe esperamos identificador.
+                self.advance(); // consume `'`
+                let start_pos = self.pos;
+                while let Some(c) = self.peek() {
+                    if c.is_alphanumeric() || c == '_' {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                if start_pos == self.pos {
+                    return Err(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        line,
+                        column,
+                        "se esperaba un identificador después de `'` (label)".to_string(),
+                    ));
+                }
+                let name: String = self.chars[start_pos..self.pos].iter().collect();
+                Token::Label(name)
             }
             '@' => {
                 self.advance();

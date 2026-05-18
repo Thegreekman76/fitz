@@ -184,8 +184,8 @@ fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut std::collections::HashSet<String
                 collect_uses_in_stmt(s, uses);
             }
         }
-        Stmt::Break(_)
-        | Stmt::Continue(_)
+        Stmt::Break(_, _, _)
+        | Stmt::Continue(_, _)
         | Stmt::Import { .. }
         | Stmt::FromImport { .. }
         | Stmt::Error(_) => {}
@@ -238,6 +238,11 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             }
         }
         Expr::TupleField { tuple, .. } => collect_uses_in_expr(tuple, uses),
+        Expr::Loop { body, .. } => {
+            for s in body {
+                collect_uses_in_stmt(s, uses);
+            }
+        }
         Expr::List(items, _) => {
             for i in items {
                 collect_uses_in_expr(i, uses);
@@ -561,8 +566,8 @@ fn walk_exprs_in_stmt(stmt: &Stmt, f: &mut impl FnMut(&Expr)) {
                 walk_exprs_in_stmt(s, f);
             }
         }
-        Stmt::Break(_)
-        | Stmt::Continue(_)
+        Stmt::Break(_, _, _)
+        | Stmt::Continue(_, _)
         | Stmt::Import { .. }
         | Stmt::FromImport { .. }
         | Stmt::Error(_) => {}
@@ -618,6 +623,11 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             }
         }
         Expr::TupleField { tuple, .. } => walk_expr(tuple, f),
+        Expr::Loop { body, .. } => {
+            for s in body {
+                walk_exprs_in_stmt(s, f);
+            }
+        }
         Expr::List(items, _) => {
             for i in items {
                 walk_expr(i, f);

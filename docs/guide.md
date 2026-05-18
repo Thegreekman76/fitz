@@ -1588,15 +1588,74 @@ while fila < 5 and done == false {
 }
 ```
 
-(Un poco verboso — los labels llegarán cuando hagan falta de verdad.)
+(Cerrado: ahora podés usar **labels** para romper varios niveles —
+ver la sub-sección "Labels en break/continue" abajo.)
+
+### Loop como expresión con valor (mini-tanda L)
+
+`loop { ... }` también funciona como expresión: el valor del primer
+`break <v>` que dispara es el valor de la expresión. Útil para
+retry patterns y polling.
+
+```fitz
+let counter = 0
+let result = loop {
+    counter = counter + 1
+    if counter == 5 {
+        break counter * 10
+    }
+}
+print(result)             // 50
+
+// break sin valor → Null
+let nothing = loop { break }
+```
+
+`loop` sigue funcionando como statement (sin retorno) para
+compatibilidad con código existente.
+
+### Labels en break / continue (mini-tanda L.2)
+
+Para escapar de un loop externo desde un loop anidado, declarás
+un label `'name:` antes del loop y lo referenciás en break o
+continue:
+
+```fitz
+'outer: for i in 0..5 {
+    for j in 0..5 {
+        if i * j == 6 {
+            break 'outer      // sale de los DOS for
+        }
+    }
+}
+
+'main: while (running) {
+    if exhausted {
+        break 'main
+    }
+}
+
+// Con loop como expresión + label + valor:
+let result = 'top: loop {
+    loop {
+        if cond {
+            break 'top 42     // sale de los dos loops, valor = 42
+        }
+    }
+}
+```
+
+Sintaxis paralela a Rust. El label se valida en el lexer
+(apóstrofe + identificador) y en el codegen se emite Rust
+nativo (`'name: loop {}`, `break 'name expr`).
+
+Ver [examples/guide/08b-loops-avanzados.fitz](../examples/guide/08b-loops-avanzados.fitz)
+para el ejemplo completo.
 
 ### Lo que todavía no anda
 
-- **`loop` como expresión** — en Rust podés escribir
-  `let x = loop { break valor }`. Acá `loop` es solo una sentencia;
-  `break` no lleva valor.
-
-- **Labels para `break` / `continue`** — para romper más de un nivel.
+- (nada importante de la lista original — los principales
+  faltantes de loops se cerraron en mini-tanda L.)
 
 ### Ejemplo completo
 

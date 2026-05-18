@@ -376,8 +376,8 @@ fn end_line_of_stmt(stmt: &Stmt) -> usize {
             .iter()
             .filter_map(|f| f.default.as_ref().map(end_line_of_expr))
             .max(),
-        Stmt::Break(_)
-        | Stmt::Continue(_)
+        Stmt::Break(_, _, _)
+        | Stmt::Continue(_, _)
         | Stmt::Import { .. }
         | Stmt::FromImport { .. }
         | Stmt::Error(_) => None,
@@ -405,6 +405,7 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         }
         Expr::TupleField { tuple, .. } => Some(end_line_of_expr(tuple)),
         Expr::Tuple(items, _) => items.iter().map(end_line_of_expr).max(),
+        Expr::Loop { body, .. } => body.iter().map(end_line_of_stmt).max(),
         Expr::Slice { object, start, end, .. } => {
             let mut m = end_line_of_expr(object);
             if let Some(s) = start { m = m.max(end_line_of_expr(s)); }
@@ -490,8 +491,24 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
         Stmt::TypeDef { name, fields, methods, .. } => {
             fmt_typedef(ctx, name, fields, methods);
         }
-        Stmt::Break(_) => ctx.write("break"),
-        Stmt::Continue(_) => ctx.write("continue"),
+        Stmt::Break(value, label, _) => {
+            ctx.write("break");
+            if let Some(l) = label {
+                ctx.write(" '");
+                ctx.write(l);
+            }
+            if let Some(e) = value {
+                ctx.write(" ");
+                ctx.write(&expr_to_inline_string(e));
+            }
+        }
+        Stmt::Continue(label, _) => {
+            ctx.write("continue");
+            if let Some(l) = label {
+                ctx.write(" '");
+                ctx.write(l);
+            }
+        }
         Stmt::While { condition, body, .. } => {
             ctx.write("while (");
             fmt_expr(ctx, condition);
@@ -795,6 +812,10 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             fmt_expr(ctx, tuple);
             ctx.write(".");
             ctx.write(&index.to_string());
+        }
+        Expr::Loop { body, .. } => {
+            ctx.write("loop ");
+            fmt_block(ctx, body);
         }
         Expr::List(items, _) => {
             ctx.write("[");

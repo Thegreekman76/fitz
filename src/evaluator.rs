@@ -54,8 +54,12 @@ use crate::value::{ResultVariant, Value};
 pub enum EvalSignal {
     Error(FitzError),
     Return(Value),
-    Break,
-    Continue,
+    /// Mini-tanda L: `break <v>` lleva el valor. `break` solo →
+    /// `Value::Null`. El `label` opcional targetea un loop
+    /// específico anidado (`break 'outer`); el loop runner
+    /// chequea si el label matchea y propaga si no.
+    Break(Value, Option<String>),
+    Continue(Option<String>),
 }
 
 /// `From<FitzError>` permite hacer `return Err(error.into())` o usar `?`
@@ -1366,12 +1370,12 @@ fn signal_to_error(signal: EvalSignal) -> FitzError {
             0, 0,
             "`return` solo puede usarse adentro de una función",
         ),
-        EvalSignal::Break => FitzError::new(
+        EvalSignal::Break(_, _) => FitzError::new(
             ErrorKind::BreakOutsideLoop,
             0, 0,
             "`break` solo puede usarse adentro de un loop",
         ),
-        EvalSignal::Continue => FitzError::new(
+        EvalSignal::Continue(_) => FitzError::new(
             ErrorKind::ContinueOutsideLoop,
             0, 0,
             "`continue` solo puede usarse adentro de un loop",
@@ -1745,8 +1749,17 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             env.lock().define(name.clone(), t);
             Ok(Value::Null)
         }
-        Stmt::Break(_) => Err(EvalSignal::Break),
-        Stmt::Continue(_) => Err(EvalSignal::Continue),
+        Stmt::Break(value_expr, label, _) => {
+            // Mini-tanda L: evaluamos el valor si está, default Null.
+            // El label se propaga vía `EvalSignal::Break(v, label)`.
+            let v = if let Some(e) = value_expr {
+                eval_expr(e, env).await?
+            } else {
+                Value::Null
+            };
+            Err(EvalSignal::Break(v, label.clone()))
+        }
+        Stmt::Continue(label, _) => Err(EvalSignal::Continue(label.clone())),
 
         // `for var in iter { body }` — evalúa `iter` una sola vez al
         // entrar, después itera. `var` se redefine en el env actual en
@@ -1758,7 +1771,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - Range: itera los Int de start a end-1.
         //  - Map: aún no (necesita el tipo `Pair`/`entry`; deuda abierta).
         //  - Otros: type error explícito.
-        Stmt::For { var, iter, body, span: _ } => {
+        Stmt::For { var, iter, body, label, span: _ } => {
             let iter_v = eval_expr(iter, env.clone()).await?;
             // F17.3: materializamos a `Vec<Value>` en lugar de
             // `Box<dyn Iterator>` porque el `dyn Iterator` no es `Send` y
@@ -1794,9 +1807,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             };
             for item in items {
                 env.lock().define(var.clone(), item);
-                match run_loop_body(body, env.clone()).await {
+                match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
-                    LoopControl::Break => break,
+                    LoopControl::Break(_) => break, // value descartado en statement-mode
                     LoopControl::Propagate(signal) => return Err(signal),
                 }
             }
@@ -1810,7 +1823,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         // loop, `Continue` salta a la siguiente iteración. Errors y
         // `Return` se propagan al caller (un return dentro de un while
         // dentro de una función rompe ambos hasta la función).
-        Stmt::While { condition, body, span: _ } => {
+        Stmt::While { condition, body, label, span: _ } => {
             loop {
                 let cond_v = eval_expr(condition, env.clone()).await?;
                 let cond_bool = match cond_v {
@@ -1830,9 +1843,9 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 if !cond_bool {
                     break;
                 }
-                match run_loop_body(body, env.clone()).await {
+                match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
-                    LoopControl::Break => break,
+                    LoopControl::Break(_) => break, // value descartado en statement-mode
                     LoopControl::Propagate(signal) => return Err(signal),
                 }
             }
@@ -1841,11 +1854,11 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
 
         // `loop { body }` — itera para siempre. Solo `break` o `return`
         // pueden sacarte.
-        Stmt::Loop { body, span: _ } => {
+        Stmt::Loop { body, label, span: _ } => {
             loop {
-                match run_loop_body(body, env.clone()).await {
+                match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
-                    LoopControl::Break => break,
+                    LoopControl::Break(_) => break, // value descartado en statement-mode
                     LoopControl::Propagate(signal) => return Err(signal),
                 }
             }
@@ -2001,20 +2014,49 @@ async fn eval_python_from_import(
 /// control de flujo en una decisión local (seguir / salir / propagar).
 enum LoopControl {
     Continue,
-    Break,
+    /// Mini-tanda L: `break <v>` lleva el valor. En statement-mode
+    /// el caller lo descarta; en `Expr::Loop` lo devuelve.
+    Break(Value),
     Propagate(EvalSignal),
 }
 
+/// Mini-tanda L — `label_matches(signal_label, loop_label)` decide si
+/// el loop actual debe capturar el signal o propagarlo arriba.
+///
+///  - `signal_label = None` → matchea cualquier loop (caso default
+///    `break` sin label = loop más cercano).
+///  - `signal_label = Some(l)` → solo matchea si `loop_label == Some(l)`.
+fn label_matches(signal_label: &Option<String>, loop_label: &Option<String>) -> bool {
+    match signal_label {
+        None => true,
+        Some(s) => match loop_label {
+            Some(l) => s == l,
+            None => false,
+        },
+    }
+}
+
 /// Ejecuta los stmts del body en orden. Si alguno emite `Break` o `Continue`,
-/// los traduce a control local. Cualquier otro signal (Error, Return) sube
-/// como `Propagate` para que el loop lo devuelva al caller.
+/// los traduce a control local SI el label matchea el del loop owner; sino
+/// propaga arriba. Cualquier otro signal (Error, Return) sube como
+/// `Propagate`.
 #[async_recursion]
-async fn run_loop_body(body: &[Stmt], env: EnvRef) -> LoopControl {
+async fn run_loop_body(body: &[Stmt], env: EnvRef, loop_label: Option<String>) -> LoopControl {
     for stmt in body {
         match eval_stmt(stmt, env.clone()).await {
             Ok(_) => {}
-            Err(EvalSignal::Break) => return LoopControl::Break,
-            Err(EvalSignal::Continue) => return LoopControl::Continue,
+            Err(EvalSignal::Break(v, sig_label)) => {
+                if label_matches(&sig_label, &loop_label) {
+                    return LoopControl::Break(v);
+                }
+                return LoopControl::Propagate(EvalSignal::Break(v, sig_label));
+            }
+            Err(EvalSignal::Continue(sig_label)) => {
+                if label_matches(&sig_label, &loop_label) {
+                    return LoopControl::Continue;
+                }
+                return LoopControl::Propagate(EvalSignal::Continue(sig_label));
+            }
             Err(other) => return LoopControl::Propagate(other),
         }
     }
@@ -2133,6 +2175,19 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         Expr::Str(s, _) => Ok(Value::Str(s.clone())),
         Expr::Bool(b, _) => Ok(Value::Bool(*b)),
         Expr::Null(_) => Ok(Value::Null),
+
+        // Mini-tanda L — `loop { body }` como expresión. El valor es
+        // el `<v>` del primer `break <v>` que dispara. `break` sin
+        // valor → `Null`. Otros signals (Return, Error) suben.
+        Expr::Loop { body, label, .. } => {
+            loop {
+                match run_loop_body(body, env.clone(), label.clone()).await {
+                    LoopControl::Continue => continue,
+                    LoopControl::Break(v) => return Ok(v),
+                    LoopControl::Propagate(sig) => return Err(sig),
+                }
+            }
+        }
 
         // Tuples (mini-tanda T) — eval cada slot y armamos el Value.
         Expr::Tuple(items, _) => {
@@ -4940,7 +4995,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn break_fuera_de_loop_es_error() {
-        let result = eval(vec![Stmt::Break(Span::ZERO)]).await;
+        let result = eval(vec![Stmt::Break(None, None, Span::ZERO)]).await;
         assert!(matches!(
             result.unwrap_err().kind,
             ErrorKind::BreakOutsideLoop
@@ -4949,7 +5004,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn continue_fuera_de_loop_es_error() {
-        let result = eval(vec![Stmt::Continue(Span::ZERO)]).await;
+        let result = eval(vec![Stmt::Continue(None, Span::ZERO)]).await;
         assert!(matches!(
             result.unwrap_err().kind,
             ErrorKind::ContinueOutsideLoop
@@ -6315,6 +6370,7 @@ print(_)\n";
                     },
                  span: Span::ZERO },
             ],
+          label: None,
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(10)));
@@ -6331,6 +6387,7 @@ print(_)\n";
                 type_: None,
                 value: Expr::Int(99, Span::ZERO),
              span: Span::ZERO }],
+          label: None,
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("counter"), Some(Value::Int(0)));
@@ -6359,10 +6416,11 @@ print(_)\n";
                         left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
                         right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
                     }),
-                    then: vec![Stmt::Break(Span::ZERO)],
+                    then: vec![Stmt::Break(None, None, Span::ZERO)],
                     else_: None, span: Span::ZERO,
                 }, Span::ZERO),
             ],
+            label: None,
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("i"), Some(Value::Int(3)));
@@ -6401,7 +6459,7 @@ print(_)\n";
                         left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
                         right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
                     }),
-                    then: vec![Stmt::Continue(Span::ZERO)],
+                    then: vec![Stmt::Continue(None, Span::ZERO)],
                     else_: None, span: Span::ZERO,
                 }, Span::ZERO),
                 Stmt::Assign { target: AssignTarget::Ident("total".into()),
@@ -6413,6 +6471,7 @@ print(_)\n";
                     },
                  span: Span::ZERO },
             ],
+            label: None,
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(12)));
@@ -6424,6 +6483,7 @@ print(_)\n";
         let stmt = Stmt::While {
             condition: Expr::Int(1, Span::ZERO),
             body: vec![],
+            label: None,
          span: Span::ZERO };
         assert!(matches!(
             eval_stmt(&stmt, env).await.unwrap_err(),
@@ -6456,10 +6516,11 @@ print(_)\n";
                         left: Box::new(Expr::Ident("count".into(), Span::ZERO)),
                         right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
                     }),
-                    then: vec![Stmt::Break(Span::ZERO)],
+                    then: vec![Stmt::Break(None, None, Span::ZERO)],
                     else_: None, span: Span::ZERO,
                 }, Span::ZERO),
             ],
+            label: None,
           span: Span::ZERO };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("count"), Some(Value::Int(5)));
@@ -6475,6 +6536,7 @@ print(_)\n";
         let body = vec![Stmt::While {
             condition: Expr::Bool(true, Span::ZERO),
             body: vec![Stmt::Return(Expr::Int(42, Span::ZERO), Span::ZERO)],
+         label: None,
          span: Span::ZERO }];
         eval_stmt(&fn_def("f", vec![], body), env.clone()).await.unwrap();
 
