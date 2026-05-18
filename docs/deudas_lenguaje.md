@@ -663,8 +663,33 @@ posteriores.
     smoke `GUIDE_EXAMPLES_COMPILE`. Cap 10 de la guía suma
     sub-sección "Tuple patterns con sub-patterns ricos
     (mini-tanda Rt)".
-  - `let (...)` solo admite Ident/Wildcard/Tuple (no literales
-    ni Ok/Err). Sigue como deuda residual menor.
+  - ~~`let (...)` solo admite Ident/Wildcard/Tuple (no literales
+    ni Ok/Err)~~ ✓ CERRADO 2026-05-18 (mini-tanda Lt). El parser y
+    evaluator ya soportaban sub-patterns ricos pre-Lt (heredados de
+    match). Solo faltaba el codegen. Implementación acotada al
+    **codegen**: nuevo predicado `pattern_is_pure_irrefutable` +
+    helper `collect_pattern_bindings`. `gen_destructure` ahora
+    bifurca: pure path emite `let pat = value` directo (sin
+    cambios pre-Lt); rich path envuelve en `match` con catch-all
+    `_ => panic!("destructuring no matcheó el valor")`. La
+    estrategia reusa `gen_pattern` (que ya tiene el counter
+    `pattern_slot_counter` de Rt para nombres únicos
+    `__s_<N>`/`__n_<N>`/`__or_v_<N>` por slot). El scrutinee se
+    bindea a `__destr_scrut` con anotación de tipo explícita
+    (`let __destr_scrut: <rust_ty> = ...`) para resolver
+    ambigüedades de inferencia tipo `Ok(99)` sin contexto del E.
+    Casos cubiertos: literales (Int/Float/Str/Bool/Null), rangos,
+    `Or`-patterns, `Ok(name)`/`Err(name)` bindings, `Ok(_)`/`Err(_)`
+    wildcards, mezcla y anidamiento. **6 unit tests nuevos** del
+    codegen + **5 compile_e2e nuevos** bit-a-bit (literal Int,
+    Str, Range, Ok-binding, panic-si-no-matchea). Ejemplo
+    `examples/guide/09f-let-destructure-rico.fitz` sumado al
+    smoke `GUIDE_EXAMPLES_COMPILE`. Cap 9 de la guía sumó
+    sub-sección "`let` con sub-patterns ricos (mini-tanda Lt)"
+    + bullet stale "MVP solo Ident/Wildcard/Tuple" removido.
+    Decisión de diseño: panic en runtime cuando no matchea
+    (paralelo a Rust `let pat = val else { panic!() }`). Si el
+    shape es incierto, preferí `match`.
 - ~~**For sobre Map con destructuring** `for (k, v) in m`~~ ✓
   CERRADO 2026-05-18 (mini-tanda Md). `Stmt::For.var` cambió de
   `String` a `Pattern`. El parser usa `parse_pattern` general

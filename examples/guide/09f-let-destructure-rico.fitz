@@ -1,0 +1,50 @@
+// Mini-tanda Lt — `let (...)` con sub-patterns ricos.
+//
+// Antes de Lt, `let (a, b) = expr` solo aceptaba sub-patterns
+// Ident/Wildcard/Tuple. Literales, ranges, Or-patterns y Ok/Err
+// estaban prohibidos: el codegen de `fitz build` los rechazaba y
+// el evaluator solo los soportaba en `match`.
+//
+// Lt cierra el gap: ahora los `let`-tuple aceptan los mismos
+// sub-patterns que `match`, ejecutando un panic si el value no
+// matchea (paralelo a Rust `let pat = val else { panic!() }`).
+
+// --- Literal Int como guard del primer slot ---
+
+let (1, x) = (1, 42)
+print(x)                              // 42
+
+// --- Literal Str como guard ---
+
+let ("ada", n) = ("ada", 7)
+print(n)                              // 7
+
+// --- Range como guard ---
+
+let (0..100, label) = (50, "rango ok")
+print(label)                          // rango ok
+
+// --- Ok-binding: extraer valor de Result dentro de tuple ---
+
+let (Ok(v), tag) = (Ok(99), "result")
+print(v)                              // 99
+print(tag)                            // result
+
+// --- Wildcards y Bool literal ---
+
+let (true, msg) = (true, "ok")
+print(msg)                            // ok
+
+let (_, _, third) = (1, 2, 3)
+print(third)                          // 3
+
+// --- Anidamiento de patterns rico + simple ---
+
+let (Ok(v), (1, y)) = (Ok(42), (1, "deep"))
+print(v)                              // 42
+print(y)                              // deep
+
+// --- Caveat: el value DEBE matchear, sino panic ---
+//
+// `let (1, x) = (2, 42)` paniquea en runtime. Si el shape es
+// incierto, usá `match` que te permite cubrir el caso de no-match.

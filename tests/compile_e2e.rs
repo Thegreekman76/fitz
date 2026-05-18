@@ -1945,6 +1945,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "09c-tuples.fitz",
     "09d-comprehensions.fitz",
     "09e-for-map.fitz",
+    "09f-let-destructure-rico.fitz",
     "10-match.fitz",
     "10b-match-tuple-subpatterns.fitz",
     "11-funciones.fitz",
@@ -3040,6 +3041,56 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Lt — let-destructure con sub-patterns ricos ----
+
+#[test]
+fn lt_let_literal_int_subpattern_compila_y_corre() {
+    // `let (1, x) = (1, 42)` — literal Int como guard del primer slot.
+    let src = "let (1, x) = (1, 42)\nprint(x)\n";
+    let (stdout, exit) = build_and_run("lt_let_int_lit", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn lt_let_str_literal_subpattern_compila_y_corre() {
+    // `let ("ada", n) = ("ada", 7)` — Str literal genera guard
+    // `__s_X.as_str() == "ada"`.
+    let src = "let (\"ada\", n) = (\"ada\", 7)\nprint(n)\n";
+    let (stdout, exit) = build_and_run("lt_let_str_lit", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "7");
+}
+
+#[test]
+fn lt_let_range_subpattern_compila_y_corre() {
+    // `let (0..100, y) = (50, "yes")` — Range emite guard
+    // `(0..100).contains(&__n_X)`.
+    let src = "let (0..100, y) = (50, \"yes\")\nprint(y)\n";
+    let (stdout, exit) = build_and_run("lt_let_range", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "yes");
+}
+
+#[test]
+fn lt_let_ok_binding_extrae_resultado() {
+    // `let (Ok(v), tag) = (Ok(99), "result")` — desempaca Result
+    // dentro de tuple. Bindings: v=99, tag="result".
+    let src = "let (Ok(v), tag) = (Ok(99), \"result\")\nprint(v)\nprint(tag)\n";
+    let (stdout, exit) = build_and_run("lt_let_ok_binding", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "99\nresult");
+}
+
+#[test]
+fn lt_let_panic_si_no_matchea() {
+    // `let (1, x) = (2, 42)`: el 2 NO matchea el 1 → panic en runtime.
+    // El binario debe terminar con exit code != 0.
+    let src = "let (1, x) = (2, 42)\nprint(x)\n";
+    let (_stdout, exit) = build_and_run("lt_let_panic", src);
+    assert_ne!(exit, 0, "esperaba exit code != 0 por panic, fue: 0");
 }
 
 // ---- Mini-tanda F9 — escapes extendidos en strings ----

@@ -2367,16 +2367,51 @@ fn clasif(p: (Int, Int)) -> Str {
 ```
 
 **Limitaciones del MVP**:
-- En `fitz build`, los tuple patterns en match no admiten
-  literales `Str`/`Range`/Or como sub-pattern (`("ada", n)` no
-  compila; el intérprete sí lo acepta). Workaround: usar bind +
-  guard. `(name, n) if name == "ada"`.
-- `let (a, b) = ...` solo admite `Ident`, `_` y tuple
-  patterns anidados — no literales ni Ok/Err.
 - Tuples como llave de Map: no soportado por ahora.
 
 Ver [examples/guide/09c-tuples.fitz](../examples/guide/09c-tuples.fitz)
 para el ejemplo completo.
+
+### `let` con sub-patterns ricos (mini-tanda Lt)
+
+Desde Lt, los `let`-tuple aceptan los mismos sub-patterns que los
+`match`-arms: literales (`Int`/`Float`/`Str`/`Bool`/`Null`), rangos
+(`0..100`, `0..=99`), `Or`-patterns (`1 | 2 | 3`), `Ok(name)` y
+`Err(name)`. Si el value no matchea el pattern en runtime, el
+programa paniquea con un mensaje claro (paralelo a Rust
+`let pat = val else { panic!() }`).
+
+```fitz
+// Literal Int como guard
+let (1, x) = (1, 42)
+print(x)                          // 42
+
+// Literal Str
+let ("ada", n) = ("ada", 7)
+print(n)                          // 7
+
+// Range
+let (0..100, label) = (50, "rango ok")
+print(label)                      // rango ok
+
+// Ok-binding: extraer valor de Result
+let (Ok(v), tag) = (Ok(99), "result")
+print(v)                          // 99
+print(tag)                        // result
+
+// Anidamiento
+let (Ok(v), (1, y)) = (Ok(42), (1, "deep"))
+print(v)                          // 42
+print(y)                          // deep
+```
+
+**Caveat**: el `let` falla en runtime si el value NO matchea
+(`let (1, x) = (2, 42)` paniquea). Si el shape es incierto,
+preferí `match`, que te permite cubrir el caso de no-match.
+
+Ver [examples/guide/09f-let-destructure-rico.fitz](../examples/guide/09f-let-destructure-rico.fitz)
+para el ejemplo completo y validado bit-a-bit `fitz run` ↔
+`fitz build`.
 
 ### List comprehensions (mini-tanda C)
 

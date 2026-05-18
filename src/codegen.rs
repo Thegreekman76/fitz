@@ -3916,11 +3916,16 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    /// Mini-tanda T — `let (a, b) = expr`. Emite `let (a, b) = ...;`
-    /// Rust nativo. Pattern admite nesting; los slots `Pattern::
-    /// Wildcard` se emiten como `_` Rust. Solo `Ident` y `Wildcard`
-    /// y `Tuple` (recursivo) admitidos como sub-patterns en codegen
-    /// MVP — literales no tienen sentido en destructuring "let".
+    /// Mini-tanda T + Lt — `let <pattern> = expr`. Dos caminos:
+    ///
+    /// - **Pure irrefutable** (solo Ident/Wildcard/Tuple recursivo):
+    ///   emite `let <pat> = <expr>;` directo, sin match wrapper. Cero
+    ///   overhead — Rust irrefutable pattern.
+    /// - **Rico/refutable** (literales/ranges/Or/Ok/Err en algún
+    ///   slot): envuelve en `match <expr> { <pat>[ if <guard>] =>
+    ///   <bindings>, _ => panic!(...) }`. Permite `let (1, x) = ...`,
+    ///   `let (Ok(v), tag) = ...`, `let ("ada", n) = ...`, etc.
+    ///   Mini-tanda Lt habilita este path (antes era error de codegen).
     fn gen_destructure(
         &mut self,
         pattern: &crate::ast::Pattern,
@@ -3928,15 +3933,93 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<(), FitzError> {
         // Inferir tipo del value para registrar bindings en el scope.
         let (val_code, val_ty) = self.gen_expr(value)?;
-        let pat_code = self.destructure_pattern_to_rust(pattern, &val_ty)?;
+
+        // Mini-tanda Lt — si el pattern es irrefutable y "puro" (solo
+        // Ident/Wildcard/Tuple), emitimos `let pat = value` directo. Si
+        // contiene literales/ranges/or/Ok/Err (que son refutables en
+        // Rust), envolvemos en `match` con un brazo catch-all que
+        // paniquea, paralelo a cómo `gen_pattern` lo trata para match.
+        if pattern_is_pure_irrefutable(pattern) {
+            let pat_code = self.destructure_pattern_to_rust(pattern, &val_ty)?;
+            self.emit_indent();
+            writeln!(&mut self.output, "let {} = {};", pat_code, val_code).unwrap();
+            return Ok(());
+        }
+
+        // Camino "rico": pattern refutable. Estrategia:
+        //   1. Bindeamos el scrutinee a un local con anotación de tipo
+        //      explícita: `let __destr_scrut: <rust_ty> = <val_code>;`.
+        //      Esto resuelve ambigüedades de inferencia tipo `Ok(99)`
+        //      sin contexto del E (Rust necesita la anotación para
+        //      saber `Result<i64, String>` vs `Result<i64, _>`).
+        //   2. Recolectar los nombres bindeados por el pattern.
+        //   3. Generar el Rust pattern + guard via `gen_pattern`
+        //      (reutiliza la lógica del match — declara las vars en el
+        //      scope del codegen).
+        //   4. Emitir `let (n1, n2) = match __destr_scrut { pat[ if
+        //      guard] => (n1, n2), _ => panic!("...") };`. Si hay un
+        //      solo binding, sin paréntesis. Si hay cero, statement
+        //      `match` con `()` en cada brazo.
+        let scrut_rust_ty = rust_type_for(&val_ty, self.env)?;
+        let mut names: Vec<String> = Vec::new();
+        collect_pattern_bindings(pattern, &mut names);
+        let (rust_pat, guard_opt) = self.gen_pattern(pattern, &val_ty, &None)?;
+        let guard_clause = match &guard_opt {
+            Some(g) => format!(" if {}", g),
+            None => String::new(),
+        };
+
         self.emit_indent();
-        writeln!(&mut self.output, "let {} = {};", pat_code, val_code).unwrap();
+        writeln!(
+            &mut self.output,
+            "let __destr_scrut: {} = {};",
+            scrut_rust_ty, val_code
+        )
+        .unwrap();
+
+        self.emit_indent();
+        match names.len() {
+            0 => {
+                // Sin bindings: el `let` no hace falta — emitimos un
+                // `match` stmt que paniquea si no matchea. Sirve para
+                // chequear shape sin extraer valores.
+                writeln!(
+                    &mut self.output,
+                    "match __destr_scrut {{ {}{} => {{}}, _ => panic!(\"destructuring no matcheó el valor\") }};",
+                    rust_pat, guard_clause
+                )
+                .unwrap();
+            }
+            1 => {
+                let n = &names[0];
+                writeln!(
+                    &mut self.output,
+                    "let mut {} = match __destr_scrut {{ {}{} => {}, _ => panic!(\"destructuring no matcheó el valor\") }};",
+                    n, rust_pat, guard_clause, n
+                )
+                .unwrap();
+            }
+            _ => {
+                let joined = names.join(", ");
+                writeln!(
+                    &mut self.output,
+                    "let ({}) = match __destr_scrut {{ {}{} => ({}), _ => panic!(\"destructuring no matcheó el valor\") }};",
+                    joined, rust_pat, guard_clause, joined
+                )
+                .unwrap();
+            }
+        }
         Ok(())
     }
 
     /// Helper para `gen_destructure`. Recursea en el pattern y va
     /// registrando bindings en el scope. Devuelve el código Rust
     /// del pattern: `(a, _, b)`, `((x, y), z)`, etc.
+    ///
+    /// Solo cubre patterns puros irrefutables (Ident/Wildcard/Tuple).
+    /// Para patterns ricos, `gen_destructure` toma otro camino (match
+    /// wrapper). Este helper retorna error si recibe algo más, como
+    /// guarda defensiva — no debería llamarse así.
     fn destructure_pattern_to_rust(
         &mut self,
         pat: &crate::ast::Pattern,
@@ -3967,8 +4050,8 @@ impl<'a> CodegenCtx<'a> {
                 }
             }
             _ => Err(self.err(
-                "destructuring solo admite Ident, Wildcard `_` y Tuple en `fitz build`"
-                    .to_string(),
+                "destructure_pattern_to_rust: pattern no puro pasó al camino puro \
+                 (bug del codegen)".to_string(),
             )),
         }
     }
@@ -10126,6 +10209,39 @@ fn check_method_arity(method: &str, args: &[Expr], expected: usize) -> Result<()
     Ok(())
 }
 
+/// Mini-tanda Lt — predicado: el pattern es "puro irrefutable",
+/// usable en `let pat = value` Rust directo. Solo Ident/Wildcard/
+/// Tuple recursivamente. Patterns ricos (literal, range, Or, Ok,
+/// Err, OkBinding, ErrBinding, OkWildcard, ErrWildcard) son
+/// refutables y requieren el camino `match` wrapper.
+fn pattern_is_pure_irrefutable(pat: &crate::ast::Pattern) -> bool {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(_) | Pattern::Wildcard => true,
+        Pattern::Tuple(subs) => subs.iter().all(pattern_is_pure_irrefutable),
+        _ => false,
+    }
+}
+
+/// Mini-tanda Lt — recolecta los nombres de los bindings que el
+/// pattern introduce al matchear. Ident/OkBinding/ErrBinding aportan
+/// un nombre; Tuple recursa; el resto (literales, ranges, Or,
+/// wildcards) no aportan nombres.
+fn collect_pattern_bindings(pat: &crate::ast::Pattern, out: &mut Vec<String>) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(n) | Pattern::OkBinding(n) | Pattern::ErrBinding(n) => {
+            out.push(n.clone());
+        }
+        Pattern::Tuple(subs) => {
+            for s in subs {
+                collect_pattern_bindings(s, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn rust_str_literal(s: &str) -> String {
     // Genera un literal Rust válido escapando comillas y barras.
     let mut out = String::with_capacity(s.len() + 2);
@@ -13960,6 +14076,118 @@ mod tests {
             ast_test::fn_return_type(x).as_deref(),
             Some("i64"),
             "esperaba return type i64 para X()"
+        );
+    }
+
+    // ---- Mini-tanda Lt — let-destructure con sub-patterns ricos ----
+
+    #[test]
+    fn lt_let_pure_irrefutable_emite_path_directo() {
+        // Caso clásico `let (a, b) = ...`: el codegen NO usa match
+        // wrapper. Emite `let (a, b) = ...;` directo (path pre-Lt).
+        let code = gen("let (a, b) = (1, 2)\nprint(a)\nprint(b)\n").unwrap();
+        assert!(
+            !code.contains("__destr_scrut"),
+            "esperaba path puro (sin __destr_scrut) para Ident/Tuple, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("let (a, b)"),
+            "esperaba `let (a, b)` directo, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn lt_let_literal_int_subpattern_emite_match_wrapper() {
+        // `let (1, x) = ...`: refutable → match wrapper con catch-all
+        // panic. El nombre `x` queda declarado en el scope outer.
+        let code = gen("let (1, x) = (1, 42)\nprint(x)\n").unwrap();
+        assert!(
+            code.contains("__destr_scrut"),
+            "esperaba match wrapper (con __destr_scrut), got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("panic!(\"destructuring no matcheó"),
+            "esperaba catch-all panic, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("(1i64, x)"),
+            "esperaba pattern `(1i64, x)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn lt_let_ok_binding_subpattern_extrae_resultado() {
+        // `let (Ok(v), tag) = ...`: bindings = [v, tag].
+        let code = gen(
+            "let (Ok(v), tag) = (Ok(99), \"result\")\nprint(v)\nprint(tag)\n",
+        )
+        .unwrap();
+        assert!(
+            code.contains("__destr_scrut"),
+            "esperaba match wrapper, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("(Ok(v), tag)"),
+            "esperaba pattern `(Ok(v), tag)`, got:\n{}",
+            code
+        );
+        // Los dos bindings se emiten en el tuple de retorno del brazo.
+        assert!(
+            code.contains("(v, tag)"),
+            "esperaba retorno `(v, tag)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn lt_let_str_literal_subpattern_usa_guard_inline() {
+        // `let ("ada", n) = ...`: el Str literal genera un guard
+        // `__s_X.as_str() == "ada"` en el brazo del match.
+        let code = gen(
+            "let (\"ada\", n) = (\"ada\", 7)\nprint(n)\n",
+        )
+        .unwrap();
+        assert!(
+            code.contains("__destr_scrut"),
+            "esperaba match wrapper, got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("if __s_") && code.contains(".as_str() == \"ada\""),
+            "esperaba guard sobre __s_X.as_str(), got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn lt_let_range_subpattern_usa_guard_contains() {
+        // `let (0..100, y) = ...`: Range emite guard `(0..100).contains(&__n_X)`.
+        let code = gen(
+            "let (0..100, y) = (50, \"yes\")\nprint(y)\n",
+        )
+        .unwrap();
+        assert!(
+            code.contains(".contains(&__n_"),
+            "esperaba guard `(0..100).contains(&__n_X)`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn lt_let_single_binding_no_emite_paren() {
+        // Con un solo binding, el `let mut <name> = match ...` evita
+        // la tupla degenerada `(x,)` que requeriría un trailing comma.
+        let code = gen("let (1, x) = (1, 42)\nprint(x)\n").unwrap();
+        assert!(
+            code.contains("let mut x = match"),
+            "esperaba `let mut x = match ...` (sin paréntesis), got:\n{}",
+            code
         );
     }
 
