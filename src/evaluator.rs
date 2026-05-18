@@ -3844,7 +3844,63 @@ fn eval_binop(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
         NotEq => Ok(Value::Bool(l != r)),
         Lt | LtEq | Gt | GtEq => compare(op, l, r, span),
         And | Or => unreachable!("And/Or se manejan en eval_logical antes de llegar acá"),
+        // Mini-tanda Bits — solo Int. El checker rechaza otros tipos
+        // estáticamente; el runtime emite TypeError si por modo
+        // gradual llega un valor no-Int.
+        BitAnd | BitOr | BitXor => eval_bitwise(op, l, r, span),
+        Shl | Shr => eval_shift(op, l, r, span),
     }
+}
+
+/// Mini-tanda Bits — AND/OR/XOR bit-a-bit sobre `Int`.
+fn eval_bitwise(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
+    match (&l, &r) {
+        (Value::Int(a), Value::Int(b)) => Ok(Value::Int(match op {
+            BinOpKind::BitAnd => a & b,
+            BinOpKind::BitOr => a | b,
+            BinOpKind::BitXor => a ^ b,
+            _ => unreachable!(),
+        })),
+        _ => {
+            let sym = match op {
+                BinOpKind::BitAnd => "&",
+                BinOpKind::BitOr => "|",
+                BinOpKind::BitXor => "^",
+                _ => unreachable!(),
+            };
+            type_error(sym, &l, &r, span)
+        }
+    }
+}
+
+/// Mini-tanda Bits — shifts `<<` / `>>` sobre `Int`. RHS negativo o
+/// fuera del rango `0..64` produce error claro (paralelo a Rust panic
+/// con shift overflow, pero como mensaje recuperable en lugar de panic).
+fn eval_shift(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Value> {
+    let (a, b) = match (&l, &r) {
+        (Value::Int(a), Value::Int(b)) => (*a, *b),
+        _ => {
+            let sym = if matches!(op, BinOpKind::Shl) { "<<" } else { ">>" };
+            return type_error(sym, &l, &r, span);
+        }
+    };
+    if !(0..64).contains(&b) {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!(
+                "shift fuera de rango: el segundo operando debe estar en 0..64, recibió {}",
+                b
+            ),
+        )));
+    }
+    let n = b as u32;
+    let result = match op {
+        BinOpKind::Shl => a.wrapping_shl(n),
+        BinOpKind::Shr => a.wrapping_shr(n),
+        _ => unreachable!(),
+    };
+    Ok(Value::Int(result))
 }
 
 /// R.1.2 — operador `%` con semántica euclidean. `i64::rem_euclid`
@@ -3989,6 +4045,8 @@ fn op_name(op: &BinOpKind) -> &'static str {
         Eq => "==", NotEq => "!=",
         Lt => "<", LtEq => "<=", Gt => ">", GtEq => ">=",
         And => "and", Or => "or",
+        BitAnd => "&", BitOr => "|", BitXor => "^",
+        Shl => "<<", Shr => ">>",
     }
 }
 
@@ -4365,6 +4423,21 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                 span.line, span.column,
                 format!(
                     "el operador `not` requiere Bool, recibió `{}`",
+                    other.type_name()
+                ),
+            ))),
+        },
+        // Mini-tanda Bits — NOT bit-a-bit. Solo Int.
+        UnaryOpKind::BitNot => match v {
+            Value::Int(n) => Ok(Value::Int(!n)),
+            other => Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "el operador `~` requiere Int, recibió `{}`",
                     other.type_name()
                 ),
             ))),
@@ -7709,6 +7782,71 @@ let first_y = zs[0].1
         assert_eq!(env.lock().get("total"), Some(Value::Int(2)));
         assert_eq!(env.lock().get("first_x"), Some(Value::Int(1)));
         assert_eq!(env.lock().get("first_y"), Some(Value::Str("a".into())));
+    }
+
+    // ---- Mini-tanda Bits — operadores bit-a-bit ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_and_or_xor_sobre_int() {
+        let src = "let a: Int = 0xF0\nlet b: Int = 0x0F\nlet and_ab: Int = a & b\nlet or_ab: Int = a | b\nlet xor_ab: Int = a ^ b\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("and_ab"), Some(Value::Int(0x00)));
+        assert_eq!(env.lock().get("or_ab"), Some(Value::Int(0xFF)));
+        assert_eq!(env.lock().get("xor_ab"), Some(Value::Int(0xFF)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_shifts_basicos() {
+        let src = "let a: Int = 1\nlet shl_a: Int = a << 4\nlet shr_a: Int = shl_a >> 2\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("shl_a"), Some(Value::Int(16)));
+        assert_eq!(env.lock().get("shr_a"), Some(Value::Int(4)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_not_unario_invierte_int() {
+        // ~0 = -1 (todos los bits encendidos en i64 con signo).
+        let src = "let r: Int = ~0\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(-1)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_shift_negativo_es_error_runtime() {
+        let src = "let r: Int = 1 << -1\n";
+        let (_, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("shift fuera de rango") || err.message.contains("0..64"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_shift_64_es_error_runtime() {
+        let src = "let r: Int = 1 << 64\n";
+        let (_, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("shift fuera de rango") || err.message.contains("0..64"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_precedencia_or_menor_que_and() {
+        // Python/C precedence: `a | b & c` → `a | (b & c)`.
+        // 0b1100 | (0b1010 & 0b0110) = 0b1100 | 0b0010 = 0b1110 = 14.
+        let src = "let r: Int = 0b1100 | 0b1010 & 0b0110\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(0b1110)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_combinado_con_hex_literales_de_lit() {
+        // Encaja con Lit: mask + shift sobre literales hex.
+        let src = "let mask: Int = 0xFF\nlet byte: Int = (0xABCD >> 8) & mask\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("byte"), Some(Value::Int(0xAB)));
     }
 
     #[tokio::test(flavor = "current_thread")]

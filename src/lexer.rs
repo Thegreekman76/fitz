@@ -82,7 +82,13 @@ pub enum Token {
     Colon,    // :
     Dot,      // .
     At,       // @ — prefijo de decoradores: @get, @post, @server, ...
-    Pipe,     // | — separador de or-patterns en `match` (R.2.1)
+    Pipe,     // | — separador de or-patterns en `match` (R.2.1); OR bit-a-bit (mini-tanda Bits)
+    // Operadores bit-a-bit (mini-tanda Bits).
+    Amp,      // & — AND bit-a-bit
+    Caret,    // ^ — XOR bit-a-bit
+    Shl,      // << — shift left
+    Shr,      // >> — shift right
+    Tilde,    // ~ — NOT bit-a-bit (unario)
     Label(String),  // 'name — labels en break/continue (mini-tanda L)
 
     // Especiales
@@ -812,6 +818,10 @@ impl Lexer {
                 if self.peek() == Some('=') {
                     self.advance();
                     Token::LtEq
+                } else if self.peek() == Some('<') {
+                    // Mini-tanda Bits — `<<` shift left.
+                    self.advance();
+                    Token::Shl
                 } else {
                     Token::Lt
                 }
@@ -821,6 +831,10 @@ impl Lexer {
                 if self.peek() == Some('=') {
                     self.advance();
                     Token::GtEq
+                } else if self.peek() == Some('>') {
+                    // Mini-tanda Bits — `>>` shift right.
+                    self.advance();
+                    Token::Shr
                 } else {
                     Token::Gt
                 }
@@ -881,9 +895,24 @@ impl Lexer {
             '|' => {
                 // R.2.1 — separador de or-patterns en `match`. Single char
                 // por ahora; `||` (or lógico) usa la keyword `or` y NO
-                // entra acá.
+                // entra acá. Mini-tanda Bits: el mismo Token::Pipe se
+                // usa como OR bit-a-bit; el parser distingue por contexto
+                // (expression nivel bitwise vs arm de match).
                 self.advance();
                 Token::Pipe
+            }
+            // Mini-tanda Bits — `&`, `^`, `~`.
+            '&' => {
+                self.advance();
+                Token::Amp
+            }
+            '^' => {
+                self.advance();
+                Token::Caret
+            }
+            '~' => {
+                self.advance();
+                Token::Tilde
             }
             '\'' => {
                 // Mini-tanda L — label `'name` para break/continue.

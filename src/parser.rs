@@ -344,8 +344,86 @@ impl Parser {
     }
 
     fn comparison(&mut self) -> FitzResult<Expr> {
-        let mut left = self.range_expr()?;
+        let mut left = self.bitor_expr()?;
         while let Some((op, span)) = self.match_comparison_op() {
+            let right = self.bitor_expr()?;
+            left = Expr::BinOp {
+                op,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    /// Mini-tanda Bits — `|` OR bit-a-bit. Precedencia más baja entre
+    /// los bitwise (paralelo a Python/C): `|` < `^` < `&` < `<<`/`>>`.
+    ///
+    /// Cuidado: `|` también se usa como separador de or-patterns en
+    /// match arms (R.2.1), pero el parser de match no llega acá — los
+    /// patterns se parsean con `parse_or_pattern`.
+    fn bitor_expr(&mut self) -> FitzResult<Expr> {
+        let mut left = self.bitxor_expr()?;
+        while matches!(self.peek(), Token::Pipe) {
+            let span = self.cur_span();
+            self.advance();
+            let right = self.bitxor_expr()?;
+            left = Expr::BinOp {
+                op: BinOpKind::BitOr,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    /// Mini-tanda Bits — `^` XOR bit-a-bit.
+    fn bitxor_expr(&mut self) -> FitzResult<Expr> {
+        let mut left = self.bitand_expr()?;
+        while matches!(self.peek(), Token::Caret) {
+            let span = self.cur_span();
+            self.advance();
+            let right = self.bitand_expr()?;
+            left = Expr::BinOp {
+                op: BinOpKind::BitXor,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    /// Mini-tanda Bits — `&` AND bit-a-bit.
+    fn bitand_expr(&mut self) -> FitzResult<Expr> {
+        let mut left = self.shift_expr()?;
+        while matches!(self.peek(), Token::Amp) {
+            let span = self.cur_span();
+            self.advance();
+            let right = self.shift_expr()?;
+            left = Expr::BinOp {
+                op: BinOpKind::BitAnd,
+                left: Box::new(left),
+                right: Box::new(right),
+                span,
+            };
+        }
+        Ok(left)
+    }
+
+    /// Mini-tanda Bits — `<<` y `>>`. Precedencia entre bitwise y rango.
+    fn shift_expr(&mut self) -> FitzResult<Expr> {
+        let mut left = self.range_expr()?;
+        loop {
+            let op = match self.peek() {
+                Token::Shl => BinOpKind::Shl,
+                Token::Shr => BinOpKind::Shr,
+                _ => break,
+            };
+            let span = self.cur_span();
+            self.advance();
             let right = self.range_expr()?;
             left = Expr::BinOp {
                 op,
@@ -480,6 +558,18 @@ impl Parser {
                 let operand = self.unary()?;
                 Ok(Expr::UnaryOp {
                     op: UnaryOpKind::Not,
+                    operand: Box::new(operand),
+                    span,
+                })
+            }
+            // Mini-tanda Bits — `~x` NOT bit-a-bit (unario, solo Int).
+            // Misma precedencia que `-` y `not`.
+            Token::Tilde => {
+                let span = self.cur_span();
+                self.advance();
+                let operand = self.unary()?;
+                Ok(Expr::UnaryOp {
+                    op: UnaryOpKind::BitNot,
                     operand: Box::new(operand),
                     span,
                 })
@@ -1314,10 +1404,28 @@ impl Parser {
                 break;
             }
             self.skip_newlines();
-            self.expect(
-                &Token::Gt,
-                format!("se esperaba '>' para cerrar `{}<...>`", name),
-            )?;
+            // Mini-tanda Bits: el lexer ahora produce `Token::Shr` para
+            // `>>`, lo que rompe `List<List<Int>>` y similares. Acá
+            // splitteamos un `Shr` en dos `Gt` consumiendo solo uno —
+            // el segundo `>` queda como `Gt` para el caller de
+            // afuera.
+            match self.peek() {
+                Token::Gt => {
+                    self.advance();
+                }
+                Token::Shr => {
+                    // Mutamos el token actual a Gt en su lugar y
+                    // shifteamos la columna para apuntar al segundo `>`.
+                    self.tokens[self.pos].token = Token::Gt;
+                    self.tokens[self.pos].column += 1;
+                }
+                _ => {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        format!("se esperaba '>' para cerrar `{}<...>`", name),
+                    ));
+                }
+            }
             TypeExpr::Generic { name, args }
         } else {
             TypeExpr::Named(name)

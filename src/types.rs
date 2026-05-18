@@ -1321,6 +1321,17 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         Type::Bool
                     }
                 },
+                // Mini-tanda Bits — `~x` solo Int.
+                UnaryOpKind::BitNot => match &t {
+                    Type::Int | Type::Any => Type::Int,
+                    other => {
+                        ctx.error_at(*span, format!(
+                            "el operador `~` espera Int, recibió `{}`",
+                            other.display(ctx.types)
+                        ));
+                        Type::Int
+                    }
+                },
             }
         }
 
@@ -2807,6 +2818,34 @@ fn infer_binop(
                 ));
             }
             Type::Bool
+        }
+        // Mini-tanda Bits — todos los bitwise solo Int. Cualquier
+        // otro tipo dispara error de tipo claro.
+        BinOpKind::BitAnd | BinOpKind::BitOr | BinOpKind::BitXor
+        | BinOpKind::Shl | BinOpKind::Shr => {
+            let sym = match op {
+                BinOpKind::BitAnd => "&",
+                BinOpKind::BitOr => "|",
+                BinOpKind::BitXor => "^",
+                BinOpKind::Shl => "<<",
+                BinOpKind::Shr => ">>",
+                _ => unreachable!(),
+            };
+            if !matches!(lt, Type::Int | Type::Any) {
+                ctx.error_at(span, format!(
+                    "el operador bit-a-bit `{}` espera Int, lado izquierdo es `{}`",
+                    sym,
+                    lt.display(ctx.types)
+                ));
+            }
+            if !matches!(rt, Type::Int | Type::Any) {
+                ctx.error_at(span, format!(
+                    "el operador bit-a-bit `{}` espera Int, lado derecho es `{}`",
+                    sym,
+                    rt.display(ctx.types)
+                ));
+            }
+            Type::Int
         }
     }
 }
@@ -7382,6 +7421,50 @@ print(total)
             errors.iter().any(|e| e.message.contains("chain")
                 && e.message.contains("List<Int>")),
             "esperaba error sobre chain con tipos incompatibles: {:?}",
+            errors
+        );
+    }
+
+    // ---- Mini-tanda Bits — operadores bit-a-bit ----
+
+    #[test]
+    fn checker_bits_sobre_int_es_ok() {
+        let src = "let a: Int = 5 & 3\nlet b: Int = 5 | 3\nlet c: Int = 5 ^ 3\nlet d: Int = 1 << 4\nlet e: Int = ~0\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_bits_sobre_float_es_error() {
+        let src = "let r = 3.14 & 2\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("bit-a-bit")
+                && e.message.contains("Float")),
+            "esperaba error sobre bit-a-bit con Float: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_bits_sobre_bool_es_error() {
+        let src = "let r = true & false\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("bit-a-bit")
+                && e.message.contains("Bool")),
+            "esperaba error sobre `&` con Bool: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_bitnot_sobre_float_es_error() {
+        let src = "let r = ~3.14\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("`~`") && e.message.contains("Int")),
+            "esperaba error sobre `~` con Float: {:?}",
             errors
         );
     }

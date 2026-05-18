@@ -182,6 +182,11 @@
           "match": "\\?"
         },
         {
+          "comment": "Mini-tanda Bits — shifts `<<`/`>>`. ANTES de comparison para que `<=`/`>=` no se confundan con sub-secuencias `<` + `<` etc.",
+          "name": "keyword.operator.bitwise.shift.fitz",
+          "match": "<<|>>"
+        },
+        {
           "name": "keyword.operator.comparison.fitz",
           "match": "==|!=|<=|>=|<|>"
         },
@@ -190,9 +195,14 @@
           "match": "&&|\\|\\||!"
         },
         {
-          "comment": "Or-pattern en match arms (mini-fase R.2.1): `Ok | Err =>`. Va después del operator lógico (`||`) para que la secuencia de dos `|` matchee como `||` y no como dos or-patterns sueltos.",
+          "comment": "Or-pattern en match arms (R.2.1): `Ok | Err =>`. También usado como OR bit-a-bit (mini-tanda Bits). Va después del operator lógico (`||`) para que dos pipes consecutivos matcheen como `||`.",
           "name": "keyword.operator.alternative.fitz",
           "match": "\\|"
+        },
+        {
+          "comment": "Mini-tanda Bits — AND bit-a-bit `&`, XOR `^`, NOT unario `~`. `&` no choca con `&&` porque el operator lógico ya fue matcheado arriba.",
+          "name": "keyword.operator.bitwise.fitz",
+          "match": "&|\\^|~"
         },
         {
           "comment": "Asignación compuesta (mini-fase R.2.3): `+= -= *= /= %=`. Va antes que `=` solo para que el regex no se quede con la primera letra.",

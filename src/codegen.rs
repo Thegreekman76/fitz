@@ -4811,6 +4811,30 @@ impl<'a> CodegenCtx<'a> {
             }
             BinOpKind::And => Ok((format!("({} && {})", lc, rc), Type::Bool)),
             BinOpKind::Or => Ok((format!("({} || {})", lc, rc), Type::Bool)),
+            // Mini-tanda Bits — operadores bit-a-bit sobre Int. Emit
+            // Rust nativo. Para shifts, el RHS de Rust requiere `u32`
+            // (i64 no implementa Shl<i64>), así que cast explícito.
+            // El check de "shift en rango 0..64" lo hace el runtime
+            // (`wrapping_shl`/`wrapping_shr` sobre i64) — el codegen
+            // emite `wrapping_shl((rhs as u32))` para mantener paridad
+            // bit-a-bit con el evaluator.
+            BinOpKind::BitAnd => Ok((format!("({} & {})", lc, rc), Type::Int)),
+            BinOpKind::BitOr => Ok((format!("({} | {})", lc, rc), Type::Int)),
+            BinOpKind::BitXor => Ok((format!("({} ^ {})", lc, rc), Type::Int)),
+            BinOpKind::Shl => Ok((
+                format!(
+                    "({{ let __rhs: i64 = {}; if !(0..64).contains(&__rhs) {{ panic!(\"shift fuera de rango: {{}}\", __rhs); }} (({}).wrapping_shl(__rhs as u32)) }})",
+                    rc, lc
+                ),
+                Type::Int,
+            )),
+            BinOpKind::Shr => Ok((
+                format!(
+                    "({{ let __rhs: i64 = {}; if !(0..64).contains(&__rhs) {{ panic!(\"shift fuera de rango: {{}}\", __rhs); }} (({}).wrapping_shr(__rhs as u32)) }})",
+                    rc, lc
+                ),
+                Type::Int,
+            )),
         }
     }
 
@@ -4826,6 +4850,9 @@ impl<'a> CodegenCtx<'a> {
             // garantiza que el operando tipa `Bool` (o `Any` gradual),
             // así que `!<bool_expr>` es válido Rust.
             UnaryOpKind::Not => Ok((format!("(!{})", code), Type::Bool)),
+            // Mini-tanda Bits — `~x` también emite `!` Rust (sirve
+            // para Int por las reglas del operador en Rust).
+            UnaryOpKind::BitNot => Ok((format!("(!{})", code), Type::Int)),
         }
     }
 

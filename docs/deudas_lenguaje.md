@@ -687,8 +687,59 @@ posteriores.
 
 ### Operadores menores
 
-- **Operadores de bits** `&|^<<>>` — útil para protocolos
-  binarios; sin presión.
+- ~~**Operadores de bits** `& | ^ << >> ~`~~ ✓ CERRADO 2026-05-18
+  (mini-tanda Bits). 5 binarios + 1 unario sobre `Int`.
+
+  **AST**: `BinOpKind::BitAnd`/`BitOr`/`BitXor`/`Shl`/`Shr` + 
+  `UnaryOpKind::BitNot`.
+
+  **Lexer**: tokens nuevos `Amp`/`Caret`/`Shl`/`Shr`/`Tilde`.
+  `Pipe` (R.2.1) se reutiliza como OR bit-a-bit; el parser distingue
+  por contexto (expression nivel bitwise vs arm de match).
+
+  **Parser**: 4 niveles de precedencia nuevos entre comparación y
+  rango (paralelo a Python/C):
+  `comparison < | < ^ < & < << >> < range_expr < ...`. Unario `~`
+  con la misma precedencia que `-` / `not`.
+
+  **Tema del lexer `>>`**: el lexer ahora produce `Token::Shr` para
+  `>>`, lo que rompía `List<List<Int>>` (el parser de tipos
+  esperaba dos `Token::Gt` separados). Fix: en `parse_type_expr`,
+  cuando se espera cerrar un generic con `>` y aparece `Shr`, se
+  splittea el `Shr` mutando el token actual a `Gt` y avanzando la
+  columna 1 char (técnica estándar de C++/Java/Rust). Cero impacto
+  en otros usos de `>>`.
+
+  **Checker**: ambos operandos deben ser `Int` (o `Any` gradual).
+  Float/Bool/Str → error claro citando el operador y el tipo.
+
+  **Evaluator**: ops Rust nativos (`& | ^`, `wrapping_shl`/
+  `wrapping_shr`, `!` para BitNot). Shifts con RHS fuera de
+  `0..64` → error de runtime claro (paralelo a Rust panic con
+  shift overflow, pero como error recuperable).
+
+  **Codegen**: emite Rust nativo. Los shifts envuelven el RHS en
+  un bloque con check de rango + cast `as u32` (Rust requiere u32
+  como exponente del shift sobre i64). Paridad bit-a-bit con el
+  evaluator validada.
+
+  **Grammar TextMate**: `<<`/`>>` antes de comparison (para no
+  romper `<=`/`>=`), `&`/`^`/`~` después del operator lógico
+  (para no romper `&&`/`||`).
+
+  Implementación: ~290 LoC total entre lexer + parser + checker +
+  evaluator + codegen + grammar. **11 unit tests nuevos** (6
+  evaluator + 4 checker + 1 más sobre el split de `>>`) + 2
+  compile_e2e bit-a-bit. Ejemplo
+  `examples/guide/04b-operadores-bit.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE` con casos canónicos: máscaras,
+  set/clear/toggle de bits, byte extraction, combinación con
+  format specs `{n:#x}`/`{n:#b}`.
+
+  **Deuda residual menor**: operadores bit-a-bit compuestos
+  (`&=`/`|=`/`^=`/`<<=`/`>>=`) — paralelo a Python/C, sub-paso
+  menor si aparece presión.
+
 - **`xor` lógico** — `a != b` sobre `Bool` cubre. Sumar si aparece
   presión.
 

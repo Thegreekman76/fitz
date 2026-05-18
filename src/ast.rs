@@ -686,6 +686,10 @@ pub enum BinOpKind {
     Mod,
     Eq, NotEq, Lt, LtEq, Gt, GtEq,
     And, Or,
+    /// Mini-tanda Bits — operadores bit-a-bit sobre `Int`. El
+    /// checker rechaza cualquier otro tipo. Shifts `<<`/`>>` con
+    /// RHS negativo o >= 64 → error de runtime.
+    BitAnd, BitOr, BitXor, Shl, Shr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -695,6 +699,8 @@ pub enum UnaryOpKind {
     /// Negación lógica: `not x` (R.1.1, mini-fase R). Solo válido
     /// sobre `Bool`; el checker rechaza cualquier otro tipo.
     Not,
+    /// Mini-tanda Bits — NOT bit-a-bit `~x`. Solo `Int`.
+    BitNot,
 }
 
 /// Parámetro formal de una función. El tipo es opcional (tipado gradual).

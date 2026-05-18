@@ -1780,6 +1780,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "03b-numeros-legibles.fitz",
     "03c-bases-numericas.fitz",
     "04-operadores.fitz",
+    "04b-operadores-bit.fitz",
     "05-strings.fitz",
     "05b-format-specs.fitz",
     "06-logica.fitz",
@@ -2649,6 +2650,39 @@ fn mini_tanda_it_enumerate_con_for_destructuring() {
     let (stdout, exit) = build_and_run("mini_tanda_it_enumerate", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "0=a\n1=b\n2=c");
+}
+
+// ---- Mini-tanda Bits — operadores bit-a-bit ----
+
+#[test]
+fn mini_tanda_bits_and_or_xor_y_shifts() {
+    // Operadores básicos sobre hex literales (combinación Lit + Bits).
+    let src = "let mask: Int = 0xFF\n\
+               let raw: Int = 0xABCD\n\
+               let lo: Int = raw & mask\n\
+               let hi: Int = (raw >> 8) & mask\n\
+               let recombined: Int = (hi << 8) | lo\n\
+               let xored: Int = raw ^ 0xFFFF\n\
+               print(lo)\n\
+               print(hi)\n\
+               print(recombined)\n\
+               print(xored)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_bits_basicos", src);
+    assert_eq!(exit, 0);
+    // lo=0xCD=205, hi=0xAB=171, recombined=0xABCD=43981, xored=0xFFFF^0xABCD=0x5432=21554.
+    assert_eq!(stdout.trim(), "205\n171\n43981\n21554");
+}
+
+#[test]
+fn mini_tanda_bits_not_unario() {
+    // ~0 = -1, ~0xFF = -256 (i64 con signo).
+    let src = "let a: Int = ~0\n\
+               let b: Int = ~0xFF\n\
+               print(a)\n\
+               print(b)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_bits_not", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "-1\n-256");
 }
 
 #[test]

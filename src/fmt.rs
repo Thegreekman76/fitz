@@ -775,6 +775,7 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             match op {
                 UnaryOpKind::Neg => ctx.write("-"),
                 UnaryOpKind::Not => ctx.write("not "),
+                UnaryOpKind::BitNot => ctx.write("~"),
             }
             fmt_expr_with_parens_if_needed(ctx, operand);
         }
@@ -952,6 +953,12 @@ fn binop_str(op: &BinOpKind) -> &'static str {
         BinOpKind::GtEq => ">=",
         BinOpKind::And => "and",
         BinOpKind::Or => "or",
+        // Mini-tanda Bits — operadores bit-a-bit.
+        BinOpKind::BitAnd => "&",
+        BinOpKind::BitOr => "|",
+        BinOpKind::BitXor => "^",
+        BinOpKind::Shl => "<<",
+        BinOpKind::Shr => ">>",
     }
 }
 

@@ -1,0 +1,62 @@
+// Mini-tanda Bits — operadores bit-a-bit sobre Int.
+//
+// Seis operadores: `&` AND, `|` OR, `^` XOR, `<<` SHL, `>>` SHR,
+// `~` NOT (unario). Precedencia paralela a Python/C: `|` < `^` < `&`
+// < `<<`/`>>`. Combinan natural con literales hex/binario/octal
+// (mini-tanda Lit) y format specs (mini-tanda Fm).
+
+// AND — máscara de bits.
+let raw: Int = 0xABCD
+let lo_byte: Int = raw & 0xFF
+print(lo_byte)                      // 205 (0xCD)
+
+// OR — combinar flags.
+let read_flag: Int = 0b0001
+let write_flag: Int = 0b0010
+let rw: Int = read_flag | write_flag
+print(rw)                           // 3 (0b0011)
+
+// XOR — toggle de bits / cifrado simple.
+let key: Int = 0xAA
+let payload: Int = 0xCD
+let cipher: Int = payload ^ key
+let decipher: Int = cipher ^ key
+print(cipher)                       // 103
+print(decipher)                     // 205 (vuelve al original)
+
+// Shift left / right — multiplicar / dividir por potencias de 2.
+let n: Int = 1
+let shifted: Int = n << 4
+print(shifted)                      // 16 (2^4)
+let halved: Int = shifted >> 1
+print(halved)                       // 8
+
+// NOT unario — invierte todos los bits (i64 con signo).
+let zero: Int = 0
+let all_ones: Int = ~zero
+print(all_ones)                     // -1 (todos los 64 bits encendidos)
+let inv_ff: Int = ~0xFF
+print(inv_ff)                       // -256
+
+// Combinado: extraer byte alto y bajo de un Int de 16 bits.
+let word: Int = 0xABCD
+let hi: Int = (word >> 8) & 0xFF
+let lo: Int = word & 0xFF
+print("hi: {hi:#x}, lo: {lo:#x}")
+// hi: 0xab, lo: 0xcd
+
+// Combinado: setear, clearear, togglear un bit individual.
+let flags: Int = 0b0000_0101         // bits 0 y 2 encendidos
+let bit_1: Int = 1 << 1               // bit 1 = 2
+let set_b1: Int = flags | bit_1       // setea
+let clear_b0: Int = set_b1 & ~(1)     // clearea bit 0
+let toggle_b2: Int = clear_b0 ^ (1 << 2)
+print("flags inicial: {flags:#b}")    // 0b101
+print("set bit 1:     {set_b1:#b}")   // 0b111
+print("clear bit 0:   {clear_b0:#b}") // 0b110
+print("toggle bit 2:  {toggle_b2:#b}")// 0b10
+
+// Precedencia: `|` tiene precedencia más BAJA que `&`. Sin paréntesis,
+// `a | b & c` se parsea como `a | (b & c)`.
+let resultado: Int = 0b1100 | 0b1010 & 0b0110
+print(resultado)                      // 14 (0b1110, no 0b0110)

@@ -819,16 +819,63 @@ for i in 1..=5 {
 print(suma)           // 15
 ```
 
+### Operadores bit-a-bit (mini-tanda Bits)
+
+Seis operadores bit-a-bit sobre `Int`. Combinan natural con
+literales hex/binario/octal (mini-tanda Lit) para máscaras de bits,
+flags y manipulación de bytes.
+
+| Operador | Aridad | Función                   |
+|----------|--------|---------------------------|
+| `&`      | Binario | AND bit-a-bit             |
+| `\|`     | Binario | OR bit-a-bit              |
+| `^`      | Binario | XOR bit-a-bit             |
+| `<<`     | Binario | Shift left                |
+| `>>`     | Binario | Shift right (aritmético)  |
+| `~`      | Unario  | NOT bit-a-bit             |
+
+```fitz
+let raw: Int = 0xABCD
+let lo: Int = raw & 0xFF                     // 0xCD = 205
+let hi: Int = (raw >> 8) & 0xFF              // 0xAB = 171
+let flags: Int = 0b0001 | 0b0010             // 0b0011 = 3
+let toggled: Int = 0xFF ^ 0xAA               // 0x55 = 85
+let doubled: Int = 1 << 4                    // 16
+let inverted: Int = ~0                       // -1 (i64 con signo)
+```
+
+**Precedencia** (paralelo a Python/C): `|` < `^` < `&` < `<<`/`>>`.
+Sin paréntesis, `a | b & c` se parsea como `a | (b & c)`. El
+unario `~` tiene la misma precedencia que `-` (negación numérica).
+
+**Reglas estrictas**:
+- Ambos operandos deben ser `Int`. Float/Bool/Str → error del checker.
+- Shifts con RHS fuera de `0..64` → error de runtime.
+
+Encaja natural con format specs (mini-tanda Fm) para debug visual:
+
+```fitz
+let n: Int = 0xCAFE
+print("hi: {(n >> 8) & 0xFF:#x}, lo: {n & 0xFF:#x}")
+// hi: 0xca, lo: 0xfe
+```
+
+Ver [examples/guide/04b-operadores-bit.fitz](../examples/guide/04b-operadores-bit.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
-- Operadores de bits (`&`, `|`, `^`, `<<`, `>>`).
 - `%=` (módulo compuesto) — sub-paso menor si aparece presión.
 - `%` sobre `Float` (la ambigüedad entre `fmod` y `rem_euclid`
   requiere decisión de diseño; sub-paso futuro si aparece presión).
+- Operadores bit-a-bit compuestos (`&=`, `|=`, `^=`, `<<=`, `>>=`)
+  — paralelo a Python/C, sub-paso menor.
 
 > Lo que **sí anda** y antes era deuda: operador `%` (módulo
 > sobre `Int` con semántica euclidean, R.1.2); operadores
-> compuestos `+=`/`-=`/`*=`/`/=` (R.2.3 mini-fase R).
+> compuestos `+=`/`-=`/`*=`/`/=` (R.2.3 mini-fase R);
+> **operadores de bits** `&`/`|`/`^`/`<<`/`>>`/`~` (mini-tanda
+> Bits — ver sub-sección de arriba).
 
 ### Ejemplo completo
 
