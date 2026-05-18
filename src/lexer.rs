@@ -89,6 +89,12 @@ pub enum Token {
     Shl,      // << — shift left
     Shr,      // >> — shift right
     Tilde,    // ~ — NOT bit-a-bit (unario)
+    // Operadores bit-a-bit compuestos (mini-tanda Cmp).
+    AmpEq,    // &=
+    PipeEq,   // |=
+    CaretEq,  // ^=
+    ShlEq,    // <<=
+    ShrEq,    // >>=
     Label(String),  // 'name — labels en break/continue (mini-tanda L)
 
     // Especiales
@@ -330,13 +336,21 @@ impl Lexer {
         let start_col = self.column;
 
         // Mini-tanda Lit — literales hex/binario/octal con prefijos
-        // `0x`/`0b`/`0o`. El char actual debe ser `0` y el siguiente
-        // el prefijo. Si NO matchea, caemos al flujo decimal de abajo.
+        // `0x`/`0b`/`0o`. Mini-tanda Cmp — también aceptamos las
+        // mayúsculas `0X`/`0B`/`0O` (Python-compat). El char actual
+        // debe ser `0` y el siguiente el prefijo. Si NO matchea,
+        // caemos al flujo decimal de abajo.
         if self.peek() == Some('0') && !self.prev_was_dot {
             match self.peek_next() {
-                Some('x') => return self.read_radix_number(16, "hex", start_line, start_col),
-                Some('b') => return self.read_radix_number(2, "binario", start_line, start_col),
-                Some('o') => return self.read_radix_number(8, "octal", start_line, start_col),
+                Some('x') | Some('X') => {
+                    return self.read_radix_number(16, "hex", start_line, start_col);
+                }
+                Some('b') | Some('B') => {
+                    return self.read_radix_number(2, "binario", start_line, start_col);
+                }
+                Some('o') | Some('O') => {
+                    return self.read_radix_number(8, "octal", start_line, start_col);
+                }
                 _ => {}
             }
         }
@@ -819,9 +833,14 @@ impl Lexer {
                     self.advance();
                     Token::LtEq
                 } else if self.peek() == Some('<') {
-                    // Mini-tanda Bits — `<<` shift left.
+                    // Mini-tanda Bits — `<<` shift left. Cmp: `<<=`.
                     self.advance();
-                    Token::Shl
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Token::ShlEq
+                    } else {
+                        Token::Shl
+                    }
                 } else {
                     Token::Lt
                 }
@@ -832,9 +851,14 @@ impl Lexer {
                     self.advance();
                     Token::GtEq
                 } else if self.peek() == Some('>') {
-                    // Mini-tanda Bits — `>>` shift right.
+                    // Mini-tanda Bits — `>>` shift right. Cmp: `>>=`.
                     self.advance();
-                    Token::Shr
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        Token::ShrEq
+                    } else {
+                        Token::Shr
+                    }
                 } else {
                     Token::Gt
                 }
@@ -893,22 +917,37 @@ impl Lexer {
                 Token::Colon
             }
             '|' => {
-                // R.2.1 — separador de or-patterns en `match`. Single char
-                // por ahora; `||` (or lógico) usa la keyword `or` y NO
-                // entra acá. Mini-tanda Bits: el mismo Token::Pipe se
-                // usa como OR bit-a-bit; el parser distingue por contexto
-                // (expression nivel bitwise vs arm de match).
+                // R.2.1 — separador de or-patterns en `match`. Mini-tanda
+                // Bits: el mismo Token::Pipe se usa como OR bit-a-bit;
+                // el parser distingue por contexto (expression nivel
+                // bitwise vs arm de match). Cmp: `|=` para asignación
+                // compuesta bit-a-bit.
                 self.advance();
-                Token::Pipe
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::PipeEq
+                } else {
+                    Token::Pipe
+                }
             }
-            // Mini-tanda Bits — `&`, `^`, `~`.
+            // Mini-tanda Bits — `&`, `^`, `~`. Cmp: `&=` y `^=`.
             '&' => {
                 self.advance();
-                Token::Amp
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::AmpEq
+                } else {
+                    Token::Amp
+                }
             }
             '^' => {
                 self.advance();
-                Token::Caret
+                if self.peek() == Some('=') {
+                    self.advance();
+                    Token::CaretEq
+                } else {
+                    Token::Caret
+                }
             }
             '~' => {
                 self.advance();
@@ -1520,6 +1559,59 @@ print("Hola, {name}!")"#;
     fn lit_underscore_terminal_o_doble_es_error_en_hex() {
         assert!(tokenize("0xFF_").is_err(), "underscore al final");
         assert!(tokenize("0xF__F").is_err(), "doble underscore");
+    }
+
+    // ---------------------------------------------------------------
+    // Mini-tanda Cmp — compuestos bit-a-bit + prefijos mayúscula.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn cmp_tokens_compuestos_bit_a_bit() {
+        use Token::*;
+        let toks: Vec<Token> = tokenize("x &= 1 |= 2 ^= 3 <<= 4 >>= 5")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        // Verifico los tokens compuestos.
+        assert!(toks.contains(&AmpEq));
+        assert!(toks.contains(&PipeEq));
+        assert!(toks.contains(&CaretEq));
+        assert!(toks.contains(&ShlEq));
+        assert!(toks.contains(&ShrEq));
+    }
+
+    #[test]
+    fn cmp_prefijos_mayuscula_hex_bin_oct() {
+        // Mini-tanda Cmp — `0X`/`0B`/`0O` (mayúscula) valen igual que
+        // las minúsculas.
+        assert_eq!(first_token_of("0XFF"), Token::Int(255));
+        assert_eq!(first_token_of("0B1010"), Token::Int(10));
+        assert_eq!(first_token_of("0O755"), Token::Int(0o755));
+    }
+
+    #[test]
+    fn cmp_token_amp_solo_sigue_funcionando() {
+        // Regresión: `&` solo (sin `=` después) sigue siendo Token::Amp.
+        let toks: Vec<Token> = tokenize("a & b")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        assert!(toks.contains(&Token::Amp));
+        assert!(!toks.contains(&Token::AmpEq));
+    }
+
+    #[test]
+    fn cmp_shl_solo_sigue_funcionando() {
+        // Regresión: `<<` solo sigue siendo Token::Shl.
+        let toks: Vec<Token> = tokenize("a << 2")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
+        assert!(toks.contains(&Token::Shl));
+        assert!(!toks.contains(&Token::ShlEq));
     }
 
     #[test]

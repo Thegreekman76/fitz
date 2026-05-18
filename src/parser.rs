@@ -1251,6 +1251,12 @@ impl Parser {
             Token::MinusEq => Some(BinOpKind::Sub),
             Token::StarEq => Some(BinOpKind::Mul),
             Token::SlashEq => Some(BinOpKind::Div),
+            // Mini-tanda Cmp — ops bit-a-bit compuestos.
+            Token::AmpEq => Some(BinOpKind::BitAnd),
+            Token::PipeEq => Some(BinOpKind::BitOr),
+            Token::CaretEq => Some(BinOpKind::BitXor),
+            Token::ShlEq => Some(BinOpKind::Shl),
+            Token::ShrEq => Some(BinOpKind::Shr),
             _ => None,
         };
         if let Some(op) = compound_op {

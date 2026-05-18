@@ -736,9 +736,13 @@ posteriores.
   set/clear/toggle de bits, byte extraction, combinación con
   format specs `{n:#x}`/`{n:#b}`.
 
-  **Deuda residual menor**: operadores bit-a-bit compuestos
-  (`&=`/`|=`/`^=`/`<<=`/`>>=`) — paralelo a Python/C, sub-paso
-  menor si aparece presión.
+  ~~**Deuda residual menor**: operadores bit-a-bit compuestos
+  (`&=`/`|=`/`^=`/`<<=`/`>>=`)~~ ✓ CERRADO 2026-05-18 (mini-tanda
+  Cmp). Cinco tokens nuevos al lexer (`AmpEq`/`PipeEq`/`CaretEq`/
+  `ShlEq`/`ShrEq`); el parser los suma al match `compound_op`
+  paralelo a `PlusEq`/etc. Desugar a `x = x <op> rhs` en parse-time,
+  sin cambios al checker/evaluator/codegen (reusan `Stmt::Assign`
+  regular). 4 unit tests (lexer) + 4 evaluator + 1 E2E bit-a-bit.
 
 - **`xor` lógico** — `a != b` sobre `Bool` cubre. Sumar si aparece
   presión.
@@ -800,9 +804,11 @@ posteriores.
   `GUIDE_EXAMPLES_COMPILE`. Cap 3 de la guía suma sub-sección
   "Literales en otras bases (mini-tanda Lit)".
 
-  **Deuda residual menor**: prefijos en mayúscula (`0X`/`0B`/
-  `0O`) no aceptados — Python los permite, Rust no. Sin
-  presión real.
+  ~~**Deuda residual menor**: prefijos en mayúscula (`0X`/`0B`/
+  `0O`)~~ ✓ CERRADO 2026-05-18 (mini-tanda Cmp). El match en
+  `read_number` ahora acepta `'x'|'X'`/`'b'|'B'`/`'o'|'O'`.
+  Grammar TextMate también actualizado con `[xX]`/`[bB]`/`[oO]`
+  en los patterns. 1 unit test (lexer).
 
 - **Identificadores no-ASCII** (`π`, `función`) — F8. Bajo
   impacto.

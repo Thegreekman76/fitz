@@ -82,19 +82,19 @@
       ]
     },
     "numbers": {
-      "comment": "Mini-tanda Núm — separadores `_` y notación científica `e/E`. Mini-tanda Lit — literales hex/binario/octal con prefijos `0x`/`0b`/`0o`. Los patterns más específicos primero (hex/bin/oct antes que float/int decimal).",
+      "comment": "Mini-tanda Núm — separadores `_` y notación científica `e/E`. Mini-tanda Lit — literales hex/binario/octal con prefijos `0x`/`0b`/`0o`. Mini-tanda Cmp — prefijos mayúscula `0X`/`0B`/`0O` también soportados. Los patterns más específicos primero (hex/bin/oct antes que float/int decimal).",
       "patterns": [
         {
           "name": "constant.numeric.hex.fitz",
-          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+          "match": "\\b0[xX][0-9a-fA-F][0-9a-fA-F_]*\\b"
         },
         {
           "name": "constant.numeric.binary.fitz",
-          "match": "\\b0b[01][01_]*\\b"
+          "match": "\\b0[bB][01][01_]*\\b"
         },
         {
           "name": "constant.numeric.octal.fitz",
-          "match": "\\b0o[0-7][0-7_]*\\b"
+          "match": "\\b0[oO][0-7][0-7_]*\\b"
         },
         {
           "name": "constant.numeric.float.fitz",
@@ -205,9 +205,9 @@
           "match": "&|\\^|~"
         },
         {
-          "comment": "Asignación compuesta (mini-fase R.2.3): `+= -= *= /= %=`. Va antes que `=` solo para que el regex no se quede con la primera letra.",
+          "comment": "Asignación compuesta (R.2.3 + mini-tanda Cmp). Aritméticos: `+= -= *= /= %=`. Bit-a-bit: `&= |= ^= <<= >>=`. Va antes que `=`/`<<`/`>>`/`&`/`|`/`^` solos para que el regex no se quede con la primera letra. Los shifts compuestos `<<=`/`>>=` van antes que `<<`/`>>` por la misma razón.",
           "name": "keyword.operator.assignment.compound.fitz",
-          "match": "\\+=|-=|\\*=|/=|%="
+          "match": "<<=|>>=|\\+=|-=|\\*=|/=|%=|&=|\\|=|\\^="
         },
         {
           "name": "keyword.operator.assignment.fitz",

@@ -1781,6 +1781,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "03c-bases-numericas.fitz",
     "04-operadores.fitz",
     "04b-operadores-bit.fitz",
+    "04c-asignacion-compuesta-bit.fitz",
     "05-strings.fitz",
     "05b-format-specs.fitz",
     "06-logica.fitz",
@@ -2692,6 +2693,44 @@ fn mini_tanda_err_plus_err_int_compila_y_corre() {
     let (stdout, exit) = build_and_run("mini_tanda_err_plus_int", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "err: 404");
+}
+
+// ---- Mini-tanda Cmp — ops compuestos bit-a-bit + prefijos mayúscula ----
+
+#[test]
+fn mini_tanda_cmp_ops_compuestos_bit_a_bit() {
+    let src = "let flags: Int = 0b0000_0101\n\
+               flags |= 0b0010\n\
+               print(flags)\n\
+               flags &= 0b1110\n\
+               print(flags)\n\
+               flags ^= 0b0100\n\
+               print(flags)\n\
+               flags <<= 2\n\
+               print(flags)\n\
+               flags >>= 1\n\
+               print(flags)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_cmp_compuestos", src);
+    assert_eq!(exit, 0);
+    // 0b101=5 | 0b010=2 → 0b111=7
+    // 7 & 0b1110=14 → 0b110=6
+    // 6 ^ 0b100=4 → 0b010=2
+    // 2 << 2 → 8
+    // 8 >> 1 → 4
+    assert_eq!(stdout.trim(), "7\n6\n2\n8\n4");
+}
+
+#[test]
+fn mini_tanda_cmp_prefijos_mayuscula() {
+    let src = "let h: Int = 0XFF\n\
+               let b: Int = 0B1010\n\
+               let o: Int = 0O755\n\
+               print(h)\n\
+               print(b)\n\
+               print(o)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_cmp_prefijos", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "255\n10\n493");
 }
 
 // ---- Mini-tanda Re+ — Result<T, E> tipado en codegen ----

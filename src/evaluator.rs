@@ -7850,6 +7850,41 @@ let first_y = zs[0].1
         assert_eq!(env.lock().get("r"), Some(Value::Int(0b1110)));
     }
 
+    // ---- Mini-tanda Cmp — ops compuestos bit-a-bit ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_and_eq_compuesto() {
+        let src = "let x: Int = 0xFF\nx &= 0x0F\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("x"), Some(Value::Int(0x0F)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_or_xor_eq_compuestos() {
+        let src = "let a: Int = 0b1100\na |= 0b0010\nlet b: Int = 0b1100\nb ^= 0b0101\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(0b1110)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(0b1001)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_shl_shr_eq_compuestos() {
+        let src = "let n: Int = 1\nn <<= 4\nlet m: Int = 16\nm >>= 2\n";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("n"), Some(Value::Int(16)));
+        assert_eq!(env.lock().get("m"), Some(Value::Int(4)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_compuesto_sobre_float_es_type_error() {
+        let src = "let x: Float = 3.14\nx &= 1\n";
+        let (_, res) = parse_eval_into_env(src).await;
+        assert!(res.is_err());
+    }
+
     // ---- Mini-tanda Err+ — `?` fuera de fn + Err con tipos no-Str ----
 
     #[tokio::test(flavor = "current_thread")]

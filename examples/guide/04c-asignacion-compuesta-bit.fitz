@@ -1,0 +1,36 @@
+// Mini-tanda Cmp — asignación compuesta bit-a-bit + prefijos
+// mayúscula `0X`/`0B`/`0O`.
+//
+// Los compuestos bit-a-bit son la simetría natural de `+=`/`-=`:
+// `x &= y` ≡ `x = x & y`. Cinco ops nuevos:
+//   `&=` (AND), `|=` (OR), `^=` (XOR), `<<=` (SHL), `>>=` (SHR).
+// Solo sobre Int.
+
+let flags: Int = 0b0000_0101         // bits 0 y 2 encendidos
+
+// `|=` — setear un bit.
+flags |= 0b0010
+print("set bit 1:    {flags:#06b}")  // 0b0111
+
+// `&=` — clearear un bit.
+flags &= 0b1110
+print("clear bit 0:  {flags:#06b}")  // 0b0110
+
+// `^=` — toggle un bit.
+flags ^= 0b0100
+print("toggle bit 2: {flags:#06b}")  // 0b0010
+
+// `<<=` / `>>=` — shifts compuestos.
+flags <<= 2
+print("shl 2:        {flags:#06b}")  // 0b1000
+flags >>= 1
+print("shr 1:        {flags:#06b}")  // 0b0100
+
+// Prefijos mayúscula `0X`/`0B`/`0O` — alternativa Python-compat
+// a `0x`/`0b`/`0o`. Mismo valor numérico.
+let upper_hex: Int = 0XFF
+let upper_bin: Int = 0B1010
+let upper_oct: Int = 0O755
+print(upper_hex)                      // 255
+print(upper_bin)                      // 10
+print(upper_oct)                      // 493

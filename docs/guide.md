@@ -868,14 +868,40 @@ para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 - `%=` (módulo compuesto) — sub-paso menor si aparece presión.
 - `%` sobre `Float` (la ambigüedad entre `fmod` y `rem_euclid`
   requiere decisión de diseño; sub-paso futuro si aparece presión).
-- Operadores bit-a-bit compuestos (`&=`, `|=`, `^=`, `<<=`, `>>=`)
-  — paralelo a Python/C, sub-paso menor.
 
 > Lo que **sí anda** y antes era deuda: operador `%` (módulo
 > sobre `Int` con semántica euclidean, R.1.2); operadores
 > compuestos `+=`/`-=`/`*=`/`/=` (R.2.3 mini-fase R);
 > **operadores de bits** `&`/`|`/`^`/`<<`/`>>`/`~` (mini-tanda
-> Bits — ver sub-sección de arriba).
+> Bits — ver sub-sección de arriba); **compuestos bit-a-bit**
+> `&=`/`|=`/`^=`/`<<=`/`>>=` y **prefijos mayúscula** `0X`/`0B`/
+> `0O` (mini-tanda Cmp — ver sub-sección de abajo).
+
+### Asignación compuesta bit-a-bit (mini-tanda Cmp)
+
+Simetría natural con `+=`/`-=`/etc. Cinco ops compuestos:
+
+```fitz
+let flags: Int = 0b0101
+flags |= 0b0010     // setear bit:    0b0111
+flags &= 0b1110     // clearear bit:  0b0110
+flags ^= 0b0100     // toggle bit:    0b0010
+flags <<= 2         // shift left 2:  0b1000
+flags >>= 1         // shift right 1: 0b0100
+```
+
+Semántica: `x &= y` ≡ `x = x & y`. Solo sobre `Int`.
+
+Además, los prefijos hex/bin/oct aceptan mayúscula (Python-compat):
+
+```fitz
+let h: Int = 0XFF        // == 0xFF
+let b: Int = 0B1010      // == 0b1010
+let o: Int = 0O755       // == 0o755
+```
+
+Ver [examples/guide/04c-asignacion-compuesta-bit.fitz](../examples/guide/04c-asignacion-compuesta-bit.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Ejemplo completo
 
