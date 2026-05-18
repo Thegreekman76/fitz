@@ -1,0 +1,55 @@
+// Mini-tanda F8 — identificadores con Unicode.
+//
+// Hasta F8, los identificadores oficialmente "documentados" eran
+// ASCII (letras + dígitos + `_`). En la práctica el lexer ya
+// aceptaba Unicode via `is_alphabetic`/`is_alphanumeric` (que son
+// Unicode-aware en Rust), pero la guía no lo mencionaba y no había
+// tests que lo lockearan.
+//
+// F8 documenta y testea: identificadores aceptan cualquier carácter
+// Unicode de la categoría "Letter" (L*) o "Number" (N*) — letras
+// griegas, acentos, ñ, CJK, cirílico, etc. Siguen restricciones:
+//
+//  - El primer carácter debe ser letra o `_` (no dígito).
+//  - El resto puede ser letra, dígito o `_`.
+//  - Emojis (Unicode "Symbol") quedan EXCLUIDOS — error de lex.
+//  - Dígitos no-ASCII al inicio (٢, etc.) también rechazados.
+
+// Letras griegas — útil para constantes matemáticas
+let π: Float = 3.14159
+let σ: Float = 0.5
+print(π)                              // 3.14159
+print(σ)                              // 0.5
+
+// Acentos + ñ — naturalidad en código en español
+let función: Str = "saludar"
+let café: Int = 42
+let año: Int = 2026
+let niño_edad: Int = 5
+print(función)                         // saludar
+print(café)                            // 42
+print(año)                             // 2026
+print(niño_edad)                       // 5
+
+// CJK + cirílico — internacional
+let 名前: Str = "Fitz"
+let имя: Str = "Roy"
+print(名前)                            // Fitz
+print(имя)                             // Roy
+
+// Mezcla Unicode + ASCII + `_`
+let user_名: Str = "Ada"
+print(user_名)                         // Ada
+
+// Funciones también: el nombre de la fn + params + locals pueden
+// ser Unicode. (Limitación heredada del codegen: el body NO puede
+// referenciar vars top-level, así que `π` se pasa como parámetro
+// o se redefine adentro — paralelo al manejo de cualquier let
+// top-level en `fitz build`.)
+fn área_círculo(radio: Float, π: Float) -> Float => π * radio * radio
+print(área_círculo(2.0, 3.14159))      // 12.56636
+
+// Convenciones recomendadas:
+//   - ASCII para identifiers de API pública (compat con tooling).
+//   - Unicode OK en código interno cuando aporta claridad
+//     (constantes matemáticas, código en idioma no-inglés).

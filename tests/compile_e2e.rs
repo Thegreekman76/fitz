@@ -1931,6 +1931,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "03-variables.fitz",
     "03b-numeros-legibles.fitz",
     "03c-bases-numericas.fitz",
+    "03d-identifiers-unicode.fitz",
     "04-operadores.fitz",
     "04b-operadores-bit.fitz",
     "04c-asignacion-compuesta-bit.fitz",
@@ -3045,6 +3046,38 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda F8 — identificadores no-ASCII (Unicode) ----
+
+#[test]
+fn f8_identifiers_unicode_compilan_y_corren() {
+    // Letras griegas, acentos, ñ, CJK, cirílico. is_alphabetic /
+    // is_alphanumeric del lexer ya los acepta; Rust permite Unicode
+    // identifiers desde edition 2021 — paso transparente.
+    let src = "let π: Float = 3.14159\n\
+               let función: Str = \"hola\"\n\
+               let café: Int = 42\n\
+               let 名前: Str = \"Fitz\"\n\
+               let имя: Str = \"Roy\"\n\
+               print(π)\n\
+               print(función)\n\
+               print(café)\n\
+               print(名前)\n\
+               print(имя)\n";
+    let (stdout, exit) = build_and_run("f8_idents_unicode", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "3.14159\nhola\n42\nFitz\nRoy");
+}
+
+#[test]
+fn f8_fn_y_params_con_identifiers_unicode() {
+    // `fn` con nombre Unicode + params con nombre Unicode.
+    let src = "fn niño(edad: Int) -> Str => \"niño de {edad}\"\n\
+               print(niño(5))\n";
+    let (stdout, exit) = build_and_run("f8_fn_unicode", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "niño de 5");
 }
 
 // ---- Mini-tanda Xor — operador `xor` lógico sobre Bool ----

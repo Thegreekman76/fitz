@@ -549,6 +549,36 @@ Rust. Las funciones sí crean su propio scope (cap. 11).
 Esto puede sorprender — lo dejamos marcado y, si en algún momento trae
 problemas reales, lo reconsideramos.
 
+### Identificadores con Unicode (mini-tanda F8)
+
+Los identificadores aceptan cualquier carácter Unicode de la categoría
+"Letter" (L*) o "Number" (N*) — letras griegas, acentos, ñ, CJK,
+cirílico, etc.:
+
+```fitz
+let π: Float = 3.14159
+let función: Str = "saludar"
+let café: Int = 42
+let 名前: Str = "Fitz"
+let имя: Str = "Roy"
+```
+
+Reglas:
+- El primer carácter debe ser letra Unicode o `_` (no dígito).
+- El resto puede ser letra, dígito o `_`.
+- **Emojis** (Unicode "Symbol") quedan EXCLUIDOS — error de lex.
+- Dígitos no-ASCII al inicio (`٢`, etc.) también rechazados.
+
+Internamente Rust acepta Unicode identifiers desde edition 2021,
+así que `fitz build` los pasa transparente al código generado.
+
+Convención recomendada: ASCII para API pública (compat con tooling);
+Unicode OK en código interno cuando aporta claridad (constantes
+matemáticas, código en idioma no-inglés).
+
+Ver [examples/guide/03d-identifiers-unicode.fitz](../examples/guide/03d-identifiers-unicode.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Ejemplo completo
 
 [examples/guide/03-variables.fitz](../examples/guide/03-variables.fitz):

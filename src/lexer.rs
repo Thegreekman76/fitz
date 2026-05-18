@@ -1266,6 +1266,91 @@ mod tests {
         );
     }
 
+    // ---- Mini-tanda F8 — identificadores no-ASCII (Unicode) ----
+
+    #[test]
+    fn f8_identifiers_griegos_y_simbolos_matematicos() {
+        // `π`, `σ`, etc. — letras griegas. is_alphabetic devuelve true.
+        assert_eq!(
+            toks("π"),
+            vec![Token::Ident("π".into()), Token::EOF],
+        );
+        assert_eq!(
+            toks("σ"),
+            vec![Token::Ident("σ".into()), Token::EOF],
+        );
+    }
+
+    #[test]
+    fn f8_identifiers_con_acentos_y_n_tilde() {
+        // Tipico de español: `función`, `niño`, `café`.
+        for ident in ["función", "niño", "café", "año"] {
+            assert_eq!(
+                toks(ident),
+                vec![Token::Ident(ident.into()), Token::EOF],
+                "identificador `{}` no se lexea correctamente",
+                ident,
+            );
+        }
+    }
+
+    #[test]
+    fn f8_identifiers_cjk() {
+        // Japonés / chino / coreano. is_alphabetic los acepta.
+        for ident in ["名前", "用户", "이름"] {
+            assert_eq!(
+                toks(ident),
+                vec![Token::Ident(ident.into()), Token::EOF],
+                "ident CJK `{}` no se lexea correctamente",
+                ident,
+            );
+        }
+    }
+
+    #[test]
+    fn f8_identifiers_cyrillic() {
+        assert_eq!(
+            toks("имя"),
+            vec![Token::Ident("имя".into()), Token::EOF],
+        );
+    }
+
+    #[test]
+    fn f8_identifiers_mixto_unicode_y_ascii() {
+        // Combinar Unicode + ASCII + `_` también funciona.
+        assert_eq!(
+            toks("user_名"),
+            vec![Token::Ident("user_名".into()), Token::EOF],
+        );
+        assert_eq!(
+            toks("café_2"),
+            vec![Token::Ident("café_2".into()), Token::EOF],
+        );
+    }
+
+    #[test]
+    fn f8_emojis_son_rechazados() {
+        // Los emojis no son `is_alphabetic` (Unicode Symbol, no Letter)
+        // — el lexer los rechaza con UnexpectedChar.
+        let err = tokenize("🚀").unwrap_err();
+        assert!(
+            matches!(err.kind, ErrorKind::UnexpectedChar('🚀')),
+            "esperaba UnexpectedChar('🚀'), fue: {:?}",
+            err.kind,
+        );
+    }
+
+    #[test]
+    fn f8_digitos_unicode_no_pueden_arrancar_identifier() {
+        // Igual que ASCII: un identificador no puede arrancar con
+        // dígito (ni ASCII ni Unicode). `٢` (árabe-índico 2) sí es
+        // is_numeric, pero el lexer entra a `read_number` para todo
+        // lo que arranque con dígito ASCII. Para dígitos no-ASCII,
+        // el lexer corta porque no son `is_alphabetic` ni dígito ASCII.
+        let err = tokenize("٢").unwrap_err();
+        assert!(matches!(err.kind, ErrorKind::UnexpectedChar(_)));
+    }
+
     #[test]
     fn let_with_arithmetic() {
         assert_eq!(

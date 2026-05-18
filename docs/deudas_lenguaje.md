@@ -866,8 +866,30 @@ posteriores.
   Grammar TextMate también actualizado con `[xX]`/`[bB]`/`[oO]`
   en los patterns. 1 unit test (lexer).
 
-- **Identificadores no-ASCII** (`π`, `función`) — F8. Bajo
-  impacto.
+- ~~**Identificadores no-ASCII** (`π`, `función`) — F8~~ ✓ CERRADO
+  2026-05-18 (mini-tanda F8). Verificación + documentación + tests:
+  el lexer ya usaba `is_alphabetic()`/`is_alphanumeric()` (que son
+  Unicode-aware en Rust), así que en la práctica los identificadores
+  con Unicode ya andaban — solo faltaba documentar el contrato y
+  lockear el comportamiento con tests. Rust acepta Unicode
+  identifiers desde edition 2021, así que `fitz build` los pasa
+  transparente al código generado. Coverage:
+  - Letras griegas (`π`, `σ`).
+  - Acentos / ñ (`función`, `niño`, `café`).
+  - CJK (`名前`, `用户`, `이름`).
+  - Cirílico (`имя`).
+  - Mezcla Unicode + ASCII + `_` (`user_名`, `café_2`).
+  - Emojis EXCLUIDOS — Unicode "Symbol", no "Letter". Lex aborta.
+  - Dígitos no-ASCII (`٢`) al inicio también rechazados.
+  7 unit tests del lexer (`f8_*`) + 2 compile_e2e bit-a-bit. Ejemplo
+  `examples/guide/03d-identifiers-unicode.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 3 sub-sección nueva "Identificadores
+  con Unicode (mini-tanda F8)" con tabla de reglas + convenciones
+  recomendadas (ASCII para API pública, Unicode para uso interno).
+  **Caveat heredado de F12**: el codegen no permite que un fn body
+  referencie vars top-level (ni ASCII ni Unicode), así que `π`
+  declarada top-level no es accesible desde `fn área_círculo(...)`
+  — paso `π` como param. Limitación NO específica de Unicode.
 - ~~**Multi-línea en `from import (...)` con paréntesis**~~ ✓
   CERRADO 2026-05-18 (mini-tanda Mln). Habilita la forma estilo
   Python: `from foo import (a, b, c,)` con items en líneas
