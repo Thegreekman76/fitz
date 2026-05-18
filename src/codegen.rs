@@ -863,6 +863,10 @@ struct LoadedModule {
     fn_sigs: HashMap<String, FnSig>,
     /// Constantes / statics top-level: nombre → tipo Fitz resuelto.
     const_sigs: HashMap<String, Type>,
+    /// Mini-tanda F14 — set de consts que se emitieron como accessor
+    /// fn `pub fn X() -> T` (en lugar de `pub const X`). El importer
+    /// necesita saberlo para emitir `X()` en lugar de `X`.
+    accessor_consts: std::collections::HashSet<String>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -1067,7 +1071,7 @@ impl ModuleLoader {
         let rel_path = mod_rel_path_from_segments(segments);
 
         // Extraer firmas para uso del importer.
-        let (type_sigs, fn_sigs, const_sigs) =
+        let (type_sigs, fn_sigs, const_sigs, accessor_consts) =
             collect_module_sigs(&module_program, &module_env)?;
 
         let idx = self.modules.len();
@@ -1078,6 +1082,7 @@ impl ModuleLoader {
             type_sigs,
             fn_sigs,
             const_sigs,
+            accessor_consts,
         });
         self.by_path.insert(canonical, idx);
         Ok(idx)
@@ -1320,7 +1325,12 @@ fn stmt_kind(s: &Stmt) -> &'static str {
 
 /// Recolecta las firmas exportadas de un módulo: tipos, fns y consts.
 /// El loader las usa para resolver llamadas / accesos cross-module.
-#[allow(clippy::type_complexity)] // tres maps por categoría es claro
+///
+/// Mini-tanda F14 — también devuelve `accessor_consts`: los nombres
+/// de `let X = <expr>` cuya RHS NO es const-eval (StrInterp/Call/
+/// StructLit/etc.). El codegen del módulo los emite como `pub fn X()
+/// -> T` y el importer los referencia como `X()`.
+#[allow(clippy::type_complexity)]
 fn collect_module_sigs(
     program: &Program,
     env: &TypeEnv,
@@ -1329,12 +1339,15 @@ fn collect_module_sigs(
         HashMap<String, TypeSig>,
         HashMap<String, FnSig>,
         HashMap<String, Type>,
+        std::collections::HashSet<String>,
     ),
     FitzError,
 > {
     let mut type_sigs: HashMap<String, TypeSig> = HashMap::new();
     let mut fn_sigs: HashMap<String, FnSig> = HashMap::new();
     let mut const_sigs: HashMap<String, Type> = HashMap::new();
+    let mut accessor_consts: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
 
     for stmt in program {
         match stmt {
@@ -1404,14 +1417,19 @@ fn collect_module_sigs(
                 fn_sigs.insert(name.clone(), FnSig { params: ps, ret });
             }
             Stmt::Assign { target, type_, value, .. } => {
-                // Solo bindings simples a un Ident con RHS literal.
+                // Solo bindings simples a un Ident.
                 let AssignTarget::Ident(name) = target else {
                     return Err(loader_err(
                         "el módulo no soporta asignación a campo a nivel top \
-                         (solo `let X = <literal>`)"
+                         (solo `let X = <expr>`)"
                             .to_string(),
                     ));
                 };
+                // Mini-tanda F14 — sin anotación, el tipo se infiere
+                // solo si la RHS es un literal puro. Para RHS más
+                // complejas (BinOp, StrInterp, etc.) exigimos anotación
+                // porque `collect_module_sigs` no hace inferencia
+                // completa (sin codegen context).
                 let resolved_ty = match type_ {
                     Some(te) => resolve_type_expr(te, env).map_err(|e| {
                         loader_err(format!(
@@ -1421,27 +1439,23 @@ fn collect_module_sigs(
                     })?,
                     None => infer_literal_type(value).ok_or_else(|| {
                         loader_err(format!(
-                            "let `{}` del módulo: la RHS debe ser un literal \
-                             (Int/Float/Str/Bool/Null) o tenés que anotar el tipo (5b.5).",
-                            name
+                            "let `{}` del módulo: la RHS no es literal — anotá el tipo (`let {}: T = <expr>`).",
+                            name, name
                         ))
                     })?,
                 };
-                if !is_literal_expr(value) {
-                    return Err(loader_err(format!(
-                        "let `{}` del módulo: la RHS debe ser un literal — \
-                         (Int/Float/Str/Bool/Null). Expresiones más complejas \
-                         no se soportan a nivel top todavía (5b.5).",
-                        name
-                    )));
-                }
                 const_sigs.insert(name.clone(), resolved_ty);
+                // Mini-tanda F14 — Str-literal sigue siendo `pub static &str`,
+                // los const-eval Rust → `pub const`, los demás → accessor fn.
+                if !is_literal_expr(value) && !is_const_eval_expr(value) {
+                    accessor_consts.insert(name.clone());
+                }
             }
             _ => {}
         }
     }
 
-    Ok((type_sigs, fn_sigs, const_sigs))
+    Ok((type_sigs, fn_sigs, const_sigs, accessor_consts))
 }
 
 /// True si la expresión es un literal puro (Int/Float/Str/Bool/Null
@@ -1462,6 +1476,40 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
         Expr::Bool(_, _) => Some(Type::Bool),
         Expr::Null(_) => Some(Type::Null),
         _ => None,
+    }
+}
+
+/// Mini-tanda F14 — `true` si la expresión puede emitirse como
+/// `pub const` Rust. Rust evalúa const expressions en compile-time:
+/// los literales primitivos, los `BinOp` aritméticos/lógicos/bit-a-bit
+/// sobre operandos const, y los `UnaryOp` Neg/Not/BitNot sobre const
+/// son válidos.
+///
+/// No const-eval: Str (porque `String::from` no es const fn aún —
+/// `&str` literal sí lo es pero hace falta type diferente), calls
+/// a fns, StringInterp, StructLit, List/Map literals (necesitan
+/// `Arc::new`), Idents (sin resolución estática).
+fn is_const_eval_expr(e: &Expr) -> bool {
+    match e {
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Null(_) => true,
+        // Str literal NO es const-eval para `String` (la lógica de
+        // gen_module_top_let lo maneja aparte como `pub static &str`).
+        Expr::Str(_, _) => false,
+        Expr::BinOp { op, left, right, .. } => {
+            use crate::ast::BinOpKind::*;
+            // Operadores que Rust acepta como const sobre primitivos.
+            matches!(
+                op,
+                Add | Sub | Mul | Div | Mod | Eq | NotEq | Lt | LtEq | Gt | GtEq
+                | And | Or | BitAnd | BitOr | BitXor | Shl | Shr
+            ) && is_const_eval_expr(left)
+                && is_const_eval_expr(right)
+        }
+        Expr::UnaryOp { op, operand, .. } => {
+            use crate::ast::UnaryOpKind::*;
+            matches!(op, Neg | Not | BitNot) && is_const_eval_expr(operand)
+        }
+        _ => false,
     }
 }
 
@@ -1950,6 +1998,11 @@ struct LoadedModuleSigs {
     type_sigs: HashMap<String, TypeSig>,
     fn_sigs: HashMap<String, FnSig>,
     const_sigs: HashMap<String, Type>,
+    /// Mini-tanda F14 — set de consts que se emitieron como
+    /// accessor fn `pub fn X() -> T` (en lugar de `pub const`).
+    /// El importer necesita saberlo para emitir `X()` en lugar de
+    /// `X` al referenciarlas.
+    accessor_consts: std::collections::HashSet<String>,
 }
 
 struct CodegenCtx<'a> {
@@ -2099,6 +2152,11 @@ struct CodegenCtx<'a> {
     /// pattern del arm (especialmente cuando dos sub-patterns de un
     /// Tuple necesitan bindings sintéticos a la vez).
     pattern_slot_counter: usize,
+    /// Mini-tanda F14 — set de consts top-level del propio módulo que
+    /// se emitieron como `pub fn X() -> T` (accessor function) en
+    /// lugar de `pub const X`. El codegen de Ident emite `X()` para
+    /// estos nombres y `X` para los consts reales.
+    accessor_consts: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -2189,6 +2247,7 @@ impl<'a> CodegenCtx<'a> {
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
             pattern_slot_counter: 0,
+            accessor_consts: std::collections::HashSet::new(),
         }
     }
 
@@ -2217,6 +2276,7 @@ impl<'a> CodegenCtx<'a> {
                 type_sigs: m.type_sigs.clone(),
                 fn_sigs: m.fn_sigs.clone(),
                 const_sigs: m.const_sigs.clone(),
+                accessor_consts: m.accessor_consts.clone(),
             });
         }
         for (name, binding) in &loader.bindings {
@@ -2242,9 +2302,17 @@ impl<'a> CodegenCtx<'a> {
                 },
             ))
         } else {
-            m.const_sigs
-                .get(field)
-                .map(|ty| (format!("{}::{}", m.mod_name, field), ty.clone()))
+            m.const_sigs.get(field).map(|ty| {
+                // F14: si el const es accessor fn, lo invocamos en el
+                // call site (`mod::X()`). Para `pub const`/`pub static`
+                // emitimos `mod::X` directo.
+                let code = if m.accessor_consts.contains(field) {
+                    format!("{}::{}()", m.mod_name, field)
+                } else {
+                    format!("{}::{}", m.mod_name, field)
+                };
+                (code, ty.clone())
+            })
         }
     }
 
@@ -3068,6 +3136,13 @@ impl<'a> CodegenCtx<'a> {
                 None => infer_literal_type(value).unwrap_or(Type::Any),
             };
             self.own_consts.insert(name.clone(), ty);
+            // Mini-tanda F14 — flagear como accessor fn los consts cuya
+            // RHS NO es const-eval (StrInterp, Call, StructLit, etc.).
+            // El codegen del Ident emite `X()` para esos vs `X` para
+            // pub const.
+            if !is_literal_expr(value) && !is_const_eval_expr(value) {
+                self.accessor_consts.insert(name.clone());
+            }
         }
         Ok(())
     }
@@ -3756,11 +3831,21 @@ impl<'a> CodegenCtx<'a> {
         Ok(())
     }
 
-    /// Emite un `let X = <literal>` top-level de un módulo como
-    /// `pub const X: T = ...;` (primitivos) o `pub static X: &str =
-    /// "...";` (Str). La validación de "es un literal" ya la hizo
-    /// `collect_module_sigs` antes; acá asumimos que el value es
-    /// una de las variantes literales.
+    /// Mini-tanda F14 — Emite `let X = <expr>` top-level de un módulo.
+    ///
+    /// Tres caminos:
+    ///   1. **Literal puro** (`Int`/`Float`/`Bool`/`Str` directo) →
+    ///      `pub const X: T = ...;` o `pub static X: &str = "...";`.
+    ///      Comportamiento histórico de 5b.5.
+    ///   2. **Expresión const-eval** (BinOp aritmético/lógico/bit-a-bit
+    ///      sobre literales y otros consts top-level const-eval) →
+    ///      `pub const X: T = <rhs>;`. Rust valida la const-eval en
+    ///      compile-time.
+    ///   3. **Expresión runtime** (StrInterp, Call, StructLit, etc.) →
+    ///      `pub fn X() -> T { <rhs> }` — accessor function. Cada
+    ///      referencia re-evalúa la RHS. Para inmutables (Str/Int/
+    ///      etc.) la diferencia es invisible; para StructLit el clone
+    ///      del Arc/Mutex es barato.
     fn gen_module_top_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let stmt_span = stmt.span();
         let Stmt::Assign { target, type_, value, .. } = stmt else {
@@ -3768,9 +3853,14 @@ impl<'a> CodegenCtx<'a> {
         };
         let AssignTarget::Ident(name) = target else {
             return Err(self.err_at(stmt_span,
-                "asignación a campo a nivel top de módulo: no soportada (solo `let X = <literal>`)",
+                "asignación a campo a nivel top de módulo: no soportada (solo `let X = <expr>`)",
             ));
         };
+
+        // Generar el código Rust de la RHS sin emitirlo todavía. Esto
+        // nos da el tipo Fitz inferido y el código Rust de la expresión
+        // para usar en la const/fn.
+        let (rhs_code, rhs_ty) = self.gen_expr(value)?;
 
         let declared_ty = match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
@@ -3779,17 +3869,14 @@ impl<'a> CodegenCtx<'a> {
                     name, e.message
                 ))
             })?,
-            None => infer_literal_type(value).ok_or_else(|| {
-                self.err_at(value.span(), format!(
-                    "let `{}` top-level de módulo: la RHS debe ser literal o tenés que anotar el tipo",
-                    name
-                ))
-            })?,
+            None => rhs_ty.clone(),
         };
 
-        // Str → `pub static X: &str = "...";`. Los otros → `pub const`.
-        match (&declared_ty, value) {
-            (Type::Str, Expr::Str(s, _)) => {
+        // Camino 1a: Str literal directo → `pub static X: &str = "...";`
+        // (Rust no acepta `String` en const, pero sí `&'static str`.
+        // El call site se encarga de `String::from(X)` cuando hace falta.)
+        if matches!(&declared_ty, Type::Str) {
+            if let Expr::Str(s, _) = value {
                 writeln!(
                     &mut self.output,
                     "pub static {}: &str = {};\n",
@@ -3797,32 +3884,65 @@ impl<'a> CodegenCtx<'a> {
                     rust_str_literal(s)
                 )
                 .unwrap();
-            }
-            (Type::Int, Expr::Int(n, _)) => {
-                writeln!(&mut self.output, "pub const {}: i64 = {}i64;\n", name, n).unwrap();
-            }
-            (Type::Float, Expr::Float(f, _)) => {
-                writeln!(&mut self.output, "pub const {}: f64 = {}f64;\n", name, f).unwrap();
-            }
-            (Type::Float, Expr::Int(n, _)) => {
-                // Coerción explícita Int → Float, como en el resto del codegen.
-                writeln!(
-                    &mut self.output,
-                    "pub const {}: f64 = {}f64;\n",
-                    name, *n as f64
-                )
-                .unwrap();
-            }
-            (Type::Bool, Expr::Bool(b, _)) => {
-                writeln!(&mut self.output, "pub const {}: bool = {};\n", name, b).unwrap();
-            }
-            _ => {
-                return Err(self.err_at(value.span(), format!(
-                    "let `{}`: combinación de tipo/valor no soportada como constante de módulo",
-                    name
-                )));
+                return Ok(());
             }
         }
+
+        // Camino 1b+2: const-eval-able (Int/Float/Bool con BinOp/UnaryOp
+        // aritmético/lógico/bit recursivo) → emit como `pub const`.
+        if is_const_eval_expr(value) {
+            match &declared_ty {
+                Type::Int => {
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int);
+                    writeln!(
+                        &mut self.output,
+                        "pub const {}: i64 = {};\n",
+                        name, coerced
+                    )
+                    .unwrap();
+                    return Ok(());
+                }
+                Type::Float => {
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float);
+                    writeln!(
+                        &mut self.output,
+                        "pub const {}: f64 = {};\n",
+                        name, coerced
+                    )
+                    .unwrap();
+                    return Ok(());
+                }
+                Type::Bool => {
+                    writeln!(
+                        &mut self.output,
+                        "pub const {}: bool = {};\n",
+                        name, rhs_code
+                    )
+                    .unwrap();
+                    return Ok(());
+                }
+                _ => {
+                    // Para otros tipos (Nominal, List, etc.) const-eval
+                    // raramente aplica — caemos al accessor fn.
+                }
+            }
+        }
+
+        // Camino 3: runtime — accessor function `pub fn X() -> T { ... }`.
+        let ret_rs = rust_type_for(&declared_ty, self.env).map_err(|_| {
+            self.err_at(value.span(), format!(
+                "let `{}`: tipo `{}` no soportado a nivel top de módulo",
+                name,
+                display_type(&declared_ty, self.env)
+            ))
+        })?;
+        let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty);
+        writeln!(
+            &mut self.output,
+            "pub fn {}() -> {} {{ {} }}\n",
+            name, ret_rs, final_rhs
+        )
+        .unwrap();
         Ok(())
     }
 
@@ -4428,11 +4548,18 @@ impl<'a> CodegenCtx<'a> {
                                 // PreF8.4: el `use foo::PREFIX [as P];`
                                 // ya bindeó el const al local `name`
                                 // (que es la key del HashMap, no `item`).
-                                // Emitimos por `name` para que `as`
-                                // funcione transparente.
+                                // Mini-tanda F14: si el const es accessor
+                                // fn en el módulo origen, referenciamos
+                                // como `name()`.
+                                let is_accessor = m.accessor_consts.contains(&item);
+                                let access = if is_accessor {
+                                    format!("{}()", name)
+                                } else {
+                                    name.to_string()
+                                };
                                 let code = match &ty {
-                                    Type::Str => format!("String::from({})", name),
-                                    _ => name.to_string(),
+                                    Type::Str if !is_accessor => format!("String::from({})", name),
+                                    _ => access,
                                 };
                                 return Ok((code, ty));
                             }
@@ -4441,11 +4568,22 @@ impl<'a> CodegenCtx<'a> {
                 }
                 // 5b.5: const top-level del propio módulo (emitida como
                 // `pub static`/`pub const`). El fn body la referencia
-                // por nombre — Rust resuelve.
+                // por nombre — Rust resuelve. Mini-tanda F14: si es
+                // accessor fn (RHS no const-eval), referenciamos
+                // como `name()` en lugar de `name`.
                 if let Some(ty) = self.own_consts.get(name).cloned() {
+                    let is_accessor = self.accessor_consts.contains(name);
+                    let access = if is_accessor {
+                        format!("{}()", name)
+                    } else {
+                        name.clone()
+                    };
                     let code = match &ty {
-                        Type::Str => format!("String::from({})", name),
-                        _ => name.clone(),
+                        // Para Str pub static (literal puro) sigue
+                        // siendo &str → String. Para Str accessor fn,
+                        // la fn ya retorna String.
+                        Type::Str if !is_accessor => format!("String::from({})", name),
+                        _ => access,
                     };
                     return Ok((code, ty));
                 }
@@ -13586,15 +13724,50 @@ mod tests {
     }
 
     #[test]
-    fn modulo_top_level_no_acepta_expr_compleja() {
-        // Una RHS no literal a nivel top de módulo se rechaza con
-        // mensaje que cita 5b.5 (deuda residual).
-        let r = gen_module("let X = 1 + 1");
-        let err = r.expect_err("esperaba error de codegen");
-        assert!(
-            err.message.contains("literal") || err.message.contains("RHS"),
-            "esperaba mensaje sobre literal/RHS, fue: {}",
-            err.message
+    fn modulo_top_level_acepta_expr_const_eval_como_pub_const() {
+        // F14: una RHS const-eval-able (BinOp aritmético sobre literales)
+        // a nivel top de módulo ahora se acepta y se emite como `pub const`.
+        let code = gen_module("let X = 1 + 1").unwrap();
+        let file = ast_test::parse(&code);
+        let x = ast_test::find_item_const(&file, "X").expect("falta const X");
+        assert!(ast_test::vis_is_pub(&x.vis), "esperaba `pub const X`");
+        assert_eq!(ast_test::ts(&*x.ty), "i64", "esperaba tipo i64 para X");
+    }
+
+    #[test]
+    fn modulo_top_level_acepta_expr_no_const_como_pub_fn() {
+        // F14: una RHS no const-eval (call a fn, field access, etc.) a
+        // nivel top de módulo se emite como accessor fn `pub fn X() -> T`.
+        let code = gen_module(
+            "fn make() -> Int => 42\nlet X: Int = make()",
+        )
+        .unwrap();
+        let file = ast_test::parse(&code);
+        let x = ast_test::find_item_fn(&file, "X").expect("falta fn X");
+        assert!(ast_test::vis_is_pub(&x.vis), "esperaba `pub fn X`");
+        assert_eq!(
+            ast_test::fn_return_type(x).as_deref(),
+            Some("i64"),
+            "esperaba return type i64 para X()"
+        );
+    }
+
+    #[test]
+    fn modulo_top_level_str_concat_se_emite_como_pub_fn() {
+        // F14: `let X = "a" + "b"` no es const-eval (Rust no acepta
+        // `String + String` en const) → accessor fn `pub fn X() -> String`.
+        let code = gen_module(
+            "let GREETING: Str = \"hola, \" + \"Fitz\"",
+        )
+        .unwrap();
+        let file = ast_test::parse(&code);
+        let greeting = ast_test::find_item_fn(&file, "GREETING")
+            .expect("falta fn GREETING (esperaba accessor para Str concat)");
+        assert!(ast_test::vis_is_pub(&greeting.vis), "esperaba `pub fn GREETING`");
+        assert_eq!(
+            ast_test::fn_return_type(greeting).as_deref(),
+            Some("String"),
+            "esperaba return type String para GREETING()"
         );
     }
 

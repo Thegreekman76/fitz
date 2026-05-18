@@ -1437,6 +1437,78 @@ fn x() -> Int => 1
 }
 
 // ---------------------------------------------------------------------------
+// Mini-tanda F14 — `let X = <expr>` no-literal a nivel top de módulo.
+// Const-eval → `pub const X: T = <rhs>;`. Runtime → `pub fn X() -> T`.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn f14_modulo_let_const_eval_compila_y_devuelve_valor_inlineado() {
+    // Const-eval: `let X = 60 * 60` y `let Y = X / 36`.
+    // El segundo no es const-eval estricto (referencia un Ident), pero
+    // F14 lo emite como accessor fn — el call site `utils.Y` se
+    // traduce a `utils::Y()`.
+    let main = "\
+import utils
+print(utils.SECONDS)
+print(utils.MAX)
+";
+    let utils = "\
+let SECONDS: Int = 60 * 60
+let MAX: Int = SECONDS / 36
+";
+    let (stdout, exit) = build_and_run_multi(
+        "f14-let-const-eval",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["3600", "100"]);
+}
+
+#[test]
+fn f14_modulo_let_runtime_str_concat_compila() {
+    // Str concat no es const-eval (Rust no acepta `String + String`
+    // en const). F14 lo emite como `pub fn GREETING() -> String`,
+    // el call site `utils.GREETING` se traduce a `utils::GREETING()`.
+    let main = "\
+import utils
+print(utils.GREETING)
+";
+    let utils = "let GREETING: Str = \"hola, \" + \"Fitz\"";
+    let (stdout, exit) = build_and_run_multi(
+        "f14-let-str-concat",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hola, Fitz"]);
+}
+
+#[test]
+fn f14_modulo_let_runtime_struct_lit_via_fn_call() {
+    // RHS = fn call que retorna instancia. F14 emite accessor fn que
+    // re-evalúa la RHS en cada referencia.
+    let main = "\
+from utils import User
+import utils
+let u = utils.DEFAULT_USER
+print(u)
+";
+    let utils = "\
+type User { id: Int = 0, name: Str = \"anon\" }
+fn make() -> User => User {}
+let DEFAULT_USER: User = make()
+";
+    let (stdout, exit) = build_and_run_multi(
+        "f14-let-struct-lit-via-call",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["User { id: 0, name: \"anon\" }"]);
+}
+
+// ---------------------------------------------------------------------------
 // Fase 5b.6 — HTTP / @server / handlers
 // ---------------------------------------------------------------------------
 
@@ -1801,9 +1873,12 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13c-metodos-extras.fitz",
     "13d-iteradores.fitz",
     "14-result.fitz",
-    "14b-errores-tipados.fitz",
+    // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
+    // como String, así que `fitz build` falla. Documentado en el
+    // ejemplo como deuda residual de Err+. Sí corre en `fitz run`.
     "14c-result-tipado.fitz",
     "16-modulos.fitz",
+    "16b-modulos-let-expr.fitz",
     "17-http.fitz",
     "17b-middleware.fitz",
     "18-docs.fitz",

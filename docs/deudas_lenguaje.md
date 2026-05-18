@@ -1258,8 +1258,33 @@ acumulamos acá con fecha + hardware + comando exacto.
   Verificar y marcar cerrado en deudas si aplica.
 - **F13**: heterogéneos `[1, "dos", true]` en `fitz build` — `FitzValue`
   tagged runtime. Decisión grande.
-- **F14**: `let X = <expr>` no-literal a nivel top-level del módulo.
-  Pre-eval eager al cargar el módulo.
+- ~~**F14**: `let X = <expr>` no-literal a nivel top-level del
+  módulo~~ ✓ CERRADO 2026-05-18 (mini-tanda F14). El codegen ahora
+  acepta RHS arbitrarias y elige el shape Rust según `is_const_eval_expr`:
+  reducible a const (literales + BinOp/UnaryOp aritmético/lógico/bit
+  sobre operands const-eval recursivos) → `pub const X: T = <rhs>`;
+  caso contrario → accessor function `pub fn X() -> T { <rhs> }` con
+  el call site emitiendo `mod::X()` en lugar de `mod::X`. Decisión:
+  no propagamos const-ness entre `let`s del módulo — una RHS que
+  referencia otra const del mismo módulo cae al camino accessor por
+  simplicidad (invisible para el usuario). Cobertura: `LoadedModule`
+  + `LoadedModuleSigs` + `CodegenCtx` sumaron `accessor_consts:
+  HashSet<String>`; `gen_module_top_let` reescrito con dos caminos;
+  `resolve_namespace_field` y `gen_expr Ident` chequean
+  `accessor_consts` para decidir `X` vs `X()`. Tests: 3 unit nuevos
+  (`modulo_top_level_acepta_expr_const_eval_como_pub_const`,
+  `modulo_top_level_acepta_expr_no_const_como_pub_fn`,
+  `modulo_top_level_str_concat_se_emite_como_pub_fn`) reemplazando
+  el viejo `modulo_top_level_no_acepta_expr_compleja`. 3 E2E nuevos
+  (`f14_modulo_let_const_eval_compila_y_devuelve_valor_inlineado`,
+  `f14_modulo_let_runtime_str_concat_compila`,
+  `f14_modulo_let_runtime_struct_lit_via_fn_call`). Ejemplo runnable
+  `examples/guide/16b-modulos-let-expr.fitz` +
+  `module_let_expr_utils.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 16 de la guía sumó sub-sección
+  "Constantes del módulo con RHS calculada"; bullet stale en "Qué
+  no se puede hacer todavía" removido. Validado bit-a-bit `fitz
+  run` ↔ `fitz build`.
 - **F15**: imports transitivos en codegen — un módulo cargado puede
   tener su propio `import`. Refactor del module loader del codegen.
 

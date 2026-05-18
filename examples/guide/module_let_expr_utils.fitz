@@ -1,0 +1,33 @@
+// module_let_expr_utils.fitz — módulo auxiliar para 16b.
+//
+// Ejercita los dos caminos que F14 abre para `let X = <expr>` a
+// nivel top de módulo: const-eval (`pub const`) y runtime
+// (`pub fn X() -> T`).
+
+// --- Camino 1: const-eval ---
+// BinOp aritmético sobre literales: const-eval recursivo.
+let SECONDS_PER_HOUR: Int = 60 * 60
+
+// Encadenado: SECONDS_PER_HOUR ya es const → la división también es
+// const-eval. F14 lo emite como `pub const MAX_USERS: i64 = ...`.
+let MAX_USERS: Int = SECONDS_PER_HOUR / 36
+
+// Lógicos sobre literales: const-eval también.
+let DEBUG_ON: Bool = true and false
+
+// --- Camino 2: runtime ---
+
+type User {
+    id: Int = 0
+    name: Str = "anon"
+}
+
+fn make_user() -> User => User {}
+
+// Struct literal vía fn call: no es const-eval. F14 lo emite como
+// `pub fn DEFAULT_USER() -> User { make_user() }`.
+let DEFAULT_USER: User = make_user()
+
+// Concat de Str: runtime porque Rust no permite `String + String`
+// en const. F14 lo emite como `pub fn GREETING() -> String { ... }`.
+let GREETING: Str = "¡hola, " + "Fitz!"

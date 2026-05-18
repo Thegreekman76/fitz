@@ -10,7 +10,7 @@
 
 // --- Caso 1: Err con Int (códigos de error simples) ---
 
-fn try_parse(s: Str) -> Result<Int> {
+fn try_parse(s: Str) -> Result<Int, Int> {
     if s == "uno" {
         return Ok(1)
     }
@@ -36,7 +36,7 @@ type ApiError {
     msg: Str
 }
 
-fn fetch(url: Str) -> Result<Int> {
+fn fetch(url: Str) -> Result<Int, ApiError> {
     if url == "/health" {
         return Ok(200)
     }

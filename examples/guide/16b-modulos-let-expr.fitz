@@ -1,0 +1,39 @@
+// Mini-tanda F14 — `let X = <expr>` no-literal a nivel top de módulo.
+//
+// Antes de F14, las consts top-level de un módulo solo aceptaban RHS
+// literal (`let MAX = 100`, `let MSG = "hola"`). Cualquier expresión
+// más rica disparaba un error de codegen citando "5b.5 deuda residual".
+//
+// F14 abre dos caminos en `fitz build`:
+//
+//  - RHS const-eval (literales + BinOp/UnaryOp aritmético/lógico/bit
+//    sobre operands const-eval) → `pub const X: T = <rhs>;`. Cero
+//    overhead: el valor se inlinea como cualquier const Rust.
+//
+//  - RHS runtime (call a fn, field access, struct lit, etc.) →
+//    `pub fn X() -> T { <rhs> }` (accessor function). Cada referencia
+//    `mod::X` se traduce a `mod::X()`; el valor se re-evalúa por call.
+//    El importer no necesita saber cuál camino tomó la dep: el
+//    codegen del Ident se encarga.
+//
+// Este ejemplo carga `module_let_expr_utils.fitz` (mismo directorio)
+// que ejercita ambos caminos.
+
+import module_let_expr_utils as utils
+
+// Const-eval: el módulo declara `let SECONDS_PER_HOUR = 60 * 60` y
+// `let MAX_USERS: Int = SECONDS_PER_HOUR / 36`. Ambos se inlinean.
+print(utils.SECONDS_PER_HOUR)              // 3600
+print(utils.MAX_USERS)                     // 100
+
+// Runtime: el módulo declara `let DEFAULT_USER = make_user()` con
+// `make_user` definida en el mismo módulo. F14 lo emite como
+// accessor `pub fn DEFAULT_USER() -> User`.
+print(utils.DEFAULT_USER)                  // User { id: 0, name: "anon" }
+
+// Runtime con BinOp no-aritmético: concat de strings es runtime
+// porque Rust no acepta `String + String` en const.
+print(utils.GREETING)                      // ¡hola, Fitz!
+
+// Bool const-eval: lógicos sobre literales.
+print(utils.DEBUG_ON)                      // false

@@ -4820,11 +4820,55 @@ Cuando aparezca la necesidad real (módulos con superficie pública
 pequeña y privada grande), se va a sumar `pub` explícito o
 convención de underscore validada por el compilador estático.
 
+### Constantes del módulo con RHS calculada
+
+Desde la mini-tanda **F14**, los `let X = <expr>` top-level del
+módulo soportan RHS arbitrarias (no solo literales). El compilador
+elige automáticamente entre dos formas:
+
+- **Const-eval** — RHS reducible a un valor Rust constante (literales
+  más BinOp/UnaryOp aritmético/lógico/bit sobre operands const-eval):
+  se emite como `pub const X: T = <rhs>` en el módulo Rust generado.
+  Cero overhead, el valor se inlinea como cualquier constante Rust.
+
+- **Runtime** — RHS no const-eval (call a una fn, struct lit, concat
+  de strings, field access, etc.): se emite como accessor function
+  `pub fn X() -> T { <rhs> }`. Cada referencia `mod.X` o `X` (tras
+  `from mod import X`) se traduce a una llamada `X()` que re-evalúa
+  la RHS. Útil para inicializar valores compuestos que no entrarían
+  en una `const` Rust.
+
+[examples/guide/16b-modulos-let-expr.fitz](../examples/guide/16b-modulos-let-expr.fitz):
+
+```fitz
+import module_let_expr_utils as utils
+
+print(utils.SECONDS_PER_HOUR)  // 3600  — pub const inlineado
+print(utils.MAX_USERS)         // 100   — accessor fn (depende de const)
+print(utils.DEFAULT_USER)      // accessor fn que devuelve User
+print(utils.GREETING)          // accessor fn (Str concat)
+```
+
+[examples/guide/module_let_expr_utils.fitz](../examples/guide/module_let_expr_utils.fitz):
+
+```fitz
+let SECONDS_PER_HOUR: Int = 60 * 60       // const-eval
+let MAX_USERS: Int = SECONDS_PER_HOUR / 36 // accessor (referencia ident)
+
+type User { id: Int = 0, name: Str = "anon" }
+fn make_user() -> User => User {}
+let DEFAULT_USER: User = make_user()       // accessor (call)
+let GREETING: Str = "¡hola, " + "Fitz!"    // accessor (concat Str)
+```
+
+Detalle: una RHS const-eval que referencia otra const del mismo
+módulo (como `MAX_USERS` arriba) cae al camino accessor por
+simplicidad — el codegen no propaga const-ness entre `let`s del
+módulo. En la práctica no importa: la diferencia entre `pub const`
+y `pub fn X()` es invisible para el código que llama a `mod.X`.
+
 ### Qué no se puede hacer todavía
 
-- **`import foo as f`** — sin aliases. La forma actual es
-  `import foo` (binding `foo`).
-- **`from foo import bar as b`** — mismo deal.
 - **`foo.User { ... }`** — el struct literal con namespace no
   parsea. La forma actual es `from foo import User`.
 - **`stdlib`** (`from fitz import http`) — el prefijo `fitz/` se
@@ -4838,10 +4882,6 @@ convención de underscore validada por el compilador estático.
   - Las funciones del módulo **deben anotar tipos** de parámetros
     y retorno (limitación de codegen 5b.1; la inferencia de
     tipos de params es deuda residual).
-  - Los `let X = ...` top-level del módulo deben tener una
-    **RHS literal** (`"texto"`, `42`, `3.14`, `true`, `null`).
-    Expresiones más complejas (`let X = compute()`) compilan
-    en el intérprete pero no en `fitz build`.
   - **Imports transitivos no se soportan**: un módulo cargado
     por el main no puede tener su propio `import`. Workaround
     hasta que se cierre: aplaná los imports al archivo principal.
