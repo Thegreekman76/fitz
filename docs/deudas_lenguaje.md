@@ -694,8 +694,34 @@ posteriores.
 
 ### Lexer / tokenización
 
-- **Separadores en números** `1_000_000` — F7. Quality of life.
-- **Notación científica** `3.14e-2` — F7. Útil para float math.
+- ~~**Separadores en números** `1_000_000`~~ ✓ CERRADO 2026-05-18
+  (mini-tanda Núm). Permitidos en Int, mantisa Float y exponente
+  científico. Rechazos: doble `_`, `_` al inicio o al final del
+  número. Implementación en helper `read_digit_run` del lexer:
+  recorre `digit (_ digit)*` y valida que después de `_` haya un
+  dígito (no `__` ni `_<no-digit>`).
+- ~~**Notación científica** `3.14e-2`~~ ✓ CERRADO 2026-05-18
+  (mini-tanda Núm). `e` o `E` con signo `+`/`-` opcional. Al
+  menos un dígito post-signo (`1e`, `1e+`, `1e-` son errores).
+  Resultado siempre `Float` (incluso `1e10` sin punto decimal).
+  Separadores también admitidos en el exponente (`1e1_0`,
+  `1_000e1_0`).
+
+  Implementación full-stack acotada al **lexer**: el parser/
+  checker/evaluator/codegen no necesitan cambios porque el
+  Token::Int/Float sintetizado lleva el mismo valor numérico que
+  un literal "clásico" (el `_` se descarta antes del parse a
+  `i64`/`f64`, y `f64::parse` ya acepta `e`/`E` nativamente).
+
+  Grammar TextMate actualizado para colorear separadores y
+  exponente. 9 unit tests nuevos del lexer (int+separador,
+  float+separador, error doble underscore, error terminal,
+  científica básica, signed exp, separator en exp, error exp
+  vacío, regresión `t.0.0`). Ejemplo
+  `examples/guide/03b-numeros-legibles.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 3 de la guía suma sub-sección
+  "Números legibles".
+
 - **Identificadores no-ASCII** (`π`, `función`) — F8. Bajo
   impacto.
 - **Escapes extendidos** `\u{...}`, `\x..`, `\0`, `\b` — F9.

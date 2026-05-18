@@ -305,60 +305,123 @@ impl Lexer {
         Ok(())
     }
 
-    /// Lee un número. Decide entre Int y Float según haya un '.' seguido de dígito.
+    /// Lee un número. Decide entre Int y Float según haya un '.' seguido
+    /// de dígito o notación científica (`e`/`E`).
+    ///
     /// Cuidado: en `0..10` el '..' es operador de rango, NO punto decimal.
+    ///
+    /// **Mini-tanda Núm**: soporta separadores `_` entre dígitos
+    /// (`1_000_000`, `3.14_15`) y notación científica `e`/`E` con
+    /// exponente opcionalmente firmado (`3.14e2`, `1e-10`, `2.5E+3`).
+    /// Reglas:
+    ///   - `_` solo entre dígitos. Inválido: `_1`, `1_`, `1__0`.
+    ///   - `e`/`E` siempre produce Float (incluso `1e10`).
+    ///   - El exponente puede llevar `+`/`-` opcional y al menos un
+    ///     dígito (`1e`, `1e+` → error).
+    ///   - Separadores también permitidos en el exponente (`1e1_0`).
     fn read_number(&mut self) -> FitzResult<Token> {
         let start_pos = self.pos;
         let start_line = self.line;
         let start_col = self.column;
 
-        while let Some(c) = self.peek() {
-            if c.is_ascii_digit() {
-                self.advance();
-            } else {
-                break;
-            }
-        }
+        // Helper: lee dígitos + underscores intercalados. El primer char
+        // ya consumido por el caller (sabemos que el número arranca con
+        // un dígito). Devuelve error si encuentra `_` huérfano (`1__`,
+        // termina en `_`).
+        self.read_digit_run(start_line, start_col)?;
 
         // Mini-tanda T — si venimos justo después de `Dot` (tuple
         // field access encadenado como `t.0.0`), NO entramos a modo
         // float. El `0` de `t.0` se cierra como Int, y el `.0`
         // siguiente arrancará un nuevo Int por el mismo camino.
-        let is_float = !self.prev_was_dot
+        let has_fraction = !self.prev_was_dot
             && self.peek() == Some('.')
             && self.peek_next().is_some_and(|c| c.is_ascii_digit());
+        let mut is_float = false;
 
-        if is_float {
+        if has_fraction {
             self.advance(); // consumir '.'
-            while let Some(c) = self.peek() {
-                if c.is_ascii_digit() {
+            self.advance(); // consumir primer dígito de la parte fraccional
+            self.read_digit_run(start_line, start_col)?;
+            is_float = true;
+        }
+
+        // Notación científica `e`/`E` con exponente opcionalmente firmado.
+        if matches!(self.peek(), Some('e') | Some('E')) {
+            self.advance(); // consume `e`/`E`
+            if matches!(self.peek(), Some('+') | Some('-')) {
+                self.advance();
+            }
+            // Al menos un dígito después del signo.
+            match self.peek() {
+                Some(c) if c.is_ascii_digit() => {
                     self.advance();
-                } else {
-                    break;
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        start_line,
+                        start_col,
+                        "exponente de notación científica sin dígitos",
+                    ));
                 }
             }
-            let s: String = self.chars[start_pos..self.pos].iter().collect();
-            let n = s.parse::<f64>().map_err(|_| {
+            self.read_digit_run(start_line, start_col)?;
+            is_float = true;
+        }
+
+        // Parse final: limpiar `_` y convertir.
+        let raw: String = self.chars[start_pos..self.pos].iter().collect();
+        let clean: String = raw.chars().filter(|c| *c != '_').collect();
+        if is_float {
+            let n = clean.parse::<f64>().map_err(|_| {
                 FitzError::new(
                     ErrorKind::InvalidSyntax,
                     start_line,
                     start_col,
-                    format!("Número float inválido: '{}'", s),
+                    format!("Número float inválido: '{}'", raw),
                 )
             })?;
             Ok(Token::Float(n))
         } else {
-            let s: String = self.chars[start_pos..self.pos].iter().collect();
-            let n = s.parse::<i64>().map_err(|_| {
+            let n = clean.parse::<i64>().map_err(|_| {
                 FitzError::new(
                     ErrorKind::InvalidSyntax,
                     start_line,
                     start_col,
-                    format!("Número entero inválido: '{}'", s),
+                    format!("Número entero inválido: '{}'", raw),
                 )
             })?;
             Ok(Token::Int(n))
         }
+    }
+
+    /// Mini-tanda Núm — lee una secuencia de `digit (_ digit)*`. Permite
+    /// `_` entre dígitos pero rechaza `__` consecutivos o un `_` al final.
+    /// El primer dígito YA está consumido por el caller; este helper sigue
+    /// hasta el primer char que no sea digit/underscore.
+    fn read_digit_run(&mut self, line: usize, col: usize) -> FitzResult<()> {
+        while let Some(c) = self.peek() {
+            if c.is_ascii_digit() {
+                self.advance();
+            } else if c == '_' {
+                // El char anterior es lo último consumido — un dígito
+                // (porque el loop solo avanza con digits o '_' previo
+                // validado). Pero después del `_` exigimos otro dígito.
+                if !self.peek_next().is_some_and(|n| n.is_ascii_digit()) {
+                    return Err(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        line,
+                        col,
+                        "separador `_` en número solo entre dígitos (ejemplo: `1_000_000`)",
+                    ));
+                }
+                self.advance(); // consume '_'
+            } else {
+                break;
+            }
+        }
+        Ok(())
     }
 
     /// Lee un string entre comillas. Soporta escapes básicos: \n \t \r \\ \" \{ \}
@@ -1219,5 +1282,85 @@ print("Hola, {name}!")"#;
         assert!(trivia.blank_lines.contains(&1));
         assert!(trivia.blank_lines.contains(&3));
         assert!(trivia.blank_lines.contains(&5));
+    }
+
+    // ---------------------------------------------------------------
+    // Mini-tanda Núm — separadores `_` + notación científica.
+    // ---------------------------------------------------------------
+
+    /// Helper: tokeniza una sola expresión y devuelve el primer token.
+    fn first_token_of(src: &str) -> Token {
+        let toks = tokenize(src).expect("debe tokenizar");
+        toks.into_iter().next().expect("al menos un token").token
+    }
+
+    #[test]
+    fn num_separador_en_int_se_parsea_como_entero_sin_underscores() {
+        assert_eq!(first_token_of("1_000_000"), Token::Int(1_000_000));
+        assert_eq!(first_token_of("1_2_3"), Token::Int(123));
+    }
+
+    #[test]
+    fn num_separador_en_float_funciona_en_int_y_fraction() {
+        assert_eq!(first_token_of("1_000.5"), Token::Float(1000.5));
+        assert_eq!(first_token_of("3.14_15"), Token::Float(3.1415));
+        assert_eq!(first_token_of("1_000.000_1"), Token::Float(1000.0001));
+    }
+
+    #[test]
+    fn num_separador_doble_o_terminal_es_error() {
+        assert!(tokenize("1__0").is_err(), "doble underscore");
+        assert!(tokenize("1_000_").is_err(), "underscore al final");
+    }
+
+    #[test]
+    fn num_notacion_cientifica_basica_produce_float() {
+        assert_eq!(first_token_of("1e10"), Token::Float(1e10));
+        assert_eq!(first_token_of("3.14e2"), Token::Float(314.0));
+        assert_eq!(first_token_of("2.5E3"), Token::Float(2500.0));
+    }
+
+    #[test]
+    fn num_notacion_cientifica_con_signo() {
+        assert_eq!(first_token_of("1e-10"), Token::Float(1e-10));
+        assert_eq!(first_token_of("1e+3"), Token::Float(1000.0));
+        assert_eq!(first_token_of("3.14E-2"), Token::Float(0.0314));
+    }
+
+    #[test]
+    fn num_separador_en_exponente() {
+        // `1e1_0` → `1e10` tras limpiar separadores.
+        assert_eq!(first_token_of("1e1_0"), Token::Float(1e10));
+        assert_eq!(first_token_of("1_000e1_0"), Token::Float(1000e10));
+    }
+
+    #[test]
+    fn num_exponente_sin_digitos_es_error() {
+        assert!(tokenize("1e").is_err(), "`e` solo sin dígitos");
+        assert!(tokenize("1e+").is_err(), "`e+` sin dígitos");
+        assert!(tokenize("1e-").is_err(), "`e-` sin dígitos");
+    }
+
+    #[test]
+    fn num_int_clasico_sigue_funcionando() {
+        // Regresión — sin separadores ni notación cientifica, mismo
+        // resultado que antes.
+        assert_eq!(first_token_of("42"), Token::Int(42));
+        assert_eq!(first_token_of("3.14"), Token::Float(3.14));
+    }
+
+    #[test]
+    fn num_tuple_field_access_no_se_confunde_con_separador() {
+        // `t.0` produce Ident("t"), Dot, Int(0) — no se confunde con
+        // ningún parseo de separador. `t.0.0` (acceso a tuple anidado)
+        // sigue funcionando: la flag prev_was_dot fuerza Int en lugar
+        // de Float.
+        use Token::*;
+        let toks: Vec<Token> = tokenize("t.0.0").unwrap().into_iter().map(|t| t.token).collect();
+        assert_eq!(toks[0], Ident("t".into()));
+        assert_eq!(toks[1], Dot);
+        assert_eq!(toks[2], Int(0));
+        assert_eq!(toks[3], Dot);
+        assert_eq!(toks[4], Int(0));
     }
 }

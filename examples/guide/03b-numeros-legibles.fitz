@@ -1,0 +1,36 @@
+// Mini-tanda Núm — separadores `_` y notación científica `e/E`.
+//
+// Ambos son sintaxis del lexer: el valor numérico final es el mismo
+// que sin la notación. Sirven para hacer literales más legibles.
+
+// Separadores en Int — útil para constantes grandes.
+let poblacion: Int = 8_000_000_000
+print(poblacion)              // 8000000000
+
+// Separadores en Float — funcionan en la parte entera y fraccional.
+let pi_long: Float = 3.141_592_653
+print(pi_long)                // 3.141592653
+
+// Notación científica básica.
+let mil: Float = 1e3
+let diez_mil: Float = 1e4
+print(mil)                    // 1000.0
+print(diez_mil)               // 10000.0
+
+// Exponente con signo positivo o negativo.
+let micro: Float = 1.5e-6
+let mega: Float = 2.5e6
+print(micro)                  // 0.0000015
+print(mega)                   // 2500000.0
+
+// Mayúscula `E` también vale.
+let big: Float = 1.23E4
+print(big)                    // 12300.0
+
+// Combinaciones — separadores adentro de mantisa y exponente.
+let valor: Float = 2.997_924_58e8
+print(valor)                  // 299792458.0
+
+// Caveat: `1e10` produce Float (no Int) incluso sin punto decimal.
+let exp_int: Float = 1e10
+print(exp_int)                // 10000000000.0

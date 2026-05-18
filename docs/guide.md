@@ -387,6 +387,37 @@ Algunas notas:
 - `null` es un valor de su propio tipo (`Null`), no es un caso especial
   de otro. Imprimir `null` muestra literalmente `null`.
 
+### Números legibles (mini-tanda Núm)
+
+Los literales numéricos aceptan **separadores `_`** entre dígitos y
+**notación científica** `e`/`E`. Ambas formas son azúcar sintáctica
+del lexer — el valor numérico final es el mismo que sin la notación.
+
+```fitz
+// Separadores en Int y Float — mejora legibilidad sin cambiar el valor.
+let poblacion: Int = 8_000_000_000
+let pi_long: Float = 3.141_592_653
+
+// Notación científica — `e` o `E`, signo opcional.
+let mil: Float = 1e3                // 1000.0
+let micro: Float = 1.5e-6            // 0.0000015
+let big: Float = 1.23E4              // 12300.0
+
+// Combinados — separador adentro de mantisa y exponente.
+let valor: Float = 2.997_924_58e8    // 299792458.0
+```
+
+Reglas:
+
+- `_` solo entre dígitos. Inválido: `_1`, `1_`, `1__0` (doble underscore).
+- `e`/`E` con exponente opcionalmente firmado (`+`/`-`). Exige al
+  menos un dígito tras el signo: `1e`, `1e+` son errores del lexer.
+- **`1e10` produce `Float`**, no `Int` (incluso sin punto decimal).
+  Si querés un entero grande, usá `10_000_000_000` (`Int`).
+
+Ver [examples/guide/03b-numeros-legibles.fitz](../examples/guide/03b-numeros-legibles.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Asignación
 
 La forma corta es solo `nombre = valor`:
