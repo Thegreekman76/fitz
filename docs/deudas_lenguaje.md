@@ -1040,6 +1040,29 @@ GUIDE_EXAMPLES_COMPILE).
   `Arc::new(Mutex::new(...iter().cloned().flat_map(|sub|
   sub.lock().unwrap().clone())...))`; LSP autocomplete suma la
   entrada con detail `fn() -> List<U>  // requiere List<List<U>>`.
+- ~~`xs.any(pred)` / `xs.all(pred)` / `xs.count(pred)` /
+  `xs.find_index(pred)`~~ ✓ CERRADO 2026-05-18 (mini-tanda Lx).
+  Cuatro predicados funcionales sobre `List<T>`, completan la
+  API funcional con patrones canónicos de programación funcional.
+  Todos toman `fn(T) -> Bool`. Devuelven: `any`/`all` → `Bool`
+  (short-circuit en primer true/false), `count` → `Int`,
+  `find_index` → `Result<Int>` (Ok del índice 0-based o
+  Err("no encontrado")). Lista vacía: `any` → false, `all` →
+  true (vacuous truth, paralelo a Python/Rust), `count` → 0,
+  `find_index` → Err. 4 capas: evaluator (4 fns nuevas
+  `list_any`/`list_all`/`list_count`/`list_find_index`),
+  checker (signatures en `infer_list_method` reutilizan
+  `check_unary_callback` con ret Bool), codegen (`any`/`all`
+  usan `.iter().cloned().any(<cb>)` / `.all(<cb>)` directo
+  porque Rust acepta `FnMut(T) -> bool`; `count` y `find_index`
+  van por manual loop porque `Iterator::filter`/`position`
+  toman `FnMut(&T)` y no encajan con nuestro callback que
+  espera `T` por valor), LSP autocomplete suma 4 entradas.
+  5 unit tests evaluator + 1 LSP unit + 3 compile_e2e bit-a-bit.
+  Ejemplo `examples/guide/13h-predicados-list.fitz` sumado al
+  smoke `GUIDE_EXAMPLES_COMPILE` con caso típico (filtrar
+  reportes graves, validación de edades). Cap 13 tabla de
+  métodos `List<T>` extendida con las 4 nuevas filas.
 
 ### ~~Iteradores estilo Python — `enumerate`/`zip`/`chain`~~ ✓ CERRADO 2026-05-18 (mini-tanda It)
 

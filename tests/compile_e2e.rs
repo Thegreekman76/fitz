@@ -1958,6 +1958,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13e-mini-bundle-metodos.fitz",
     "13f-range-iteradores.fitz",
     "13g-static-methods.fitz",
+    "13h-predicados-list.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3047,6 +3048,49 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Lx — List.any/all/count/find_index ----
+
+#[test]
+fn lx_any_y_all_bit_a_bit() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               print(xs.any(fn(x: Int) => x > 3))\n\
+               print(xs.any(fn(x: Int) => x > 10))\n\
+               print(xs.all(fn(x: Int) => x > 0))\n\
+               print(xs.all(fn(x: Int) => x > 2))\n";
+    let (stdout, exit) = build_and_run("lx_any_all", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\nfalse\ntrue\nfalse");
+}
+
+#[test]
+fn lx_count_y_find_index_bit_a_bit() {
+    let src = "let xs: List<Int> = [10, 20, 30, 40]\n\
+               print(xs.count(fn(x: Int) => x > 15))\n\
+               match xs.find_index(fn(x: Int) => x == 30) {\n\
+                 Ok(i) => print(\"idx: {i}\"),\n\
+                 Err(_) => print(\"missing\")\n\
+               }\n\
+               match xs.find_index(fn(x: Int) => x > 100) {\n\
+                 Ok(i) => print(\"idx: {i}\"),\n\
+                 Err(_) => print(\"missing\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("lx_count_find_index", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "3\nidx: 2\nmissing");
+}
+
+#[test]
+fn lx_lista_vacia_any_false_all_true() {
+    let src = "let empty: List<Int> = []\n\
+               print(empty.any(fn(x: Int) => true))\n\
+               print(empty.all(fn(x: Int) => false))\n\
+               print(empty.count(fn(x: Int) => true))\n";
+    let (stdout, exit) = build_and_run("lx_empty", src);
+    assert_eq!(exit, 0);
+    // any vacía → false, all vacía → true (vacuous truth), count → 0.
+    assert_eq!(stdout.trim(), "false\ntrue\n0");
 }
 
 // ---- Mini-tanda St — métodos estáticos en `type` ----

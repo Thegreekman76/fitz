@@ -3157,6 +3157,11 @@ async fn dispatch_method(
         // Mini-tanda Mb — flatten + sort_by con callback comparator.
         (Value::List(_), "flatten") => list_flatten(receiver, args, span),
         (Value::List(_), "sort_by") => list_sort_by(receiver, args, span).await,
+        // Mini-tanda Lx — predicados funcionales: any/all/count/find_index.
+        (Value::List(_), "any") => list_any(receiver, args, span).await,
+        (Value::List(_), "all") => list_all(receiver, args, span).await,
+        (Value::List(_), "count") => list_count(receiver, args, span).await,
+        (Value::List(_), "find_index") => list_find_index(receiver, args, span).await,
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3565,6 +3570,152 @@ fn list_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     };
     let n = items.lock().len() as i64;
     Ok(Value::Int(n))
+}
+
+/// Mini-tanda Lx — `xs.any(pred)`: `true` si algún elemento satisface
+/// el predicado. Lista vacía → `false` (paralelo a Python/Rust).
+/// Short-circuit en el primer `true`.
+#[async_recursion]
+async fn list_any(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("any", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    for item in snapshot {
+        let ok = invoke_callback(callback, item, "any", span).await?;
+        match ok {
+            Value::Bool(true) => return Ok(Value::Bool(true)),
+            Value::Bool(false) => {}
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "la callback de `.any()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::Bool(false))
+}
+
+/// Mini-tanda Lx — `xs.all(pred)`: `true` si TODOS los elementos
+/// satisfacen el predicado. Lista vacía → `true` (vacuamente todo
+/// es verdad, paralelo a Python `all([])`). Short-circuit en el
+/// primer `false`.
+#[async_recursion]
+async fn list_all(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("all", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    for item in snapshot {
+        let ok = invoke_callback(callback, item, "all", span).await?;
+        match ok {
+            Value::Bool(true) => {}
+            Value::Bool(false) => return Ok(Value::Bool(false)),
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "la callback de `.all()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::Bool(true))
+}
+
+/// Mini-tanda Lx — `xs.count(pred)`: cuenta cuántos elementos
+/// satisfacen el predicado. Devuelve `Int`.
+#[async_recursion]
+async fn list_count(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("count", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut n: i64 = 0;
+    for item in snapshot {
+        let ok = invoke_callback(callback, item, "count", span).await?;
+        match ok {
+            Value::Bool(true) => n += 1,
+            Value::Bool(false) => {}
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "la callback de `.count()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::Int(n))
+}
+
+/// Mini-tanda Lx — `xs.find_index(pred)`: índice del primer elemento
+/// que satisface el predicado. Devuelve `Result<Int>`: `Ok(i)` si lo
+/// encuentra, `Err("no encontrado")` si no. Paralelo a `find` (que
+/// devuelve el elemento en lugar del índice).
+#[async_recursion]
+async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("find_index", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    for (i, item) in snapshot.into_iter().enumerate() {
+        let ok = invoke_callback(callback, item, "find_index", span).await?;
+        match ok {
+            Value::Bool(true) => {
+                return Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(i as i64)))));
+            }
+            Value::Bool(false) => {}
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "la callback de `.find_index()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+        "no encontrado".into(),
+    )))))
 }
 
 /// S.3 — `xs.sort()` ordena IN-PLACE. Soporta `List<T>` para T en
@@ -9598,6 +9749,81 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(10)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
+    }
+
+    // ---- Mini-tanda Lx: any/all/count/find_index ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lx_any_y_all_corto_circuito() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let a = xs.any(fn(x) => x > 3)\n\
+             let b = xs.any(fn(x) => x > 10)\n\
+             let c = xs.all(fn(x) => x > 0)\n\
+             let d = xs.all(fn(x) => x > 2)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("c"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("d"), Some(Value::Bool(false)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lx_any_vacia_es_false_all_vacia_es_true() {
+        let (env, res) = parse_eval_into_env(
+            "let empty: List<Int> = []\n\
+             let a = empty.any(fn(x) => true)\n\
+             let b = empty.all(fn(x) => false)",
+        ).await;
+        res.unwrap();
+        // Lista vacía: any → false, all → true (vacuamente todo es
+        // verdad, paralelo a Python/Rust).
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(true)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lx_count_devuelve_int() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let n = xs.count(fn(x) => x > 2)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("n"), Some(Value::Int(3)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lx_find_index_ok_o_err() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [10, 20, 30, 40]\n\
+             let a = xs.find_index(fn(x) => x == 30)\n\
+             let b = xs.find_index(fn(x) => x > 100)",
+        ).await;
+        res.unwrap();
+        let a = env.lock().get("a").unwrap();
+        let b = env.lock().get("b").unwrap();
+        // Ok(2) — el índice es 0-based.
+        assert!(matches!(a, Value::Result(ResultVariant::Ok(_))));
+        if let Value::Result(ResultVariant::Ok(inner)) = a {
+            assert_eq!(*inner, Value::Int(2));
+        }
+        // Err("no encontrado").
+        assert!(matches!(b, Value::Result(ResultVariant::Err(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lx_callback_no_bool_es_type_error() {
+        let (_env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.any(fn(x) => x)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("Bool") || err.message.contains("any"),
+            "esperaba mensaje sobre Bool/any, fue: {}",
+            err.message,
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

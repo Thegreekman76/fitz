@@ -528,6 +528,14 @@ fn after_dot_completions(
                     t.display(type_env),
                     t.display(type_env)
                 )),
+                // Mini-tanda Lx — predicados funcionales.
+                ("any", format!("fn(fn({}) -> Bool) -> Bool", t.display(type_env))),
+                ("all", format!("fn(fn({}) -> Bool) -> Bool", t.display(type_env))),
+                ("count", format!("fn(fn({}) -> Bool) -> Int", t.display(type_env))),
+                ("find_index", format!(
+                    "fn(fn({}) -> Bool) -> Result<Int>",
+                    t.display(type_env)
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -1257,6 +1265,27 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn after_dot_sobre_list_incluye_any_all_count_find_index() {
+        // Mini-tanda Lx: 4 predicados funcionales en List.
+        let src = "let xs = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["any", "all", "count", "find_index"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Lx): {labels:?}"
+            );
+        }
+        let count = items.iter().find(|i| i.label == "count").unwrap();
+        assert!(
+            count.detail.as_deref().unwrap_or("").contains("-> Int"),
+            "esperaba firma con `-> Int`, dio: {:?}",
+            count.detail
+        );
     }
 
     #[test]

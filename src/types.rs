@@ -2367,6 +2367,26 @@ fn infer_list_method(
             check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool), span);
             Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
         }
+        // Mini-tanda Lx — predicados funcionales sobre List<T>.
+        // Todos toman `fn(T) -> Bool`. Devuelven Bool/Int/Result<Int>.
+        "any" | "all" => {
+            if check_method_arity(ctx, method, args_ty, 1, span) {
+                check_unary_callback(ctx, &args_ty[0], t, method, Some(&Type::Bool), span);
+            }
+            Type::Bool
+        }
+        "count" => {
+            if check_method_arity(ctx, "count", args_ty, 1, span) {
+                check_unary_callback(ctx, &args_ty[0], t, "count", Some(&Type::Bool), span);
+            }
+            Type::Int
+        }
+        "find_index" => {
+            if check_method_arity(ctx, "find_index", args_ty, 1, span) {
+                check_unary_callback(ctx, &args_ty[0], t, "find_index", Some(&Type::Bool), span);
+            }
+            Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime

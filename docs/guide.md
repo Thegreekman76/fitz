@@ -4025,20 +4025,26 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.replace(o, n)` | `Str`, `Str` | `Str`       | TODAS las ocurrencias |
 | `.repeat(n)`     | `Int`        | `Str`       | `n < 0` es error |
 
-**Sobre `List<T>`** (S.3 + Mb):
+**Sobre `List<T>`** (S.3 + Mb + Lx):
 
-| Método          | Args | Retorna | Notas |
-|-----------------|------|---------|-------|
-| `.sort()`       | —    | `Null`  | IN-PLACE, T ∈ {Int, Float, Str, Bool} |
-| `.sort_by(cmp)` | `fn(T, T) -> Int` | `Null` | IN-PLACE, callback estilo Rust/JS `cmp` (Mb) |
-| `.reverse()`    | —    | `Null`  | IN-PLACE, cualquier T |
-| `.contains(v)`  | `T`  | `Bool`  | igualdad estructural |
-| `.flatten()`    | —    | `List<U>` | requiere `List<List<U>>`, aplana un nivel (Mb) |
+| Método              | Args              | Retorna       | Notas |
+|---------------------|-------------------|---------------|-------|
+| `.sort()`           | —                 | `Null`        | IN-PLACE, T ∈ {Int, Float, Str, Bool} |
+| `.sort_by(cmp)`     | `fn(T, T) -> Int` | `Null`        | IN-PLACE, callback estilo Rust/JS `cmp` (Mb) |
+| `.reverse()`        | —                 | `Null`        | IN-PLACE, cualquier T |
+| `.contains(v)`      | `T`               | `Bool`        | igualdad estructural |
+| `.flatten()`        | —                 | `List<U>`     | requiere `List<List<U>>`, aplana un nivel (Mb) |
+| `.any(pred)`        | `fn(T) -> Bool`   | `Bool`        | ¿existe alguno? Vacía → `false` (Lx) |
+| `.all(pred)`        | `fn(T) -> Bool`   | `Bool`        | ¿todos? Vacía → `true` (vacuously) (Lx) |
+| `.count(pred)`      | `fn(T) -> Bool`   | `Int`         | cuántos cumplen (Lx) |
+| `.find_index(pred)` | `fn(T) -> Bool`   | `Result<Int>` | índice del primero o `Err` (Lx) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
-para los métodos S y
+para los métodos S,
 [examples/guide/13e-mini-bundle-metodos.fitz](../examples/guide/13e-mini-bundle-metodos.fitz)
-para los de Mb.
+para los de Mb, y
+[examples/guide/13h-predicados-list.fitz](../examples/guide/13h-predicados-list.fitz)
+para los predicados de Lx.
 
 ### Iteradores: `enumerate` / `zip` / `chain` (mini-tanda It)
 

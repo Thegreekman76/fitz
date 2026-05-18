@@ -1,0 +1,63 @@
+// Mini-tanda Lx — predicados funcionales en List.
+//
+// Cuatro métodos chicos que completan la API funcional de `List<T>`:
+//
+//  - `xs.any(pred)`   → `Bool`        — ¿existe alguno?
+//  - `xs.all(pred)`   → `Bool`        — ¿todos?
+//  - `xs.count(pred)` → `Int`         — cuántos cumplen
+//  - `xs.find_index(pred)` → `Result<Int>` — índice del primero
+//
+// Todos toman un callback `fn(T) -> Bool`. `any`/`all` short-circuit
+// (cortan en el primer true/false). Lista vacía: `any` → false,
+// `all` → true (vacuamente todo es verdad), `count` → 0,
+// `find_index` → `Err`.
+
+// --- Caso típico: filtrar reportes ---
+type Reporte {
+    id: Int
+    grave: Bool
+    tipo: Str
+}
+
+let reportes: List<Reporte> = [
+    Reporte { id: 1, grave: false, tipo: "info" },
+    Reporte { id: 2, grave: true, tipo: "error" },
+    Reporte { id: 3, grave: false, tipo: "warn" },
+    Reporte { id: 4, grave: true, tipo: "error" }
+]
+
+// ¿Hay reportes graves?
+print(reportes.any(fn(r: Reporte) => r.grave))            // true
+
+// ¿Son todos del tipo "error"?
+print(reportes.all(fn(r: Reporte) => r.tipo == "error"))  // false
+
+// Cuántos errores graves
+print(reportes.count(fn(r: Reporte) => r.grave))          // 2
+
+// --- find_index: índice del primer match ---
+match reportes.find_index(fn(r: Reporte) => r.tipo == "warn") {
+    Ok(i) => print("primer warn en idx: {i}"),            // 2
+    Err(_) => print("ningún warn")
+}
+
+match reportes.find_index(fn(r: Reporte) => r.tipo == "fatal") {
+    Ok(i) => print("primer fatal en idx: {i}"),
+    Err(_) => print("ningún fatal")                        // ← este
+}
+
+// --- Caso clásico: validación ---
+let edades: List<Int> = [25, 30, 17, 45]
+
+if edades.all(fn(e: Int) => e >= 18) {
+    print("todos mayores de edad")
+} else {
+    print("hay menores: {edades.count(fn(e: Int) => e < 18)}")
+    //                                              // hay menores: 1
+}
+
+// --- Lista vacía: edge cases ---
+let empty: List<Int> = []
+print(empty.any(fn(x: Int) => true))    // false (no hay items)
+print(empty.all(fn(x: Int) => false))   // true (vacuamente verdad)
+print(empty.count(fn(x: Int) => true))  // 0

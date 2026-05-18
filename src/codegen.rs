@@ -5752,8 +5752,67 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Null))
             }
+            // Mini-tanda Lx — predicados funcionales any/all/count/find_index.
+            // Rust `Iterator::any`/`all` toman `FnMut(T) -> bool`. Nuestro
+            // callback Fitz es `fn(T) -> Bool` y se emite como closure
+            // sync via `gen_callback_inline`. La firma encaja directo.
+            (Type::List(t), "any") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, _) = self.gen_callback_inline(&args[0], t, Some(&Type::Bool), "any")?;
+                let code = format!(
+                    "({obj_code}).lock().unwrap().iter().cloned().any({cb_code})"
+                );
+                Ok((code, Type::Bool))
+            }
+            (Type::List(t), "all") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, _) = self.gen_callback_inline(&args[0], t, Some(&Type::Bool), "all")?;
+                let code = format!(
+                    "({obj_code}).lock().unwrap().iter().cloned().all({cb_code})"
+                );
+                Ok((code, Type::Bool))
+            }
+            (Type::List(t), "count") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, _) = self.gen_callback_inline(&args[0], t, Some(&Type::Bool), "count")?;
+                // Manual loop: `Iterator::filter` toma `FnMut(&T)`, no
+                // `FnMut(T)`, así que no encaja con nuestra callback
+                // sync que toma `T` por valor. Snapshot + for-loop
+                // paralelo a `gen_list_filter`.
+                let code = format!(
+                    "{{ \
+                        let __items: Vec<_> = ({obj_code}).lock().unwrap().clone(); \
+                        let __cb = {cb_code}; \
+                        let mut __n: i64 = 0; \
+                        for __it in __items.into_iter() {{ \
+                            if __cb(__it) {{ __n += 1; }} \
+                        }} \
+                        __n \
+                    }}"
+                );
+                Ok((code, Type::Int))
+            }
+            (Type::List(t), "find_index") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, _) = self.gen_callback_inline(&args[0], t, Some(&Type::Bool), "find_index")?;
+                // Manual loop (mismo motivo que count + acceso al
+                // índice). Devuelve `Result<i64, String>`.
+                let code = format!(
+                    "{{ \
+                        let __items: Vec<_> = ({obj_code}).lock().unwrap().clone(); \
+                        let __cb = {cb_code}; \
+                        let mut __result: Result<i64, String> = \
+                            Err(String::from(\"no encontrado\")); \
+                        for (__i, __it) in __items.into_iter().enumerate() {{ \
+                            if __cb(__it) {{ __result = Ok(__i as i64); break; }} \
+                        }} \
+                        __result \
+                    }}"
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index)",
                 other
             ))),
 
