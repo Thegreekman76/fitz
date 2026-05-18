@@ -2604,9 +2604,12 @@ impl Parser {
         expr: Expr,
     ) -> FitzResult<Expr> {
         self.expect(&Token::For, "se esperaba 'for' en list comprehension")?;
-        let var = self.expect_ident(
-            "se esperaba nombre de variable después de 'for' en list comprehension",
-        )?;
+        // Mini-tanda Up — el var ahora es un Pattern (paralelo a
+        // `Stmt::For.var` de Md). Acepta Ident, Wildcard, Tuple.
+        // Reusa `parse_pattern` (el general usado por match), aunque
+        // el checker rechaza cualquier pattern fuera de
+        // Ident/Wildcard/Tuple.
+        let var = self.parse_pattern()?;
         self.expect(
             &Token::In,
             "se esperaba 'in' después de la variable en list comprehension",
@@ -7363,9 +7366,27 @@ mod tests {
         match v {
             Expr::ListComp { expr, var, iter, filter, .. } => {
                 assert!(matches!(*expr, Expr::Ident(ref n, _) if n == "x"));
-                assert_eq!(var, "x");
+                assert!(matches!(var, Pattern::Ident(ref n) if n == "x"));
                 assert!(matches!(*iter, Expr::Ident(ref n, _) if n == "xs"));
                 assert!(filter.is_none());
+            }
+            other => panic!("se esperaba ListComp, recibió {:?}", other),
+        }
+    }
+
+    // Mini-tanda Up — tuple destructuring en list comprehension.
+    #[test]
+    fn up_comprehension_acepta_tuple_destructuring() {
+        let v = parse_first_let_value("let ys = [a + b for (a, b) in pairs]");
+        match v {
+            Expr::ListComp { var, .. } => {
+                if let Pattern::Tuple(subs) = var {
+                    assert_eq!(subs.len(), 2);
+                    assert!(matches!(subs[0], Pattern::Ident(ref n) if n == "a"));
+                    assert!(matches!(subs[1], Pattern::Ident(ref n) if n == "b"));
+                } else {
+                    panic!("esperaba Pattern::Tuple, vio {:?}", var);
+                }
             }
             other => panic!("se esperaba ListComp, recibió {:?}", other),
         }

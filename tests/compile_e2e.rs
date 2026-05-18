@@ -1962,6 +1962,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13i-campos-privados.fitz",
     "13j-extras-str-map.fitz",
     "13k-flat-map-first-last-merge.fitz",
+    "13l-update-comp-tuple-paramnames.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3051,6 +3052,34 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Up — Map.update + list comprehension tuple destructure ----
+
+#[test]
+fn up_map_update_compila() {
+    let src = "let scores: Map<Str, Int> = {\"ada\": 80, \"bob\": 45}\n\
+               let bumped: Map<Str, Int> = scores.update(\"ada\", fn(v: Int) => v + 10)\n\
+               print(bumped[\"ada\"])\n\
+               print(bumped[\"bob\"])\n\
+               let nochange: Map<Str, Int> = scores.update(\"missing\", fn(v: Int) => v + 999)\n\
+               print(nochange.len())\n\
+               print(nochange[\"ada\"])\n";
+    let (stdout, exit) = build_and_run("up_map_update", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "90\n45\n2\n80");
+}
+
+#[test]
+fn up_comprehension_tuple_destructure_compila() {
+    let src = "let pairs: List<(Int, Int)> = [(1, 10), (2, 20), (3, 30)]\n\
+               let sums: List<Int> = [a + b for (a, b) in pairs]\n\
+               print(sums)\n\
+               let firsts: List<Int> = [a for (a, _) in pairs]\n\
+               print(firsts)\n";
+    let (stdout, exit) = build_and_run("up_comp_tuple", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[11, 22, 33]\n[1, 2, 3]");
 }
 
 // ---- Mini-tanda Ex2 — List.flat_map/first/last + Map.merge ----

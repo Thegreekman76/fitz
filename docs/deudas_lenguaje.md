@@ -1131,6 +1131,48 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Updates + Polish ergonómico (Map.update + comp tuple destruct + LSP param names)~~ ✓ CERRADO 2026-05-18 (mini-tanda Up)
+
+Bundle de 3 deudas residuales chicas, todas relacionadas a "ergonomía"
+del lenguaje y tooling:
+
+- ~~**`Map.update(k, fn(V) -> V)`**~~ ✓ Update inmutable atómico de
+  un value asociado a una key. Si `k` no está, no-op (no inserta).
+  Cubre el patrón canónico `m.update("ada", fn(v) => v + 10)` sin
+  tener que `get(k)?` + reconstruir el map. Paralelo a Rust
+  `HashMap::entry().and_modify()`. Implementación en 4 capas con
+  callback async + signatures fijas (`fn(V) -> V`, mismo V para
+  preservar el tipo del Map).
+
+- ~~**Comprehension con tuple destructuring**~~ ✓ Ver entrada arriba
+  en la sección de Comprehensions — `Expr::ListComp.var` migró de
+  `String` a `Pattern`. Reusa toda la infraestructura de Md
+  (`bind_for_pattern`, `bind_for_pattern_in_checker`, codegen
+  `pattern_to_simple_binding` + tuple destructuring).
+
+- ~~**LSP autocomplete con param names**~~ ✓ Ver entrada arriba en
+  la deuda residual del LSP. `NominalMethod` ahora incluye
+  `param_names: Vec<String>` paralelo a `params`. Mejor UX en
+  autocomplete y hover sobre métodos custom.
+
+Tests: 3 unit nuevos evaluator (Up.1 update key existente/inexistente,
+Up.2 comprehension tuple destructure) + 2 LSP unit (update en
+autocomplete, param names en signatures) + 1 parser unit nuevo
+(`up_comprehension_acepta_tuple_destructuring`) + 2 compile_e2e
+bit-a-bit. Ejemplo `examples/guide/13l-update-comp-tuple-paramnames.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE` con pipelines chained
+(scores.update().merge()), comprehension con tuple destructure
+construyendo instancias, y Point con distance_to demostrando la
+firma del autocomplete. Cap 13 tabla Map sumó row `update` + cap 9
+"Cobertura del MVP" de comprehensions actualizada (de "deuda" a
+"sí anda con Up").
+
+VSCode extension: grammar TextMate sin cambios (los métodos comparten
+identifiers + la sintaxis de comprehension tuple destructure usa
+tokens existentes `(`, `,`, `)`). LSP autocomplete refleja `update`
+automáticamente + el param names update es de upgrade transparente
+(re-build del fitz-lsp binary toma el cambio).
+
 ### ~~Extras de API 2: List.flat_map/first/last + Map.merge~~ ✓ CERRADO 2026-05-18 (mini-tanda Ex2)
 
 Bundle siguiente al de Ex, cierra deudas chicas adicionales:
@@ -1337,9 +1379,14 @@ compile bit-a-bit `fitz run` ↔ `fitz build` sobre
 "List comprehensions (mini-tanda C)".
 
 **Diferido como deuda residual menor**:
-- Destructuring del var `[a + b for (a, b) in pairs]` —
-  workaround actual: `[t.0 + t.1 for t in pairs]`. Requiere
-  Pattern en lugar de Ident en el AST.
+- ~~Destructuring del var `[a + b for (a, b) in pairs]`~~ ✓
+  CERRADO 2026-05-18 (mini-tanda Up). `Expr::ListComp.var` cambió
+  de `String` a `Pattern` (paralelo a `Stmt::For.var` de Md).
+  Parser reusa `parse_pattern`, checker `bind_for_pattern_in_checker`,
+  evaluator `bind_for_pattern`, codegen emite destructuring nativo
+  Rust `for (mut a, mut b) in ...`. Cero refactor adicional —
+  toda la infraestructura ya existía de Md. fmt.rs también
+  actualizado para emitir Pattern via `fmt_pattern`.
 - Múltiples `for` clauses `[x*y for x in xs for y in ys]` —
   cartesian product. Python lo soporta; sin demanda concreta.
 - Set/Map comprehensions — Map comprehension `{k: v for ...}`
@@ -1840,10 +1887,13 @@ encaje en mini-tanda futura tipo "Sp" sin compromiso):
 - **Highlighting de `0..=10`**: el `=` del `..=` no se
   distingue visualmente del `=` de asignación. Aceptable
   como trade-off del grammar.
-- **Firmas de params con nombres** en autocomplete de
-  métodos custom (`fn(x: Int)` vs `fn(Int)`): requiere
-  extender `NominalMethod` con `param_names: Vec<String>`.
-  Trivial pero NO necesario para el MVP.
+- ~~**Firmas de params con nombres** en autocomplete de
+  métodos custom (`fn(x: Int)` vs `fn(Int)`)~~ ✓ CERRADO
+  2026-05-18 (mini-tanda Up). `NominalMethod` ahora incluye
+  `param_names: Vec<String>` paralelo a `params`, populado en
+  `resolve_program`. LSP `after_dot_completions` combina ambos
+  vectores para producir `fn(x: Int, y: Int) -> R` en el detail
+  del item.
 
 ---
 

@@ -1,0 +1,69 @@
+// Mini-tanda Up — updates inmutables y polish ergonómico.
+//
+// Tres mejoras chicas que cierran deuda residual visible:
+//
+//  - `Map.update(k, fn(V) -> V)`: update inmutable atómico sin tener
+//    que `get(k)?` + reconstruir el map manualmente.
+//  - `[expr for (a, b) in pairs]`: tuple destructuring en list
+//    comprehensions (paralelo a `for (k, v) in m` de Md).
+//  - LSP autocomplete de métodos custom ahora muestra param names
+//    (`fn(x: Int, y: Int)` en lugar de `fn(Int, Int)`).
+
+// --- Map.update: mutación funcional atómica ---
+let scores: Map<Str, Int> = {"ada": 80, "bob": 45, "cam": 92}
+
+// Sumar 10 puntos a ada
+let bumped: Map<Str, Int> = scores.update("ada", fn(v: Int) => v + 10)
+print(bumped["ada"])                          // 90
+print(bumped["bob"])                          // 45 (intacto)
+
+// Key inexistente: no-op (no inserta).
+let nochange: Map<Str, Int> = scores.update("missing", fn(v: Int) => v + 999)
+print(nochange.len())                         // 3
+print(nochange["ada"])                        // 80 (intacto)
+
+// Chain con merge (Ex2) — pipelines naturales.
+let normalized: Map<Str, Int> = scores
+    .update("bob", fn(v: Int) => v + 5)
+    .merge({"dru": 100})
+print(normalized["bob"])                      // 50
+print(normalized["dru"])                      // 100
+
+// --- List comprehension con tuple destructuring ---
+let pares: List<(Int, Int)> = [(1, 10), (2, 20), (3, 30)]
+
+// Antes de Up había que escribir `[t.0 + t.1 for t in pares]`.
+// Ahora directo:
+let sumas: List<Int> = [a + b for (a, b) in pares]
+print(sumas)                                  // [11, 22, 33]
+
+// Wildcard sigue funcionando.
+let primeros: List<Int> = [a for (a, _) in pares]
+print(primeros)                               // [1, 2, 3]
+
+// Caso típico: convertir pairs a otra estructura.
+type Item {
+    key: Int = 0
+    value: Int = 0
+}
+
+let items: List<Item> = [Item { key: k, value: v } for (k, v) in pares]
+print(items.len())                            // 3
+
+// --- LSP autocomplete con param names ---
+//
+// (No es algo visible desde el código mismo — el cambio lo notás
+// cuando escribís `p.` en VSCode y el editor muestra la firma del
+// método custom como `fn(other_x: Int, other_y: Int) -> Int`
+// en lugar de `fn(Int, Int) -> Int`.)
+type Point {
+    x: Int = 0
+    y: Int = 0
+
+    fn distance_to(other_x: Int, other_y: Int) -> Int {
+        return (x - other_x) + (y - other_y)
+    }
+}
+
+let p: Point = Point { x: 10, y: 5 }
+print(p.distance_to(3, 1))                    // 11

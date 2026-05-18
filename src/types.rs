@@ -200,6 +200,10 @@ pub struct NominalMethod {
     /// (`static fn` adentro del `type` body). Se invoca como
     /// `Type.method(args)` en lugar de `instance.method(args)`.
     pub is_static: bool,
+    /// Mini-tanda Up — nombres de los params en orden, paralelo a
+    /// `params`. Útil para que el LSP muestre `fn(x: Int, y: Int)`
+    /// en lugar de `fn(Int, Int)` en autocomplete + hover.
+    pub param_names: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -742,12 +746,14 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
             let mut resolved_methods: Vec<NominalMethod> = Vec::with_capacity(methods.len());
             for m in methods {
                 let mut params = Vec::with_capacity(m.params.len());
+                let mut param_names = Vec::with_capacity(m.params.len());
                 for p in &m.params {
                     let pty = match &p.type_ {
                         Some(t) => resolve_type_expr(t, &env).unwrap_or(Type::Any),
                         None => Type::Any,
                     };
                     params.push(pty);
+                    param_names.push(p.name.clone());
                 }
                 let ret = match &m.return_type {
                     Some(r) => resolve_type_expr(r, &env).unwrap_or(Type::Any),
@@ -759,6 +765,7 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
                     ret,
                     is_async: m.is_async,
                     is_static: m.is_static,
+                    param_names,
                 });
             }
             env.set_methods(id, resolved_methods);
@@ -1457,7 +1464,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             ctx.push_scope();
             // El span del binding apunta al span de la comprehension
             // (sin span propio para `var` en el AST — deuda S1).
-            ctx.declare_var(var.clone(), var_ty, *span);
+            // Mini-tanda Up — `var` ahora es Pattern. Reusa
+            // `bind_for_pattern_in_checker` (Ident/Wildcard/Tuple).
+            bind_for_pattern_in_checker(ctx, var, &var_ty, *span);
             // Filter opcional: debe tipar `Bool` (Any pasa por gradual).
             if let Some(f) = filter {
                 let f_ty = infer_expr(ctx, f);
@@ -2707,6 +2716,26 @@ fn infer_map_method(
                     span,
                 );
             }
+            Type::Map(Box::new(k.clone()), Box::new(v.clone()))
+        }
+        // Mini-tanda Up — `update(k, fn(V) -> V) -> Map<K, V>`.
+        // Aplica el callback al value asociado a `k` (si existe);
+        // devuelve un Map nuevo. Si `k` no está, no-op.
+        "update" => {
+            if !check_method_arity(ctx, "update", args_ty, 2, span) {
+                return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
+            }
+            // Arg 0: key, debe ser compatible con K.
+            if !is_compatible(&args_ty[0], k) {
+                ctx.error_at(span, format!(
+                    "`Map<{}, _>.update()`: la key debe ser `{}`, recibió `{}`",
+                    k.display(ctx.types),
+                    k.display(ctx.types),
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            // Arg 1: callback fn(V) -> V (mismo V, no transforma tipo).
+            check_unary_callback(ctx, &args_ty[1], v, "update", Some(v), span);
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
         // Mini-tanda Ex2 — `merge(other)` combina dos `Map<K, V>` en

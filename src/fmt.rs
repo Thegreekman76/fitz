@@ -840,7 +840,9 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write("[");
             ctx.write(&expr_to_inline_string(expr));
             ctx.write(" for ");
-            ctx.write(var);
+            // Mini-tanda Up — `var` ahora es Pattern. Reusa
+            // `fmt_pattern` para soportar Ident/Tuple/Wildcard.
+            fmt_pattern(ctx, var);
             ctx.write(" in ");
             ctx.write(&expr_to_inline_string(iter));
             if let Some(f) = filter {

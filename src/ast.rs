@@ -110,8 +110,10 @@ pub enum Expr {
         /// La expresión que se evalúa por cada iteración y se acumula
         /// en la lista resultado.
         expr: Box<Expr>,
-        /// Nombre del binding del for (sin destructuring).
-        var: String,
+        /// Binding del for. Pre-Up era `String` (sin destructuring);
+        /// post-Up es `Pattern` (paralelo a `Stmt::For.var` de Md).
+        /// Acepta `Ident`, `Wildcard`, y `Tuple` para destructuring.
+        var: crate::ast::Pattern,
         /// Iterable: `List<T>` o `Range`.
         iter: Box<Expr>,
         /// Filtro opcional `if cond`. Si está, se evalúa antes del

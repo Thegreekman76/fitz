@@ -2603,7 +2603,10 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             let comp_env = Environment::new_child(env);
             let mut result = Vec::new();
             for item in items {
-                comp_env.lock().define(var.clone(), item);
+                // Mini-tanda Up — bind via Pattern (paralelo a `for`
+                // de Md). Reusa `bind_for_pattern` para soportar
+                // Ident/Wildcard/Tuple destructuring.
+                bind_for_pattern(var, item, &comp_env)?;
                 if let Some(f) = filter {
                     let f_v = eval_expr(f, comp_env.clone()).await?;
                     match f_v {
@@ -3204,6 +3207,9 @@ async fn dispatch_method(
         (Value::Map(_), "map_values") => map_map_values(receiver, args, span).await,
         // Mini-tanda Ex2 — merge: combina dos Maps (last-write-wins).
         (Value::Map(_), "merge") => map_merge(receiver, args, span),
+        // Mini-tanda Up — update inmutable: aplica `fn(V) -> V` al
+        // value asociado a `k` y devuelve un Map nuevo.
+        (Value::Map(_), "update") => map_update(receiver, args, span).await,
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -4211,6 +4217,35 @@ async fn map_map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
     for (k, v) in snapshot {
         let new_v = invoke_callback(&callback, v, "map_values", span).await?;
         out.push((k, new_v));
+    }
+    Ok(Value::new_map(out))
+}
+
+/// Mini-tanda Up — `m.update(k, fn(V) -> V)`: aplica `fn` al value
+/// asociado a `k`, devuelve un Map nuevo (no muta). Si `k` no está
+/// presente, devuelve un Map igual al original (no inserta — sigue
+/// la convención "update" estilo Rust `Entry::and_modify`).
+///
+/// Útil para mutaciones atómicas sin tener que `get(k)?` + `set`.
+#[async_recursion]
+async fn map_update(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("update", &args, 2, span)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let key = it.next().unwrap();
+    let callback = it.next().unwrap();
+    let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+    for (k, v) in snapshot {
+        if k == key {
+            let new_v = invoke_callback(&callback, v, "update", span).await?;
+            out.push((k, new_v));
+        } else {
+            out.push((k, v));
+        }
     }
     Ok(Value::new_map(out))
 }
@@ -10010,6 +10045,60 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(10)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
+    }
+
+    // ---- Mini-tanda Up: Map.update + comprehension tuple destructuring ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn up_map_update_key_existente() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 10, \"b\": 20}\n\
+             let r = m.update(\"a\", fn(v) => v + 100)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            let a_value = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
+            assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(110)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn up_map_update_key_inexistente_es_no_op() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 10}\n\
+             let r = m.update(\"missing\", fn(v) => v + 1000)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 1);
+            let a_value = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
+            assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(10)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn up_comprehension_con_tuple_destructuring() {
+        let (env, res) = parse_eval_into_env(
+            "let pairs: List<(Int, Int)> = [(1, 10), (2, 20), (3, 30)]\n\
+             let sums: List<Int> = [a + b for (a, b) in pairs]",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("sums").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            assert_eq!(nums, vec![11, 22, 33]);
+        } else {
+            panic!("esperaba List");
+        }
     }
 
     // ---- Mini-tanda Ex2: List.flat_map/first/last + Map.merge ----

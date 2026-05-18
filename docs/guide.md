@@ -2506,8 +2506,9 @@ diferencia documentada pero intencional.
 
 **Cobertura del MVP**:
 - Una sola `for` clause (no `[x*y for x in xs for y in ys]`).
-- El `var` es un solo identificador (no destructuring de
-  tuples — `[a+b for (a, b) in pairs]` queda como deuda).
+- **El `var` acepta tuple destructuring** (mini-tanda Up):
+  `[a+b for (a, b) in pairs]` o `[a for (a, _) in pairs]`.
+  Paralelo al `for ... in ...` destructure de Md.
 - `iter` puede ser `List<T>` o `Range` (igual que `for ... in`).
 - Filter inline `if cond` opcional al final.
 
@@ -3713,6 +3714,7 @@ print(xs)                          // [1, 2, 3]
 | `filter(fn(k, v))`  | Map nuevo con los pares donde el callback devuelve true (Ex). |
 | `map_values(fn(v))` | Map nuevo: aplica `fn` a cada value, mantiene las keys (Ex).  |
 | `merge(other)`      | Combina dos `Map<K, V>` (last-write-wins, paralelo a `{**m, **other}`) (Ex2). |
+| `update(k, fn(v))`  | Map nuevo: aplica `fn` al value de `k` si existe, no-op si no (Up). |
 
 ```fitz
 let m = {"a": 1, "b": 2}

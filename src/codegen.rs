@@ -656,14 +656,23 @@ fn walk_expr_for_state_refs(
         // marcar falso positivo si shadowea un state var del scope.
         Expr::ListComp { expr, var, iter, filter, .. } => {
             walk_expr_for_state_refs(iter, candidates, locals, refs);
-            let was_local = locals.contains(var);
-            locals.insert(var.clone());
+            // Mini-tanda Up — `var` ahora es Pattern. Recolectamos todos
+            // los nombres del pattern (Ident/Tuple recursivo) y los
+            // agregamos a `locals` mientras walkeamos el cuerpo.
+            let mut added: Vec<String> = Vec::new();
+            collect_pattern_bindings(var, &mut added);
+            for name in &added {
+                if !locals.contains(name) {
+                    locals.insert(name.clone());
+                }
+            }
             if let Some(f) = filter {
                 walk_expr_for_state_refs(f, candidates, locals, refs);
             }
             walk_expr_for_state_refs(expr, candidates, locals, refs);
-            if !was_local {
-                locals.remove(var);
+            // Quitamos solo los que NO estaban antes (preserva outer).
+            for name in &added {
+                locals.remove(name);
             }
         }
         Expr::Map(pairs, _) => {
@@ -5995,6 +6004,28 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Map(k.clone(), Box::new(u_ty))))
             }
+            // Mini-tanda Up — update(k, fn(V) -> V) → Map<K, V> nuevo.
+            // Snapshot del receiver, busca la key, aplica fn solo si
+            // está presente; cualquier otra entry queda igual.
+            (Type::Map(k, v), "update") => {
+                check_method_arity(method, args, 2)?;
+                let (key_code, key_ty) = self.gen_expr(&args[0])?;
+                let coerced_key = coerce(&key_code, &key_ty, k);
+                let (cb_code, _) = self.gen_callback_inline(&args[1], v, Some(v), "update")?;
+                let k_rs = rust_type_for(k, self.env)?;
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let __key: {k_rs} = {key_code}; \
+                       let __cb = {cb_code}; \
+                       let __pairs: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let __out: Vec<({k_rs}, {v_rs})> = __pairs.into_iter().map(|(__k, __v)| {{ \
+                           if __k == __key {{ (__k, __cb(__v)) }} else {{ (__k, __v) }} \
+                       }}).collect(); \
+                       Arc::new(Mutex::new(__out)) }}",
+                    key_code = coerced_key,
+                );
+                Ok((code, Type::Map(k.clone(), v.clone())))
+            }
             // Mini-tanda Ex2 — merge: combina dos Maps last-write-wins.
             // Iteramos los pares de `other` y actualizamos/insertamos en
             // un clone del `obj`. Devuelve Map nuevo.
@@ -7417,7 +7448,7 @@ impl<'a> CodegenCtx<'a> {
     fn gen_list_comp(
         &mut self,
         expr: &Expr,
-        var: &str,
+        var: &crate::ast::Pattern,
         iter: &Expr,
         filter: Option<&Expr>,
         span: crate::ast::Span,
@@ -7456,7 +7487,38 @@ impl<'a> CodegenCtx<'a> {
         };
         // Scope nuevo para el var. El filter y el expr lo ven; nada más.
         self.push_scope();
-        self.declare_var(var.to_string(), elem_ty.clone());
+        // Mini-tanda Up — `var` ahora es Pattern. Construimos el binding
+        // Rust + declaramos las vars en el scope. Para Pattern::Ident
+        // emite `mut <name>`; Wildcard → `_`; Tuple → `(mut a, mut b, ...)`
+        // con destructuring nativo Rust (paralelo a `gen_for` post-Md).
+        let var_binding = match var {
+            crate::ast::Pattern::Tuple(subs) => {
+                let slot_tys: Vec<Type> = match &elem_ty {
+                    Type::Tuple(items) if items.len() == subs.len() => items.clone(),
+                    _ => (0..subs.len()).map(|_| Type::Any).collect(),
+                };
+                let mut parts: Vec<String> = Vec::with_capacity(subs.len());
+                for (sub, st) in subs.iter().zip(slot_tys.iter()) {
+                    let (b, declared) = pattern_to_simple_binding(sub, st)
+                        .map_err(|msg| self.err_at(iter.span(), msg))?;
+                    let mut_prefix = if b == "_" { "" } else { "mut " };
+                    parts.push(format!("{}{}", mut_prefix, b));
+                    for (n, t) in declared {
+                        self.declare_var(n, t);
+                    }
+                }
+                format!("({})", parts.join(", "))
+            }
+            _ => {
+                let (b, declared) = pattern_to_simple_binding(var, &elem_ty)
+                    .map_err(|msg| self.err_at(iter.span(), msg))?;
+                for (n, t) in declared {
+                    self.declare_var(n, t);
+                }
+                let mut_prefix = if b == "_" { "" } else { "mut " };
+                format!("{}{}", mut_prefix, b)
+            }
+        };
         // Filter (opcional).
         let filter_code = if let Some(f) = filter {
             let (fc, ft) = self.gen_expr(f)?;
@@ -7480,16 +7542,14 @@ impl<'a> CodegenCtx<'a> {
                     .to_string(),
             ));
         }
-        // Emitimos un bloque que devuelve el Arc<Mutex<Vec<T>>>. El
-        // for binding `var` se declara `mut` por consistencia con
-        // `gen_for` (los bodies suelen permitir reasignación local).
+        // Emitimos un bloque que devuelve el Arc<Mutex<Vec<T>>>.
         let block = if let Some(fc) = filter_code {
             format!(
-                "{{ let mut __fitz_comp = Vec::new(); for mut {var} in {iter_code} {{ if {fc} {{ __fitz_comp.push({expr_code}); }} }} Arc::new(Mutex::new(__fitz_comp)) }}",
+                "{{ let mut __fitz_comp = Vec::new(); for {var_binding} in {iter_code} {{ if {fc} {{ __fitz_comp.push({expr_code}); }} }} Arc::new(Mutex::new(__fitz_comp)) }}",
             )
         } else {
             format!(
-                "{{ let mut __fitz_comp = Vec::new(); for mut {var} in {iter_code} {{ __fitz_comp.push({expr_code}); }} Arc::new(Mutex::new(__fitz_comp)) }}",
+                "{{ let mut __fitz_comp = Vec::new(); for {var_binding} in {iter_code} {{ __fitz_comp.push({expr_code}); }} Arc::new(Mutex::new(__fitz_comp)) }}",
             )
         };
         Ok((block, Type::List(Box::new(expr_ty))))
@@ -9888,16 +9948,23 @@ fn collect_captures_expr(
         }
         // Mini-tanda C — list comprehension. El `var` es local
         // adentro del expr/filter (paralelo a walk_expr_for_state_refs).
+        // Mini-tanda Up — `var` ahora es Pattern; recolectamos sus
+        // nombres y los marcamos locals para el walk del body.
         Expr::ListComp { expr, var, iter, filter, .. } => {
             collect_captures_expr(iter, params, locals, ctx, seen, out);
-            let was_local = locals.contains(var);
-            locals.insert(var.clone());
+            let mut added: Vec<String> = Vec::new();
+            collect_pattern_bindings(var, &mut added);
+            for name in &added {
+                if !locals.contains(name) {
+                    locals.insert(name.clone());
+                }
+            }
             if let Some(f) = filter {
                 collect_captures_expr(f, params, locals, ctx, seen, out);
             }
             collect_captures_expr(expr, params, locals, ctx, seen, out);
-            if !was_local {
-                locals.remove(var);
+            for name in &added {
+                locals.remove(name);
             }
         }
         Expr::Map(pairs, _) => {

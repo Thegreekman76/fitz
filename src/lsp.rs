@@ -471,11 +471,10 @@ fn after_dot_completions(
                 }
             }
             // Mini-tanda V.5 — métodos custom (R.3) ahora aparecen
-            // después de fields. NominalMethod no guarda los nombres
-            // de los params (solo tipos), así que la firma muestra
-            // `fn(Int) -> Float` y no `fn(x: Int) -> Float`. Trade-off
-            // consistente con cómo Map/List exponen sus signatures
-            // genéricas. `async fn` se prefija explícitamente.
+            // después de fields. Mini-tanda Up — `NominalMethod` ahora
+            // incluye `param_names` paralelo a `params`, así la firma
+            // muestra `fn(x: Int, y: Int) -> Float` en lugar de
+            // `fn(Int, Int) -> Float` (mejor UX en autocomplete).
             //
             // Mini-tanda St — los métodos estáticos NO aparecen acá:
             // se invocan como `Type.method()`, no como
@@ -487,12 +486,23 @@ fn after_dot_completions(
             for m in info.methods.iter()
                 .filter(|m| !m.is_static && !m.name.starts_with('_'))
             {
-                let params_str = m
-                    .params
-                    .iter()
-                    .map(|t| t.display(type_env))
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                // Combinar param_names con params para formar
+                // `x: Int, y: Float`. Si por algún motivo las longitudes
+                // no coinciden (defensivo), caemos al format viejo.
+                let params_str = if m.param_names.len() == m.params.len() {
+                    m.params
+                        .iter()
+                        .zip(m.param_names.iter())
+                        .map(|(t, n)| format!("{}: {}", n, t.display(type_env)))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                } else {
+                    m.params
+                        .iter()
+                        .map(|t| t.display(type_env))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                };
                 let prefix = if m.is_async { "async fn" } else { "fn" };
                 let detail = format!("{}({}) -> {}", prefix, params_str, m.ret.display(type_env));
                 items.push(CompletionItem {
@@ -587,6 +597,16 @@ fn after_dot_completions(
                 ("merge", format!(
                     "fn(Map<{}, {}>) -> Map<{}, {}>",
                     k.display(type_env),
+                    v.display(type_env),
+                    k.display(type_env),
+                    v.display(type_env),
+                )),
+                // Mini-tanda Up — update inmutable (last-write-wins
+                // sobre una sola key).
+                ("update", format!(
+                    "fn({}, fn({}) -> {}) -> Map<{}, {}>",
+                    k.display(type_env),
+                    v.display(type_env),
                     v.display(type_env),
                     k.display(type_env),
                     v.display(type_env),
@@ -1311,6 +1331,44 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn up_after_dot_map_incluye_update() {
+        let src = "let m = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"update"),
+            "falta `update` (mini-tanda Up): {labels:?}"
+        );
+    }
+
+    #[test]
+    fn up_after_dot_nominal_muestra_param_names_en_signature() {
+        // Mini-tanda Up: la firma de un método custom debe mostrar
+        // `fn(x: Int, y: Int)` en lugar de `fn(Int, Int)`.
+        let src = "type Point {\n\
+                       x: Int = 0\n\
+                       y: Int = 0\n\n\
+                       fn distance_to(other_x: Int, other_y: Int) -> Int {\n\
+                           return (x - other_x) + (y - other_y)\n\
+                       }\n\
+                   }\n\
+                   let p = Point { x: 1, y: 2 }\n\
+                   p.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor justo después del último `.`.
+        let lines: Vec<&str> = src.split('\n').collect();
+        let last_line = lines.len() as u32 - 2; // -2: descontamos la línea vacía final
+        let items = completion_at_position(src, &program, &type_info, &env, last_line, 2);
+        let m = items.iter().find(|i| i.label == "distance_to").expect("falta distance_to");
+        let detail = m.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("other_x: Int") && detail.contains("other_y: Int"),
+            "esperaba firma con param names, fue: {detail:?}"
+        );
     }
 
     #[test]
