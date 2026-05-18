@@ -1,0 +1,38 @@
+// Mini-tanda Md — for sobre Map con destructuring.
+//
+// Sintaxis: `for (k, v) in m { ... }`. Bindea k y v en cada iteración.
+
+// Setup: un mapa de Str a Int.
+let inventario: Map<Str, Int> = {"manzanas": 5, "peras": 3, "bananas": 7}
+
+// Iteración con destructuring — el caso típico.
+let total: Int = 0
+for (fruta, cantidad) in inventario {
+    print("{fruta}: {cantidad}")
+    total = total + cantidad
+}
+print("total: {total}")
+// manzanas: 5
+// peras: 3
+// bananas: 7
+// total: 15
+
+// Wildcard — ignorar un campo del par.
+let suma: Int = 0
+for (_, v) in inventario {
+    suma = suma + v
+}
+print("suma sin claves: {suma}")    // 15
+
+// Wildcard total — solo contar iteraciones.
+let conteo: Int = 0
+for _ in 0..5 {
+    conteo = conteo + 1
+}
+print("conteo: {conteo}")           // 5
+
+// El `for x in xs` clásico sigue funcionando igual.
+let xs: List<Int> = [10, 20, 30]
+for x in xs {
+    print("item: {x}")
+}

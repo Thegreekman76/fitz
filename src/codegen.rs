@@ -465,6 +465,46 @@ fn contains_return_status_expr(expr: &Expr) -> bool {
     }
 }
 
+/// Mini-tanda Md — extrae todos los `Ident` de un Pattern. Usado por
+/// los walkers de codegen y el codegen del `for` con tuple destructuring.
+/// Solo cubre los patterns aceptados en `Stmt::For` (Ident, Wildcard,
+/// Tuple). Otros patterns devuelven Vec vacío (el checker los rechaza
+/// antes).
+fn collect_pattern_idents(pat: &crate::ast::Pattern) -> Vec<String> {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(name) => vec![name.clone()],
+        Pattern::Wildcard => Vec::new(),
+        Pattern::Tuple(subs) => subs.iter().flat_map(collect_pattern_idents).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// Mini-tanda Md — convierte un Pattern simple (Ident o Wildcard) en
+/// `(binding_string, vec![(name, type)])` para emitir en un `for ... in`
+/// y declarar el var en el scope del codegen. Tuple no se admite acá
+/// porque los call sites del `for` lo descomponen ANTES de llamar a
+/// este helper. Otros patterns (literales, Ok/Err, Range) devuelven
+/// error claro.
+fn pattern_to_simple_binding(
+    pat: &crate::ast::Pattern,
+    ty: &Type,
+) -> Result<(String, Vec<(String, Type)>), String> {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(name) => Ok((name.clone(), vec![(name.clone(), ty.clone())])),
+        Pattern::Wildcard => Ok(("_".into(), Vec::new())),
+        Pattern::Tuple(_) => Err(
+            "el codegen del `for` con tuple pattern requiere un Pattern::Tuple manejado por el caller"
+                .into(),
+        ),
+        other => Err(format!(
+            "patrón `{:?}` no admitido como variable de `for` en `fitz build`",
+            other
+        )),
+    }
+}
+
 /// Walker recursivo que detecta refs a `candidates` en un stmt,
 /// respetando bindings locales nuevos. `locals` se extiende a medida
 /// que entran asignaciones / for / params de FnExpr.
@@ -518,15 +558,15 @@ fn walk_stmt_for_state_refs(
         }
         Stmt::For { var, iter, body, .. } => {
             walk_expr_for_state_refs(iter, candidates, locals, refs);
-            let was_local = locals.insert(var.clone());
+            // Mini-tanda Md: extraemos todos los bindings del Pattern.
+            let names = collect_pattern_idents(var);
+            for n in &names {
+                locals.insert(n.clone());
+            }
             for s in body {
                 walk_stmt_for_state_refs(s, candidates, locals, refs);
             }
-            if !was_local {
-                // El binding ya estaba — no removemos. Si era nuevo,
-                // lo dejamos para mantener la conservadurez del
-                // approach (mejor sobre-detectar que sub-detectar).
-            }
+            // Mantenemos los bindings (igual que antes, conservador).
         }
         Stmt::Break(_, _, _) | Stmt::Continue(_, _) => {}
         Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
@@ -4058,36 +4098,45 @@ impl<'a> CodegenCtx<'a> {
 
     fn gen_for(
         &mut self,
-        var: &str,
+        var: &crate::ast::Pattern,
         iter: &Expr,
         body: &[Stmt],
         label: Option<&str>,
         ret_expected: &Type,
     ) -> Result<(), FitzError> {
-        // Dos iterables soportados hoy:
+        // Tres iterables soportados:
         //   * `for v in start..end` — rango exclusivo (5b.1).
         //   * `for v in xs` con xs: List<T> — itera sobre snapshot.
-        //     Snapshot (clone del Vec interno) para evitar re-entrancia
-        //     al RefCell si el body muta la lista original. Mismo patrón
-        //     que list_map en el intérprete.
-        // Map como iterable directo NO se soporta (alineado con el
-        // intérprete, que también lo rechaza).
+        //   * `for (k, v) in m` con m: Map<K, V> — itera sobre snapshot
+        //     con destructuring nativo Rust (mini-tanda Md).
+        // Snapshot para evitar re-entrancia si el body muta el container.
+        //
+        // Patrones aceptados como `var`:
+        //   - Pattern::Ident(name) — bindea cada elemento.
+        //   - Pattern::Wildcard — ignora cada elemento (emite `_`).
+        //   - Pattern::Tuple(subs) — destructura cada elemento como tupla.
+        use crate::ast::Pattern;
         let label_prefix = label.map(|l| format!("'{}: ", l)).unwrap_or_default();
+
+        // Range case — solo Pattern::Ident y Wildcard tienen sentido.
         if let Expr::Range { start, end, inclusive, .. } = iter {
             let (start_code, _) = self.gen_expr(start)?;
             let (end_code, _) = self.gen_expr(end)?;
-            // R.1.4: emite `..` o `..=` Rust según el flag. Mismo
-            // operador que el spec del lenguaje.
             let op = if *inclusive { "..=" } else { ".." };
+            let (binding, declared) = pattern_to_simple_binding(var, &Type::Int)
+                .map_err(|msg| self.err_at(iter.span(), msg))?;
+            let mut_prefix = if binding == "_" { "" } else { "mut " };
             self.emit_indent();
             writeln!(
                 &mut self.output,
-                "{label_prefix}for mut {var} in ({start_code} as i64){op}({end_code} as i64) {{"
+                "{label_prefix}for {mut_prefix}{binding} in ({start_code} as i64){op}({end_code} as i64) {{"
             )
             .unwrap();
             self.indent += 1;
             self.push_scope();
-            self.declare_var(var.to_string(), Type::Int);
+            for (name, ty) in declared {
+                self.declare_var(name, ty);
+            }
             for s in body {
                 self.gen_stmt_in_fn(s, ret_expected)?;
             }
@@ -4097,39 +4146,104 @@ impl<'a> CodegenCtx<'a> {
             self.emit("}\n");
             return Ok(());
         }
-        // Caso general: el iter tiene que evaluar a List<T>.
+
+        // Generic case — iter es List<T> o Map<K, V>.
         let (iter_code, iter_ty) = self.gen_expr(iter)?;
-        let elem_ty = match &iter_ty {
-            Type::List(inner) => (**inner).clone(),
+        match &iter_ty {
+            Type::List(inner) => {
+                let elem_ty = (**inner).clone();
+                if matches!(elem_ty, Type::Any) {
+                    return Err(self.err_at(iter.span(),
+                        "`for ... in xs` sobre `List<Any>`: el subset compilado exige tipo homogéneo concreto"
+                            .to_string(),
+                    ));
+                }
+                let (binding, declared) = pattern_to_simple_binding(var, &elem_ty)
+                    .map_err(|msg| self.err_at(iter.span(), msg))?;
+                let mut_prefix = if binding == "_" { "" } else { "mut " };
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "{label_prefix}for {mut_prefix}{binding} in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+                )
+                .unwrap();
+                self.indent += 1;
+                self.push_scope();
+                for (name, ty) in declared {
+                    self.declare_var(name, ty);
+                }
+                for s in body {
+                    self.gen_stmt_in_fn(s, ret_expected)?;
+                }
+                self.pop_scope();
+                self.indent -= 1;
+            }
+            Type::Map(k_ty, v_ty) => {
+                // Mini-tanda Md — destructuring nativo Rust sobre el
+                // Vec<(K, V)> interno del Map. Aceptamos:
+                //   - Pattern::Tuple([Ident a, Ident b]) → `(a, b)`
+                //     destructuring directo.
+                //   - Pattern::Wildcard → `_` (ignora todo el par).
+                // Pattern::Ident solo (`for kv in m`) NO está soportado
+                // en codegen porque emitir un binding tipo `(K, V)` que
+                // se use luego como Tuple Rust requiere helpers que
+                // hoy no tenemos.
+                match var {
+                    Pattern::Tuple(subs) if subs.len() == 2 => {
+                        let (kname, ktdecl) = pattern_to_simple_binding(&subs[0], k_ty)
+                            .map_err(|msg| self.err_at(iter.span(), msg))?;
+                        let (vname, vtdecl) = pattern_to_simple_binding(&subs[1], v_ty)
+                            .map_err(|msg| self.err_at(iter.span(), msg))?;
+                        // `mut _` no es válido en Rust. Detectar
+                        // wildcards y omitir el `mut`.
+                        let k_prefix = if kname == "_" { "" } else { "mut " };
+                        let v_prefix = if vname == "_" { "" } else { "mut " };
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for ({k_prefix}{kname}, {v_prefix}{vname}) in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+                        )
+                        .unwrap();
+                        self.indent += 1;
+                        self.push_scope();
+                        for (name, ty) in ktdecl.into_iter().chain(vtdecl) {
+                            self.declare_var(name, ty);
+                        }
+                        for s in body {
+                            self.gen_stmt_in_fn(s, ret_expected)?;
+                        }
+                        self.pop_scope();
+                        self.indent -= 1;
+                    }
+                    Pattern::Wildcard => {
+                        self.emit_indent();
+                        writeln!(
+                            &mut self.output,
+                            "{label_prefix}for _ in ({iter_code}).lock().unwrap().clone().into_iter() {{"
+                        )
+                        .unwrap();
+                        self.indent += 1;
+                        self.push_scope();
+                        for s in body {
+                            self.gen_stmt_in_fn(s, ret_expected)?;
+                        }
+                        self.pop_scope();
+                        self.indent -= 1;
+                    }
+                    _ => {
+                        return Err(self.err_at(iter.span(),
+                            "`for ... in m` sobre Map en `fitz build` exige un tuple pattern de 2 elementos: `for (k, v) in m { ... }`. `for kv in m` queda como deuda residual del codegen.",
+                        ));
+                    }
+                }
+            }
             other => {
                 return Err(self.err_at(iter.span(), format!(
-                    "`for {} in <expr>`: el iterable es `{}`, solo se soportan Range y List<T>",
-                    var,
+                    "`for <pat> in <expr>`: el iterable es `{}`, solo se soportan Range, List<T> y Map<K, V>",
                     display_type(other, self.env)
                 )));
             }
-        };
-        if matches!(elem_ty, Type::Any) {
-            return Err(self.err_at(iter.span(), format!(
-                "`for {} in ...` sobre `List<Any>`: el subset compilado exige tipo homogéneo \
-                 concreto",
-                var
-            )));
         }
-        self.emit_indent();
-        writeln!(
-            &mut self.output,
-            "{label_prefix}for mut {var} in ({iter_code}).lock().unwrap().clone().into_iter() {{"
-        )
-        .unwrap();
-        self.indent += 1;
-        self.push_scope();
-        self.declare_var(var.to_string(), elem_ty);
-        for s in body {
-            self.gen_stmt_in_fn(s, ret_expected)?;
-        }
-        self.pop_scope();
-        self.indent -= 1;
         self.emit_indent();
         self.emit("}\n");
         Ok(())
@@ -8523,7 +8637,10 @@ fn collect_captures_stmt(
         }
         Stmt::For { var, iter, body, .. } => {
             collect_captures_expr(iter, params, locals, ctx, seen, out);
-            locals.insert(var.clone());
+            // Mini-tanda Md: var es Pattern, extraemos todos los idents.
+            for name in collect_pattern_idents(var) {
+                locals.insert(name);
+            }
             for s in body {
                 collect_captures_stmt(s, params, locals, ctx, seen, out);
             }

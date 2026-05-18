@@ -592,12 +592,15 @@ pub enum Stmt {
     },
 
     /// `for var in iter { body }`. `iter` se evalúa una vez al entrar
-    /// y debe ser iterable (List o Range; Map iterable cuando exista
-    /// el tipo `Pair`). `var` se define en el scope del body en cada
-    /// iteración. `break`/`continue` funcionan igual que en `while`.
+    /// y debe ser iterable (List, Range, o Map). `var` es un `Pattern`
+    /// que se matchea contra cada elemento del iter en cada iteración.
+    /// Mini-tanda Md: el Pattern destraba `for (k, v) in m` sobre Map
+    /// (Pattern::Tuple), `for _ in 0..10` (Pattern::Wildcard), además
+    /// del clásico `for x in xs` (Pattern::Ident).
+    /// `break`/`continue` funcionan igual que en `while`.
     /// `label` (mini-tanda L) opcional para `break 'outer`.
     For {
-        var: String,
+        var: Pattern,
         iter: Expr,
         body: Vec<Stmt>,
         label: Option<String>,
@@ -1093,7 +1096,7 @@ mod tests {
     fn for_stmt_envuelve_var_iter_y_body() {
         // `for x in xs { print(x) }`
         let f = Stmt::For {
-            var: "x".into(),
+            var: Pattern::Ident("x".into()),
             iter: Expr::Ident("xs".into(), Span::ZERO),
             body: vec![Stmt::Expr(Expr::Call {
                 callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
@@ -1103,7 +1106,7 @@ mod tests {
          span: Span::ZERO };
         match f {
             Stmt::For { var, iter, body, .. } => {
-                assert_eq!(var, "x");
+                assert_eq!(var, Pattern::Ident("x".into()));
                 assert_eq!(iter, Expr::Ident("xs".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
             }

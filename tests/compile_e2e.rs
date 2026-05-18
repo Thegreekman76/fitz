@@ -1787,6 +1787,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "09b-indexing-slicing.fitz",
     "09c-tuples.fitz",
     "09d-comprehensions.fitz",
+    "09e-for-map.fitz",
     "10-match.fitz",
     "11-funciones.fitz",
     "12-type.fitz",
@@ -2601,4 +2602,33 @@ fn mini_tanda_fm_alignment_right_con_fill_default() {
     let (stdout, exit) = build_and_run("mini_tanda_fm_align_right", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "[   42]");
+}
+
+// ---- Mini-tanda Md — for con Pattern (Map destructuring) ----
+
+#[test]
+fn mini_tanda_md_for_sobre_map_destructura_pares() {
+    // `for (k, v) in m` itera sobre el Map bindeando k y v.
+    let src = "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+               let total: Int = 0\n\
+               for (_, v) in m {\n\
+                 total = total + v\n\
+               }\n\
+               print(total)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_md_for_map", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "6");
+}
+
+#[test]
+fn mini_tanda_md_for_wildcard_pattern_compila() {
+    // `for _ in 0..5` ignora el elemento.
+    let src = "let count: Int = 0\n\
+               for _ in 0..5 {\n\
+                 count = count + 1\n\
+               }\n\
+               print(count)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_md_wildcard", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "5");
 }

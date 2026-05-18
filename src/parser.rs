@@ -1629,9 +1629,11 @@ impl Parser {
 
     fn parse_for_with_label(&mut self, span: Span, label: Option<String>) -> FitzResult<Stmt> {
         self.expect(&Token::For, "se esperaba 'for'")?;
-        let var = self.expect_ident(
-            "se esperaba nombre de variable después de 'for'",
-        )?;
+        // Mini-tanda Md: el var del for ahora es un Pattern. Reusa
+        // `parse_pattern` (el mismo de los arms de match), que cubre
+        // Ident, Wildcard, Tuple — los 3 casos válidos en for. Otros
+        // patterns (literales, Ok/Err, Range) el checker los rechaza.
+        let var = self.parse_pattern()?;
         self.expect(&Token::In, "se esperaba 'in' después de la variable de 'for'")?;
         // El iterable no permite struct literal a primer nivel — el `{`
         // siguiente arranca el cuerpo del for. Adentro de paréntesis o
@@ -5503,7 +5505,7 @@ mod tests {
         assert_eq!(
             stmt,
             Stmt::For {
-                var: "x".into(),
+                var: Pattern::Ident("x".into()),
                 iter: Expr::Ident("xs".into(), Span::ZERO),
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
                 }, Span::ZERO)],
@@ -5518,7 +5520,7 @@ mod tests {
         let stmt = parse_one_stmt("for i in 0..10 { print(i) }");
         match stmt {
             Stmt::For { var, iter, body, .. } => {
-                assert_eq!(var, "i");
+                assert_eq!(var, Pattern::Ident("i".into()));
                 assert_eq!(
                     iter,
                     Expr::Range {
@@ -6279,7 +6281,7 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::For { var, iter, body, .. } => {
-                assert_eq!(var, "u");
+                assert_eq!(var, Pattern::Ident("u".into()));
                 assert!(matches!(iter, Expr::List(_, _)));
                 assert_eq!(body.len(), 1);
             }
@@ -7140,6 +7142,53 @@ mod tests {
                 assert!(has_none, "esperaba StrPart::Expr(_, None) sin spec");
             }
             other => panic!("se esperaba StrInterp, recibió {:?}", other),
+        }
+    }
+
+    // ---------------------------------------------------------------
+    // Mini-tanda Md — for con Pattern en `var`.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn for_con_tuple_pattern_parsea() {
+        // `for (k, v) in m { ... }` con Pattern::Tuple de 2 idents.
+        let stmt = parse_one_stmt("for (k, v) in m { print(k) }");
+        match stmt {
+            Stmt::For { var, .. } => {
+                match var {
+                    Pattern::Tuple(subs) => {
+                        assert_eq!(subs.len(), 2);
+                        assert!(matches!(subs[0], Pattern::Ident(ref n) if n == "k"));
+                        assert!(matches!(subs[1], Pattern::Ident(ref n) if n == "v"));
+                    }
+                    other => panic!("esperaba Pattern::Tuple, dio {:?}", other),
+                }
+            }
+            other => panic!("esperaba Stmt::For, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_con_wildcard_pattern_parsea() {
+        // `for _ in 0..10 { ... }` con Pattern::Wildcard.
+        let stmt = parse_one_stmt("for _ in 0..10 { print(\"x\") }");
+        match stmt {
+            Stmt::For { var, .. } => {
+                assert!(matches!(var, Pattern::Wildcard));
+            }
+            other => panic!("esperaba Stmt::For, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn for_con_ident_simple_sigue_funcionando() {
+        // Regresión: `for x in xs` con Pattern::Ident.
+        let stmt = parse_one_stmt("for x in xs { print(x) }");
+        match stmt {
+            Stmt::For { var, .. } => {
+                assert_eq!(var, Pattern::Ident("x".into()));
+            }
+            other => panic!("esperaba Stmt::For, dio {:?}", other),
         }
     }
 }

@@ -1975,6 +1975,50 @@ for i in 0..3 {
 print(total)   // → 9
 ```
 
+### Iterar Maps con destructuring (mini-tanda Md)
+
+`for` también itera sobre `Map<K, V>`, produciendo un par `(k, v)`
+por cada iteración. El patrón canónico es destructurar en el binding:
+
+```fitz
+let inventario: Map<Str, Int> = {"manzanas": 5, "peras": 3}
+
+for (fruta, cantidad) in inventario {
+    print("{fruta}: {cantidad}")
+}
+```
+
+El orden de iteración es el orden de inserción del Map (Fitz preserva
+inserción order). El `for ... in` toma un snapshot del Map antes de
+iterar, así que mutar el Map durante el loop no afecta la iteración.
+
+Para casos donde querés ignorar un campo (o todo el elemento), usá `_`:
+
+```fitz
+let suma: Int = 0
+for (_, v) in inventario {       // solo valores
+    suma = suma + v
+}
+
+for _ in 0..5 {                   // solo contar
+    print("tick")
+}
+```
+
+El `_` no bindea nada — útil con `for _ in 0..N` para "repetir N veces".
+
+Si necesitás el par como `Tuple` (sin destructurar), usá un Ident
+solo (solo `fitz run`; el codegen exige tuple pattern):
+
+```fitz
+for kv in inventario {
+    print("{kv.0} = {kv.1}")     // accedés por .0/.1
+}
+```
+
+Ver [examples/guide/09e-for-map.fitz](../examples/guide/09e-for-map.fitz)
+para el ejemplo completo, validado bit-a-bit `fitz run` ↔ `fitz build`.
+
 ### Patrón de rango en `match` (adelanto)
 
 Los rangos también se pueden usar como **patrones** en `match`, para

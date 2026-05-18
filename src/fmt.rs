@@ -528,7 +528,9 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
         }
         Stmt::For { var, iter, body, .. } => {
             ctx.write("for ");
-            ctx.write(var);
+            // Mini-tanda Md: var es Pattern (puede ser Ident, Wildcard,
+            // Tuple). `fmt_pattern` ya cubre los 3 casos.
+            fmt_pattern(ctx, var);
             ctx.write(" in ");
             fmt_expr(ctx, iter);
             ctx.write(" ");

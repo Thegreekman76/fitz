@@ -2434,6 +2434,57 @@ fn update_result_coverage(
     }
 }
 
+/// Mini-tanda Md — Bindea un Pattern del `for` contra el tipo del
+/// elemento del iter, declarando las vars correspondientes en el
+/// scope actual. Cubre Ident/Wildcard/Tuple recursivo. Otros patterns
+/// (literales, Ok/Err, Range) emiten error "patrón no admitido en
+/// for".
+fn bind_for_pattern_in_checker(
+    ctx: &mut CheckCtx,
+    pat: &crate::ast::Pattern,
+    elem_ty: &Type,
+    fallback_span: Span,
+) {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(name) => {
+            ctx.declare_var(name.clone(), elem_ty.clone(), fallback_span);
+        }
+        Pattern::Wildcard => {
+            // Sin binding — el elemento se descarta.
+        }
+        Pattern::Tuple(subs) => {
+            // El elem tiene que ser una tupla del mismo largo.
+            match elem_ty.base() {
+                Type::Tuple(item_tys) if item_tys.len() == subs.len() => {
+                    for (sub, t) in subs.iter().zip(item_tys.iter()) {
+                        bind_for_pattern_in_checker(ctx, sub, t, fallback_span);
+                    }
+                }
+                Type::Any => {
+                    // Gradual — bindeamos cada ident del pattern como Any.
+                    for sub in subs {
+                        bind_for_pattern_in_checker(ctx, sub, &Type::Any, fallback_span);
+                    }
+                }
+                other => {
+                    ctx.error_at(fallback_span, format!(
+                        "tuple pattern del `for` espera una tupla de {} elementos, recibió `{}`",
+                        subs.len(),
+                        other.display(ctx.types)
+                    ));
+                }
+            }
+        }
+        other => {
+            ctx.error_at(fallback_span, format!(
+                "patrón `{:?}` no admitido como variable de `for` (usá Ident, `_`, o tupla)",
+                other
+            ));
+        }
+    }
+}
+
 /// Mini-tanda Fm — valida que un `FormatSpec` sea aplicable al tipo
 /// del expr interpolado. Reglas (paralelas a Python):
 ///   - `f`/`F`/`e`/`E`/`g`/`G`/`%` exigen Float o Int (promoción
@@ -3098,14 +3149,18 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
         }
 
         Stmt::For { var, iter, body, span, .. } => {
+            // Mini-tanda Md — `var` ahora es un Pattern. Tipo del elem
+            // depende del iter: List<T> → T; Range → Int; Map<K, V> →
+            // Tuple([K, V]) (cada iteración produce un par).
             let iter_ty = infer_expr(ctx, iter);
             let elem_ty = match &iter_ty {
                 Type::List(t) => (**t).clone(),
                 Type::Range => Type::Int,
+                Type::Map(k, v) => Type::Tuple(vec![(**k).clone(), (**v).clone()]),
                 Type::Any => Type::Any,
                 other => {
                     ctx.error_at(*span, format!(
-                        "el iterable de `for` debe ser List o Range, recibió `{}`",
+                        "el iterable de `for` debe ser List, Range o Map, recibió `{}`",
                         other.display(ctx.types)
                     ));
                     Type::Any
@@ -3113,10 +3168,7 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             };
             ctx.push_scope();
             ctx.loop_depth += 1;
-            // `For.var` no tiene span propio (deuda S1) — aproximamos
-            // con el span del Stmt::For. go-to-def sobre el uso del
-            // var salta al `for ... in ...`.
-            ctx.declare_var(var.clone(), elem_ty, *span);
+            bind_for_pattern_in_checker(ctx, var, &elem_ty, *span);
             check_block(ctx, body);
             ctx.loop_depth -= 1;
             ctx.pop_scope();
@@ -7188,5 +7240,49 @@ print(total)
         let src = "let n: Int = 42\nlet r = \"{n:s}\"\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    // ---- Mini-tanda Md — for con Pattern en `var` ----
+
+    #[test]
+    fn checker_for_tuple_pattern_sobre_map_bindea_k_y_v_con_tipos_correctos() {
+        // `for (k, v) in m` con m: Map<Str, Int> debe bindear k: Str y v: Int.
+        // Si los uso correctamente, sin errores.
+        let src = "let m: Map<Str, Int> = {\"a\": 1}\nfor (k, v) in m {\n    let len_k: Int = k.len()\n    let v2: Int = v + 1\n}\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_for_wildcard_pattern_compila_sin_binding() {
+        // `for _ in xs` no bindea nada, no debe haber errores aún si `_`
+        // se usaría adentro del body (no existe).
+        let src = "let xs: List<Int> = [1, 2, 3]\nfor _ in xs {\n    print(\"hola\")\n}\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_for_tuple_pattern_sobre_list_es_error() {
+        // `for (a, b) in xs` con xs: List<Int> no tiene sentido — error.
+        let src = "let xs: List<Int> = [1, 2, 3]\nfor (a, b) in xs {\n    print(a)\n}\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("tupla")),
+            "esperaba error sobre tuple pattern: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_for_pattern_int_literal_es_error() {
+        // `for 42 in xs` — pattern literal no admitido como for var.
+        let src = "for 42 in [1, 2] { print(\"x\") }\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("admitido") || e.message.contains("Ident")),
+            "esperaba error sobre pattern no admitido: {:?}",
+            errors
+        );
     }
 }

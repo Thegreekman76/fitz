@@ -1772,6 +1772,11 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
         //  - Range: itera los Int de start a end-1.
         //  - Map: aún no (necesita el tipo `Pair`/`entry`; deuda abierta).
         //  - Otros: type error explícito.
+        // Mini-tanda Md: `var` es ahora un Pattern. Maneja:
+        //   - `for x in xs` → Pattern::Ident bindea cada elem.
+        //   - `for _ in 0..10` → Pattern::Wildcard ignora cada elem.
+        //   - `for (k, v) in m` → Pattern::Tuple destructura.
+        //   - `for kv in m` → Pattern::Ident bindea como `Value::Tuple([k, v])`.
         Stmt::For { var, iter, body, label, span: _ } => {
             let iter_v = eval_expr(iter, env.clone()).await?;
             // F17.3: materializamos a `Vec<Value>` en lugar de
@@ -1789,14 +1794,17 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 // iterating" sin renunciar a mutación.
                 Value::List(items) => items.lock().clone(),
                 Value::Range { start, end } => (start..end).map(Value::Int).collect(),
-                Value::Map(_) => return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::InvalidSyntax,
-                    0, 0,
-                    "`for` sobre Map aún no soportado — necesita el tipo Pair",
-                ))),
+                // Mini-tanda Md: Map iterable como Vec<Tuple([K, V])>.
+                // El orden de inserción se preserva (Map de Fitz usa Vec
+                // internamente). Snapshot para evitar re-entrancia.
+                Value::Map(entries) => entries
+                    .lock()
+                    .iter()
+                    .map(|(k, v)| Value::Tuple(vec![k.clone(), v.clone()]))
+                    .collect(),
                 other => return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeMismatch {
-                        expected: "List o Range".into(),
+                        expected: "List, Range o Map".into(),
                         found: other.type_name().into(),
                     },
                     0, 0,
@@ -1807,7 +1815,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                 ))),
             };
             for item in items {
-                env.lock().define(var.clone(), item);
+                bind_for_pattern(var, item, &env)?;
                 match run_loop_body(body, env.clone(), label.clone()).await {
                     LoopControl::Continue => continue,
                     LoopControl::Break(_) => break, // value descartado en statement-mode
@@ -2034,6 +2042,56 @@ fn label_matches(signal_label: &Option<String>, loop_label: &Option<String>) -> 
             Some(l) => s == l,
             None => false,
         },
+    }
+}
+
+/// Mini-tanda Md — Bindea un Pattern del for contra un Value en el
+/// env actual. Cubre Ident, Wildcard, Tuple (recursivo). Otros
+/// patterns NO deberían llegar acá — el checker los rechaza, pero
+/// si lo hacen igual, devolvemos un error de runtime claro.
+fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> EvalResult<()> {
+    use crate::ast::Pattern;
+    match pat {
+        Pattern::Ident(name) => {
+            env.lock().define(name.clone(), value);
+            Ok(())
+        }
+        Pattern::Wildcard => Ok(()),
+        Pattern::Tuple(subs) => match value {
+            Value::Tuple(items) if items.len() == subs.len() => {
+                for (sub, v) in subs.iter().zip(items) {
+                    bind_for_pattern(sub, v, env)?;
+                }
+                Ok(())
+            }
+            Value::Tuple(items) => Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: format!("tupla de {} elementos", subs.len()),
+                    found: format!("tupla de {} elementos", items.len()),
+                },
+                0, 0,
+                format!(
+                    "tuple pattern del `for` espera {} elementos, recibió {}",
+                    subs.len(), items.len()
+                ),
+            ))),
+            other => Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Tuple".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!(
+                    "tuple pattern del `for` espera una tupla, recibió `{}`",
+                    other.type_name()
+                ),
+            ))),
+        },
+        other => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            0, 0,
+            format!("patrón `{:?}` no admitido en `for` (usá Ident, `_`, o Tuple)", other),
+        ))),
     }
 }
 
@@ -7490,15 +7548,35 @@ for i in 0..5 {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn for_sobre_map_es_error_explicito() {
+    async fn for_sobre_map_destructura_pares_kv() {
+        // Mini-tanda Md — `for (k, v) in m` bindea k y v en cada iteración.
         let src = r#"
-for x in {"a": 1} {
-    print(x)
+let m = {"a": 1, "b": 2}
+for (k, v) in m {
+    last_k = k
+    last_v = v
 }
 "#;
-        let res = parse_and_eval(src).await;
-        let err = res.unwrap_err();
-        assert!(err.message.contains("Map"));
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("last_k"), Some(Value::Str("b".into())));
+        assert_eq!(env.lock().get("last_v"), Some(Value::Int(2)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn for_sobre_map_con_ident_bindea_como_tuple() {
+        // `for kv in m` bindea kv como Value::Tuple([k, v]) en cada iter.
+        let src = r#"
+let m = {"a": 1}
+for kv in m {
+    last_first = kv.0
+    last_second = kv.1
+}
+"#;
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("last_first"), Some(Value::Str("a".into())));
+        assert_eq!(env.lock().get("last_second"), Some(Value::Int(1)));
     }
 
     #[tokio::test(flavor = "current_thread")]

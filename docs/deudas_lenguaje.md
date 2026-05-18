@@ -651,9 +651,33 @@ posteriores.
   tuple patterns en match (con nesting). Limitaciones del MVP
   documentadas: en `fitz build` los tuple patterns no admiten
   literales Str/Range/Or como sub-pattern, y `let (...)` solo
-  admite Ident/Wildcard/Tuple (no literales ni Ok/Err). Iteración
-  de Maps con destructuring `for (k, v) in m` queda como
-  sub-paso futuro (requiere cambio al iterador de Map).
+  admite Ident/Wildcard/Tuple (no literales ni Ok/Err).
+- ~~**For sobre Map con destructuring** `for (k, v) in m`~~ ✓
+  CERRADO 2026-05-18 (mini-tanda Md). `Stmt::For.var` cambió de
+  `String` a `Pattern`. El parser usa `parse_pattern` general
+  (reusa el del match) y el checker valida que sea Ident,
+  Wildcard o Tuple — otros patterns rechazados con error claro.
+  Evaluator: `Value::Map` se materializa como `Vec<Value::Tuple([k,
+  v])>` (snapshot para evitar re-entrancia) y el helper
+  `bind_for_pattern` descompone recursivamente. Checker: el
+  elem_ty para Map es `Tuple(K, V)`, y `bind_for_pattern_in_checker`
+  bindea k:K y v:V en el scope cuando el pattern es
+  Pattern::Tuple. Codegen: emite `for (mut k, mut v) in m.lock()
+  .unwrap().clone().into_iter() { ... }` nativo Rust con
+  destructuring; `_` se emite sin `mut`. Wildcard `for _ in 0..N`
+  también soportado (Rust nativo). 9 unit tests nuevos (3 parser
+  + 4 checker + 2 evaluator de regresión) + 2 E2E bit-a-bit.
+  Ejemplo `examples/guide/09e-for-map.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 9 de la guía suma sub-sección
+  "Iterar Maps con destructuring (mini-tanda Md)".
+
+  **Deuda residual menor**: `for kv in m` (Pattern::Ident sobre
+  Map, sin destructuring) funciona en `fitz run` (bindea como
+  `Value::Tuple([k, v])` accesible con `kv.0`/`kv.1`), pero `fitz
+  build` lo rechaza con error claro porque emitir un binding
+  Rust tipo `(K, V)` que se use como Tuple Fitz requiere helpers
+  que no tenemos. Workaround: usar tuple destructuring `for (k,
+  v) in m`.
 - **Trait-like polymorphism** — interfaces o traits con métodos
   abstractos. Decisión grande de diseño (Rust traits? Go
   interfaces? duck typing?). ~10-15h cuando aparezca el caso de
