@@ -1063,15 +1063,67 @@ sobre mensajes específicos) + 2 compile_e2e bit-a-bit
 mensaje propio".
 
 **Deuda residual** (NO bloquea próximas tandas):
-- **`Result<T, E>` con E tipado en codegen**: el binding `Err(e)`
-  en codegen siempre tipa `Str`, así que acceder a fields del
-  Err (`Err(e) => e.status`) no funciona en `fitz build`. Refactor:
-  `Type::Result(Box<Type>)` → `Type::Result { ok, err }` con
-  inferencia del E. Toca 10+ sitios del checker. ~3-4h cuando
-  aparezca demanda concreta.
+- ~~**`Result<T, E>` con E tipado en codegen**~~ ✓ CERRADO
+  2026-05-18 (mini-tanda Re+). Ver entrada dedicada a continuación.
 - **`Err(List<T>)`/`Err(Map<K, V>)` en codegen**: requieren
   helpers de format para el wrap Arc<Mutex<Vec<...>>>. Sin
   presión real.
+
+### ~~`Result<T, E>` con E tipado~~ ✓ CERRADO 2026-05-18 (mini-tanda Re+)
+
+Refactor del shape `Type::Result(Box<Type>)` → `Type::Result {
+ok: Box<Type>, err: Box<Type> }`. Cierra la deuda residual más
+visible de Err+: el binding `Err(e)` ahora tipa con el E real,
+así que **acceder a fields del Err funciona end-to-end** (`fitz
+run` Y `fitz build`).
+
+**Sintaxis source**:
+- `Result<T>` (1 arg) — default `err = Str`, compat con código
+  existente.
+- `Result<T, E>` (2 args) — E explícito.
+
+**Inferencia del checker**:
+- `Ok(x)` → `Result { ok: type(x), err: Any }`.
+- `Err(e)` → `Result { ok: Any, err: type(e) }`.
+- LUB de Results recursivo en ambos lados.
+- `is_compatible` para Results requiere compat en ok Y err.
+
+**Pattern `Err(e)`**: el binding `e` ahora extrae el err del
+scrutinee `Result { ok, err }`. Hereda el E concreto (Int,
+Instance, Tuple) o el default Str cuando es un Result legacy.
+
+**Codegen**:
+- `rust_type_for(Type::Result { ok, err })` → `Result<T_rust,
+  E_rust>` con E real (default Str cuando E es Str default,
+  `_` cuando es Any para inferencia rustc).
+- `gen_err(value)`: ya NO coerce a String. Emite `Err(<code>)`
+  directo con el tipo Rust real. Tipo Fitz sintetizado:
+  `Result { ok: Any, err: type(value) }`.
+- `pattern_to_arm` para `Pattern::ErrBinding`: extrae el `err`
+  del `scrut_ty` y bindea con ese tipo en lugar de Str hardcoded.
+
+**Display de `Type::Result`** omite el E cuando es Str (default)
+o Any para no contaminar mensajes con `Result<T, Str>` redundante.
+
+Implementación: ~80 LoC entre types (`Type::Result` enum +
+inferencia + is_compatible + lub + display + pattern bind) +
+codegen (rust_type_for + gen_err + pattern_to_arm). Refactor
+mecánico de ~25+ sitios donde se construía/destructuraba
+`Type::Result(t)` — todos cubiertos con sed regex automáticos.
+**8 unit tests nuevos** (5 checker — anotación explícita,
+binding inferido, legacy compat, aridad inválida, display
+condicional) + 3 compile_e2e bit-a-bit (caso canónico `Err(e)
+=> e.status`, `Err(Int)` con binding Int, legacy `Result<T>`).
+Ejemplo `examples/guide/14c-result-tipado.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`. Cap 14 de la guía suma sub-sección
+"`Result<T, E>` con E tipado (mini-tanda Re+)".
+
+**Deuda residual menor** (NO bloquea):
+- `Err(List<T>)`/`Err(Map<K, V>)`: el codegen ya no rechaza
+  estos tipos en `gen_err` (los acepta como cualquier otro tipo
+  ahora que no hay coerción a String), PERO el codegen del
+  Result Rust para listas requeriría wrappers `Arc<Mutex<>>` en
+  ambos lados, todavía no validado end-to-end. Sin presión real.
 
 ### Bridge async Fitz ↔ Python asyncio (Fase 8.6)
 

@@ -1800,6 +1800,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13d-iteradores.fitz",
     "14-result.fitz",
     "14b-errores-tipados.fitz",
+    "14c-result-tipado.fitz",
     "16-modulos.fitz",
     "17-http.fitz",
     "17b-middleware.fitz",
@@ -2691,6 +2692,59 @@ fn mini_tanda_err_plus_err_int_compila_y_corre() {
     let (stdout, exit) = build_and_run("mini_tanda_err_plus_int", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "err: 404");
+}
+
+// ---- Mini-tanda Re+ — Result<T, E> tipado en codegen ----
+
+#[test]
+fn mini_tanda_re_plus_err_instance_fields_accesibles_en_build() {
+    // El caso canónico que motiva Re+: tras anotar `Result<T, E>`
+    // con E concreto, el binding `Err(e)` tipa con E real (no Str),
+    // así que podés acceder a sus fields en `fitz build`.
+    let src = "type ApiError { status: Int, msg: Str }\n\
+               fn fetch() -> Result<Int, ApiError> {\n\
+                 return Err(ApiError { status: 503, msg: \"unavailable\" })\n\
+               }\n\
+               match fetch() {\n\
+                 Ok(v) => print(\"ok: {v}\"),\n\
+                 Err(e) => print(\"err {e.status}: {e.msg}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mini_tanda_re_plus_fields", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err 503: unavailable");
+}
+
+#[test]
+fn mini_tanda_re_plus_err_int_bindea_int_no_str() {
+    // Antes de Re+, `Err(e)` siempre bindeaba `e: Str` en codegen.
+    // Ahora con `Result<T, Int>` explícito, `e` tipa como Int.
+    let src = "fn fail() -> Result<Str, Int> {\n\
+                 return Err(404)\n\
+               }\n\
+               let code: Int = match fail() {\n\
+                 Ok(_) => 0,\n\
+                 Err(e) => e\n\
+               }\n\
+               print(code)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_re_plus_int_binding", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "404");
+}
+
+#[test]
+fn mini_tanda_re_plus_legacy_result_t_sin_e_sigue_funcionando() {
+    // Regresión: `Result<T>` sin E sigue funcionando (default Str).
+    let src = "fn div(a: Int, b: Int) -> Result<Int> {\n\
+                 if b == 0 { return Err(\"zero\") }\n\
+                 return Ok(a / b)\n\
+               }\n\
+               match div(10, 0) {\n\
+                 Ok(v) => print(\"ok: {v}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mini_tanda_re_plus_legacy", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err: zero");
 }
 
 #[test]

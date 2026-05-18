@@ -53,9 +53,15 @@ pub enum Type {
     List(Box<Type>),
     /// `Map<K, V>`.
     Map(Box<Type>, Box<Type>),
-    /// `Result<T>`. La E está fijada como `Str` por convención hasta
-    /// que el lenguaje soporte genéricos de usuario (post-Fase 5).
-    Result(Box<Type>),
+    /// `Result<T>` o `Result<T, E>` (mini-tanda Re+). Cuando el usuario
+    /// escribe `Result<T>` sin E explícito, el parser lo expande a
+    /// `Result<T, Str>` por compatibilidad con todo el código que existía
+    /// antes del refactor. Anotar `Result<T, MiError>` permite carry de
+    /// tipos custom en el Err side.
+    Result {
+        ok: Box<Type>,
+        err: Box<Type>,
+    },
 
     /// `Future<T>` — el valor pendiente que produce una `async fn` al
     /// llamarse. Solo `.await` (adentro de otra `async fn`) lo desempaca
@@ -138,7 +144,14 @@ impl Type {
             Type::Range => "Range".into(),
             Type::List(t) => format!("List<{}>", t.display(env)),
             Type::Map(k, v) => format!("Map<{}, {}>", k.display(env), v.display(env)),
-            Type::Result(t) => format!("Result<{}>", t.display(env)),
+            // Mini-tanda Re+ — Display omite el E cuando es Str
+            // (default, compat con escritura `Result<T>`) o cuando es
+            // Any. Para E concreto distinto (Int/Instance/etc.),
+            // muestra la forma completa `Result<T, E>`.
+            Type::Result { ok: t, err: e } => match e.as_ref() {
+                Type::Str | Type::Any => format!("Result<{}>", t.display(env)),
+                _ => format!("Result<{}, {}>", t.display(env), e.display(env)),
+            },
             Type::Future(t) => format!("Future<{}>", t.display(env)),
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
@@ -494,9 +507,27 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             Ok(Type::Map(Box::new(k), Box::new(v)))
         }
         "Result" => {
-            expect_arity(name, 1, args)?;
-            let inner = resolve_type_expr(&args[0], env)?;
-            Ok(Type::Result(Box::new(inner)))
+            // Mini-tanda Re+ — aridad 1 o 2. `Result<T>` se expande a
+            // `Result<T, Str>` (default por compatibilidad). `Result<T, E>`
+            // con E explícito habilita carry de tipos custom en Err.
+            if args.is_empty() || args.len() > 2 {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    format!(
+                        "el tipo `Result` espera 1 o 2 argumentos, recibió {}",
+                        args.len()
+                    ),
+                ));
+            }
+            let ok = resolve_type_expr(&args[0], env)?;
+            let err = if args.len() == 2 {
+                resolve_type_expr(&args[1], env)?
+            } else {
+                Type::Str
+            };
+            Ok(Type::Result { ok: Box::new(ok), err: Box::new(err) })
         }
         "Future" => {
             expect_arity(name, 1, args)?;
@@ -1599,7 +1630,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // forzado a manejar la falla estáticamente, igual
                 // que cualquier `Result<T>` nativo.
                 if matches!(obj_ty, Type::PyAny) {
-                    return Type::Result(Box::new(Type::Any));
+                    return Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) };
                 }
                 return match infer_method_call(ctx, &obj_ty, field, &args_ty, *span) {
                     Some(ret) => ret,
@@ -1621,7 +1652,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Python y vuelve envuelto en `Result<T>` (decisión
                 // 8.3). Cubre `let f = math.sqrt; f(25.0)` (callee
                 // resuelto por Ident después del field access).
-                Type::PyAny => Type::Result(Box::new(Type::Any)),
+                Type::PyAny => Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) },
                 Type::Function { params, ret } => {
                     let label = describe_callee(callee);
                     if args.len() != params.len() {
@@ -1820,19 +1851,26 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // Exhaustividad: solo la exigimos cuando el scrutinee es
             // `Result<T>` (puro, no nullable). Otros tipos no tienen
             // semántica de "variantes" para Fitz todavía.
-            if matches!(scrutinee, Type::Result(_)) {
+            if matches!(scrutinee, Type::Result { .. }) {
                 check_result_match_exhaustiveness(ctx, arms, *span);
             }
             first.unwrap_or(Type::Any)
         }
         Expr::Ok(inner, _) => {
+            // Mini-tanda Re+ — sin contexto, E queda como `Any` (el
+            // checker no sabe qué Err puede aparecer luego). El LUB
+            // contra otros Results refinará E si se construyen Err en
+            // el mismo flujo. La anotación destino (`-> Result<T, E>`)
+            // gana sobre el inferido.
             let t = infer_expr(ctx, inner);
-            Type::Result(Box::new(t))
+            Type::Result { ok: Box::new(t), err: Box::new(Type::Any) }
         }
         Expr::Err(inner, _) => {
-            let _ = infer_expr(ctx, inner);
-            // E está fijado en Str pero el T es desconocido sin contexto.
-            Type::Result(Box::new(Type::Any))
+            // Mini-tanda Re+ — el tipo del E ahora se infiere desde el
+            // value. T queda Any sin contexto; el LUB/anotación destino
+            // lo refinará.
+            let e_ty = infer_expr(ctx, inner);
+            Type::Result { ok: Box::new(Type::Any), err: Box::new(e_ty) }
         }
         Expr::Await(inner, span) => {
             // 6.2: semántica completa del checker.
@@ -1895,14 +1933,14 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Cubre el caso típico de método built-in (callee
                 // Field) que todavía devuelve Any hasta 5.3.4.
                 Type::Any => Type::Any,
-                Type::Result(inner_ty) => {
+                Type::Result { ok: inner_ty, err: _ } => {
                     // Si estamos adentro de una función con
                     // return_type concreto, exigimos que sea Result —
                     // el `?` propaga un `Err(_)` vía `return`, así que
                     // la fn contenedora tiene que poder recibirlo.
                     // Fn sin return_type (Any) o top-level no chequea.
                     if let Some(expected) = ctx.return_stack.last().cloned() {
-                        let is_ok = matches!(expected, Type::Any | Type::Result(_));
+                        let is_ok = matches!(expected, Type::Any | Type::Result { .. });
                         if !is_ok {
                             ctx.error_at(*span, format!(
                                 "el operador `?` solo puede usarse adentro de una función que retorne `Result<...>`; esta retorna `{}`",
@@ -2000,7 +2038,13 @@ fn lub(a: &Type, b: &Type) -> Type {
         (Type::Map(ak, av), Type::Map(bk, bv)) => {
             Type::Map(Box::new(lub(ak, bk)), Box::new(lub(av, bv)))
         }
-        (Type::Result(ai), Type::Result(bi)) => Type::Result(Box::new(lub(ai, bi))),
+        // Mini-tanda Re+: lub recursivo en ambos lados (ok y err).
+        (Type::Result { ok: a_ok, err: a_err }, Type::Result { ok: b_ok, err: b_err }) => {
+            Type::Result {
+                ok: Box::new(lub(a_ok, b_ok)),
+                err: Box::new(lub(a_err, b_err)),
+            }
+        }
         (Type::Future(ai), Type::Future(bi)) => Type::Future(Box::new(lub(ai, bi))),
         (Type::Nullable(ai), Type::Nullable(bi)) => Type::Nullable(Box::new(lub(ai, bi))),
         _ => Type::Any,
@@ -2241,10 +2285,10 @@ fn infer_list_method(
         }
         "find" => {
             if !check_method_arity(ctx, "find", args_ty, 1, span) {
-                return Type::Result(Box::new(t.clone()));
+                return Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) };
             }
             check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool), span);
-            Type::Result(Box::new(t.clone()))
+            Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
         }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
@@ -2357,7 +2401,7 @@ fn infer_map_method(
                     ));
                 }
             }
-            Type::Result(Box::new(v.clone()))
+            Type::Result { ok: Box::new(v.clone()), err: Box::new(Type::Str) }
         }
         "has" => {
             check_method_arity(ctx, "has", args_ty, 1, span);
@@ -2669,14 +2713,21 @@ fn bind_pattern(
         Pattern::OkBinding(name) => {
             // `Ok(x)` desempaca `Result<T>` — x es T.
             let inner = match scrutinee {
-                Type::Result(t) => (**t).clone(),
+                Type::Result { ok: t, err: _ } => (**t).clone(),
                 _ => Type::Any,
             };
             ctx.declare_var(name.clone(), inner, arm_span);
         }
         Pattern::ErrBinding(name) => {
-            // `Err(e)` — por convención la E está fijada en Str.
-            ctx.declare_var(name.clone(), Type::Str, arm_span);
+            // Mini-tanda Re+ — `Err(e)` desempaca `Result<T, E>` y `e`
+            // queda con el tipo E inferido. Para Result legacy (sin E
+            // explícito, default Str) o cualquier Any, fallback a la
+            // semántica anterior (e: Str / e: Any).
+            let inner = match scrutinee {
+                Type::Result { ok: _, err: e } => (**e).clone(),
+                _ => Type::Any,
+            };
+            ctx.declare_var(name.clone(), inner, arm_span);
         }
         Pattern::Wildcard
         | Pattern::OkWildcard
@@ -2891,7 +2942,10 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
         (Type::Map(ka, va), Type::Map(kb, vb)) => {
             is_compatible(ka, kb) && is_compatible(va, vb)
         }
-        (Type::Result(a), Type::Result(b)) => is_compatible(a, b),
+        // Mini-tanda Re+: ambos lados (ok y err) deben ser compatibles.
+        (Type::Result { ok: a_ok, err: a_err }, Type::Result { ok: b_ok, err: b_err }) => {
+            is_compatible(a_ok, b_ok) && is_compatible(a_err, b_err)
+        }
         (Type::Future(a), Type::Future(b)) => is_compatible(a, b),
         (Type::Nullable(a), Type::Nullable(b)) => is_compatible(a, b),
         (
@@ -4115,7 +4169,7 @@ mod tests {
         let r = resolve_type_expr(&t, &env).unwrap();
         assert_eq!(
             r,
-            Type::Result(Box::new(Type::List(Box::new(Type::Int)))),
+            Type::Result { ok: Box::new(Type::List(Box::new(Type::Int))), err: Box::new(Type::Str) },
         );
     }
 
@@ -5222,13 +5276,13 @@ mod tests {
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
         assert!(is_compatible(
-            &Type::Result(Box::new(Type::Any)),
-            &Type::Result(Box::new(user.clone())),
+            &Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) },
+            &Type::Result { ok: Box::new(user.clone()), err: Box::new(Type::Str) },
         ));
         // Result<Int> no matchea Result<Str>.
         assert!(!is_compatible(
-            &Type::Result(Box::new(Type::Int)),
-            &Type::Result(Box::new(Type::Str)),
+            &Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) },
+            &Type::Result { ok: Box::new(Type::Str), err: Box::new(Type::Str) },
         ));
     }
 
@@ -6043,8 +6097,8 @@ mod tests {
         // lub(Result<User>, Result<Any>) → Result<User>.
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
-        let a = Type::Result(Box::new(user.clone()));
-        let b = Type::Result(Box::new(Type::Any));
+        let a = Type::Result { ok: Box::new(user.clone()), err: Box::new(Type::Str) };
+        let b = Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) };
         assert_eq!(lub(&a, &b), a);
     }
 
@@ -7426,6 +7480,55 @@ print(total)
     }
 
     // ---- Mini-tanda Bits — operadores bit-a-bit ----
+
+    // ---- Mini-tanda Re+ — Type::Result { ok, err } tipado ----
+
+    #[test]
+    fn checker_re_plus_result_t_e_anotacion_explicita() {
+        let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"down\" })\n}\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_re_plus_match_err_bindea_e_con_tipo_inferido() {
+        // El binding `e` del `Err(e)` ahora tipa con el E del Result.
+        let src = "type ApiError { status: Int, msg: Str }\nfn fetch() -> Result<Int, ApiError> {\n    return Err(ApiError { status: 503, msg: \"x\" })\n}\nlet code: Int = match fetch() {\n    Ok(v) => v,\n    Err(e) => e.status\n}\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_re_plus_result_legacy_sin_e_explicito_sigue_andando() {
+        // `Result<T>` sin E debe seguir funcionando (default Str).
+        let src = "fn div(a: Int, b: Int) -> Result<Int> {\n    if b == 0 { return Err(\"zero\") }\n    return Ok(a / b)\n}\n";
+        let errors = check_recovering(src);
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    #[test]
+    fn checker_re_plus_result_aridad_invalida_es_error() {
+        // `Result<T, E, X>` con 3 args es error.
+        let src = "let r: Result<Int, Str, Bool> = Ok(1)\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("Result") && e.message.contains("1 o 2")),
+            "esperaba error sobre aridad: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_re_plus_result_display_con_e_concreto() {
+        use crate::types::Type;
+        let env = TypeEnv::default();
+        let r1 = Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) };
+        let r2 = Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Int) };
+        // E = Str (default) → omite E.
+        assert_eq!(r1.display(&env), "Result<Int>");
+        // E ≠ Str (Int) → forma completa.
+        assert_eq!(r2.display(&env), "Result<Int, Int>");
+    }
 
     #[test]
     fn checker_bits_sobre_int_es_ok() {

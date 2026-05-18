@@ -4370,7 +4370,7 @@ impl<'a> CodegenCtx<'a> {
                             let needs_clone = matches!(
                                 t,
                                 Type::Str | Type::List(_) | Type::Map(_, _) | Type::Nominal(_)
-                                    | Type::Tuple(_) | Type::Result(_) | Type::Nullable(_)
+                                    | Type::Tuple(_) | Type::Result { .. } | Type::Nullable(_)
                             );
                             let code = if needs_clone {
                                 format!("({}).{}.clone()", obj_code, index)
@@ -4907,7 +4907,7 @@ impl<'a> CodegenCtx<'a> {
                 callee = callee_code,
                 args = args_code,
             );
-            return Ok((code, Type::Result(Box::new(Type::PyAny))));
+            return Ok((code, Type::Result { ok: Box::new(Type::PyAny), err: Box::new(Type::Str) }));
         }
         if name == "print" {
             return Err(self.err_at(call_span,
@@ -5040,7 +5040,7 @@ impl<'a> CodegenCtx<'a> {
                 name = rust_str_literal(method),
                 args = args_code,
             );
-            return Ok((code, Type::Result(Box::new(Type::PyAny))));
+            return Ok((code, Type::Result { ok: Box::new(Type::PyAny), err: Box::new(Type::Str) }));
         }
         match (&obj_ty, method) {
             // ---- Str ----
@@ -5586,7 +5586,7 @@ impl<'a> CodegenCtx<'a> {
             }}",
             obj_code, callback_code, elem_rs
         );
-        Ok((code, Type::Result(Box::new(elem_ty.clone()))))
+        Ok((code, Type::Result { ok: Box::new(elem_ty.clone()), err: Box::new(Type::Str) }))
     }
 
     /// S.3 — `xs.sort()` IN-PLACE. Soporta `List<T>` para T en
@@ -5677,7 +5677,7 @@ impl<'a> CodegenCtx<'a> {
             }}",
             obj_code, coerced_key, val_rs, key_show
         );
-        Ok((code, Type::Result(Box::new(val_ty.clone()))))
+        Ok((code, Type::Result { ok: Box::new(val_ty.clone()), err: Box::new(Type::Str) }))
     }
 
     /// `m.has(k)` → búsqueda lineal por igualdad → bool.
@@ -6010,7 +6010,7 @@ impl<'a> CodegenCtx<'a> {
     /// type / brazo del match opuesto).
     fn gen_ok(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
         let (code, ty) = self.gen_expr(inner)?;
-        Ok((format!("Ok({})", code), Type::Result(Box::new(ty))))
+        Ok((format!("Ok({})", code), Type::Result { ok: Box::new(ty), err: Box::new(Type::Str) }))
     }
 
     /// `Err(e)` → `Err(<e como String>)`. El Err side está pinned a String
@@ -6020,35 +6020,36 @@ impl<'a> CodegenCtx<'a> {
     /// El tipo Fitz sintetizado es `Result<Any>` — no conocemos el T del
     /// Ok side, el contexto destino lo refinará.
     ///
-    /// Mini-tanda Err+ — `Err(<no-Str>)` se coerce a `String` para
-    /// mantener el shape `Result<T, String>` pinned del codegen. Para
-    /// `Nominal`, deref del `Arc<Mutex<TData>>` antes del `format!`
-    /// porque `Mutex<T>` no implementa `Display` aunque el `TData`
-    /// adentro sí (vía `impl Display for FooData` emitido por
-    /// `gen_type_def`). Para `List`/`Map`, el wrap es más profundo y
-    /// requiere helpers que no tenemos — error claro citando `fitz
+    /// Mini-tanda Re+ — `Err(value)` ahora tipa como `Result<Any, E>`
+    /// donde E es el tipo del value. El codegen NO coerce el value a
+    /// String — emite `Err(<code>)` directo. El tipo Rust final del
+    /// `Result<T, E>` se resuelve cuando el contexto destino lo
+    /// determina (anotación del let, return de fn, etc.).
+    ///
+    /// Casos no soportados: `Err(List<...>)` y `Err(Map<...>)` siguen
+    /// requiriendo helpers que no tenemos — error claro citando `fitz
     /// run` como workaround.
     fn gen_err(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
         let (code, ty) = self.gen_expr(inner)?;
-        let as_string = match &ty {
-            Type::Str => code,
-            Type::Int | Type::Float | Type::Bool | Type::Null => {
-                format!("format!(\"{{}}\", {})", code)
-            }
-            Type::Nominal(_) => {
-                // Deref el Arc<Mutex<TData>> para conseguir un TData
-                // que SÍ implementa Display (el codegen emite
-                // `impl Display for FooData` por cada `type`).
-                format!("format!(\"{{}}\", *({}).lock().unwrap())", code)
+        match &ty {
+            // Str/Int/Float/Bool/Null/Nominal — emit `Err(<code>)`
+            // directo, sin coerción a String. El tipo del Result
+            // resultante lleva el E real para que el binding `Err(e)`
+            // pueda tipar como ese E (no como String).
+            Type::Str | Type::Int | Type::Float | Type::Bool | Type::Null
+            | Type::Nominal(_) => {
+                Ok((
+                    format!("Err({})", code),
+                    Type::Result { ok: Box::new(Type::Any), err: Box::new(ty) },
+                ))
             }
             other => {
-                return Err(self.err_at(inner.span(), format!(
-                    "`Err({})` no soportado en `fitz build` — el codegen sigue con `Result<T, String>` pinned. Usá `fitz run` para preservar el value, o convertí explícitamente con interpolación: `Err(\"...{{x}}...\")`",
+                Err(self.err_at(inner.span(), format!(
+                    "`Err({})` no soportado en `fitz build` — los tipos compuestos (`List`/`Map`/etc.) requieren helpers de format. Usá `fitz run` para preservar el value, o convertí explícitamente con interpolación: `Err(\"...{{x}}...\")`",
                     display_type(other, self.env)
-                )));
+                )))
             }
-        };
-        Ok((format!("Err({})", as_string), Type::Result(Box::new(Type::Any))))
+        }
     }
 
     /// `expr?` — operador de propagación de errores. En Rust, `?` solo
@@ -6060,7 +6061,7 @@ impl<'a> CodegenCtx<'a> {
         let inner_span = inner.span();
         let (code, ty) = self.gen_expr(inner)?;
         let inner_ty = match &ty {
-            Type::Result(t) => (**t).clone(),
+            Type::Result { ok: t, err: _ } => (**t).clone(),
             // Any cae a gradual: probablemente vino de un `.find()` u otro
             // call que el checker no pudo tipar concreto. Asumimos que es
             // Result y dejamos que rustc lo confirme. (En la práctica
@@ -6076,7 +6077,7 @@ impl<'a> CodegenCtx<'a> {
         };
         let ret = self.ret_stack.last().cloned().unwrap_or(Type::Null);
         match &ret {
-            Type::Result(_) => {}
+            Type::Result { .. } => {}
             Type::Any => {}
             _ => {
                 return Err(self.err_at(inner_span,
@@ -6113,7 +6114,7 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<(String, Type), FitzError> {
         let (scrut_code, scrut_ty) = self.gen_expr(value)?;
         let inner_ok_ty = match &scrut_ty {
-            Type::Result(t) => Some((**t).clone()),
+            Type::Result { ok: t, err: _ } => Some((**t).clone()),
             _ => None,
         };
 
@@ -6254,7 +6255,14 @@ impl<'a> CodegenCtx<'a> {
                 Ok((format!("Ok({})", name), None))
             }
             Pattern::ErrBinding(name) => {
-                self.declare_var(name.clone(), Type::Str);
+                // Mini-tanda Re+ — `Err(e)` tipa con el E del
+                // `Result { ok, err }` del scrutinee. Pre-Re+ siempre
+                // era Str (default); ahora puede ser Int/Instance/etc.
+                let bind_ty = match scrut_ty {
+                    Type::Result { err, .. } => (**err).clone(),
+                    _ => Type::Str,
+                };
+                self.declare_var(name.clone(), bind_ty);
                 Ok((format!("Err({})", name), None))
             }
             Pattern::OkWildcard => Ok(("Ok(_)".to_string(), None)),
@@ -7456,7 +7464,7 @@ impl<'a> CodegenCtx<'a> {
             })?,
             None => Type::Null,
         };
-        let returns_result = matches!(resolved_ret, Type::Result(_));
+        let returns_result = matches!(resolved_ret, Type::Result { .. });
 
         Ok(HandlerSig {
             name: name.clone(),
@@ -8997,8 +9005,8 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
         // Result<a> ↔ Result<b> recursivo. Cubre el caso típico de
         // `match r { Ok(v) => Ok(v + 1), Err(e) => Err(e) }`: ambas
         // ramas son Result<T, String> con el mismo T, lub = T.
-        (Type::Result(a_in), Type::Result(b_in)) => {
-            lub(a_in, b_in).map(|t| Type::Result(Box::new(t)))
+        (Type::Result { ok: a_in, err: _ }, Type::Result { ok: b_in, err: _ }) => {
+            lub(a_in, b_in).map(|t| Type::Result { ok: Box::new(t), err: Box::new(Type::Str) })
         }
         // Any cede al concreto. Permite que `Err("x")` (Result<Any>)
         // unifique con `Ok(42)` (Result<Int>) → Result<Int>.
@@ -9126,7 +9134,7 @@ fn field_eq_expr(
                 v_eq = v_eq,
             ))
         }
-        Type::Result(inner) => {
+        Type::Result { ok: inner, err: _ } => {
             let inner_eq = field_eq_expr(inner, "__a", "__b", _env)?;
             Ok(format!(
                 "(match (&{lhs}, &{rhs}) {{ \
@@ -9253,13 +9261,24 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // (Err suelto sin contexto), dejamos que el contexto destino
         // (anotación / return type) lo refine; rustc fallará con
         // "type annotations needed" si nadie lo restringe.
-        Type::Result(inner) => {
-            let inner_rs = if matches!(**inner, Type::Any) {
+        Type::Result { ok: ok_t, err: err_t } => {
+            // Mini-tanda Re+ — Result<T, E> tipado. Default Err = Str
+            // mantiene compat con código pre-Re+. Cuando el checker
+            // infiere E concreto (Int/Instance/etc.), el binding
+            // `Err(e)` puede tipar como ese E en lugar de String.
+            let ok_rs = if matches!(**ok_t, Type::Any) {
                 "_".to_string()
             } else {
-                rust_type_for(inner, env)?
+                rust_type_for(ok_t, env)?
             };
-            Ok(format!("Result<{}, String>", inner_rs))
+            let err_rs = match err_t.as_ref() {
+                // Default histórico — Str se mapea a String.
+                Type::Str => "String".to_string(),
+                // Any se mapea a `_` para que rustc lo infiera.
+                Type::Any => "_".to_string(),
+                other => rust_type_for(other, env)?,
+            };
+            Ok(format!("Result<{}, {}>", ok_rs, err_rs))
         }
         // Higher-order (F12): tipo función Fitz → `Arc<dyn Fn(...) -> R
         // + Send + Sync>` Rust. F17.4b: el bound `Send + Sync` permite
@@ -9336,7 +9355,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::PyAny => "PyAny",
         Type::List(_) => "List<...>",
         Type::Map(_, _) => "Map<...>",
-        Type::Result(_) => "Result<...>",
+        Type::Result { .. } => "Result<...>",
         Type::Future(_) => "Future<...>",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
@@ -9360,7 +9379,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::PyAny => "PyAny".into(),
         Type::List(inner) => format!("List<{}>", display_type(inner, env)),
         Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
-        Type::Result(inner) => format!("Result<{}>", display_type(inner, env)),
+        Type::Result { ok: inner, err: _ } => format!("Result<{}>", display_type(inner, env)),
         Type::Future(inner) => format!("Future<{}>", display_type(inner, env)),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
@@ -9401,7 +9420,7 @@ fn needs_clone(t: &Type) -> bool {
         Type::List(_) | Type::Map(_, _) => true,
         // `Result<T, String>` no es Copy (String tampoco lo es), y el T
         // adentro puede ser Str/Nominal/List/etc. — clonamos por valor.
-        Type::Result(_) => true,
+        Type::Result { .. } => true,
         // Funciones-como-valor: `Arc<dyn Fn(...) -> R>` — clone del Rc,
         // barato y comparte el closure (alias semántico, mismo patrón
         // que List/Map/Nominal).
@@ -9537,7 +9556,7 @@ fn show_expr(code: &str, ty: &Type) -> String {
         // se formatea con `show_expr_inline` (strings con comillas, igual
         // al intérprete); el Err side está pinned a `String` y siempre se
         // muestra con comillas dobles.
-        Type::Result(inner) => {
+        Type::Result { ok: inner, err: _ } => {
             let ok_show = show_expr_inline("__v", inner);
             format!(
                 "(match &({}) {{ \
@@ -13257,15 +13276,22 @@ mod tests {
     }
 
     #[test]
-    fn err_con_no_str_coerciona_via_format() {
-        // Err(42): el Err side está pinned a String, así que se coerce
-        // con format!. Cambio de comportamiento sutil pero documentado.
-        let code = gen("fn boom() -> Result<Str> { return Err(42) }").unwrap();
+    fn err_con_no_str_emite_value_directo_post_re_plus() {
+        // Mini-tanda Re+ — `Err(42)` ya NO coerce a String. Emit
+        // `Err(42i64)` directo y el tipo del Result es
+        // `Result<T, i64>` con E concreto. Cambio respecto al
+        // comportamiento pre-Re+ donde se hacía `format!("{}", 42)`.
+        let code = gen("fn boom() -> Result<Str, Int> { return Err(42) }").unwrap();
         let file = ast_test::parse(&code);
         let boom = ast_test::find_item_fn(&file, "boom").expect("falta fn boom");
         assert!(
-            ast_test::fn_body_returns_any_matching(boom, &["Err", "format !", "42i64"]),
-            "esperaba coerción a String via format!, body:\n{}",
+            ast_test::fn_body_returns_any_matching(boom, &["Err", "42i64"]),
+            "esperaba Err(42i64) directo sin format!, body:\n{}",
+            ast_test::fn_body_text(boom)
+        );
+        assert!(
+            !ast_test::fn_body_text(boom).contains("format !"),
+            "NO debería haber format! ya que el Err es Int (no Str): {}",
             ast_test::fn_body_text(boom)
         );
     }

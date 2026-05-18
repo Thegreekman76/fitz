@@ -1,0 +1,66 @@
+// Mini-tanda Re+ — `Result<T, E>` con tipo del Err explícito.
+//
+// Anotar `Result<T, E>` (con E concreto) permite carry de errores
+// estructurados con TODOS sus fields accesibles, incluso en `fitz build`.
+//
+// Comparación con Err+:
+//   - Err+ permitía Err con tipos custom en `fitz run`, pero el codegen
+//     coerce a String → el binding `Err(e)` siempre tipa Str en build.
+//   - Re+ trackea el tipo del E en `Type::Result { ok, err }`. El
+//     binding `Err(e)` tipa con el E real, así que podés acceder a
+//     fields del Err en `fitz build` también.
+
+type ApiError {
+    status: Int
+    msg: Str
+}
+
+fn fetch(url: Str) -> Result<Int, ApiError> {
+    if url == "/health" {
+        return Ok(200)
+    }
+    return Err(ApiError { status: 503, msg: "service unavailable" })
+}
+
+// El `e` del `Err(e)` tipa `ApiError` (no `Str`), así que podés
+// destructurar fields directamente:
+match fetch("/users") {
+    Ok(code) => print("status: {code}"),
+    Err(e) => print("err {e.status}: {e.msg}")
+}
+// err 503: service unavailable
+
+// `Result<T, Int>` para códigos de error simples.
+fn try_parse(s: Str) -> Result<Int, Int> {
+    if s == "uno" {
+        return Ok(1)
+    }
+    return Err(404)
+}
+
+let r1 = match try_parse("uno") {
+    Ok(n) => "ok: {n}",
+    Err(code) => "error code: {code}"
+}
+print(r1)                         // ok: 1
+
+let r2 = match try_parse("dos") {
+    Ok(n) => "ok: {n}",
+    Err(code) => "error code: {code}"
+}
+print(r2)                         // error code: 404
+
+// `Result<T>` sin E sigue funcionando (default Str, compat
+// con código pre-Re+).
+fn div(a: Int, b: Int) -> Result<Int> {
+    if b == 0 {
+        return Err("division por cero")
+    }
+    return Ok(a / b)
+}
+
+match div(10, 0) {
+    Ok(v) => print("ok: {v}"),
+    Err(e) => print("err: {e}")
+}
+// err: division por cero

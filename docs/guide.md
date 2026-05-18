@@ -4073,6 +4073,44 @@ print(e)            // Err("boom")
 La igualdad es estructural: dos `Ok(1)` son iguales, dos `Err("x")`
 también, y `Ok(1) == Err(1)` da `false`.
 
+### `Result<T, E>` con E tipado (mini-tanda Re+)
+
+Anotar el tipo del Err explícitamente con `Result<T, E>` habilita
+errores estructurados accesibles end-to-end:
+
+```fitz
+type ApiError { status: Int, msg: Str }
+
+fn fetch(url: Str) -> Result<Int, ApiError> {
+    if url == "/health" {
+        return Ok(200)
+    }
+    return Err(ApiError { status: 503, msg: "service unavailable" })
+}
+
+// El `e` del Err tipa ApiError, NO Str — fields accesibles.
+match fetch("/users") {
+    Ok(code) => print("status: {code}"),
+    Err(e) => print("err {e.status}: {e.msg}")
+}
+// err 503: service unavailable
+```
+
+Funciona bit-a-bit en `fitz run` y `fitz build`.
+
+Sintaxis:
+- `Result<T>` (1 arg) — default `E = Str`, compat con código existente.
+- `Result<T, E>` (2 args) — E concreto: `Result<Int, ApiError>`,
+  `Result<User, Int>` (códigos de error), etc.
+
+Si omitís la anotación del E en una fn que devuelve `Result<T>` y
+hacés `Err(MiError {...})`, el checker bindea el `e` como `Str` por
+default. Para que el binding `Err(e)` tipa como tu tipo custom,
+anotá explícitamente el E.
+
+Ver [examples/guide/14c-result-tipado.fitz](../examples/guide/14c-result-tipado.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Err con tipos custom (mini-tanda Err+)
 
 El `Err` acepta cualquier value, no solo `Str`. En `fitz run`
