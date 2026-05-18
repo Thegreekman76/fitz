@@ -248,6 +248,17 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
                 collect_uses_in_expr(i, uses);
             }
         }
+        // Mini-tanda C — list comprehension. Walkeamos iter, filter
+        // y expr. El `var` se BINDEA adentro, no es un uso (paralelo
+        // a cómo Stmt::For trata su var: el target del binding NO
+        // cuenta como uso).
+        Expr::ListComp { expr, iter, filter, .. } => {
+            collect_uses_in_expr(iter, uses);
+            if let Some(f) = filter {
+                collect_uses_in_expr(f, uses);
+            }
+            collect_uses_in_expr(expr, uses);
+        }
         Expr::Map(pairs, _) => {
             for (k, v) in pairs {
                 collect_uses_in_expr(k, uses);
@@ -632,6 +643,14 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             for i in items {
                 walk_expr(i, f);
             }
+        }
+        // Mini-tanda C — list comprehension. Walkeamos los 3 sub-Exprs.
+        Expr::ListComp { expr, iter, filter, .. } => {
+            walk_expr(iter, f);
+            if let Some(flt) = filter {
+                walk_expr(flt, f);
+            }
+            walk_expr(expr, f);
         }
         Expr::Map(pairs, _) => {
             for (k, v) in pairs {

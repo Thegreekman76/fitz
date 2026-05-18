@@ -2106,12 +2106,63 @@ fn clasif(p: (Int, Int)) -> Str {
 Ver [examples/guide/09c-tuples.fitz](../examples/guide/09c-tuples.fitz)
 para el ejemplo completo.
 
+### List comprehensions (mini-tanda C)
+
+Sintaxis compacta para construir listas derivadas. Azúcar sobre
+los patrones `.map()` y `.filter().map()` — útil cuando el dato
+viene directo de otro iterable y querés transformarlo/filtrarlo.
+
+```fitz
+// Simple — el equivalente a `.map(fn(x) => x * 2)`.
+let doublados: List<Int> = [x * 2 for x in [1, 2, 3]]
+// → [2, 4, 6]
+
+// Sobre Range — los rangos son iterables igual que listas.
+let cuadrados: List<Int> = [n * n for n in 0..5]
+// → [0, 1, 4, 9, 16]
+
+// Con filter inline — `if cond` al final.
+let pares: List<Int> = [n for n in 0..10 if n % 2 == 0]
+// → [0, 2, 4, 6, 8]
+
+// Expr compuesta — strings interpolados, llamadas, lo que sea.
+let etiquetados: List<Str> = ["item-{i}" for i in 0..3]
+// → ["item-0", "item-1", "item-2"]
+```
+
+**Scope local del var** (a diferencia del `for ... in`):
+
+```fitz
+let i: Int = 100
+let _: List<Int> = [i for i in 0..3]   // el `i` de adentro es nuevo
+print(i)                                // 100 — el original intacto
+```
+
+Las comprehensions abren un scope dedicado para el binding del
+`for`. Esto es lo que hace Python y evita shadowear variables del
+scope contenedor sin querer. El `for ... in` clásico de Fitz NO
+tiene esta propiedad (su var queda visible afuera del loop) —
+diferencia documentada pero intencional.
+
+**Cobertura del MVP**:
+- Una sola `for` clause (no `[x*y for x in xs for y in ys]`).
+- El `var` es un solo identificador (no destructuring de
+  tuples — `[a+b for (a, b) in pairs]` queda como deuda).
+- `iter` puede ser `List<T>` o `Range` (igual que `for ... in`).
+- Filter inline `if cond` opcional al final.
+
+Ver [examples/guide/09d-comprehensions.fitz](../examples/guide/09d-comprehensions.fitz)
+para el ejemplo completo y validado bit-a-bit `fitz run` ↔
+`fitz build`.
+
 > Lo que **sí anda** y antes era deuda (mini-tanda I post-S):
 > **índices negativos** `xs[-1]` para listas y strings + **slicing**
 > `xs[a..b]`, `xs[..b]`, `xs[a..]`, `xs[..]`, `xs[a..=b]` (con
 > clamp silencioso). **Tuples** `(T1, T2)` con acceso `.0`/`.1`,
 > destructuring `let (a, b) = ...`, y `Pattern::Tuple` en match
-> (mini-tanda T). Ver las sub-secciones de arriba.
+> (mini-tanda T). **Comprehensions** `[expr for var in iter]` con
+> filter inline opcional (mini-tanda C). Ver las sub-secciones de
+> arriba.
 
 > Lo que **sí anda** y antes era deuda: **asignación a índice**
 > (R.1.3) — ver sección "Asignación a índice" arriba. **Rangos

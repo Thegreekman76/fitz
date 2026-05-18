@@ -1,0 +1,36 @@
+// Mini-tanda C — list comprehensions.
+//
+// Sintaxis: [expr for var in iter] o [expr for var in iter if cond].
+// Azúcar sobre los patrones .map() y .filter().map() — más compacto
+// para listas derivadas.
+
+// Caso simple — duplicar cada elemento de una lista.
+let xs: List<Int> = [1, 2, 3, 4]
+let doublados: List<Int> = [x * 2 for x in xs]
+print(doublados)         // [2, 4, 6, 8]
+
+// Sobre un Range — los rangos son iterables como las listas.
+let cuadrados: List<Int> = [n * n for n in 0..5]
+print(cuadrados)         // [0, 1, 4, 9, 16]
+
+// Con filter inline — solo pares.
+let pares: List<Int> = [n for n in 0..10 if n % 2 == 0]
+print(pares)             // [0, 2, 4, 6, 8]
+
+// Expr compuesta — la expresión final puede usar el var libremente.
+let etiquetados: List<Str> = ["item-{i}" for i in 0..3]
+print(etiquetados)       // ["item-0", "item-1", "item-2"]
+
+// Filter + expr — combinación natural. Tomamos solo los positivos
+// y los elevamos al cuadrado.
+let valores: List<Int> = [-2, -1, 0, 1, 2, 3]
+let positivos_cuadrados: List<Int> = [v * v for v in valores if v > 0]
+print(positivos_cuadrados)  // [1, 4, 9]
+
+// Scope del var — a diferencia del `for ... in` (donde la variable
+// queda visible afuera del loop), las comprehensions tienen scope
+// local. El `i` de adentro no afecta al `i` de afuera ni se filtra.
+let i: Int = 100
+let dummy: List<Int> = [i for i in 0..3]
+print(i)                 // 100 — intacto
+print(dummy)             // [0, 1, 2]

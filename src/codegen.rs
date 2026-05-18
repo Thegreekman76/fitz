@@ -306,6 +306,11 @@ fn program_uses_async(program: &Program) -> bool {
                     || end.as_ref().is_some_and(|e| expr_uses_async(e))
             }
             Expr::List(items, _) => items.iter().any(expr_uses_async),
+            Expr::ListComp { expr, iter, filter, .. } => {
+                expr_uses_async(expr)
+                    || expr_uses_async(iter)
+                    || filter.as_ref().is_some_and(|f| expr_uses_async(f))
+            }
             Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
             Expr::Tuple(items, _) => items.iter().any(expr_uses_async),
             Expr::TupleField { tuple, .. } => expr_uses_async(tuple),
@@ -604,6 +609,21 @@ fn walk_expr_for_state_refs(
         Expr::List(items, _) => {
             for it in items {
                 walk_expr_for_state_refs(it, candidates, locals, refs);
+            }
+        }
+        // Mini-tanda C — list comprehension. El `var` introducido es
+        // local adentro del expr/filter, lo sumamos a locals para no
+        // marcar falso positivo si shadowea un state var del scope.
+        Expr::ListComp { expr, var, iter, filter, .. } => {
+            walk_expr_for_state_refs(iter, candidates, locals, refs);
+            let was_local = locals.contains(var);
+            locals.insert(var.clone());
+            if let Some(f) = filter {
+                walk_expr_for_state_refs(f, candidates, locals, refs);
+            }
+            walk_expr_for_state_refs(expr, candidates, locals, refs);
+            if !was_local {
+                locals.remove(var);
             }
         }
         Expr::Map(pairs, _) => {
@@ -4325,6 +4345,9 @@ impl<'a> CodegenCtx<'a> {
                 "`Range` solo se acepta como iterable de `for`; otros usos no se generan",
             )),
             Expr::List(items, span) => self.gen_list_lit(items, *span),
+            Expr::ListComp { expr, var, iter, filter, span } => {
+                self.gen_list_comp(expr, var, iter, filter.as_deref(), *span)
+            }
             Expr::Map(pairs, span) => self.gen_map_lit(pairs, *span),
             Expr::Index { object, index, span } => self.gen_index(object, index, *span),
             Expr::Slice { object, start, end, inclusive, span } => {
@@ -6132,6 +6155,91 @@ impl<'a> CodegenCtx<'a> {
             coerced.join(", ")
         );
         Ok((code, Type::List(Box::new(common_ty))))
+    }
+
+    /// Mini-tanda C — `[expr for var in iter [if filter]]` →
+    /// emite un bloque Rust que arma un `Vec` con un for + push y lo
+    /// envuelve en `Arc::new(Mutex::new(...))` igual que un List literal.
+    /// Soporta `Range` y `List<T>` como iter (paralelo a `gen_for`).
+    fn gen_list_comp(
+        &mut self,
+        expr: &Expr,
+        var: &str,
+        iter: &Expr,
+        filter: Option<&Expr>,
+        span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        // Resolver el iter: Range o List<T>. Devuelve `(iter_code,
+        // elem_ty)`. Mismo set de casos que `gen_for`.
+        let (iter_code, elem_ty) = if let Expr::Range { start, end, inclusive, .. } = iter {
+            let (s_code, _) = self.gen_expr(start)?;
+            let (e_code, _) = self.gen_expr(end)?;
+            let op = if *inclusive { "..=" } else { ".." };
+            (
+                format!("({s_code} as i64){op}({e_code} as i64)"),
+                Type::Int,
+            )
+        } else {
+            let (iter_code, iter_ty) = self.gen_expr(iter)?;
+            let elem_ty = match &iter_ty {
+                Type::List(inner) => (**inner).clone(),
+                other => {
+                    return Err(self.err_at(iter.span(), format!(
+                        "list comprehension necesita un iterable (`Range` o `List<T>`), recibió `{}`",
+                        display_type(other, self.env)
+                    )));
+                }
+            };
+            if matches!(elem_ty, Type::Any) {
+                return Err(self.err_at(iter.span(),
+                    "list comprehension sobre `List<Any>`: el subset compilado exige tipo homogéneo concreto"
+                        .to_string(),
+                ));
+            }
+            (
+                format!("({iter_code}).lock().unwrap().clone().into_iter()"),
+                elem_ty,
+            )
+        };
+        // Scope nuevo para el var. El filter y el expr lo ven; nada más.
+        self.push_scope();
+        self.declare_var(var.to_string(), elem_ty.clone());
+        // Filter (opcional).
+        let filter_code = if let Some(f) = filter {
+            let (fc, ft) = self.gen_expr(f)?;
+            if !matches!(ft, Type::Bool) {
+                self.pop_scope();
+                return Err(self.err_at(f.span(), format!(
+                    "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                    display_type(&ft, self.env)
+                )));
+            }
+            Some(fc)
+        } else {
+            None
+        };
+        // Expr final. Su tipo determina T del `List<T>` resultado.
+        let (expr_code, expr_ty) = self.gen_expr(expr)?;
+        self.pop_scope();
+        if matches!(expr_ty, Type::Any) {
+            return Err(self.err_at(span,
+                "la expresión de la list comprehension tipa como `Any`: el subset compilado exige tipo concreto"
+                    .to_string(),
+            ));
+        }
+        // Emitimos un bloque que devuelve el Arc<Mutex<Vec<T>>>. El
+        // for binding `var` se declara `mut` por consistencia con
+        // `gen_for` (los bodies suelen permitir reasignación local).
+        let block = if let Some(fc) = filter_code {
+            format!(
+                "{{ let mut __fitz_comp = Vec::new(); for mut {var} in {iter_code} {{ if {fc} {{ __fitz_comp.push({expr_code}); }} }} Arc::new(Mutex::new(__fitz_comp)) }}",
+            )
+        } else {
+            format!(
+                "{{ let mut __fitz_comp = Vec::new(); for mut {var} in {iter_code} {{ __fitz_comp.push({expr_code}); }} Arc::new(Mutex::new(__fitz_comp)) }}",
+            )
+        };
+        Ok((block, Type::List(Box::new(expr_ty))))
     }
 
     /// `{k1: v1, k2: v2, ...}` → `Arc::new(Mutex::new(vec![(k1, v1), ...]))`.
@@ -8519,6 +8627,20 @@ fn collect_captures_expr(
         Expr::List(items, _) => {
             for it in items {
                 collect_captures_expr(it, params, locals, ctx, seen, out);
+            }
+        }
+        // Mini-tanda C — list comprehension. El `var` es local
+        // adentro del expr/filter (paralelo a walk_expr_for_state_refs).
+        Expr::ListComp { expr, var, iter, filter, .. } => {
+            collect_captures_expr(iter, params, locals, ctx, seen, out);
+            let was_local = locals.contains(var);
+            locals.insert(var.clone());
+            if let Some(f) = filter {
+                collect_captures_expr(f, params, locals, ctx, seen, out);
+            }
+            collect_captures_expr(expr, params, locals, ctx, seen, out);
+            if !was_local {
+                locals.remove(var);
             }
         }
         Expr::Map(pairs, _) => {

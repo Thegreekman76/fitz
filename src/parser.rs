@@ -2395,7 +2395,15 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
-            items.push(self.expression()?);
+            let first = self.expression()?;
+            self.skip_newlines();
+            // Mini-tanda C: tras parsear el primer expr, si viene `for`,
+            // es una list comprehension. Solo cuando items está vacío
+            // (no podemos mezclar `[1, 2 for x in xs]`).
+            if items.is_empty() && matches!(self.peek(), Token::For) {
+                return self.parse_list_comprehension_tail(span, first);
+            }
+            items.push(first);
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -2413,6 +2421,50 @@ impl Parser {
             "se esperaba ']' para cerrar la lista",
         )?;
         Ok(Expr::List(items, span))
+    }
+
+    /// Mini-tanda C — parsea la cola de una list comprehension después
+    /// del expr inicial: `for <var> in <iter> [if <filter>]?]`. El `[`
+    /// y el primer expr ya fueron consumidos por el caller. Asume que
+    /// el `for` que sigue en `peek()` SÍ es el marcador de
+    /// comprehension (el caller ya validó `items.is_empty()`).
+    fn parse_list_comprehension_tail(
+        &mut self,
+        span: Span,
+        expr: Expr,
+    ) -> FitzResult<Expr> {
+        self.expect(&Token::For, "se esperaba 'for' en list comprehension")?;
+        let var = self.expect_ident(
+            "se esperaba nombre de variable después de 'for' en list comprehension",
+        )?;
+        self.expect(
+            &Token::In,
+            "se esperaba 'in' después de la variable en list comprehension",
+        )?;
+        self.skip_newlines();
+        // El iter es una expresión cualquiera. Permitimos struct lits
+        // adentro porque estamos entre corchetes (no hay ambigüedad).
+        let iter = self.expression()?;
+        self.skip_newlines();
+        let filter = if matches!(self.peek(), Token::If) {
+            self.advance(); // consume `if`
+            self.skip_newlines();
+            Some(Box::new(self.expression()?))
+        } else {
+            None
+        };
+        self.skip_newlines();
+        self.expect(
+            &Token::RBracket,
+            "se esperaba ']' para cerrar la list comprehension",
+        )?;
+        Ok(Expr::ListComp {
+            expr: Box::new(expr),
+            var,
+            iter: Box::new(iter),
+            filter,
+            span,
+        })
     }
 
     /// `{"k": v, ...}` — mapa literal. Acepta vacío `{}`, trailing
@@ -6805,5 +6857,68 @@ mod tests {
         let src = "let x = +\nlet y = 2";
         let err = parse(tokenize(src).unwrap()).unwrap_err();
         assert!(matches!(err.kind, ErrorKind::UnexpectedToken));
+    }
+
+    // ---------------------------------------------------------------------
+    // Mini-tanda C — list comprehensions.
+    // ---------------------------------------------------------------------
+
+    /// Extrae el valor de un `let x = <expr>` top-level y lo devuelve.
+    /// Útil para tests que arman programas chicos y quieren inspeccionar
+    /// el primer `Expr` parseado.
+    fn parse_first_let_value(src: &str) -> Expr {
+        let stmts = parse(tokenize(src).expect("tokenize")).expect("parse");
+        match stmts.into_iter().next().expect("al menos un stmt") {
+            Stmt::Assign { value, .. } => value,
+            other => panic!("se esperaba Stmt::Assign, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn comprehension_parsea_caso_basico() {
+        let v = parse_first_let_value("let ys = [x for x in xs]");
+        match v {
+            Expr::ListComp { expr, var, iter, filter, .. } => {
+                assert!(matches!(*expr, Expr::Ident(ref n, _) if n == "x"));
+                assert_eq!(var, "x");
+                assert!(matches!(*iter, Expr::Ident(ref n, _) if n == "xs"));
+                assert!(filter.is_none());
+            }
+            other => panic!("se esperaba ListComp, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn comprehension_parsea_con_filter_inline() {
+        let v = parse_first_let_value("let ys = [x for x in xs if x > 0]");
+        match v {
+            Expr::ListComp { filter, .. } => {
+                assert!(filter.is_some(), "filter inline debe estar presente");
+            }
+            other => panic!("se esperaba ListComp, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn comprehension_parsea_sobre_range() {
+        let v = parse_first_let_value("let ys = [x * 2 for x in 0..10]");
+        match v {
+            Expr::ListComp { iter, .. } => {
+                assert!(matches!(*iter, Expr::Range { .. }));
+            }
+            other => panic!("se esperaba ListComp, recibió {:?}", other),
+        }
+    }
+
+    #[test]
+    fn lista_de_un_elemento_no_se_confunde_con_comprehension() {
+        // `[42]` es una lista de un elemento, NO una comprehension.
+        // El parser solo detecta comprehension si tras el primer expr
+        // viene `for` (no `,` ni `]`).
+        let v = parse_first_let_value("let xs = [42]");
+        match v {
+            Expr::List(items, _) => assert_eq!(items.len(), 1),
+            other => panic!("se esperaba List, recibió {:?}", other),
+        }
     }
 }

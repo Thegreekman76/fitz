@@ -413,6 +413,13 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             Some(m)
         }
         Expr::List(items, _) => items.iter().map(end_line_of_expr).max(),
+        Expr::ListComp { expr, iter, filter, .. } => {
+            let mut m = end_line_of_expr(expr).max(end_line_of_expr(iter));
+            if let Some(f) = filter {
+                m = m.max(end_line_of_expr(f));
+            }
+            Some(m)
+        }
         Expr::Map(entries, _) => entries
             .iter()
             .flat_map(|(k, v)| [end_line_of_expr(k), end_line_of_expr(v)])
@@ -821,6 +828,22 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write("[");
             let parts: Vec<String> = items.iter().map(expr_to_inline_string).collect();
             ctx.write(&parts.join(", "));
+            ctx.write("]");
+        }
+        // Mini-tanda C — `[expr for var in iter (if filter)?]`. Una
+        // línea con espacios canónicos. Multi-línea queda como deuda
+        // residual si entra demanda.
+        Expr::ListComp { expr, var, iter, filter, .. } => {
+            ctx.write("[");
+            ctx.write(&expr_to_inline_string(expr));
+            ctx.write(" for ");
+            ctx.write(var);
+            ctx.write(" in ");
+            ctx.write(&expr_to_inline_string(iter));
+            if let Some(f) = filter {
+                ctx.write(" if ");
+                ctx.write(&expr_to_inline_string(f));
+            }
             ctx.write("]");
         }
         Expr::Map(entries, _) => {

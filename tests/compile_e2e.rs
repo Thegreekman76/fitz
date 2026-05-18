@@ -1785,6 +1785,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "08b-loops-avanzados.fitz",
     "09b-indexing-slicing.fitz",
     "09c-tuples.fitz",
+    "09d-comprehensions.fitz",
     "10-match.fitz",
     "11-funciones.fitz",
     "12-type.fitz",
@@ -2536,4 +2537,28 @@ fn fase_8_7_3_build_pipeline_con_multiples_awaits() {
     assert_eq!(exit, 0);
     // (10+1) * 2 + 100 = 122
     assert_eq!(stdout.trim(), "result = 122");
+}
+
+// ---- Mini-tanda C — list comprehensions ----
+
+#[test]
+fn mini_tanda_c_comprehension_sobre_lista_compila_y_doblea() {
+    // `[x * 2 for x in [1, 2, 3]]` debe producir `[2, 4, 6]` y el
+    // binario nativo lo imprime con el formato canónico bit-a-bit
+    // igual que `fitz run`.
+    let src = "let r: List<Int> = [x * 2 for x in [1, 2, 3]]\nprint(r)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_c_comp_simple", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[2, 4, 6]");
+}
+
+#[test]
+fn mini_tanda_c_comprehension_sobre_range_con_filter() {
+    // `[n for n in 0..10 if n % 2 == 0]` filtra pares. La anotación
+    // `List<Int>` ayuda al codegen a tipar concreto el iter Int.
+    let src =
+        "let r: List<Int> = [n for n in 0..10 if n % 2 == 0]\nprint(r)\n";
+    let (stdout, exit) = build_and_run("mini_tanda_c_comp_filter", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[0, 2, 4, 6, 8]");
 }

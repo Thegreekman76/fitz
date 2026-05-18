@@ -94,6 +94,32 @@ pub enum Expr {
     /// Lista literal `[1, 2, 3]`, `[]`. Anidable.
     List(Vec<Expr>, Span),
 
+    /// List comprehension (mini-tanda C). `[expr for var in iter]` o
+    /// `[expr for var in iter if filter]`. AST node dedicado (no
+    /// desazucarado a `.map()`) para que el fmt preserve la sintaxis
+    /// original y los errores del checker apunten al `for` real.
+    ///
+    /// Cobertura del MVP:
+    ///   - `iter` puede ser `List<T>` o `Range` (misma semántica que
+    ///     `for ... in`).
+    ///   - `var` es un solo identificador (sin destructuring de tuples
+    ///     en el MVP — deuda residual).
+    ///   - Filter inline opcional con `if cond`.
+    ///   - Una sola `for` clause (no múltiples — deuda residual).
+    ListComp {
+        /// La expresión que se evalúa por cada iteración y se acumula
+        /// en la lista resultado.
+        expr: Box<Expr>,
+        /// Nombre del binding del for (sin destructuring).
+        var: String,
+        /// Iterable: `List<T>` o `Range`.
+        iter: Box<Expr>,
+        /// Filtro opcional `if cond`. Si está, se evalúa antes del
+        /// expr; si retorna false, esa iteración se skipea.
+        filter: Option<Box<Expr>>,
+        span: Span,
+    },
+
     /// Mapa literal `{"k": v, ...}`, `{}`. Preserva orden de inserción.
     Map(Vec<(Expr, Expr)>, Span),
 
@@ -225,6 +251,7 @@ impl Expr {
             Expr::TupleField { span, .. } => *span,
             Expr::Loop { span, .. } => *span,
             Expr::List(_, s) => *s,
+            Expr::ListComp { span, .. } => *span,
             Expr::Map(_, s) => *s,
             Expr::Range { span, .. } => *span,
             Expr::If { span, .. } => *span,

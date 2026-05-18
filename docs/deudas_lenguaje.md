@@ -757,10 +757,42 @@ codegen, fmt). **16 unit tests nuevos** + smoke E2E bit-a-bit
 **Diferido como deuda menor**: slicing con paso (`xs[::2]`).
 Sin demanda concreta.
 
-### Comprehensions
+### ~~Comprehensions~~ ✓ CERRADO 2026-05-18 (mini-tanda C)
 
-- `[x * 2 for x in xs]` — azúcar sobre `.map()`. ~3-4h. Decisión:
-  ¿filter inline también? `[x for x in xs if x > 0]`?
+- ~~`[x * 2 for x in xs]`~~ ✓ — list comprehensions con AST node
+  dedicado `Expr::ListComp { expr, var, iter, filter, span }`.
+  Decisión: AST propio (no desazúcar a `.map()` en parse) para
+  que el fmt preserve la sintaxis y los errores del checker
+  apunten al `for` real. Consistente con cómo T sumó
+  `Expr::Tuple` propio.
+- ~~Filter inline `[x for x in xs if x > 0]`~~ ✓ —
+  `if cond` opcional al final. Tipa como `Bool` en el checker;
+  short-circuit en runtime con `continue`.
+- ~~`iter` puede ser `List<T>` o `Range`~~ ✓ — paralelo a la
+  cobertura de `for ... in` del evaluator.
+- **Scope local del var** (decisión Python-style) — a diferencia
+  del `for ... in` clásico de Fitz que deja la var visible
+  afuera, las comprehensions abren un env hijo dedicado y el
+  var no escapa. El checker hace `push_scope`/`pop_scope`
+  paralelo.
+
+Implementación en 6 capas (ast, parser, evaluator, checker,
+codegen, fmt, lint, lsp walker pendiente). **14 unit tests
+nuevos** (4 parser + 5 evaluator + 5 checker) + 2 E2E
+compile bit-a-bit `fitz run` ↔ `fitz build` sobre
+`examples/guide/09d-comprehensions.fitz` (sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`). Cap 9 de la guía suma sub-sección
+"List comprehensions (mini-tanda C)".
+
+**Diferido como deuda residual menor**:
+- Destructuring del var `[a + b for (a, b) in pairs]` —
+  workaround actual: `[t.0 + t.1 for t in pairs]`. Requiere
+  Pattern en lugar de Ident en el AST.
+- Múltiples `for` clauses `[x*y for x in xs for y in ys]` —
+  cartesian product. Python lo soporta; sin demanda concreta.
+- Set/Map comprehensions — Map comprehension `{k: v for ...}`
+  podría ser útil si entra demanda; el grammar lo destrabaría
+  con un patrón paralelo.
 
 ### Format specifiers
 

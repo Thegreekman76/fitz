@@ -1371,6 +1371,47 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
+        // Mini-tanda C — `[expr for var in iter [if filter]]`. Tipa el
+        // iter como `List<T>` o `Range` (paralelo a Stmt::For), bindea
+        // `var: T` en un scope dedicado, valida `filter: Bool` y tipa
+        // `expr: U`. Devuelve `List<U>`. El scope se descarta al salir
+        // — `var` no escapa al caller, consistente con la decisión
+        // estilo Python del evaluator.
+        Expr::ListComp { expr, var, iter, filter, span } => {
+            let iter_ty = infer_expr(ctx, iter);
+            // El tipo del var sale del iter.
+            let var_ty = match iter_ty.base() {
+                Type::List(t) => (**t).clone(),
+                Type::Range => Type::Int,
+                // Any pasa silencioso (gradual) — paralelo al for.
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(iter.span(), format!(
+                        "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                        other.display(ctx.types)
+                    ));
+                    Type::Any
+                }
+            };
+            ctx.push_scope();
+            // El span del binding apunta al span de la comprehension
+            // (sin span propio para `var` en el AST — deuda S1).
+            ctx.declare_var(var.clone(), var_ty, *span);
+            // Filter opcional: debe tipar `Bool` (Any pasa por gradual).
+            if let Some(f) = filter {
+                let f_ty = infer_expr(ctx, f);
+                if !is_compatible(&f_ty, &Type::Bool) {
+                    ctx.error_at(f.span(), format!(
+                        "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                        f_ty.display(ctx.types)
+                    ));
+                }
+            }
+            let elem_ty = infer_expr(ctx, expr);
+            ctx.pop_scope();
+            Type::List(Box::new(elem_ty))
+        }
+
         Expr::Map(pairs, _) => {
             if pairs.is_empty() {
                 return Type::Map(Box::new(Type::Any), Box::new(Type::Any));
@@ -6966,6 +7007,73 @@ print(total)
             defs.is_empty(),
             "ident no definido no debe registrarse: {:?}",
             defs.iter().collect::<Vec<_>>()
+        );
+    }
+
+    // ---- Mini-tanda C — list comprehensions ----
+
+    #[test]
+    fn checker_list_comp_simple_tipa_como_list_del_expr() {
+        // `[x * 2 for x in [1, 2, 3]]` debe tipar como `List<Int>`
+        // (el expr es Int, el iter es List<Int>).
+        let src = "let r: List<Int> = [x * 2 for x in [1, 2, 3]]\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores, dio {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_list_comp_sobre_range_tipa_int_en_var() {
+        // El var de la comprehension sobre Range debe tipar Int.
+        // Si el expr usa `var * 2`, el resultado es List<Int>.
+        let src = "let r: List<Int> = [n * 2 for n in 0..10]\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores, dio {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_list_comp_filter_no_bool_es_error() {
+        // El filter debe ser `Bool`. Si es Int → error de tipo.
+        let src = "let r = [x for x in [1, 2, 3] if x]\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("filtro") || e.message.contains("Bool")),
+            "esperaba error sobre el filtro: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_list_comp_iter_no_iterable_es_error() {
+        // Iter Int → error de tipo (no es List ni Range).
+        let src = "let r = [x for x in 42]\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("iterable") || e.message.contains("List o Range")),
+            "esperaba error sobre el iter: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn checker_list_comp_var_no_escapa_al_caller() {
+        // El scope local del var significa que tras la comprehension,
+        // `x` no está visible afuera. Usar `x` afuera debe emitir
+        // "variable no definida".
+        let src = "let r = [x for x in [1, 2, 3]]\nlet y = x\n";
+        let errors = check_recovering(src);
+        assert!(
+            errors.iter().any(|e| e.message.contains("variable")
+                && (e.message.contains("x") || e.message.contains("no definida"))),
+            "esperaba error sobre `x` no definida: {:?}",
+            errors
         );
     }
 }

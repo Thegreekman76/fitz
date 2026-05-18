@@ -2486,6 +2486,64 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::new_list(values))
         }
 
+        // Mini-tanda C — `[expr for var in iter [if filter]]`. Itera
+        // como el `for ... in`, evalúa filter (si está), y push al
+        // resultado. A diferencia del `for ... in` (que deja el var
+        // definido en el env del caller), comprehensions abren un env
+        // hijo dedicado — estilo Python — para que el var no escape
+        // ni shadowee variables del scope contenedor después de
+        // evaluar.
+        Expr::ListComp { expr, var, iter, filter, span: _ } => {
+            let iter_v = eval_expr(iter, env.clone()).await?;
+            let items: Vec<Value> = match iter_v {
+                Value::List(items) => items.lock().clone(),
+                Value::Range { start, end } => (start..end).map(Value::Int).collect(),
+                other => {
+                    let s = iter.span();
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "List o Range".into(),
+                            found: other.type_name().into(),
+                        },
+                        s.line, s.column,
+                        format!(
+                            "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                            other.type_name()
+                        ),
+                    )));
+                }
+            };
+            let comp_env = Environment::new_child(env);
+            let mut result = Vec::new();
+            for item in items {
+                comp_env.lock().define(var.clone(), item);
+                if let Some(f) = filter {
+                    let f_v = eval_expr(f, comp_env.clone()).await?;
+                    match f_v {
+                        Value::Bool(true) => {}
+                        Value::Bool(false) => continue,
+                        other => {
+                            let s = f.span();
+                            return Err(EvalSignal::Error(FitzError::new(
+                                ErrorKind::TypeMismatch {
+                                    expected: "Bool".into(),
+                                    found: other.type_name().into(),
+                                },
+                                s.line, s.column,
+                                format!(
+                                    "el filtro `if` de la list comprehension debe ser `Bool`, no `{}`",
+                                    other.type_name()
+                                ),
+                            )));
+                        }
+                    }
+                }
+                let v = eval_expr(expr, comp_env.clone()).await?;
+                result.push(v);
+            }
+            Ok(Value::new_list(result))
+        }
+
         // `{k1: v1, ...}` — evaluamos cada par en orden (clave, valor).
         // El orden de inserción se preserva en el Vec resultante.
         Expr::Map(pairs, _) => {
@@ -11643,6 +11701,73 @@ let r = match n {
         let err = res.unwrap_err();
         assert!(
             err.message.contains("función") || err.message.contains("Function"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---- Mini-tanda C — list comprehensions ----
+
+    /// Helper local: evalúa una expresión `let r = <expr>` y devuelve
+    /// el valor de `r` como Value::List clonado a un Vec.
+    async fn eval_to_list_vec(src: &str) -> Vec<Value> {
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let val = env.lock().get("r").expect("var `r` no definida");
+        match val {
+            Value::List(items) => items.lock().clone(),
+            other => panic!("se esperaba List, recibió {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_comp_basica_doubla_cada_elemento() {
+        let items = eval_to_list_vec("let r = [x * 2 for x in [1, 2, 3]]").await;
+        assert_eq!(
+            items,
+            vec![Value::Int(2), Value::Int(4), Value::Int(6)],
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_comp_sobre_range_exclusivo() {
+        let items = eval_to_list_vec("let r = [n for n in 0..5]").await;
+        assert_eq!(items.len(), 5);
+        assert_eq!(items[0], Value::Int(0));
+        assert_eq!(items[4], Value::Int(4));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_comp_con_filter_solo_pares() {
+        let items =
+            eval_to_list_vec("let r = [x for x in [1, 2, 3, 4, 5] if x % 2 == 0]").await;
+        assert_eq!(items, vec![Value::Int(2), Value::Int(4)]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_comp_var_no_escapa_al_caller_estilo_python() {
+        // Decisión de diseño: el var de la comprehension vive en un
+        // env hijo dedicado, así no shadowea ni define una var nueva
+        // en el scope contenedor (a diferencia del `for ... in`).
+        let src = "\
+            let x = 100\n\
+            let r = [v for v in [1, 2, 3]]\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        // `x` del caller intacto.
+        assert_eq!(env.lock().get("x"), Some(Value::Int(100)));
+        // `v` NO escapó al caller.
+        assert_eq!(env.lock().get("v"), None);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_comp_iter_de_tipo_no_iterable_es_error() {
+        let src = "let r = [x for x in 42]";
+        let (_, res) = parse_eval_into_env(src).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("iterable") || err.message.contains("List o Range"),
             "mensaje inesperado: {}",
             err.message,
         );
