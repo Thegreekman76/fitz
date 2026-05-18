@@ -2149,6 +2149,15 @@ fn infer_method_call(
         Type::Nominal(id) => {
             let info = ctx.types.info(*id);
             if let Some(nm) = info.methods.iter().find(|m| m.name == method).cloned() {
+                // Mini-tanda Vm — métodos privados (`_method`) solo
+                // accesibles desde adentro de métodos del MISMO type.
+                // Aplica a métodos de instancia y estáticos por igual.
+                if is_private_field(method) && ctx.current_type != Some(*id) {
+                    ctx.error_at(span, format!(
+                        "el método `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
+                        info.name, method, info.name
+                    ));
+                }
                 // Aridad.
                 if args_ty.len() != nm.params.len() {
                     ctx.error_at(span, format!(
@@ -7139,6 +7148,71 @@ mod tests {
             "esperaba error de asignación a campo privado, fue: {:?}",
             errors,
         );
+    }
+
+    // ---- Mini-tanda Vm — métodos privados (`_method`) ----
+
+    #[test]
+    fn vm_call_a_metodo_privado_desde_afuera_es_error() {
+        let (_, errors) = check_str(
+            "type C {\n\
+                 fn _hidden() -> Int { return 42 }\n\
+             }\n\
+             let c = C {}\n\
+             let r = c._hidden()\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("privado") && e.message.contains("_hidden")),
+            "esperaba error sobre `_hidden` privado, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vm_call_a_metodo_privado_desde_adentro_es_ok() {
+        // Usando `static fn` para pasar la instancia y llamar al
+        // privado (el patrón canónico — los métodos de instancia
+        // no pueden llamar otros métodos del mismo type sin
+        // `self` explícito).
+        let (_, errors) = check_str(
+            "type C {\n\
+                 x: Int = 0\n\
+                 fn _hidden() -> Int { return x }\n\
+                 static fn unsafe_get(c: C) -> Int { return c._hidden() }\n\
+             }\n",
+        );
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores adentro del tipo, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vm_call_a_metodo_privado_desde_otro_tipo_es_error() {
+        let (_, errors) = check_str(
+            "type A { fn _hidden() -> Int { return 1 } }\n\
+             type B {\n\
+                 fn spy(a: A) -> Int { return a._hidden() }\n\
+             }\n",
+        );
+        assert!(
+            errors.iter().any(|e| e.message.contains("privado")),
+            "esperaba error de acceso desde otro tipo, fue: {:?}",
+            errors,
+        );
+    }
+
+    #[test]
+    fn vm_metodo_publico_no_se_afecta_por_la_regla() {
+        let (_, errors) = check_str(
+            "type C {\n\
+                 fn greet() -> Str { return \"hola\" }\n\
+             }\n\
+             let c = C {}\n\
+             let r = c.greet()\n",
+        );
+        assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
     #[test]

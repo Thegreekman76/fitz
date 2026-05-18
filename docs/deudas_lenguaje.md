@@ -541,10 +541,21 @@ let profile = u.fetch_profile().await
 
 ### Deuda derivada (NO blocker de R.3)
 
-- Métodos con visibilidad (`pub fn`/`fn` privado) — todos public
-  en MVP. **Nota**: la deuda de campos privados ya se cerró
-  (mini-tanda Vp, ver entrada dedicada abajo). Métodos privados
-  sigue siendo deuda.
+- ~~Métodos con visibilidad (`pub fn`/`fn` privado) — todos public
+  en MVP~~ ✓ CERRADO 2026-05-18 (mini-tanda Vm). La misma convención
+  de Vp aplicada a métodos: `_method` es privado, accesible solo
+  desde adentro de métodos del propio `type` (instance + static).
+  Implementación: checker reusa `is_private_field` + `current_type`
+  ya introducidos en Vp; agrega validación en `infer_method_call`
+  para `Type::Nominal(id)` antes de la aridad y el chequeo de
+  tipos de args. LSP autocomplete filtra `_method` en `instance.`
+  paralelo al filter de fields. Caveat documentado: los métodos
+  de instancia no pueden llamar otros métodos del mismo type sin
+  un receiver explícito (R.3 opción A — no hay `self`). El patrón
+  canónico es `static fn` que recibe la instancia como param.
+  4 unit tests (afuera = error, adentro = ok via static, otro
+  tipo = error, método público no afectado) + 1 LSP unit + 1
+  compile_e2e (método público sigue compilando).
 - ~~Visibility en campos (`_field` privado)~~ ✓ CERRADO 2026-05-18
   (mini-tanda Vp). Convención estilo Python pero validada por el
   checker estático: los campos cuyo nombre arranca con `_` son
@@ -622,8 +633,21 @@ let profile = u.fetch_profile().await
   `GUIDE_EXAMPLES_COMPILE`. Cap 13 sub-sección nueva "Métodos
   estáticos (mini-tanda St)" con explicación + caveats.
 - Operator overloading (`fn +(self, other)`) — no implementado.
-- Métodos sobre tipos importados desde otro módulo — verificar
-  que el dispatch siga al tipo cross-module.
+- ~~Métodos sobre tipos importados desde otro módulo~~ ✓ CERRADO
+  2026-05-18 (mini-tanda CM). `fitz run` ya andaba (el evaluator
+  busca por type_name canónico via env del módulo). `fitz build`
+  fallaba con "el tipo `X` no tiene un método llamado `foo`"
+  porque `type_methods` solo se poblaba con types definidos en el
+  main. Fix: `LoadedModule` + `LoadedModuleSigs` suman
+  `type_methods: HashMap<String, Vec<MethodDef>>`; el
+  `load_module_inner` los recolecta del AST del módulo (`for stmt
+  in &module_program { if let Stmt::TypeDef { name, methods, ..
+  } = stmt { ... } }`); `install_loader_bindings` los copia a la
+  `CodegenCtx`; la enrichment loop de imports
+  (`from foo import User`) los reasocia al nombre LOCAL del
+  importer (permite alias via `as`). 1 compile_e2e bit-a-bit
+  (`cm_metodos_custom_sobre_tipos_importados_compilan`) con
+  método de instancia + método estático cross-module.
 
 ### R.3 — Estado
 

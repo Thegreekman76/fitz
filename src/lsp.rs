@@ -480,7 +480,13 @@ fn after_dot_completions(
             // Mini-tanda St — los métodos estáticos NO aparecen acá:
             // se invocan como `Type.method()`, no como
             // `instance.method()`. Filtramos `is_static`.
-            for m in info.methods.iter().filter(|m| !m.is_static) {
+            //
+            // Mini-tanda Vm — métodos privados (`_method`) tampoco
+            // aparecen en `instance.`: solo accesibles desde adentro
+            // del type body. Paralelo al filter de fields (Vp).
+            for m in info.methods.iter()
+                .filter(|m| !m.is_static && !m.name.starts_with('_'))
+            {
                 let params_str = m
                     .params
                     .iter()
@@ -1273,6 +1279,29 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn vm_after_dot_oculta_metodos_privados() {
+        // Mini-tanda Vm: métodos `_method` NO aparecen en `instance.`.
+        let src = "type C {\n\
+                       fn greet() -> Str { return \"hi\" }\n\
+                       fn _hidden() -> Str { return \"x\" }\n\
+                   }\n\
+                   let c = C {}\n\
+                   c.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Cursor en línea 5 col 2 (0-based), justo después del `.`.
+        let items = completion_at_position(src, &program, &type_info, &env, 5, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"greet"),
+            "esperaba `greet` (público), dio: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"_hidden"),
+            "método `_hidden` (privado) NO debería aparecer, dio: {labels:?}"
+        );
     }
 
     #[test]

@@ -3051,6 +3051,51 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     assert_eq!(stdout.trim(), "2\n5\n20");
 }
 
+// ---- Mini-tanda CM — cross-module method dispatch ----
+
+#[test]
+fn cm_metodos_custom_sobre_tipos_importados_compilan() {
+    // Antes de CM: `from foo import User` + `u.greet()` fallaba en
+    // `fitz build` con "el tipo `User` no tiene un método llamado
+    // `greet`". Las methods del tipo no se copiaban al type_methods
+    // del importer. Post-CM: dispatch funciona bit-a-bit.
+    let main = "from utils import User\n\
+                let u: User = User { id: 1, name: \"Ada\" }\n\
+                print(u.greet())\n\
+                let admin: User = User.admin()\n\
+                print(admin.greet())\n";
+    let utils = "type User {\n\
+                     id: Int = 0\n\
+                     name: Str = \"anon\"\n\
+                     fn greet() -> Str { return \"hola, {name}\" }\n\
+                     static fn admin() -> User { return User { id: 0, name: \"admin\" } }\n\
+                 }\n";
+    let (stdout, exit) = build_and_run_multi(
+        "cm-cross-module-methods",
+        main,
+        &[("utils.fitz", utils)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["hola, Ada", "hola, admin"]);
+}
+
+// ---- Mini-tanda Vm — métodos privados (`_method`) en `type` ----
+
+#[test]
+fn vm_metodo_publico_compila() {
+    // Sanity: un método público sigue funcionando con el filter de
+    // private methods activo.
+    let src = "type C {\n\
+                   x: Int = 0\n\
+                   fn show() -> Int { return x }\n\
+               }\n\
+               let c: C = C { x: 42 }\n\
+               print(c.show())\n";
+    let (stdout, exit) = build_and_run("vm_publico_ok", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42");
+}
+
 // ---- Mini-tanda Lx — List.any/all/count/find_index ----
 
 #[test]

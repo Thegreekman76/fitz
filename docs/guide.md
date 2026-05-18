@@ -4045,13 +4045,43 @@ El LSP autocomplete también respeta la regla: después de `instance.`
 NO sugiere campos `_field`. Adentro de un método del propio type
 siguen apareciendo (como locales).
 
-Ver [examples/guide/13i-campos-privados.fitz](../examples/guide/13i-campos-privados.fitz)
-para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+#### Métodos privados (mini-tanda Vm)
 
-**Limitaciones del MVP** (R.3 + St + Vp):
-- Métodos siguen siendo todos públicos (no hay `_method` privado todavía;
-  solo aplica a fields).
+La misma convención aplica a métodos: `_method()` solo se puede
+invocar desde adentro de métodos del propio `type`. El checker
+rechaza `instance._method()` desde afuera con mensaje claro.
+
+```fitz
+type Counter {
+    n: Int = 0
+    fn _bumped_by(by: Int) -> Counter {     // ← privado
+        return Counter { n: n + by }
+    }
+    static fn bump_twice(c: Counter) -> Counter {
+        return c._bumped_by(2)               // ok: adentro del type
+    }
+}
+
+let c = Counter.bump_twice(Counter {})
+print(c._bumped_by(1))                      // ERROR: privado
+```
+
+**Caveat de R.3 (opción A)**: los métodos de instancia NO pueden
+llamarse entre sí adentro del mismo body — no hay `self` ni `this`.
+El patrón canónico para componer métodos privados con públicos es
+usar `static fn` que recibe la instancia como param y delega.
+
+LSP autocomplete también filtra `_method` en `instance.`.
+
+Ver [examples/guide/13i-campos-privados.fitz](../examples/guide/13i-campos-privados.fitz)
+para el ejemplo completo (incluye sección Vm) — validado bit-a-bit
+`fitz run` ↔ `fitz build`.
+
+**Limitaciones del MVP** (R.3 + St + Vp + Vm):
 - Sin operator overloading (`fn +(self, other)`).
+- Métodos de instancia no pueden llamar a otros métodos del mismo
+  type sin un receiver explícito (no hay `self`). Workaround:
+  extraer la lógica común a un `static fn` que recibe la instancia.
 
 Ver [examples/guide/13b-metodos-custom.fitz](../examples/guide/13b-metodos-custom.fitz)
 para el ejemplo completo de métodos de instancia (incluye async).

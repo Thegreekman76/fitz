@@ -47,11 +47,43 @@ print(ada.balance())                  // 150
 print(ada.richer_than(bob))           // true
 print(bob.balance())                  // 80
 
+// --- Métodos privados (mini-tanda Vm) ---
+//
+// La misma convención `_` aplica a métodos: `_method()` solo se
+// puede invocar desde adentro de métodos del propio type.
+
+type Counter {
+    n: Int = 0
+
+    static fn new() -> Counter { return Counter { n: 0 } }
+
+    fn incremented() -> Counter {
+        return Counter { n: n + 1 }
+    }
+
+    // Método privado: helper interno.
+    fn _bumped_by(by: Int) -> Counter {
+        return Counter { n: n + by }
+    }
+
+    // Helper público que ofrece acceso controlado al privado vía
+    // `static fn` con la instancia como param (los métodos de
+    // instancia no pueden llamar otros métodos del mismo type sin
+    // un receiver explícito).
+    static fn bump_twice(c: Counter) -> Counter {
+        return c._bumped_by(2)
+    }
+}
+
+let c5: Counter = Counter.bump_twice(Counter.new().incremented().incremented().incremented())
+print(c5.n)                            // 5 (1 + 1 + 1 + 2)
+
 // --- Caveats (todos validados por el checker) ---
 //
 // 1) `ada._balance` desde afuera → error.
 // 2) `Account { name: "x", _balance: 999 }` desde afuera → error.
 // 3) `ada._balance = 999` desde afuera → error.
+// 4) `c._bumped_by(2)` desde afuera → error.
 //
 // Para verlo en vivo: descomentá una de las líneas y corré
 // `fitz check examples/guide/13i-campos-privados.fitz`.
@@ -59,3 +91,4 @@ print(bob.balance())                  // 80
 // print(ada._balance)
 // let hack = Account { name: "Hack", _balance: 99999 }
 // ada._balance = 0
+// print(c5._bumped_by(10))

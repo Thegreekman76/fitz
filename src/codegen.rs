@@ -873,6 +873,12 @@ struct LoadedModule {
     /// cross-module. Vacío para módulos sin imports.
     #[allow(dead_code)]
     local_bindings: HashMap<String, ResolvedBinding>,
+    /// Mini-tanda CM — métodos custom (R.3) de cada tipo exportado.
+    /// El importer los copia a su `type_methods` para que el dispatch
+    /// `instance.method()` resuelva sobre tipos importados. Sin esto,
+    /// `from foo import User` + `u.greet()` falla en `fitz build` con
+    /// "el tipo `User` no tiene un método llamado `greet`".
+    type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -1166,6 +1172,18 @@ impl ModuleLoader {
         let (type_sigs, fn_sigs, const_sigs, accessor_consts) =
             collect_module_sigs(&module_program, &module_env)?;
 
+        // Mini-tanda CM — recolectar métodos custom de cada `type`
+        // exportado. El importer los necesita para dispatch
+        // `instance.method()` sobre tipos importados.
+        let mut type_methods: HashMap<String, Vec<crate::ast::MethodDef>> = HashMap::new();
+        for stmt in &module_program {
+            if let Stmt::TypeDef { name, methods, .. } = stmt {
+                if !methods.is_empty() {
+                    type_methods.insert(name.clone(), methods.clone());
+                }
+            }
+        }
+
         let idx = self.modules.len();
         self.modules.push(LoadedModule {
             mod_name,
@@ -1176,6 +1194,7 @@ impl ModuleLoader {
             const_sigs,
             accessor_consts,
             local_bindings,
+            type_methods,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -1374,6 +1393,7 @@ fn generate_module_rs_with_bindings(
             fn_sigs: m.fn_sigs.clone(),
             const_sigs: m.const_sigs.clone(),
             accessor_consts: m.accessor_consts.clone(),
+            type_methods: m.type_methods.clone(),
         });
     }
     for (name, binding) in local_bindings {
@@ -2140,6 +2160,10 @@ struct LoadedModuleSigs {
     /// El importer necesita saberlo para emitir `X()` en lugar de
     /// `X` al referenciarlas.
     accessor_consts: std::collections::HashSet<String>,
+    /// Mini-tanda CM — métodos custom (R.3) por nombre de tipo
+    /// exportado. Copiados al importer en `install_loader_bindings`
+    /// y enriquecidos en `type_methods` al procesar imports.
+    type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
 }
 
 struct CodegenCtx<'a> {
@@ -2427,6 +2451,7 @@ impl<'a> CodegenCtx<'a> {
                 fn_sigs: m.fn_sigs.clone(),
                 const_sigs: m.const_sigs.clone(),
                 accessor_consts: m.accessor_consts.clone(),
+                type_methods: m.type_methods.clone(),
             });
         }
         for (name, binding) in &loader.bindings {
@@ -3284,13 +3309,15 @@ impl<'a> CodegenCtx<'a> {
                     name
                 ))
             })?;
-            let module_sig = {
+            let (module_sig, module_type_methods) = {
                 let m = self.loaded_modules.get(module_index).ok_or_else(|| {
                     self.err(format!("módulo no cargado al registrar `{}`", item))
                 })?;
-                m.type_sigs.get(&item).cloned().ok_or_else(|| {
+                let sig = m.type_sigs.get(&item).cloned().ok_or_else(|| {
                     self.err(format!("el módulo no expone el tipo `{}`", item))
-                })?
+                })?;
+                let methods = m.type_methods.get(&item).cloned();
+                (sig, methods)
             };
             let resolved: Vec<ResolvedField> = module_sig
                 .fields
@@ -3310,6 +3337,13 @@ impl<'a> CodegenCtx<'a> {
                     fields: combined,
                 },
             );
+            // Mini-tanda CM — copiar métodos del tipo importado. El
+            // dispatch `instance.method()` busca en `type_methods` por
+            // el nombre LOCAL del tipo (que puede ser un alias via
+            // `from foo import User as Person`); ahí los registramos.
+            if let Some(methods) = module_type_methods {
+                self.type_methods.insert(name.clone(), methods);
+            }
         }
         Ok(())
     }
