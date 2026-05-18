@@ -921,6 +921,15 @@ I, T, L sobre el grammar TextMate y el LSP autocomplete.
     matcheando como un solo operator.
   - JSON validado con `ConvertFrom-Json` (smoke estructural).
 
+- **V.1.bis — Assertion builtins en el grammar** (gap
+  detectado al releer post-V.4): los 4 builtins de testing
+  (`assert`, `assert_eq`, `assert_ne`, `assert_throws`)
+  introducidos en la mini-fase 9.z.2 NO estaban marcados
+  como `support.function.builtin.fitz` en el grammar — solo
+  estaban en el LSP autocomplete (`scope_level_completions`).
+  Sumados a la regex de `builtins` para consistencia visual
+  con `print`/`len`/`sleep`/`cors`.
+
 - **V.2 — LSP autocomplete** (`src/lsp.rs::after_dot_completions`):
   - **Str sumó 7 métodos** (mini-tanda S.1+S.2): `contains`,
     `starts_with`, `ends_with`, `split`, `trim`, `replace`,
@@ -937,14 +946,13 @@ I, T, L sobre el grammar TextMate y el LSP autocomplete.
     `after_dot_sobre_str_incluye_metodos_de_mini_tanda_s`,
     `after_dot_sobre_list_incluye_sort_reverse_y_contains`,
     `after_dot_sobre_tuple_lista_indices_numericos_con_tipo`.
-    Suite del LSP queda en 39 unit (era 36) + 5 E2E.
 
 - **V.3 — Build del `.vsix` + smoke manual**: `npm run
-  build:vsix` produce `fitz-language-0.9.2-win32-x64.vsix`
-  con el binario `fitz-lsp.exe` (rebuild en release) y la
-  grammar nuevos bundleados. Smoke manual del autor confirma
-  el highlighting + autocomplete sobre un archivo `.fitz`
-  con los features nuevos.
+  build:vsix` produce `fitz-language-win32-x64-0.9.2.vsix`
+  (~1.53 MB) con el binario `fitz-lsp.exe` (rebuild en
+  release, 3.47 MB) y la grammar nuevos bundleados. Smoke
+  manual del autor confirma el highlighting + autocomplete
+  sobre un archivo `.fitz` con los features nuevos.
 
 - **V.4 — Cierre formal**: esta entrada + refresh del cap 22
   de la guía (conteos de métodos actualizados: Str 3→10,
@@ -952,21 +960,55 @@ I, T, L sobre el grammar TextMate y el LSP autocomplete.
   mención de labels, multilínea, ops compuestos y rangos
   inclusivos en la lista del syntax highlighting).
 
+- **V.5 — Métodos custom sobre `type` en autocomplete** (R.3
+  en LSP): el case `Type::Nominal` de `after_dot_completions`
+  ahora lista fields **+ métodos custom** del type. Aprovecha
+  `NominalInfo.methods: Vec<NominalMethod>` que el checker
+  R.3 ya populaba en una tercera vuelta sobre el TypeEnv
+  (`types.rs::set_methods`). El item se emite como
+  `CompletionItemKind::METHOD` con `detail` = firma
+  `fn(T1, T2) -> Ret` (o `async fn(...) -> Ret` cuando
+  `is_async`). Limitación heredada: `NominalMethod` guarda
+  solo tipos de params (no nombres), así que la firma muestra
+  `fn(Int) -> Float` y no `fn(x: Int) -> Float` —
+  trade-off consistente con cómo Map/List exponen signatures.
+  1 unit test nuevo: `after_dot_sobre_nominal_incluye_metodos_custom_r3`
+  (cubre fn sin args, fn con args, async fn — los 3 casos
+  ejemplares de R.3). Suite del LSP queda en **40 unit**
+  (era 36 al cerrar V.4 = 36 + 3 V.2 + 1 V.5) + 5 E2E.
+
+- **V.6 — Re-build + cierre formal definitivo**: rebuild del
+  `.vsix` con los cambios de V.1.bis + V.5 bundleados;
+  refresh del cap 22 mencionando que los métodos custom
+  (R.3) ahora aparecen en autocomplete.
+
 **Decisiones tomadas al arrancar**: (a) sin bump de versión
 de la extensión — el usuario lo hace cuando publique al
 Marketplace; (b) tuple labels numéricos crudos sin "campo X"
-extra en el detail (consistencia con rust-analyzer).
+extra en el detail (consistencia con rust-analyzer); (c)
+firmas de métodos custom muestran solo tipos de params (no
+nombres) — trade-off consistente con cómo se exponen las
+signatures de Map/List/Str.
 
-**Deuda residual visible** (NO bloquea próximas mini-tandas):
-- VSCode 1.74+ auto-derive de `activationEvents` desde
-  `contributes.languages` — ya estaba bien por 9.x.5.
-- Range exacto en respuestas Hover/Definition sigue dependiendo
-  de `end_span` en el AST (deuda S1 heredada del LSP MVP).
-- Scope-aware autocomplete (vars locales según cursor) sigue
-  como deuda del LSP, no se aborda en V.
-- Highlighting de `0..=10` matchea ahora `..=` como `range`,
-  pero el `=` del `..=` no se distingue visualmente del `=`
-  de asignación. Aceptable como trade-off del grammar.
+**Deuda residual visible** (NO bloquea próximas mini-tandas;
+encaje en mini-tanda futura tipo "Sp" sin compromiso):
+- **Range exacto en respuestas Hover/Definition** sigue
+  dependiendo de `end_span` en el AST (deuda S1 heredada
+  del LSP MVP). ~6-10h cuando aparezca demanda.
+- **Scope-aware autocomplete** (vars locales y params
+  visibles según posición del cursor) sigue como deuda
+  del LSP. Refactor del checker para persistir scope-table
+  por posición. ~4-6h.
+- **Cross-module go-to-definition** sigue apuntando al
+  `Stmt::Import` local en vez del símbolo remoto. Deuda
+  documentada desde 9.x.3.
+- **Highlighting de `0..=10`**: el `=` del `..=` no se
+  distingue visualmente del `=` de asignación. Aceptable
+  como trade-off del grammar.
+- **Firmas de params con nombres** en autocomplete de
+  métodos custom (`fn(x: Int)` vs `fn(Int)`): requiere
+  extender `NominalMethod` con `param_names: Vec<String>`.
+  Trivial pero NO necesario para el MVP.
 
 ---
 

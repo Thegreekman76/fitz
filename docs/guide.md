@@ -6259,7 +6259,8 @@ VSCode** que lo aprovecha.
   `{name}` resaltado distinto del resto, números, decoradores
   (`@get`, `@server`, `@middleware`...), comentarios (`//` y
   `/* */`), constantes (`true`/`false`/`null`/`Ok`/`Err`),
-  built-ins (`print`/`len`/`sleep`/`cors`), labels de loops
+  built-ins (`print`/`len`/`sleep`/`cors`/`assert`/`assert_eq`/
+  `assert_ne`/`assert_throws`), labels de loops
   (`'outer` — mini-tanda L), operadores compuestos (`+=`/`-=`/...)
   y rangos inclusivos (`..=`).
 - **Diagnostics en vivo** — los errores del lexer, parser y type
@@ -6290,8 +6291,10 @@ VSCode** que lo aprovecha.
 - **Autocomplete contextual** — al tipear, VSCode te muestra una
   lista de sugerencias según el contexto:
   - Tras `.` (caso *after-dot*): si el receiver es un tipo custom
-    (`u: User`), aparecen sus fields. Si es `List<T>`, sus 9
-    métodos built-in (`push`/`pop`/`map`/`filter`/`find`/`len`/
+    (`u: User`), aparecen sus fields **y sus métodos custom**
+    (mini-fase R.3, firma `fn(T1, T2) -> Ret` o `async fn(...)
+    -> Ret` en el detail). Si es `List<T>`, sus 9 métodos built-in
+    (`push`/`pop`/`map`/`filter`/`find`/`len`/
     `sort`/`reverse`/`contains`). Si es `Map<K, V>`, sus 5
     (`get`/`has`/`keys`/`values`/`len`). Si es `Str`, sus 10
     (`upper`/`lower`/`len`/`contains`/`starts_with`/`ends_with`/

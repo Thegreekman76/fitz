@@ -448,22 +448,43 @@ fn after_dot_completions(
     };
     match &ty {
         Type::Nominal(id) => {
-            // Fields del type. `info()` panics si el id no existe —
-            // no debería pasar (el checker valida).
+            // Fields del type + métodos custom (R.3). `info()` panics
+            // si el id no existe — no debería pasar (el checker valida).
             let info = type_env.info(*id);
-            info.fields
-                .as_ref()
-                .map(|fs| {
-                    fs.iter()
-                        .map(|f| CompletionItem {
-                            label: f.name.clone(),
-                            kind: Some(CompletionItemKind::FIELD),
-                            detail: Some(f.type_.display(type_env)),
-                            ..CompletionItem::default()
-                        })
-                        .collect()
-                })
-                .unwrap_or_default()
+            let mut items = Vec::new();
+            if let Some(fs) = info.fields.as_ref() {
+                for f in fs {
+                    items.push(CompletionItem {
+                        label: f.name.clone(),
+                        kind: Some(CompletionItemKind::FIELD),
+                        detail: Some(f.type_.display(type_env)),
+                        ..CompletionItem::default()
+                    });
+                }
+            }
+            // Mini-tanda V.5 — métodos custom (R.3) ahora aparecen
+            // después de fields. NominalMethod no guarda los nombres
+            // de los params (solo tipos), así que la firma muestra
+            // `fn(Int) -> Float` y no `fn(x: Int) -> Float`. Trade-off
+            // consistente con cómo Map/List exponen sus signatures
+            // genéricas. `async fn` se prefija explícitamente.
+            for m in &info.methods {
+                let params_str = m
+                    .params
+                    .iter()
+                    .map(|t| t.display(type_env))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let prefix = if m.is_async { "async fn" } else { "fn" };
+                let detail = format!("{}({}) -> {}", prefix, params_str, m.ret.display(type_env));
+                items.push(CompletionItem {
+                    label: m.name.clone(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(detail),
+                    ..CompletionItem::default()
+                });
+            }
+            items
         }
         Type::List(t) => method_items(
             &[
@@ -1203,5 +1224,56 @@ mod tests {
         assert_eq!(it0.detail.as_deref(), Some("Int"));
         assert_eq!(it1.detail.as_deref(), Some("Str"));
         assert_eq!(it2.detail.as_deref(), Some("Bool"));
+    }
+
+    #[test]
+    fn after_dot_sobre_nominal_incluye_metodos_custom_r3() {
+        // Mini-tanda V.5 + R.3: además de fields, los métodos custom
+        // del type aparecen en la lista con kind METHOD y detail con
+        // la firma. Test cubre los 3 casos: método sin args, con args,
+        // y async fn.
+        let src = "type User {\n    id: Int\n    name: Str\n\n    fn greet() -> Str {\n        return \"hi\"\n    }\n\n    fn double(n: Int) -> Int {\n        return n * 2\n    }\n\n    async fn fetch() -> Result<Str> {\n        return Ok(\"x\")\n    }\n}\nlet u = User { id: 1, name: \"Ada\" }\nu.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        // Conteo de líneas (0-based, una entrada por cada `\n`):
+        //   0: type User {
+        //   1:     id: Int
+        //   2:     name: Str
+        //   3: (blank)
+        //   4:     fn greet() -> Str {
+        //   5:         return "hi"
+        //   6:     }
+        //   7: (blank)
+        //   8:     fn double(n: Int) -> Int {
+        //   9:         return n * 2
+        //  10:     }
+        //  11: (blank)
+        //  12:     async fn fetch() -> Result<Str> {
+        //  13:         return Ok("x")
+        //  14:     }
+        //  15: }
+        //  16: let u = User { id: 1, name: "Ada" }
+        //  17: u.
+        let items = completion_at_position(src, &program, &type_info, &env, 17, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        // Fields (heredados del case original).
+        assert!(labels.contains(&"id"), "falta field `id`: {labels:?}");
+        assert!(labels.contains(&"name"), "falta field `name`: {labels:?}");
+        // Métodos custom (R.3 / V.5).
+        assert!(labels.contains(&"greet"), "falta método `greet`: {labels:?}");
+        assert!(labels.contains(&"double"), "falta método `double`: {labels:?}");
+        assert!(labels.contains(&"fetch"), "falta método async `fetch`: {labels:?}");
+        // Kind: fields como FIELD, métodos como METHOD.
+        let it_id = items.iter().find(|i| i.label == "id").unwrap();
+        let it_greet = items.iter().find(|i| i.label == "greet").unwrap();
+        let it_double = items.iter().find(|i| i.label == "double").unwrap();
+        let it_fetch = items.iter().find(|i| i.label == "fetch").unwrap();
+        assert_eq!(it_id.kind, Some(CompletionItemKind::FIELD));
+        assert_eq!(it_greet.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(it_double.kind, Some(CompletionItemKind::METHOD));
+        assert_eq!(it_fetch.kind, Some(CompletionItemKind::METHOD));
+        // Detail: firma con prefix `fn` o `async fn` y tipos de params.
+        assert_eq!(it_greet.detail.as_deref(), Some("fn() -> Str"));
+        assert_eq!(it_double.detail.as_deref(), Some("fn(Int) -> Int"));
+        assert_eq!(it_fetch.detail.as_deref(), Some("async fn() -> Result<Str>"));
     }
 }
