@@ -1,0 +1,58 @@
+// Mini-tanda Ex — extras de API: Str search + Map transforms.
+//
+// Tres métodos nuevos en Str para búsqueda + dos en Map para
+// transformación funcional. Completan patrones canónicos que faltaban
+// en las APIs respectivas.
+
+// --- Str: find / index_of / last_index_of ---
+//
+// Todos devuelven `Result<Int>`: `Ok(i)` con el char index (0-based)
+// si lo encuentra, `Err("no encontrado")` si no. `find` y `index_of`
+// son alias; `last_index_of` busca desde el final.
+
+let s: Str = "hola mundo, hola fitz"
+
+match s.find("hola") {
+    Ok(i) => print("primero: {i}"),         // primero: 0
+    Err(_) => print("no")
+}
+
+match s.last_index_of("hola") {
+    Ok(i) => print("último: {i}"),          // último: 12
+    Err(_) => print("no")
+}
+
+match s.index_of("nope") {
+    Ok(i) => print("idx: {i}"),
+    Err(_) => print("no encontrado")        // ← este
+}
+
+// Importante: el índice es en CHARS, no bytes. Útil con Unicode.
+let cafe: Str = "café latte"
+match cafe.find("latte") {
+    Ok(i) => print("char idx: {i}"),        // char idx: 5
+    Err(_) => print("no")
+}
+
+// --- Map: filter / map_values ---
+//
+// `filter(fn(k, v) -> Bool)` keeps los pares que matchean. Devuelve
+// un Map nuevo (no muta). `map_values(fn(v) -> U)` aplica una fn a
+// cada value preservando las keys (Map<K, U>).
+
+let scores: Map<Str, Int> = {"ada": 80, "bob": 45, "cam": 92, "dru": 73}
+
+// Filter: quedarse con los que pasan (>= 60).
+let passing: Map<Str, Int> = scores.filter(fn(k, v) => v >= 60)
+print(passing.len())                         // 3 (ada, cam, dru)
+
+// map_values: transformar values sin tocar keys.
+let percent: Map<Str, Float> = scores.map_values(fn(v: Int) => (v * 100) / 100.0)
+print(percent["ada"])                        // 80.0
+
+// Composición: filter + map_values en un pipeline.
+let titles: Map<Str, Str> = scores
+    .filter(fn(k, v) => v >= 90)
+    .map_values(fn(v: Int) => "{v}/100 - excelente")
+print(titles.len())                          // 1 (solo cam)
+print(titles["cam"])                         // 92/100 - excelente

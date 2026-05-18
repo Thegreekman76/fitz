@@ -1131,6 +1131,46 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Extras de API: Str search + Map transforms~~ ✓ CERRADO 2026-05-18 (mini-tanda Ex)
+
+Mini-tanda bundle que cierra 3 deudas chicas relacionadas:
+
+- ~~**`Str.find(sub)` / `Str.index_of(sub)` / `Str.last_index_of(sub)`**~~
+  ✓ Devuelven `Result<Int>` con el char index (no byte index) de
+  la 1ra ocurrencia (o última, para `last_index_of`); `Err("no
+  encontrado")` si no matchea. `index_of` es alias de `find`
+  (estilo JS/TS — ambos nombres son comunes en distintas
+  comunidades). El codegen convierte byte index de Rust a char
+  index con `s[..byte_idx].chars().count()` para que el output
+  matchee el evaluator bit-a-bit (importante para strings con
+  Unicode no-ASCII tipo "café latte").
+
+- ~~**`Map<K,V>.filter(fn(K, V) -> Bool)` / `Map<K,V>.map_values(fn(V) -> U)`**~~
+  ✓ Transformaciones funcionales sin mutar el receiver. `filter`
+  keeps pares donde el callback es true, devuelve `Map<K, V>`.
+  `map_values` aplica `fn(V) -> U` a cada value, mantiene las
+  keys, devuelve `Map<K, U>`. Codegen reusa
+  `gen_binary_callback_inline` (refactorizado para aceptar ret
+  type Bool o Int según el método caller) para `filter`; usa
+  `gen_callback_inline` (1-arg) para `map_values`. Habilita
+  pipelines tipo `scores.filter(...).map_values(...)`.
+
+Implementación: 4 capas cada uno (evaluator + checker + codegen
++ LSP). Helper nuevo `check_binary_callback` en el checker para
+validar callbacks de 2 params + ret esperado (paralelo a
+`check_unary_callback` heredado de S.3). 5 unit tests evaluator
++ 2 LSP unit + 2 compile_e2e bit-a-bit. Ejemplo
+`examples/guide/13j-extras-str-map.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE` con pipelines típicos. Cap 13 tabla
+`Str` extendida con 3 filas + tabla `Map` con 2 filas
++ referencia al ejemplo.
+
+**F5 + F1 docs cleanup** (mismo bundle):
+- ~~F5 verificación~~ ✓ `FnDef.is_async: bool` cableado end-to-end
+  desde Fase 6 + F17. Sin deuda residual.
+- ~~F1 matriz Type::Any~~ ✓ Lista auditada de casos donde aparece
+  `Type::Any` en el checker (ver entrada F1 abajo).
+
 ### ~~Iteradores estilo Python — `enumerate`/`zip`/`chain`~~ ✓ CERRADO 2026-05-18 (mini-tanda It)
 
 Tres métodos canónicos sobre `List<T>` que componen listas sin
@@ -1549,8 +1589,44 @@ acumulamos acá con fecha + hardware + comando exacto.
 
 ### Robustez interna del compilador (matriz F en `deudas-post-5b.md`)
 
-- **F1**: documentar matriz cobertura de `Type::Any`. Solo docs.
-- **F5**: `is_async` en `FnDef`. Casi cerrado por Fase 6 + F17.
+- ~~**F1**: documentar matriz cobertura de `Type::Any`~~ ✓ CERRADO
+  2026-05-18 (mini-tanda Ex). `Type::Any` aparece en estos casos
+  del checker:
+  - Variables sin anotación cuyo RHS tipa Any (típicamente
+    `let x = foo.something_imported()` donde el módulo importado
+    no declara la fn).
+  - Args/return de fns sin anotación (deuda 5b.1 — inferencia
+    completa pendiente).
+  - List/Map literales vacíos sin contexto: `let xs = []` →
+    `List<Any>` hasta que un binding tipado lo restrinja.
+  - Callbacks de `map`/`filter`/`find` cuando el FnExpr inline no
+    declara `return_type` (el wrapper infiere via dry-run pero
+    cae a Any si el body es ambiguo).
+  - Identificadores no resueltos en runtime (escape gradual; el
+    evaluator emite error real).
+  - Lados de `BinOp`/`Index`/`Field` cuando el receptor es Any
+    — propaga a Any sin chequeo (gradual).
+  - Imports sin anotación: `from foo import bar` donde `bar` es
+    una fn del módulo cuyo retorno no está declarado.
+  - **Distinto de** `Type::PyAny`: ese marca valores que vienen
+    del bridge Python (8.4); tiene reglas propias (call envuelve
+    en Result<Any>, field access devuelve PyAny opaco).
+  - **Distinto de** `Type::Nullable(T)`: `T?` es "T o Null", NO
+    es Any. El checker mantiene la unión real.
+  Esta lista está auditada — cualquier caso nuevo donde aparezca
+  `Type::Any` desde 2026-05-18 debe sumarse acá. Política: Any se
+  usa como escape gradual deliberado, no como fallback silencioso
+  por bug del checker.
+- ~~**F5**: `is_async` en `FnDef`~~ ✓ CERRADO 2026-05-18 (mini-tanda
+  Ex, verificación). El field `FnDef.is_async: bool` existe en
+  AST desde Fase 6, está cableado al evaluator (despacho de
+  `Value::Function { is_async }` en `eval_call` + `Value::Future`
+  perezoso), al codegen (`gen_top_fn` emite `pub async fn` y
+  ajusta el ret type a `Pin<Box<dyn Future>>`), y al checker
+  (`await_stack` en `CheckCtx`, validado por `Expr::Await`). F17
+  cerró el ciclo eliminando el bridge HTTP sync/async (`Rc<RefCell>`
+  → `Arc<Mutex>`, futures `+ Send`). Nada residual; cerrado por
+  cobertura cruzada de Fase 6 + F17.
   Verificar y marcar cerrado en deudas si aplica.
 - **F13**: heterogéneos `[1, "dos", true]` en `fitz build` — `FitzValue`
   tagged runtime. Decisión grande.

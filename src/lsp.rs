@@ -563,6 +563,19 @@ fn after_dot_completions(
                 ("keys", format!("fn() -> List<{}>", k.display(type_env))),
                 ("values", format!("fn() -> List<{}>", v.display(type_env))),
                 ("len", "fn() -> Int".into()),
+                // Mini-tanda Ex — transformaciones funcionales.
+                ("filter", format!(
+                    "fn(fn({}, {}) -> Bool) -> Map<{}, {}>",
+                    k.display(type_env),
+                    v.display(type_env),
+                    k.display(type_env),
+                    v.display(type_env),
+                )),
+                ("map_values", format!(
+                    "fn(fn({}) -> U) -> Map<{}, U>",
+                    v.display(type_env),
+                    k.display(type_env),
+                )),
             ],
         ),
         Type::Str => method_items(&[
@@ -582,6 +595,10 @@ fn after_dot_completions(
             ("trim_end", "fn() -> Str".into()),
             ("replace", "fn(old: Str, new: Str) -> Str".into()),
             ("repeat", "fn(n: Int) -> Str".into()),
+            // Mini-tanda Ex — search.
+            ("find", "fn(sub: Str) -> Result<Int>".into()),
+            ("index_of", "fn(sub: Str) -> Result<Int>".into()),
+            ("last_index_of", "fn(sub: Str) -> Result<Int>".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -1279,6 +1296,34 @@ mod tests {
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
         assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+    }
+
+    #[test]
+    fn ex_after_dot_str_incluye_search_methods() {
+        let src = "let s = \"hi\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["find", "index_of", "last_index_of"] {
+            assert!(
+                labels.contains(&expected),
+                "falta `{expected}` (mini-tanda Ex): {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ex_after_dot_map_incluye_filter_y_map_values() {
+        let src = "let m = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["filter", "map_values"] {
+            assert!(
+                labels.contains(&expected),
+                "falta `{expected}` (mini-tanda Ex): {labels:?}"
+            );
+        }
     }
 
     #[test]

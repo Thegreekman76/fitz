@@ -1960,6 +1960,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13g-static-methods.fitz",
     "13h-predicados-list.fitz",
     "13i-campos-privados.fitz",
+    "13j-extras-str-map.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3049,6 +3050,41 @@ fn mini_tanda_it_zip_trunca_y_chain_concatena() {
     // zip truncado al más corto (len 2), chain concatena (3 + 2 = 5),
     // último elemento del chain es 20.
     assert_eq!(stdout.trim(), "2\n5\n20");
+}
+
+// ---- Mini-tanda Ex — extras: Str search + Map filter/map_values ----
+
+#[test]
+fn ex_str_find_index_of_compilan() {
+    let src = "let s: Str = \"hola mundo, hola fitz\"\n\
+               match s.find(\"hola\") {\n\
+                 Ok(i) => print(\"find: {i}\"),\n\
+                 Err(_) => print(\"no\")\n\
+               }\n\
+               match s.last_index_of(\"hola\") {\n\
+                 Ok(i) => print(\"last: {i}\"),\n\
+                 Err(_) => print(\"no\")\n\
+               }\n\
+               match s.index_of(\"nope\") {\n\
+                 Ok(i) => print(\"idx: {i}\"),\n\
+                 Err(_) => print(\"not found\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("ex_str_search", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "find: 0\nlast: 12\nnot found");
+}
+
+#[test]
+fn ex_map_filter_y_map_values_compilan() {
+    let src = "let scores: Map<Str, Int> = {\"ada\": 80, \"bob\": 45, \"cam\": 92}\n\
+               let passing: Map<Str, Int> = scores.filter(fn(k: Str, v: Int) => v >= 60)\n\
+               print(passing.len())\n\
+               let doubled: Map<Str, Int> = scores.map_values(fn(v: Int) => v * 2)\n\
+               print(doubled[\"ada\"])\n\
+               print(doubled[\"bob\"])\n";
+    let (stdout, exit) = build_and_run("ex_map_transforms", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "2\n160\n90");
 }
 
 // ---- Mini-tanda CM — cross-module method dispatch ----

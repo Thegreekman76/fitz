@@ -2641,6 +2641,59 @@ fn infer_map_method(
             check_method_arity(ctx, "len", args_ty, 0, span);
             Type::Int
         }
+        // Mini-tanda Ex — transformaciones funcionales sobre Map.
+        // `filter(pred)` con callback `fn(K, V) -> Bool` devuelve un
+        // Map<K, V> nuevo. `map_values(fn)` con callback `fn(V) -> U`
+        // devuelve Map<K, U>.
+        "filter" => {
+            if check_method_arity(ctx, "filter", args_ty, 1, span) {
+                check_binary_callback(
+                    ctx,
+                    &args_ty[0],
+                    k,
+                    v,
+                    "filter",
+                    Some(&Type::Bool),
+                    span,
+                );
+            }
+            Type::Map(Box::new(k.clone()), Box::new(v.clone()))
+        }
+        "map_values" => {
+            if !check_method_arity(ctx, "map_values", args_ty, 1, span) {
+                return Type::Map(Box::new(k.clone()), Box::new(Type::Any));
+            }
+            // Callback es `fn(V) -> U`. Si es FnExpr inline con ret
+            // anotado o inferido, sacamos U; si es Any, fallback Any.
+            let cb_ret = match &args_ty[0] {
+                Type::Function { params, ret } => {
+                    if params.len() != 1 {
+                        ctx.error_at(span, format!(
+                            "`Map.map_values()`: el callback debe tener 1 param, tiene {}",
+                            params.len(),
+                        ));
+                        return Type::Map(Box::new(k.clone()), Box::new(Type::Any));
+                    }
+                    if !is_compatible(v, &params[0]) && !is_compatible(&params[0], v) {
+                        ctx.error_at(span, format!(
+                            "`Map.map_values()`: el callback espera `{}`, los values son `{}`",
+                            params[0].display(ctx.types),
+                            v.display(ctx.types),
+                        ));
+                    }
+                    (**ret).clone()
+                }
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`Map.map_values()` espera un callback, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            };
+            Type::Map(Box::new(k.clone()), Box::new(cb_ret))
+        }
         _ => {
             ctx.error_at(span, format!(
                 "`Map<{}, {}>` no tiene el método `{}`",
@@ -2649,6 +2702,68 @@ fn infer_map_method(
                 method
             ));
             Type::Any
+        }
+    }
+}
+
+/// Mini-tanda Ex — Valida un callback binario (2 params). Usado por
+/// `Map.filter(pred)`. Más simple que `check_unary_callback` extendido
+/// porque solo necesitamos las 2 firmas conocidas (Map.filter).
+fn check_binary_callback(
+    ctx: &mut CheckCtx,
+    cb_ty: &Type,
+    p0_ty: &Type,
+    p1_ty: &Type,
+    method: &str,
+    expected_ret: Option<&Type>,
+    span: Span,
+) {
+    match cb_ty {
+        Type::Function { params, ret } => {
+            if params.len() != 2 {
+                ctx.error_at(span, format!(
+                    "`.{}` espera un callback de 2 params, recibió uno de {} params",
+                    method,
+                    params.len(),
+                ));
+                return;
+            }
+            if !is_compatible(&params[0], p0_ty) && !is_compatible(p0_ty, &params[0]) {
+                ctx.error_at(span, format!(
+                    "`.{}`: param[0] del callback es `{}`, esperaba `{}`",
+                    method,
+                    params[0].display(ctx.types),
+                    p0_ty.display(ctx.types),
+                ));
+            }
+            if !is_compatible(&params[1], p1_ty) && !is_compatible(p1_ty, &params[1]) {
+                ctx.error_at(span, format!(
+                    "`.{}`: param[1] del callback es `{}`, esperaba `{}`",
+                    method,
+                    params[1].display(ctx.types),
+                    p1_ty.display(ctx.types),
+                ));
+            }
+            if let Some(want_ret) = expected_ret {
+                if !is_compatible(ret, want_ret) {
+                    ctx.error_at(span, format!(
+                        "`.{}`: el callback debe retornar `{}`, retorna `{}`",
+                        method,
+                        want_ret.display(ctx.types),
+                        ret.display(ctx.types),
+                    ));
+                }
+            }
+        }
+        Type::Any => {
+            // Gradual: callback sin tipo concreto, no chequeo.
+        }
+        other => {
+            ctx.error_at(span, format!(
+                "`.{}` espera un callback, recibió `{}`",
+                method,
+                other.display(ctx.types),
+            ));
         }
     }
 }
@@ -2727,6 +2842,20 @@ fn infer_str_method(
                 ));
             }
             Type::Str
+        }
+        // Mini-tanda Ex — search en strings: find / index_of /
+        // last_index_of. Todos toman `Str` y devuelven `Result<Int>`.
+        "find" | "index_of" | "last_index_of" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Str)
+            {
+                ctx.error_at(span, format!(
+                    "`Str.{}()` espera `Str`, recibió `{}`",
+                    method,
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }
         }
         _ => {
             ctx.error_at(span, format!("`Str` no tiene el método `{}`", method));

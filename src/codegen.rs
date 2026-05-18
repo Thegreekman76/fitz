@@ -5649,8 +5649,40 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Str))
             }
+            // Mini-tanda Ex — Str search (find / index_of / last_index_of).
+            // Rust `str::find` devuelve byte index; convertimos a char
+            // index via `s[..idx].chars().count()`. Output:
+            // `Result<i64, String>`.
+            (Type::Str, "find") | (Type::Str, "index_of") => {
+                check_method_arity(method, args, 1)?;
+                let (a_code, a_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let code = format!(
+                    "{{ let __s: String = {}; let __needle: String = {}; \
+                     match __s.find(__needle.as_str()) {{ \
+                         Some(__b) => Ok(__s[..__b].chars().count() as i64), \
+                         None => Err(String::from(\"no encontrado\")) \
+                     }} }}",
+                    obj_code, coerced,
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }))
+            }
+            (Type::Str, "last_index_of") => {
+                check_method_arity(method, args, 1)?;
+                let (a_code, a_ty) = self.gen_expr(&args[0])?;
+                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let code = format!(
+                    "{{ let __s: String = {}; let __needle: String = {}; \
+                     match __s.rfind(__needle.as_str()) {{ \
+                         Some(__b) => Ok(__s[..__b].chars().count() as i64), \
+                         None => Err(String::from(\"no encontrado\")) \
+                     }} }}",
+                    obj_code, coerced,
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }))
+            }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of)",
                 other
             ))),
 
@@ -5873,8 +5905,43 @@ impl<'a> CodegenCtx<'a> {
                 Ok((format!("(({}).lock().unwrap().len() as i64)", obj_code), Type::Int))
             }
             (Type::Map(k, v), "get") => self.gen_map_get(&obj_code, k, v, args),
+            // Mini-tanda Ex — Map.filter(pred): callback `fn(K, V) -> Bool`.
+            // Emit manual loop con snapshot — `Vec::filter` toma `FnMut(&T)`
+            // que no encaja con nuestro closure.
+            (Type::Map(k, v), "filter") => {
+                check_method_arity(method, args, 1)?;
+                let cb_code = self.gen_binary_callback_inline(&args[0], k, v, "filter")?;
+                let k_rust = rust_type_for(k, self.env)?;
+                let v_rust = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let __pairs: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __out: Vec<({k_rs}, {v_rs})> = Vec::new(); \
+                       for (__k, __v) in __pairs.into_iter() {{ \
+                           if __cb(__k.clone(), __v.clone()) {{ __out.push((__k, __v)); }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}",
+                    k_rs = k_rust, v_rs = v_rust,
+                );
+                Ok((code, Type::Map(k.clone(), v.clone())))
+            }
+            // Mini-tanda Ex — Map.map_values(fn): callback `fn(V) -> U`,
+            // output `Map<K, U>`. Reusa `gen_callback_inline` (1-arg).
+            (Type::Map(k, v), "map_values") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, u_ty) = self.gen_callback_inline(&args[0], v, None, "map_values")?;
+                let k_rust = rust_type_for(k, self.env)?;
+                let u_rust = rust_type_for(&u_ty, self.env)?;
+                let code = format!(
+                    "{{ let __pairs = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       Arc::new(Mutex::new(__pairs.into_iter().map(|(__k, __v)| ((__k as {k_rs}), __cb(__v) as {u_rs})).collect::<Vec<({k_rs}, {u_rs})>>())) }}",
+                    k_rs = k_rust, u_rs = u_rust,
+                );
+                Ok((code, Type::Map(k.clone(), Box::new(u_ty))))
+            }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values)",
                 other
             ))),
 
@@ -6530,6 +6597,16 @@ impl<'a> CodegenCtx<'a> {
         param1_ty: &Type,
         method: &str,
     ) -> Result<String, FitzError> {
+        // Mini-tanda Ex — el callback binario es genérico en el ret
+        // type. `sort_by` espera Int; `Map.filter` espera Bool. La
+        // decisión la toma el caller via el método (matching por
+        // nombre). Sub-paso futuro si llegamos a 4+ callers: pasar
+        // `expected_ret_ty` como param explícito.
+        let expected_ret = match method {
+            "sort_by" => Type::Int,
+            "filter" => Type::Bool, // Map.filter
+            _ => Type::Any,
+        };
         let arg_span = arg.span();
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),
@@ -6552,9 +6629,7 @@ impl<'a> CodegenCtx<'a> {
         let p0_name = params[0].name.clone();
         let p1_name = params[1].name.clone();
 
-        // Para `sort_by` el ret esperado es Int. No ofrecemos la opción
-        // de inferir otro tipo (es el único caller hoy).
-        let ret_ty = Type::Int;
+        let ret_ty = expected_ret;
         let p0_rs = rust_type_for(param0_ty, self.env)?;
         let p1_rs = rust_type_for(param1_ty, self.env)?;
         let ret_rs = rust_type_for(&ret_ty, self.env)?;

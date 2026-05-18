@@ -3703,13 +3703,15 @@ print(xs)                          // [1, 2, 3]
 
 ### Métodos de `Map`
 
-| Método      | Qué hace                                                |
-|-------------|---------------------------------------------------------|
-| `get(k)`    | Devuelve `Ok(valor)` si la clave existe, o `Err(...)`.  |
-| `has(k)`    | `true` si la clave existe, `false` si no.               |
-| `keys()`    | Lista con las claves, en orden de inserción.            |
-| `values()`  | Lista con los valores, en orden de inserción.           |
-| `len()`     | Cantidad de pares.                                      |
+| Método              | Qué hace                                                |
+|---------------------|---------------------------------------------------------|
+| `get(k)`            | Devuelve `Ok(valor)` si la clave existe, o `Err(...)`.  |
+| `has(k)`            | `true` si la clave existe, `false` si no.               |
+| `keys()`            | Lista con las claves, en orden de inserción.            |
+| `values()`          | Lista con los valores, en orden de inserción.           |
+| `len()`             | Cantidad de pares.                                      |
+| `filter(fn(k, v))`  | Map nuevo con los pares donde el callback devuelve true (Ex). |
+| `map_values(fn(v))` | Map nuevo: aplica `fn` a cada value, mantiene las keys (Ex).  |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -3726,6 +3728,9 @@ La diferencia entre `m["a"]` y `m.get("a")` está en cómo modelan la
 falta: `m["a"]` corta con error si no hay clave, `m.get("a")` te
 devuelve un `Result` y vos decidís qué hacer. Si querés evitar el
 corte, usá `get` (y matcheá el `Result`, cap. 14).
+
+Ver [examples/guide/13j-extras-str-map.fitz](../examples/guide/13j-extras-str-map.fitz)
+para ejemplos de `filter`/`map_values` sobre Map (mini-tanda Ex).
 
 ### Métodos de `Str`
 
@@ -4090,19 +4095,22 @@ para el ejemplo completo de métodos de instancia (incluye async).
 
 Resumen de los métodos cerrados en la mini-tanda S (post-R):
 
-**Sobre `Str`** (S.1 + S.2):
+**Sobre `Str`** (S.1 + S.2 + Mb + Ex):
 
-| Método           | Args         | Retorna     | Notas |
-|------------------|--------------|-------------|-------|
-| `.contains(s)`   | `Str`        | `Bool`      | empty string siempre matchea |
-| `.starts_with(s)`| `Str`        | `Bool`      | case-sensitive |
-| `.ends_with(s)`  | `Str`        | `Bool`      | case-sensitive |
-| `.split(sep)`    | `Str`        | `List<Str>` | empty separator → chars individuales |
-| `.trim()`        | —            | `Str`       | whitespace ambos lados |
-| `.trim_start()`  | —            | `Str`       | whitespace solo al inicio (Mb) |
-| `.trim_end()`    | —            | `Str`       | whitespace solo al final (Mb) |
-| `.replace(o, n)` | `Str`, `Str` | `Str`       | TODAS las ocurrencias |
-| `.repeat(n)`     | `Int`        | `Str`       | `n < 0` es error |
+| Método              | Args         | Retorna       | Notas |
+|---------------------|--------------|---------------|-------|
+| `.contains(s)`      | `Str`        | `Bool`        | empty string siempre matchea |
+| `.starts_with(s)`   | `Str`        | `Bool`        | case-sensitive |
+| `.ends_with(s)`     | `Str`        | `Bool`        | case-sensitive |
+| `.split(sep)`       | `Str`        | `List<Str>`   | empty separator → chars individuales |
+| `.trim()`           | —            | `Str`         | whitespace ambos lados |
+| `.trim_start()`     | —            | `Str`         | whitespace solo al inicio (Mb) |
+| `.trim_end()`       | —            | `Str`         | whitespace solo al final (Mb) |
+| `.replace(o, n)`    | `Str`, `Str` | `Str`         | TODAS las ocurrencias |
+| `.repeat(n)`        | `Int`        | `Str`         | `n < 0` es error |
+| `.find(s)`          | `Str`        | `Result<Int>` | índice (en chars) de la 1ra ocurrencia (Ex) |
+| `.index_of(s)`      | `Str`        | `Result<Int>` | alias de `find` (estilo JS/TS) (Ex) |
+| `.last_index_of(s)` | `Str`        | `Result<Int>` | índice de la ÚLTIMA ocurrencia (Ex) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 

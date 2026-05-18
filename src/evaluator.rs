@@ -3195,6 +3195,9 @@ async fn dispatch_method(
         (Value::Map(_), "keys") => map_keys(receiver, args, span),
         (Value::Map(_), "values") => map_values(receiver, args, span),
         (Value::Map(_), "len") => map_len(receiver, args, span),
+        // Mini-tanda Ex — transformaciones funcionales sobre Map.
+        (Value::Map(_), "filter") => map_filter(receiver, args, span).await,
+        (Value::Map(_), "map_values") => map_map_values(receiver, args, span).await,
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3211,6 +3214,10 @@ async fn dispatch_method(
         (Value::Str(_), "trim_end") => str_trim_end(receiver, args, span),
         (Value::Str(_), "replace") => str_replace(receiver, args, span),
         (Value::Str(_), "repeat") => str_repeat(receiver, args, span),
+        // Mini-tanda Ex — búsqueda en strings.
+        (Value::Str(_), "find") => str_find(receiver, args, span),
+        (Value::Str(_), "index_of") => str_index_of(receiver, args, span),
+        (Value::Str(_), "last_index_of") => str_last_index_of(receiver, args, span),
         // Module: `mod.fn(args)` se resuelve buscando `fn` en el env del
         // módulo y llamándola como cualquier función. No es method
         // dispatch real — el módulo no es "el receptor", solo el lugar
@@ -4067,6 +4074,68 @@ fn map_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     Ok(Value::Int(n))
 }
 
+/// Mini-tanda Ex — `m.filter(pred)`: keeps pares (k, v) donde
+/// `pred(k, v) → true`. Devuelve un Map nuevo (no muta el receiver).
+/// Callback toma 2 args: la key y el value.
+#[async_recursion]
+async fn map_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("filter", &args, 1, span)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let callback = args.into_iter().next().unwrap();
+    let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
+    let mut out: Vec<(Value, Value)> = Vec::new();
+    for (k, v) in snapshot {
+        let ok = invoke_value(
+            callback.clone(),
+            vec![k.clone(), v.clone()],
+            "filter",
+            span,
+        ).await?;
+        match ok {
+            Value::Bool(true) => out.push((k, v)),
+            Value::Bool(false) => {}
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "el callback de `Map.filter()` debe devolver Bool, recibió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::new_map(out))
+}
+
+/// Mini-tanda Ex — `m.map_values(fn)`: aplica `fn(v) → U` a cada
+/// value, dejando las keys intactas. Devuelve un Map nuevo. Cubre
+/// el patrón canónico de transformar values sin tocar la estructura
+/// (paralelo a Python `{k: fn(v) for k, v in m.items()}`).
+#[async_recursion]
+async fn map_map_values(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("map_values", &args, 1, span)?;
+    let pairs = match receiver {
+        Value::Map(pairs) => pairs,
+        _ => unreachable!(),
+    };
+    let callback = args.into_iter().next().unwrap();
+    let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+    for (k, v) in snapshot {
+        let new_v = invoke_callback(&callback, v, "map_values", span).await?;
+        out.push((k, new_v));
+    }
+    Ok(Value::new_map(out))
+}
+
 // ---- Str ----
 
 fn str_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -4244,6 +4313,87 @@ fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
         )));
     }
     Ok(Value::Str(s.repeat(n as usize)))
+}
+
+/// Mini-tanda Ex — `s.find(sub)`: posición de la primera ocurrencia.
+/// Devuelve `Result<Int>` — `Ok(i)` con el índice (en chars, no bytes)
+/// si lo encuentra, `Err("no encontrado")` si no. Sub vacío matchea
+/// en posición 0 (paralelo a Python).
+fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("find", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let needle = match args.into_iter().next().unwrap() {
+        Value::Str(x) => x,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.find()` espera Str, recibió {}", other.type_name()),
+        ))),
+    };
+    // Rust `str::find` devuelve byte index; convertimos a char index.
+    if let Some(byte_idx) = s.find(needle.as_str()) {
+        let char_idx = s[..byte_idx].chars().count() as i64;
+        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(char_idx)))))
+    } else {
+        Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "no encontrado".into(),
+        )))))
+    }
+}
+
+/// Mini-tanda Ex — `s.index_of(sub)`: alias de `find` con nombre
+/// estilo JS/TypeScript. Misma semántica.
+fn str_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("index_of", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let needle = match args.into_iter().next().unwrap() {
+        Value::Str(x) => x,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.index_of()` espera Str, recibió {}", other.type_name()),
+        ))),
+    };
+    if let Some(byte_idx) = s.find(needle.as_str()) {
+        let char_idx = s[..byte_idx].chars().count() as i64;
+        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(char_idx)))))
+    } else {
+        Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "no encontrado".into(),
+        )))))
+    }
+}
+
+/// Mini-tanda Ex — `s.last_index_of(sub)`: posición de la ÚLTIMA
+/// ocurrencia. Mismo shape de retorno que `find`/`index_of`.
+fn str_last_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("last_index_of", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let needle = match args.into_iter().next().unwrap() {
+        Value::Str(x) => x,
+        other => return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
+            span.line, span.column,
+            format!("`.last_index_of()` espera Str, recibió {}", other.type_name()),
+        ))),
+    };
+    if let Some(byte_idx) = s.rfind(needle.as_str()) {
+        let char_idx = s[..byte_idx].chars().count() as i64;
+        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(char_idx)))))
+    } else {
+        Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "no encontrado".into(),
+        )))))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -9749,6 +9899,94 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(10)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
+    }
+
+    // ---- Mini-tanda Ex: Str.find/index_of/last_index_of, Map.filter/map_values ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex_str_find_devuelve_result_int() {
+        let (env, res) = parse_eval_into_env(
+            "let s: Str = \"hola mundo, hola fitz\"\n\
+             let a = s.find(\"hola\")\n\
+             let b = s.find(\"nope\")",
+        ).await;
+        res.unwrap();
+        let a = env.lock().get("a").unwrap();
+        let b = env.lock().get("b").unwrap();
+        assert!(matches!(a, Value::Result(ResultVariant::Ok(_))));
+        if let Value::Result(ResultVariant::Ok(inner)) = a {
+            assert_eq!(*inner, Value::Int(0));
+        }
+        assert!(matches!(b, Value::Result(ResultVariant::Err(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex_str_last_index_of_busca_desde_el_final() {
+        let (env, res) = parse_eval_into_env(
+            "let s: Str = \"hola mundo, hola fitz\"\n\
+             let a = s.last_index_of(\"hola\")",
+        ).await;
+        res.unwrap();
+        let a = env.lock().get("a").unwrap();
+        if let Value::Result(ResultVariant::Ok(inner)) = a {
+            assert_eq!(*inner, Value::Int(12));
+        } else {
+            panic!("esperaba Ok");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex_str_find_con_chars_no_ascii_devuelve_char_index() {
+        // "café" tiene 4 chars (c, a, f, é) pero `é` ocupa 2 bytes
+        // en UTF-8. `find` debe devolver char index (3 para "é"),
+        // no byte index (3 también casualmente — usemos un char no-ASCII
+        // adelante para forzar la diferencia).
+        let (env, res) = parse_eval_into_env(
+            "let s: Str = \"café latte\"\n\
+             let a = s.find(\"latte\")",
+        ).await;
+        res.unwrap();
+        let a = env.lock().get("a").unwrap();
+        if let Value::Result(ResultVariant::Ok(inner)) = a {
+            // chars: c(0) a(1) f(2) é(3) ' '(4) l(5) → char index = 5
+            assert_eq!(*inner, Value::Int(5));
+        } else {
+            panic!("esperaba Ok");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex_map_filter_keeps_pares_donde_pred_true() {
+        let (env, res) = parse_eval_into_env(
+            "let scores: Map<Str, Int> = {\"ada\": 80, \"bob\": 45, \"cam\": 92}\n\
+             let passing = scores.filter(fn(k, v) => v >= 60)",
+        ).await;
+        res.unwrap();
+        let passing = env.lock().get("passing").unwrap();
+        if let Value::Map(pairs) = passing {
+            assert_eq!(pairs.lock().len(), 2);
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn ex_map_map_values_transforma_y_mantiene_keys() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+             let doubled = m.map_values(fn(v) => v * 2)",
+        ).await;
+        res.unwrap();
+        let doubled = env.lock().get("doubled").unwrap();
+        if let Value::Map(pairs) = doubled {
+            let pairs = pairs.lock().clone();
+            assert_eq!(pairs.len(), 3);
+            // Verificamos un par a modo de sample.
+            let a_value = pairs.iter().find(|(k, _)| k == &Value::Str("a".into()));
+            assert_eq!(a_value.map(|(_, v)| v.clone()), Some(Value::Int(2)));
+        } else {
+            panic!("esperaba Map");
+        }
     }
 
     // ---- Mini-tanda Lx: any/all/count/find_index ----
