@@ -481,6 +481,11 @@ fn after_dot_completions(
                     t.display(type_env)
                 )),
                 ("len", "fn() -> Int".into()),
+                // Mini-tanda S.3: `sort` y `reverse` mutan in-place y
+                // devuelven Null. `contains(v)` toma un T y devuelve Bool.
+                ("sort", "fn() -> Null".into()),
+                ("reverse", "fn() -> Null".into()),
+                ("contains", format!("fn({}) -> Bool", t.display(type_env))),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -500,7 +505,33 @@ fn after_dot_completions(
             ("upper", "fn() -> Str".into()),
             ("lower", "fn() -> Str".into()),
             ("len", "fn() -> Int".into()),
+            // Mini-tanda S.1/S.2: métodos chicos de Str. `contains` y
+            // `starts_with`/`ends_with` toman un `Str` y devuelven Bool.
+            // `split` devuelve List<Str>. `trim` no toma args. `replace`
+            // pide dos Strs. `repeat` un Int.
+            ("contains", "fn(s: Str) -> Bool".into()),
+            ("starts_with", "fn(s: Str) -> Bool".into()),
+            ("ends_with", "fn(s: Str) -> Bool".into()),
+            ("split", "fn(sep: Str) -> List<Str>".into()),
+            ("trim", "fn() -> Str".into()),
+            ("replace", "fn(old: Str, new: Str) -> Str".into()),
+            ("repeat", "fn(n: Int) -> Str".into()),
         ]),
+        // Mini-tanda T (tuples): después de `t.` sugerimos los índices
+        // de los campos como labels numéricos (`0`, `1`, ...) con el
+        // tipo del elemento como detail. Estilo rust-analyzer. VSCode
+        // muestra los labels en la lista; el usuario tipea el número
+        // para insertarlo.
+        Type::Tuple(items) => items
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| CompletionItem {
+                label: i.to_string(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(ty.display(type_env)),
+                ..CompletionItem::default()
+            })
+            .collect(),
         // Any, PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }
@@ -1103,5 +1134,74 @@ mod tests {
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 0, 12);
         assert!(items.is_empty(), "esperaba vacío, dio {items:?}");
+    }
+
+    // Mini-tanda V.2 (VSCode catch-up) — los métodos nuevos de Str
+    // (S.1/S.2), de List (S.3), y el tuple field access (T.1).
+
+    #[test]
+    fn after_dot_sobre_str_incluye_metodos_de_mini_tanda_s() {
+        // Los 7 métodos nuevos sumados en S.1/S.2 deben aparecer en la
+        // lista de completion para receptores `Str`.
+        let src = "let s = \"hola\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in [
+            "contains",
+            "starts_with",
+            "ends_with",
+            "split",
+            "trim",
+            "replace",
+            "repeat",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda S) en Str: {labels:?}"
+            );
+        }
+        // Sanity: los 3 originales siguen.
+        assert!(labels.contains(&"upper"));
+        assert!(labels.contains(&"lower"));
+        assert!(labels.contains(&"len"));
+    }
+
+    #[test]
+    fn after_dot_sobre_list_incluye_sort_reverse_y_contains() {
+        // Mini-tanda S.3: sort, reverse, contains se suman a la lista
+        // canónica de métodos de List.
+        let src = "let xs = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["sort", "reverse", "contains"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda S.3) en List: {labels:?}"
+            );
+        }
+        // El detail de `contains` debe reflejar el tipo del elemento.
+        let item_contains = items.iter().find(|i| i.label == "contains").unwrap();
+        assert_eq!(item_contains.detail.as_deref(), Some("fn(Int) -> Bool"));
+    }
+
+    #[test]
+    fn after_dot_sobre_tuple_lista_indices_numericos_con_tipo() {
+        // Mini-tanda T.1: después de `t.` sugerimos `0`, `1`, ...
+        // como labels, con el tipo del campo en `detail`.
+        let src = "let t = (1, \"x\", true)\nt.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert_eq!(labels, vec!["0", "1", "2"], "esperaba labels 0/1/2, dio {labels:?}");
+        // Cada item es FIELD con detail = tipo del elemento.
+        let it0 = &items[0];
+        let it1 = &items[1];
+        let it2 = &items[2];
+        assert_eq!(it0.kind, Some(CompletionItemKind::FIELD));
+        assert_eq!(it0.detail.as_deref(), Some("Int"));
+        assert_eq!(it1.detail.as_deref(), Some("Str"));
+        assert_eq!(it2.detail.as_deref(), Some("Bool"));
     }
 }

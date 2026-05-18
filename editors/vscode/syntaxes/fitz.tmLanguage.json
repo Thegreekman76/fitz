@@ -5,6 +5,7 @@
   "fileTypes": ["fitz"],
   "patterns": [
     { "include": "#comments" },
+    { "include": "#strings-triple" },
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#decorators" },
@@ -12,6 +13,7 @@
     { "include": "#types" },
     { "include": "#constants" },
     { "include": "#builtins" },
+    { "include": "#labels" },
     { "include": "#operators" },
     { "include": "#functions" }
   ],
@@ -26,6 +28,31 @@
           "name": "comment.block.fitz",
           "begin": "/\\*",
           "end": "\\*/"
+        }
+      ]
+    },
+    "strings-triple": {
+      "name": "string.quoted.triple.fitz",
+      "begin": "\"\"\"",
+      "end": "\"\"\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.fitz",
+          "match": "\\\\."
+        },
+        {
+          "name": "meta.embedded.expression.fitz",
+          "begin": "\\{",
+          "end": "\\}",
+          "beginCaptures": {
+            "0": { "name": "punctuation.section.embedded.begin.fitz" }
+          },
+          "endCaptures": {
+            "0": { "name": "punctuation.section.embedded.end.fitz" }
+          },
+          "patterns": [
+            { "include": "$self" }
+          ]
         }
       ]
     },
@@ -82,7 +109,7 @@
         },
         {
           "name": "keyword.operator.logical.fitz",
-          "match": "\\b(and|or)\\b"
+          "match": "\\b(not|and|or)\\b"
         }
       ]
     },
@@ -118,6 +145,11 @@
       "name": "support.function.builtin.fitz",
       "match": "\\b(print|len|sleep|cors)\\b(?=\\s*\\()"
     },
+    "labels": {
+      "comment": "Labels de loops (mini-tanda L): `'outer:` en sitio de declaración y `'outer` en break/continue. El `:` opcional al final NO se consume — lo agarra el resto del parser.",
+      "name": "entity.name.label.fitz",
+      "match": "'[a-zA-Z_][a-zA-Z0-9_]*"
+    },
     "operators": {
       "patterns": [
         {
@@ -126,7 +158,7 @@
         },
         {
           "name": "keyword.operator.range.fitz",
-          "match": "\\.\\."
+          "match": "\\.\\.=?"
         },
         {
           "name": "keyword.operator.try.fitz",
@@ -139,6 +171,16 @@
         {
           "name": "keyword.operator.logical.fitz",
           "match": "&&|\\|\\||!"
+        },
+        {
+          "comment": "Or-pattern en match arms (mini-fase R.2.1): `Ok | Err =>`. Va después del operator lógico (`||`) para que la secuencia de dos `|` matchee como `||` y no como dos or-patterns sueltos.",
+          "name": "keyword.operator.alternative.fitz",
+          "match": "\\|"
+        },
+        {
+          "comment": "Asignación compuesta (mini-fase R.2.3): `+= -= *= /= %=`. Va antes que `=` solo para que el regex no se quede con la primera letra.",
+          "name": "keyword.operator.assignment.compound.fitz",
+          "match": "\\+=|-=|\\*=|/=|%="
         },
         {
           "name": "keyword.operator.assignment.fitz",

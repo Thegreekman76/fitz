@@ -894,6 +894,80 @@ acumulamos acá con fecha + hardware + comando exacto.
 - **F15**: imports transitivos en codegen — un módulo cargado puede
   tener su propio `import`. Refactor del module loader del codegen.
 
+### ~~Tooling — VSCode catch-up~~ ✓ CERRADO 2026-05-17 (mini-tanda V)
+
+El usuario marcó como política que la extensión VSCode siempre
+debe estar sincronizada con cada feature nuevo del lenguaje. La
+mini-tanda V salda el gap acumulado tras las mini-tandas R, S,
+I, T, L sobre el grammar TextMate y el LSP autocomplete.
+
+- **V.1 — Grammar TextMate** (`editors/vscode/syntaxes/fitz.tmLanguage.json`):
+  - Keyword `not` sumado a `keyword.operator.logical.fitz`
+    (R.1.1).
+  - Strings multilínea `"""..."""` con interpolación recursiva
+    como pattern dedicado `strings-triple` colocado ANTES de
+    `strings` para que matchee primero (R.1.5).
+  - Labels de loops (`'name` y `'name:`) como
+    `entity.name.label.fitz` (L.2). Sin esto el apóstrofe
+    quedaba como token desconocido y rompía el highlighting
+    del resto de la línea.
+  - Operadores compuestos `+=`/`-=`/`*=`/`/=`/`%=` (R.2.3) y
+    rangos inclusivos `..=` (R.1.4) como patterns dedicados,
+    colocados antes que `=` y `..` para que el regex no se
+    quede con la primera parte.
+  - Or-pattern `|` en match arms (R.2.1) como
+    `keyword.operator.alternative.fitz`, posicionado después
+    del `||` lógico para que dos pipes consecutivos sigan
+    matcheando como un solo operator.
+  - JSON validado con `ConvertFrom-Json` (smoke estructural).
+
+- **V.2 — LSP autocomplete** (`src/lsp.rs::after_dot_completions`):
+  - **Str sumó 7 métodos** (mini-tanda S.1+S.2): `contains`,
+    `starts_with`, `ends_with`, `split`, `trim`, `replace`,
+    `repeat`. Quedó en 10 totales con los 3 originales
+    (`upper`/`lower`/`len`).
+  - **List sumó 3 métodos** (mini-tanda S.3): `sort`,
+    `reverse`, `contains`. Quedó en 9 totales.
+  - **Tuple field access** (mini-tanda T.1): case nuevo
+    `Type::Tuple(items)` que devuelve labels numéricos
+    `0`/`1`/`2`... como `CompletionItemKind::FIELD` con
+    `detail` = tipo del elemento. Estilo rust-analyzer
+    (label sin punto — VSCode ya consumió el `.`).
+  - 3 unit tests nuevos en `lsp::tests`:
+    `after_dot_sobre_str_incluye_metodos_de_mini_tanda_s`,
+    `after_dot_sobre_list_incluye_sort_reverse_y_contains`,
+    `after_dot_sobre_tuple_lista_indices_numericos_con_tipo`.
+    Suite del LSP queda en 39 unit (era 36) + 5 E2E.
+
+- **V.3 — Build del `.vsix` + smoke manual**: `npm run
+  build:vsix` produce `fitz-language-0.9.2-win32-x64.vsix`
+  con el binario `fitz-lsp.exe` (rebuild en release) y la
+  grammar nuevos bundleados. Smoke manual del autor confirma
+  el highlighting + autocomplete sobre un archivo `.fitz`
+  con los features nuevos.
+
+- **V.4 — Cierre formal**: esta entrada + refresh del cap 22
+  de la guía (conteos de métodos actualizados: Str 3→10,
+  List 6→9; mención de tuple field access en autocomplete;
+  mención de labels, multilínea, ops compuestos y rangos
+  inclusivos en la lista del syntax highlighting).
+
+**Decisiones tomadas al arrancar**: (a) sin bump de versión
+de la extensión — el usuario lo hace cuando publique al
+Marketplace; (b) tuple labels numéricos crudos sin "campo X"
+extra en el detail (consistencia con rust-analyzer).
+
+**Deuda residual visible** (NO bloquea próximas mini-tandas):
+- VSCode 1.74+ auto-derive de `activationEvents` desde
+  `contributes.languages` — ya estaba bien por 9.x.5.
+- Range exacto en respuestas Hover/Definition sigue dependiendo
+  de `end_span` en el AST (deuda S1 heredada del LSP MVP).
+- Scope-aware autocomplete (vars locales según cursor) sigue
+  como deuda del LSP, no se aborda en V.
+- Highlighting de `0..=10` matchea ahora `..=` como `range`,
+  pero el `=` del `..=` no se distingue visualmente del `=`
+  de asignación. Aceptable como trade-off del grammar.
+
 ---
 
 ## Cómo se actualiza este doc

@@ -6252,13 +6252,16 @@ VSCode** que lo aprovecha.
 
 - **Syntax highlighting** sobre archivos `.fitz` (grammar TextMate
   embebida en la extensión). Colorea keywords (`let`, `fn`, `if`,
-  `match`, `async`/`await`...), tipos built-in (`Int`, `Float`,
-  `Str`, `Bool`, `List`, `Map`, `Result`, `Future`...), tipos
-  nominales (`User`, `Order`...), strings con interpolación
-  (`"hola, {name}"` con el `{name}` resaltado distinto), números,
-  decoradores (`@get`, `@server`, `@middleware`...), comentarios
-  (`//` y `/* */`), constantes (`true`/`false`/`null`/`Ok`/`Err`),
-  built-ins (`print`/`len`/`sleep`/`cors`).
+  `match`, `async`/`await`, `not`/`and`/`or`...), tipos built-in
+  (`Int`, `Float`, `Str`, `Bool`, `List`, `Map`, `Result`,
+  `Future`...), tipos nominales (`User`, `Order`...), strings con
+  interpolación — incluyendo multilínea `"""..."""` (cap 5) —, el
+  `{name}` resaltado distinto del resto, números, decoradores
+  (`@get`, `@server`, `@middleware`...), comentarios (`//` y
+  `/* */`), constantes (`true`/`false`/`null`/`Ok`/`Err`),
+  built-ins (`print`/`len`/`sleep`/`cors`), labels de loops
+  (`'outer` — mini-tanda L), operadores compuestos (`+=`/`-=`/...)
+  y rangos inclusivos (`..=`).
 - **Diagnostics en vivo** — los errores del lexer, parser y type
   checker aparecen subrayados en rojo al tipear, con el mismo
   mensaje + sugerencia que `fitz check` muestra en la terminal.
@@ -6287,11 +6290,15 @@ VSCode** que lo aprovecha.
 - **Autocomplete contextual** — al tipear, VSCode te muestra una
   lista de sugerencias según el contexto:
   - Tras `.` (caso *after-dot*): si el receiver es un tipo custom
-    (`u: User`), aparecen sus fields. Si es `List<T>`, sus 6
-    métodos built-in (`push`/`pop`/`map`/`filter`/`find`/`len`).
-    Si es `Map<K, V>`, sus 5 (`get`/`has`/`keys`/`values`/`len`).
-    Si es `Str`, sus 3 (`upper`/`lower`/`len`). Para otros tipos
-    (`Any`, `PyAny`, primitivos) la lista queda vacía.
+    (`u: User`), aparecen sus fields. Si es `List<T>`, sus 9
+    métodos built-in (`push`/`pop`/`map`/`filter`/`find`/`len`/
+    `sort`/`reverse`/`contains`). Si es `Map<K, V>`, sus 5
+    (`get`/`has`/`keys`/`values`/`len`). Si es `Str`, sus 10
+    (`upper`/`lower`/`len`/`contains`/`starts_with`/`ends_with`/
+    `split`/`trim`/`replace`/`repeat`). Si es un tuple (`(Int,
+    Str, Bool)`), aparecen los índices `0`/`1`/`2` como campos
+    con el tipo de cada elemento. Para otros tipos (`Any`, `PyAny`,
+    primitivos) la lista queda vacía.
   - En cualquier otra posición (caso *scope-level*): aparecen las
     variables y funciones top-level del archivo, los tipos custom
     declarados, los símbolos importados, los builtins (`print`/
