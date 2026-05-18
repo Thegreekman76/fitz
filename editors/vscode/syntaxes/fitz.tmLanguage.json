@@ -82,8 +82,20 @@
       ]
     },
     "numbers": {
-      "comment": "Mini-tanda Núm — separadores `_` (`1_000_000`) y notación científica `e/E[+-]?` (`3.14e-2`, `1e10`). Float matchea primero porque su pattern es más específico.",
+      "comment": "Mini-tanda Núm — separadores `_` y notación científica `e/E`. Mini-tanda Lit — literales hex/binario/octal con prefijos `0x`/`0b`/`0o`. Los patterns más específicos primero (hex/bin/oct antes que float/int decimal).",
       "patterns": [
+        {
+          "name": "constant.numeric.hex.fitz",
+          "match": "\\b0x[0-9a-fA-F][0-9a-fA-F_]*\\b"
+        },
+        {
+          "name": "constant.numeric.binary.fitz",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.octal.fitz",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
         {
           "name": "constant.numeric.float.fitz",
           "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?\\b"

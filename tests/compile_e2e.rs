@@ -1778,6 +1778,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "02-hola.fitz",
     "03-variables.fitz",
     "03b-numeros-legibles.fitz",
+    "03c-bases-numericas.fitz",
     "04-operadores.fitz",
     "05-strings.fitz",
     "05b-format-specs.fitz",

@@ -320,14 +320,24 @@ impl Lexer {
     ///     dígito (`1e`, `1e+` → error).
     ///   - Separadores también permitidos en el exponente (`1e1_0`).
     fn read_number(&mut self) -> FitzResult<Token> {
-        let start_pos = self.pos;
         let start_line = self.line;
         let start_col = self.column;
 
-        // Helper: lee dígitos + underscores intercalados. El primer char
-        // ya consumido por el caller (sabemos que el número arranca con
-        // un dígito). Devuelve error si encuentra `_` huérfano (`1__`,
-        // termina en `_`).
+        // Mini-tanda Lit — literales hex/binario/octal con prefijos
+        // `0x`/`0b`/`0o`. El char actual debe ser `0` y el siguiente
+        // el prefijo. Si NO matchea, caemos al flujo decimal de abajo.
+        if self.peek() == Some('0') && !self.prev_was_dot {
+            match self.peek_next() {
+                Some('x') => return self.read_radix_number(16, "hex", start_line, start_col),
+                Some('b') => return self.read_radix_number(2, "binario", start_line, start_col),
+                Some('o') => return self.read_radix_number(8, "octal", start_line, start_col),
+                _ => {}
+            }
+        }
+
+        let start_pos = self.pos;
+        // Helper: lee dígitos + underscores intercalados. Devuelve error
+        // si encuentra `_` huérfano (`1__`, termina en `_`).
         self.read_digit_run(start_line, start_col)?;
 
         // Mini-tanda T — si venimos justo después de `Dot` (tuple
@@ -394,6 +404,64 @@ impl Lexer {
             })?;
             Ok(Token::Int(n))
         }
+    }
+
+    /// Mini-tanda Lit — lee un literal con prefijo de radix (hex `0x`,
+    /// binario `0b`, octal `0o`). Soporta separadores `_` entre dígitos.
+    /// Produce `Token::Int`. Overflow sobre `i64` o dígitos vacíos →
+    /// error claro del lexer.
+    fn read_radix_number(
+        &mut self,
+        radix: u32,
+        name: &str,
+        line: usize,
+        col: usize,
+    ) -> FitzResult<Token> {
+        self.advance(); // consume '0'
+        self.advance(); // consume prefijo ('x'/'b'/'o')
+        let digit_start = self.pos;
+        loop {
+            match self.peek() {
+                Some(c) if c.is_digit(radix) => {
+                    self.advance();
+                }
+                Some('_') => {
+                    // Después de `_` exige dígito válido para la base.
+                    if !self.peek_next().is_some_and(|n| n.is_digit(radix)) {
+                        return Err(FitzError::new(
+                            ErrorKind::InvalidSyntax,
+                            line,
+                            col,
+                            format!("separador `_` en literal {} solo entre dígitos válidos", name),
+                        ));
+                    }
+                    self.advance();
+                }
+                _ => break,
+            }
+        }
+        if digit_start == self.pos {
+            return Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                line,
+                col,
+                format!("literal {} sin dígitos después del prefijo", name),
+            ));
+        }
+        let raw: String = self.chars[digit_start..self.pos].iter().collect();
+        let clean: String = raw.chars().filter(|c| *c != '_').collect();
+        let n = i64::from_str_radix(&clean, radix).map_err(|_| {
+            FitzError::new(
+                ErrorKind::InvalidSyntax,
+                line,
+                col,
+                format!(
+                    "literal {} `{}` excede el rango de Int (i64)",
+                    name, clean
+                ),
+            )
+        })?;
+        Ok(Token::Int(n))
     }
 
     /// Mini-tanda Núm — lee una secuencia de `digit (_ digit)*`. Permite
@@ -1362,5 +1430,75 @@ print("Hola, {name}!")"#;
         assert_eq!(toks[2], Int(0));
         assert_eq!(toks[3], Dot);
         assert_eq!(toks[4], Int(0));
+    }
+
+    // ---------------------------------------------------------------
+    // Mini-tanda Lit — literales hex / binario / octal.
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn lit_hex_basico_lower_y_upper_case() {
+        // Los dígitos hex son case-insensitive (paralelo a Rust/Python).
+        assert_eq!(first_token_of("0xFF"), Token::Int(255));
+        assert_eq!(first_token_of("0xff"), Token::Int(255));
+        assert_eq!(first_token_of("0xCAFE"), Token::Int(0xCAFE));
+        assert_eq!(first_token_of("0x0"), Token::Int(0));
+    }
+
+    #[test]
+    fn lit_binario_y_octal_basicos() {
+        assert_eq!(first_token_of("0b1010"), Token::Int(10));
+        assert_eq!(first_token_of("0b0"), Token::Int(0));
+        assert_eq!(first_token_of("0o755"), Token::Int(0o755));
+        assert_eq!(first_token_of("0o7"), Token::Int(7));
+    }
+
+    #[test]
+    fn lit_separadores_en_hex_bin_oct() {
+        // `_` entre dígitos válidos para cada base.
+        assert_eq!(first_token_of("0xDEAD_BEEF"), Token::Int(0xDEAD_BEEF));
+        assert_eq!(first_token_of("0b1010_1010"), Token::Int(0b1010_1010));
+        assert_eq!(first_token_of("0o7_5_5"), Token::Int(0o755));
+    }
+
+    #[test]
+    fn lit_sin_digitos_tras_prefijo_es_error() {
+        // `0x`, `0b`, `0o` solos sin dígitos.
+        assert!(tokenize("0x").is_err());
+        assert!(tokenize("0b").is_err());
+        assert!(tokenize("0o").is_err());
+    }
+
+    #[test]
+    fn lit_digito_invalido_para_la_base_corta_el_literal() {
+        // `0b2` lexea `0b` + ... pero no hay '2' válido en binario.
+        // El lexer corta tras el '0' del prefijo, dispara error "sin
+        // dígitos tras prefijo".
+        assert!(tokenize("0b2").is_err());
+        // `0o9` mismo case: `9` no es octal válido.
+        assert!(tokenize("0o9").is_err());
+    }
+
+    #[test]
+    fn lit_overflow_es_error_explicito() {
+        // i64::MAX = 0x7FFF_FFFF_FFFF_FFFF (positivo). Un nibble más → overflow.
+        assert!(tokenize("0xFFFFFFFFFFFFFFFF").is_err());
+        // Binario equivalente.
+        assert!(tokenize("0b11111111111111111111111111111111111111111111111111111111111111111").is_err());
+    }
+
+    #[test]
+    fn lit_underscore_terminal_o_doble_es_error_en_hex() {
+        assert!(tokenize("0xFF_").is_err(), "underscore al final");
+        assert!(tokenize("0xF__F").is_err(), "doble underscore");
+    }
+
+    #[test]
+    fn lit_decimal_clasico_sigue_funcionando() {
+        // Regresión: nada que arranca con `0` que no tiene prefijo
+        // hex/bin/oct se sigue parseando como decimal.
+        assert_eq!(first_token_of("0"), Token::Int(0));
+        assert_eq!(first_token_of("007"), Token::Int(7));
+        assert_eq!(first_token_of("0.5"), Token::Float(0.5));
     }
 }

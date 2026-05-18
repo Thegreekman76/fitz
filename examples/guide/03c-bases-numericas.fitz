@@ -1,0 +1,40 @@
+// Mini-tanda Lit — literales hex / binario / octal.
+//
+// Tres prefijos en minúscula: `0x` (hex), `0b` (binario), `0o` (octal).
+// Todos producen `Int` (i64). Soportan separadores `_` (mini-tanda Núm).
+// Dígitos hex case-insensitive: `0xFF` == `0xff`.
+
+// Hex — el más común. Útil para bytes, colores RGB, máscaras.
+let max_byte: Int = 0xFF
+let cafe: Int = 0xCAFE
+let upper: Int = 0xff             // mismo valor que 0xFF
+print(max_byte)                    // 255
+print(cafe)                        // 51966
+print(upper)                       // 255
+
+// Hex con separadores — útil para constantes grandes (32/64-bit).
+let dead_beef: Int = 0xDEAD_BEEF
+print(dead_beef)                   // 3735928559
+
+// Binario — patrón de bits explícito.
+let nibble_alto: Int = 0b1111_0000
+let mascara: Int = 0b1010_1010
+print(nibble_alto)                 // 240
+print(mascara)                     // 170
+
+// Octal — permisos Unix (raro, pero clásico).
+let perms_rwxr_xr_x: Int = 0o755
+let perms_rw_rw_r__: Int = 0o664
+print(perms_rwxr_xr_x)             // 493
+print(perms_rw_rw_r__)             // 436
+
+// Todos los formatos producen el mismo `Int` numérico — la diferencia
+// es solo de notación al escribir el literal.
+let mismo_valor: Bool = (0xFF == 255) and (0b11111111 == 255) and (0o377 == 255)
+print(mismo_valor)                 // true
+
+// Combinación con la interpolación de format specs (mini-tanda Fm)
+// para mostrar el mismo valor en distintas bases.
+let n: Int = 0xCAFE
+print("dec: {n}, hex: {n:#x}, bin: {n:#b}, oct: {n:#o}")
+// dec: 51966, hex: 0xcafe, bin: 0b1100101011111110, oct: 0o145376

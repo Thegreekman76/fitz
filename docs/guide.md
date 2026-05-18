@@ -418,6 +418,45 @@ Reglas:
 Ver [examples/guide/03b-numeros-legibles.fitz](../examples/guide/03b-numeros-legibles.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Literales en otras bases (mini-tanda Lit)
+
+Los `Int` aceptan tres prefijos para expresarse en distintas bases:
+
+| Prefijo | Base       | Ejemplo        | Valor |
+|---------|------------|----------------|-------|
+| `0x`    | Hexadecimal | `0xFF`, `0xff` | 255   |
+| `0b`    | Binario     | `0b1010`       | 10    |
+| `0o`    | Octal       | `0o755`        | 493   |
+
+```fitz
+let max_byte: Int = 0xFF
+let nibble_alto: Int = 0b1111_0000     // 240
+let perms_rwxr_xr_x: Int = 0o755        // 493
+let dead_beef: Int = 0xDEAD_BEEF        // 3735928559
+```
+
+Reglas:
+
+- **Solo minúsculas en el prefijo** (`0x`, no `0X`). Los dígitos hex
+  sí son case-insensitive (`0xff` == `0xFF`).
+- **Separadores `_`** permitidos entre dígitos válidos para la base
+  (`0xDEAD_BEEF`, `0b1010_1010`, `0o7_5_5`).
+- **Overflow sobre `i64`** → error claro del lexer.
+- **Sin notación científica adentro de hex/bin/oct**. La `e` en hex
+  es un dígito válido (`0xCAFE`, `0xFE`), no exponente.
+
+Combinados con format specs de la mini-tanda Fm, podés mostrar un
+mismo número en distintas bases para debug:
+
+```fitz
+let n: Int = 0xCAFE
+print("dec: {n}, hex: {n:#x}, bin: {n:#b}, oct: {n:#o}")
+// dec: 51966, hex: 0xcafe, bin: 0b1100101011111110, oct: 0o145376
+```
+
+Ver [examples/guide/03c-bases-numericas.fitz](../examples/guide/03c-bases-numericas.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Asignación
 
 La forma corta es solo `nombre = valor`:

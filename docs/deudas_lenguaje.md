@@ -722,6 +722,37 @@ posteriores.
   `GUIDE_EXAMPLES_COMPILE`. Cap 3 de la guía suma sub-sección
   "Números legibles".
 
+- ~~**Literales hex/binario/octal** `0xFF`, `0b1010`, `0o755`~~ ✓
+  CERRADO 2026-05-18 (mini-tanda Lit). Tres prefijos en
+  minúscula (`0x`/`0b`/`0o`). Dígitos hex case-insensitive
+  (`0xff` == `0xFF`). Separadores `_` heredados de Núm también
+  funcionan (`0xDEAD_BEEF`, `0b1010_1010`, `0o7_5_5`). Overflow
+  sobre `i64` → error claro del lexer.
+
+  Implementación acotada al **lexer**: helper nuevo
+  `read_radix_number(radix, name, line, col)` que consume el
+  prefijo, lee dígitos válidos para la base con separadores
+  intercalados, y parsea con `i64::from_str_radix`. El branch
+  se inserta al inicio de `read_number` con un lookahead
+  (`peek == '0'` + `peek_next == 'x'/'b'/'o'`). Cero cambios
+  al parser/checker/evaluator/codegen — el `Token::Int`
+  sintetizado lleva el mismo valor que un literal decimal
+  equivalente.
+
+  Grammar TextMate actualizado con 3 patterns nuevos (hex/bin/
+  oct antes del Int decimal por especificidad). 8 unit tests
+  nuevos del lexer (hex case-insensitive, bin+oct básicos,
+  separadores, error sin dígitos tras prefijo, error dígito
+  inválido, overflow, error underscore terminal/doble,
+  regresión decimal `0`/`007`/`0.5`). Ejemplo
+  `examples/guide/03c-bases-numericas.fitz` sumado al smoke
+  `GUIDE_EXAMPLES_COMPILE`. Cap 3 de la guía suma sub-sección
+  "Literales en otras bases (mini-tanda Lit)".
+
+  **Deuda residual menor**: prefijos en mayúscula (`0X`/`0B`/
+  `0O`) no aceptados — Python los permite, Rust no. Sin
+  presión real.
+
 - **Identificadores no-ASCII** (`π`, `función`) — F8. Bajo
   impacto.
 - **Escapes extendidos** `\u{...}`, `\x..`, `\0`, `\b` — F9.
