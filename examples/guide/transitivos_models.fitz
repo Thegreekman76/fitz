@@ -1,0 +1,6 @@
+// transitivos_models.fitz — type compartido del ejemplo F15.
+
+type User {
+    id: Int = 0
+    name: Str = "anon"
+}

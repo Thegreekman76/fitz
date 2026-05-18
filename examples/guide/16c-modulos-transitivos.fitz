@@ -1,0 +1,21 @@
+// Mini-tanda F15 — imports transitivos en `fitz build`.
+//
+// Antes de F15, `fitz build` rechazaba cualquier módulo cargado que
+// tuviera su propio `import` ("imports transitivos no soportados").
+// El workaround era aplanar los imports al archivo principal.
+//
+// F15 cierra esa deuda: el `ModuleLoader` del codegen ahora hace
+// load recursivo + detección de ciclos (paralelo al evaluator).
+// Los módulos pueden organizar dependencias en árbol.
+//
+// Este ejemplo carga `transitivos_app.fitz` que a su vez importa
+// `transitivos_models.fitz` (type compartido) y `transitivos_format.fitz`
+// (helper de formato). Cero `import` directo del main hacia los
+// modules internos — solo hacia la fachada `transitivos_app`.
+
+import transitivos_app
+
+// La fachada compone los módulos internos: arma un `User`, lo formatea
+// vía `transitivos_format`, y devuelve el `Str` listo para imprimir.
+print(transitivos_app.welcome(42, "Fitz"))
+// → bienvenido USER#42:FITZ

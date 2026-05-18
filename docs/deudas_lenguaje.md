@@ -1285,8 +1285,44 @@ acumulamos acá con fecha + hardware + comando exacto.
   "Constantes del módulo con RHS calculada"; bullet stale en "Qué
   no se puede hacer todavía" removido. Validado bit-a-bit `fitz
   run` ↔ `fitz build`.
-- **F15**: imports transitivos en codegen — un módulo cargado puede
-  tener su propio `import`. Refactor del module loader del codegen.
+- ~~**F15**: imports transitivos en codegen — un módulo cargado puede
+  tener su propio `import`~~ ✓ CERRADO 2026-05-18 (mini-tanda F15).
+  El `ModuleLoader` del codegen ahora hace load recursivo + detección
+  de ciclos paralelo al evaluator. Cambios principales:
+  `ModuleLoader` suma `loading_stack: Vec<PathBuf>` que pushea
+  canonical path antes de procesar cada módulo (cycle detect con
+  mismo mensaje del evaluator: `"ciclo de imports detectado: a -> b
+  -> a"`); `load_module` divide en `load_module` (cycle guard +
+  push/pop) y `load_module_inner` (parse+check+recursive load +
+  codegen + push to modules); `LoadedModule` suma `local_bindings:
+  HashMap<String, ResolvedBinding>` que captura los bindings
+  transitivos del módulo (Namespace/Named); nueva fn
+  `generate_module_rs_with_bindings` reemplaza `generate_module_rs`,
+  instala firmas + bindings en el `CodegenCtx` ANTES del pre-registro
+  (para que pre_register_top_lets pueda resolver tipos cross-module).
+  `CodegenCtx::mod_path_prefix()` devuelve `"crate::"` en Module mode
+  y `""` en Main mode; usado en `resolve_namespace_field`,
+  `resolve_namespace_call`, y el call a `__default_<T>_<F>()` para
+  defaults de tipos importados. Nuevo método
+  `CodegenCtx::emit_module_use_decls` paralelo a
+  `ModuleLoader::emit_use_decls` pero con `use crate::<other>::...`.
+  `Stmt::Import`/`Stmt::FromImport` ahora se ignoran adentro del
+  loop de partición en `generate_module_rs_with_bindings` (ya
+  procesados por el loader). Imports Python dentro de módulos
+  transitivos NO se soportan en F15 (error explícito sugerendo
+  workaround) — deuda residual menor. Tests: 1 unit nuevo
+  (`f15_module_loader_acepta_imports_transitivos_en_modulo`),
+  3 E2E nuevos (`f15_import_transitivo_namespace_y_named_mixto`,
+  `f15_ciclo_de_imports_transitivos_aborta_con_error_claro`,
+  `f15_import_transitivo_con_type_compartido`). El viejo E2E
+  `modulo_con_import_propio_es_error_transitivo` se reapuntó a
+  `modulo_con_import_propio_compila_via_import_transitivo` (test
+  positivo). Ejemplo runnable `examples/guide/16c-modulos-transitivos.fitz`
+  + tres archivos auxiliares (`transitivos_app/_models/_format.fitz`)
+  sumado al smoke `GUIDE_EXAMPLES_COMPILE`. Cap 16 de la guía sumó
+  sub-sección "Imports transitivos" + bullet stale removido de
+  "Qué no se puede hacer todavía". Validado bit-a-bit `fitz run` ↔
+  `fitz build`.
 
 ### ~~Tooling — VSCode catch-up~~ ✓ CERRADO 2026-05-17 (mini-tanda V)
 

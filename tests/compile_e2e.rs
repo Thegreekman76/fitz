@@ -1412,28 +1412,108 @@ fn modulo_inexistente_aborta_build() {
 }
 
 #[test]
-fn modulo_con_import_propio_es_error_transitivo() {
-    // 5b.5: los imports transitivos no se soportan todavía.
-    // Si el módulo cargado tiene su propio `import`, el loader aborta.
+fn modulo_con_import_propio_compila_via_import_transitivo() {
+    // F15: imports transitivos ahora compilan. Un módulo cargado puede
+    // tener su propio `import` que el codegen sigue recursivamente.
     let main = "\
 import primero
 print(primero.x())
 ";
     let primero = "\
-import segundo
-fn x() -> Int => 1
+from segundo import dos
+fn x() -> Int => dos()
 ";
-    let segundo = "fn y() -> Int => 2";
-    let stderr = build_expect_fail_multi(
-        "module-transitivo",
+    let segundo = "fn dos() -> Int => 2";
+    let (stdout, exit) = build_and_run_multi(
+        "module-transitivo-ok",
         main,
         &[("primero.fitz", primero), ("segundo.fitz", segundo)],
     );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["2"]);
+}
+
+#[test]
+fn f15_import_transitivo_namespace_y_named_mixto() {
+    // Cobertura más amplia: un módulo cargado usa `import` (namespace)
+    // y otro módulo usa `from ... import` (named) — ambos transitivos.
+    let main = "\
+import a
+print(a.compose(\"Fitz\"))
+";
+    let a = "\
+import b
+from c import upper
+fn compose(name: Str) -> Str => upper(b.greet(name))
+";
+    let b = "\
+let PREFIX = \"hola, \"
+fn greet(name: Str) -> Str => \"{PREFIX}{name}\"
+";
+    let c = "fn upper(s: Str) -> Str => s.upper()";
+    let (stdout, exit) = build_and_run_multi(
+        "f15-namespace-y-named-mixto",
+        main,
+        &[
+            ("a.fitz", a),
+            ("b.fitz", b),
+            ("c.fitz", c),
+        ],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["HOLA, FITZ"]);
+}
+
+#[test]
+fn f15_ciclo_de_imports_transitivos_aborta_con_error_claro() {
+    // F15: ciclo de imports detectado por el loader del codegen
+    // (paralelo al evaluator). a → b → a debe abortar el build.
+    let main = "\
+import a
+print(a.x())
+";
+    let a = "\
+import b
+fn x() -> Int => 1
+";
+    let b = "\
+import a
+fn y() -> Int => 2
+";
+    let stderr = build_expect_fail_multi(
+        "f15-ciclo-imports",
+        main,
+        &[("a.fitz", a), ("b.fitz", b)],
+    );
     assert!(
-        stderr.contains("transitivos") || stderr.contains("5b.5"),
-        "esperaba mensaje sobre imports transitivos / 5b.5, fue: {}",
+        stderr.contains("ciclo de imports"),
+        "esperaba mensaje sobre ciclo de imports, fue: {}",
         stderr
     );
+}
+
+#[test]
+fn f15_import_transitivo_con_type_compartido() {
+    // F15: un type definido en C, usado por B, expuesto via fn de A.
+    // El codegen del módulo A necesita conocer la sig de `User` para
+    // que `from c import User` resuelva al `pub fn` que retorna.
+    let main = "\
+import a
+print(a.make_user(7))
+";
+    let a = "\
+from c import User
+fn make_user(id: Int) -> User => User { id: id }
+";
+    let _b = ""; // sin uso
+    let c = "type User { id: Int = 0 }";
+    let (stdout, exit) = build_and_run_multi(
+        "f15-type-compartido",
+        main,
+        &[("a.fitz", a), ("c.fitz", c)],
+    );
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["User { id: 7 }"]);
 }
 
 // ---------------------------------------------------------------------------
@@ -1879,6 +1959,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "14c-result-tipado.fitz",
     "16-modulos.fitz",
     "16b-modulos-let-expr.fitz",
+    "16c-modulos-transitivos.fitz",
     "17-http.fitz",
     "17b-middleware.fitz",
     "18-docs.fitz",
@@ -2756,10 +2837,9 @@ fn mini_tanda_bits_and_or_xor_y_shifts() {
 
 #[test]
 fn mini_tanda_err_plus_err_int_compila_y_corre() {
-    // `Err(Int)` se coerce a Str via `format!("{}", n)` en codegen.
-    // El value se preserva en el mensaje pero pierde el tipo (Result
-    // sigue siendo Result<T, String> pinned).
-    let src = "fn fail() -> Result<Int> {\n\
+    // Re+ post-tightened: `Result<Int>` con `Err(Int)` ahora requiere
+    // declarar el E explícito (`Result<Int, Int>`).
+    let src = "fn fail() -> Result<Int, Int> {\n\
                  return Err(404)\n\
                }\n\
                match fail() {\n\
@@ -2918,9 +2998,10 @@ fn mini_tanda_re_plus_legacy_result_t_sin_e_sigue_funcionando() {
 #[test]
 fn mini_tanda_err_plus_err_instance_compila_y_preserva_display() {
     // `Err(Instance)` deref del Arc<Mutex<TData>> antes del format!
-    // — paridad bit-a-bit con el Display del intérprete.
+    // — paridad bit-a-bit con el Display del intérprete. Post-Re+ se
+    // requiere declarar el E explícito.
     let src = "type ApiError { status: Int, msg: Str }\n\
-               fn fetch() -> Result<Int> {\n\
+               fn fetch() -> Result<Int, ApiError> {\n\
                  return Err(ApiError { status: 503, msg: \"unavailable\" })\n\
                }\n\
                match fetch() {\n\

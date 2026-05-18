@@ -867,6 +867,12 @@ struct LoadedModule {
     /// fn `pub fn X() -> T` (en lugar de `pub const X`). El importer
     /// necesita saberlo para emitir `X()` en lugar de `X`.
     accessor_consts: std::collections::HashSet<String>,
+    /// Mini-tanda F15 — bindings de los `import` propios del módulo.
+    /// El codegen del módulo los emite como `use crate::<other>::...`
+    /// y los usa al resolver expresiones que referencian items
+    /// cross-module. Vacío para módulos sin imports.
+    #[allow(dead_code)]
+    local_bindings: HashMap<String, ResolvedBinding>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -912,6 +918,10 @@ struct ModuleLoader {
     /// este map ANTES de fallback al path relativo `<base>/foo.fitz`.
     /// Empty hashmap en single-file mode (pre-9.y.2 behavior).
     dep_registry: crate::manifest::DepRegistry,
+    /// Mini-tanda F15 — stack de paths en curso de carga, para
+    /// detectar ciclos durante recursión transitiva. Paralelo al
+    /// `loader_stack` del evaluator (`evaluator::load_module`).
+    loading_stack: Vec<PathBuf>,
 }
 
 impl ModuleLoader {
@@ -922,6 +932,7 @@ impl ModuleLoader {
             by_path: HashMap::new(),
             bindings: HashMap::new(),
             dep_registry,
+            loading_stack: Vec::new(),
         }
     }
 
@@ -1033,7 +1044,37 @@ impl ModuleLoader {
             return Ok(idx);
         }
 
-        let source = std::fs::read_to_string(&canonical).map_err(|e| {
+        // F15 — cycle detection paralelo al evaluator. Si el módulo
+        // que vamos a cargar ya está en curso de carga (más arriba en
+        // la cadena de imports transitivos), reportamos el ciclo
+        // completo y abortamos.
+        if self.loading_stack.contains(&canonical) {
+            let mut cycle: Vec<String> = self
+                .loading_stack
+                .iter()
+                .map(|p| p.display().to_string())
+                .collect();
+            cycle.push(canonical.display().to_string());
+            return Err(loader_err(format!(
+                "ciclo de imports detectado: {}",
+                cycle.join(" -> ")
+            )));
+        }
+        self.loading_stack.push(canonical.clone());
+
+        let load_result = self.load_module_inner(segments, &canonical);
+        self.loading_stack.pop();
+        load_result
+    }
+
+    /// F15 — Cuerpo de `load_module` separado para garantizar que
+    /// `loading_stack.pop()` corra incluso ante errores intermedios.
+    fn load_module_inner(
+        &mut self,
+        segments: &[String],
+        canonical: &Path,
+    ) -> Result<usize, FitzError> {
+        let source = std::fs::read_to_string(canonical).map_err(|e| {
             loader_err(format!(
                 "error leyendo el módulo `{}`: {}",
                 canonical.display(),
@@ -1053,19 +1094,70 @@ impl ModuleLoader {
             )));
         }
 
-        // Restricción 5b.5: imports transitivos no soportados todavía.
+        // F15 — carga recursiva de imports transitivos. Antes del codegen
+        // del módulo, resolvemos cada `Stmt::Import` / `Stmt::FromImport`
+        // del módulo y armamos su tabla de bindings locales. Si alguno
+        // dispara un ciclo, `load_module` lo detecta vía `loading_stack`.
+        // Imports Python adentro de módulos transitivos: NO soportados
+        // todavía (deuda residual menor — se rechaza explícito).
+        let mut local_bindings: HashMap<String, ResolvedBinding> = HashMap::new();
         for stmt in &module_program {
-            if matches!(stmt, Stmt::Import { .. } | Stmt::FromImport { .. }) {
-                return Err(loader_err(format!(
-                    "el módulo `{}` usa `import` propio: imports transitivos no soportados \
-                     en 5b.5 (deuda residual). Workaround: aplaná los imports al main.",
-                    segments.join(".")
-                )));
+            match stmt {
+                Stmt::Import { path, .. }
+                    if path.first().map(|s| s.as_str()) == Some("python") =>
+                {
+                    return Err(loader_err(format!(
+                        "el módulo `{}` usa `from python import ...`: imports Python \
+                         dentro de módulos transitivos no se soportan todavía. \
+                         Workaround: poné el `from python import` en el main.",
+                        segments.join(".")
+                    )));
+                }
+                Stmt::FromImport { path, .. }
+                    if path.first().map(|s| s.as_str()) == Some("python") =>
+                {
+                    return Err(loader_err(format!(
+                        "el módulo `{}` usa `from python import ...`: imports Python \
+                         dentro de módulos transitivos no se soportan todavía. \
+                         Workaround: poné el `from python import` en el main.",
+                        segments.join(".")
+                    )));
+                }
+                Stmt::Import { path: nested, alias, .. } => {
+                    let idx = self.load_module(nested)?;
+                    let binding_name = alias.clone().unwrap_or_else(|| {
+                        nested.last().cloned().unwrap_or_default()
+                    });
+                    local_bindings.insert(
+                        binding_name,
+                        ResolvedBinding::Namespace { module_index: idx },
+                    );
+                }
+                Stmt::FromImport { path: nested, names, .. } => {
+                    let idx = self.load_module(nested)?;
+                    for (name, alias) in names {
+                        let kind = self.classify_named(idx, name)?;
+                        let local = alias.clone().unwrap_or_else(|| name.clone());
+                        local_bindings.insert(
+                            local,
+                            ResolvedBinding::Named {
+                                module_index: idx,
+                                item: name.clone(),
+                                kind,
+                            },
+                        );
+                    }
+                }
+                _ => {}
             }
         }
 
-        // Generar el código Rust del módulo (modo Module).
-        let rust_content = generate_module_rs(&module_program, &module_env)?;
+        // Generar el código Rust del módulo (modo Module). En F15 el
+        // codegen recibe los bindings locales + las firmas de todos los
+        // módulos ya cargados, así puede emitir `use crate::<other>::...`
+        // y resolver expresiones cross-module adentro del módulo.
+        let rust_content =
+            generate_module_rs_with_bindings(&module_program, &module_env, &local_bindings, &self.modules)?;
 
         let mod_name = segments.last().cloned().unwrap_or_default();
         let rel_path = mod_rel_path_from_segments(segments);
@@ -1083,8 +1175,9 @@ impl ModuleLoader {
             fn_sigs,
             const_sigs,
             accessor_consts,
+            local_bindings,
         });
-        self.by_path.insert(canonical, idx);
+        self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
     }
 
@@ -1254,16 +1347,57 @@ fn root_segment_of(rel_path: &Path) -> String {
 /// Genera `src/<mod>.rs` para un módulo importado. Modo: `Module`
 /// (todo `pub`, sin `fn main()`, top-level `let X = literal` →
 /// `pub const`/`pub static`).
-fn generate_module_rs(program: &Program, env: &TypeEnv) -> Result<String, FitzError> {
+/// F15 — Versión completa del codegen del módulo. Si el módulo tiene
+/// imports propios (`local_bindings` no-vacío), se emite el bloque
+/// `use crate::<other>::...` al inicio y las firmas de los módulos
+/// referenciados se instalan en el ctx para que las expresiones
+/// puedan resolver `<ns>.<field>` y nombres directos a items
+/// cross-module.
+///
+/// `loaded_modules`: slice de los módulos ya cargados, en el mismo
+/// orden que el `ModuleLoader`. Los `module_index` de
+/// `local_bindings` son índices a este slice.
+fn generate_module_rs_with_bindings(
+    program: &Program,
+    env: &TypeEnv,
+    local_bindings: &HashMap<String, ResolvedBinding>,
+    loaded_modules: &[LoadedModule],
+) -> Result<String, FitzError> {
     let mut ctx = CodegenCtx::new_for_module(env);
+    // F15 — instalar firmas + bindings ANTES del pre-registro, porque
+    // los pre-pases pueden tener que resolver tipos cross-module al
+    // armar las firmas locales de fns/types/consts.
+    for m in loaded_modules {
+        ctx.loaded_modules.push(LoadedModuleSigs {
+            mod_name: m.mod_name.clone(),
+            type_sigs: m.type_sigs.clone(),
+            fn_sigs: m.fn_sigs.clone(),
+            const_sigs: m.const_sigs.clone(),
+            accessor_consts: m.accessor_consts.clone(),
+        });
+    }
+    for (name, binding) in local_bindings {
+        ctx.module_bindings.insert(name.clone(), binding.clone());
+    }
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
     ctx.pre_register_top_lets(program)?;
 
     ctx.emit_prelude();
 
-    // Particionar stmts top-level. Para módulos: type / fn / let
-    // (con RHS literal). Cualquier otra cosa → error de codegen.
+    // F15 — `use crate::<other>::...` lines para cada Named binding del
+    // módulo. Para Namespace bindings (`import foo`) no hace falta
+    // emitir `use crate::foo;` porque el módulo `foo` es declarado
+    // como `mod foo;` en main.rs, que vive en crate root accesible
+    // como `crate::foo`. Las referencias se emiten con prefix
+    // `crate::` en módulos (ver `mod_path_prefix`).
+    ctx.emit_module_use_decls(local_bindings, loaded_modules);
+
+    // Particionar stmts top-level. Para módulos: type / fn / let.
+    // F15: `Stmt::Import` / `Stmt::FromImport` se ignoran acá — el
+    // loader ya los procesó recursivamente antes de invocar el codegen
+    // y registró los bindings locales. Cualquier otra cosa → error
+    // de codegen.
     let mut type_defs: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut top_lets: Vec<&Stmt> = Vec::new();
@@ -1272,10 +1406,13 @@ fn generate_module_rs(program: &Program, env: &TypeEnv) -> Result<String, FitzEr
             Stmt::TypeDef { .. } => type_defs.push(s),
             Stmt::FnDef { .. } => top_fns.push(s),
             Stmt::Assign { .. } => top_lets.push(s),
+            Stmt::Import { .. } | Stmt::FromImport { .. } => {
+                // F15: ya procesados por el loader.
+            }
             other => {
                 return Err(loader_err(format!(
                     "el módulo no soporta `{}` a nivel top: hoy permitimos solo `type`, \
-                     `fn` y `let X = <literal>` (5b.5).",
+                     `fn`, `let` e `import`.",
                     stmt_kind(other)
                 )));
             }
@@ -2264,6 +2401,19 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    /// F15 — Prefix Rust para referenciar otros módulos por path
+    /// absoluto desde adentro del archivo actual. En `main.rs` los
+    /// módulos están declarados como `mod foo;` y son accesibles
+    /// directo (`foo::greet`). En un módulo del crate (`src/foo.rs`),
+    /// los demás módulos viven al lado en crate root, así que hay
+    /// que prefijarlos con `crate::` (`crate::bar::greet`).
+    fn mod_path_prefix(&self) -> &'static str {
+        match self.mode {
+            GenMode::Main => "",
+            GenMode::Module => "crate::",
+        }
+    }
+
     /// Lee los bindings y las firmas de módulos del loader, dejando al
     /// ctx autocontenido (sin necesidad de mantener viva una referencia
     /// al loader). Las firmas se copian — son pocos KBs por módulo, y
@@ -2284,6 +2434,64 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
+    /// F15 — Emite `use crate::<other>::<item>` para cada Named binding
+    /// del módulo. Paralelo a `ModuleLoader::emit_use_decls` pero usa
+    /// el prefix `crate::` y itera sobre los bindings locales del
+    /// módulo en vez de los del importer principal. Para Namespace
+    /// bindings (`import foo`) no emitimos `use` — las referencias
+    /// `foo::greet` ya funcionan con `crate::foo::greet` (ver
+    /// `resolve_namespace_field`).
+    fn emit_module_use_decls(
+        &mut self,
+        local_bindings: &HashMap<String, ResolvedBinding>,
+        loaded_modules: &[LoadedModule],
+    ) {
+        let mut entries: Vec<(&String, &ResolvedBinding)> = local_bindings.iter().collect();
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        let mut emitted_any = false;
+        for (local, binding) in entries {
+            if let ResolvedBinding::Named { module_index, item, kind } = binding {
+                let mod_name = &loaded_modules[*module_index].mod_name;
+                let needs_alias = local != item;
+                match kind {
+                    NamedKind::Type => {
+                        if needs_alias {
+                            self.output.push_str(&format!(
+                                "use crate::{mod}::{{{item} as {local}, {item}Data as {local}Data}};\n",
+                                mod = mod_name,
+                                item = item,
+                                local = local,
+                            ));
+                        } else {
+                            self.output.push_str(&format!(
+                                "use crate::{mod}::{{{item}, {item}Data}};\n",
+                                mod = mod_name,
+                                item = item,
+                            ));
+                        }
+                    }
+                    NamedKind::Fn | NamedKind::Const => {
+                        if needs_alias {
+                            self.output.push_str(&format!(
+                                "use crate::{}::{} as {};\n",
+                                mod_name, item, local
+                            ));
+                        } else {
+                            self.output.push_str(&format!(
+                                "use crate::{}::{};\n",
+                                mod_name, item
+                            ));
+                        }
+                    }
+                }
+                emitted_any = true;
+            }
+        }
+        if emitted_any {
+            self.output.push('\n');
+        }
+    }
+
     /// Resuelve `<ns>.<field>` (namespace access) cuando `ns` es un
     /// módulo importado via `import foo`. Devuelve `(código Rust,
     /// tipo Fitz)`. Si el módulo no exporta `field`, `None`.
@@ -2293,9 +2501,10 @@ impl<'a> CodegenCtx<'a> {
             _ => return None,
         };
         let m = self.loaded_modules.get(idx)?;
+        let prefix = self.mod_path_prefix();
         if let Some(sig) = m.fn_sigs.get(field) {
             Some((
-                format!("{}::{}", m.mod_name, field),
+                format!("{}{}::{}", prefix, m.mod_name, field),
                 Type::Function {
                     params: sig.params.clone(),
                     ret: Box::new(sig.ret.clone()),
@@ -2307,9 +2516,9 @@ impl<'a> CodegenCtx<'a> {
                 // call site (`mod::X()`). Para `pub const`/`pub static`
                 // emitimos `mod::X` directo.
                 let code = if m.accessor_consts.contains(field) {
-                    format!("{}::{}()", m.mod_name, field)
+                    format!("{}{}::{}()", prefix, m.mod_name, field)
                 } else {
-                    format!("{}::{}", m.mod_name, field)
+                    format!("{}{}::{}", prefix, m.mod_name, field)
                 };
                 (code, ty.clone())
             })
@@ -2324,9 +2533,10 @@ impl<'a> CodegenCtx<'a> {
             _ => return None,
         };
         let m = self.loaded_modules.get(idx)?;
+        let prefix = self.mod_path_prefix();
         m.fn_sigs
             .get(fn_name)
-            .map(|sig| (format!("{}::{}", m.mod_name, fn_name), sig.clone()))
+            .map(|sig| (format!("{}{}::{}", prefix, m.mod_name, fn_name), sig.clone()))
     }
 
     // --- emit helpers -----------------------------------------------------
@@ -7000,8 +7210,9 @@ impl<'a> CodegenCtx<'a> {
                     // Llamada a la helper fn del módulo de origen. Su
                     // body ya retorna el tipo correcto, sin coerce extra.
                     // Usamos `item` (nombre dentro del módulo), no
-                    // `type_name` (alias local).
-                    format!("{}::__default_{}_{}()", mod_name, item, f.name)
+                    // `type_name` (alias local). F15: prefix `crate::`
+                    // cuando el codegen es de un módulo.
+                    format!("{}{}::__default_{}_{}()", self.mod_path_prefix(), mod_name, item, f.name)
                 } else {
                     let (code, ty) = self.gen_expr(default_expr)?;
                     coerce(&code, &ty, &f.type_)
@@ -13653,7 +13864,7 @@ mod tests {
         if !errors.is_empty() {
             panic!("checker errors: {:?}", errors);
         }
-        generate_module_rs(&program, &env)
+        generate_module_rs_with_bindings(&program, &env, &HashMap::new(), &[])
     }
 
     #[test]
@@ -13749,6 +13960,31 @@ mod tests {
             ast_test::fn_return_type(x).as_deref(),
             Some("i64"),
             "esperaba return type i64 para X()"
+        );
+    }
+
+    #[test]
+    fn f15_module_loader_acepta_imports_transitivos_en_modulo() {
+        // F15: un módulo con su propio `import` ya no se rechaza al
+        // codegen-time. El test usa `generate_project` indirectamente
+        // via la suite e2e; acá solo validamos a nivel unit que el
+        // `gen_module` (que NO toma loader) sigue funcionando con
+        // imports stmts en el AST — los stmts se ignoran (ya los
+        // procesó el loader).
+        let code = gen_module(
+            "from segundo import dos\nfn x() -> Int => dos()",
+        );
+        assert!(
+            code.is_err(),
+            "gen_module sin loader: el cuerpo de `x` referencia `dos` \
+             que no está en scope; debe ser error"
+        );
+        // El mensaje NO debería citar 5b.5 ni "imports transitivos".
+        let msg = code.unwrap_err().message;
+        assert!(
+            !msg.contains("transitivos") && !msg.contains("5b.5"),
+            "el error ya no debe citar deuda transitiva post-F15; fue: {}",
+            msg
         );
     }
 

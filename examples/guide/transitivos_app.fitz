@@ -1,0 +1,18 @@
+// transitivos_app.fitz — fachada del ejemplo F15.
+//
+// Importa dos módulos hermanos:
+//  - transitivos_models exporta el type `User`.
+//  - transitivos_format exporta `format_user`.
+//
+// El main del ejemplo (16c) NO importa estos módulos directo; solo
+// importa esta fachada. Antes de F15 esto no compilaba con
+// `fitz build` porque el codegen rechazaba imports adentro de
+// módulos cargados.
+
+from transitivos_models import User
+from transitivos_format import format_user
+
+fn welcome(id: Int, name: Str) -> Str {
+    let u = User { id: id, name: name }
+    return "bienvenido {format_user(u)}"
+}

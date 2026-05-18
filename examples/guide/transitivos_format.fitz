@@ -1,0 +1,12 @@
+// transitivos_format.fitz — helper de formato del ejemplo F15.
+//
+// Importa `User` de transitivos_models — esta es exactamente la
+// cadena transitiva que F15 habilita: el main carga transitivos_app
+// que a su vez carga transitivos_format que a su vez carga
+// transitivos_models.
+
+from transitivos_models import User
+
+fn format_user(u: User) -> Str {
+    return "USER#{u.id}:{u.name.upper()}"
+}

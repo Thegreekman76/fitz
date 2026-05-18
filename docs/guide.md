@@ -4867,6 +4867,52 @@ simplicidad — el codegen no propaga const-ness entre `let`s del
 módulo. En la práctica no importa: la diferencia entre `pub const`
 y `pub fn X()` es invisible para el código que llama a `mod.X`.
 
+### Imports transitivos
+
+Los módulos pueden tener sus propios `import` — la cadena se sigue
+recursivamente. Esto vale tanto para `fitz run` como para
+`fitz build` (mini-tanda **F15** cerró el último gap del codegen).
+
+[examples/guide/16c-modulos-transitivos.fitz](../examples/guide/16c-modulos-transitivos.fitz)
+muestra una fachada que organiza dependencias en árbol:
+
+```fitz
+// 16c-modulos-transitivos.fitz
+import transitivos_app
+print(transitivos_app.welcome(42, "Fitz"))     // bienvenido USER#42:FITZ
+```
+
+```fitz
+// transitivos_app.fitz — fachada
+from transitivos_models import User           // ← transitivo
+from transitivos_format import format_user    // ← transitivo
+
+fn welcome(id: Int, name: Str) -> Str {
+    let u = User { id: id, name: name }
+    return "bienvenido {format_user(u)}"
+}
+```
+
+```fitz
+// transitivos_format.fitz — helper
+from transitivos_models import User           // ← cadena profunda
+
+fn format_user(u: User) -> Str {
+    return "USER#{u.id}:{u.name.upper()}"
+}
+```
+
+Detalles del loader:
+
+- **Ciclos** detectados con un stack de paths en curso: `a → b → a`
+  aborta con `ciclo de imports detectado: ...\a.fitz -> ...\b.fitz
+  -> ...\a.fitz` (paralelo bit-a-bit al evaluator).
+- **Cache compartida**: si dos módulos transitivos importan el
+  mismo archivo, se carga una sola vez.
+- **`from python import` adentro de módulos transitivos no se
+  soporta todavía**: tiene que estar en el main. Workaround si
+  hace falta: re-exportar la fachada desde el main.
+
 ### Qué no se puede hacer todavía
 
 - **`foo.User { ... }`** — el struct literal con namespace no
@@ -4876,15 +4922,10 @@ y `pub fn X()` es invisible para el código que llama a `mod.X`.
   de usuario.
 - **Multi-línea en `from import (...)` con paréntesis** — sin
   soporte. Una línea sola.
-- **Compilar (`fitz build`)** — desde 5b.5 el compilador
-  soporta módulos. Con dos restricciones que no afectan al
-  intérprete:
-  - Las funciones del módulo **deben anotar tipos** de parámetros
-    y retorno (limitación de codegen 5b.1; la inferencia de
-    tipos de params es deuda residual).
-  - **Imports transitivos no se soportan**: un módulo cargado
-    por el main no puede tener su propio `import`. Workaround
-    hasta que se cierre: aplaná los imports al archivo principal.
+- **`fitz build`** soporta módulos con la única restricción de
+  inferencia: las funciones del módulo **deben anotar tipos** de
+  parámetros y retorno (limitación heredada de codegen 5b.1; la
+  inferencia de tipos de params es deuda residual).
 
 ### Ejemplo completo
 
