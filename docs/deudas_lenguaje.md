@@ -1131,6 +1131,108 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Default params + cleanup docs~~ ✓ CERRADO 2026-05-19 (mini-tanda Fp + Sp)
+
+Bundle de funciones + docs cleanup. Cierra la primera de las tres
+deudas del cap 11 de la guía ("Parámetros con default"); varargs y
+named args quedan como próxima mini-tanda (Fp.2/Fp.3).
+
+**Parte 1 — Fp.1: Default params**:
+
+- ~~**`fn greet(name: Str = "amigo")`**~~ ✓ Sintaxis Python-style:
+  `name: Tipo = expr`. El default puede ser cualquier expresión
+  válida (literales, idents, BinOp, etc.); se evalúa CADA vez que
+  se llama sin ese arg (no se cachea — semántica idéntica a Python).
+- ~~**Regla Python: defaults trailing obligatorios**~~ ✓ Una vez que
+  un param tiene default, todos los siguientes también. El parser
+  rechaza `fn f(a = 1, b)` con error claro citando el param ofensor.
+- ~~**Soporte cross-feature**~~ ✓ Funciona en fns top-level, métodos
+  custom sobre `type` (R.3) y métodos estáticos (St). `parse_params`
+  es la single source of truth — todos los sitios que lo invocan
+  heredan la feature automáticamente.
+
+Implementación en 5 capas:
+- **AST** (`src/ast.rs`): `Param` suma `default: Option<Expr>`.
+  Espejo de cómo `Field` ya lleva `default: Option<Expr>` para
+  struct fields (3.2).
+- **Parser** (`src/parser.rs::parse_params`): tras el tipo opcional,
+  detecta `=` y parsea la default expr. Si un param SIN default
+  aparece después de uno CON default → `ErrorKind::UnexpectedToken`
+  con mensaje claro.
+- **Checker** (`src/types.rs`): `VarBinding` suma
+  `defaults_count: usize`. `preregister_fn_signatures` lo popula
+  contando params con `default.is_some()` (los defaults son
+  trailing por construcción del parser). Nueva fn
+  `required_arity_for_callee(ctx, callee, total)` lee la binding
+  cuando `callee` es Ident resoluble y devuelve
+  `total - defaults_count`. Fallback estricto a `total` para
+  callbacks/fns como var (no se conserva info de defaults en
+  `Type::Function`). El check de aridad pasa de `args.len() !=
+  params.len()` a `args.len() < required || args.len() > params.len()`
+  con mensaje informativo "espera entre R y T arg(s)".
+- **Evaluator** (`src/evaluator.rs`): `invoke_value`,
+  `invoke_custom_method` e `invoke_static_method` validan la nueva
+  aridad y, al iterar params, completan los faltantes evaluando el
+  `default` expr en el env del closure (paralelo a fields default
+  de struct lit). La default expr se evalúa **en cada call** —
+  útil para defaults con state como `[]` (no comparten ref).
+- **Codegen** (`src/codegen.rs`): `FnSig` suma `defaults: Vec<Option<Expr>>`
+  (uno por param, `None`/`Some`). `gen_call_with_sig`,
+  `gen_custom_method_call` y `gen_static_method_call` rellenan
+  args faltantes emitiendo `gen_expr(default_expr)` con coerción
+  al tipo del param. La fn DEFINIDA en Rust mantiene firma fija
+  (Rust no soporta default args nativos) — los defaults se inline
+  en cada call site. **Higher-order**: vars con tipo `Type::Function`
+  no llevan info de defaults (la signature paramétrica no
+  conserva las exprs); estricta aridad para callbacks.
+- **LSP** (`src/lsp.rs`): scope-level FnDef ahora muestra
+  signature completa en `detail` con format `fn(p: T = default) -> R`.
+  Helper nuevo `render_default_expr` para mostrar literales primitivos
+  + idents + UnaryOp + listas/maps vacíos como string compacto;
+  exprs complejas (BinOp, FnExpr, struct lit) → `...` placeholder.
+
+**Tests**: 22 unit (5 parser + 6 checker + 5 evaluator + 1 LSP + 5 ya
+incluidos en otros sitios) + 3 compile_e2e bit-a-bit `fitz run` ↔
+`fitz build`. Ejemplo runnable
+`examples/guide/11b-default-params.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`.
+
+Cap 11 de la guía: sub-sección nueva "Parámetros con default
+(mini-tanda Fp)" con sintaxis, reglas, scopes soportados; "Lo que
+todavía no anda" actualizado (default sale, varargs y named args
+permanecen).
+
+**Parte 2 — Sp.1: Cleanup docs stale**:
+
+- Cap 1 ("Qué todavía no anda"): mencionaba tuplas y métodos custom
+  como deuda — ambos cerrados hace varias mini-tandas. Reemplazado
+  por mención de las deudas grandes que sí quedan abiertas
+  (WebSockets, traits, herencia, operator overloading).
+- Cap 12 ("Lo que todavía no anda"): mencionaba "Métodos custom
+  sobre `type`" como deuda — cerrado en R.3. Reemplazado por nota
+  positiva con link al cap 13.
+- Cap 13 ("Lo que todavía no anda"): refactor — la lista de "métodos
+  que faltan" era engañosa porque la API ya cubre el 99% de los
+  casos. Texto reescrito como "abrí un issue si te falta alguno";
+  el bullet de `return` adentro de match arm queda explícito como
+  deuda pendiente.
+- `deudas_lenguaje.md` línea 1331: marcado "Métodos sobre Int"
+  como CERRADO (cerró en Math+Mb9+Int/Float methods anterior).
+
+**Deuda residual derivada (NO bloquea)**:
+
+- **Varargs `fn sum(...xs: Int)`**: comprometido como próxima
+  mini-tanda Fp.2. Requiere `Param.varargs: bool` (mutex con
+  default), `parse_params` detectar `...` antes del name, checker
+  binda como `List<T>` en el body, evaluator recolecta extras en
+  Vec, codegen emite con `&[T]`/`Vec<T>` Rust. ~4-6h.
+- **Named args en call site `greet(name: "Fitz")`**: comprometido
+  como Fp.3. Más invasivo — cambia `Call.args: Vec<Expr>` a
+  `Vec<CallArg { name: Option<String>, value: Expr }>`. ~4-6h.
+- **`return` adentro de match arm**: la deuda anterior de cap 13.
+  Requiere agregar `Expr::Block(Vec<Stmt>)` o refactor de
+  `MatchArm.body` para aceptar Vec<Stmt>. ~3-4h.
+
 ### ~~Math builtins + Mb9 + dispatch sobre Int/Float~~ ✓ CERRADO 2026-05-19 (mini-tanda Math + Mb9 + Int/Float methods)
 
 Bundle numérico + polish final: 9 builtins globales de Math + 7
@@ -1328,9 +1430,13 @@ TextMate sin cambios; LSP autocomplete refleja todo via rebuild.
   Refactor grande. La interop Python actual funciona como `PyAny`
   opaco por default — los stubs darían tipado fino. Sub-paso futuro
   cuando aparezca demanda real.
-- **Métodos sobre Int**: hoy los ops de bits son builtins globales
-  (`popcount(n)` en lugar de `n.popcount()`). Si entra demanda
-  real, sumar dispatch sobre `Value::Int` en `dispatch_method`.
+- ~~**Métodos sobre Int**~~ ✓ CERRADO 2026-05-19 (mini-tanda
+  Math+Mb9+Int/Float). Hoy ya hay dispatch sobre `Value::Int` y
+  `Value::Float` en `dispatch_method`: `n.abs()`, `n.to_str()`,
+  `n.to_str_base(b)`, `x.abs()`, `x.to_str()`, `x.is_nan()`,
+  `x.is_finite()`. Los bit ops (`popcount`/`leading_zeros`/...)
+  siguen como builtins globales — si entra demanda real para
+  `n.popcount()`, ahora la infraestructura está lista.
 
 ### ~~Métodos extras + format specs faltantes en build~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb7 + Fmt-build)
 

@@ -1649,10 +1649,16 @@ impl Parser {
     }
 
     /// Lista de parámetros, ya con '(' consumido. Termina consumiendo
-    /// el ')'. Cada parámetro es `name` o `name: Type`. Acepta
-    /// trailing comma y newlines dentro de los paréntesis.
+    /// el ')'. Cada parámetro es `name`, `name: Type`, `name = default`
+    /// o `name: Type = default` (mini-tanda Fp — default params).
+    /// Acepta trailing comma y newlines dentro de los paréntesis.
+    ///
+    /// **Regla Python**: una vez que un param tiene default, todos los
+    /// siguientes también deben tener default. Validado acá con error
+    /// claro citando el param ofensor.
     fn parse_params(&mut self) -> FitzResult<Vec<Param>> {
         let mut params = Vec::new();
+        let mut saw_default = false;
         self.skip_newlines();
         if matches!(self.peek(), Token::RParen) {
             self.advance();
@@ -1662,7 +1668,26 @@ impl Parser {
             self.skip_newlines();
             let name = self.expect_ident("se esperaba nombre de parámetro")?;
             let type_ = self.parse_optional_type_annotation()?;
-            params.push(Param { name, type_ });
+            // Fp — default value `= <expr>` después del tipo (o del name).
+            let default = if matches!(self.peek(), Token::Eq) {
+                self.advance(); // consume `=`
+                let expr = self.expression()?;
+                saw_default = true;
+                Some(expr)
+            } else {
+                if saw_default {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        format!(
+                            "el parámetro `{}` no tiene default pero uno anterior sí — \
+                             en Fitz, una vez que un param tiene default, todos los siguientes también",
+                            name
+                        ),
+                    ));
+                }
+                None
+            };
+            params.push(Param { name, type_, default });
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -4604,7 +4629,7 @@ mod tests {
             parse_one_stmt("fn double(n) => n * 2"),
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None }],
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -4627,6 +4652,7 @@ mod tests {
                 params: vec![Param {
                     name: "n".into(),
                     type_: Some(TypeExpr::named("Int")),
+                    default: None,
                 }],
                 return_type: Some(TypeExpr::named("Int")),
                 body: vec![Stmt::Return(Expr::BinOp {
@@ -4647,7 +4673,7 @@ mod tests {
             parse_one_stmt("fn greet(name) { print(name) }"),
             Stmt::FnDef {
                 name: "greet".into(),
-                params: vec![Param { name: "name".into(), type_: None }],
+                params: vec![Param { name: "name".into(), type_: None, default: None }],
                 return_type: None,
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("name".into(), Span::ZERO)], span: Span::ZERO,
                 }, Span::ZERO)],
@@ -4664,7 +4690,7 @@ mod tests {
             parse_one_stmt(src),
             Stmt::FnDef {
                 name: "calc".into(),
-                params: vec![Param { name: "n".into(), type_: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None }],
                 return_type: None,
                 body: vec![
                     Stmt::Assign { target: AssignTarget::Ident("x".into()),
@@ -5485,7 +5511,7 @@ mod tests {
             program[3],
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None }],
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -7630,6 +7656,80 @@ mod tests {
                 assert_eq!(var, Pattern::Ident("x".into()));
             }
             other => panic!("esperaba Stmt::For, dio {:?}", other),
+        }
+    }
+
+    // ---- Mini-tanda Fp — default params ----
+
+    #[test]
+    fn fp_param_con_default_int_se_parsea() {
+        let stmt = parse_one_stmt("fn f(x: Int = 5) -> Int { return x }");
+        match stmt {
+            Stmt::FnDef { params, .. } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert!(params[0].default.is_some(), "esperaba default");
+                if let Some(Expr::Int(5, _)) = params[0].default {} else {
+                    panic!("esperaba default Int(5), dio {:?}", params[0].default);
+                }
+            }
+            other => panic!("esperaba FnDef, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fp_param_default_str_se_parsea() {
+        let stmt = parse_one_stmt("fn greet(name: Str = \"amigo\") -> Str { return name }");
+        match stmt {
+            Stmt::FnDef { params, .. } => {
+                assert_eq!(params.len(), 1);
+                match &params[0].default {
+                    Some(Expr::Str(s, _)) => assert_eq!(s, "amigo"),
+                    other => panic!("esperaba Str default, dio {:?}", other),
+                }
+            }
+            other => panic!("esperaba FnDef, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fp_mezcla_required_y_default_se_parsea() {
+        let stmt = parse_one_stmt("fn f(a: Int, b: Int = 10) -> Int { return a + b }");
+        match stmt {
+            Stmt::FnDef { params, .. } => {
+                assert_eq!(params.len(), 2);
+                assert!(params[0].default.is_none(), "a NO debe tener default");
+                assert!(params[1].default.is_some(), "b SÍ debe tener default");
+            }
+            other => panic!("esperaba FnDef, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fp_required_despues_de_default_es_error() {
+        // Regla Python: una vez que un param tiene default, todos los
+        // siguientes también. `fn f(a = 1, b)` debe rechazarse.
+        let result = parse_program_str("fn f(a: Int = 1, b: Int) -> Int { return a + b }");
+        assert!(result.is_err(), "esperaba error, dio {:?}", result);
+        let msg = result.unwrap_err().message;
+        assert!(
+            msg.contains("default") && msg.contains("b"),
+            "mensaje esperado contener 'default' y 'b', fue: {}",
+            msg
+        );
+    }
+
+    #[test]
+    fn fp_param_default_sin_tipo_se_parsea() {
+        // `fn f(x = 5)` sin anotación de tipo. Gradual: default
+        // sí, pero el tipo del param queda en Any.
+        let stmt = parse_one_stmt("fn f(x = 5) { return x }");
+        match stmt {
+            Stmt::FnDef { params, .. } => {
+                assert!(params[0].type_.is_none());
+                assert!(params[0].default.is_some());
+            }
+            other => panic!("esperaba FnDef, dio {:?}", other),
         }
     }
 }

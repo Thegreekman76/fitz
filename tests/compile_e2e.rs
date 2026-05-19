@@ -1950,6 +1950,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "10-match.fitz",
     "10b-match-tuple-subpatterns.fitz",
     "11-funciones.fitz",
+    "11b-default-params.fitz",
     "12-type.fitz",
     "13-metodos.fitz",
     "13b-metodos-custom.fitz",
@@ -4606,3 +4607,44 @@ fn float_methods_abs_to_str_is_nan_is_finite_compila() {
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "3.14\n3.14\nfalse\ntrue");
 }
+
+// ---- Mini-tanda Fp — default params ------------------
+
+#[test]
+fn fp_default_param_str_compila() {
+    let src = "fn greet(name: Str = \"amigo\") -> Str {\n\
+                   return \"Hola, {name}\"\n\
+               }\n\
+               print(greet())\n\
+               print(greet(\"Fitz\"))\n";
+    let (stdout, exit) = build_and_run("fp_default_str", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "Hola, amigo\nHola, Fitz");
+}
+
+#[test]
+fn fp_mezcla_required_y_default_compila() {
+    let src = "fn add(a: Int, b: Int = 10) -> Int {\n\
+                   return a + b\n\
+               }\n\
+               print(add(5))\n\
+               print(add(5, 2))\n";
+    let (stdout, exit) = build_and_run("fp_mezcla", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "15\n7");
+}
+
+#[test]
+fn fp_multiples_defaults_compila() {
+    let src = "fn make(prefix: Str = \"x\", n: Int = 3, sep: Str = \"-\") -> Str {\n\
+                   return \"{prefix}{sep}{n}\"\n\
+               }\n\
+               print(make())\n\
+               print(make(\"y\"))\n\
+               print(make(\"z\", 5))\n\
+               print(make(\"w\", 7, \":\"))\n";
+    let (stdout, exit) = build_and_run("fp_multiples", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "x-3\ny-3\nz-5\nw:7");
+}
+

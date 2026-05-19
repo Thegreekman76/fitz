@@ -1804,7 +1804,8 @@ fn collect_module_sigs(
                     })?,
                     None => Type::Null,
                 };
-                fn_sigs.insert(name.clone(), FnSig { params: ps, ret });
+                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                fn_sigs.insert(name.clone(), FnSig { params: ps, ret, defaults });
             }
             Stmt::Assign { target, type_, value, .. } => {
                 // Solo bindings simples a un Ident.
@@ -2605,6 +2606,11 @@ struct CodegenCtx<'a> {
 struct FnSig {
     params: Vec<Type>,
     ret: Type,
+    /// Fp — defaults trailing por param. `defaults[i]` es la expr del
+    /// default del param `i`, o `None` si no tiene. La regla del parser
+    /// garantiza que los defaults son consecutivos al final, así que
+    /// los `None`s aparecen antes que los `Some`s.
+    defaults: Vec<Option<Expr>>,
 }
 
 /// Info de un tipo custom durante el codegen. Combina los datos
@@ -3797,7 +3803,7 @@ impl<'a> CodegenCtx<'a> {
             } = stmt
             {
                 let fn_span = stmt.span();
-                let params: Vec<Type> = params
+                let params_tys: Vec<Type> = params
                     .iter()
                     .map(|p| self.resolve_param_type(name, &p.name, p.type_.as_ref(), fn_span))
                     .collect::<Result<_, _>>()?;
@@ -3828,7 +3834,11 @@ impl<'a> CodegenCtx<'a> {
                 } else {
                     inner_ret
                 };
-                self.fn_sigs.insert(name.clone(), FnSig { params, ret });
+                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                self.fn_sigs.insert(
+                    name.clone(),
+                    FnSig { params: params_tys, ret, defaults },
+                );
             }
         }
         Ok(())
@@ -6121,7 +6131,12 @@ impl<'a> CodegenCtx<'a> {
         // un closure → llamarla con `(*f)(args)` o `f(args)`. Rc<dyn
         // Fn> implementa `Fn` directamente; rustc auto-derefs.
         if let Some(Type::Function { params, ret }) = self.lookup_var(name).cloned() {
-            let sig = FnSig { params, ret: *ret };
+            // Higher-order: vars `Type::Function` no llevan info de
+            // defaults (la signature paramétrica no conserva los Expr).
+            // Defaults solo aplican a callees por nombre resolubles en
+            // `fn_sigs`. Estricta aridad acá.
+            let arity = params.len();
+            let sig = FnSig { params, ret: *ret, defaults: vec![None; arity] };
             return self.gen_call_with_sig(name, &sig, args, call_span);
         }
 
@@ -6144,18 +6159,37 @@ impl<'a> CodegenCtx<'a> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        if args.len() != sig.params.len() {
-            return Err(self.err_at(call_span, format!(
-                "`{}` espera {} argumento(s), recibió {}",
-                callee_expr,
-                sig.params.len(),
-                args.len()
-            )));
+        // Fp — aridad mínima = params SIN default; máxima = total.
+        let required = sig.defaults.iter().filter(|d| d.is_none()).count();
+        if args.len() < required || args.len() > sig.params.len() {
+            return Err(self.err_at(call_span, if required == sig.params.len() {
+                format!(
+                    "`{}` espera {} argumento(s), recibió {}",
+                    callee_expr, sig.params.len(), args.len(),
+                )
+            } else {
+                format!(
+                    "`{}` espera entre {} y {} argumento(s), recibió {}",
+                    callee_expr, required, sig.params.len(), args.len(),
+                )
+            }));
         }
-        let mut arg_codes = Vec::with_capacity(args.len());
+        let mut arg_codes = Vec::with_capacity(sig.params.len());
+        // Args provistos.
         for (a, expected) in args.iter().zip(sig.params.iter()) {
             let (code, ty) = self.gen_expr(a)?;
             arg_codes.push(coerce(&code, &ty, expected));
+        }
+        // Fp — fill con defaults para los params faltantes (siempre trailing).
+        for i in args.len()..sig.params.len() {
+            let default_expr = sig.defaults[i].as_ref().ok_or_else(|| {
+                self.err_at(call_span, format!(
+                    "`{}`: el parámetro {} no tiene default y no fue provisto (bug interno)",
+                    callee_expr, i + 1,
+                ))
+            })?;
+            let (code, ty) = self.gen_expr(default_expr)?;
+            arg_codes.push(coerce(&code, &ty, &sig.params[i]));
         }
         Ok((
             format!("{}({})", callee_expr, arg_codes.join(", ")),
@@ -7918,9 +7952,23 @@ impl<'a> CodegenCtx<'a> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        check_method_arity(&method_def.name, args, method_def.params.len())?;
+        // Fp — aridad con defaults para métodos estáticos.
+        let required = method_def.params.iter().filter(|p| p.default.is_none()).count();
+        if args.len() < required || args.len() > method_def.params.len() {
+            return Err(self.err_at(call_span, if required == method_def.params.len() {
+                format!(
+                    "el método estático `{}.{}` espera {} argumento(s), recibió {}",
+                    type_name, method_def.name, method_def.params.len(), args.len(),
+                )
+            } else {
+                format!(
+                    "el método estático `{}.{}` espera entre {} y {} argumento(s), recibió {}",
+                    type_name, method_def.name, required, method_def.params.len(), args.len(),
+                )
+            }));
+        }
 
-        let mut arg_codes: Vec<String> = Vec::with_capacity(args.len());
+        let mut arg_codes: Vec<String> = Vec::with_capacity(method_def.params.len());
         for (i, arg) in args.iter().enumerate() {
             let (a_code, a_ty) = self.gen_expr(arg)?;
             let target_ty = method_def.params[i]
@@ -7929,6 +7977,17 @@ impl<'a> CodegenCtx<'a> {
                 .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
                 .unwrap_or(Type::Any);
             arg_codes.push(coerce(&a_code, &a_ty, &target_ty));
+        }
+        // Fp — fill con defaults para los faltantes.
+        for i in args.len()..method_def.params.len() {
+            let default_expr = method_def.params[i].default.as_ref().expect("ya cubierto");
+            let (d_code, d_ty) = self.gen_expr(default_expr)?;
+            let target_ty = method_def.params[i]
+                .type_
+                .as_ref()
+                .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
+                .unwrap_or(Type::Any);
+            arg_codes.push(coerce(&d_code, &d_ty, &target_ty));
         }
 
         let ret_ty = method_def
@@ -7961,10 +8020,24 @@ impl<'a> CodegenCtx<'a> {
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let _ = type_name; // disponible para mensajes de error futuros
-        check_method_arity(&method_def.name, args, method_def.params.len())?;
+        // Fp — aridad con defaults para custom methods.
+        let required = method_def.params.iter().filter(|p| p.default.is_none()).count();
+        if args.len() < required || args.len() > method_def.params.len() {
+            return Err(self.err_at(call_span, if required == method_def.params.len() {
+                format!(
+                    "el método `.{}()` espera {} argumento(s), recibió {}",
+                    method_def.name, method_def.params.len(), args.len(),
+                )
+            } else {
+                format!(
+                    "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
+                    method_def.name, required, method_def.params.len(), args.len(),
+                )
+            }));
+        }
 
         // Resolver tipos de params y return (con anotaciones del MethodDef).
-        let mut arg_codes: Vec<String> = Vec::with_capacity(args.len());
+        let mut arg_codes: Vec<String> = Vec::with_capacity(method_def.params.len());
         for (i, arg) in args.iter().enumerate() {
             let (a_code, a_ty) = self.gen_expr(arg)?;
             let target_ty = method_def.params[i]
@@ -7973,6 +8046,17 @@ impl<'a> CodegenCtx<'a> {
                 .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
                 .unwrap_or(Type::Any);
             arg_codes.push(coerce(&a_code, &a_ty, &target_ty));
+        }
+        // Fp — fill con defaults para los params faltantes.
+        for i in args.len()..method_def.params.len() {
+            let default_expr = method_def.params[i].default.as_ref().expect("ya cubierto");
+            let (d_code, d_ty) = self.gen_expr(default_expr)?;
+            let target_ty = method_def.params[i]
+                .type_
+                .as_ref()
+                .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
+                .unwrap_or(Type::Any);
+            arg_codes.push(coerce(&d_code, &d_ty, &target_ty));
         }
 
         let ret_ty = method_def

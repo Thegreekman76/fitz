@@ -807,6 +807,35 @@ fn after_dot_completions(
     }
 }
 
+/// Fp — render compacto de una expresión de default param para
+/// mostrar en el detail del CompletionItem. Cubre literales primitivos
+/// (Int/Float/Str/Bool/Null), listas/maps vacíos, e idents. Para todo
+/// lo más complejo (BinOp, FnExpr, struct lits) emite `...` como
+/// placeholder — el usuario abre la fn para ver el detalle real.
+fn render_default_expr(e: &crate::ast::Expr) -> String {
+    use crate::ast::Expr;
+    match e {
+        Expr::Int(n, _) => n.to_string(),
+        Expr::Float(f, _) => f.to_string(),
+        Expr::Str(s, _) => format!("\"{}\"", s),
+        Expr::Bool(b, _) => b.to_string(),
+        Expr::Null(_) => "null".into(),
+        Expr::Ident(n, _) => n.clone(),
+        Expr::List(items, _) if items.is_empty() => "[]".into(),
+        Expr::Map(items, _) if items.is_empty() => "{}".into(),
+        Expr::UnaryOp { op, operand, .. } => {
+            use crate::ast::UnaryOpKind;
+            let pre = match op {
+                UnaryOpKind::Neg => "-",
+                UnaryOpKind::Not => "not ",
+                UnaryOpKind::BitNot => "~",
+            };
+            format!("{}{}", pre, render_default_expr(operand))
+        }
+        _ => "...".into(),
+    }
+}
+
 /// Construye una lista de `CompletionItem` de tipo Method desde un
 /// slice de `(nombre, firma)`.
 fn method_items(items: &[(&str, String)]) -> Vec<CompletionItem> {
@@ -840,10 +869,31 @@ fn scope_level_completions(program: &Program, type_env: &TypeEnv) -> Vec<Complet
                     ..CompletionItem::default()
                 });
             }
-            Stmt::FnDef { name, .. } => {
+            Stmt::FnDef { name, params, return_type, is_async, .. } => {
+                // Fp — firma de la fn con tipos + defaults (cuando los hay).
+                let params_str = params
+                    .iter()
+                    .map(|p| {
+                        let ty = p.type_.as_ref().map(|t| t.display_name()).unwrap_or_else(|| "Any".into());
+                        let base = format!("{}: {}", p.name, ty);
+                        if let Some(default) = &p.default {
+                            format!("{} = {}", base, render_default_expr(default))
+                        } else {
+                            base
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ret_str = return_type
+                    .as_ref()
+                    .map(|t| t.display_name())
+                    .unwrap_or_else(|| "Any".into());
+                let prefix = if *is_async { "async fn" } else { "fn" };
+                let detail = format!("{}({}) -> {}", prefix, params_str, ret_str);
                 items.push(CompletionItem {
                     label: name.clone(),
                     kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(detail),
                     ..CompletionItem::default()
                 });
             }
@@ -2070,6 +2120,21 @@ mod tests {
         for expected in ["abs", "to_str", "is_nan", "is_finite"] {
             assert!(labels.contains(&expected), "falta `{expected}` en Float: {labels:?}");
         }
+    }
+
+    #[test]
+    fn fp_scope_level_fn_con_default_incluye_signature_y_default_en_detail() {
+        let src = "fn greet(name: Str = \"amigo\") -> Str { return name }\n\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
+        let it = items.iter().find(|i| i.label == "greet").expect("falta greet");
+        let detail = it.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("name: Str = \"amigo\""),
+            "esperaba `name: Str = \"amigo\"` en detail, fue: {}",
+            detail
+        );
+        assert!(detail.contains("-> Str"), "esperaba `-> Str` en detail, fue: {}", detail);
     }
 
     #[test]

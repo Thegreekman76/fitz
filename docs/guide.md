@@ -127,16 +127,11 @@ Solo lo que el intérprete ejecuta hoy:
 
 ### Qué todavía no anda
 
-Estas cosas aparecen en la [especificación de sintaxis](syntax-spec.md)
-pero el intérprete aún no las ejecuta. Si las tipeás vas a ver un
-error explícito:
-
-- Tuplas (`(1, "a", true)`).
-- Métodos custom declarados por el usuario sobre `type`
-  (`type User { ... fn greet() => ... }`).
-
-Todo eso está mapeado en el [roadmap](roadmap.md). Cada vez que una de
-estas piezas se cierra, esta guía suma el capítulo correspondiente.
+A esta altura, casi todo lo que aparece en la [especificación de
+sintaxis](syntax-spec.md) ya está implementado. Algunas piezas
+grandes pendientes: WebSockets / streaming HTTP (Fase 9.w), traits /
+interfaces, herencia entre `type`s, operator overloading. Cada vez
+que una pieza se cierra, esta guía suma el capítulo correspondiente.
 
 ### Cómo está organizada
 
@@ -3222,14 +3217,61 @@ let triplicar = fn(n) => n * factor
 print(triplicar(5))                       // 15
 ```
 
+### Parámetros con default (mini-tanda Fp)
+
+Un parámetro puede tener un valor por defecto: si el caller no lo
+provee, se usa ese valor. La sintaxis sigue de cerca a Python: `nombre:
+Tipo = expr`.
+
+```fitz
+fn greet(name: Str = "amigo") -> Str {
+    return "Hola, {name}"
+}
+
+print(greet())                            // Hola, amigo
+print(greet("Fitz"))                      // Hola, Fitz
+```
+
+**Reglas**:
+
+- El default puede ser cualquier expresión válida (literales, idents,
+  llamadas, etc.). Se evalúa **cada vez** que se llama la fn sin ese
+  arg — no se cachea.
+- **Regla Python**: una vez que un param tiene default, todos los
+  siguientes también. El parser rechaza `fn f(a = 1, b: Int)` con
+  error claro.
+- Funciona en `fn` top-level, métodos custom sobre `type` (R.3) y
+  métodos estáticos. `fn` anónimos (`fn(x) => ...`) lo aceptan
+  sintácticamente pero el caso típico no lo necesita.
+
+```fitz
+fn add(a: Int, b: Int = 10) -> Int {
+    return a + b
+}
+
+print(add(5))                             // 15
+print(add(5, 2))                          // 7
+
+fn make(prefix: Str = "x", n: Int = 3) -> Str {
+    return "{prefix}-{n}"
+}
+
+print(make())                             // x-3
+print(make("y"))                          // y-3
+print(make("z", 5))                       // z-5
+```
+
+Ver [examples/guide/11b-default-params.fitz](../examples/guide/11b-default-params.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
-- **Parámetros con default** (`fn greet(name = "amigo") { ... }`).
 - **Varargs** (`fn sum(...xs)`).
 - **Argumentos nombrados al llamar** (`greet(name: "Fitz")`).
-- **Métodos custom sobre `type`** (`type User { ... fn greet() => "Hola" }`)
-  — los built-in sobre listas, mapas, strings ya andan (cap. 13),
-  pero declarar métodos propios sobre tus tipos sigue siendo deuda.
+
+> Lo que **sí anda** y antes era deuda: **default params** (mini-tanda
+> Fp — ver sub-sección de arriba), **métodos custom sobre `type`**
+> (R.3) — ver [cap 13](#13-métodos-y-mutación) con su propia sub-sección.
 
 ### Ejemplo completo
 
@@ -3572,16 +3614,16 @@ print("Hola, {u.name}!")    // Hola, Fitz!
 
 ### Lo que todavía no anda
 
-- **Métodos custom sobre `type`** (`type User { ... fn greet() => ... }`)
-  — hoy todo método propio se hace con funciones aparte que reciben
-  la instancia como parámetro. Los métodos built-in (sobre `List`,
-  `Map`, `Str`) ya están vivos: ver el [próximo capítulo](#13-métodos-y-mutación).
 - **Herencia / composición de tipos** — un `type` no puede heredar
   campos de otro. Los structs son planos. Para compartir campos,
   por ahora repetirlos o anidarlos (`type Order { user: User, ... }`).
 - **Trait-like polymorphism** — no hay interfaces / traits. Si
   necesitás polimorfismo, hoy es vía `match` sobre un enum tipo
   `type Shape { ... }` con un campo discriminador.
+
+> Lo que **sí anda** y antes era deuda: **métodos custom sobre `type`**
+> — cerrado en R.3 (mini-fase R). Ver [cap 13](#13-métodos-y-mutación)
+> con su propia sub-sección y ejemplos.
 
 > Lo que **sí anda** y antes era deuda (cerrado fase tras fase):
 > chequeo estático de anotaciones contra valores (Fase 5a — `let
@@ -5086,23 +5128,24 @@ para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda
 
-- **`return` adentro de un brazo de `match` como expresión** —
-  como cada brazo es una expresión, no podés cortar la función
-  desde adentro con `return`. Se puede pulir cuando moleste.
-- **Más métodos**: `.find()` para strings, etc. Se irán sumando
-  con la práctica.
+- **`return` adentro de un brazo de `match`** — como cada brazo es
+  una expresión (no un bloque de stmts), no podés cortar la función
+  desde adentro con `return`/`break`/`continue`. Workaround: hacer
+  el `return` afuera del match. Sub-paso futuro dedicado — requiere
+  refactor de `MatchArm.body` o agregar `Expr::Block(Vec<Stmt>)`.
+- *(la API de métodos sobre `Str`/`List`/`Map`/`Range`/`Int`/`Float`
+  cubre el 99% de los casos. Si te falta uno puntual, abrí un issue.)*
 
 > Lo que **sí anda** y antes era deuda: encadenamiento multi-línea
-> (cerrado en PreF8.2), **asignación a índice** `xs[0] = v` y
-> `m["k"] = v` (R.1.3 mini-fase R, ver
-> [cap 9 sub-sección "Asignación a índice"](#9-listas-mapas-y-rangos)),
-> **métodos custom sobre `type`** (R.3 mini-fase R, ver
-> sub-sección de arriba), **métodos chicos de Str y List**
-> (mini-tanda S — `.contains`/`.starts_with`/`.ends_with`/
-> `.split`/`.trim`/`.replace`/`.repeat` sobre Str;
+> (PreF8.2), **asignación a índice** `xs[0] = v` y `m["k"] = v`
+> (R.1.3, [cap 9](#9-listas-mapas-y-rangos)), **métodos custom
+> sobre `type`** (R.3, sub-sección de arriba), **métodos chicos
+> de Str y List** (mini-tanda S — `.contains`/`.starts_with`/
+> `.ends_with`/`.split`/`.trim`/`.replace`/`.repeat` sobre Str;
 > `.sort`/`.reverse`/`.contains` sobre List), **iteradores
-> `.enumerate()`/`.zip()`/`.chain()`** (mini-tanda It — ver
-> sub-sección de arriba).
+> `.enumerate()`/`.zip()`/`.chain()`** (mini-tanda It), **dispatch
+> sobre primitivos `Int`/`Float`** (`n.abs()`, `x.is_nan()`, etc.
+> en mini-tanda Math+Mb9 — ver sub-sección de arriba).
 > Forma idiomática del chain multi-línea:
 > ```fitz
 > let nombres = users

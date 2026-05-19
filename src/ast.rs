@@ -736,11 +736,16 @@ pub enum UnaryOpKind {
     BitNot,
 }
 
-/// Parámetro formal de una función. El tipo es opcional (tipado gradual).
+/// Parámetro formal de una función. El tipo es opcional (tipado
+/// gradual). `default` (mini-tanda Fp): expresión a usar cuando el
+/// caller no provee este arg. Si un param tiene default, todos los
+/// posteriores también (regla Python). El parser y el checker lo
+/// validan.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub type_: Option<TypeExpr>,
+    pub default: Option<Expr>,
 }
 
 /// Campo de un `type`. El tipo es obligatorio dentro de un struct.
@@ -1018,7 +1023,7 @@ mod tests {
             // fn double(n) => n * 2
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None }],
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -1289,7 +1294,7 @@ mod tests {
     fn fn_expr_envuelve_params_y_body() {
         // `fn(x) => x * 2` — versión sin nombre.
         let fnexpr = Expr::FnExpr {
-            params: vec![Param { name: "x".into(), type_: None }],
+            params: vec![Param { name: "x".into(), type_: None, default: None }],
             body: vec![Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),

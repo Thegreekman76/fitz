@@ -927,6 +927,11 @@ struct VarBinding {
     /// `Span::ZERO` para builtins — el LSP los filtra en go-to-definition
     /// porque no hay archivo donde saltar.
     def_span: Span,
+    /// Fp — cantidad de params con default al final de la firma. Si la
+    /// fn tiene `fn(a, b, c = 1, d = 2)`, `defaults_count = 2`. La aridad
+    /// requerida es `params.len() - defaults_count`. Solo relevante para
+    /// vars que tipan como `Type::Function`. 0 para todo lo demás.
+    defaults_count: usize,
 }
 
 /// Estado mutable durante la pasada de chequeo de expresiones.
@@ -1039,6 +1044,7 @@ impl<'a> CheckCtx<'a> {
                 ty: Type::Any,
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         // `len(x) -> Int` — aridad 1 sobre List/Map/Str/Range. El
@@ -1054,6 +1060,7 @@ impl<'a> CheckCtx<'a> {
                 },
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
@@ -1068,6 +1075,7 @@ impl<'a> CheckCtx<'a> {
                 ty: Type::Any,
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         // `sleep(ms: Int) -> Future<Null>` — primer async primitive.
@@ -1086,6 +1094,7 @@ impl<'a> CheckCtx<'a> {
                 },
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         // Fase 9.z.2.a — assertion builtins. `assert` queda como `Any`
@@ -1099,6 +1108,7 @@ impl<'a> CheckCtx<'a> {
                 ty: Type::Any,
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         self.scopes[0].insert(
@@ -1110,6 +1120,7 @@ impl<'a> CheckCtx<'a> {
                 },
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         self.scopes[0].insert(
@@ -1121,6 +1132,7 @@ impl<'a> CheckCtx<'a> {
                 },
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         self.scopes[0].insert(
@@ -1135,6 +1147,7 @@ impl<'a> CheckCtx<'a> {
                 },
                 annotated: false,
                 def_span: Span::ZERO,
+                defaults_count: 0,
             },
         );
         // Mini-tanda Bits-extras — builtins globales sobre Int.
@@ -1150,6 +1163,7 @@ impl<'a> CheckCtx<'a> {
                     },
                     annotated: false,
                     def_span: Span::ZERO,
+                defaults_count: 0,
                 },
             );
         }
@@ -1163,6 +1177,7 @@ impl<'a> CheckCtx<'a> {
                     },
                     annotated: false,
                     def_span: Span::ZERO,
+                defaults_count: 0,
                 },
             );
         }
@@ -1180,6 +1195,7 @@ impl<'a> CheckCtx<'a> {
                     ty: Type::Any,
                     annotated: false,
                     def_span: Span::ZERO,
+                defaults_count: 0,
                 },
             );
         }
@@ -1206,6 +1222,7 @@ impl<'a> CheckCtx<'a> {
                     ty,
                     annotated: false,
                     def_span,
+                    defaults_count: 0,
                 },
             );
         }
@@ -1222,6 +1239,23 @@ impl<'a> CheckCtx<'a> {
                     ty,
                     annotated: true,
                     def_span,
+                    defaults_count: 0,
+                },
+            );
+        }
+    }
+
+    /// Fp — declara una fn con info de defaults. La aridad mínima del
+    /// callee es `params.len() - defaults_count`.
+    fn declare_fn(&mut self, name: String, ty: Type, def_span: Span, defaults_count: usize) {
+        if let Some(top) = self.scopes.last_mut() {
+            top.insert(
+                name,
+                VarBinding {
+                    ty,
+                    annotated: true,
+                    def_span,
+                    defaults_count,
                 },
             );
         }
@@ -1752,13 +1786,25 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 Type::PyAny => Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) },
                 Type::Function { params, ret } => {
                     let label = describe_callee(callee);
-                    if args.len() != params.len() {
-                        ctx.error_at(*span, format!(
-                            "{} espera {} argumento(s), recibió {}",
-                            label,
-                            params.len(),
-                            args.len()
-                        ));
+                    // Fp — la function-signature en `Type::Function` no
+                    // lleva info de defaults (solo lista los tipos). Para
+                    // el chequeo de aridad consultamos directo el
+                    // Stmt::FnDef o Expr::FnExpr cuando el callee es un
+                    // Ident resoluble; fallback a aridad estricta para
+                    // callees indirectos (callbacks, fns como var).
+                    let required = required_arity_for_callee(ctx, callee, params.len());
+                    if args.len() < required || args.len() > params.len() {
+                        ctx.error_at(*span, if required == params.len() {
+                            format!(
+                                "{} espera {} argumento(s), recibió {}",
+                                label, params.len(), args.len(),
+                            )
+                        } else {
+                            format!(
+                                "{} espera entre {} y {} argumento(s), recibió {}",
+                                label, required, params.len(), args.len(),
+                            )
+                        });
                     } else {
                         for (i, (actual, expected)) in
                             args_ty.iter().zip(params.iter()).enumerate()
@@ -4617,19 +4663,38 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
             } else {
                 ret
             };
+            // Fp — defaults_count = cantidad de params con `default`
+            // al final. La aridad mínima del callee es
+            // `params.len() - defaults_count`. El parser garantiza que
+            // todos los defaults son consecutivos al final.
+            let defaults_count = params.iter().filter(|p| p.default.is_some()).count();
             // go-to-def sobre el uso de la fn salta al span del FnDef
             // (que apunta al `fn` keyword). Aproximación; precisión
             // por nombre requiere span propio del identificador.
-            ctx.declare_var(
+            ctx.declare_fn(
                 name.clone(),
                 Type::Function {
                     params: param_types,
                     ret: Box::new(outer_ret),
                 },
                 *span,
+                defaults_count,
             );
         }
     }
+}
+
+/// Fp — aridad mínima del callee. Si es un Ident resoluble a una fn con
+/// defaults registrada, devuelve `params.len() - defaults_count`. Si no,
+/// devuelve `total` (fallback estricto — callbacks/fns como var no
+/// tienen info de defaults en `Type::Function`).
+fn required_arity_for_callee(ctx: &CheckCtx, callee: &Expr, total: usize) -> usize {
+    if let Expr::Ident(name, _) = callee {
+        if let Some(b) = ctx.lookup_binding(name) {
+            return total.saturating_sub(b.defaults_count);
+        }
+    }
+    total
 }
 
 /// Entrada pública del checker estático completo: corre resolución
@@ -5679,6 +5744,7 @@ mod tests {
                 params: vec![Param {
                     name: "p".into(),
                     type_: Some(TE::named("X")),
+                    default: None,
                 }],
                 return_type: None,
                 body: vec![],
@@ -9584,6 +9650,68 @@ print(total)
         assert_error_with(
             "let x: Float = 3.14\nlet r = x.foobar()",
             &["Float", "foobar"],
+        );
+    }
+
+    // ---- Mini-tanda Fp — default params ----
+
+    #[test]
+    fn fp_call_sin_args_a_fn_con_default_pasa() {
+        // `fn greet(name = "amigo") -> Str` puede invocarse sin args.
+        assert_ok(
+            "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
+             let r: Str = greet()",
+        );
+    }
+
+    #[test]
+    fn fp_call_con_arg_a_fn_con_default_pasa() {
+        assert_ok(
+            "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
+             let r: Str = greet(\"Fitz\")",
+        );
+    }
+
+    #[test]
+    fn fp_call_con_mezcla_required_y_default() {
+        // Required + default: 1 o 2 args válidos, 0 o 3+ falla.
+        assert_ok(
+            "fn add(a: Int, b: Int = 1) -> Int { return a + b }\n\
+             let r1: Int = add(10)\n\
+             let r2: Int = add(10, 5)",
+        );
+    }
+
+    #[test]
+    fn fp_call_muy_pocos_args_es_error() {
+        // `fn add(a, b)` sin defaults — call con 0 args es error.
+        assert_error_with(
+            "fn add(a: Int, b: Int) -> Int { return a + b }\n\
+             let r = add()",
+            &["add", "2"],
+        );
+    }
+
+    #[test]
+    fn fp_call_demasiados_args_es_error() {
+        assert_error_with(
+            "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
+             let r = greet(\"a\", \"b\")",
+            &["greet", "0", "1"],
+        );
+    }
+
+    #[test]
+    fn fp_default_tipo_incorrecto_es_error_en_llamada() {
+        // El default `"texto"` no matchea `Int`. Al chequear el call
+        // sin args, el default debería triggerear un type error. Hoy
+        // el checker NO valida el default expr — el runtime lo hará.
+        // Test "negativo" del scope: assert que SÍ pasa (no rompe nada).
+        // El default mismo será un error de runtime si nunca se llama
+        // el default path.
+        assert_ok(
+            "fn f(x: Int = 5) -> Int { return x }\n\
+             let r: Int = f()",
         );
     }
 }

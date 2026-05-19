@@ -3105,25 +3105,47 @@ async fn invoke_value(
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
 
         Value::Function { params, body, closure, is_async } => {
-            if arg_values.len() != params.len() {
+            // Fp — default params: si faltan args trailing y los params
+            // tienen `default`, se rellenan. Aridad mínima = cantidad
+            // de params SIN default; máxima = total de params.
+            let required = params.iter().filter(|p| p.default.is_none()).count();
+            if arg_values.len() < required || arg_values.len() > params.len() {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::WrongArgCount {
                         expected: params.len(),
                         found: arg_values.len(),
                     },
                     span.line, span.column,
-                    format!(
-                        "`{}` espera {} argumento(s), recibió {}",
-                        display_name,
-                        params.len(),
-                        arg_values.len(),
-                    ),
+                    if required == params.len() {
+                        format!(
+                            "`{}` espera {} argumento(s), recibió {}",
+                            display_name, params.len(), arg_values.len(),
+                        )
+                    } else {
+                        format!(
+                            "`{}` espera entre {} y {} argumento(s), recibió {}",
+                            display_name, required, params.len(), arg_values.len(),
+                        )
+                    },
                 )));
             }
 
             // Nuevo scope hijo del CLOSURE, no del caller. Lexical scoping.
             let call_env = Environment::new_child(closure);
-            for (param, value) in params.iter().zip(arg_values) {
+            let provided = arg_values.len();
+            let mut arg_iter = arg_values.into_iter();
+            for (i, param) in params.iter().enumerate() {
+                let value = if i < provided {
+                    arg_iter.next().unwrap()
+                } else {
+                    // Default expr — se evalúa en el env del CLOSURE
+                    // (donde la fn vive), no en el del caller. Match
+                    // con la semántica de fields default y de Python.
+                    let default_expr = param.default.as_ref().expect(
+                        "params sin default ya fueron cubiertos por arity check",
+                    );
+                    eval_expr(default_expr, call_env.clone()).await?
+                };
                 call_env.lock().define(param.name.clone(), value);
             }
 
@@ -3573,18 +3595,26 @@ async fn invoke_custom_method(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    // Aridad.
-    if args.len() != method.params.len() {
+    // Fp — aridad con defaults: requerido = params SIN default; total = params.len().
+    let required = method.params.iter().filter(|p| p.default.is_none()).count();
+    if args.len() < required || args.len() > method.params.len() {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::WrongArgCount {
                 expected: method.params.len(),
                 found: args.len(),
             },
             span.line, span.column,
-            format!(
-                "el método `.{}()` espera {} argumento(s), recibió {}",
-                method.name, method.params.len(), args.len(),
-            ),
+            if required == method.params.len() {
+                format!(
+                    "el método `.{}()` espera {} argumento(s), recibió {}",
+                    method.name, method.params.len(), args.len(),
+                )
+            } else {
+                format!(
+                    "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
+                    method.name, required, method.params.len(), args.len(),
+                )
+            },
         )));
     }
 
@@ -3598,8 +3628,16 @@ async fn invoke_custom_method(
         }
     }
 
-    // Declarar params (sobreescriben fields homónimos — local gana).
-    for (p, v) in method.params.iter().zip(args) {
+    // Declarar params: args provistos + defaults para los faltantes.
+    let provided = args.len();
+    let mut arg_iter = args.into_iter();
+    for (i, p) in method.params.iter().enumerate() {
+        let v = if i < provided {
+            arg_iter.next().unwrap()
+        } else {
+            let de = p.default.as_ref().expect("ya cubierto por arity check");
+            eval_expr(de, method_env.clone()).await?
+        };
         method_env.lock().define(p.name.clone(), v);
     }
 
@@ -3643,22 +3681,39 @@ async fn invoke_static_method(
     env: EnvRef,
     span: Span,
 ) -> EvalResult<Value> {
-    if args.len() != method.params.len() {
+    // Fp — aridad con defaults.
+    let required = method.params.iter().filter(|p| p.default.is_none()).count();
+    if args.len() < required || args.len() > method.params.len() {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::WrongArgCount {
                 expected: method.params.len(),
                 found: args.len(),
             },
             span.line, span.column,
-            format!(
-                "el método estático `{}` espera {} argumento(s), recibió {}",
-                method.name, method.params.len(), args.len(),
-            ),
+            if required == method.params.len() {
+                format!(
+                    "el método estático `{}` espera {} argumento(s), recibió {}",
+                    method.name, method.params.len(), args.len(),
+                )
+            } else {
+                format!(
+                    "el método estático `{}` espera entre {} y {} argumento(s), recibió {}",
+                    method.name, required, method.params.len(), args.len(),
+                )
+            },
         )));
     }
 
     let method_env = Environment::new_child(env.clone());
-    for (p, v) in method.params.iter().zip(args) {
+    let provided = args.len();
+    let mut arg_iter = args.into_iter();
+    for (i, p) in method.params.iter().enumerate() {
+        let v = if i < provided {
+            arg_iter.next().unwrap()
+        } else {
+            let de = p.default.as_ref().expect("ya cubierto por arity check");
+            eval_expr(de, method_env.clone()).await?
+        };
         method_env.lock().define(p.name.clone(), v);
     }
 
@@ -8998,6 +9053,7 @@ mod tests {
             params: params.into_iter().map(|p| crate::ast::Param {
                 name: p.into(),
                 type_: None,
+                default: None,
             }).collect(),
             return_type: None,
             body,
@@ -11684,7 +11740,7 @@ let r = match n {
     async fn fn_expr_evalua_a_function() {
         // `fn(x) => x * 2` — evaluada sola, da un `Value::Function`.
         let fnexpr = Expr::FnExpr {
-            params: vec![crate::ast::Param { name: "x".into(), type_: None }],
+            params: vec![crate::ast::Param { name: "x".into(), type_: None, default: None }],
             body: vec![Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
@@ -17445,6 +17501,78 @@ let r = match n {
     }
 
     // ---- Mini-tanda Math+Mb9: métodos sobre Float ----
+
+    // ---- Mini-tanda Fp — default params ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp_call_sin_args_usa_default() {
+        let (env, res) = parse_eval_into_env(
+            "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
+             let r: Str = greet()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("amigo".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp_call_con_arg_overridea_default() {
+        let (env, res) = parse_eval_into_env(
+            "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
+             let r: Str = greet(\"Fitz\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("Fitz".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp_mezcla_required_y_default() {
+        let (env, res) = parse_eval_into_env(
+            "fn add(a: Int, b: Int = 10) -> Int { return a + b }\n\
+             let r1: Int = add(5)\n\
+             let r2: Int = add(5, 2)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r1"), Some(Value::Int(15)));
+        assert_eq!(env.lock().get("r2"), Some(Value::Int(7)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp_demasiados_args_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
+             let r = greet(\"a\", \"b\")",
+        ).await;
+        assert!(res.is_err(), "esperaba error de aridad");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp_default_expr_compleja_se_evalua_en_cada_call() {
+        // Default expr puede ser cualquier expr — se evalúa en el
+        // env del closure cada vez que se llama sin ese arg.
+        // (Decisión de diseño: evaluado-en-cada-call, NO cacheado).
+        let (env, res) = parse_eval_into_env(
+            "fn make_list(prefix: Str = \"x\", n: Int = 3) -> List<Str> {\n\
+                let xs: List<Str> = []\n\
+                let i: Int = 0\n\
+                while i < n {\n\
+                    xs.push(prefix)\n\
+                    i = i + 1\n\
+                }\n\
+                return xs\n\
+             }\n\
+             let r: List<Str> = make_list()",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r");
+        match r {
+            Some(Value::List(list)) => {
+                let g = list.lock();
+                assert_eq!(g.len(), 3);
+                assert_eq!(g[0], Value::Str("x".into()));
+            }
+            other => panic!("r no es List: {:?}", other),
+        }
+    }
 
     #[tokio::test(flavor = "current_thread")]
     async fn float_methods_abs_to_str_is_nan_is_finite() {

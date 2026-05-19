@@ -1,0 +1,65 @@
+// Mini-tanda Fp — default params.
+//
+// Sintaxis: `fn nombre(param: Tipo = expr_default) -> Ret`.
+// El default puede ser cualquier expresión válida; se evalúa cada vez
+// que se llama la fn SIN ese arg (no se cachea).
+//
+// Regla Python: una vez que un param tiene default, todos los siguientes
+// también. `fn f(a = 1, b)` es error de parser.
+
+// --- Caso canónico: un solo default --------------------------------
+
+fn greet(name: Str = "amigo") -> Str {
+    return "Hola, {name}"
+}
+
+print(greet())                        // Hola, amigo
+print(greet("Fitz"))                  // Hola, Fitz
+
+// --- Mezcla required + default -------------------------------------
+
+fn add(a: Int, b: Int = 10) -> Int {
+    return a + b
+}
+
+print(add(5))                         // 15
+print(add(5, 2))                      // 7
+
+// --- Múltiples defaults consecutivos -------------------------------
+
+fn make(prefix: Str = "x", n: Int = 3, sep: Str = "-") -> Str {
+    return "{prefix}{sep}{n}"
+}
+
+print(make())                         // x-3
+print(make("y"))                      // y-3
+print(make("z", 5))                   // z-5
+print(make("w", 7, ":"))              // w:7
+
+// --- Default Bool/Float --------------------------------------------
+
+fn config(verbose: Bool = false, ratio: Float = 1.0) -> Str {
+    return "verbose={verbose}, ratio={ratio}"
+}
+
+print(config())                       // verbose=false, ratio=1.0
+print(config(true))                   // verbose=true, ratio=1.0
+print(config(true, 2.5))              // verbose=true, ratio=2.5
+
+// --- Default con expresión compleja --------------------------------
+//
+// El default se evalúa CADA vez que se llama la fn sin ese arg
+// (no se cachea — semántica idéntica a Python/Rust).
+
+fn empty_list(n: Int = 0) -> List<Int> {
+    let xs: List<Int> = []
+    let i: Int = 0
+    while i < n {
+        xs.push(i)
+        i = i + 1
+    }
+    return xs
+}
+
+print(empty_list())                   // []
+print(empty_list(3))                  // [0, 1, 2]
