@@ -586,6 +586,26 @@ fn after_dot_completions(
                     t.display(type_env),
                     t.display(type_env),
                 )),
+                // Mini-tanda Mb5 — group_by + zip_with + max_by/min_by.
+                ("group_by", format!(
+                    "fn(fn({}) -> K) -> Map<K, List<{}>>",
+                    t.display(type_env),
+                    t.display(type_env),
+                )),
+                ("zip_with", format!(
+                    "fn(List<U>, fn({}, U) -> V) -> List<V>",
+                    t.display(type_env),
+                )),
+                ("max_by", format!(
+                    "fn(fn({}) -> Int) -> Result<{}>",
+                    t.display(type_env),
+                    t.display(type_env),
+                )),
+                ("min_by", format!(
+                    "fn(fn({}) -> Int) -> Result<{}>",
+                    t.display(type_env),
+                    t.display(type_env),
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -677,6 +697,9 @@ fn after_dot_completions(
             ("chars", "fn() -> List<Str>".into()),
             // Mini-tanda Mb4 — split_at: divide en char idx → (Str, Str).
             ("split_at", "fn(idx: Int) -> (Str, Str)".into()),
+            // Mini-tanda Mb5 — lines + is_empty.
+            ("lines", "fn() -> List<Str>".into()),
+            ("is_empty", "fn() -> Bool".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -1716,6 +1739,34 @@ mod tests {
             labels.contains(&"split_at"),
             "falta `split_at` (mini-tanda Mb4) en Str: {labels:?}",
         );
+    }
+
+    #[test]
+    fn mb5_after_dot_sobre_list_incluye_group_by_zip_with_max_min_by() {
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["group_by", "zip_with", "max_by", "min_by"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb5) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb5_after_dot_sobre_str_incluye_lines_y_is_empty() {
+        let src = "let s: Str = \"abc\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["lines", "is_empty"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb5) en Str: {labels:?}"
+            );
+        }
     }
 
     #[test]

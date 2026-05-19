@@ -1131,6 +1131,108 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos analíticos + async closures inline~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb5 + Async-cl)
+
+Bundle combinado siguiente a Mb4 + Cmp+: cuatro métodos analíticos
+sobre colecciones + dos sobre Str + un feature nuevo (async closures
+inline). Async-cl cierra una deuda explícita mencionada desde el
+prompt inicial de la sesión.
+
+**Parte 1 — Mb5 (6 métodos chicos)**:
+
+- ~~**`List.group_by(fn(T) -> K) -> Map<K, List<T>>`**~~ ✓ Agrupa
+  por key derivada del callback. Preserva orden de aparición. K se
+  infiere del ret type del callback. Útil para clasificar listas
+  de instancias por algún field o categoría calculada.
+- ~~**`List.zip_with(ys, fn(T, U) -> V) -> List<V>`**~~ ✓ Combina
+  zip + map en un paso. Trunca al más corto (paralelo a Python `zip`).
+  V se infiere del ret type del callback. Implementación nota:
+  reusa `gen_binary_callback_inline_with_ret` con `expected_ret_ty`
+  explícito; dry-run del FnExpr con `infer_callback_ret_silently_binary_named`
+  (helper nuevo que usa los nombres reales de los params, no
+  placeholders).
+- ~~**`List.max_by(fn(T) -> Int) -> Result<T>` y `min_by(...)`**~~
+  ✓ Útil para tipos no numéricos (Instance, Str, etc.) donde
+  `max`/`min` directos no aplican. El callback extrae un Int
+  ranking; devuelve el item con max/min ranking. Vacía → Err.
+- ~~**`Str.lines() -> List<Str>`**~~ ✓ Separa por `\n`. Paralelo
+  a `str::lines` Rust: si el string termina con `\n`, NO agrega
+  línea vacía al final.
+- ~~**`Str.is_empty() -> Bool`**~~ ✓ Atajo de `len() == 0` con
+  intención clara. `is_empty()` sobre `""` es `true`.
+
+**Parte 2 — Async-cl (async closures inline)**:
+
+- ~~**`async fn(...) => ...` y `async fn(...) { ... }` como
+  expresión**~~ ✓ AST: `Expr::FnExpr` suma `is_async: bool`.
+  Parser detecta el prefijo `async fn(...)` en posición de
+  expresión (lookahead `peek_at(2)`). Evaluator: el `Value::Function`
+  resultante hereda `is_async`, así que al invocar devuelve
+  `Value::Future` perezoso (paralelo a fns async top-level). Checker:
+  `await_stack` pushea `is_async` del FnExpr — habilita `.await`
+  adentro del cuerpo del async closure; sync FnExpr lo sigue
+  rechazando. El tipo final del FnExpr async es
+  `Function { ret: Future<T> }`.
+
+  **Limitación de codegen**: `fitz build` rechaza async closures
+  inline con mensaje claro citando el workaround (declarar la fn
+  async top-level y referenciarla por nombre). El boxing real con
+  `Pin<Box<dyn Future + Send>>` requiere infraestructura adicional
+  que queda como deuda residual menor. `fitz run` los soporta
+  end-to-end.
+
+  Habilita patrones funcionales async:
+
+  ```fitz
+  async fn pipeline(input, transform) -> Int {
+      return transform(input).await
+  }
+  // Async closure como arg.
+  pipeline(21, async fn(n: Int) -> Int { return n * 2 }).await
+  ```
+
+**Refactor incidental**:
+- Nuevo helper `infer_callback_ret_silently_binary_named` en
+  codegen que dry-run un FnExpr binario usando los nombres reales
+  de los params (en lugar de placeholders `__p0_dry`/`__p1_dry`).
+  Necesario para que el body del callback resuelva los idents
+  declarados localmente. Reusado por `zip_with` para inferir V
+  estático antes de emitir el closure binario.
+
+Implementación: ~550 LoC entre evaluator (5 fns nuevas List + 2
+Str + propagación de is_async en FnExpr), types (5 ramas List + 2
+Str + propagación de is_async + await_stack), codegen (5 ramas
+List + 2 Str + guard de async FnExpr + helper nuevo), LSP (4 + 2
+entries), parser (detección de `async fn(...)` en primary +
+parse_fn_expr).
+
+**21 unit tests** evaluator/checker/LSP (10 evaluator + 9 checker
++ 2 LSP) + **7 compile_e2e** bit-a-bit `fitz run` ↔ `fitz build`
+(group_by + zip_with + max_by + min_by vacía + lines + is_empty
++ async closure aborta con mensaje claro). Ejemplo runnable
+`examples/guide/13q-mb5-y-async-closures.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE` con casos típicos.
+
+Cap 13 de la guía: 2 filas nuevas en tabla `Str` (lines,
+is_empty), 4 en tabla `List<T>` (group_by, zip_with, max_by,
+min_by). Sub-sección dedicada "group_by + zip_with + max_by/min_by
++ lines + async closures (mini-tanda Mb5 + Async-cl)" con
+ejemplos inline + caveat documentado del codegen para async
+closures. VSCode extension: grammar TextMate sin cambios (`async`
+ya es keyword; los métodos son identifiers genéricos); LSP
+autocomplete refleja todo via rebuild del `fitz-lsp` binary.
+
+**Deuda residual menor** (NO bloquea):
+- Async closures inline en `fitz build` — requiere boxing con
+  `Pin<Box<dyn Future + Send>>` y un type erasure adicional. La
+  fn async top-level es el workaround documentado.
+- `List.group_by` ordering — preservamos orden de 1ra aparición
+  de cada key. Si el caso de uso necesita orden alfabético/
+  numérico de keys, usar `m.keys_sorted()` (Mb2) sobre el output.
+- `min_by`/`max_by` con callback `fn(T) -> Float` — hoy exigimos
+  Int. Float ranking es deuda menor (necesita `partial_cmp` en
+  el codegen).
+
 ### ~~Métodos chicos + comprehensions extendidas~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb4 + Cmp+)
 
 Bundle combinado que cierra dos sets de deudas relacionadas en una

@@ -2508,15 +2508,14 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         // `fn(x) => x * 2` o `fn(x) { return x * 2 }` — función anónima.
         // Se evalúa a `Value::Function` con el env actual como closure,
         // igual que un `Stmt::FnDef`, pero sin nombre ni binding en el env.
-        Expr::FnExpr { params, body, .. } => Ok(Value::Function {
+        // Mini-tanda Async-cl — `async fn(...)` propaga `is_async = true`,
+        // habilitando `.await` adentro y haciendo que la invocación
+        // devuelva `Value::Future` perezoso (paralelo a fn nombradas async).
+        Expr::FnExpr { params, body, is_async, .. } => Ok(Value::Function {
             params: params.clone(),
             body: body.clone(),
             closure: env,
-            // FnExpr (closure anónimo) siempre es sync — el lenguaje no
-            // soporta `async fn(...) => ...` todavía. Si en el futuro
-            // lo agregamos, el parser pasa a marcar el `is_async`
-            // sobre el `Expr::FnExpr` y este sitio lo refleja.
-            is_async: false,
+            is_async: *is_async,
         }),
 
         // `obj.campo` — acceso a campo de instancia de tipo custom, o
@@ -3292,6 +3291,11 @@ async fn dispatch_method(
         // Mini-tanda Mb4 — unique + partition.
         (Value::List(_), "unique") => list_unique(receiver, args, span),
         (Value::List(_), "partition") => list_partition(receiver, args, span).await,
+        // Mini-tanda Mb5 — group_by + zip_with + max_by/min_by.
+        (Value::List(_), "group_by") => list_group_by(receiver, args, span).await,
+        (Value::List(_), "zip_with") => list_zip_with(receiver, args, span).await,
+        (Value::List(_), "max_by") => list_max_by(receiver, args, span).await,
+        (Value::List(_), "min_by") => list_min_by(receiver, args, span).await,
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3357,6 +3361,9 @@ async fn dispatch_method(
         (Value::Str(_), "chars") => str_chars(receiver, args, span),
         // Mini-tanda Mb4 — split_at: divide en char idx → (Str, Str).
         (Value::Str(_), "split_at") => str_split_at(receiver, args, span),
+        // Mini-tanda Mb5 — lines + is_empty.
+        (Value::Str(_), "lines") => str_lines(receiver, args, span),
+        (Value::Str(_), "is_empty") => str_is_empty(receiver, args, span),
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
         // Mini-tanda Mb — variantes parciales de trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
@@ -4515,6 +4522,137 @@ fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(out))
 }
 
+/// Mini-tanda Mb5 — `xs.group_by(fn(T) -> K)`: agrupa los elementos
+/// por la key que devuelve el callback. Output: `Map<K, List<T>>`.
+/// Preserva orden — el primer item con key K define posición en el
+/// map; items posteriores se acumulan en su `List<T>`.
+#[async_recursion]
+async fn list_group_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("group_by", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut groups: Vec<(Value, Vec<Value>)> = Vec::new();
+    for item in snapshot {
+        let item_clone = item.clone();
+        let k = invoke_callback(callback, item_clone, "group_by", span).await?;
+        if let Some(slot) = groups.iter_mut().find(|(ek, _)| ek == &k) {
+            slot.1.push(item);
+        } else {
+            groups.push((k, vec![item]));
+        }
+    }
+    let pairs: Vec<(Value, Value)> = groups
+        .into_iter()
+        .map(|(k, vs)| (k, Value::new_list(vs)))
+        .collect();
+    Ok(Value::new_map(pairs))
+}
+
+/// Mini-tanda Mb5 — `xs.zip_with(ys, fn(T, U) -> V)`: combina zip +
+/// map en un paso. Trunca al más corto (paralelo a Python `zip`).
+/// Útil cuando solo querés la transformación, no los pares crudos.
+#[async_recursion]
+async fn list_zip_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("zip_with", &args, 2, span)?;
+    let xs = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let other = it.next().unwrap();
+    let cb = it.next().unwrap();
+    let other_items = match other {
+        Value::List(items) => items,
+        v => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: v.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.zip_with()` espera otra `List`, recibió `{}`", v.type_name()),
+            )));
+        }
+    };
+    let a: Vec<Value> = xs.lock().clone();
+    let b: Vec<Value> = other_items.lock().clone();
+    let mut out: Vec<Value> = Vec::with_capacity(a.len().min(b.len()));
+    for (x, y) in a.into_iter().zip(b.into_iter()) {
+        let v = invoke_value(cb.clone(), vec![x, y], "zip_with", span).await?;
+        out.push(v);
+    }
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb5 — `xs.max_by(fn(T) -> Int)` y `xs.min_by(...)`:
+/// devuelven el elemento con mayor/menor ranking según el callback.
+/// El callback extrae un `Int` y nosotros elegimos el item con el
+/// valor más grande/chico. Útil para tipos no numéricos (`Instance`,
+/// `Str`, etc.) donde `max`/`min` directos no aplican. Vacía → Err.
+#[async_recursion]
+async fn list_max_min_by(
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+    want_max: bool,
+    method: &'static str,
+) -> EvalResult<Value> {
+    expect_arity(method, &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    if snapshot.is_empty() {
+        return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "lista vacía".into(),
+        )))));
+    }
+    let mut best: Option<(i64, Value)> = None;
+    for item in snapshot {
+        let item_clone = item.clone();
+        let r = invoke_callback(callback, item_clone, method, span).await?;
+        let key = match r {
+            Value::Int(n) => n,
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Int".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "la callback de `.{}()` tiene que devolver `Int`, devolvió `{}`",
+                        method, other.type_name(),
+                    ),
+                )));
+            }
+        };
+        best = match best {
+            None => Some((key, item)),
+            Some((bk, bv)) => {
+                let take_new = if want_max { key > bk } else { key < bk };
+                if take_new { Some((key, item)) } else { Some((bk, bv)) }
+            }
+        };
+    }
+    let (_, item) = best.unwrap();
+    Ok(Value::Result(ResultVariant::Ok(Box::new(item))))
+}
+
+async fn list_max_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    list_max_min_by(receiver, args, span, true, "max_by").await
+}
+
+async fn list_min_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    list_max_min_by(receiver, args, span, false, "min_by").await
+}
+
 /// Mini-tanda Mb4 — `xs.partition(pred)`: devuelve `(List<T>, List<T>)`
 /// con los elementos para los que `pred` da `true` en el primer slot
 /// y los `false` en el segundo. Preserva orden relativo.
@@ -5022,6 +5160,31 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     let left: String = s.chars().take(clamped).collect();
     let right: String = s.chars().skip(clamped).collect();
     Ok(Value::Tuple(vec![Value::Str(left), Value::Str(right)]))
+}
+
+/// Mini-tanda Mb5 — `s.lines()`: separa el string por `\n` devolviendo
+/// `List<Str>`. Paralelo a `str::lines` Rust: si el string termina con
+/// `\n`, NO se agrega línea vacía al final. Strings vacíos → lista
+/// vacía.
+fn str_lines(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("lines", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let parts: Vec<Value> = s.lines().map(|l| Value::Str(l.to_string())).collect();
+    Ok(Value::new_list(parts))
+}
+
+/// Mini-tanda Mb5 — `s.is_empty()`: `Bool` indicando si `s == ""`.
+/// Atajo de `s.len() == 0` con intención clara.
+fn str_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("is_empty", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    Ok(Value::Bool(s.is_empty()))
 }
 
 /// Mini-tanda Mb3 — `s.chars()`: devuelve `List<Str>` con cada char
@@ -10206,7 +10369,7 @@ let r = match n {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
                 right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO)], span: Span::ZERO,
+            }, Span::ZERO)], is_async: false, span: Span::ZERO,
         };
         let env = Environment::new();
         let v = eval_expr(&fnexpr, env).await.unwrap();
@@ -15039,6 +15202,186 @@ let r = match n {
         } else {
             panic!("esperaba Map");
         }
+    }
+
+    // ---- Mini-tanda Mb5: group_by + zip_with + max_by/min_by +
+    //                     lines + is_empty ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_list_group_by_agrupa_por_key() {
+        let (env, res) = parse_eval_into_env(
+            "let nums: List<Int> = [1, 2, 3, 4, 5, 6]\n\
+             let r: Map<Str, List<Int>> = nums.group_by(fn(n: Int) => if (n % 2 == 0) { \"par\" } else { \"impar\" })",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 2);
+            // El primer grupo creado fue "impar" (n=1 cae primero).
+            assert_eq!(g[0].0, Value::Str("impar".into()));
+            // Y "par" segundo (n=2).
+            assert_eq!(g[1].0, Value::Str("par".into()));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_list_zip_with_combina_y_trunca_al_corto() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4]\n\
+             let ys: List<Int> = [10, 20]\n\
+             let r: List<Int> = xs.zip_with(ys, fn(a: Int, b: Int) => a + b)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            // trunca a min(4, 2) = 2 elementos.
+            assert_eq!(nums, vec![11, 22]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_list_max_by_devuelve_item_con_max_ranking() {
+        let (env, res) = parse_eval_into_env(
+            "type P { age: Int = 0, name: Str = \"\" }\n\
+             let xs: List<P> = [P { age: 28, name: \"Bob\" }, P { age: 42, name: \"Cam\" }, P { age: 35, name: \"Ada\" }]\n\
+             let r: Result<P> = xs.max_by(fn(p: P) => p.age)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Result(ResultVariant::Ok(item)) = v {
+            if let Value::Instance { fields, .. } = item.as_ref() {
+                let g = fields.lock();
+                let name = g.iter().find(|(k, _)| k == "name").map(|(_, v)| v.clone());
+                assert_eq!(name, Some(Value::Str("Cam".into())));
+            } else {
+                panic!("esperaba Instance");
+            }
+        } else {
+            panic!("esperaba Ok(P)");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_list_min_by_lista_vacia_devuelve_err() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let r: Result<Int> = xs.min_by(fn(n: Int) => n)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Result(ResultVariant::Err(_)) = v {
+            // OK.
+        } else {
+            panic!("esperaba Err");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_str_lines_separa_por_newline() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"uno\\ndos\\ntres\"\n\
+             let ls: List<Str> = s.lines()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("ls").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let strs: Vec<String> = g.iter().filter_map(|x| {
+                if let Value::Str(s) = x { Some(s.clone()) } else { None }
+            }).collect();
+            assert_eq!(strs, vec!["uno".to_string(), "dos".to_string(), "tres".to_string()]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_str_lines_termina_con_newline_no_agrega_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"a\\nb\\n\"\n\
+             let ls: List<Str> = s.lines()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("ls").unwrap();
+        if let Value::List(items) = v {
+            assert_eq!(items.lock().len(), 2);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb5_str_is_empty_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Bool = \"\".is_empty()\n\
+             let b: Bool = \"hola\".is_empty()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+    }
+
+    // ---- Mini-tanda Async-cl: async fn como closure inline ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_cl_inline_devuelve_future() {
+        // `async fn(...) => ...` produce un Value::Function con
+        // is_async = true. Al invocar, devuelve Value::Future perezoso
+        // que el caller debe `.await`ar.
+        let (env, res) = parse_eval_into_env(
+            "async fn run() -> Int {\n\
+                 let f = async fn(n: Int) -> Int { return n * 2 }\n\
+                 let r = f(21).await\n\
+                 return r\n\
+             }\n\
+             let r: Int = run().await",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(42)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_cl_inline_con_sleep_dentro() {
+        let (env, res) = parse_eval_into_env(
+            "async fn run() -> Int {\n\
+                 let delayed = async fn(n: Int) -> Int {\n\
+                     sleep(1).await\n\
+                     return n + 100\n\
+                 }\n\
+                 let r = delayed(5).await\n\
+                 return r\n\
+             }\n\
+             let r: Int = run().await",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(105)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_cl_pasada_como_arg_funciona() {
+        // Un async closure se puede pasar como arg a otra async fn.
+        let (env, res) = parse_eval_into_env(
+            "async fn apply_async(f, n: Int) -> Int {\n\
+                 let r = f(n).await\n\
+                 return r\n\
+             }\n\
+             async fn run() -> Int {\n\
+                 let r = apply_async(async fn(x: Int) -> Int { return x + 1 }, 10).await\n\
+                 return r\n\
+             }\n\
+             let r: Int = run().await",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(11)));
     }
 
     #[tokio::test(flavor = "current_thread")]

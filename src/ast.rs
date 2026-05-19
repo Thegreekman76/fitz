@@ -57,9 +57,13 @@ pub enum Expr {
 
     /// Función anónima `fn(x) => ...` o `fn(x) { ... }`. La flecha la
     /// convierte el parser a `body: vec![Stmt::Return(expr, ...)]`.
+    /// Mini-tanda Async-cl — el prefijo `async fn(...)` marca el closure
+    /// como async; el body puede usar `.await` y la fn devuelve un
+    /// `Future<T>` que el caller debe `.await`ar.
     FnExpr {
         params: Vec<Param>,
         body: Vec<Stmt>,
+        is_async: bool,
         span: Span,
     },
 
@@ -1290,7 +1294,7 @@ mod tests {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
                 right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO)], span: Span::ZERO,
+            }, Span::ZERO)], is_async: false, span: Span::ZERO,
         };
         match fnexpr {
             Expr::FnExpr { params, body, .. } => {

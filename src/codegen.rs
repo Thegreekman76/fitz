@@ -5302,7 +5302,14 @@ impl<'a> CodegenCtx<'a> {
             // consume directo. Acá llega cualquier FnExpr usado como
             // valor: `let f = fn(n) => ...`, `apply(fn(n) => ..., 7)`,
             // `return fn(y) => x + y`.
-            Expr::FnExpr { params, body, span } => self.gen_fn_expr_as_value(params, body, *span),
+            Expr::FnExpr { params, body, is_async, span } => {
+                if *is_async {
+                    return Err(self.err_at(*span,
+                        "async closure inline (`async fn(...) => ...`) como valor: no soportado en codegen todavía. Por ahora, declará la fn async como top-level: `async fn nombre(...) -> T { ... }` y referenciála por nombre.".to_string(),
+                    ));
+                }
+                self.gen_fn_expr_as_value(params, body, *span)
+            }
             // Fase 9.0.1 (F15): defensa — `fitz build` no debería ver
             // `Expr::Error` (strict parser nunca lo produce).
             Expr::Error(span) => Err(self.err_at(*span,
@@ -5919,6 +5926,22 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::List(Box::new(Type::Str))))
             }
+            // Mini-tanda Mb5 — `lines()` → `List<Str>`. Reusa
+            // `str::lines` Rust (separa por `\n` y descarta `\n` final
+            // sin agregar línea vacía).
+            (Type::Str, "lines") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "Arc::new(Mutex::new(({}).lines().map(String::from).collect::<Vec<String>>()))",
+                    obj_code
+                );
+                Ok((code, Type::List(Box::new(Type::Str))))
+            }
+            // Mini-tanda Mb5 — `is_empty()` → `Bool`.
+            (Type::Str, "is_empty") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).is_empty()", obj_code), Type::Bool))
+            }
             // Mini-tanda Mb4 — `split_at(idx)`: divide en char idx →
             // `(Str, Str)`. idx negativo → panic; idx > len → ("s", "").
             (Type::Str, "split_at") => {
@@ -6050,7 +6073,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty)",
                 other
             ))),
 
@@ -6494,8 +6517,125 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Map(Box::new(k_ty), Box::new(v_ty))))
             }
+            // Mini-tanda Mb5 — group_by(fn(T) -> K) → Map<K, List<T>>.
+            // Emite snapshot + for loop con find-or-push estilo
+            // last-write-wins paralelo a `to_map`.
+            (Type::List(t), "group_by") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, k_ty) = self.gen_callback_inline(&args[0], t, None, "group_by")?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let k_rs = rust_type_for(&k_ty, self.env)?;
+                let code = format!(
+                    "{{ let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __groups: Vec<({k_rs}, Vec<{t_rs}>)> = Vec::new(); \
+                       for __it in __items.into_iter() {{ \
+                           let __k: {k_rs} = __cb(__it.clone()); \
+                           if let Some(__slot) = __groups.iter_mut().find(|__p| __p.0 == __k) {{ \
+                               __slot.1.push(__it); \
+                           }} else {{ \
+                               __groups.push((__k, vec![__it])); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__groups.into_iter().map(|(__k, __vs)| (__k, Arc::new(Mutex::new(__vs)))).collect::<Vec<({k_rs}, Arc<Mutex<Vec<{t_rs}>>>)>>())) }}"
+                );
+                Ok((
+                    code,
+                    Type::Map(Box::new(k_ty), Box::new(Type::List(Box::new((**t).clone())))),
+                ))
+            }
+            // Mini-tanda Mb5 — zip_with(ys, fn(T, U) -> V) → List<V>.
+            // Combina zip + map en un paso. Trunca al más corto.
+            (Type::List(t), "zip_with") => {
+                check_method_arity(method, args, 2)?;
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                let u_ty = match &other_ty {
+                    Type::List(inner) => (**inner).clone(),
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.zip_with()` espera `List<U>` como primer arg, recibió `{}`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                // Inferimos V (ret del callback) ANTES de emitir el
+                // closure binario, así pasamos el tipo concreto al
+                // helper (necesario para que el `-> V` Rust no sea
+                // `_` que rustc no puede inferir en algunos casos).
+                let v_ty = match &args[1] {
+                    Expr::FnExpr { params, body, .. } => self
+                        .infer_callback_ret_silently_binary_named(params, body, t, &u_ty)
+                        .unwrap_or(Type::Any),
+                    Expr::Ident(name, _) => {
+                        if let Some(sig) = self.fn_sigs.get(name).cloned() {
+                            sig.ret
+                        } else if let Some(Type::Function { ret, .. }) = self.lookup_var(name) {
+                            (**ret).clone()
+                        } else {
+                            Type::Any
+                        }
+                    }
+                    _ => Type::Any,
+                };
+                if matches!(v_ty, Type::Any) {
+                    return Err(self.err_at(call_span,
+                        "`.zip_with()`: el ret type del callback es `Any` (anotalo o usá tipos concretos)".to_string(),
+                    ));
+                }
+                let cb_code = self.gen_binary_callback_inline_with_ret(
+                    &args[1], t, &u_ty, &v_ty, "zip_with",
+                )?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let u_rs = rust_type_for(&u_ty, self.env)?;
+                let v_rs = rust_type_for(&v_ty, self.env)?;
+                let code = format!(
+                    "{{ let __a: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __b: Vec<{u_rs}> = ({other_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __out: Vec<{v_rs}> = Vec::with_capacity(__a.len().min(__b.len())); \
+                       for (__x, __y) in __a.into_iter().zip(__b.into_iter()) {{ \
+                           __out.push(__cb(__x, __y)); \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new(v_ty))))
+            }
+            // Mini-tanda Mb5 — max_by/min_by(fn(T) -> Int) → Result<T>.
+            // Extrae ranking Int por elemento, devuelve el item con
+            // max/min ranking. Vacía → Err.
+            (Type::List(t), "max_by") | (Type::List(t), "min_by") => {
+                check_method_arity(method, args, 1)?;
+                let is_max = method == "max_by";
+                let (cb_code, _) = self.gen_callback_inline(&args[0], t, Some(&Type::Int), method)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let cmp_op = if is_max { "__rank > __bk" } else { "__rank < __bk" };
+                let code = format!(
+                    "{{ let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __best: Option<(i64, {t_rs})> = None; \
+                       for __it in __items.into_iter() {{ \
+                           let __rank: i64 = __cb(__it.clone()); \
+                           __best = match __best {{ \
+                               None => Some((__rank, __it)), \
+                               Some((__bk, __bv)) if {cmp_op} => Some((__rank, __it)), \
+                               Some(__keep) => Some(__keep), \
+                           }}; \
+                       }} \
+                       match __best {{ \
+                           Some((_, __v)) => Ok::<{t_rs}, String>(__v), \
+                           None => Err(String::from(\"lista vacía\")) \
+                       }} }}"
+                );
+                Ok((
+                    code,
+                    Type::Result {
+                        ok: Box::new((**t).clone()),
+                        err: Box::new(Type::Str),
+                    },
+                ))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by)",
                 other
             ))),
 
@@ -7684,6 +7824,39 @@ impl<'a> CodegenCtx<'a> {
         let (_discarded, result) = self.with_temp_output(|ctx| ctx.gen_expr(e));
         self.pop_scope();
         result.map(|(_, t)| t)
+    }
+
+    /// Mini-tanda Mb5 — variante binaria de `infer_callback_ret_silently`.
+    /// Usa los nombres reales del FnExpr para declarar los params en
+    /// el scope antes del dry-run del primer `Stmt::Return` (o último
+    /// `Stmt::Expr` no-print) del body. Necesario para `zip_with`
+    /// donde V se determina del callback y no por nombre del método.
+    fn infer_callback_ret_silently_binary_named(
+        &mut self,
+        params: &[crate::ast::Param],
+        body: &[Stmt],
+        p0_ty: &Type,
+        p1_ty: &Type,
+    ) -> Option<Type> {
+        if params.len() != 2 {
+            return None;
+        }
+        let target: Option<&Expr> = body
+            .iter()
+            .find_map(|s| if let Stmt::Return(e, _) = s { Some(e) } else { None })
+            .or_else(|| {
+                body.last().and_then(|s| match s {
+                    Stmt::Expr(e, _) if !is_print_call(e) => Some(e),
+                    _ => None,
+                })
+            });
+        let e = target?;
+        self.push_scope();
+        self.declare_var(params[0].name.clone(), p0_ty.clone());
+        self.declare_var(params[1].name.clone(), p1_ty.clone());
+        let (_discarded, result) = self.with_temp_output(|ctx| ctx.gen_expr(e));
+        self.pop_scope();
+        result.ok().map(|(_, t)| t)
     }
 
     // --- Result, `?`, match (5b.4) ----------------------------------------

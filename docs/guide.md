@@ -4146,6 +4146,8 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.pad_end(w, c)`    | `Int`, `Str` | `Str`         | padding a la derecha; `c` debe ser 1 char (Mb2) |
 | `.chars()`          | —            | `List<Str>`   | cada char como Str de 1 caracter (Mb3) |
 | `.split_at(i)`      | `Int`        | `(Str, Str)`  | divide en char idx; idx >= len → segundo vacío (Mb4) |
+| `.lines()`          | —            | `List<Str>`   | separa por `\n`; ignora `\n` final (Mb5) |
+| `.is_empty()`       | —            | `Bool`        | atajo de `len() == 0` (Mb5) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 
@@ -4171,6 +4173,10 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.to_map()`         | —                 | `Map<K, V>`   | requiere `List<(K, V)>`; last-write-wins (Mb3) |
 | `.unique()`         | —                 | `List<T>`     | dedup preservando orden de 1ra aparición (Mb4) |
 | `.partition(pred)`  | `fn(T) -> Bool`   | `(List<T>, List<T>)` | divide en truthy/falsy preservando orden (Mb4) |
+| `.group_by(fn)`     | `fn(T) -> K`      | `Map<K, List<T>>` | agrupa por key derivada del callback (Mb5) |
+| `.zip_with(ys, fn)` | `List<U>`, `fn(T, U) -> V` | `List<V>` | zip + map en un paso; trunca al más corto (Mb5) |
+| `.max_by(fn)`       | `fn(T) -> Int`    | `Result<T>`   | item con max ranking; vacía → `Err` (Mb5) |
+| `.min_by(fn)`       | `fn(T) -> Int`    | `Result<T>`   | item con min ranking; vacía → `Err` (Mb5) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4577,6 +4583,91 @@ print(lens["Ada"])               // 3
 
 Ver [examples/guide/13p-mb4-y-comprehensions-extendidas.fitz](../examples/guide/13p-mb4-y-comprehensions-extendidas.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+### group_by + zip_with + max_by/min_by + lines + async closures (mini-tanda Mb5 + Async-cl)
+
+Bundle siguiente a Mb4 — combina cuatro métodos analíticos sobre
+colecciones, dos sobre `Str`, y un feature nuevo: async closures
+inline.
+
+**`List.group_by(fn(T) -> K)`** — agrupa por una key derivada del
+callback. Output: `Map<K, List<T>>`. Preserva orden — el primer
+item con key K define posición en el map, items posteriores se
+acumulan en su `List<T>`.
+
+```fitz
+type User { name: Str = "", role: Str = "guest" }
+
+let users: List<User> = [...]
+let by_role: Map<Str, List<User>> = users.group_by(fn(u: User) => u.role)
+print(by_role["admin"].len())
+```
+
+**`List.zip_with(ys, fn(T, U) -> V)`** — combina zip + map en un
+paso (devuelve directamente la transformación, sin pares crudos
+intermedios). Trunca al más corto (paralelo a Python `zip`).
+
+```fitz
+let xs: List<Int> = [1, 2, 3]
+let ys: List<Int> = [10, 20, 30]
+let r: List<Int> = xs.zip_with(ys, fn(a: Int, b: Int) => a + b)
+print(r)                                         // [11, 22, 33]
+```
+
+**`List.max_by(fn(T) -> Int)` / `List.min_by(fn(T) -> Int)`** — útil
+para tipos no numéricos (`Instance`, `Str`, etc.) donde `max`/`min`
+directos no aplican. El callback extrae un `Int` ranking; devuelve
+el item con max/min ranking. Vacía → `Err`.
+
+```fitz
+type Item { score: Int = 0, name: Str = "" }
+let items: List<Item> = [...]
+match items.max_by(fn(it: Item) => it.score) {
+    Ok(best) => print("mejor: {best.name}"),
+    Err(_) => print("vacío")
+}
+```
+
+**`Str.lines()` y `Str.is_empty()`** — utilidades de strings:
+`lines` separa por `\n` (sin agregar línea vacía si el string
+termina con `\n`, paralelo a `str::lines` Rust); `is_empty` es
+atajo de `len() == 0` con intención clara.
+
+```fitz
+let txt = "Hola\nFitz\n\nFin"
+let renglones: List<Str> = txt.lines()
+print(renglones.len())                           // 4 (incluye la vacía intermedia)
+
+let validas: List<Str> = renglones.filter(fn(l: Str) => not l.is_empty())
+print(validas.len())                             // 3
+```
+
+**Async closures inline** — `async fn(...) => expr` o `async fn(...) { ... }`
+como expresión: el closure resultante es invocable y devuelve un
+`Future<T>` que el caller debe `.await`ar (igual que con fns async
+top-level). Habilita patrones funcionales async.
+
+```fitz
+async fn run() -> Int {
+    // Async closure asignado a una var
+    let delayed = async fn(n: Int) -> Int {
+        sleep(1).await
+        return n * 2
+    }
+    return delayed(21).await   // 42
+}
+run().await
+```
+
+**Caveat de `fitz build`**: las async closures inline funcionan
+en `fitz run` pero NO en `fitz build` (boxing de `Future<T>` con
+`Pin<Box<dyn Future>>` requiere infraestructura que no está
+todavía). El error de codegen sugiere el workaround: declarar la
+fn async top-level y referenciarla por nombre.
+
+Ver [examples/guide/13q-mb5-y-async-closures.fitz](../examples/guide/13q-mb5-y-async-closures.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`
+para los métodos Mb5; las async closures sólo en `fitz run`).
 
 ### Lo que todavía no anda
 

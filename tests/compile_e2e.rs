@@ -1967,6 +1967,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13n-reduce-product-chars-entries-to-map.fitz",
     "13o-higher-order-y-consts-globales.fitz",
     "13p-mb4-y-comprehensions-extendidas.fitz",
+    "13q-mb5-y-async-closures.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -4025,6 +4026,104 @@ fn cmp_map_comp_con_filter_compila() {
     let (stdout, exit) = build_and_run("cmp_map_comp_filter", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "60\n90");
+}
+
+// ---- Mini-tanda Mb5 + Async-cl --------------------------------
+
+#[test]
+fn mb5_list_group_by_compila() {
+    let src = "let nums: List<Int> = [1, 2, 3, 4, 5, 6]\n\
+               let g: Map<Str, List<Int>> = nums.group_by(fn(n: Int) => if (n % 2 == 0) { \"par\" } else { \"impar\" })\n\
+               print(g[\"par\"])\n\
+               print(g[\"impar\"])\n";
+    let (stdout, exit) = build_and_run("mb5_list_group_by", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[2, 4, 6]\n[1, 3, 5]");
+}
+
+#[test]
+fn mb5_list_zip_with_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3]\n\
+               let ys: List<Int> = [10, 20, 30]\n\
+               let r: List<Int> = xs.zip_with(ys, fn(a: Int, b: Int) => a + b)\n\
+               print(r)\n";
+    let (stdout, exit) = build_and_run("mb5_list_zip_with", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[11, 22, 33]");
+}
+
+#[test]
+fn mb5_list_max_by_compila() {
+    let src = "type P { age: Int = 0 name: Str = \"\" }\n\
+               let ps: List<P> = [P { age: 28, name: \"Bob\" }, P { age: 42, name: \"Cam\" }, P { age: 35, name: \"Ada\" }]\n\
+               match ps.max_by(fn(p: P) => p.age) {\n\
+                 Ok(p) => print(\"mayor: {p.name}\"),\n\
+                 Err(_) => print(\"vacío\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mb5_list_max_by", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "mayor: Cam");
+}
+
+#[test]
+fn mb5_list_min_by_lista_vacia_devuelve_err_compila() {
+    let src = "let xs: List<Int> = []\n\
+               match xs.min_by(fn(n: Int) => n) {\n\
+                 Ok(v) => print(\"min: {v}\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("mb5_list_min_by_vacia", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "err: lista vacía");
+}
+
+#[test]
+fn mb5_str_lines_compila() {
+    let src = "let s = \"uno\\ndos\\ntres\"\n\
+               let ls: List<Str> = s.lines()\n\
+               print(ls)\n\
+               print(ls.len())\n";
+    let (stdout, exit) = build_and_run("mb5_str_lines", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[\"uno\", \"dos\", \"tres\"]\n3");
+}
+
+#[test]
+fn mb5_str_is_empty_compila() {
+    let src = "print(\"\".is_empty())\n\
+               print(\"hola\".is_empty())\n";
+    let (stdout, exit) = build_and_run("mb5_str_is_empty", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+#[test]
+fn async_cl_inline_aborta_en_codegen_con_mensaje_claro() {
+    // async closures inline NO se soportan en codegen 5b (boxing
+    // de Future<T> requiere Pin<Box<dyn Future>>). El mensaje
+    // sugiere el workaround: declarar la fn async top-level.
+    let src = "let f = async fn(n: Int) -> Int { return n }\n\
+               print(0)\n";
+    let mut sanitized = src.to_string();
+    let _ = &mut sanitized;
+    // Usamos build directo para capturar el error de codegen.
+    let dir = std::env::temp_dir().join("fitz-build-async-cl-reject");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("test.fitz");
+    std::fs::write(&path, src).expect("write src");
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fitz"))
+        .arg("build")
+        .arg(&path)
+        .output()
+        .expect("run fitz build");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let combined = format!("{stderr}{stdout}");
+    assert!(
+        combined.contains("async closure inline")
+            || combined.contains("async fn nombre"),
+        "esperaba mensaje específico de async closure inline, fue:\nstderr: {stderr}\nstdout: {stdout}",
+    );
 }
 
 #[test]

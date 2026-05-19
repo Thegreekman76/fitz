@@ -1613,6 +1613,14 @@ impl Parser {
     /// Fase 4). El cuerpo y el tipo de retorno se parsean igual.
     fn parse_fn_expr(&mut self) -> FitzResult<Expr> {
         let span = self.cur_span();
+        // Mini-tanda Async-cl — `async fn(...)` es un closure async.
+        // El body puede usar `.await` y la fn devuelve un `Future<T>`.
+        let is_async = if matches!(self.peek(), Token::Async) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         self.expect(&Token::Fn, "se esperaba 'fn'")?;
         self.expect(
             &Token::LParen,
@@ -1637,7 +1645,7 @@ impl Parser {
             }
         };
 
-        Ok(Expr::FnExpr { params, body, span })
+        Ok(Expr::FnExpr { params, body, is_async, span })
     }
 
     /// Lista de parámetros, ya con '(' consumido. Termina consumiendo
@@ -2474,6 +2482,15 @@ impl Parser {
             // de expresión. `fn name(...)` no es válido acá: una function
             // con nombre es `Stmt::FnDef`, sentencia, no expresión.
             Token::Fn if matches!(self.peek_at(1), Token::LParen) => {
+                return self.parse_fn_expr();
+            }
+            // Mini-tanda Async-cl — `async fn(...)` closure async en
+            // posición de expresión. Reusa `parse_fn_expr` (que detecta
+            // el `async` prefijo y setea `is_async`).
+            Token::Async
+                if matches!(self.peek_at(1), Token::Fn)
+                    && matches!(self.peek_at(2), Token::LParen) =>
+            {
                 return self.parse_fn_expr();
             }
             _ => {}

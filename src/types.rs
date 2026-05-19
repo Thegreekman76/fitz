@@ -1741,7 +1741,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 }
             }
         }
-        Expr::FnExpr { params, body, span } => {
+        Expr::FnExpr { params, body, is_async, span } => {
             // Walkeamos el body con un scope nuevo y los params
             // bindeados (con su tipo declarado o `Any` si la
             // anotación faltó). El tipo del FnExpr es `Function`;
@@ -1751,15 +1751,15 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // no podemos validar contra qué — los returns se
             // recolectan, no se chequean.
             //
-            // `await_stack` pushea `false`: el lenguaje no soporta
-            // `async fn(...)` anónimas hoy. `.await` adentro de un
-            // FnExpr (incluso si está anidado adentro de una `async
-            // fn`) es error — el closure sync no puede await-ear.
+            // Mini-tanda Async-cl — `await_stack` pushea `*is_async`:
+            // `async fn(...)` permite `.await` adentro; `fn(...)` lo
+            // rechaza. El tipo final del FnExpr async es
+            // `Function { ret: Future<T> }`.
             ctx.push_scope();
             ctx.return_stack.push(Type::Any);
             ctx.inferred_returns.push(Vec::new());
             ctx.in_http_handler.push(false);
-            ctx.await_stack.push(false);
+            ctx.await_stack.push(*is_async);
             // R.2.4 (F3): break/continue NO escapan FnExpr (closures).
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
@@ -1782,9 +1782,14 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             ctx.await_stack.pop();
             ctx.pop_scope();
             let ret = unify_returns(&returns);
+            let final_ret = if *is_async {
+                Type::Future(Box::new(ret))
+            } else {
+                ret
+            };
             Type::Function {
                 params: param_types,
-                ret: Box::new(ret),
+                ret: Box::new(final_ret),
             }
         }
         Expr::Slice { object, start, end, span, .. } => {
@@ -2618,6 +2623,81 @@ fn infer_list_method(
                 Type::List(Box::new(t.clone())),
             ])
         }
+        // Mini-tanda Mb5 — `group_by(fn(T) -> K)`: agrupa por key.
+        // Output: `Map<K, List<T>>`. K se infiere del ret type del cb.
+        "group_by" => {
+            if !check_method_arity(ctx, "group_by", args_ty, 1, span) {
+                return Type::Map(
+                    Box::new(Type::Any),
+                    Box::new(Type::List(Box::new(t.clone()))),
+                );
+            }
+            let k_ty = check_unary_callback(ctx, &args_ty[0], t, "group_by", None, span);
+            Type::Map(Box::new(k_ty), Box::new(Type::List(Box::new(t.clone()))))
+        }
+        // Mini-tanda Mb5 — `zip_with(ys, fn(T, U) -> V)`: combina zip
+        // + map. Ret: `List<V>`. U sale del tipo de elementos de `ys`;
+        // V del ret type del callback.
+        "zip_with" => {
+            if !check_method_arity(ctx, "zip_with", args_ty, 2, span) {
+                return Type::List(Box::new(Type::Any));
+            }
+            let u_ty = match args_ty[0].base() {
+                Type::List(inner) => (**inner).clone(),
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.zip_with()` espera `List<U>` como primer arg, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                    return Type::List(Box::new(Type::Any));
+                }
+            };
+            let v_ty = match &args_ty[1] {
+                Type::Function { params, ret } => {
+                    if params.len() != 2 {
+                        ctx.error_at(span, format!(
+                            "`.zip_with()`: el callback toma 2 params, tiene {}",
+                            params.len(),
+                        ));
+                        return Type::List(Box::new(Type::Any));
+                    }
+                    if !is_compatible(t, &params[0]) {
+                        ctx.error_at(span, format!(
+                            "`.zip_with()`: param[0] del callback es `{}`, esperaba `{}`",
+                            params[0].display(ctx.types),
+                            t.display(ctx.types),
+                        ));
+                    }
+                    if !is_compatible(&u_ty, &params[1]) {
+                        ctx.error_at(span, format!(
+                            "`.zip_with()`: param[1] del callback es `{}`, esperaba `{}`",
+                            params[1].display(ctx.types),
+                            u_ty.display(ctx.types),
+                        ));
+                    }
+                    (**ret).clone()
+                }
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.zip_with()` espera un callback, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            };
+            Type::List(Box::new(v_ty))
+        }
+        // Mini-tanda Mb5 — `max_by`/`min_by(fn(T) -> Int)`: extrae
+        // ranking Int por elemento y devuelve el item con max/min.
+        // Vacía → `Err`. Útil para tipos no numéricos.
+        "max_by" | "min_by" => {
+            if check_method_arity(ctx, method, args_ty, 1, span) {
+                check_unary_callback(ctx, &args_ty[0], t, method, Some(&Type::Int), span);
+            }
+            Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -3067,6 +3147,15 @@ fn infer_str_method(
                 ));
             }
             Type::Tuple(vec![Type::Str, Type::Str])
+        }
+        // Mini-tanda Mb5 — `lines() -> List<Str>` y `is_empty() -> Bool`.
+        "lines" => {
+            check_method_arity(ctx, "lines", args_ty, 0, span);
+            Type::List(Box::new(Type::Str))
+        }
+        "is_empty" => {
+            check_method_arity(ctx, "is_empty", args_ty, 0, span);
+            Type::Bool
         }
         // S.2 — manipulación de strings:
         "split" => {
@@ -6759,6 +6848,94 @@ mod tests {
         assert_error_with(
             "let m = {n: n for n in 0..3 if n}",
             &["filtro", "Bool"],
+        );
+    }
+
+    // ---- Mini-tanda Mb5 + Async-cl ----
+
+    #[test]
+    fn mb5_list_group_by_devuelve_map_k_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: Map<Str, List<Int>> = xs.group_by(fn(n: Int) => if (n > 1) { \"big\" } else { \"small\" })",
+        );
+    }
+
+    #[test]
+    fn mb5_list_zip_with_devuelve_list_v() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let ys: List<Int> = [10, 20]\n\
+             let r: List<Int> = xs.zip_with(ys, fn(a: Int, b: Int) => a + b)",
+        );
+    }
+
+    #[test]
+    fn mb5_list_zip_with_arg_no_list_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1]\n\
+             let r = xs.zip_with(42, fn(a: Int, b: Int) => a + b)",
+            &["zip_with", "List"],
+        );
+    }
+
+    #[test]
+    fn mb5_list_max_by_devuelve_result_t() {
+        assert_ok(
+            "type P { age: Int = 0 }\n\
+             let xs: List<P> = [P { age: 1 }]\n\
+             let r: Result<P> = xs.max_by(fn(p: P) => p.age)",
+        );
+    }
+
+    #[test]
+    fn mb5_list_max_by_callback_no_int_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1]\n\
+             let r = xs.max_by(fn(n: Int) => \"oops\")",
+            &["max_by", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb5_str_lines_devuelve_list_str() {
+        assert_ok(
+            "let r: List<Str> = \"a\\nb\".lines()",
+        );
+    }
+
+    #[test]
+    fn mb5_str_is_empty_devuelve_bool() {
+        assert_ok(
+            "let r: Bool = \"\".is_empty()",
+        );
+    }
+
+    #[test]
+    fn async_cl_inline_tipa_como_function_con_future() {
+        // El tipo del FnExpr async tiene ret = Future<T>, así que el
+        // checker valida `.await` adentro y permite usarlo desde una
+        // async fn caller.
+        assert_ok(
+            "async fn run() -> Int {\n\
+                 let f = async fn(n: Int) -> Int { return n * 2 }\n\
+                 return f(21).await\n\
+             }",
+        );
+    }
+
+    #[test]
+    fn async_cl_sync_no_acepta_await_dentro() {
+        // FnExpr sync (sin `async`) rechaza `.await` adentro.
+        assert_error_with(
+            "fn run() -> Int {\n\
+                 let f = fn(n: Int) -> Int {\n\
+                     sleep(1).await\n\
+                     return n\n\
+                 }\n\
+                 return 0\n\
+             }",
+            &["await"],
         );
     }
 
