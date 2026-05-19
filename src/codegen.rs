@@ -296,7 +296,10 @@ fn program_uses_fmt_helpers(program: &Program) -> bool {
         }
         matches!(
             spec.kind,
-            Some(FormatKind::Char) | Some(FormatKind::Percent)
+            Some(FormatKind::Char)
+                | Some(FormatKind::Percent)
+                | Some(FormatKind::GeneralLower)
+                | Some(FormatKind::GeneralUpper)
         )
     }
     fn expr_uses_fmt(e: &Expr) -> bool {
@@ -3492,6 +3495,35 @@ impl<'a> CodegenCtx<'a> {
                 "fn __fitz_fmt_char(n: i64) -> String {\n    \
                  char::from_u32(n as u32).map(|c| c.to_string()).unwrap_or_else(|| format!(\"\\\\u{{{:x}}}\", n))\n}\n\n",
             );
+            // Mini-tanda Fmt-g — general format `g`/`G`: bit-a-bit con
+            // `src/format.rs::general_format` del intérprete.
+            //   - precision = 0 → 1 (paralelo a Python).
+            //   - exp = floor(log10(abs(x))) — categoriza la magnitud.
+            //   - use_exp = exp < -4 || exp >= precision.
+            //   - exp branch: precision - 1 después del punto, NO strip.
+            //   - fixed branch: precision - 1 - exp dígitos después,
+            //     CON strip de ceros trailing.
+            //   - upper → uppercase ('e' → 'E').
+            self.emit(
+                "fn __fitz_fmt_general(x: f64, precision: usize, upper: bool) -> String {\n    \
+                 let p = precision.max(1);\n    \
+                 if x == 0.0 { return if upper { \"0\".to_string() } else { \"0\".to_string() }; }\n    \
+                 let abs = x.abs();\n    \
+                 let exp = abs.log10().floor() as i32;\n    \
+                 let use_exp = exp < -4 || exp >= p as i32;\n    \
+                 let result = if use_exp {\n        \
+                     let after = p.saturating_sub(1);\n        \
+                     format!(\"{:.*e}\", after, x)\n    \
+                 } else {\n        \
+                     let after = (p as i32 - 1 - exp).max(0) as usize;\n        \
+                     let s = format!(\"{:.*}\", after, x);\n        \
+                     if s.contains('.') {\n            \
+                         let t = s.trim_end_matches('0').trim_end_matches('.');\n            \
+                         if t.is_empty() || t == \"-\" { \"0\".to_string() } else { t.to_string() }\n        \
+                     } else { s }\n    \
+                 };\n    \
+                 if upper { result.to_uppercase() } else { result }\n}\n\n",
+            );
         }
         // Fase 6.6: builtin `sleep` Fitz → wrapper async sobre
         // `tokio::time::sleep`. Solo se emite cuando el programa lo
@@ -5834,6 +5866,60 @@ impl<'a> CodegenCtx<'a> {
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
             ));
         }
+        // Mini-tanda Bits-extras — builtins globales sobre Int. Si
+        // el usuario define una fn con el mismo nombre, `fn_sigs` la
+        // toma antes (paralelo a `sleep`/`len`). Emite el método Rust
+        // nativo equivalente sobre `i64`.
+        if matches!(
+            name.as_str(),
+            "popcount" | "leading_zeros" | "trailing_zeros"
+        ) && !self.fn_sigs.contains_key(name)
+        {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`{}` espera 1 argumento, recibió {}",
+                    name, args.len()
+                )));
+            }
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            let coerced = coerce(&arg_code, &arg_ty, &Type::Int);
+            let rust_method = match name.as_str() {
+                "popcount" => "count_ones",
+                "leading_zeros" => "leading_zeros",
+                "trailing_zeros" => "trailing_zeros",
+                _ => unreachable!(),
+            };
+            return Ok((
+                format!("(({}).{}() as i64)", coerced, rust_method),
+                Type::Int,
+            ));
+        }
+        if matches!(name.as_str(), "rotate_left" | "rotate_right")
+            && !self.fn_sigs.contains_key(name)
+        {
+            if args.len() != 2 {
+                return Err(self.err_at(call_span, format!(
+                    "`{}` espera 2 argumentos (n, bits), recibió {}",
+                    name, args.len()
+                )));
+            }
+            let (n_code, n_ty) = self.gen_expr(&args[0])?;
+            let (b_code, b_ty) = self.gen_expr(&args[1])?;
+            let n_c = coerce(&n_code, &n_ty, &Type::Int);
+            let b_c = coerce(&b_code, &b_ty, &Type::Int);
+            let rust_method = if name == "rotate_left" {
+                "rotate_left"
+            } else {
+                "rotate_right"
+            };
+            return Ok((
+                format!(
+                    "(({n_c}).{method}((({b_c}).rem_euclid(64)) as u32))",
+                    method = rust_method
+                ),
+                Type::Int,
+            ));
+        }
         // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
         // usuario definió una fn `sleep` propia, `fn_sigs` la captura
         // antes y el builtin no dispara — misma política que `len`.
@@ -6228,6 +6314,62 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Str))
             }
+            // Mini-tanda Mb8 — `left(n)` / `right(n)`: primeros/últimos
+            // n chars. n <= 0 → vacío; n >= len → string completo.
+            (Type::Str, "left") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let __n: i64 = {n_c}; \
+                       let __take = if __n <= 0 {{ 0 }} else {{ __n as usize }}; \
+                       __s.chars().take(__take).collect::<String>() }}"
+                );
+                Ok((code, Type::Str))
+            }
+            (Type::Str, "right") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let __n: i64 = {n_c}; \
+                       let __len = __s.chars().count(); \
+                       let __take = if __n <= 0 {{ 0 }} else {{ (__n as usize).min(__len) }}; \
+                       let __skip = __len - __take; \
+                       __s.chars().skip(__skip).collect::<String>() }}"
+                );
+                Ok((code, Type::Str))
+            }
+            // Mini-tanda Mb8 — `center(width, ch)`: padding bilateral.
+            (Type::Str, "center") => {
+                check_method_arity(method, args, 2)?;
+                let (w_code, w_ty) = self.gen_expr(&args[0])?;
+                let (ch_code, ch_ty) = self.gen_expr(&args[1])?;
+                let w_c = coerce(&w_code, &w_ty, &Type::Int);
+                let ch_c = coerce(&ch_code, &ch_ty, &Type::Str);
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let __width: i64 = {w_c}; \
+                       let __ch: String = {ch_c}; \
+                       if __ch.chars().count() != 1 {{ \
+                           panic!(\"`Str.center(width, ch)`: el char de relleno debe ser 1 caracter, recibió `\\\"{{}}\\\"`\", __ch); \
+                       }} \
+                       let __len: i64 = __s.chars().count() as i64; \
+                       if __len >= __width {{ __s }} else {{ \
+                           let __total = (__width - __len) as usize; \
+                           let __left = __total / 2; \
+                           let __right = __total - __left; \
+                           let mut __out = String::with_capacity(__width as usize); \
+                           __out.push_str(&__ch.repeat(__left)); \
+                           __out.push_str(&__s); \
+                           __out.push_str(&__ch.repeat(__right)); \
+                           __out \
+                       }} }}"
+                );
+                Ok((code, Type::Str))
+            }
             // Mini-tanda Mb7 — `repeat_with(n, sep)`: repite intercalando
             // sep. n < 0 → panic; n == 0 → vacío.
             (Type::Str, "repeat_with") => {
@@ -6247,7 +6389,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with/left/right/center)",
                 other
             ))),
 
@@ -6860,6 +7002,109 @@ impl<'a> CodegenCtx<'a> {
                     Type::List(Box::new(Type::List(Box::new((**t).clone())))),
                 ))
             }
+            // Mini-tanda Mb8 — starts_with(prefix) / ends_with(suffix):
+            // arg `List<T>`, devuelve `Bool`.
+            (Type::List(t), "starts_with") | (Type::List(t), "ends_with") => {
+                check_method_arity(method, args, 1)?;
+                let is_start = method == "starts_with";
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                match &other_ty {
+                    Type::List(_) => {}
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.{}()` espera una `List`, recibió `{}`",
+                            method,
+                            display_type(other, self.env)
+                        )));
+                    }
+                }
+                let t_rs = rust_type_for(t, self.env)?;
+                let chain = if is_start {
+                    "__self.iter().take(__other.len()).eq(__other.iter())"
+                } else {
+                    "__self.iter().rev().take(__other.len()).eq(__other.iter().rev())"
+                };
+                let code = format!(
+                    "{{ let __self: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __other: Vec<{t_rs}> = ({other_code}).lock().unwrap().clone(); \
+                       if __other.len() > __self.len() {{ false }} else {{ {chain} }} }}"
+                );
+                Ok((code, Type::Bool))
+            }
+            // Mini-tanda Mb8 — insert_at(i, v): functional, idx clamp
+            // a [0, len]. Negativo → panic con mensaje claro.
+            (Type::List(t), "insert_at") => {
+                check_method_arity(method, args, 2)?;
+                let (idx_code, idx_ty) = self.gen_expr(&args[0])?;
+                let (v_code, v_ty) = self.gen_expr(&args[1])?;
+                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int);
+                let v_c = coerce(&v_code, &v_ty, t);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __idx: i64 = {idx_c}; \
+                       if __idx < 0 {{ panic!(\"`.insert_at()` no acepta idx negativo: recibió {{}}\", __idx); }} \
+                       let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __clamped = (__idx as usize).min(__snap.len()); \
+                       let mut __out: Vec<{t_rs}> = Vec::with_capacity(__snap.len() + 1); \
+                       __out.extend(__snap.iter().take(__clamped).cloned()); \
+                       __out.push({v_c}); \
+                       __out.extend(__snap.into_iter().skip(__clamped)); \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            // Mini-tanda Mb8 — remove_at(i): functional, idx fuera de
+            // rango → panic.
+            (Type::List(t), "remove_at") => {
+                check_method_arity(method, args, 1)?;
+                let (idx_code, idx_ty) = self.gen_expr(&args[0])?;
+                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __idx: i64 = {idx_c}; \
+                       let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       if __idx < 0 || (__idx as usize) >= __snap.len() {{ \
+                           panic!(\"`.remove_at()`: idx {{}} fuera de rango (len = {{}})\", __idx, __snap.len()); \
+                       }} \
+                       let __remove = __idx as usize; \
+                       let __out: Vec<{t_rs}> = __snap.into_iter().enumerate() \
+                           .filter(|(__i, _)| *__i != __remove) \
+                           .map(|(_, __v)| __v) \
+                           .collect(); \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            // Mini-tanda Mb8 — zip_to_map(values) -> Map<K, V>.
+            (Type::List(t), "zip_to_map") => {
+                check_method_arity(method, args, 1)?;
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                let v_ty = match &other_ty {
+                    Type::List(inner) => (**inner).clone(),
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.zip_to_map()` espera `List<V>`, recibió `{}`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let k_rs = rust_type_for(t, self.env)?;
+                let v_rs = rust_type_for(&v_ty, self.env)?;
+                let code = format!(
+                    "{{ let __ks: Vec<{k_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __vs: Vec<{v_rs}> = ({other_code}).lock().unwrap().clone(); \
+                       let mut __out: Vec<({k_rs}, {v_rs})> = Vec::with_capacity(__ks.len().min(__vs.len())); \
+                       for (__k, __v) in __ks.into_iter().zip(__vs.into_iter()) {{ \
+                           if let Some(__slot) = __out.iter_mut().find(|__p| __p.0 == __k) {{ \
+                               __slot.1 = __v; \
+                           }} else {{ \
+                               __out.push((__k, __v)); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::Map(Box::new((**t).clone()), Box::new(v_ty))))
+            }
             // Mini-tanda Mb7 — take(n) / drop(n) / cycle(n) / init() /
             // tail() / intersperse(sep). Snapshot + slice/iter Rust.
             (Type::List(t), "take") => {
@@ -6946,7 +7191,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::List(Box::new((**t).clone()))))
             }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle/starts_with/ends_with/insert_at/remove_at/zip_to_map)",
                 other
             ))),
 
@@ -12116,9 +12361,27 @@ fn format_spec_to_rust(
         Some(FormatKind::ExponentLower) => "e",
         Some(FormatKind::ExponentUpper) => "E",
         Some(FormatKind::GeneralLower) | Some(FormatKind::GeneralUpper) => {
-            return Err(
-                "format spec `g`/`G` no soportado en `fitz build`; usá `fitz run`".into(),
-            );
+            // Mini-tanda Fmt-g — `g` lower / `G` upper. El helper
+            // decide entre fixed vs exponente según magnitud y
+            // precision; quita ceros trailing.
+            let coerced_f = match ty {
+                Type::Int => format!("(({}) as f64)", code),
+                Type::Float => code.to_string(),
+                other => {
+                    return Err(format!(
+                        "format spec `g`/`G` requiere Float o Int, recibió `{}`",
+                        display_type(other, &crate::types::TypeEnv::new())
+                    ));
+                }
+            };
+            // Default precision Python: 6.
+            let precision = spec.precision.unwrap_or(6);
+            let upper = matches!(spec.kind, Some(FormatKind::GeneralUpper));
+            helper_wrapper = Some(format!(
+                "__fitz_fmt_general({}, {}, {})",
+                coerced_f, precision, upper
+            ));
+            ""
         }
         Some(FormatKind::Char) => {
             // Mini-tanda Fmt-build — `c` char: Int → Str (codepoint).

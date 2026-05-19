@@ -1970,6 +1970,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13q-mb5-y-async-closures.fitz",
     "13r-mb6-y-async-build.fitz",
     "13s-mb7-y-fmt-build.fitz",
+    "13t-mb8-bits-y-fmt-g.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -4097,6 +4098,102 @@ fn mb5_str_is_empty_compila() {
     let (stdout, exit) = build_and_run("mb5_str_is_empty", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+// ---- Mini-tanda Mb8 + Bits-extras + Fmt-g ------------------
+
+#[test]
+fn mb8_list_starts_ends_with_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               print(xs.starts_with([1, 2]))\n\
+               print(xs.ends_with([4, 5]))\n\
+               print(xs.starts_with([1, 3]))\n";
+    let (stdout, exit) = build_and_run("mb8_starts_ends", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\ntrue\nfalse");
+}
+
+#[test]
+fn mb8_list_insert_at_compila() {
+    let src = "let xs: List<Int> = [1, 2, 4, 5]\n\
+               print(xs.insert_at(2, 3))\n";
+    let (stdout, exit) = build_and_run("mb8_insert_at", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 2, 3, 4, 5]");
+}
+
+#[test]
+fn mb8_list_remove_at_compila() {
+    let src = "let xs: List<Int> = [10, 20, 30, 40]\n\
+               print(xs.remove_at(2))\n";
+    let (stdout, exit) = build_and_run("mb8_remove_at", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[10, 20, 40]");
+}
+
+#[test]
+fn mb8_list_zip_to_map_compila() {
+    let src = "let ks: List<Str> = [\"a\", \"b\"]\n\
+               let vs: List<Int> = [1, 2]\n\
+               let m: Map<Str, Int> = ks.zip_to_map(vs)\n\
+               print(m[\"a\"])\n\
+               print(m[\"b\"])\n";
+    let (stdout, exit) = build_and_run("mb8_zip_to_map", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n2");
+}
+
+#[test]
+fn mb8_str_left_right_center_compila() {
+    let src = "let s = \"hola mundo\"\n\
+               print(s.left(4))\n\
+               print(s.right(5))\n\
+               print(s.center(20, \"-\"))\n";
+    let (stdout, exit) = build_and_run("mb8_str_left_right_center", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "hola\nmundo\n-----hola mundo-----");
+}
+
+#[test]
+fn bits_extras_popcount_y_leading_zeros_compila() {
+    let src = "print(popcount(7))\n\
+               print(popcount(255))\n\
+               print(leading_zeros(1))\n\
+               print(trailing_zeros(8))\n";
+    let (stdout, exit) = build_and_run("bits_extras_popcount_lz", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "3\n8\n63\n3");
+}
+
+#[test]
+fn bits_extras_rotate_compila() {
+    let src = "print(rotate_left(1, 4))\n\
+               print(rotate_right(16, 4))\n";
+    let (stdout, exit) = build_and_run("bits_extras_rotate", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "16\n1");
+}
+
+#[test]
+fn fmt_g_general_compila() {
+    let src = "let x = 1234.5\n\
+               print(\"{x:g}\")\n\
+               let y = 0.00001\n\
+               print(\"{y:g}\")\n\
+               let z = 3.140000\n\
+               print(\"{z:g}\")\n";
+    let (stdout, exit) = build_and_run("fmt_g_general", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1234.5\n1.00000e-5\n3.14");
+}
+
+#[test]
+fn fmt_G_uppercase_compila() {
+    let src = "let w = 1234567890.0\n\
+               print(\"{w:G}\")\n";
+    let (stdout, exit) = build_and_run("fmt_G_uppercase", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1.23457E9");
 }
 
 // ---- Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle +

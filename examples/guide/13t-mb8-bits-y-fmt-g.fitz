@@ -1,0 +1,109 @@
+// Mini-tanda Mb8 + Bits-extras + Fmt-g — bundle final de polish.
+//
+//   - Mb8 (8 métodos sobre colecciones y Str):
+//     * `List.starts_with(prefix)` / `List.ends_with(suffix)` → Bool.
+//     * `List.insert_at(i, v)` / `List.remove_at(i)` → List<T>.
+//     * `List.zip_to_map(values)` → Map<K, V> (alternativa a from_lists).
+//     * `Str.left(n)` / `Str.right(n)` → primeros/últimos n chars.
+//     * `Str.center(width, ch)` → centra con padding.
+//
+//   - Bits-extras (5 builtins globales sobre Int):
+//     * `popcount(n)` / `leading_zeros(n)` / `trailing_zeros(n)`.
+//     * `rotate_left(n, bits)` / `rotate_right(n, bits)`.
+//
+//   - Fmt-g: completa los format specs `g`/`G` en `fitz build`.
+
+// --- List.starts_with / ends_with ------------------------------
+
+let xs: List<Int> = [1, 2, 3, 4, 5]
+print(xs.starts_with([1, 2, 3]))                  // true
+print(xs.ends_with([4, 5]))                       // true
+print(xs.starts_with([1, 3]))                     // false
+print(xs.starts_with([]))                         // true (prefix vacío matchea)
+
+// Útil para parsing simple de tokens, paths, etc.
+let tokens: List<Str> = ["let", "x", "=", "10"]
+print(tokens.starts_with(["let", "x"]))           // true
+
+// --- List.insert_at / remove_at: updates funcionales ----------
+
+let base: List<Int> = [10, 20, 40, 50]
+let agregado: List<Int> = base.insert_at(2, 30)
+print(agregado)                                   // [10, 20, 30, 40, 50]
+print(base.len())                                 // 4 — base intacto
+
+let sin_segundo: List<Int> = base.remove_at(1)
+print(sin_segundo)                                // [10, 40, 50]
+
+// idx fuera de rango en insert_at → clamp al final.
+print(base.insert_at(99, 99))                     // [10, 20, 40, 50, 99]
+
+// --- List.zip_to_map: construir Map desde dos listas ----------
+
+let ids: List<Int> = [1, 2, 3]
+let nombres: List<Str> = ["Ada", "Bob", "Cam"]
+let registry: Map<Int, Str> = ids.zip_to_map(nombres)
+print(registry[1])                                // Ada
+print(registry[3])                                // Cam
+
+// Trunca al más corto.
+let solo_dos: List<Str> = ["X", "Y"]
+let r: Map<Int, Str> = ids.zip_to_map(solo_dos)
+print(r.len())                                    // 2
+
+// --- Str.left / right / center -------------------------------
+
+let texto = "hola mundo"
+print(texto.left(4))                              // hola
+print(texto.right(5))                             // mundo
+print(texto.center(20, "-"))                      // -----hola mundo-----
+
+// Para construir tablas:
+let titulo = "Reporte"
+print(titulo.center(30, "="))                     // ===========Reporte============
+
+// Truncar (left/right son seguros con n grande):
+print("ab".left(99))                              // ab (sin cambios)
+print("".left(5))                                 // (vacío)
+
+// --- Bits-extras: ops sobre Int como builtins globales -------
+
+// popcount: cantidad de bits en 1.
+print(popcount(0b1010))                           // 2
+print(popcount(0xff))                             // 8
+print(popcount(0))                                // 0
+
+// leading_zeros / trailing_zeros sobre 64 bits.
+print(leading_zeros(1))                           // 63
+print(trailing_zeros(8))                          // 3
+
+// Rotaciones bit-a-bit (64-bit cyclic).
+print(rotate_left(1, 4))                          // 16
+print(rotate_right(16, 4))                        // 1
+
+// Caso típico: máscaras y flags.
+let flags = 0b1010
+print(popcount(flags))                            // 2 — dos flags activos
+
+// --- Fmt-g: format specs g/G en `fitz build` ------------------
+
+// `g` decide entre fixed y exponente según magnitud (paralelo a Python).
+let normal = 1234.5
+print("{normal:g}")                               // 1234.5 (fixed)
+
+let chico = 0.00001
+print("{chico:g}")                                // 1.00000e-5 (exponente, abs < 1e-4)
+
+let grande = 1234567890.0
+print("{grande:g}")                               // 1.23457e9 (exponente, >= 1e6)
+
+// `G` igual pero con E mayúscula.
+print("{grande:G}")                               // 1.23457E9
+
+// `g` quita ceros trailing del decimal.
+let con_ceros = 3.140000
+print("{con_ceros:g}")                            // 3.14
+
+// Precision custom.
+let pi = 3.14159265
+print("{pi:.4g}")                                 // 3.142

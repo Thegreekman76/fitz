@@ -1137,6 +1137,35 @@ impl<'a> CheckCtx<'a> {
                 def_span: Span::ZERO,
             },
         );
+        // Mini-tanda Bits-extras — builtins globales sobre Int.
+        // `popcount/leading_zeros/trailing_zeros(n: Int) -> Int`
+        // `rotate_left/right(n: Int, bits: Int) -> Int`
+        for name in &["popcount", "leading_zeros", "trailing_zeros"] {
+            self.scopes[0].insert(
+                (*name).into(),
+                VarBinding {
+                    ty: Type::Function {
+                        params: vec![Type::Int],
+                        ret: Box::new(Type::Int),
+                    },
+                    annotated: false,
+                    def_span: Span::ZERO,
+                },
+            );
+        }
+        for name in &["rotate_left", "rotate_right"] {
+            self.scopes[0].insert(
+                (*name).into(),
+                VarBinding {
+                    ty: Type::Function {
+                        params: vec![Type::Int, Type::Int],
+                        ret: Box::new(Type::Int),
+                    },
+                    annotated: false,
+                    def_span: Span::ZERO,
+                },
+            );
+        }
     }
 
     fn push_scope(&mut self) {
@@ -2730,6 +2759,85 @@ fn infer_list_method(
             }
             Type::List(Box::new(Type::List(Box::new(t.clone()))))
         }
+        // Mini-tanda Mb8 — `starts_with(prefix)` / `ends_with(suffix)`:
+        // arg `List<T>`, devuelven `Bool`.
+        "starts_with" | "ends_with" => {
+            if check_method_arity(ctx, method, args_ty, 1, span) {
+                match args_ty[0].base() {
+                    Type::List(inner) => {
+                        if !is_compatible(inner, t) {
+                            ctx.error_at(span, format!(
+                                "`.{}()`: espera `List<{}>`, recibió `List<{}>`",
+                                method,
+                                t.display(ctx.types),
+                                inner.display(ctx.types),
+                            ));
+                        }
+                    }
+                    Type::Any => {}
+                    other => {
+                        ctx.error_at(span, format!(
+                            "`.{}()`: espera `List<{}>`, recibió `{}`",
+                            method,
+                            t.display(ctx.types),
+                            other.display(ctx.types),
+                        ));
+                    }
+                }
+            }
+            Type::Bool
+        }
+        // Mini-tanda Mb8 — `insert_at(i, v) -> List<T>`: idx Int, v
+        // compatible con T.
+        "insert_at" => {
+            if check_method_arity(ctx, "insert_at", args_ty, 2, span) {
+                if !is_compatible(&args_ty[0], &Type::Int) {
+                    ctx.error_at(span, format!(
+                        "`.insert_at(i, v)`: arg 0 (idx) espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ));
+                }
+                if !is_compatible(&args_ty[1], t) {
+                    ctx.error_at(span, format!(
+                        "`.insert_at(i, v)`: v es `{}`, debe ser compatible con `{}`",
+                        args_ty[1].display(ctx.types),
+                        t.display(ctx.types),
+                    ));
+                }
+            }
+            Type::List(Box::new(t.clone()))
+        }
+        // Mini-tanda Mb8 — `remove_at(i) -> List<T>`: idx Int.
+        "remove_at" => {
+            if check_method_arity(ctx, "remove_at", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`.remove_at(i)`: idx espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::List(Box::new(t.clone()))
+        }
+        // Mini-tanda Mb8 — `zip_to_map(values) -> Map<K, V>` donde
+        // K = T (el tipo de los elementos de self).
+        "zip_to_map" => {
+            if !check_method_arity(ctx, "zip_to_map", args_ty, 1, span) {
+                return Type::Map(Box::new(t.clone()), Box::new(Type::Any));
+            }
+            let v_ty = match args_ty[0].base() {
+                Type::List(inner) => (**inner).clone(),
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.zip_to_map()` espera `List<V>`, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            };
+            Type::Map(Box::new(t.clone()), Box::new(v_ty))
+        }
         // Mini-tanda Mb7 — `take(n)` / `drop(n)` / `cycle(n)`: Int arg,
         // devuelven `List<T>`.
         "take" | "drop" | "cycle" => {
@@ -3285,6 +3393,39 @@ fn infer_str_method(
         "is_empty" => {
             check_method_arity(ctx, "is_empty", args_ty, 0, span);
             Type::Bool
+        }
+        // Mini-tanda Mb8 — `left(n)` / `right(n)`: primeros/últimos n
+        // chars. `n: Int`.
+        "left" | "right" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`Str.{}()` espera `Int`, recibió `{}`",
+                    method,
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Str
+        }
+        // Mini-tanda Mb8 — `center(width, ch) -> Str`: similar a
+        // pad_start/pad_end (Mb2). width Int, ch Str (1 char en runtime).
+        "center" => {
+            if check_method_arity(ctx, "center", args_ty, 2, span) {
+                if !is_compatible(&args_ty[0], &Type::Int) {
+                    ctx.error_at(span, format!(
+                        "`Str.center(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ));
+                }
+                if !is_compatible(&args_ty[1], &Type::Str) {
+                    ctx.error_at(span, format!(
+                        "`Str.center(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
+                        args_ty[1].display(ctx.types),
+                    ));
+                }
+            }
+            Type::Str
         }
         // Mini-tanda Mb7 — `repeat_with(n, sep) -> Str`: variante de
         // repeat que intercala `sep` entre repeticiones.
@@ -7114,6 +7255,83 @@ mod tests {
             "let a: Map<Str, Int> = {\"x\": 1}\n\
              let b: Map<Str, Int> = {\"x\": 2}\n\
              let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)",
+        );
+    }
+
+    // ---- Mini-tanda Mb8 + Bits-extras ----
+
+    #[test]
+    fn mb8_list_starts_with_devuelve_bool() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: Bool = xs.starts_with([1, 2])",
+        );
+    }
+
+    #[test]
+    fn mb8_list_starts_with_arg_no_list_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1]\n\
+             let r = xs.starts_with(42)",
+            &["starts_with", "List"],
+        );
+    }
+
+    #[test]
+    fn mb8_list_insert_at_devuelve_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 3]\n\
+             let r: List<Int> = xs.insert_at(1, 2)",
+        );
+    }
+
+    #[test]
+    fn mb8_list_remove_at_devuelve_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.remove_at(1)",
+        );
+    }
+
+    #[test]
+    fn mb8_list_zip_to_map_devuelve_map_k_v() {
+        assert_ok(
+            "let ks: List<Str> = [\"a\"]\n\
+             let vs: List<Int> = [1]\n\
+             let m: Map<Str, Int> = ks.zip_to_map(vs)",
+        );
+    }
+
+    #[test]
+    fn mb8_str_left_right_devuelven_str() {
+        assert_ok(
+            "let l: Str = \"abc\".left(2)\n\
+             let r: Str = \"abc\".right(2)",
+        );
+    }
+
+    #[test]
+    fn mb8_str_center_devuelve_str() {
+        assert_ok(
+            "let c: Str = \"hi\".center(10, \"-\")",
+        );
+    }
+
+    #[test]
+    fn bits_extras_popcount_tipa_int() {
+        assert_ok("let r: Int = popcount(42)");
+    }
+
+    #[test]
+    fn bits_extras_rotate_left_tipa_int() {
+        assert_ok("let r: Int = rotate_left(1, 4)");
+    }
+
+    #[test]
+    fn bits_extras_popcount_arg_no_int_es_error() {
+        assert_error_with(
+            "let r = popcount(\"oops\")",
+            &["popcount", "Int"],
         );
     }
 

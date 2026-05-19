@@ -1131,6 +1131,100 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos sub-lista + functional updates + bits + g/G~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb8 + Bits-extras + Fmt-g)
+
+Bundle final de polish del lenguaje base: 8 métodos chicos (Mb8) +
+5 builtins globales sobre Int (Bits-extras) + completa el último
+format spec faltante (`g`/`G`, cierra el resto de la deuda Fm).
+
+**Parte 1 — Mb8 (8 métodos chicos)**:
+
+- ~~**`List.starts_with(prefix) / ends_with(suffix) -> Bool`**~~ ✓
+  Igualdad estructural. Prefix/suffix vacío → true. El chequeo del
+  checker valida que el arg sea `List<T>` compatible.
+- ~~**`List.insert_at(i, v) -> List<T>`**~~ ✓ Functional update.
+  Clamp safe: `idx >= len` → al final; `idx < 0` → error claro.
+- ~~**`List.remove_at(i) -> List<T>`**~~ ✓ Functional update.
+  Exige idx en rango (no clamp — devuelve error claro fuera de
+  rango, distinto a `insert_at` por convención: insert es relajado,
+  remove es estricto).
+- ~~**`List.zip_to_map(values) -> Map<K, V>`**~~ ✓ Convierte
+  `List<K>` + `List<V>` en `Map<K, V>` (truncado al más corto).
+  Equivalente a Python `dict(zip(ks, vs))`. Más natural que un
+  método estático `Map.from_lists`.
+- ~~**`Str.left(n) / right(n) -> Str`**~~ ✓ Primeros/últimos n
+  chars (char-based, no byte). Clamp safe en ambos extremos.
+- ~~**`Str.center(width, ch) -> Str`**~~ ✓ Padding bilateral.
+  `ch` debe ser 1 char (validado runtime). Si el padding es impar,
+  el extra va a la derecha (paralelo a Python `str.center`).
+
+**Parte 2 — Bits-extras (5 builtins globales sobre Int)**:
+
+- ~~**`popcount(n: Int) -> Int`**~~ ✓ Cantidad de bits en 1 (64-bit).
+- ~~**`leading_zeros(n: Int) -> Int`**~~ ✓ Ceros líderes en 64 bits.
+- ~~**`trailing_zeros(n: Int) -> Int`**~~ ✓ Ceros al final.
+- ~~**`rotate_left(n: Int, bits: Int) -> Int`**~~ ✓ Rotación cíclica.
+  `bits` se toma módulo 64 (paralelo a Rust `i64::rotate_left`).
+- ~~**`rotate_right(n: Int, bits: Int) -> Int`**~~ ✓
+
+Builtins en lugar de métodos sobre Int (Fitz no tiene dispatch
+sobre primitivos hoy — esa decisión queda como deuda futura si
+aparece demanda). Registrados en `register_builtins` (evaluator) y
+en el scope global del checker (con firma `fn(Int) -> Int` o
+`fn(Int, Int) -> Int`). Codegen los emite como métodos Rust
+nativos: `count_ones()`/`leading_zeros()`/`rotate_left()`/etc.
+
+**Parte 3 — Fmt-g (g/G general format en `fitz build`)**:
+
+- ~~**`g` / `G` general format**~~ ✓ Cierra la última deuda residual
+  de Fm/Fmt-build. Helper nuevo `__fitz_fmt_general(x, precision,
+  upper)` en el preludio (gated por `uses_fmt_helpers`). Bit-a-bit
+  con `src/format.rs::general_format` del intérprete:
+  - precision = 0 → 1 (paralelo a Python).
+  - exp = floor(log10(abs(x))) — categoriza la magnitud.
+  - use_exp = exp < -4 || exp >= precision.
+  - exp branch: precision - 1 después del punto, NO strip.
+  - fixed branch: precision - 1 - exp dígitos después, CON strip
+    de ceros trailing.
+  - upper → uppercase ('e' → 'E').
+
+  `spec_needs_helper` y `format_spec_to_rust` actualizados para
+  incluir `GeneralLower`/`GeneralUpper`.
+
+Implementación: ~700 LoC entre evaluator (8 fns Mb8 + 5 fns
+builtins bits), types (8 ramas Mb8 + 5 bindings de scope global),
+codegen (8 ramas Mb8 + 5 builtins en gen_call + helper
+__fitz_fmt_general + helper_wrapper para g/G), LSP (8 entries
+Mb8).
+
+**23 unit tests** (12 evaluator + 9 checker + 2 LSP) + **9
+compile_e2e** bit-a-bit `fitz run` ↔ `fitz build` (5 Mb8 + 2 bits
++ 2 fmt-g). Ejemplo runnable `examples/guide/13t-mb8-bits-y-fmt-g.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE`.
+
+Cap 13 de la guía: 3 filas nuevas en tabla `Str` (left/right/center),
+5 en tabla `List<T>` (starts_with/ends_with/insert_at/remove_at/
+zip_to_map). Sub-sección dedicada con ejemplos para los 8 métodos
+Mb8 + 5 builtins bits + format g/G. VSCode extension: grammar
+TextMate sin cambios; LSP autocomplete refleja todo via rebuild.
+
+**Deuda residual menor** (NO bloquea):
+
+- **Middleware con `next` callable (post-process)**: sigue siendo
+  sub-paso futuro dedicado. Cambia el shape de la cadena de
+  middlewares (gate vs wrap es un cambio fundamental); requiere
+  sintaxis nueva del callback binario (`fn(req, next) -> Response`)
+  y reimplementar la cadena. Sin presión real hoy — el modelo
+  gate-only cubre el 80% de los casos. Alcance ~6-8h aparte.
+- **Stubs `.pyi` parseados** (interop Python): requiere parser
+  separado para archivos `.pyi` + integración con el bridge Python.
+  Refactor grande. La interop Python actual funciona como `PyAny`
+  opaco por default — los stubs darían tipado fino. Sub-paso futuro
+  cuando aparezca demanda real.
+- **Métodos sobre Int**: hoy los ops de bits son builtins globales
+  (`popcount(n)` en lugar de `n.popcount()`). Si entra demanda
+  real, sumar dispatch sobre `Value::Int` en `dispatch_method`.
+
 ### ~~Métodos extras + format specs faltantes en build~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb7 + Fmt-build)
 
 Bundle combinado de polish: 7 métodos chicos sobre colecciones y Str

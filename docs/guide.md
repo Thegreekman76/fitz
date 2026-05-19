@@ -4151,6 +4151,9 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.lines()`          | —            | `List<Str>`   | separa por `\n`; ignora `\n` final (Mb5) |
 | `.is_empty()`       | —            | `Bool`        | atajo de `len() == 0` (Mb5) |
 | `.repeat_with(n, sep)` | `Int`, `Str` | `Str`      | repite intercalando `sep`; `n < 0` error (Mb7) |
+| `.left(n)`          | `Int`        | `Str`         | primeros `n` chars; `n <= 0` → vacío (Mb8) |
+| `.right(n)`         | `Int`        | `Str`         | últimos `n` chars; clamp safe (Mb8) |
+| `.center(w, ch)`    | `Int`, `Str` | `Str`         | centra con padding `ch` a ambos lados (Mb8) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 
@@ -4188,6 +4191,11 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.tail()`           | —                 | `List<T>`     | todos menos el primero; vacía → vacía (Mb7) |
 | `.intersperse(sep)` | `T`               | `List<T>`     | inserta `sep` entre elementos (Mb7) |
 | `.cycle(n)`         | `Int`             | `List<T>`     | repite la lista `n` veces; `n <= 0` → vacía (Mb7) |
+| `.starts_with(p)`   | `List<T>`         | `Bool`        | la lista empieza con el prefix `p` (Mb8) |
+| `.ends_with(s)`     | `List<T>`         | `Bool`        | la lista termina con el suffix `s` (Mb8) |
+| `.insert_at(i, v)`  | `Int`, `T`        | `List<T>`     | functional: nueva lista con `v` en idx `i` (Mb8) |
+| `.remove_at(i)`     | `Int`             | `List<T>`     | functional: nueva lista sin idx `i` (Mb8) |
+| `.zip_to_map(vs)`   | `List<V>`         | `Map<K, V>`   | combina keys (self) con values; trunca al corto (Mb8) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4875,6 +4883,92 @@ print("|{big:>15,d}|")                           // |      1,234,567|
 involucrada. Sin presión real.
 
 Ver [examples/guide/13s-mb7-y-fmt-build.fitz](../examples/guide/13s-mb7-y-fmt-build.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+### Sublistas + functional updates + ops de bits + g/G format (mini-tanda Mb8 + Bits-extras + Fmt-g)
+
+Bundle final de polish del lenguaje base: 8 métodos chicos sobre
+colecciones y Str (Mb8) + 5 builtins globales sobre Int (Bits-extras)
++ completar el último format spec faltante (`g`/`G` general).
+
+**`List.starts_with(prefix)` / `List.ends_with(suffix)`** — devuelve
+`Bool`. Igualdad estructural. Prefix/suffix vacío → `true`. Útil para
+parsing simple de tokens, paths, etc.
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4, 5]
+print(xs.starts_with([1, 2]))                    // true
+print(xs.ends_with([4, 5]))                      // true
+```
+
+**`List.insert_at(i, v)` / `List.remove_at(i)`** — functional
+updates (devuelven lista nueva, receiver intacto). `insert_at` clamp
+seguro: `idx >= len` inserta al final; `idx < 0` → error. `remove_at`
+exige idx en rango.
+
+```fitz
+let base: List<Int> = [10, 20, 40]
+print(base.insert_at(2, 30))                     // [10, 20, 30, 40]
+print(base.remove_at(0))                         // [20, 40]
+```
+
+**`List.zip_to_map(values)`** — combina la lista de keys (self) con
+una lista de values formando un `Map<K, V>`. Trunca al más corto.
+Equivalente a Python `dict(zip(ks, vs))`.
+
+```fitz
+let ks: List<Str> = ["a", "b", "c"]
+let vs: List<Int> = [1, 2, 3]
+let m: Map<Str, Int> = ks.zip_to_map(vs)
+print(m["a"])                                    // 1
+```
+
+**`Str.left(n)` / `Str.right(n)`** — primeros/últimos `n` chars.
+Char-based, no byte-based. Clamp safe: `n <= 0` → vacío, `n >= len`
+→ string completo.
+
+```fitz
+let s = "hola mundo"
+print(s.left(4))                                 // "hola"
+print(s.right(5))                                // "mundo"
+```
+
+**`Str.center(width, ch)`** — centra el string padeando con `ch` a
+ambos lados hasta `width` chars. `ch` debe ser 1 char. Si el padding
+es impar, el extra va a la derecha (paralelo a Python).
+
+```fitz
+print("hi".center(10, "-"))                      // "----hi----"
+print("Reporte".center(30, "="))                 // "===========Reporte============"
+```
+
+**`popcount(n)` / `leading_zeros(n)` / `trailing_zeros(n)` /
+`rotate_left(n, bits)` / `rotate_right(n, bits)`** — builtins
+globales sobre Int (64 bits). Útil para máscaras, flags, ops bit-a-bit
+de bajo nivel.
+
+```fitz
+print(popcount(0b1010))                          // 2
+print(leading_zeros(1))                          // 63
+print(rotate_left(1, 4))                         // 16
+```
+
+**Format spec `g`/`G` en `fitz build`** (cierra el último item de
+deuda residual de Fm/Fmt-build) — decide entre fixed y exponente
+según magnitud y precision; quita ceros trailing del decimal
+(paralelo a Python).
+
+```fitz
+let x = 1234.5
+print("{x:g}")                                   // 1234.5
+
+let chico = 0.00001
+print("{chico:g}")                               // 1.00000e-5
+
+print("{1234567890.0:G}")                        // 1.23457E9
+```
+
+Ver [examples/guide/13t-mb8-bits-y-fmt-g.fitz](../examples/guide/13t-mb8-bits-y-fmt-g.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda

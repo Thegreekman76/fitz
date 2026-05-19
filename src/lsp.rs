@@ -622,6 +622,12 @@ fn after_dot_completions(
                 ("tail", format!("fn() -> List<{}>  // todos menos el primero", t.display(type_env))),
                 ("intersperse", format!("fn(sep: {}) -> List<{}>", t.display(type_env), t.display(type_env))),
                 ("cycle", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
+                // Mini-tanda Mb8 — starts_with/ends_with/insert_at/remove_at/zip_to_map.
+                ("starts_with", format!("fn(prefix: List<{}>) -> Bool", t.display(type_env))),
+                ("ends_with", format!("fn(suffix: List<{}>) -> Bool", t.display(type_env))),
+                ("insert_at", format!("fn(idx: Int, v: {}) -> List<{}>", t.display(type_env), t.display(type_env))),
+                ("remove_at", format!("fn(idx: Int) -> List<{}>", t.display(type_env))),
+                ("zip_to_map", format!("fn(values: List<V>) -> Map<{}, V>", t.display(type_env))),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -737,6 +743,10 @@ fn after_dot_completions(
             ("is_empty", "fn() -> Bool".into()),
             // Mini-tanda Mb7 — repeat_with: repeat con separador.
             ("repeat_with", "fn(n: Int, sep: Str) -> Str".into()),
+            // Mini-tanda Mb8 — left/right/center.
+            ("left", "fn(n: Int) -> Str".into()),
+            ("right", "fn(n: Int) -> Str".into()),
+            ("center", "fn(width: Int, ch: Str) -> Str".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -1802,6 +1812,34 @@ mod tests {
             assert!(
                 labels.contains(&expected),
                 "falta método `{expected}` (mini-tanda Mb6) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb8_after_dot_sobre_list_incluye_starts_ends_with_insert_remove_at_zip_to_map() {
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["starts_with", "ends_with", "insert_at", "remove_at", "zip_to_map"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb8) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb8_after_dot_sobre_str_incluye_left_right_center() {
+        let src = "let s: Str = \"x\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["left", "right", "center"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb8) en Str: {labels:?}"
             );
         }
     }

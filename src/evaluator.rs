@@ -256,6 +256,12 @@ pub fn builtin_names() -> &'static [&'static str] {
         "assert_eq",
         "assert_ne",
         "assert_throws",
+        // Mini-tanda Bits-extras — ops sobre Int como builtins globales.
+        "popcount",
+        "leading_zeros",
+        "trailing_zeros",
+        "rotate_left",
+        "rotate_right",
     ]
 }
 
@@ -3306,6 +3312,12 @@ async fn dispatch_method(
         (Value::List(_), "tail") => list_tail(receiver, args, span),
         (Value::List(_), "intersperse") => list_intersperse(receiver, args, span),
         (Value::List(_), "cycle") => list_cycle(receiver, args, span),
+        // Mini-tanda Mb8 — starts_with / ends_with / insert_at / remove_at / zip_to_map.
+        (Value::List(_), "starts_with") => list_starts_with(receiver, args, span),
+        (Value::List(_), "ends_with") => list_ends_with(receiver, args, span),
+        (Value::List(_), "insert_at") => list_insert_at(receiver, args, span),
+        (Value::List(_), "remove_at") => list_remove_at(receiver, args, span),
+        (Value::List(_), "zip_to_map") => list_zip_to_map(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3381,6 +3393,10 @@ async fn dispatch_method(
         (Value::Str(_), "is_empty") => str_is_empty(receiver, args, span),
         // Mini-tanda Mb7 — repeat_with (variante de repeat con sep).
         (Value::Str(_), "repeat_with") => str_repeat_with(receiver, args, span),
+        // Mini-tanda Mb8 — left/right/center.
+        (Value::Str(_), "left") => str_left(receiver, args, span),
+        (Value::Str(_), "right") => str_right(receiver, args, span),
+        (Value::Str(_), "center") => str_center(receiver, args, span),
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
         // Mini-tanda Mb — variantes parciales de trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
@@ -4539,6 +4555,178 @@ fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(out))
 }
 
+/// Mini-tanda Mb8 — `xs.starts_with(prefix)` / `xs.ends_with(suffix)`:
+/// devuelven `Bool` si la lista empieza/termina con la sublista dada.
+/// Usa igualdad estructural (PartialEq). Prefix vacío → `true`.
+fn list_starts_or_ends_with(
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+    is_start: bool,
+    method: &'static str,
+) -> EvalResult<Value> {
+    expect_arity(method, &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let prefix_or_suffix = match args.into_iter().next().unwrap() {
+        Value::List(items) => items,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!(
+                    "`.{}()` espera una `List` como arg, recibió `{}`",
+                    method, other.type_name(),
+                ),
+            )));
+        }
+    };
+    let self_g = items.lock();
+    let other_g = prefix_or_suffix.lock();
+    if other_g.len() > self_g.len() {
+        return Ok(Value::Bool(false));
+    }
+    let result = if is_start {
+        self_g.iter().take(other_g.len()).eq(other_g.iter())
+    } else {
+        self_g.iter().rev().take(other_g.len()).eq(other_g.iter().rev())
+    };
+    Ok(Value::Bool(result))
+}
+
+fn list_starts_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    list_starts_or_ends_with(receiver, args, span, true, "starts_with")
+}
+
+fn list_ends_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    list_starts_or_ends_with(receiver, args, span, false, "ends_with")
+}
+
+/// Mini-tanda Mb8 — `xs.insert_at(i, v) -> List<T>`: devuelve una
+/// lista nueva con `v` insertado en posición `i` (los elementos
+/// existentes se corren a la derecha). `i < 0` → error claro;
+/// `i > len(xs)` clamp a `len(xs)` (insert al final, paralelo a
+/// Python `list.insert`).
+fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("insert_at", &args, 2, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let idx = match it.next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.insert_at()`: idx espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let v = it.next().unwrap();
+    if idx < 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("`.insert_at()` no acepta idx negativo: recibió {}", idx),
+        )));
+    }
+    let snapshot: Vec<Value> = items.lock().clone();
+    let clamped = (idx as usize).min(snapshot.len());
+    let mut out: Vec<Value> = Vec::with_capacity(snapshot.len() + 1);
+    out.extend(snapshot.iter().take(clamped).cloned());
+    out.push(v);
+    out.extend(snapshot.into_iter().skip(clamped));
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb8 — `xs.remove_at(i) -> List<T>`: devuelve una lista
+/// nueva sin el elemento en posición `i`. `i < 0` o `i >= len(xs)`
+/// → error claro (no clamp — el usuario debería saber el rango).
+fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("remove_at", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let idx = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.remove_at()`: idx espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    if idx < 0 || (idx as usize) >= snapshot.len() {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!(
+                "`.remove_at()`: idx {} fuera de rango (len = {})",
+                idx, snapshot.len(),
+            ),
+        )));
+    }
+    let remove_idx = idx as usize;
+    let out: Vec<Value> = snapshot
+        .into_iter()
+        .enumerate()
+        .filter(|(i, _)| *i != remove_idx)
+        .map(|(_, v)| v)
+        .collect();
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb8 — `xs.zip_to_map(values) -> Map<K, V>`: combina
+/// la lista de keys (self) con la de values formando un Map.
+/// Trunca al más corto (paralelo a Python `dict(zip(ks, vs))`).
+fn list_zip_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("zip_to_map", &args, 1, span)?;
+    let keys = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let values = match args.into_iter().next().unwrap() {
+        Value::List(items) => items,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.zip_to_map()` espera una `List`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let ks: Vec<Value> = keys.lock().clone();
+    let vs: Vec<Value> = values.lock().clone();
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(ks.len().min(vs.len()));
+    for (k, v) in ks.into_iter().zip(vs) {
+        if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &k) {
+            slot.1 = v;
+        } else {
+            out.push((k, v));
+        }
+    }
+    Ok(Value::new_map(out))
+}
+
 /// Mini-tanda Mb7 — `xs.take(n) -> List<T>`: primeros `n` elementos.
 /// Si `n >= len(xs)`, devuelve copia completa; si `n <= 0`, lista
 /// vacía. Paralelo a Rust `Iterator::take`.
@@ -5466,6 +5654,123 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     let left: String = s.chars().take(clamped).collect();
     let right: String = s.chars().skip(clamped).collect();
     Ok(Value::Tuple(vec![Value::Str(left), Value::Str(right)]))
+}
+
+/// Mini-tanda Mb8 — `s.left(n) -> Str` / `s.right(n) -> Str`:
+/// primeros/últimos `n` caracteres. `n <= 0` → vacío; `n >= len(s)`
+/// → string completo. Paralelo a métodos VB/SQL clásicos. Char-based,
+/// no byte-based (consistente con `len`).
+fn str_left(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("left", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`Str.left()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let take = if n <= 0 { 0 } else { n as usize };
+    let out: String = s.chars().take(take).collect();
+    Ok(Value::Str(out))
+}
+
+fn str_right(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("right", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`Str.right()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let len = s.chars().count();
+    let take = if n <= 0 { 0 } else { (n as usize).min(len) };
+    let skip = len - take;
+    let out: String = s.chars().skip(skip).collect();
+    Ok(Value::Str(out))
+}
+
+/// Mini-tanda Mb8 — `s.center(width, ch) -> Str`: centra el string
+/// padeando con `ch` a ambos lados hasta alcanzar `width` chars. Si
+/// `len(s) >= width`, devuelve `s` sin cambios. `ch` debe ser
+/// exactamente 1 char. Paralelo a Python `str.center(width, ch)`.
+/// Si el padding es impar, el extra va a la derecha (paralelo a
+/// Python).
+fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("center", &args, 2, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let width = match it.next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`Str.center()`: arg 0 (width) espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let ch = match it.next().unwrap() {
+        Value::Str(s) => s,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`Str.center()`: arg 1 (ch) espera `Str`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    if ch.chars().count() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!(
+                "`Str.center(width, ch)`: el char de relleno debe ser 1 caracter, recibió `\"{}\"`",
+                ch,
+            ),
+        )));
+    }
+    let len = s.chars().count() as i64;
+    if len >= width {
+        return Ok(Value::Str(s));
+    }
+    let total_pad = (width - len) as usize;
+    let left = total_pad / 2;
+    let right = total_pad - left;
+    let mut out = String::with_capacity(width as usize);
+    out.push_str(&ch.repeat(left));
+    out.push_str(&s);
+    out.push_str(&ch.repeat(right));
+    Ok(Value::Str(out))
 }
 
 /// Mini-tanda Mb7 — `s.repeat_with(n, sep) -> Str`: repite el string
@@ -6548,6 +6853,168 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_assert_throws_stub,
         },
     );
+    // Mini-tanda Bits-extras — ops sobre Int. Builtins globales (en
+    // lugar de métodos sobre Int) para mantener simple la dispatch
+    // del receptor primitivo.
+    env.lock().define(
+        "popcount",
+        Value::Builtin { name: "popcount", func: builtin_popcount },
+    );
+    env.lock().define(
+        "leading_zeros",
+        Value::Builtin { name: "leading_zeros", func: builtin_leading_zeros },
+    );
+    env.lock().define(
+        "trailing_zeros",
+        Value::Builtin { name: "trailing_zeros", func: builtin_trailing_zeros },
+    );
+    env.lock().define(
+        "rotate_left",
+        Value::Builtin { name: "rotate_left", func: builtin_rotate_left },
+    );
+    env.lock().define(
+        "rotate_right",
+        Value::Builtin { name: "rotate_right", func: builtin_rotate_right },
+    );
+}
+
+/// Mini-tanda Bits-extras — `popcount(n: Int) -> Int`: cantidad de
+/// bits en 1 en la representación de complemento a dos de `n` (64
+/// bits). Paralelo a `i64::count_ones()` Rust.
+fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`popcount(n)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(n.count_ones() as i64)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`popcount(n)` espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+/// Mini-tanda Bits-extras — `leading_zeros(n: Int) -> Int`: cantidad
+/// de ceros líderes en la representación de 64 bits de `n`.
+fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`leading_zeros(n)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(n.leading_zeros() as i64)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`leading_zeros(n)` espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+/// Mini-tanda Bits-extras — `trailing_zeros(n: Int) -> Int`.
+fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`trailing_zeros(n)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(n.trailing_zeros() as i64)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`trailing_zeros(n)` espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+/// Mini-tanda Bits-extras — `rotate_left(n: Int, bits: Int) -> Int`.
+/// Rotación a la izquierda en 64 bits. `bits` se toma módulo 64
+/// (paralelo a Rust `i64::rotate_left`).
+fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
+            0, 0,
+            format!("`rotate_left(n, bits)` espera 2 args, recibió {}", args.len()),
+        ));
+    }
+    let n = match &args[0] {
+        Value::Int(n) => *n,
+        other => return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`rotate_left(n, bits)`: arg 0 espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    };
+    let bits = match &args[1] {
+        Value::Int(b) => *b,
+        other => return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`rotate_left(n, bits)`: arg 1 espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    };
+    Ok(Value::Int(n.rotate_left(bits.rem_euclid(64) as u32)))
+}
+
+/// Mini-tanda Bits-extras — `rotate_right(n: Int, bits: Int) -> Int`.
+fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
+            0, 0,
+            format!("`rotate_right(n, bits)` espera 2 args, recibió {}", args.len()),
+        ));
+    }
+    let n = match &args[0] {
+        Value::Int(n) => *n,
+        other => return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`rotate_right(n, bits)`: arg 0 espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    };
+    let bits = match &args[1] {
+        Value::Int(b) => *b,
+        other => return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`rotate_right(n, bits)`: arg 1 espera `Int`, recibió `{}`", other.type_name()),
+        )),
+    };
+    Ok(Value::Int(n.rotate_right(bits.rem_euclid(64) as u32)))
 }
 
 /// `print(arg1, arg2, ...)` — imprime los args convertidos a string,
@@ -15564,6 +16031,157 @@ let r = match n {
         } else {
             panic!("esperaba Map");
         }
+    }
+
+    // ---- Mini-tanda Mb8 — starts_with/ends_with + insert_at/remove_at
+    //                       + Str.left/right/center + zip_to_map +
+    //                       bits-extras ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_list_starts_ends_with() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let a: Bool = xs.starts_with([1, 2])\n\
+             let b: Bool = xs.starts_with([1, 3])\n\
+             let c: Bool = xs.ends_with([4, 5])\n\
+             let d: Bool = xs.ends_with([3, 5])\n\
+             let e: Bool = xs.starts_with([])",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("c"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("d"), Some(Value::Bool(false)));
+        assert_eq!(env.lock().get("e"), Some(Value::Bool(true)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_list_insert_at_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 4, 5]\n\
+             let r: List<Int> = xs.insert_at(2, 3)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            assert_eq!(nums, vec![1, 2, 3, 4, 5]);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_list_insert_at_idx_grande_clamp_al_final() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.insert_at(99, 9)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g.len(), 4);
+            assert_eq!(g[3], Value::Int(9));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_list_remove_at_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [10, 20, 30, 40]\n\
+             let r: List<Int> = xs.remove_at(2)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g.len(), 3);
+            assert_eq!(g[2], Value::Int(40));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_list_remove_at_idx_fuera_de_rango_error() {
+        let (_, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1]\n\
+             let r: List<Int> = xs.remove_at(5)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("fuera de rango"), "msg: {}", err.message);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_list_zip_to_map_combina_keys_y_values() {
+        let (env, res) = parse_eval_into_env(
+            "let ks: List<Str> = [\"a\", \"b\", \"c\"]\n\
+             let vs: List<Int> = [1, 2, 3]\n\
+             let m: Map<Str, Int> = ks.zip_to_map(vs)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("m").unwrap();
+        if let Value::Map(pairs) = v {
+            assert_eq!(pairs.lock().len(), 3);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_str_left_right_basicos() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"hola mundo\"\n\
+             let l: Str = s.left(4)\n\
+             let r: Str = s.right(5)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("l"), Some(Value::Str("hola".into())));
+        assert_eq!(env.lock().get("r"), Some(Value::Str("mundo".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_str_center_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"hi\"\n\
+             let c: Str = s.center(10, \"-\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("c"), Some(Value::Str("----hi----".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb8_str_center_width_menor_que_len_sin_cambios() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"hola mundo\"\n\
+             let c: Str = s.center(5, \"*\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("c"), Some(Value::Str("hola mundo".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_extras_popcount_leading_trailing() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = popcount(7)\n\
+             let b: Int = popcount(255)\n\
+             let c: Int = leading_zeros(1)\n\
+             let d: Int = trailing_zeros(8)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(8)));
+        assert_eq!(env.lock().get("c"), Some(Value::Int(63)));
+        assert_eq!(env.lock().get("d"), Some(Value::Int(3)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bits_extras_rotate_left_right() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = rotate_left(1, 4)\n\
+             let b: Int = rotate_right(16, 4)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(16)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(1)));
     }
 
     // ---- Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle +
