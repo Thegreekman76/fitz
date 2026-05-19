@@ -1965,6 +1965,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13l-update-comp-tuple-paramnames.fitz",
     "13m-min-max-sum-pad-keys-step.fitz",
     "13n-reduce-product-chars-entries-to-map.fitz",
+    "13o-higher-order-y-consts-globales.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3855,6 +3856,100 @@ fn mb3_list_to_map_compila() {
     let (stdout, exit) = build_and_run("mb3_list_to_map", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "1\n2\n2");
+}
+
+// ---- Mini-tanda Cd — codegen polish: higher-order + F12 ----
+
+#[test]
+fn cd_ho_map_con_fn_nombrada_compila() {
+    let src = "fn double(n: Int) -> Int { return n * 2 }\n\
+               let xs: List<Int> = [1, 2, 3]\n\
+               let ys: List<Int> = xs.map(double)\n\
+               print(ys)\n";
+    let (stdout, exit) = build_and_run("cd_ho_map_named", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[2, 4, 6]");
+}
+
+#[test]
+fn cd_ho_filter_con_fn_nombrada_compila() {
+    let src = "fn is_even(n: Int) -> Bool { return n % 2 == 0 }\n\
+               let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               let ys: List<Int> = xs.filter(is_even)\n\
+               print(ys)\n";
+    let (stdout, exit) = build_and_run("cd_ho_filter_named", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[2, 4]");
+}
+
+#[test]
+fn cd_ho_reduce_binary_con_fn_nombrada_compila() {
+    let src = "fn sumar(acc: Int, x: Int) -> Int { return acc + x }\n\
+               let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               let total: Int = xs.reduce(0, sumar)\n\
+               print(total)\n";
+    let (stdout, exit) = build_and_run("cd_ho_reduce_named", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "15");
+}
+
+#[test]
+fn cd_f12_let_int_const_referenciado_por_fn_compila() {
+    let src = "let MAX = 100\n\
+               fn cap(n: Int) -> Int {\n\
+                   if (n > MAX) { return MAX }\n\
+                   return n\n\
+               }\n\
+               print(cap(50))\n\
+               print(cap(200))\n";
+    let (stdout, exit) = build_and_run("cd_f12_let_int_const", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "50\n100");
+}
+
+#[test]
+fn cd_f12_let_str_compila() {
+    let src = "let GREETING = \"hola\"\n\
+               fn greet(name: Str) -> Str { return \"{GREETING}, {name}\" }\n\
+               print(greet(\"Ada\"))\n";
+    let (stdout, exit) = build_and_run("cd_f12_let_str", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "hola, Ada");
+}
+
+#[test]
+fn cd_f12_let_float_compila() {
+    let src = "let PI = 3.14\n\
+               fn area(r: Float) -> Float { return PI * r * r }\n\
+               print(area(2.0))\n";
+    let (stdout, exit) = build_and_run("cd_f12_let_float", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "12.56");
+}
+
+#[test]
+fn cd_f12_const_eval_con_binop_compila() {
+    let src = "let LIMIT = 10 * 2 + 5\n\
+               fn check(n: Int) -> Bool { return n < LIMIT }\n\
+               print(check(20))\n\
+               print(check(30))\n";
+    let (stdout, exit) = build_and_run("cd_f12_const_eval_binop", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+#[test]
+fn cd_combinado_ho_y_f12_compila() {
+    // Combina ambos features: fn nombrada como callback Y const hoisteado
+    // referenciado adentro de la fn.
+    let src = "let MULTIPLIER = 10\n\
+               fn boost(n: Int) -> Int { return n * MULTIPLIER }\n\
+               let xs: List<Int> = [1, 2, 3]\n\
+               let ys: List<Int> = xs.map(boost)\n\
+               print(ys)\n";
+    let (stdout, exit) = build_and_run("cd_combinado", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[10, 20, 30]");
 }
 
 #[test]

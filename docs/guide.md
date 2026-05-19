@@ -4403,6 +4403,79 @@ print(total)                                     // 172
 Ver [examples/guide/13n-reduce-product-chars-entries-to-map.fitz](../examples/guide/13n-reduce-product-chars-entries-to-map.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Higher-order por nombre + constantes globales (mini-tanda Cd)
+
+Bundle de polish del codegen — cierra las dos limitaciones más
+visibles del compilador heredadas:
+
+**Higher-order callbacks por nombre** — antes el codegen exigía
+callbacks inline `fn(x) => ...` para los métodos de colección.
+Ahora podés pasar una fn nombrada directamente:
+
+```fitz
+fn double(n: Int) -> Int { return n * 2 }
+fn is_even(n: Int) -> Bool { return n % 2 == 0 }
+fn sumar(acc: Int, x: Int) -> Int { return acc + x }
+
+let xs: List<Int> = [1, 2, 3, 4, 5]
+print(xs.map(double))                            // [2, 4, 6, 8, 10]
+print(xs.filter(is_even))                        // [2, 4]
+print(xs.reduce(0, sumar))                       // 15
+```
+
+Cubre `map`/`filter`/`find`/`any`/`all`/`count`/`find_index`/
+`flat_map`/`reduce`/`sort_by` y los callbacks binarios de Map
+(`filter`, `map_values`, `update`). El checker valida aridad +
+tipos de params + ret type contra la signature de la fn (igual
+que con callbacks inline).
+
+**Constantes globales** — antes, un `let X = 100` top-level NO
+era accesible desde fns top-level en `fitz build` ("variable
+desconocida en codegen"). Había que pasarla como param a cada
+fn. Ahora, si la RHS es **const-eval** (literal Int/Float/Bool
+o Str literal, o BinOp/UnaryOp puros sobre operands const-eval)
+Y la var es referenciada por al menos una fn top-level, el
+codegen la "hoistea" automáticamente a `const X: T = ...;` o
+`static X: &str = ...;` Rust.
+
+```fitz
+let MAX = 100
+let GREETING: Str = "hola"
+let LIMIT = 10 * 2 + 5     // const-eval con BinOp
+
+fn cap(n: Int) -> Int {
+    if (n > MAX) { return MAX }
+    return n
+}
+
+fn greet(name: Str) -> Str {
+    return "{GREETING}, {name}"
+}
+
+fn check(n: Int) -> Bool {
+    return n < LIMIT
+}
+
+print(cap(50))          // 50
+print(cap(200))         // 100
+print(greet("Ada"))     // hola, Ada
+print(check(20))        // true
+```
+
+**Reglas del hoist**:
+- Solo aplica a `let X = <const-eval>` o `let X: Str = "literal"`.
+  RHS con calls a fns, struct lits o expresiones runtime NO se
+  hoistan (siguen como locales de `main()`, el codegen rechaza
+  si las referencia una fn).
+- Si `X` se reasigna (`let X = 10; X = 20`), el hoist se cancela
+  (Rust `const` es inmutable). Workaround: pasarla como param a
+  cada fn que la necesite, o `Mutex` (futuro).
+- Solo aplica a modo CLI. En modo HTTP, el mecanismo de state
+  compartido (`thread_local`) ya cubre el caso.
+
+Ver [examples/guide/13o-higher-order-y-consts-globales.fitz](../examples/guide/13o-higher-order-y-consts-globales.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
 - **`return` adentro de un brazo de `match` como expresión** —

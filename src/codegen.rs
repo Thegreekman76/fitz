@@ -47,7 +47,7 @@ use crate::ast::{
     UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError};
-use crate::types::{check_program, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
+use crate::types::{check_program, is_compatible, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
 
 // ---------------------------------------------------------------------------
 // API pública del codegen
@@ -429,6 +429,84 @@ fn detect_shared_state(program: &Program) -> (Vec<String>, HashMap<String, Vec<S
         .filter(|n| used_globally.contains(n))
         .collect();
     (final_state, fn_deps)
+}
+
+// Mini-tanda Cd (F12) — identifica los `let X = <expr>` top-level del
+// archivo principal que el codegen debe "hoistar" a const/static Rust
+// global para que fns top-level puedan referenciarlos. Reglas:
+//   - El value es const-eval (literal Int/Float/Bool/Null + ops puros,
+//     o Str literal directo).
+//   - Tiene una sola ocurrencia en main_stmts (no se reasigna).
+//   - Es referenciado por al menos UNA fn top-level (sin esa ref no
+//     hace falta hoistar — el let queda como local de main()).
+// Devuelve los stmts en el orden de aparición original (necesario
+// para que un hoist que referencia otro const ya esté declarado).
+fn collect_f12_hoists<'a>(
+    program: &'a Program,
+    main_stmts: &[&'a Stmt],
+) -> Vec<&'a Stmt> {
+    // Paso 1: candidatos = `Stmt::Assign(Ident(name), hoistable_value)`
+    // únicos en main_stmts.
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for s in main_stmts {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            ..
+        } = s
+        {
+            *counts.entry(name.clone()).or_insert(0) += 1;
+        }
+    }
+    let mut candidates: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in main_stmts {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            value,
+            ..
+        } = s
+        {
+            let hoistable = is_const_eval_expr(value) || matches!(value, Expr::Str(_, _));
+            if hoistable && counts.get(name).copied().unwrap_or(0) == 1 {
+                candidates.insert(name.clone());
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+
+    // Paso 2: filtrar por referencia desde alguna fn top-level. Reusamos
+    // `walk_stmt_for_state_refs` que ya hace skip de locales/params.
+    let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in program {
+        if let Stmt::FnDef { params, body, .. } = s {
+            let mut locals: std::collections::HashSet<String> = params
+                .iter()
+                .map(|p| p.name.clone())
+                .collect();
+            let mut refs = std::collections::HashSet::new();
+            for stmt in body {
+                walk_stmt_for_state_refs(stmt, &candidates, &mut locals, &mut refs);
+            }
+            referenced.extend(refs);
+        }
+    }
+
+    // Paso 3: emitir en orden original solo los names que sobrevivieron.
+    let mut out: Vec<&'a Stmt> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for s in main_stmts {
+        if let Stmt::Assign {
+            target: AssignTarget::Ident(name),
+            ..
+        } = s
+        {
+            if referenced.contains(name) && seen.insert(name.clone()) {
+                out.push(s);
+            }
+        }
+    }
+    out
 }
 
 /// True si el slice de stmts contiene un `Stmt::ReturnStatus` en
@@ -1977,6 +2055,17 @@ fn emit_main_rs_body(
             ctx.gen_type_http_impls(stmt)?;
         }
     }
+
+    // Mini-tanda Cd (F12 fix) — hoistar los `let X = <const-eval>` top-level
+    // del archivo principal que fns top-level referencian. Solo aplica en
+    // modo CLI: en modo HTTP, el mecanismo de state compartido
+    // (`detect_shared_state` + thread_local) ya cubre el caso.
+    if !has_http {
+        let hoists = collect_f12_hoists(program, &p.main_stmts);
+        for stmt in hoists {
+            ctx.gen_main_hoisted_let(stmt)?;
+        }
+    }
     for stmt in &p.http_fns {
         ctx.gen_top_fn(stmt)?;
     }
@@ -2210,6 +2299,15 @@ struct CodegenCtx<'a> {
     /// referenciarlas. En main mode, queda vacío (los `let` top-level
     /// son vars locales adentro de `fn main()`).
     own_consts: HashMap<String, Type>,
+    /// Mini-tanda Cd — set de `let X = <const-eval>` top-level del
+    /// archivo principal que el codegen "hoisteó" a `pub const`/
+    /// `pub static` Rust porque alguna fn top-level los referencia.
+    /// El check de `gen_expr Ident` los trata como bindings globales
+    /// (resuelve al nombre Rust directo sin error de "variable
+    /// desconocida"). Vacío en módulo mode (módulos siempre emiten
+    /// todos sus `let` top-level como consts/accessors, no hace
+    /// falta el set extra).
+    hoisted_main_lets: HashMap<String, Type>,
     /// Bindings de módulos importados: nombre visible (último segmento
     /// del path para `import foo`, o el identificador en `from foo
     /// import X`) → `ResolvedBinding` con el índice del módulo cargado.
@@ -2418,6 +2516,7 @@ impl<'a> CodegenCtx<'a> {
             python_imports_ordered: Vec::new(),
             pattern_slot_counter: 0,
             accessor_consts: std::collections::HashSet::new(),
+            hoisted_main_lets: HashMap::new(),
         }
     }
 
@@ -2604,6 +2703,23 @@ impl<'a> CodegenCtx<'a> {
             if let Some(t) = s.get(name) {
                 return Some(t);
             }
+        }
+        None
+    }
+
+    // Mini-tanda Cd — resuelve un ident a una firma de callback
+    // `(params, ret)` cuando se usa como higher-order arg de un
+    // método (map/filter/find/reduce/etc.). Busca primero las fns
+    // top-level del archivo principal (`fn_sigs`); como fallback,
+    // variables locales con tipo `Function { params, ret }` (caso
+    // `let f = fn(n) => ...; xs.map(f)`). Devuelve `None` si no es
+    // callable bajo ninguna fuente.
+    fn resolve_named_callback(&self, name: &str) -> Option<(Vec<Type>, Type)> {
+        if let Some(sig) = self.fn_sigs.get(name) {
+            return Some((sig.params.clone(), sig.ret.clone()));
+        }
+        if let Some(Type::Function { params, ret }) = self.lookup_var(name) {
+            return Some((params.clone(), (**ret).clone()));
         }
         None
     }
@@ -3206,7 +3322,19 @@ impl<'a> CodegenCtx<'a> {
         // declararlos como vars locales — `gen_expr::Ident` despacha
         // sobre `python_bindings` y emite el getter inline cuando
         // aparece el nombre.
+        //
+        // Mini-tanda Cd (F12 fix) — skipear los `Stmt::Assign(Ident(name))`
+        // cuyos names fueron hoisteados a const/static top-level. El
+        // hoist los emitió antes del `fn main()`, así que ya están
+        // accesibles como bindings Rust globales. Re-emitirlos como
+        // locales sería redundante (e incompatible cuando declared con
+        // un tipo Rust distinto).
         for stmt in stmts {
+            if let Stmt::Assign { target: AssignTarget::Ident(name), .. } = stmt {
+                if self.hoisted_main_lets.contains_key(name) {
+                    continue;
+                }
+            }
             self.gen_stmt(stmt)?;
         }
         self.pop_scope();
@@ -4182,6 +4310,79 @@ impl<'a> CodegenCtx<'a> {
     ///      referencia re-evalúa la RHS. Para inmutables (Str/Int/
     ///      etc.) la diferencia es invisible; para StructLit el clone
     ///      del Arc/Mutex es barato.
+    // Mini-tanda Cd, F12 fix: emite `let X = <const-eval>` top-level
+    // del archivo principal como `const X: T = ...;` o `static X: &str
+    // = ...;` para que las fns top-level lo puedan referenciar; el name
+    // se registra en `hoisted_main_lets` para que el `Stmt::Assign`
+    // original no se emita como local de `main()` después.
+    fn gen_main_hoisted_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let stmt_span = stmt.span();
+        let Stmt::Assign { target, type_, value, .. } = stmt else {
+            unreachable!("gen_main_hoisted_let solo se llama sobre Stmt::Assign");
+        };
+        let AssignTarget::Ident(name) = target else {
+            unreachable!("collect_f12_hoists ya filtró por Ident");
+        };
+
+        let (rhs_code, rhs_ty) = self.gen_expr(value)?;
+        let declared_ty = match type_ {
+            Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
+                self.err_at(value.span(), format!(
+                    "let `{}` (hoist): anotación: {}",
+                    name, e.message
+                ))
+            })?,
+            None => rhs_ty.clone(),
+        };
+
+        // Str literal → `static NAME: &str = "...";`.
+        if matches!(&declared_ty, Type::Str) {
+            if let Expr::Str(s, _) = value {
+                writeln!(
+                    &mut self.output,
+                    "static {}: &str = {};\n",
+                    name,
+                    rust_str_literal(s),
+                ).unwrap();
+                self.hoisted_main_lets.insert(name.clone(), declared_ty);
+                return Ok(());
+            }
+        }
+
+        // const-eval (Int/Float/Bool con BinOp/UnaryOp puros).
+        if is_const_eval_expr(value) {
+            match &declared_ty {
+                Type::Int => {
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int);
+                    writeln!(&mut self.output, "const {}: i64 = {};\n", name, coerced).unwrap();
+                    self.hoisted_main_lets.insert(name.clone(), declared_ty);
+                    return Ok(());
+                }
+                Type::Float => {
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float);
+                    writeln!(&mut self.output, "const {}: f64 = {};\n", name, coerced).unwrap();
+                    self.hoisted_main_lets.insert(name.clone(), declared_ty);
+                    return Ok(());
+                }
+                Type::Bool => {
+                    writeln!(&mut self.output, "const {}: bool = {};\n", name, rhs_code).unwrap();
+                    self.hoisted_main_lets.insert(name.clone(), declared_ty);
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
+
+        // Caso defensive: el filtro `collect_f12_hoists` no debería
+        // dejar pasar otros tipos. Si llega acá es un bug; reportamos
+        // claro en lugar de panic.
+        Err(self.err_at(stmt_span, format!(
+            "F12 hoist: tipo `{}` no soportado para `let {}` top-level (esperaba Int/Float/Bool/Str literal o const-eval)",
+            display_type(&declared_ty, self.env),
+            name,
+        )))
+    }
+
     fn gen_module_top_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let stmt_span = stmt.span();
         let Stmt::Assign { target, type_, value, .. } = stmt else {
@@ -4900,6 +5101,24 @@ impl<'a> CodegenCtx<'a> {
                                 return Ok((code, ty));
                             }
                         }
+                    }
+                }
+                // Mini-tanda Cd (F12 fix) — `let X = <const-eval>` del
+                // archivo principal hoisteado a const/static top-level.
+                // Si no hay binding local con ese nombre, resolvemos al
+                // ident Rust directo (Rust hace el lookup global).
+                if !self.var_in_any_scope(name) {
+                    if let Some(ty) = self.hoisted_main_lets.get(name).cloned() {
+                        // Str hoisteado vive como &str — los call sites
+                        // necesitan String, así que envolvemos como
+                        // `String::from(NAME)` por uniformidad (paralelo
+                        // a `own_consts` para Str pub static).
+                        let code = if matches!(&ty, Type::Str) {
+                            format!("String::from({})", name)
+                        } else {
+                            name.clone()
+                        };
+                        return Ok((code, ty));
                     }
                 }
                 // 5b.5: const top-level del propio módulo (emitida como
@@ -6896,13 +7115,45 @@ impl<'a> CodegenCtx<'a> {
         method: &str,
     ) -> Result<(String, Type), FitzError> {
         let arg_span = arg.span();
+        // Mini-tanda Cd — higher-order: si el arg es `Expr::Ident(name)`
+        // y refiere a una fn top-level (`fn_sigs`) o local con tipo
+        // `Function`, lo emitimos como referencia directa al ident Rust.
+        // Habilita `xs.map(double)` cuando `double` es `fn double(n: Int)`.
+        if let Expr::Ident(name, _) = arg {
+            if let Some((sig_params, sig_ret)) = self.resolve_named_callback(name) {
+                if sig_params.len() != 1 {
+                    return Err(self.err_at(arg_span, format!(
+                        "el callback de `.{}` toma 1 parámetro, la fn `{}` declara {}",
+                        method, name, sig_params.len(),
+                    )));
+                }
+                if !is_compatible(param_ty, &sig_params[0]) {
+                    return Err(self.err_at(arg_span, format!(
+                        "el callback `{}` espera `{}`, pero el elemento es `{}`",
+                        name,
+                        display_type(&sig_params[0], self.env),
+                        display_type(param_ty, self.env),
+                    )));
+                }
+                if let Some(want) = expected_ret_ty {
+                    if !is_compatible(&sig_ret, want) {
+                        return Err(self.err_at(arg_span, format!(
+                            "el callback `{}` debe retornar `{}`, retorna `{}`",
+                            name,
+                            display_type(want, self.env),
+                            display_type(&sig_ret, self.env),
+                        )));
+                    }
+                }
+                return Ok((name.clone(), sig_ret));
+            }
+        }
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),
             _ => {
                 return Err(self.err_at(arg_span, format!(
-                    "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}`. \
-                     Pasar una fn nombrada como callback (higher-order) llega en un sub-paso \
-                     posterior de 5b.",
+                    "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}` \
+                     o el nombre de una fn top-level (`fn(...) -> ...`).",
                     method
                 )));
             }
@@ -7004,13 +7255,49 @@ impl<'a> CodegenCtx<'a> {
     ) -> Result<String, FitzError> {
         let expected_ret = expected_ret_ty.clone();
         let arg_span = arg.span();
+        // Mini-tanda Cd — higher-order: aceptamos también fn nombrada
+        // como callback binario (`xs.reduce(0, sumar)`, `xs.sort_by(cmp)`).
+        if let Expr::Ident(name, _) = arg {
+            if let Some((sig_params, sig_ret)) = self.resolve_named_callback(name) {
+                if sig_params.len() != 2 {
+                    return Err(self.err_at(arg_span, format!(
+                        "el callback de `.{}` toma 2 parámetros, la fn `{}` declara {}",
+                        method, name, sig_params.len(),
+                    )));
+                }
+                if !is_compatible(param0_ty, &sig_params[0]) {
+                    return Err(self.err_at(arg_span, format!(
+                        "el callback `{}` espera `{}` en el param[0], recibe `{}`",
+                        name,
+                        display_type(&sig_params[0], self.env),
+                        display_type(param0_ty, self.env),
+                    )));
+                }
+                if !is_compatible(param1_ty, &sig_params[1]) {
+                    return Err(self.err_at(arg_span, format!(
+                        "el callback `{}` espera `{}` en el param[1], recibe `{}`",
+                        name,
+                        display_type(&sig_params[1], self.env),
+                        display_type(param1_ty, self.env),
+                    )));
+                }
+                if !is_compatible(&sig_ret, &expected_ret) {
+                    return Err(self.err_at(arg_span, format!(
+                        "el callback `{}` debe retornar `{}`, retorna `{}`",
+                        name,
+                        display_type(&expected_ret, self.env),
+                        display_type(&sig_ret, self.env),
+                    )));
+                }
+                return Ok(name.clone());
+            }
+        }
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),
             _ => {
                 return Err(self.err_at(arg_span, format!(
-                    "`.{}(...)` exige un callback inline `fn(a, b) => ...` o `fn(a, b) {{ ... }}`. \
-                     Pasar una fn nombrada como callback (higher-order) llega en un sub-paso \
-                     posterior de 5b.",
+                    "`.{}(...)` exige un callback inline `fn(a, b) => ...` o `fn(a, b) {{ ... }}` \
+                     o el nombre de una fn top-level (`fn(...) -> ...`).",
                     method
                 )));
             }
@@ -15392,6 +15679,189 @@ mod tests {
                 && guard_tokens.contains("__n"),
             "esperaba guard `(0i64..10i64).contains(&__n)`, got: {}",
             guard_tokens
+        );
+    }
+
+    // ---- Mini-tanda Cd ----
+    //
+    // HO callbacks: pasar fn nombrada (`xs.map(double)`) y F12 fix:
+    // hoist de `let X = <const-eval>` top-level a `const X` cuando
+    // alguna fn top-level lo referencia.
+
+    #[test]
+    fn cd_ho_pasar_fn_nombrada_a_map() {
+        let src = "fn double(n: Int) -> Int { return n * 2 }\n\
+                   let xs: List<Int> = [1, 2, 3]\n\
+                   let ys: List<Int> = xs.map(double)";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El callback se emite como referencia a la fn nombrada `double`.
+        assert!(
+            code.contains(". map (double)") || code.contains(".map(double)"),
+            "esperaba `.map(double)` con fn nombrada, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn cd_ho_pasar_fn_nombrada_a_filter() {
+        let src = "fn is_even(n: Int) -> Bool { return n % 2 == 0 }\n\
+                   let xs: List<Int> = [1, 2, 3, 4]\n\
+                   let ys: List<Int> = xs.filter(is_even)";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("let __cb = is_even"),
+            "esperaba `let __cb = is_even`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn cd_ho_pasar_fn_nombrada_a_reduce() {
+        // Callback binario: `xs.reduce(0, sumar)`.
+        let src = "fn sumar(acc: Int, x: Int) -> Int { return acc + x }\n\
+                   let xs: List<Int> = [1, 2, 3]\n\
+                   let total: Int = xs.reduce(0, sumar)";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("let __cb = sumar"),
+            "esperaba `let __cb = sumar` (callback binario nombrado), got:\n{}",
+            code
+        );
+    }
+
+    // Los siguientes 3 casos los **detecta el checker** ANTES del codegen
+    // (las firmas de las fns nombradas tipan como `Function { params, ret }`
+    // y la validación del callback usa `check_unary_callback`). Los tests
+    // verifican que el pipeline completo aborta con mensaje claro — el
+    // codegen ni siquiera llega a correr porque el checker corta antes.
+
+    #[test]
+    fn cd_ho_fn_inexistente_aborta_en_checker() {
+        let src = "let xs: List<Int> = [1, 2, 3]\n\
+                   let ys: List<Int> = xs.map(no_existe)";
+        // El checker detecta `no_existe` como variable desconocida.
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (_env, _types, _defs, errors) = check_program(&program);
+        assert!(
+            !errors.is_empty()
+                && errors.iter().any(|e| e.message.contains("no_existe")),
+            "esperaba error del checker sobre `no_existe`, fue: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cd_ho_fn_nombrada_con_aridad_incorrecta_aborta_en_checker() {
+        let src = "fn binaria(a: Int, b: Int) -> Int { return a + b }\n\
+                   let xs: List<Int> = [1, 2, 3]\n\
+                   let ys: List<Int> = xs.map(binaria)";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (_env, _types, _defs, errors) = check_program(&program);
+        assert!(
+            !errors.is_empty()
+                && errors.iter().any(|e| e.message.contains("1 ar")),
+            "esperaba error del checker sobre aridad, fue: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cd_ho_fn_nombrada_con_ret_incompatible_aborta_en_checker() {
+        let src = "fn to_str(n: Int) -> Str { return \"{n}\" }\n\
+                   let xs: List<Int> = [1, 2, 3]\n\
+                   let ys: List<Int> = xs.filter(to_str)";
+        let tokens = tokenize(src).expect("lex OK");
+        let program = parse(tokens).expect("parse OK");
+        let (_env, _types, _defs, errors) = check_program(&program);
+        assert!(
+            !errors.is_empty()
+                && errors.iter().any(|e| e.message.contains("Bool")),
+            "esperaba error del checker sobre ret type, fue: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cd_f12_let_int_const_referenciado_por_fn_se_hoistea() {
+        let src = "let MAX = 100\n\
+                   fn cap(n: Int) -> Int {\n\
+                       if (n > MAX) { return MAX }\n\
+                       return n\n\
+                   }\n\
+                   print(cap(50))\n\
+                   print(cap(200))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El hoist emite `const MAX: i64 = 100;` antes de fns.
+        assert!(
+            code.contains("const MAX : i64 = 100") || code.contains("const MAX: i64 = 100"),
+            "esperaba `const MAX: i64 = 100;` hoisteado, got:\n{}",
+            code
+        );
+        // La fn body referencia MAX directo (con o sin paréntesis del if).
+        assert!(
+            code.contains("n > MAX") && code.contains("return MAX"),
+            "esperaba la fn `cap` referenciando MAX, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn cd_f12_let_str_referenciado_por_fn_se_hoistea_a_static() {
+        let src = "let GREETING = \"hola\"\n\
+                   fn greet(name: Str) -> Str { return \"{GREETING}, {name}\" }\n\
+                   print(greet(\"Ada\"))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("static GREETING : & str") || code.contains("static GREETING: &str"),
+            "esperaba `static GREETING: &str = ...;` hoisteado, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn cd_f12_let_no_referenciado_por_fn_no_se_hoistea() {
+        // Si nadie lo referencia, queda como local de main(); no hoist.
+        let src = "let X = 42\nprint(X)";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // NO debería haber `const X: i64 = 42;` top-level.
+        assert!(
+            !code.contains("const X : i64 = 42") && !code.contains("const X: i64 = 42"),
+            "X no debería hoistar (no es referenciado por fn), got:\n{}",
+            code
+        );
+        // Sigue como let local.
+        assert!(
+            code.contains("let mut X : i64 = 42") || code.contains("let mut X: i64"),
+            "X debería seguir como local de main(), got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn cd_f12_let_reasignado_no_se_hoistea() {
+        // Reasignación rompe el hoist (const Rust no se puede mutar).
+        let src = "let X = 10\nX = 20\nfn read() -> Int { return X }\nprint(read())";
+        let err = gen(src).expect_err("esperaba error de codegen (X no hoisteable, reasignado)");
+        assert!(
+            err.message.contains("desconocida") && err.message.contains("X"),
+            "esperaba error sobre `X` desconocida (no hoisteada), fue: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn cd_f12_const_eval_con_binop_se_hoistea() {
+        let src = "let LIMIT = 10 * 2 + 5\n\
+                   fn check(n: Int) -> Bool { return n < LIMIT }\n\
+                   print(check(20))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // 10 * 2 + 5 sigue siendo const-eval (BinOp puros).
+        assert!(
+            code.contains("const LIMIT : i64") || code.contains("const LIMIT: i64"),
+            "esperaba `const LIMIT: i64` hoisteado, got:\n{}",
+            code
         );
     }
 }

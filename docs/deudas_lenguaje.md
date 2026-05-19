@@ -1131,6 +1131,88 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Codegen polish: higher-order callbacks por nombre + F12 caveat fix~~ ✓ CERRADO 2026-05-19 (mini-tanda Cd)
+
+Bundle de polish del codegen que cierra las dos limitaciones más
+visibles heredadas del compilador. Ambas afectaban el day-to-day
+y obligaban a workarounds en cada call site.
+
+- ~~**Higher-order callbacks por nombre**~~ ✓ `gen_callback_inline`
+  y `gen_binary_callback_inline_with_ret` ahora aceptan también
+  `Expr::Ident(name)` cuando refiere a una fn top-level (registrada
+  en `fn_sigs`) o a una var local con tipo `Function`. Nuevo helper
+  `resolve_named_callback(name)` consulta ambas fuentes. Validaciones
+  estructurales (aridad de la fn, compatibilidad de param y ret
+  type) ya las hace el checker estático con `check_unary_callback` /
+  `check_binary_callback`; el codegen las replica como back-stop
+  defensive. El código emitido para `xs.map(double)` es `xs.iter()
+  ...map(double)` Rust directo — las fn items de Rust implementan
+  `Fn`, así que esto compila sin boxing. Cubre `map`/`filter`/
+  `find`/`any`/`all`/`count`/`find_index`/`flat_map`/`reduce`/
+  `sort_by` (List) y `filter`/`map_values`/`update` (Map) — todos
+  los métodos con callback.
+
+- ~~**F12 caveat fix: `let X = <const-eval>` accesible desde fns
+  top-level**~~ ✓ El codegen ahora detecta `let X = <const-eval>`
+  top-level del archivo principal que son referenciados por al
+  menos una fn top-level y los "hoistea" a `const X: T = ...;`
+  (Int/Float/Bool) o `static X: &str = "...";` (Str literal) en el
+  output Rust. El binding hoisteado es accesible desde cualquier
+  fn del programa generado. **Reglas**:
+  - Solo RHS const-eval (literal o BinOp/UnaryOp puros sobre
+    operands const-eval) o Str literal directo se hoistan.
+  - Solo aplica si el name NO se reasigna en `main_stmts` (el
+    helper `collect_f12_hoists` filtra por count).
+  - El name DEBE ser referenciado por alguna fn top-level —
+    si no, queda como local de `main()` y el path tradicional
+    funciona.
+  - Modo CLI únicamente. En modo HTTP, `detect_shared_state`
+    + `thread_local` ya cubre el patrón con semántica distinta
+    (state mutable compartido).
+  - El lookup en `gen_expr Ident` chequea `hoisted_main_lets`
+    ANTES de fallar con "variable desconocida"; resuelve al
+    ident Rust directo (`String::from(NAME)` para Str, `NAME`
+    para primitivos). Mismo patrón que `own_consts` en módulos.
+
+  **Reusa la lógica** de `gen_module_top_let` (que ya hacía esto
+  para módulos): mismo subset de tipos soportados, misma emisión
+  Rust (const vs static). El campo nuevo del `CodegenCtx` es
+  `hoisted_main_lets: HashMap<String, Type>`.
+
+Implementación: ~250 LoC entre codegen (`collect_f12_hoists` helper
+free, `gen_main_hoisted_let` y `resolve_named_callback` en
+`CodegenCtx`, ramas nuevas en `gen_callback_inline` y
+`gen_binary_callback_inline_with_ret`, skip en `gen_main`, llamada
+desde `emit_main_rs_body` antes de top_fns) + dep `is_compatible`
+expuesto en el use de `crate::types`.
+
+**11 unit tests** del codegen (`cd_ho_*`: pasar fn nombrada a
+map/filter/reduce, errores claros del checker para fn inexistente/
+aridad/ret incompatible; `cd_f12_*`: hoist Int/Float/Str/const-eval
+BinOp, no-hoist cuando no se referencia o cuando se reasigna) +
+**8 compile_e2e** bit-a-bit `fitz run` ↔ `fitz build` (map+filter+
+reduce con fn nombrada, const Int/Str/Float/const-eval, combinado).
+Ejemplo runnable `examples/guide/13o-higher-order-y-consts-globales.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE` con caso típico.
+
+Cap 13 de la guía: sub-sección dedicada "Higher-order por nombre +
+constantes globales (mini-tanda Cd)" con ejemplos inline + reglas
+del hoist + caveats documentados (RHS runtime, reasignación,
+modo HTTP). VSCode extension: grammar TextMate sin cambios; LSP
+ya sugería las fns top-level via scope-level completions.
+
+**Deuda residual menor** (NO bloquea):
+- `let X = <expr-runtime>` (call a fn, struct lit, list lit) sigue
+  sin hoistar — el binding no es const Rust válido. Para soporte
+  completo haría falta `LazyLock<X>` o un init en main que se
+  exporta. Sub-paso futuro si aparece presión.
+- Reasignación de globales hoisteados requiere `static mut` (unsafe)
+  o `Atomic*`/`Mutex<T>`. Decisión de diseño abierta — por ahora
+  el workaround es pasar como param.
+- Closures inline que **capturan** vars locales del scope contenedor
+  son otro camino del codegen (F12 original); este Cd no las toca.
+  Las closures siguen funcionando como antes.
+
 ### ~~Métodos funcionales: fold + product + chars + entries + to_map~~ ✓ CERRADO 2026-05-18 (mini-tanda Mb3)
 
 Bundle siguiente al de Mb2, completa la API canónica "functional

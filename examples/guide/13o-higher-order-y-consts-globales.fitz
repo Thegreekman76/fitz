@@ -1,0 +1,89 @@
+// Mini-tanda Cd — polish del codegen: higher-order callbacks por
+// nombre + constantes globales en `fitz build`.
+//
+// Estas dos limitaciones del compilador eran las más visibles del
+// día a día y obligaban a rodeos:
+//
+//   - HO callbacks: hasta antes de Cd, `xs.map(double)` (con `double`
+//     declarada como fn top-level) fallaba con "exige un callback
+//     inline". Había que inline-ar el callback en cada call site.
+//   - F12 caveat: `let MAX = 100` top-level + `fn cap()` referenciando
+//     `MAX` adentro fallaba en `fitz build` con "variable desconocida".
+//     Había que pasar `MAX` como param a cada fn.
+//
+// Cd cierra ambas. `fitz run` siempre soportó estos patrones; ahora
+// `fitz build` los soporta también con paridad bit-a-bit.
+
+// --- Higher-order: pasar fn nombrada a map/filter/find/reduce ---
+
+fn double(n: Int) -> Int { return n * 2 }
+fn is_even(n: Int) -> Bool { return n % 2 == 0 }
+fn sumar(acc: Int, x: Int) -> Int { return acc + x }
+
+let xs: List<Int> = [1, 2, 3, 4, 5]
+
+// `xs.map(double)` directo — antes había que escribir
+// `xs.map(fn(n: Int) => double(n))` o `xs.map(fn(n: Int) => n * 2)`.
+let doblados: List<Int> = xs.map(double)
+print(doblados)                                  // [2, 4, 6, 8, 10]
+
+let pares: List<Int> = xs.filter(is_even)
+print(pares)                                     // [2, 4]
+
+let total: Int = xs.reduce(0, sumar)
+print(total)                                     // 15
+
+// También funciona con métodos custom de tipos definidos por
+// el usuario y con funciones de otros módulos importadas via
+// `from foo import bar` (el bind queda visible como ident).
+
+// --- F12: `let X` top-level accesible desde fns top-level ---
+//
+// Los `let X = <const-eval>` (literal Int/Float/Bool, o Str literal,
+// o BinOp/UnaryOp puros sobre operandos const-eval) que son
+// referenciados por al menos una fn top-level se hoistan
+// automáticamente a `const X`/`static X` Rust, accesibles desde
+// cualquier fn del programa.
+
+let MAX_RETRIES = 3                          // const-eval Int
+let GREETING: Str = "hola"                   // Str literal
+let DEBUG = true                             // const-eval Bool
+let LIMIT = 10 * 2 + 5                       // const-eval con BinOp
+
+fn try_with_cap(n: Int) -> Int {
+    if (n > MAX_RETRIES) { return MAX_RETRIES }
+    return n
+}
+
+fn greet(name: Str) -> Str {
+    return "{GREETING}, {name}"
+}
+
+fn log(msg: Str) -> Null {
+    if (DEBUG) { print("[DEBUG] {msg}") }
+    return null
+}
+
+fn check(n: Int) -> Bool {
+    return n < LIMIT
+}
+
+print(try_with_cap(2))                           // 2
+print(try_with_cap(10))                          // 3
+print(greet("Ada"))                              // hola, Ada
+log("startup completo")                          // [DEBUG] startup completo
+print(check(20))                                 // true
+print(check(30))                                 // false
+
+// --- Caveats / lo que sigue como deuda ---
+//
+//   - Solo `let X = <const-eval>` se hoistan. RHS con calls a fns,
+//     constructors de tipos custom o expresiones runtime (`let xs =
+//     [1, 2, 3]`) NO se hoistan — siguen siendo locales de main()
+//     y las fns top-level no pueden referenciarlas.
+//   - Si `X` se reasigna (`let X = 10; X = 20`), no se hoiste
+//     tampoco (const Rust es inmutable). Workaround: pasarla como
+//     param o usar un wrapper con Mutex (futuro).
+//   - HO callbacks: hoy solo fns nombradas top-level y vars locales
+//     con tipo `Function` se aceptan. Closures capturando estado del
+//     scope tienen su propio camino (F12 original).
