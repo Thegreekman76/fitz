@@ -3744,6 +3744,7 @@ print(xs)                          // [1, 2, 3]
 | `entries()`         | `List<(K, V)>` con los pares en orden de inserción; inversa de `to_map` (Mb3). |
 | `invert()`          | `Map<V, K>` con keys/values intercambiados; last-write-wins en values dups (Mb4). |
 | `merge_with(o, fn)` | `Map<K, V>` con merge de `other`; el callback `fn(V, V) -> V` decide en conflicts (Mb6). |
+| `with(k, v)`        | Map nuevo con `k → v`; sobreescribe si `k` existe. Functional update (Mb7). |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -4149,6 +4150,7 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.split_at(i)`      | `Int`        | `(Str, Str)`  | divide en char idx; idx >= len → segundo vacío (Mb4) |
 | `.lines()`          | —            | `List<Str>`   | separa por `\n`; ignora `\n` final (Mb5) |
 | `.is_empty()`       | —            | `Bool`        | atajo de `len() == 0` (Mb5) |
+| `.repeat_with(n, sep)` | `Int`, `Str` | `Str`      | repite intercalando `sep`; `n < 0` error (Mb7) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 
@@ -4180,6 +4182,12 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.min_by(fn)`       | `fn(T) -> Int`    | `Result<T>`   | item con min ranking; vacía → `Err` (Mb5) |
 | `.scan(init, fn)`   | `Acc`, `fn(Acc, T) -> Acc` | `List<Acc>` | fold con outputs intermedios (cumulative) (Mb6) |
 | `.windows(n)`       | `Int`             | `List<List<T>>` | sliding windows de tamaño n; `len < n` → vacía (Mb6) |
+| `.take(n)`          | `Int`             | `List<T>`     | primeros `n` elementos; clamp safe (Mb7) |
+| `.drop(n)`          | `Int`             | `List<T>`     | saltea primeros `n`; clamp safe (Mb7) |
+| `.init()`           | —                 | `List<T>`     | todos menos el último; vacía → vacía (Mb7) |
+| `.tail()`           | —                 | `List<T>`     | todos menos el primero; vacía → vacía (Mb7) |
+| `.intersperse(sep)` | `T`               | `List<T>`     | inserta `sep` entre elementos (Mb7) |
+| `.cycle(n)`         | `Int`             | `List<T>`     | repite la lista `n` veces; `n <= 0` → vacía (Mb7) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4771,6 +4779,103 @@ fn h() -> Str => "ok"
 Ver [examples/guide/13r-mb6-y-async-build.fitz](../examples/guide/13r-mb6-y-async-build.fitz)
 para el ejemplo completo de Mb6 + async closures (validado bit-a-bit
 `fitz run` ↔ `fitz build`).
+
+### take + drop + init + tail + intersperse + cycle + repeat_with + with + format specs en build (mini-tanda Mb7 + Fmt-build)
+
+Bundle final de polish: 7 métodos chicos sobre colecciones y Str +
+completar los format specs que faltaban en `fitz build`.
+
+**`List.take(n)` / `List.drop(n)`** — primeros/restantes elementos.
+Paralelo a Rust `Iterator::take`/`skip`. Clamp safe: `n` fuera de
+rango no es error (`n <= 0` → vacía/full, `n >= len` → full/vacía).
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4, 5]
+print(xs.take(3))                                // [1, 2, 3]
+print(xs.drop(2))                                // [3, 4, 5]
+```
+
+**`List.init()` / `List.tail()`** — todos menos último/primero
+respectivamente. Paralelo a Haskell. Sobre lista vacía → lista
+vacía (sin error).
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4]
+print(xs.init())                                 // [1, 2, 3]
+print(xs.tail())                                 // [2, 3, 4]
+```
+
+**`List.intersperse(sep)`** — inserta `sep` entre cada par de
+elementos consecutivos.
+
+```fitz
+let palabras: List<Str> = ["hola", "fitz", "rust"]
+print(palabras.intersperse(" | "))               // ["hola", " | ", "fitz", " | ", "rust"]
+```
+
+**`List.cycle(n)`** — repite la lista `n` veces. `n <= 0` → vacía
+(política friendly, no error).
+
+```fitz
+let abc: List<Str> = ["a", "b"]
+print(abc.cycle(3))                              // ["a", "b", "a", "b", "a", "b"]
+```
+
+**`Str.repeat_with(n, sep)`** — variante de `repeat(n)` que
+intercala `sep` entre repeticiones. Paralelo a Python
+`sep.join([s] * n)`.
+
+```fitz
+print("hi".repeat_with(3, "-"))                  // hi-hi-hi
+print("=".repeat_with(20, ""))                   // 20 iguales seguidos
+```
+
+**`Map.with(k, v)`** — functional update. Devuelve un Map nuevo
+con `k → v`; el receiver queda intacto. Si `k` ya existe,
+sobreescribe (last-write-wins). Encadenable para construir Maps
+paso a paso sin mutar.
+
+```fitz
+let base: Map<Str, Int> = {"a": 1, "b": 2}
+let extendido: Map<Str, Int> = base.with("c", 3)
+print(extendido.len())                           // 3
+print(base.len())                                // 2 — intacto
+
+let chain: Map<Str, Int> = base.with("x", 10).with("y", 20).with("z", 30)
+print(chain.len())                               // 5
+```
+
+**Format specs en `fitz build` (cierre de deuda Fm)** — los format
+specs `,`/`_` grouping, `%` percent y `c` char ahora compilan en
+`fitz build` (antes solo andaban en `fitz run`). El codegen emite
+helpers `__fitz_fmt_grouping`/`__fitz_fmt_percent`/`__fitz_fmt_char`
+en el preludio cuando el programa los usa.
+
+```fitz
+// Grouping con `,` o `_`:
+let big = 1234567
+print("{big:,d}")                                // 1,234,567
+print("{big:_d}")                                // 1_234_567
+
+// Percent (multiplica x100, agrega %):
+let ratio = 0.857
+print("{ratio:.2%}")                             // 85.70%
+
+// Char codepoint (Int → caracter Unicode):
+let cp = 65
+print("{cp:c}")                                  // A
+
+// Combinación con width/align:
+print("|{big:>15,d}|")                           // |      1,234,567|
+```
+
+**Deuda residual menor** (sub-paso futuro): el spec `g`/`G`
+(general) sigue solo en `fitz run` — requiere lógica de
+"decide entre fixed y exponente según magnitud" que es más
+involucrada. Sin presión real.
+
+Ver [examples/guide/13s-mb7-y-fmt-build.fitz](../examples/guide/13s-mb7-y-fmt-build.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda
 

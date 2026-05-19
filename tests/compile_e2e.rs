@@ -1969,6 +1969,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13p-mb4-y-comprehensions-extendidas.fitz",
     "13q-mb5-y-async-closures.fitz",
     "13r-mb6-y-async-build.fitz",
+    "13s-mb7-y-fmt-build.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -4096,6 +4097,119 @@ fn mb5_str_is_empty_compila() {
     let (stdout, exit) = build_and_run("mb5_str_is_empty", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+// ---- Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle +
+//                      repeat_with + with ----------
+
+#[test]
+fn mb7_list_take_drop_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               print(xs.take(3))\n\
+               print(xs.drop(2))\n\
+               print(xs.take(99))\n\
+               print(xs.drop(99))\n";
+    let (stdout, exit) = build_and_run("mb7_take_drop", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 2, 3]\n[3, 4, 5]\n[1, 2, 3, 4, 5]\n[]");
+}
+
+#[test]
+fn mb7_list_init_tail_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4]\n\
+               print(xs.init())\n\
+               print(xs.tail())\n";
+    let (stdout, exit) = build_and_run("mb7_init_tail", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 2, 3]\n[2, 3, 4]");
+}
+
+#[test]
+fn mb7_list_intersperse_compila() {
+    let src = "let xs: List<Int> = [10, 20, 30]\n\
+               print(xs.intersperse(0))\n";
+    let (stdout, exit) = build_and_run("mb7_intersperse", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[10, 0, 20, 0, 30]");
+}
+
+#[test]
+fn mb7_list_cycle_compila() {
+    let src = "let xs: List<Int> = [1, 2]\n\
+               print(xs.cycle(3))\n";
+    let (stdout, exit) = build_and_run("mb7_cycle", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 2, 1, 2, 1, 2]");
+}
+
+#[test]
+fn mb7_str_repeat_with_compila() {
+    let src = "print(\"hi\".repeat_with(3, \"-\"))\n\
+               print(\"x\".repeat_with(0, \",\"))\n";
+    let (stdout, exit) = build_and_run("mb7_repeat_with", src);
+    assert_eq!(exit, 0);
+    // Segunda línea es string vacío (n=0).
+    assert_eq!(stdout, "hi-hi-hi\n\n");
+}
+
+#[test]
+fn mb7_map_with_compila() {
+    let src = "let m: Map<Str, Int> = {\"a\": 1}\n\
+               let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
+               print(m2[\"a\"])\n\
+               print(m2[\"b\"])\n\
+               let m3: Map<Str, Int> = m.with(\"a\", 99)\n\
+               print(m3[\"a\"])\n";
+    let (stdout, exit) = build_and_run("mb7_with", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n2\n99");
+}
+
+// ---- Mini-tanda Fmt-build — format specs faltantes ----
+
+#[test]
+fn fmt_build_grouping_coma_compila() {
+    let src = "let n = 1234567\n\
+               print(\"{n:,d}\")\n";
+    let (stdout, exit) = build_and_run("fmt_grouping_coma", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1,234,567");
+}
+
+#[test]
+fn fmt_build_grouping_underscore_compila() {
+    let src = "let n = 1000000\n\
+               print(\"{n:_d}\")\n";
+    let (stdout, exit) = build_and_run("fmt_grouping_underscore", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1_000_000");
+}
+
+#[test]
+fn fmt_build_percent_compila() {
+    let src = "let r = 0.857\n\
+               print(\"{r:.2%}\")\n";
+    let (stdout, exit) = build_and_run("fmt_percent", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "85.70%");
+}
+
+#[test]
+fn fmt_build_char_codepoint_compila() {
+    let src = "let cp = 65\n\
+               print(\"{cp:c}\")\n";
+    let (stdout, exit) = build_and_run("fmt_char_codepoint", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "A");
+}
+
+#[test]
+fn fmt_build_grouping_negativo_compila() {
+    let src = "let n = -1234\n\
+               print(\"{n:,d}\")\n";
+    let (stdout, exit) = build_and_run("fmt_grouping_neg", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "-1,234");
 }
 
 // ---- Mini-tanda Mb6 — scan + windows + merge_with --------

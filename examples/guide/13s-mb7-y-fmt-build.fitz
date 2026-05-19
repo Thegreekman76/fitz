@@ -1,0 +1,100 @@
+// Mini-tanda Mb7 + Fmt-build — métodos extras + format specs faltantes
+// en `fitz build`.
+//
+//   - Mb7 (7 métodos chicos sobre colecciones y Str):
+//     * `List.take(n)` / `List.drop(n)` — primeros/restantes elementos.
+//     * `List.init()` / `List.tail()` — todos menos último/primero.
+//     * `List.intersperse(sep)` — inserta sep entre elementos.
+//     * `List.cycle(n)` — repite la lista n veces.
+//     * `Str.repeat_with(n, sep)` — repite con separador.
+//     * `Map.with(k, v)` — functional update (Map nuevo con k→v).
+//
+//   - Fmt-build: format specs que antes solo andaban en `fitz run`:
+//     * `,` y `_` grouping para Int (separadores de miles).
+//     * `%` percent (multiplica x100 + sufijo %).
+//     * `c` char (Int → caracter Unicode).
+
+// --- List.take / List.drop -------------------------------------
+
+let serie: List<Int> = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+
+print(serie.take(3))                             // [1, 2, 3]
+print(serie.drop(7))                             // [8, 9, 10]
+
+// take/drop con n fuera de rango son no-ops seguros.
+print(serie.take(99))                            // todos
+print(serie.drop(99))                            // vacía
+
+// --- List.init / List.tail (estilo Haskell) -------------------
+
+print(serie.init())                              // sin el último
+print(serie.tail())                              // sin el primero
+
+let vacia: List<Int> = []
+print(vacia.init())                              // []
+print(vacia.tail())                              // []
+
+// --- List.intersperse: insertar separador entre elementos ----
+
+let palabras: List<Str> = ["hola", "fitz", "rust"]
+print(palabras.intersperse(" | "))               // ["hola", " | ", "fitz", " | ", "rust"]
+
+let pares: List<Int> = [10, 20, 30]
+print(pares.intersperse(0))                      // [10, 0, 20, 0, 30]
+
+// --- List.cycle: repetir la lista n veces --------------------
+
+let abc: List<Str> = ["a", "b"]
+print(abc.cycle(3))                              // ["a", "b", "a", "b", "a", "b"]
+print(abc.cycle(0))                              // []
+
+// --- Str.repeat_with: repetir con separador -----------------
+
+print("hi".repeat_with(3, "-"))                  // hi-hi-hi
+print("=".repeat_with(20, ""))                   // 20 iguales seguidos
+
+// --- Map.with: functional update ---------------------------
+
+let base: Map<Str, Int> = {"a": 1, "b": 2}
+
+// Devuelve Map NUEVO con key adicional, sin mutar `base`.
+let extendido: Map<Str, Int> = base.with("c", 3)
+print(extendido.len())                           // 3
+print(base.len())                                // 2 — intacto
+
+// Si la key existe, sobreescribe (last-write-wins).
+let updated: Map<Str, Int> = base.with("a", 100)
+print(updated["a"])                              // 100
+
+// Encadenable: construir un Map paso a paso.
+let final_map: Map<Str, Int> = base.with("x", 1).with("y", 2).with("z", 3)
+print(final_map.len())                           // 5 (a, b, x, y, z)
+
+// --- Fmt-build: format specs ahora también en `fitz build` ---
+
+// Grouping con `,` (separadores de miles, estilo US/UK).
+let big = 1234567
+print("ventas: {big:,d}")                        // ventas: 1,234,567
+
+// Grouping con `_` (separadores de miles, estilo Python PEP 515).
+let conteo = 1000000
+print("conteo: {conteo:_d}")                     // conteo: 1_000_000
+
+// Percent (multiplica por 100, agrega %).
+let ratio = 0.857
+print("conversión: {ratio:.2%}")                 // conversión: 85.70%
+
+let progreso = 0.5
+print("progreso: {progreso:.0%}")                // progreso: 50%
+
+// Char codepoint (Int → caracter Unicode).
+let a_code = 65
+print("char {a_code}: {a_code:c}")               // char 65: A
+
+let snowman = 9731
+print("snowman {snowman}: {snowman:c}")          // snowman 9731: ☃
+
+// Combinación con width/align.
+let large = 1234567
+print("|{large:>15,d}|")                         // |      1,234,567|
+print("|{large:<15,d}|")                         // |1,234,567      |

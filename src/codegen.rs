@@ -284,6 +284,101 @@ fn has_http_routes(program: &Program) -> bool {
 /// HTTP ya implica async (los handlers axum corren en tokio), así
 /// que el flag es ortogonal: un programa puede ser HTTP sin sleep
 /// (no necesita `time`), o CLI con sleep (no necesita axum).
+/// Mini-tanda Fmt-build — detecta si el programa usa format specs
+/// que requieren helpers custom: `,`/`_` grouping, `%` percent, `c`
+/// char. Cuando es `true`, el preludio emite los helpers
+/// `__fitz_fmt_grouping`/`__fitz_fmt_percent`/`__fitz_fmt_char`.
+fn program_uses_fmt_helpers(program: &Program) -> bool {
+    use crate::ast::{FormatKind, StrPart};
+    fn spec_needs_helper(spec: &crate::ast::FormatSpec) -> bool {
+        if spec.grouping.is_some() {
+            return true;
+        }
+        matches!(
+            spec.kind,
+            Some(FormatKind::Char) | Some(FormatKind::Percent)
+        )
+    }
+    fn expr_uses_fmt(e: &Expr) -> bool {
+        match e {
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Expr(inner, Some(spec)) => {
+                    spec_needs_helper(spec) || expr_uses_fmt(inner)
+                }
+                StrPart::Expr(inner, None) => expr_uses_fmt(inner),
+                StrPart::Lit(_) => false,
+            }),
+            Expr::BinOp { left, right, .. } => expr_uses_fmt(left) || expr_uses_fmt(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_fmt(operand),
+            Expr::Call { callee, args, .. } => {
+                expr_uses_fmt(callee) || args.iter().any(expr_uses_fmt)
+            }
+            Expr::Field { object, .. } => expr_uses_fmt(object),
+            Expr::Index { object, index, .. } => {
+                expr_uses_fmt(object) || expr_uses_fmt(index)
+            }
+            Expr::Slice { object, start, end, .. } => {
+                expr_uses_fmt(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_fmt(s))
+                    || end.as_ref().is_some_and(|e| expr_uses_fmt(e))
+            }
+            Expr::List(items, _) => items.iter().any(expr_uses_fmt),
+            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+                expr_uses_fmt(expr)
+                    || expr_uses_fmt(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_fmt(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_fmt(f))
+            }
+            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+                expr_uses_fmt(key)
+                    || expr_uses_fmt(value)
+                    || expr_uses_fmt(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_fmt(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_fmt(f))
+            }
+            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_fmt(k) || expr_uses_fmt(v)),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_fmt),
+            Expr::TupleField { tuple, .. } => expr_uses_fmt(tuple),
+            Expr::Range { start, end, .. } => expr_uses_fmt(start) || expr_uses_fmt(end),
+            Expr::If { condition, then, else_, .. } => {
+                expr_uses_fmt(condition)
+                    || then.iter().any(stmt_uses_fmt)
+                    || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_fmt))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_fmt(value) || arms.iter().any(|a| expr_uses_fmt(&a.body))
+            }
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_fmt),
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_fmt(v)),
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_fmt),
+            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+                expr_uses_fmt(inner)
+            }
+            _ => false,
+        }
+    }
+    fn stmt_uses_fmt(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_fmt),
+            Stmt::Assign { value, .. } => expr_uses_fmt(value),
+            Stmt::Return(e, _) => expr_uses_fmt(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_fmt(status) || body.as_ref().is_some_and(expr_uses_fmt)
+            }
+            Stmt::Expr(e, _) => expr_uses_fmt(e),
+            Stmt::While { condition, body, .. } => {
+                expr_uses_fmt(condition) || body.iter().any(stmt_uses_fmt)
+            }
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_fmt),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_fmt(iter) || body.iter().any(stmt_uses_fmt)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_fmt)
+}
+
 fn program_uses_async(program: &Program) -> bool {
     fn expr_uses_async(e: &Expr) -> bool {
         match e {
@@ -1860,10 +1955,12 @@ fn generate_main_rs(
     let has_http = has_http_routes(program);
     let uses_async = program_uses_async(program);
     let uses_python = !python_imports.is_empty();
+    let uses_fmt_helpers = program_uses_fmt_helpers(program);
 
     let mut ctx = CodegenCtx::new(env);
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
+    ctx.uses_fmt_helpers = uses_fmt_helpers;
     ctx.install_python_bindings(python_imports);
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
@@ -2460,6 +2557,14 @@ struct CodegenCtx<'a> {
     /// sobre `fn main()` CLI, y el feature `time` en el Cargo.toml.
     /// Se setea en `generate_main_rs` antes de emit_prelude.
     uses_async: bool,
+    /// Mini-tanda Fmt-build — `true` si el programa usa al menos un
+    /// format spec que requiere helpers custom (`,`/`_` grouping,
+    /// `%` percent, `c` char). Habilita la emisión de los helpers
+    /// `__fitz_fmt_grouping`/`__fitz_fmt_percent`/`__fitz_fmt_char`
+    /// en el preludio. Detectado en una pre-pasada (no afecta el
+    /// resto del codegen si es false). Se setea durante `gen_str_interp`
+    /// cuando aparece un FormatSpec con grouping o kind Char/Percent.
+    uses_fmt_helpers: bool,
     /// Fase 8.7.1: `true` si el programa tiene al menos un import
     /// Python (`from python import X` / `import python.X`). Habilita
     /// el preludio Python (`__FitzPyObject` + helpers PyO3) y la
@@ -2583,6 +2688,7 @@ impl<'a> CodegenCtx<'a> {
             http_handlers_returning_response: std::collections::HashSet::new(),
             middleware_fn_names: std::collections::HashSet::new(),
             uses_async: false,
+            uses_fmt_helpers: false,
             uses_python: false,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
@@ -3360,6 +3466,33 @@ impl<'a> CodegenCtx<'a> {
             "fn __fitz_fmt_float(v: f64) -> String {\n    \
              if v.is_finite() && v.fract() == 0.0 { format!(\"{:.1}\", v) } else { format!(\"{}\", v) }\n}\n\n",
         );
+        // Mini-tanda Fmt-build — helpers para los format specs que
+        // Rust no soporta nativamente: `,`/`_` grouping, `%` percent,
+        // `c` char. Solo se emiten cuando el programa los usa (gating
+        // via `uses_fmt_helpers`).
+        if self.uses_fmt_helpers {
+            self.emit(
+                "fn __fitz_fmt_grouping(n: i64, sep: char) -> String {\n    \
+                 let abs = (n as i128).unsigned_abs();\n    \
+                 let s = abs.to_string();\n    \
+                 let mut out: Vec<char> = Vec::with_capacity(s.len() + s.len() / 3);\n    \
+                 for (i, c) in s.chars().rev().enumerate() {\n        \
+                     if i > 0 && i % 3 == 0 { out.push(sep); }\n        \
+                     out.push(c);\n    \
+                 }\n    \
+                 let mut rev: String = out.into_iter().rev().collect();\n    \
+                 if n < 0 { rev.insert(0, '-'); }\n    \
+                 rev\n}\n\n",
+            );
+            self.emit(
+                "fn __fitz_fmt_percent(x: f64, precision: usize) -> String {\n    \
+                 format!(\"{:.*}%\", precision, x * 100.0)\n}\n\n",
+            );
+            self.emit(
+                "fn __fitz_fmt_char(n: i64) -> String {\n    \
+                 char::from_u32(n as u32).map(|c| c.to_string()).unwrap_or_else(|| format!(\"\\\\u{{{:x}}}\", n))\n}\n\n",
+            );
+        }
         // Fase 6.6: builtin `sleep` Fitz → wrapper async sobre
         // `tokio::time::sleep`. Solo se emite cuando el programa lo
         // usa (`uses_async` cubre `sleep`/`.await`/`async fn`) — los
@@ -6095,8 +6228,26 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Str))
             }
+            // Mini-tanda Mb7 — `repeat_with(n, sep)`: repite intercalando
+            // sep. n < 0 → panic; n == 0 → vacío.
+            (Type::Str, "repeat_with") => {
+                check_method_arity(method, args, 2)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let (sep_code, sep_ty) = self.gen_expr(&args[1])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let sep_c = coerce(&sep_code, &sep_ty, &Type::Str);
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let __n: i64 = {n_c}; \
+                       let __sep: String = {sep_c}; \
+                       if __n < 0 {{ panic!(\"`.repeat_with()` no acepta n negativo: recibió {{}}\", __n); }} \
+                       let __parts: Vec<&str> = std::iter::repeat(__s.as_str()).take(__n as usize).collect(); \
+                       __parts.join(__sep.as_str()) }}"
+                );
+                Ok((code, Type::Str))
+            }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with)",
                 other
             ))),
 
@@ -6709,8 +6860,93 @@ impl<'a> CodegenCtx<'a> {
                     Type::List(Box::new(Type::List(Box::new((**t).clone())))),
                 ))
             }
+            // Mini-tanda Mb7 — take(n) / drop(n) / cycle(n) / init() /
+            // tail() / intersperse(sep). Snapshot + slice/iter Rust.
+            (Type::List(t), "take") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __n: i64 = {n_c}; \
+                       let __take = if __n <= 0 {{ 0 }} else {{ (__n as usize).min(__snap.len()) }}; \
+                       Arc::new(Mutex::new(__snap.into_iter().take(__take).collect::<Vec<{t_rs}>>())) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            (Type::List(t), "drop") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __n: i64 = {n_c}; \
+                       let __drop = if __n <= 0 {{ 0 }} else {{ (__n as usize).min(__snap.len()) }}; \
+                       Arc::new(Mutex::new(__snap.into_iter().skip(__drop).collect::<Vec<{t_rs}>>())) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            (Type::List(t), "init") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __out: Vec<{t_rs}> = if __snap.is_empty() {{ Vec::new() }} \
+                           else {{ __snap[..__snap.len() - 1].to_vec() }}; \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            (Type::List(t), "tail") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __out: Vec<{t_rs}> = if __snap.is_empty() {{ Vec::new() }} \
+                           else {{ __snap[1..].to_vec() }}; \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            (Type::List(t), "intersperse") => {
+                check_method_arity(method, args, 1)?;
+                let (sep_code, sep_ty) = self.gen_expr(&args[0])?;
+                let sep_c = coerce(&sep_code, &sep_ty, t);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __sep: {t_rs} = {sep_c}; \
+                       let mut __out: Vec<{t_rs}> = Vec::with_capacity(__snap.len() * 2); \
+                       for (__i, __v) in __snap.into_iter().enumerate() {{ \
+                           if __i > 0 {{ __out.push(__sep.clone()); }} \
+                           __out.push(__v); \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            (Type::List(t), "cycle") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __n: i64 = {n_c}; \
+                       let __out: Vec<{t_rs}> = if __n <= 0 || __snap.is_empty() {{ Vec::new() }} \
+                           else {{ \
+                               let mut __r: Vec<{t_rs}> = Vec::with_capacity(__snap.len() * (__n as usize)); \
+                               for _ in 0..__n {{ for __v in &__snap {{ __r.push(__v.clone()); }} }} \
+                               __r \
+                           }}; \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle)",
                 other
             ))),
 
@@ -6916,8 +7152,30 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::List(Box::new(Type::Tuple(vec![(**k).clone(), (**v).clone()])))))
             }
+            // Mini-tanda Mb7 — with(k, v) -> Map<K, V>: functional update.
+            (Type::Map(k, v), "with") => {
+                check_method_arity(method, args, 2)?;
+                let (key_code, key_ty) = self.gen_expr(&args[0])?;
+                let (val_code, val_ty) = self.gen_expr(&args[1])?;
+                let key_c = coerce(&key_code, &key_ty, k);
+                let val_c = coerce(&val_code, &val_ty, v);
+                let k_rs = rust_type_for(k, self.env)?;
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let mut __out: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let __k: {k_rs} = {key_c}; \
+                       let __v: {v_rs} = {val_c}; \
+                       if let Some(__slot) = __out.iter_mut().find(|__p| __p.0 == __k) {{ \
+                           __slot.1 = __v; \
+                       }} else {{ \
+                           __out.push((__k, __v)); \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::Map(k.clone(), v.clone())))
+            }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with)",
                 other
             ))),
 
@@ -11825,10 +12083,26 @@ fn format_spec_to_rust(
     ty: &Type,
 ) -> Result<(String, String), String> {
     use crate::ast::FormatKind;
-    if spec.grouping.is_some() {
-        return Err(
-            "format spec con `,`/`_` (grouping) no soportado en `fitz build`; usá `fitz run`".into(),
-        );
+    // Mini-tanda Fmt-build — `,`/`_` grouping, `%` percent, y `c`
+    // char usan helpers custom emitidos en el preludio. Acá los
+    // detectamos y construimos un wrapper que pre-formatea el value
+    // como String; el resto del spec (width/align/precision) se
+    // aplica encima con `{:>5}` por ejemplo. La señal de "wrapper
+    // helper" se hace devolviendo el coerced ya envuelto + kind_str
+    // forzado a "" (es un String al final).
+    let mut helper_wrapper: Option<String> = None;
+    if let Some(grouping_char) = spec.grouping {
+        // Grouping requiere Int.
+        if !matches!(ty, Type::Int) {
+            return Err(format!(
+                "format spec con grouping (`,`/`_`) requiere Int, recibió `{}`",
+                display_type(ty, &crate::types::TypeEnv::new())
+            ));
+        }
+        helper_wrapper = Some(format!(
+            "__fitz_fmt_grouping(({}) as i64, '{}')",
+            code, grouping_char
+        ));
     }
     let kind_str = match spec.kind {
         None => "",
@@ -11847,14 +12121,36 @@ fn format_spec_to_rust(
             );
         }
         Some(FormatKind::Char) => {
-            return Err(
-                "format spec `c` (codepoint) no soportado en `fitz build`; usá `fitz run`".into(),
-            );
+            // Mini-tanda Fmt-build — `c` char: Int → Str (codepoint).
+            if !matches!(ty, Type::Int) {
+                return Err(format!(
+                    "format spec `c` (codepoint) requiere Int, recibió `{}`",
+                    display_type(ty, &crate::types::TypeEnv::new())
+                ));
+            }
+            helper_wrapper = Some(format!("__fitz_fmt_char(({}) as i64)", code));
+            ""
         }
         Some(FormatKind::Percent) => {
-            return Err(
-                "format spec `%` (percent) no soportado en `fitz build`; usá `fitz run`".into(),
-            );
+            // Mini-tanda Fmt-build — `%` percent: Float (o Int) →
+            // Str con valor multiplicado x100 + sufijo %. Precision
+            // del spec se pasa al helper (default 6 paralelo a Python).
+            let coerced_f = match ty {
+                Type::Int => format!("(({}) as f64)", code),
+                Type::Float => code.to_string(),
+                other => {
+                    return Err(format!(
+                        "format spec `%` (percent) requiere Float o Int, recibió `{}`",
+                        display_type(other, &crate::types::TypeEnv::new())
+                    ));
+                }
+            };
+            let precision = spec.precision.unwrap_or(6);
+            helper_wrapper = Some(format!(
+                "__fitz_fmt_percent({}, {})",
+                coerced_f, precision
+            ));
+            ""
         }
     };
 
@@ -11887,6 +12183,25 @@ fn format_spec_to_rust(
 
     // Armado del rust spec.
     let mut out = String::new();
+    // Mini-tanda Fmt-build — cuando hay helper_wrapper, el resultado
+    // del helper ya es un String con todo aplicado (grouping ya
+    // formateado, precision ya consumida por el `%`, kind por `c`).
+    // El único spec extra Rust acepta encima es fill/align/width.
+    // Si NO hay wrapper, comportamiento Fm clásico.
+    if let Some(wrapped) = helper_wrapper {
+        if let (Some(fill), Some(align)) = (spec.fill, spec.align) {
+            out.push(fill);
+            out.push(align.to_char());
+        } else if let Some(align) = spec.align {
+            out.push(align.to_char());
+        }
+        if let Some(w) = spec.width {
+            out.push_str(&w.to_string());
+        }
+        // Ignoramos sign/alternate/zero_pad/precision/kind — el helper
+        // ya hizo lo suyo. El coerced final es el wrapper (String).
+        return Ok((format!(":{}", out), wrapped));
+    }
     if let (Some(fill), Some(align)) = (spec.fill, spec.align) {
         out.push(fill);
         out.push(align.to_char());

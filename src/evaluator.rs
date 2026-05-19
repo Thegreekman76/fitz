@@ -3299,6 +3299,13 @@ async fn dispatch_method(
         // Mini-tanda Mb6 — scan (fold con outputs intermedios) + windows.
         (Value::List(_), "scan") => list_scan(receiver, args, span).await,
         (Value::List(_), "windows") => list_windows(receiver, args, span),
+        // Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle.
+        (Value::List(_), "take") => list_take(receiver, args, span),
+        (Value::List(_), "drop") => list_drop(receiver, args, span),
+        (Value::List(_), "init") => list_init(receiver, args, span),
+        (Value::List(_), "tail") => list_tail(receiver, args, span),
+        (Value::List(_), "intersperse") => list_intersperse(receiver, args, span),
+        (Value::List(_), "cycle") => list_cycle(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3353,6 +3360,8 @@ async fn dispatch_method(
         // Mini-tanda Mb6 — merge_with: merge con callback para
         // resolver conflicts.
         (Value::Map(_), "merge_with") => map_merge_with(receiver, args, span).await,
+        // Mini-tanda Mb7 — with: functional update (Map nuevo con k→v).
+        (Value::Map(_), "with") => map_with(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3370,6 +3379,8 @@ async fn dispatch_method(
         // Mini-tanda Mb5 — lines + is_empty.
         (Value::Str(_), "lines") => str_lines(receiver, args, span),
         (Value::Str(_), "is_empty") => str_is_empty(receiver, args, span),
+        // Mini-tanda Mb7 — repeat_with (variante de repeat con sep).
+        (Value::Str(_), "repeat_with") => str_repeat_with(receiver, args, span),
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
         // Mini-tanda Mb — variantes parciales de trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
@@ -4528,6 +4539,155 @@ fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(out))
 }
 
+/// Mini-tanda Mb7 — `xs.take(n) -> List<T>`: primeros `n` elementos.
+/// Si `n >= len(xs)`, devuelve copia completa; si `n <= 0`, lista
+/// vacía. Paralelo a Rust `Iterator::take`.
+fn list_take(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("take", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.take()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let take_n = if n <= 0 { 0 } else { (n as usize).min(snapshot.len()) };
+    let out: Vec<Value> = snapshot.into_iter().take(take_n).collect();
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb7 — `xs.drop(n) -> List<T>`: saltea los primeros `n`
+/// elementos. Si `n >= len(xs)`, lista vacía; si `n <= 0`, copia
+/// completa. Paralelo a Rust `Iterator::skip`.
+fn list_drop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("drop", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.drop()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let drop_n = if n <= 0 { 0 } else { (n as usize).min(snapshot.len()) };
+    let out: Vec<Value> = snapshot.into_iter().skip(drop_n).collect();
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb7 — `xs.init() -> List<T>`: todos los elementos menos
+/// el último. Paralelo a Haskell `init`. Lista vacía → lista vacía.
+fn list_init(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("init", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let out: Vec<Value> = if snapshot.is_empty() {
+        Vec::new()
+    } else {
+        snapshot[..snapshot.len() - 1].to_vec()
+    };
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb7 — `xs.tail() -> List<T>`: todos los elementos menos
+/// el primero. Paralelo a Haskell `tail`. Lista vacía → lista vacía.
+fn list_tail(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("tail", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let out: Vec<Value> = if snapshot.is_empty() {
+        Vec::new()
+    } else {
+        snapshot[1..].to_vec()
+    };
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb7 — `xs.intersperse(sep) -> List<T>`: inserta `sep`
+/// entre cada par de elementos consecutivos. `[a, b, c]` →
+/// `[a, sep, b, sep, c]`. Lista vacía o de 1 elemento → sin cambios.
+/// Paralelo a Haskell `intersperse`.
+fn list_intersperse(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("intersperse", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let sep = args.into_iter().next().unwrap();
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut out: Vec<Value> = Vec::with_capacity(snapshot.len() * 2);
+    for (i, item) in snapshot.into_iter().enumerate() {
+        if i > 0 {
+            out.push(sep.clone());
+        }
+        out.push(item);
+    }
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb7 — `xs.cycle(n) -> List<T>`: repite la lista `n`
+/// veces. `n <= 0` → lista vacía (no error — política friendly).
+/// Paralelo a Rust `Iterator::cycle().take(n * len)` pero acotado
+/// para evitar listas infinitas en memoria.
+fn list_cycle(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("cycle", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.cycle()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    if n <= 0 || snapshot.is_empty() {
+        return Ok(Value::new_list(Vec::new()));
+    }
+    let total = snapshot.len() * (n as usize);
+    let mut out: Vec<Value> = Vec::with_capacity(total);
+    for _ in 0..n {
+        for v in &snapshot {
+            out.push(v.clone());
+        }
+    }
+    Ok(Value::new_list(out))
+}
+
 /// Mini-tanda Mb6 — `xs.scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
 /// Fold con outputs intermedios — devuelve una lista con cada
 /// estado del acumulador después de procesar cada elemento. Útil
@@ -4995,6 +5155,29 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_map(out))
 }
 
+/// Mini-tanda Mb7 — `m.with(k, v) -> Map<K, V>`: devuelve un Map
+/// nuevo con la key `k` mapeada a `v`. Si `k` ya existe, sobreescribe
+/// (last-write-wins, paralelo a `merge`). Operación funcional pura —
+/// el receiver queda intacto. Útil para construir Maps acumulando
+/// updates sin mutar.
+fn map_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("with", &args, 2, span)?;
+    let pairs = match receiver {
+        Value::Map(p) => p,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let k = it.next().unwrap();
+    let v = it.next().unwrap();
+    let mut out: Vec<(Value, Value)> = pairs.lock().clone();
+    if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &k) {
+        slot.1 = v;
+    } else {
+        out.push((k, v));
+    }
+    Ok(Value::new_map(out))
+}
+
 /// Mini-tanda Mb6 — `m.merge_with(other, fn(V, V) -> V) -> Map<K, V>`:
 /// merge con resolución de conflictos via callback. Para cada key
 /// que aparece en ambos maps, el callback decide qué value queda
@@ -5283,6 +5466,55 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     let left: String = s.chars().take(clamped).collect();
     let right: String = s.chars().skip(clamped).collect();
     Ok(Value::Tuple(vec![Value::Str(left), Value::Str(right)]))
+}
+
+/// Mini-tanda Mb7 — `s.repeat_with(n, sep) -> Str`: repite el string
+/// `n` veces, intercalando `sep` entre cada repetición. `n < 0` →
+/// error claro; `n == 0` → string vacío. `"x".repeat_with(3, ", ")` →
+/// `"x, x, x"`. Paralelo a Python `sep.join([s] * n)` con sintaxis
+/// método.
+fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("repeat_with", &args, 2, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let n = match it.next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let sep = match it.next().unwrap() {
+        Value::Str(s) => s,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    if n < 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("`.repeat_with()` no acepta n negativo: recibió {}", n),
+        )));
+    }
+    let parts: Vec<&str> = std::iter::repeat_n(s.as_str(), n as usize).collect();
+    Ok(Value::Str(parts.join(&sep)))
 }
 
 /// Mini-tanda Mb5 — `s.lines()`: separa el string por `\n` devolviendo
@@ -15332,6 +15564,174 @@ let r = match n {
         } else {
             panic!("esperaba Map");
         }
+    }
+
+    // ---- Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle +
+    //                       repeat_with + with ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_list_take_y_drop() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let a: List<Int> = xs.take(3)\n\
+             let b: List<Int> = xs.drop(2)",
+        ).await;
+        res.unwrap();
+        let a = env.lock().get("a").unwrap();
+        if let Value::List(items) = a {
+            assert_eq!(items.lock().len(), 3);
+        }
+        let b = env.lock().get("b").unwrap();
+        if let Value::List(items) = b {
+            assert_eq!(items.lock().len(), 3);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_list_init_y_tail() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4]\n\
+             let i: List<Int> = xs.init()\n\
+             let t: List<Int> = xs.tail()",
+        ).await;
+        res.unwrap();
+        let i = env.lock().get("i").unwrap();
+        if let Value::List(items) = i {
+            let g = items.lock();
+            assert_eq!(g.len(), 3);
+            assert_eq!(g[0], Value::Int(1));
+            assert_eq!(g[2], Value::Int(3));
+        }
+        let t = env.lock().get("t").unwrap();
+        if let Value::List(items) = t {
+            let g = items.lock();
+            assert_eq!(g.len(), 3);
+            assert_eq!(g[0], Value::Int(2));
+            assert_eq!(g[2], Value::Int(4));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_list_init_y_tail_sobre_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let i: List<Int> = xs.init()\n\
+             let t: List<Int> = xs.tail()",
+        ).await;
+        res.unwrap();
+        let i = env.lock().get("i").unwrap();
+        if let Value::List(items) = i {
+            assert!(items.lock().is_empty());
+        }
+        let t = env.lock().get("t").unwrap();
+        if let Value::List(items) = t {
+            assert!(items.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_list_intersperse_int() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [10, 20, 30]\n\
+             let r: List<Int> = xs.intersperse(0)",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        if let Value::List(items) = r {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            assert_eq!(nums, vec![10, 0, 20, 0, 30]);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_list_cycle_repite_n_veces() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2]\n\
+             let r: List<Int> = xs.cycle(3)",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        if let Value::List(items) = r {
+            assert_eq!(items.lock().len(), 6);
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_list_cycle_n_cero_es_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.cycle(0)",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        if let Value::List(items) = r {
+            assert!(items.lock().is_empty());
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_str_repeat_with_intercala_sep() {
+        let (env, res) = parse_eval_into_env(
+            "let r: Str = \"hi\".repeat_with(3, \", \")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("hi, hi, hi".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_str_repeat_with_n_cero_es_vacio() {
+        let (env, res) = parse_eval_into_env(
+            "let r: Str = \"hi\".repeat_with(0, \", \")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_str_repeat_with_n_negativo_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "let r: Str = \"hi\".repeat_with(-1, \",\")",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(err.message.contains("negativo"), "msg fue: {}", err.message);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_map_with_inserta_o_sobreescribe() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
+             let m3: Map<Str, Int> = m.with(\"a\", 99)",
+        ).await;
+        res.unwrap();
+        // m2: {"a": 1, "b": 2}
+        let m2 = env.lock().get("m2").unwrap();
+        if let Value::Map(pairs) = m2 {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 2);
+        }
+        // m3: {"a": 99}
+        let m3 = env.lock().get("m3").unwrap();
+        if let Value::Map(pairs) = m3 {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 1);
+            let a = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
+            assert_eq!(a.map(|(_, v)| v.clone()), Some(Value::Int(99)));
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb7_map_with_no_muta_receptor() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
+             let original_has_b: Bool = m.has(\"b\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("original_has_b"), Some(Value::Bool(false)));
     }
 
     // ---- Mini-tanda Mb6 — scan + windows + merge_with ----

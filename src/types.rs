@@ -2730,6 +2730,38 @@ fn infer_list_method(
             }
             Type::List(Box::new(Type::List(Box::new(t.clone()))))
         }
+        // Mini-tanda Mb7 — `take(n)` / `drop(n)` / `cycle(n)`: Int arg,
+        // devuelven `List<T>`.
+        "take" | "drop" | "cycle" => {
+            if check_method_arity(ctx, method, args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`.{}()` espera `Int`, recibió `{}`",
+                    method, args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::List(Box::new(t.clone()))
+        }
+        // Mini-tanda Mb7 — `init()` / `tail()`: sin args, `List<T>`.
+        "init" | "tail" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::List(Box::new(t.clone()))
+        }
+        // Mini-tanda Mb7 — `intersperse(sep)`: el sep debe ser compatible
+        // con T.
+        "intersperse" => {
+            if check_method_arity(ctx, "intersperse", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], t)
+            {
+                ctx.error_at(span, format!(
+                    "`.intersperse()`: sep es `{}`, debe ser compatible con `{}`",
+                    args_ty[0].display(ctx.types),
+                    t.display(ctx.types),
+                ));
+            }
+            Type::List(Box::new(t.clone()))
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -2943,6 +2975,28 @@ fn infer_map_method(
         "invert" => {
             check_method_arity(ctx, "invert", args_ty, 0, span);
             Type::Map(Box::new(v.clone()), Box::new(k.clone()))
+        }
+        // Mini-tanda Mb7 — `with(k, v) -> Map<K, V>`: functional update.
+        // Devuelve Map nuevo con `k → v`. Si `k` existe, sobreescribe.
+        "with" => {
+            if !check_method_arity(ctx, "with", args_ty, 2, span) {
+                return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
+            }
+            if !is_compatible(&args_ty[0], k) {
+                ctx.error_at(span, format!(
+                    "`.with()`: la key debe ser `{}`, recibió `{}`",
+                    k.display(ctx.types),
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            if !is_compatible(&args_ty[1], v) {
+                ctx.error_at(span, format!(
+                    "`.with()`: el value debe ser `{}`, recibió `{}`",
+                    v.display(ctx.types),
+                    args_ty[1].display(ctx.types),
+                ));
+            }
+            Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
         // Mini-tanda Mb6 — `merge_with(other, fn(V, V) -> V) -> Map<K, V>`.
         // Generaliza merge: el callback decide qué value queda cuando
@@ -3231,6 +3285,25 @@ fn infer_str_method(
         "is_empty" => {
             check_method_arity(ctx, "is_empty", args_ty, 0, span);
             Type::Bool
+        }
+        // Mini-tanda Mb7 — `repeat_with(n, sep) -> Str`: variante de
+        // repeat que intercala `sep` entre repeticiones.
+        "repeat_with" => {
+            if check_method_arity(ctx, "repeat_with", args_ty, 2, span) {
+                if !is_compatible(&args_ty[0], &Type::Int) {
+                    ctx.error_at(span, format!(
+                        "`Str.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ));
+                }
+                if !is_compatible(&args_ty[1], &Type::Str) {
+                    ctx.error_at(span, format!(
+                        "`Str.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`",
+                        args_ty[1].display(ctx.types),
+                    ));
+                }
+            }
+            Type::Str
         }
         // S.2 — manipulación de strings:
         "split" => {
@@ -7041,6 +7114,92 @@ mod tests {
             "let a: Map<Str, Int> = {\"x\": 1}\n\
              let b: Map<Str, Int> = {\"x\": 2}\n\
              let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)",
+        );
+    }
+
+    // ---- Mini-tanda Mb7 ----
+
+    #[test]
+    fn mb7_list_take_drop_devuelven_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let a: List<Int> = xs.take(2)\n\
+             let b: List<Int> = xs.drop(1)",
+        );
+    }
+
+    #[test]
+    fn mb7_list_take_arg_no_int_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.take(\"x\")",
+            &["take", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb7_list_init_tail_no_args() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let a: List<Int> = xs.init()\n\
+             let b: List<Int> = xs.tail()",
+        );
+    }
+
+    #[test]
+    fn mb7_list_intersperse_sep_compatible() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.intersperse(0)",
+        );
+    }
+
+    #[test]
+    fn mb7_list_intersperse_sep_incompatible_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.intersperse(\"oops\")",
+            &["intersperse"],
+        );
+    }
+
+    #[test]
+    fn mb7_list_cycle_devuelve_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1]\n\
+             let r: List<Int> = xs.cycle(3)",
+        );
+    }
+
+    #[test]
+    fn mb7_str_repeat_with_devuelve_str() {
+        assert_ok(
+            "let r: Str = \"x\".repeat_with(3, \", \")",
+        );
+    }
+
+    #[test]
+    fn mb7_str_repeat_with_args_invalidos_es_error() {
+        assert_error_with(
+            "let r = \"x\".repeat_with(\"oops\", \", \")",
+            &["repeat_with", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb7_map_with_devuelve_map_k_v() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let r: Map<Str, Int> = m.with(\"b\", 2)",
+        );
+    }
+
+    #[test]
+    fn mb7_map_with_value_tipo_incompatible_es_error() {
+        assert_error_with(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let r = m.with(\"b\", \"oops\")",
+            &["with"],
         );
     }
 

@@ -1131,6 +1131,83 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos extras + format specs faltantes en build~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb7 + Fmt-build)
+
+Bundle combinado de polish: 7 métodos chicos sobre colecciones y Str
+(Mb7) + completar los format specs que faltaban en `fitz build`
+(Fmt-build, cierra deuda residual de la mini-tanda Fm).
+
+**Parte 1 — Mb7 (7 métodos chicos)**:
+
+- ~~**`List.take(n)` / `List.drop(n)`**~~ ✓ Primeros/restantes
+  elementos. Paralelo a `Iterator::take`/`skip` Rust. Clamp safe:
+  `n <= 0` → vacía/full según método; `n >= len` → full/vacía.
+- ~~**`List.init()` / `List.tail()`**~~ ✓ Todos menos último/
+  primero (estilo Haskell). Vacía sobre vacía (sin error).
+- ~~**`List.intersperse(sep)`**~~ ✓ Inserta `sep` entre cada par
+  consecutivo. Paralelo a Haskell `intersperse`.
+- ~~**`List.cycle(n)`**~~ ✓ Repite la lista `n` veces. `n <= 0`
+  → vacía (política friendly).
+- ~~**`Str.repeat_with(n, sep)`**~~ ✓ Variante de `repeat(n)` que
+  intercala `sep`. Paralelo a Python `sep.join([s] * n)`. `n < 0`
+  → error claro.
+- ~~**`Map.with(k, v)`**~~ ✓ Functional update — Map nuevo con
+  `k → v`, receiver intacto. Encadenable.
+
+**Parte 2 — Fmt-build (format specs que faltaban)**:
+
+- ~~**`,`/`_` grouping**~~ ✓ Separadores de miles para Int. El
+  codegen emite `__fitz_fmt_grouping(value, ',' | '_')` (helper
+  emitido en el preludio). El spec width/align Rust se aplica
+  encima del String resultante.
+- ~~**`%` percent**~~ ✓ Multiplica el value (Float) por 100 y
+  agrega sufijo `%`. La precision del spec se pasa al helper
+  `__fitz_fmt_percent(x, precision)`.
+- ~~**`c` char codepoint**~~ ✓ `Int → caracter Unicode`. El helper
+  `__fitz_fmt_char(n)` usa `char::from_u32(n as u32)` con fallback
+  a `\u{HEX}` para codepoints inválidos.
+
+Los 3 helpers se emiten solo cuando el programa los usa (gating
+via `program_uses_fmt_helpers` que detecta `FormatSpec` con
+grouping/Char/Percent en una pre-pasada). Programas que no usan
+estos specs no pagan el costo del preludio extra.
+
+**Refactor incidental**:
+- `CodegenCtx` suma `uses_fmt_helpers: bool` (paralelo a
+  `uses_async` y `uses_python`).
+- `format_spec_to_rust` ahora devuelve `helper_wrapper:
+  Option<String>` cuando el spec requiere uno de los helpers
+  custom. El armado del spec Rust ignora sign/alternate/precision/
+  kind cuando hay wrapper (el helper ya los aplicó); width/align
+  sí siguen aplicándose sobre el String resultante.
+
+Implementación: ~600 LoC entre evaluator (7 fns nuevas), types
+(7 ramas), codegen (7 ramas + refactor de `format_spec_to_rust`
+con helper_wrapper + nuevo `program_uses_fmt_helpers` walker +
+3 helpers en el preludio), LSP (7 entries: 6 List + 1 Str + 1 Map).
+
+**24 unit tests** evaluator/checker/LSP (11 evaluator Mb7 + 10
+checker Mb7 + 3 LSP Mb7) + **11 compile_e2e** bit-a-bit `fitz run`
+↔ `fitz build` (6 Mb7 + 5 Fmt-build: grouping coma, grouping
+underscore, percent, char, grouping negativo). Ejemplo runnable
+`examples/guide/13s-mb7-y-fmt-build.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`.
+
+Cap 13 de la guía: 6 filas nuevas en tabla `List<T>` (take, drop,
+init, tail, intersperse, cycle), 1 en tabla `Str` (repeat_with),
+1 en tabla `Map<K, V>` (with). Sub-sección dedicada "take + drop +
+init + tail + intersperse + cycle + repeat_with + with + format
+specs en build (mini-tanda Mb7 + Fmt-build)" con ejemplos inline.
+VSCode extension: grammar TextMate sin cambios (los métodos son
+identifiers; format specs son interpolation interna del Str que
+no afecta tokens); LSP autocomplete refleja todo automáticamente
+vía rebuild del `fitz-lsp` binary.
+
+**Deuda residual menor** (NO bloquea):
+- **`g`/`G` general format** sigue solo en `fitz run`. Requiere
+  decidir entre fixed vs exponente según magnitud — lógica más
+  involucrada. Sin presión real hoy.
+
 ### ~~Métodos analíticos extra + async closures en build + HTTP refinements~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb6 + Async-cl build + HTTP refinements)
 
 Bundle combinado de polish: 3 métodos analíticos (Mb6) + cierre del

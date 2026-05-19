@@ -615,6 +615,13 @@ fn after_dot_completions(
                     "fn(n: Int) -> List<List<{}>>",
                     t.display(type_env),
                 )),
+                // Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle.
+                ("take", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
+                ("drop", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
+                ("init", format!("fn() -> List<{}>  // todos menos el último", t.display(type_env))),
+                ("tail", format!("fn() -> List<{}>  // todos menos el primero", t.display(type_env))),
+                ("intersperse", format!("fn(sep: {}) -> List<{}>", t.display(type_env), t.display(type_env))),
+                ("cycle", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -687,6 +694,14 @@ fn after_dot_completions(
                     k.display(type_env),
                     v.display(type_env),
                 )),
+                // Mini-tanda Mb7 — with: functional update.
+                ("with", format!(
+                    "fn({}, {}) -> Map<{}, {}>",
+                    k.display(type_env),
+                    v.display(type_env),
+                    k.display(type_env),
+                    v.display(type_env),
+                )),
             ],
         ),
         Type::Str => method_items(&[
@@ -720,6 +735,8 @@ fn after_dot_completions(
             // Mini-tanda Mb5 — lines + is_empty.
             ("lines", "fn() -> List<Str>".into()),
             ("is_empty", "fn() -> Bool".into()),
+            // Mini-tanda Mb7 — repeat_with: repeat con separador.
+            ("repeat_with", "fn(n: Int, sep: Str) -> Str".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -1787,6 +1804,44 @@ mod tests {
                 "falta método `{expected}` (mini-tanda Mb6) en List: {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn mb7_after_dot_sobre_list_incluye_take_drop_init_tail_intersperse_cycle() {
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["take", "drop", "init", "tail", "intersperse", "cycle"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb7) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb7_after_dot_sobre_str_incluye_repeat_with() {
+        let src = "let s: Str = \"x\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"repeat_with"),
+            "falta `repeat_with` (mini-tanda Mb7) en Str: {labels:?}",
+        );
+    }
+
+    #[test]
+    fn mb7_after_dot_sobre_map_incluye_with() {
+        let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"with"),
+            "falta `with` (mini-tanda Mb7) en Map: {labels:?}",
+        );
     }
 
     #[test]
