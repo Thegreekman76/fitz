@@ -571,6 +571,13 @@ fn after_dot_completions(
                 ("min", format!("fn() -> Result<{}>  // List<Int> o List<Float>", t.display(type_env))),
                 ("max", format!("fn() -> Result<{}>  // List<Int> o List<Float>", t.display(type_env))),
                 ("sum", format!("fn() -> {}  // List<Int> o List<Float>", t.display(type_env))),
+                // Mini-tanda Mb3 — fold + product + to_map.
+                ("reduce", format!(
+                    "fn(init: Acc, fn(Acc, {}) -> Acc) -> Acc",
+                    t.display(type_env),
+                )),
+                ("product", format!("fn() -> {}  // List<Int> o List<Float>", t.display(type_env))),
+                ("to_map", "fn() -> Map<K, V>  // requiere List<(K, V)>".into()),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -620,6 +627,12 @@ fn after_dot_completions(
                     "fn() -> List<{}>  // K comparable (Int/Float/Str/Bool)",
                     k.display(type_env),
                 )),
+                // Mini-tanda Mb3 — entries: pares (K, V) en orden de inserción.
+                ("entries", format!(
+                    "fn() -> List<({}, {})>",
+                    k.display(type_env),
+                    v.display(type_env),
+                )),
             ],
         ),
         Type::Str => method_items(&[
@@ -646,6 +659,8 @@ fn after_dot_completions(
             // Mini-tanda Mb2 — padding.
             ("pad_start", "fn(width: Int, ch: Str) -> Str".into()),
             ("pad_end", "fn(width: Int, ch: Str) -> Str".into()),
+            // Mini-tanda Mb3 — chars: List<Str> con cada char.
+            ("chars", "fn() -> List<Str>".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -1602,6 +1617,49 @@ mod tests {
         );
         let step_by = items.iter().find(|i| i.label == "step_by").unwrap();
         assert_eq!(step_by.detail.as_deref(), Some("fn(n: Int) -> List<Int>"));
+    }
+
+    #[test]
+    fn mb3_after_dot_sobre_list_incluye_reduce_product_to_map() {
+        // Mini-tanda Mb3: List suma reduce/product/to_map.
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["reduce", "product", "to_map"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb3) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb3_after_dot_sobre_str_incluye_chars() {
+        let src = "let s: Str = \"abc\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"chars"),
+            "falta `chars` (mini-tanda Mb3) en Str: {labels:?}",
+        );
+        let chars = items.iter().find(|i| i.label == "chars").unwrap();
+        assert_eq!(chars.detail.as_deref(), Some("fn() -> List<Str>"));
+    }
+
+    #[test]
+    fn mb3_after_dot_sobre_map_incluye_entries() {
+        let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"entries"),
+            "falta `entries` (mini-tanda Mb3) en Map: {labels:?}",
+        );
+        let entries = items.iter().find(|i| i.label == "entries").unwrap();
+        assert_eq!(entries.detail.as_deref(), Some("fn() -> List<(Str, Int)>"));
     }
 
     #[test]

@@ -2544,6 +2544,59 @@ fn infer_list_method(
                 }
             }
         }
+        // Mini-tanda Mb3 — `product()` análogo a `sum`. Solo Int/Float.
+        // Vacío → 1/1.0 (sentinel).
+        "product" => {
+            check_method_arity(ctx, "product", args_ty, 0, span);
+            match t {
+                Type::Int | Type::Float => t.clone(),
+                Type::Any => Type::Any,
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.product()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Any
+                }
+            }
+        }
+        // Mini-tanda Mb3 — `reduce(init, fn(acc, x) -> Acc) -> Acc`.
+        // Fold canónico funcional. El init tipa Acc; el callback es
+        // `fn(Acc, T) -> Acc`; el ret es Acc.
+        "reduce" => {
+            if !check_method_arity(ctx, "reduce", args_ty, 2, span) {
+                return Type::Any;
+            }
+            let acc_ty = args_ty[0].clone();
+            check_binary_callback(
+                ctx,
+                &args_ty[1],
+                &acc_ty,
+                t,
+                "reduce",
+                Some(&acc_ty),
+                span,
+            );
+            acc_ty
+        }
+        // Mini-tanda Mb3 — `to_map()`: convierte `List<(K, V)>` →
+        // `Map<K, V>`. T debe ser `Tuple` de aridad 2; otros → error.
+        "to_map" => {
+            check_method_arity(ctx, "to_map", args_ty, 0, span);
+            match t {
+                Type::Tuple(items) if items.len() == 2 => {
+                    Type::Map(Box::new(items[0].clone()), Box::new(items[1].clone()))
+                }
+                Type::Any => Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.to_map()` requiere `List<(K, V)>` (Tuple de aridad 2), recibió `List<{}>`",
+                        other.display(ctx.types),
+                    ));
+                    Type::Map(Box::new(Type::Any), Box::new(Type::Any))
+                }
+            }
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -2746,6 +2799,12 @@ fn infer_map_method(
         "keys_sorted" => {
             check_method_arity(ctx, "keys_sorted", args_ty, 0, span);
             Type::List(Box::new(k.clone()))
+        }
+        // Mini-tanda Mb3 — `entries()`: devuelve `List<(K, V)>` con
+        // los pares clave-valor. Inversa de `xs.to_map()`.
+        "entries" => {
+            check_method_arity(ctx, "entries", args_ty, 0, span);
+            Type::List(Box::new(Type::Tuple(vec![k.clone(), v.clone()])))
         }
         "values" => {
             check_method_arity(ctx, "values", args_ty, 0, span);
@@ -2963,6 +3022,12 @@ fn infer_str_method(
                 ));
             }
             Type::Bool
+        }
+        // Mini-tanda Mb3 — `chars()`: devuelve `List<Str>` con cada
+        // char del string como Str de 1 caracter.
+        "chars" => {
+            check_method_arity(ctx, "chars", args_ty, 0, span);
+            Type::List(Box::new(Type::Str))
         }
         // S.2 — manipulación de strings:
         "split" => {
@@ -6467,6 +6532,83 @@ mod tests {
         assert_error_with(
             "let xs = (0..10).step_by(\"x\")",
             &["step_by", "Int"],
+        );
+    }
+
+    // ---- Mini-tanda Mb3: reduce + product + chars + entries + to_map ----
+
+    #[test]
+    fn mb3_list_reduce_acc_int_devuelve_int() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => acc + x)",
+        );
+    }
+
+    #[test]
+    fn mb3_list_reduce_acc_distinto_a_t_funciona() {
+        // Acc puede ser Str aunque T sea Int.
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let s: Str = xs.reduce(\"\", fn(acc: Str, x: Int) => acc)",
+        );
+    }
+
+    #[test]
+    fn mb3_list_reduce_callback_ret_distinto_de_acc_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => \"oops\")",
+            &["reduce", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb3_list_product_int_devuelve_int() {
+        assert_ok(
+            "let xs: List<Int> = [2, 3, 4]\n\
+             let p: Int = xs.product()",
+        );
+    }
+
+    #[test]
+    fn mb3_list_product_sobre_str_es_error() {
+        assert_error_with(
+            "let xs: List<Str> = [\"a\"]\n\
+             let p = xs.product()",
+            &["product", "Int", "Float"],
+        );
+    }
+
+    #[test]
+    fn mb3_str_chars_devuelve_list_str() {
+        assert_ok(
+            "let cs: List<Str> = \"abc\".chars()",
+        );
+    }
+
+    #[test]
+    fn mb3_map_entries_devuelve_list_de_tuples() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let es: List<(Str, Int)> = m.entries()",
+        );
+    }
+
+    #[test]
+    fn mb3_list_to_map_sobre_tuple_pairs() {
+        assert_ok(
+            "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"b\", 2)]\n\
+             let m: Map<Str, Int> = pairs.to_map()",
+        );
+    }
+
+    #[test]
+    fn mb3_list_to_map_sobre_no_tuple_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\n\
+             let m = xs.to_map()",
+            &["to_map", "Tuple"],
         );
     }
 

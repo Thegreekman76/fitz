@@ -3732,6 +3732,7 @@ print(xs)                          // [1, 2, 3]
 | `merge(other)`      | Combina dos `Map<K, V>` (last-write-wins, paralelo a `{**m, **other}`) (Ex2). |
 | `update(k, fn(v))`  | Map nuevo: aplica `fn` al value de `k` si existe, no-op si no (Up). |
 | `keys_sorted()`     | `List<K>` con las keys ordenadas; K ∈ {Int, Float, Str, Bool} (Mb2). |
+| `entries()`         | `List<(K, V)>` con los pares en orden de inserción; inversa de `to_map` (Mb3). |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -4133,6 +4134,7 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.last_index_of(s)` | `Str`        | `Result<Int>` | índice de la ÚLTIMA ocurrencia (Ex) |
 | `.pad_start(w, c)`  | `Int`, `Str` | `Str`         | padding a la izquierda; `c` debe ser 1 char (Mb2) |
 | `.pad_end(w, c)`    | `Int`, `Str` | `Str`         | padding a la derecha; `c` debe ser 1 char (Mb2) |
+| `.chars()`          | —            | `List<Str>`   | cada char como Str de 1 caracter (Mb3) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 
@@ -4153,6 +4155,9 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.min()`            | —                 | `Result<T>`   | mínimo numérico; `T ∈ {Int, Float}`; vacía → `Err` (Mb2) |
 | `.max()`            | —                 | `Result<T>`   | máximo numérico; `T ∈ {Int, Float}`; vacía → `Err` (Mb2) |
 | `.sum()`            | —                 | `T`           | suma numérica; `T ∈ {Int, Float}`; vacía → `0` (Mb2) |
+| `.product()`        | —                 | `T`           | producto numérico; `T ∈ {Int, Float}`; vacía → `1` (Mb3) |
+| `.reduce(init, fn)` | `Acc`, `fn(Acc, T) -> Acc` | `Acc` | fold canónico; Acc puede ser distinto de T (Mb3) |
+| `.to_map()`         | —                 | `Map<K, V>`   | requiere `List<(K, V)>`; last-write-wins (Mb3) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4323,6 +4328,79 @@ print(suma_pares)                                // 2450
 ```
 
 Ver [examples/guide/13m-min-max-sum-pad-keys-step.fitz](../examples/guide/13m-min-max-sum-pad-keys-step.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+### Fold + product + chars + entries + to_map (mini-tanda Mb3)
+
+Bundle de métodos funcionales que completan la API canónica
+"functional collections":
+
+**`List.reduce(init, fn(acc, x) -> Acc)`** — fold canónico.
+Equivalente a `Array.prototype.reduce(fn, init)` de JS o
+`functools.reduce(fn, xs, init)` de Python. El `Acc` puede ser de
+un tipo distinto al de los elementos (caso típico: reducir una
+`List<Int>` a un `Str` construyendo una representación).
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4, 5]
+let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => acc + x)
+print(total)                                     // 15
+
+// Acc de otro tipo:
+let csv: Str = xs.reduce("", fn(acc: Str, x: Int) => "{acc}{x},")
+print(csv)                                       // 1,2,3,4,5,
+
+// Lista vacía → devuelve el init.
+let empty: List<Int> = []
+print(empty.reduce(42, fn(acc: Int, x: Int) => acc + x))  // 42
+```
+
+**`List.product()`** — análogo a `sum()`. Solo válido sobre
+`List<Int>` o `List<Float>` homogéneos. Vacío → `1` (sentinel,
+paralelo a Python `math.prod([])`).
+
+```fitz
+let factorial_terms: List<Int> = [1, 2, 3, 4, 5]
+print(factorial_terms.product())                 // 120
+```
+
+**`Str.chars()`** — devuelve `List<Str>` con cada caracter como
+Str de 1 char. Útil para componer pipelines sobre strings (chars
++ filter + count + ...). Cuenta caracteres Unicode correctamente,
+no bytes.
+
+```fitz
+let cs: List<Str> = "fitz".chars()
+print(cs)                                        // ["f", "i", "t", "z"]
+
+// Pipeline canónico — contar vocales.
+let vocales: Int = "hello".chars().count(fn(c: Str) => c == "e" or c == "o")
+print(vocales)                                   // 2
+```
+
+**`Map.entries()` ↔ `List<(K, V)>.to_map()`** — conversión
+bidireccional Map ↔ lista de pares. `entries()` preserva insertion
+order (paralelo a Python `dict.items()`); `to_map()` aplica
+last-write-wins en duplicados (paralelo a Python `dict(items)`).
+
+```fitz
+let scores: Map<Str, Int> = {"ada": 80, "bob": 92}
+
+// entries: Map → List<(K, V)>
+let pairs: List<(Str, Int)> = scores.entries()
+print(pairs)                                     // [("ada", 80), ("bob", 92)]
+
+// to_map: List<(K, V)> → Map
+let back: Map<Str, Int> = pairs.to_map()
+print(back["ada"])                               // 80
+
+// Combinar entries() con List.reduce:
+let total: Int = scores.entries().reduce(0,
+    fn(acc: Int, p: (Str, Int)) => acc + p.1)
+print(total)                                     // 172
+```
+
+Ver [examples/guide/13n-reduce-product-chars-entries-to-map.fitz](../examples/guide/13n-reduce-product-chars-entries-to-map.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda

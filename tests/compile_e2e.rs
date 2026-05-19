@@ -1964,6 +1964,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13k-flat-map-first-last-merge.fitz",
     "13l-update-comp-tuple-paramnames.fitz",
     "13m-min-max-sum-pad-keys-step.fitz",
+    "13n-reduce-product-chars-entries-to-map.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3785,4 +3786,85 @@ fn rg_range_step_by_inclusivo_compila() {
     assert_eq!(exit, 0);
     // 0..=10 step 3 → [0, 3, 6, 9].
     assert_eq!(stdout.trim(), "[0, 3, 6, 9]");
+}
+
+// ---- Mini-tanda Mb3 — fold + product + chars + entries + to_map ----
+
+#[test]
+fn mb3_list_reduce_sum_int_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => acc + x)\n\
+               print(total)\n";
+    let (stdout, exit) = build_and_run("mb3_list_reduce_sum", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "15");
+}
+
+#[test]
+fn mb3_list_reduce_acc_distinto_de_t_compila() {
+    // Acc puede ser de un tipo distinto al de los elementos.
+    let src = "let xs: List<Int> = [1, 2, 3]\n\
+               let s: Str = xs.reduce(\"\", fn(acc: Str, x: Int) => \"{acc}{x}-\")\n\
+               print(s)\n";
+    let (stdout, exit) = build_and_run("mb3_list_reduce_acc_str", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1-2-3-");
+}
+
+#[test]
+fn mb3_list_product_compila() {
+    let src = "let xs: List<Int> = [2, 3, 4]\n\
+               let p: Int = xs.product()\n\
+               print(p)\n\
+               let empty: List<Int> = []\n\
+               print(empty.product())\n";
+    let (stdout, exit) = build_and_run("mb3_list_product", src);
+    assert_eq!(exit, 0);
+    // 2*3*4=24, vacío → 1 (sentinel).
+    assert_eq!(stdout.trim(), "24\n1");
+}
+
+#[test]
+fn mb3_str_chars_compila() {
+    let src = "let cs: List<Str> = \"abc\".chars()\n\
+               print(cs)\n\
+               print(cs.len())\n";
+    let (stdout, exit) = build_and_run("mb3_str_chars", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[\"a\", \"b\", \"c\"]\n3");
+}
+
+#[test]
+fn mb3_map_entries_compila() {
+    let src = "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n\
+               let es: List<(Str, Int)> = m.entries()\n\
+               print(es)\n\
+               print(es.len())\n";
+    let (stdout, exit) = build_and_run("mb3_map_entries", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[(\"a\", 1), (\"b\", 2)]\n2");
+}
+
+#[test]
+fn mb3_list_to_map_compila() {
+    let src = "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"b\", 2)]\n\
+               let m: Map<Str, Int> = pairs.to_map()\n\
+               print(m[\"a\"])\n\
+               print(m[\"b\"])\n\
+               print(m.len())\n";
+    let (stdout, exit) = build_and_run("mb3_list_to_map", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n2\n2");
+}
+
+#[test]
+fn mb3_round_trip_entries_to_map_compila() {
+    let src = "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+               let back: Map<Str, Int> = m.entries().to_map()\n\
+               print(back[\"a\"])\n\
+               print(back[\"b\"])\n\
+               print(back[\"c\"])\n";
+    let (stdout, exit) = build_and_run("mb3_round_trip", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n2\n3");
 }

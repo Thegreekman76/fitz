@@ -3173,6 +3173,10 @@ async fn dispatch_method(
         (Value::List(_), "min") => list_min(receiver, args, span),
         (Value::List(_), "max") => list_max(receiver, args, span),
         (Value::List(_), "sum") => list_sum(receiver, args, span),
+        // Mini-tanda Mb3 — fold + product + to_map.
+        (Value::List(_), "reduce") => list_reduce(receiver, args, span).await,
+        (Value::List(_), "product") => list_product(receiver, args, span),
+        (Value::List(_), "to_map") => list_to_map(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3220,6 +3224,8 @@ async fn dispatch_method(
         (Value::Map(_), "update") => map_update(receiver, args, span).await,
         // Mini-tanda Mb2 — keys_sorted: keys ordenadas (Int/Float/Str/Bool).
         (Value::Map(_), "keys_sorted") => map_keys_sorted(receiver, args, span),
+        // Mini-tanda Mb3 — entries: List<(K, V)> con los pares.
+        (Value::Map(_), "entries") => map_entries(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3230,6 +3236,8 @@ async fn dispatch_method(
         (Value::Str(_), "ends_with") => str_ends_with(receiver, args, span),
         // S.2 — manipulación de strings:
         (Value::Str(_), "split") => str_split(receiver, args, span),
+        // Mini-tanda Mb3 — chars: List<Str> con cada caracter.
+        (Value::Str(_), "chars") => str_chars(receiver, args, span),
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
         // Mini-tanda Mb — variantes parciales de trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
@@ -4313,6 +4321,105 @@ async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
     Ok(Value::Null)
 }
 
+/// Mini-tanda Mb3 — `xs.reduce(init, fn(acc, x) -> Acc)` fold canónico.
+/// Itera la lista aplicando `fn(acc, x)` y devuelve el acumulador
+/// final. Vacía → init. Paralelo a `Iterator::fold` de Rust o
+/// `Array.prototype.reduce(fn, init)` de JS.
+#[async_recursion]
+async fn list_reduce(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("reduce", &args, 2, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let mut acc = it.next().unwrap();
+    let cb = it.next().unwrap();
+    let snapshot: Vec<Value> = items.lock().clone();
+    for item in snapshot {
+        acc = invoke_value(cb.clone(), vec![acc, item], "reduce", span).await?;
+    }
+    Ok(acc)
+}
+
+/// Mini-tanda Mb3 — `xs.product()` análogo a `sum`. Para `List<Int>`
+/// o `List<Float>` homogéneos. Vacía → `Int(1)` sentinel (paralelo
+/// a Python `math.prod([])`).
+fn list_product(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("product", &args, 0, span)?;
+    let (snapshot, kind) = require_numeric_list(receiver, "product", span)?;
+    if snapshot.is_empty() {
+        return Ok(Value::Int(1));
+    }
+    let total = match kind {
+        "Int" => {
+            let mut total: i64 = 1;
+            for v in snapshot {
+                if let Value::Int(n) = v {
+                    total = total.wrapping_mul(n);
+                }
+            }
+            Value::Int(total)
+        }
+        "Float" => {
+            let mut total: f64 = 1.0;
+            for v in snapshot {
+                if let Value::Float(n) = v {
+                    total *= n;
+                }
+            }
+            Value::Float(total)
+        }
+        _ => unreachable!(),
+    };
+    Ok(total)
+}
+
+/// Mini-tanda Mb3 — `xs.to_map()`: convierte `List<(K, V)>` en
+/// `Map<K, V>`. Política last-write-wins si hay keys duplicadas
+/// (paralelo a Python `dict(items)` que también sobrescribe).
+/// Si algún elemento no es Tuple de aridad 2 → error de runtime.
+fn list_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("to_map", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+    for (i, v) in snapshot.into_iter().enumerate() {
+        match v {
+            Value::Tuple(parts) if parts.len() == 2 => {
+                let mut pit = parts.into_iter();
+                let k = pit.next().unwrap();
+                let val = pit.next().unwrap();
+                // Last-write-wins: buscamos si k ya existe y reemplazamos.
+                if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &k) {
+                    slot.1 = val;
+                } else {
+                    out.push((k, val));
+                }
+            }
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Tuple(K, V)".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "`.to_map()` requiere `List<(K, V)>`: el elemento [{}] es `{}` (aridad {})",
+                        i,
+                        other.type_name(),
+                        if let Value::Tuple(p) = &other { p.len() } else { 0 },
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::new_map(out))
+}
+
 // ---- Map ----
 
 fn map_get(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
@@ -4496,6 +4603,24 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_map(out))
 }
 
+/// Mini-tanda Mb3 — `m.entries()`: devuelve `List<(K, V)>` con los
+/// pares clave-valor en orden de inserción. Paralelo a Python
+/// `dict.items()` o JS `Object.entries(obj)`. Inversa de
+/// `xs.to_map()` (Mb3).
+fn map_entries(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("entries", &args, 0, span)?;
+    let pairs = match receiver {
+        Value::Map(p) => p,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<Value> = pairs
+        .lock()
+        .iter()
+        .map(|(k, v)| Value::Tuple(vec![k.clone(), v.clone()]))
+        .collect();
+    Ok(Value::new_list(snapshot))
+}
+
 /// Mini-tanda Mb2 — `m.keys_sorted()`: devuelve `List<K>` con las
 /// keys ordenadas. Solo válido para K en {Int, Float, Str, Bool}
 /// (mismas reglas que `list_sort`). Map vacío → lista vacía. Tipos
@@ -4653,6 +4778,20 @@ fn str_split(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         .split(&sep[..])
         .map(|p| Value::Str(p.to_string()))
         .collect();
+    Ok(Value::new_list(parts))
+}
+
+/// Mini-tanda Mb3 — `s.chars()`: devuelve `List<Str>` con cada char
+/// del string como Str de 1 caracter. Paralelo a Python `list(s)` o
+/// JS `[...s]`. Útil para iterar y para componer pipelines (e.g.
+/// `s.chars().filter(...)`).
+fn str_chars(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("chars", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let parts: Vec<Value> = s.chars().map(|c| Value::Str(c.to_string())).collect();
     Ok(Value::new_list(parts))
 }
 
@@ -14223,5 +14362,188 @@ let r = match n {
             "mensaje inesperado: {}",
             err.message,
         );
+    }
+
+    // ---- Mini-tanda Mb3: métodos funcionales (reduce, product,
+    //      chars, entries, to_map) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_reduce_int_sum() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let total: Int = xs.reduce(0, fn(acc, x) => acc + x)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(15)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_reduce_vacia_devuelve_init() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let total: Int = xs.reduce(42, fn(acc, x) => acc + x)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("total"), Some(Value::Int(42)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_reduce_acc_tipo_distinto_del_elem() {
+        // Acc puede ser de un tipo distinto al de los elementos.
+        // Ejemplo: List<Int> reducida a un Str.
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let s: Str = xs.reduce(\"\", fn(acc, x) => \"{acc}{x}-\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("s"), Some(Value::Str("1-2-3-".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_product_int() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [2, 3, 4]\n\
+             let p: Int = xs.product()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("p"), Some(Value::Int(24)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_product_vacia_es_uno() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let p: Int = xs.product()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("p"), Some(Value::Int(1)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_product_float() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Float> = [1.5, 2.0, 2.0]\n\
+             let p: Float = xs.product()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("p"), Some(Value::Float(6.0)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_str_chars_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let s = \"abc\"\n\
+             let cs: List<Str> = s.chars()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("cs").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let names: Vec<String> = g.iter().filter_map(|v| {
+                if let Value::Str(s) = v { Some(s.clone()) } else { None }
+            }).collect();
+            assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_str_chars_unicode() {
+        // Para chars no-ASCII contamos como un solo elemento.
+        let (env, res) = parse_eval_into_env(
+            "let cs: List<Str> = \"café\".chars()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("cs").unwrap();
+        if let Value::List(items) = v {
+            assert_eq!(items.lock().len(), 4);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_map_entries_devuelve_pares_en_orden() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+             let es: List<(Str, Int)> = m.entries()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("es").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            assert_eq!(g.len(), 3);
+            // Validamos el primer par.
+            if let Value::Tuple(parts) = &g[0] {
+                assert_eq!(parts.len(), 2);
+                assert_eq!(parts[0], Value::Str("a".into()));
+                assert_eq!(parts[1], Value::Int(1));
+            } else {
+                panic!("esperaba Tuple");
+            }
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_to_map_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"b\", 2)]\n\
+             let m: Map<Str, Int> = pairs.to_map()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("m").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 2);
+            let a = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
+            assert_eq!(a.map(|(_, v)| v.clone()), Some(Value::Int(1)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_list_to_map_last_write_wins() {
+        // Si hay keys duplicadas, gana la última (paralelo a
+        // Python `dict(items)`).
+        let (env, res) = parse_eval_into_env(
+            "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"a\", 999)]\n\
+             let m: Map<Str, Int> = pairs.to_map()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("m").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 1);
+            let a = g.iter().find(|(k, _)| k == &Value::Str("a".into()));
+            assert_eq!(a.map(|(_, v)| v.clone()), Some(Value::Int(999)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb3_round_trip_entries_to_map() {
+        // entries → to_map roundtrip preserva contenido.
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n\
+             let back: Map<Str, Int> = m.entries().to_map()\n\
+             let av: Result<Int> = back.get(\"a\")\n\
+             let bv: Result<Int> = back.get(\"b\")",
+        ).await;
+        res.unwrap();
+        let av = env.lock().get("av").unwrap();
+        let bv = env.lock().get("bv").unwrap();
+        match av {
+            Value::Result(ResultVariant::Ok(b)) => assert_eq!(*b, Value::Int(1)),
+            other => panic!("esperaba Ok(1), vi {:?}", other),
+        }
+        match bv {
+            Value::Result(ResultVariant::Ok(b)) => assert_eq!(*b, Value::Int(2)),
+            other => panic!("esperaba Ok(2), vi {:?}", other),
+        }
     }
 }

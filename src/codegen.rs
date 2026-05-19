@@ -5637,6 +5637,18 @@ impl<'a> CodegenCtx<'a> {
                 let coerced = coerce(&a_code, &a_ty, &Type::Str);
                 Ok((format!("({}).ends_with({}.as_str())", obj_code, coerced), Type::Bool))
             }
+            // Mini-tanda Mb3 — `chars()` devuelve `List<Str>` con
+            // cada char del string. Rust `str::chars()` devuelve un
+            // iterator de `char`; lo materializamos como Vec<String>
+            // con 1 char cada uno via `to_string()`.
+            (Type::Str, "chars") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "Arc::new(Mutex::new(({}).chars().map(|__c| __c.to_string()).collect::<Vec<String>>()))",
+                    obj_code
+                );
+                Ok((code, Type::List(Box::new(Type::Str))))
+            }
             // S.2 — `split` devuelve `List<Str>` = `Arc<Mutex<Vec<String>>>`.
             // Rust `str::split` devuelve un iterator de `&str`; lo
             // materializamos a `Vec<String>` via `.map(String::from)`.
@@ -5750,7 +5762,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars)",
                 other
             ))),
 
@@ -6071,8 +6083,90 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, (**t).clone()))
             }
+            // Mini-tanda Mb3 — `product` análogo a `sum`. Usa
+            // `Iterator::product` (Rust nativo, vacío → 1/1.0).
+            (Type::List(t), "product") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = match &**t {
+                    Type::Int | Type::Float => rust_type_for(t, self.env)?,
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.product()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let code = format!(
+                    "({obj_code}).lock().unwrap().iter().copied().product::<{t_rs}>()"
+                );
+                Ok((code, (**t).clone()))
+            }
+            // Mini-tanda Mb3 — `reduce(init, fn(acc, x) -> Acc) -> Acc`.
+            // Snapshot del receiver + for loop con el callback binario.
+            // El init y Acc tienen el mismo tipo; el item tiene tipo T.
+            (Type::List(t), "reduce") => {
+                check_method_arity(method, args, 2)?;
+                let (init_code, init_ty) = self.gen_expr(&args[0])?;
+                // `Acc` es el tipo del init (concreto o Any si gradual).
+                // Si init es literal con tipo inferible, lo tomamos como
+                // Acc; sino fallback Any.
+                let acc_ty = init_ty.clone();
+                // Pasamos Acc como expected_ret porque el callback de
+                // reduce produce el siguiente acc — mismo tipo que el
+                // inicial, no Any genérico.
+                let cb_code = self.gen_binary_callback_inline_with_ret(
+                    &args[1], &acc_ty, t, &acc_ty, "reduce",
+                )?;
+                let acc_rs = rust_type_for(&acc_ty, self.env)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __acc: {acc_rs} = {init_code}; \
+                       for __it in __items.into_iter() {{ \
+                           __acc = __cb(__acc, __it); \
+                       }} \
+                       __acc }}"
+                );
+                Ok((code, acc_ty))
+            }
+            // Mini-tanda Mb3 — `to_map()`: convierte `List<(K, V)>` →
+            // `Map<K, V>`. Política last-write-wins (paralelo a Python
+            // `dict(items)`). El tipo `T` del receptor debe ser
+            // `Tuple` de aridad 2.
+            (Type::List(t), "to_map") => {
+                check_method_arity(method, args, 0)?;
+                let (k_ty, v_ty) = match &**t {
+                    Type::Tuple(items) if items.len() == 2 => {
+                        (items[0].clone(), items[1].clone())
+                    }
+                    other => {
+                        return Err(self.err_at(call_span, format!(
+                            "`.to_map()` requiere `List<(K, V)>` (Tuple aridad 2), recibió `List<{}>`",
+                            display_type(other, self.env)
+                        )));
+                    }
+                };
+                let k_rs = rust_type_for(&k_ty, self.env)?;
+                let v_rs = rust_type_for(&v_ty, self.env)?;
+                // Last-write-wins: por cada par, si la key ya está, la
+                // sobreescribimos; si no, push al final.
+                let code = format!(
+                    "{{ let __items: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let mut __out: Vec<({k_rs}, {v_rs})> = Vec::new(); \
+                       for (__k, __v) in __items.into_iter() {{ \
+                           if let Some(__slot) = __out.iter_mut().find(|(__ek, _)| *__ek == __k) {{ \
+                               __slot.1 = __v; \
+                           }} else {{ \
+                               __out.push((__k, __v)); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::Map(Box::new(k_ty), Box::new(v_ty))))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map)",
                 other
             ))),
 
@@ -6213,8 +6307,20 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
+            // Mini-tanda Mb3 — `entries()`: devuelve `List<(K, V)>`.
+            // Inversa de `xs.to_map()`. Emite snapshot del Vec<(K, V)>
+            // del Map adentro de un Arc<Mutex<>>.
+            (Type::Map(k, v), "entries") => {
+                check_method_arity(method, args, 0)?;
+                let k_rs = rust_type_for(k, self.env)?;
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "Arc::new(Mutex::new(({obj_code}).lock().unwrap().iter().map(|(__k, __v)| (__k.clone(), __v.clone())).collect::<Vec<({k_rs}, {v_rs})>>()))"
+                );
+                Ok((code, Type::List(Box::new(Type::Tuple(vec![(**k).clone(), (**v).clone()])))))
+            }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries)",
                 other
             ))),
 
@@ -6870,16 +6976,33 @@ impl<'a> CodegenCtx<'a> {
         param1_ty: &Type,
         method: &str,
     ) -> Result<String, FitzError> {
-        // Mini-tanda Ex — el callback binario es genérico en el ret
-        // type. `sort_by` espera Int; `Map.filter` espera Bool. La
-        // decisión la toma el caller via el método (matching por
-        // nombre). Sub-paso futuro si llegamos a 4+ callers: pasar
-        // `expected_ret_ty` como param explícito.
+        // Mini-tanda Mb3: caller pasa `expected_ret_ty` via
+        // `gen_binary_callback_inline_with_ret`; para callers
+        // existentes el fallback por nombre de método sigue siendo
+        // válido.
         let expected_ret = match method {
             "sort_by" => Type::Int,
             "filter" => Type::Bool, // Map.filter
             _ => Type::Any,
         };
+        self.gen_binary_callback_inline_with_ret(
+            arg, param0_ty, param1_ty, &expected_ret, method,
+        )
+    }
+
+    /// Mini-tanda Mb3 — versión explícita: el caller pasa el
+    /// `expected_ret_ty` que el callback debe satisfacer. Útil para
+    /// `reduce` donde Acc puede ser cualquier tipo declarado por el
+    /// usuario (no se infiere por nombre de método).
+    fn gen_binary_callback_inline_with_ret(
+        &mut self,
+        arg: &Expr,
+        param0_ty: &Type,
+        param1_ty: &Type,
+        expected_ret_ty: &Type,
+        method: &str,
+    ) -> Result<String, FitzError> {
+        let expected_ret = expected_ret_ty.clone();
         let arg_span = arg.span();
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),

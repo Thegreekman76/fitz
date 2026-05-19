@@ -1131,6 +1131,59 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos funcionales: fold + product + chars + entries + to_map~~ ✓ CERRADO 2026-05-18 (mini-tanda Mb3)
+
+Bundle siguiente al de Mb2, completa la API canónica "functional
+collections" con métodos pedidos del prompt anterior (`List.reduce`,
+`List.product`, `Str.chars`, `Map.entries`, `List.to_map`):
+
+- ~~**`List.reduce(init, fn(acc, x) -> Acc) -> Acc`**~~ ✓ Fold
+  canónico. El callback es binario y `Acc` puede ser de cualquier
+  tipo (no necesariamente igual al de los elementos). Evaluator
+  async invoca el callback con `invoke_value`; codegen reusa
+  `gen_binary_callback_inline_with_ret` (refactor del helper: el
+  caller ahora puede pasar `expected_ret_ty` explícito, antes era
+  fijo por nombre del método). Vacía → devuelve `init`.
+- ~~**`List.product()`**~~ ✓ Análogo a `sum`. Solo sobre Int/Float
+  homogéneo. Vacío → `Int(1)` sentinel (paralelo a Python
+  `math.prod([])`). Reusa el helper `require_numeric_list` de Mb2.
+- ~~**`Str.chars() -> List<Str>`**~~ ✓ Cada char del string como
+  `Str` de 1 caracter. Unicode-aware (cuenta chars, no bytes).
+  Habilita pipelines como `s.chars().count(fn(c) => ...)`.
+- ~~**`Map.entries() -> List<(K, V)>`**~~ ✓ Paralelo a Python
+  `dict.items()` / JS `Object.entries`. Preserva insertion order.
+- ~~**`List<(K, V)>.to_map() -> Map<K, V>`**~~ ✓ Inversa de
+  `entries()`. Last-write-wins en duplicados (paralelo a Python
+  `dict(items)`). El checker requiere `T == Tuple<K, V>` con
+  aridad 2; cualquier otro tipo → error.
+
+**Refactor incidental**: `gen_binary_callback_inline` ahora delega
+a `gen_binary_callback_inline_with_ret` que recibe el ret type
+explícito. Cierra el TODO marcado en el código ("Sub-paso futuro
+si llegamos a 4+ callers: pasar `expected_ret_ty` como param
+explícito").
+
+Implementación: ~250 LoC entre evaluator (5 fns nuevas:
+`list_reduce`/`list_product`/`list_to_map`/`map_entries`/`str_chars`),
+types (5 ramas nuevas en infer_list/map/str/method), codegen
+(5 ramas nuevas + refactor del helper), LSP (5 entries nuevos).
+
+**12 unit tests** del evaluator + **9 unit tests** del checker +
+**3 unit tests** del LSP + **7 compile_e2e** bit-a-bit `fitz run`
+↔ `fitz build` (incluye round-trip `entries().to_map()` que valida
+preservación de orden + último valor en duplicados). Ejemplo
+runnable `examples/guide/13n-reduce-product-chars-entries-to-map.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE`.
+
+Cap 13 de la guía: 3 filas nuevas en tabla `List<T>` (product/
+reduce/to_map), 1 en tabla `Str` (chars), 1 en tabla `Map<K, V>`
+(entries). Sub-sección dedicada "Fold + product + chars + entries
++ to_map (mini-tanda Mb3)" con ejemplos inline + caso canónico
+de pipeline (`scores.entries().reduce(...)`). VSCode extension:
+grammar TextMate sin cambios (métodos comparten patrón general de
+identifiers); LSP autocomplete refleja todo automáticamente vía
+rebuild del `fitz-lsp` binary.
+
 ### ~~Métodos chicos + Range step (List.min/max/sum + Str.pad_start/pad_end + Map.keys_sorted + Range.step_by)~~ ✓ CERRADO 2026-05-18 (mini-tanda Mb2 + Rg)
 
 Bundle de polish ergonómico chico, todos en 4 capas (evaluator +

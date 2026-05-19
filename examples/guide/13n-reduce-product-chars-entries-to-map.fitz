@@ -1,0 +1,107 @@
+// Mini-tanda Mb3 — métodos funcionales: fold canónico, multiplicación,
+// chars de un string y la conversión bidireccional entre Map y
+// lista de pares.
+//
+//   - `List.reduce(init, fn(acc, x) -> Acc)`: fold canónico funcional.
+//     Acc puede ser de cualquier tipo (no necesariamente igual al
+//     tipo de los elementos).
+//   - `List.product()`: multiplica todos los elementos. Solo para
+//     `List<Int>` o `List<Float>` homogéneos. Vacío → 1 (sentinel).
+//   - `Str.chars()`: devuelve `List<Str>` con cada char del string.
+//   - `Map.entries()`: devuelve `List<(K, V)>` con los pares clave-valor.
+//   - `List<(K, V)>.to_map()`: inversa de entries; convierte una lista
+//     de pares a un Map (last-write-wins en duplicados).
+
+// --- List.reduce: fold canónico ---------------------------------
+//
+// El patrón clásico para combinar elementos en un acumulador.
+// Equivalente a `Array.prototype.reduce(fn, init)` de JS o
+// `functools.reduce(fn, xs, init)` de Python.
+
+let xs: List<Int> = [1, 2, 3, 4, 5]
+
+// Sumar (sum() ya lo hace, pero reduce es general):
+let total: Int = xs.reduce(0, fn(acc: Int, x: Int) => acc + x)
+print("total: {total}")                          // total: 15
+
+// Buscar el máximo "a mano" (mostrando que se puede usar reduce
+// con cualquier op):
+let largest: Int = xs.reduce(0, fn(acc: Int, x: Int) -> Int {
+    if (x > acc) { return x }
+    return acc
+})
+print("largest: {largest}")                      // largest: 5
+
+// Acc puede ser de un tipo distinto al de los elementos. Caso
+// típico: construir un Str concatenando elementos formateados.
+let csv: Str = xs.reduce("", fn(acc: Str, x: Int) => "{acc}{x},")
+print("csv: {csv}")                              // csv: 1,2,3,4,5,
+
+// Lista vacía: reduce devuelve el init.
+let empty: List<Int> = []
+let nothing: Int = empty.reduce(42, fn(acc: Int, x: Int) => acc + x)
+print("vacía: {nothing}")                        // vacía: 42
+
+// --- List.product: multiplicar todos los elementos --------------
+//
+// Análogo a sum(). Vacío → 1 (sentinel — paralelo a `math.prod([])`
+// de Python). Solo válido sobre Int/Float homogéneos.
+
+let factorial_terms: List<Int> = [1, 2, 3, 4, 5]
+print("5! = {factorial_terms.product()}")        // 5! = 120
+
+let ratios: List<Float> = [1.5, 2.0, 2.0]
+print("ratio total: {ratios.product()}")         // ratio total: 6.0
+
+let vacia: List<Int> = []
+print("vacía product: {vacia.product()}")        // vacía product: 1
+
+// --- Str.chars: iterar caracteres -------------------------------
+//
+// Útil para componer pipelines sobre strings (chars + filter + ...).
+// Cada caracter sale como un Str de 1 char.
+
+let cs: List<Str> = "hola".chars()
+print(cs)                                        // ["h", "o", "l", "a"]
+print("len chars: {cs.len()}")                   // len chars: 4
+
+// Unicode también funciona — `len()` del Str ya contaba chars, no
+// bytes; chars() lo refleja como List<Str>.
+let acentos: List<Str> = "café".chars()
+print(acentos.len())                             // 4
+
+// Pipeline canónico — contar vocales:
+let vocales: Int = "fitz lang".chars().count(fn(c: Str) => c == "a" or c == "e" or c == "i" or c == "o" or c == "u")
+print("vocales en 'fitz lang': {vocales}")       // vocales en 'fitz lang': 2
+
+// --- Map.entries + List.to_map: round-trip ----------------------
+//
+// `entries()` devuelve los pares como `List<(K, V)>`, paralelo a
+// Python `dict.items()` o JS `Object.entries(obj)`.
+// `to_map()` hace la conversión inversa.
+
+let scores: Map<Str, Int> = {"ada": 80, "bob": 92, "cam": 65}
+let pairs: List<(Str, Int)> = scores.entries()
+print(pairs)                                     // [("ada", 80), ("bob", 92), ("cam", 65)]
+
+// Combinar con List methods naturalmente:
+let total_score: Int = scores.entries().reduce(0,
+    fn(acc: Int, p: (Str, Int)) => acc + p.1)
+print("suma total: {total_score}")               // suma total: 237
+
+// Inverso: construir un Map desde una lista de pares.
+let nuevos: List<(Str, Int)> = [("alice", 100), ("ben", 50)]
+let m: Map<Str, Int> = nuevos.to_map()
+print(m["alice"])                                // 100
+print(m["ben"])                                  // 50
+
+// Last-write-wins en duplicados (paralelo a Python `dict(items)`).
+let dups: List<(Str, Int)> = [("x", 1), ("x", 999)]
+let resolved: Map<Str, Int> = dups.to_map()
+print(resolved["x"])                             // 999
+
+// Round-trip preserva contenido (insertion order incluido).
+let back: Map<Str, Int> = scores.entries().to_map()
+print(back["ada"])                               // 80
+print(back["bob"])                               // 92
+print(back["cam"])                               // 65
