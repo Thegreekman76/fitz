@@ -1971,6 +1971,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13r-mb6-y-async-build.fitz",
     "13s-mb7-y-fmt-build.fitz",
     "13t-mb8-bits-y-fmt-g.fitz",
+    "13u-math-mb9-y-int-float.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -4513,4 +4514,95 @@ fn mb3_round_trip_entries_to_map_compila() {
     let (stdout, exit) = build_and_run("mb3_round_trip", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "1\n2\n3");
+}
+
+// ---- Mini-tanda Math + Mb9 + Int/Float methods ------------------
+
+#[test]
+fn math_builtins_basicos_compila() {
+    let src = "print(abs(-5))\n\
+               print(abs(-3.14))\n\
+               print(min(3, 5))\n\
+               print(max(1.5, 2.5))\n\
+               print(pow(2, 10))\n\
+               print(sqrt(16))\n\
+               print(ceil(3.2))\n\
+               print(floor(3.8))\n\
+               print(round(3.5))\n\
+               print(clamp(5, 0, 10))\n\
+               print(clamp(-5, 0, 10))\n\
+               print(clamp(15, 0, 10))\n";
+    let (stdout, exit) = build_and_run("math_builtins", src);
+    assert_eq!(exit, 0);
+    assert_eq!(
+        stdout.trim(),
+        "5\n3.14\n3\n2.5\n1024.0\n4.0\n4\n3\n4\n5\n0\n10"
+    );
+}
+
+#[test]
+fn mb9_str_swap_case_title_compila() {
+    let src = "print(\"Hola Mundo\".swap_case())\n\
+               print(\"hola mundo de fitz\".title())\n";
+    let (stdout, exit) = build_and_run("mb9_str_swap_title", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "hOLA mUNDO\nHola Mundo De Fitz");
+}
+
+#[test]
+fn mb9_str_is_alpha_digit_numeric_compila() {
+    let src = "print(\"hola\".is_alpha())\n\
+               print(\"hola123\".is_alpha())\n\
+               print(\"12345\".is_digit())\n\
+               print(\"3.14\".is_numeric())\n\
+               print(\"-42\".is_numeric())\n\
+               print(\"3.14.5\".is_numeric())\n";
+    let (stdout, exit) = build_and_run("mb9_str_is_predicates", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\nfalse\ntrue\ntrue\ntrue\nfalse");
+}
+
+#[test]
+fn mb9_list_split_at_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               let parts = xs.split_at(2)\n\
+               print(parts)\n";
+    let (stdout, exit) = build_and_run("mb9_list_split_at", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "([1, 2], [3, 4, 5])");
+}
+
+#[test]
+fn mb9_map_has_value_compila() {
+    let src = "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+               print(m.has_value(2))\n\
+               print(m.has_value(99))\n";
+    let (stdout, exit) = build_and_run("mb9_map_has_value", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+#[test]
+fn int_methods_abs_to_str_to_str_base_compila() {
+    let src = "let n: Int = -5\n\
+               print(n.abs())\n\
+               print((42).to_str())\n\
+               print((255).to_str_base(16))\n\
+               print((10).to_str_base(2))\n\
+               print((8).to_str_base(8))\n";
+    let (stdout, exit) = build_and_run("int_methods", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "5\n42\nff\n1010\n10");
+}
+
+#[test]
+fn float_methods_abs_to_str_is_nan_is_finite_compila() {
+    let src = "let x: Float = -3.14\n\
+               print(x.abs())\n\
+               print((3.14).to_str())\n\
+               print((1.0).is_nan())\n\
+               print((1.0).is_finite())\n";
+    let (stdout, exit) = build_and_run("float_methods", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "3.14\n3.14\nfalse\ntrue");
 }

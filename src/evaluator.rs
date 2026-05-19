@@ -262,6 +262,16 @@ pub fn builtin_names() -> &'static [&'static str] {
         "trailing_zeros",
         "rotate_left",
         "rotate_right",
+        // Mini-tanda Math — builtins matemáticos.
+        "abs",
+        "min",
+        "max",
+        "pow",
+        "sqrt",
+        "ceil",
+        "floor",
+        "round",
+        "clamp",
     ]
 }
 
@@ -3318,6 +3328,8 @@ async fn dispatch_method(
         (Value::List(_), "insert_at") => list_insert_at(receiver, args, span),
         (Value::List(_), "remove_at") => list_remove_at(receiver, args, span),
         (Value::List(_), "zip_to_map") => list_zip_to_map(receiver, args, span),
+        // Mini-tanda Mb9 — split_at sobre List (similar a Str.split_at).
+        (Value::List(_), "split_at") => list_split_at(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3374,6 +3386,8 @@ async fn dispatch_method(
         (Value::Map(_), "merge_with") => map_merge_with(receiver, args, span).await,
         // Mini-tanda Mb7 — with: functional update (Map nuevo con k→v).
         (Value::Map(_), "with") => map_with(receiver, args, span),
+        // Mini-tanda Mb9 — has_value: chequea si v está como value.
+        (Value::Map(_), "has_value") => map_has_value(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3397,6 +3411,81 @@ async fn dispatch_method(
         (Value::Str(_), "left") => str_left(receiver, args, span),
         (Value::Str(_), "right") => str_right(receiver, args, span),
         (Value::Str(_), "center") => str_center(receiver, args, span),
+        // Mini-tanda Mb9 — swap_case/title/is_alpha/is_digit/is_numeric.
+        (Value::Str(_), "swap_case") => str_swap_case(receiver, args, span),
+        (Value::Str(_), "title") => str_title(receiver, args, span),
+        (Value::Str(_), "is_alpha") => str_is_alpha(receiver, args, span),
+        (Value::Str(_), "is_digit") => str_is_digit(receiver, args, span),
+        (Value::Str(_), "is_numeric") => str_is_numeric(receiver, args, span),
+        // ---- Mini-tanda Mb9 — methods sobre primitivos Int/Float ----
+        //
+        // Hasta acá Fitz no tenía dispatch sobre `Value::Int`/`Value::Float`.
+        // Sumamos un set acotado de métodos análogos a Rust/Python.
+        // `n.abs()` / `x.abs()`, `n.to_str()` / `x.to_str()`, `n.to_str_base(b)`,
+        // `x.is_nan()` / `x.is_finite()`. Aridad fija; expect_arity.
+        (Value::Int(_), "abs") => {
+            expect_arity("abs", &args, 0, span)?;
+            let n = match receiver { Value::Int(n) => n, _ => unreachable!() };
+            Ok(Value::Int(n.wrapping_abs()))
+        }
+        (Value::Int(_), "to_str") => {
+            expect_arity("to_str", &args, 0, span)?;
+            let n = match receiver { Value::Int(n) => n, _ => unreachable!() };
+            Ok(Value::Str(n.to_string()))
+        }
+        (Value::Int(_), "to_str_base") => {
+            expect_arity("to_str_base", &args, 1, span)?;
+            let n = match receiver { Value::Int(n) => n, _ => unreachable!() };
+            let base = match args.into_iter().next().unwrap() {
+                Value::Int(b) => b,
+                other => return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Int".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!("`Int.to_str_base()` espera `Int`, recibió `{}`", other.type_name()),
+                ))),
+            };
+            let s = match base {
+                2 => format!("{:b}", n),
+                8 => format!("{:o}", n),
+                10 => n.to_string(),
+                16 => format!("{:x}", n),
+                _ => return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    span.line, span.column,
+                    format!("`Int.to_str_base()` solo soporta bases 2, 8, 10 o 16; recibió {}", base),
+                ))),
+            };
+            Ok(Value::Str(s))
+        }
+        (Value::Float(_), "abs") => {
+            expect_arity("abs", &args, 0, span)?;
+            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            Ok(Value::Float(x.abs()))
+        }
+        (Value::Float(_), "to_str") => {
+            expect_arity("to_str", &args, 0, span)?;
+            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            // Mismo formato que Display del intérprete (3.0 → "3.0").
+            let s = if x.is_finite() && x.fract() == 0.0 {
+                format!("{:.1}", x)
+            } else {
+                format!("{}", x)
+            };
+            Ok(Value::Str(s))
+        }
+        (Value::Float(_), "is_nan") => {
+            expect_arity("is_nan", &args, 0, span)?;
+            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            Ok(Value::Bool(x.is_nan()))
+        }
+        (Value::Float(_), "is_finite") => {
+            expect_arity("is_finite", &args, 0, span)?;
+            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            Ok(Value::Bool(x.is_finite()))
+        }
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
         // Mini-tanda Mb — variantes parciales de trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
@@ -4555,6 +4644,45 @@ fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(out))
 }
 
+/// Mini-tanda Mb9 — `xs.split_at(i)`: divide la lista en posición
+/// `i` y devuelve `(List<T>, List<T>)`. `i <= 0` → `([], xs)`;
+/// `i >= len` → `(xs, [])`. Paralelo a Rust `slice::split_at` pero
+/// devuelve copias en lugar de views.
+fn list_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("split_at", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let idx = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`List.split_at()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let clamped = if idx <= 0 {
+        0
+    } else if (idx as usize) >= snapshot.len() {
+        snapshot.len()
+    } else {
+        idx as usize
+    };
+    let left: Vec<Value> = snapshot[..clamped].to_vec();
+    let right: Vec<Value> = snapshot[clamped..].to_vec();
+    Ok(Value::Tuple(vec![
+        Value::new_list(left),
+        Value::new_list(right),
+    ]))
+}
+
 /// Mini-tanda Mb8 — `xs.starts_with(prefix)` / `xs.ends_with(suffix)`:
 /// devuelven `Bool` si la lista empieza/termina con la sublista dada.
 /// Usa igualdad estructural (PartialEq). Prefix vacío → `true`.
@@ -5343,6 +5471,20 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_map(out))
 }
 
+/// Mini-tanda Mb9 — `m.has_value(v) -> Bool`: devuelve true si algún
+/// par del Map tiene `v` como value. Igualdad estructural. Paralelo
+/// a `m.has(k)` (que chequea keys), pero sobre values.
+fn map_has_value(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("has_value", &args, 1, span)?;
+    let pairs = match receiver {
+        Value::Map(p) => p,
+        _ => unreachable!(),
+    };
+    let needle = args.into_iter().next().unwrap();
+    let found = pairs.lock().iter().any(|(_, v)| v == &needle);
+    Ok(Value::Bool(found))
+}
+
 /// Mini-tanda Mb7 — `m.with(k, v) -> Map<K, V>`: devuelve un Map
 /// nuevo con la key `k` mapeada a `v`. Si `k` ya existe, sobreescribe
 /// (last-write-wins, paralelo a `merge`). Operación funcional pura —
@@ -5654,6 +5796,92 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     let left: String = s.chars().take(clamped).collect();
     let right: String = s.chars().skip(clamped).collect();
     Ok(Value::Tuple(vec![Value::Str(left), Value::Str(right)]))
+}
+
+/// Mini-tanda Mb9 — `s.swap_case() -> Str`: invierte el case de cada
+/// caracter (mayúscula ↔ minúscula). Caracteres sin case (dígitos,
+/// símbolos) quedan como están.
+fn str_swap_case(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("swap_case", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let out: String = s
+        .chars()
+        .map(|c| {
+            if c.is_uppercase() {
+                c.to_lowercase().collect::<String>()
+            } else if c.is_lowercase() {
+                c.to_uppercase().collect::<String>()
+            } else {
+                c.to_string()
+            }
+        })
+        .collect();
+    Ok(Value::Str(out))
+}
+
+/// Mini-tanda Mb9 — `s.title() -> Str`: capitaliza la primera letra
+/// de cada palabra (separadas por whitespace). Paralelo a Python
+/// `str.title`. El resto de cada palabra queda en lowercase.
+fn str_title(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("title", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let mut out = String::with_capacity(s.len());
+    let mut start_of_word = true;
+    for c in s.chars() {
+        if c.is_whitespace() {
+            out.push(c);
+            start_of_word = true;
+        } else if start_of_word {
+            out.extend(c.to_uppercase());
+            start_of_word = false;
+        } else {
+            out.extend(c.to_lowercase());
+        }
+    }
+    Ok(Value::Str(out))
+}
+
+/// Mini-tanda Mb9 — `s.is_alpha() -> Bool`: todos los chars son
+/// letras. String vacío → false (paralelo a Python).
+fn str_is_alpha(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("is_alpha", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let r = !s.is_empty() && s.chars().all(|c| c.is_alphabetic());
+    Ok(Value::Bool(r))
+}
+
+/// Mini-tanda Mb9 — `s.is_digit() -> Bool`: todos los chars son
+/// dígitos ASCII (0-9). String vacío → false.
+fn str_is_digit(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("is_digit", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let r = !s.is_empty() && s.chars().all(|c| c.is_ascii_digit());
+    Ok(Value::Bool(r))
+}
+
+/// Mini-tanda Mb9 — `s.is_numeric() -> Bool`: el string completo
+/// parsea como número (Int o Float, con signo opcional). String
+/// vacío → false. Más permisivo que `is_digit` (acepta `.` y `-`).
+fn str_is_numeric(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("is_numeric", &args, 0, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let r = !s.is_empty() && s.parse::<f64>().is_ok();
+    Ok(Value::Bool(r))
 }
 
 /// Mini-tanda Mb8 — `s.left(n) -> Str` / `s.right(n) -> Str`:
@@ -6876,6 +7104,43 @@ fn register_builtins(env: &EnvRef) {
         "rotate_right",
         Value::Builtin { name: "rotate_right", func: builtin_rotate_right },
     );
+    // Mini-tanda Math — abs/min/max/pow/sqrt/ceil/floor/round/clamp.
+    env.lock().define(
+        "abs",
+        Value::Builtin { name: "abs", func: builtin_math_abs },
+    );
+    env.lock().define(
+        "min",
+        Value::Builtin { name: "min", func: builtin_math_min },
+    );
+    env.lock().define(
+        "max",
+        Value::Builtin { name: "max", func: builtin_math_max },
+    );
+    env.lock().define(
+        "pow",
+        Value::Builtin { name: "pow", func: builtin_math_pow },
+    );
+    env.lock().define(
+        "sqrt",
+        Value::Builtin { name: "sqrt", func: builtin_math_sqrt },
+    );
+    env.lock().define(
+        "ceil",
+        Value::Builtin { name: "ceil", func: builtin_math_ceil },
+    );
+    env.lock().define(
+        "floor",
+        Value::Builtin { name: "floor", func: builtin_math_floor },
+    );
+    env.lock().define(
+        "round",
+        Value::Builtin { name: "round", func: builtin_math_round },
+    );
+    env.lock().define(
+        "clamp",
+        Value::Builtin { name: "clamp", func: builtin_math_clamp },
+    );
 }
 
 /// Mini-tanda Bits-extras — `popcount(n: Int) -> Int`: cantidad de
@@ -7015,6 +7280,232 @@ fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
         )),
     };
     Ok(Value::Int(n.rotate_right(bits.rem_euclid(64) as u32)))
+}
+
+// ---- Mini-tanda Math — builtins matemáticos ----
+//
+// `abs/min/max/pow/sqrt/ceil/floor/round/clamp`. Polimórficos sobre
+// Int/Float donde aplica:
+//   - abs/min/max/clamp aceptan ambos (devuelven el mismo tipo del input)
+//   - pow/sqrt operan sobre Float (devuelven Float)
+//   - ceil/floor/round toman Float y devuelven Int
+
+fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`abs(x)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Int(n) => Ok(Value::Int(n.wrapping_abs())),
+        Value::Float(x) => Ok(Value::Float(x.abs())),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int|Float".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`abs(x)` espera `Int` o `Float`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+fn builtin_math_min_max(args: &[Value], want_max: bool, name: &str) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
+            0, 0,
+            format!("`{}(a, b)` espera 2 argumentos, recibió {}", name, args.len()),
+        ));
+    }
+    match (&args[0], &args[1]) {
+        (Value::Int(a), Value::Int(b)) => {
+            let r = if want_max { *a.max(b) } else { *a.min(b) };
+            Ok(Value::Int(r))
+        }
+        (Value::Float(a), Value::Float(b)) => {
+            let r = if want_max {
+                if a > b { *a } else { *b }
+            } else {
+                if a < b { *a } else { *b }
+            };
+            Ok(Value::Float(r))
+        }
+        (other_a, other_b) => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int+Int|Float+Float".into(),
+                found: format!("{}+{}", other_a.type_name(), other_b.type_name()),
+            },
+            0, 0,
+            format!(
+                "`{}(a, b)`: ambos args deben ser del mismo tipo Int o Float, recibió `{}` y `{}`",
+                name, other_a.type_name(), other_b.type_name(),
+            ),
+        )),
+    }
+}
+
+fn builtin_math_min(args: &[Value]) -> FitzResult<Value> {
+    builtin_math_min_max(args, false, "min")
+}
+
+fn builtin_math_max(args: &[Value]) -> FitzResult<Value> {
+    builtin_math_min_max(args, true, "max")
+}
+
+fn builtin_math_pow(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
+            0, 0,
+            format!("`pow(base, exp)` espera 2 args, recibió {}", args.len()),
+        ));
+    }
+    let to_f = |v: &Value| -> Option<f64> {
+        match v {
+            Value::Int(n) => Some(*n as f64),
+            Value::Float(x) => Some(*x),
+            _ => None,
+        }
+    };
+    let base = to_f(&args[0]).ok_or_else(|| FitzError::new(
+        ErrorKind::TypeMismatch {
+            expected: "Int|Float".into(),
+            found: args[0].type_name().into(),
+        },
+        0, 0,
+        format!("`pow(base, exp)`: arg 0 espera `Int` o `Float`, recibió `{}`", args[0].type_name()),
+    ))?;
+    let exp = to_f(&args[1]).ok_or_else(|| FitzError::new(
+        ErrorKind::TypeMismatch {
+            expected: "Int|Float".into(),
+            found: args[1].type_name().into(),
+        },
+        0, 0,
+        format!("`pow(base, exp)`: arg 1 espera `Int` o `Float`, recibió `{}`", args[1].type_name()),
+    ))?;
+    Ok(Value::Float(base.powf(exp)))
+}
+
+fn builtin_math_sqrt(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`sqrt(x)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    let x = match &args[0] {
+        Value::Int(n) => *n as f64,
+        Value::Float(x) => *x,
+        other => return Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int|Float".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`sqrt(x)` espera `Int` o `Float`, recibió `{}`", other.type_name()),
+        )),
+    };
+    Ok(Value::Float(x.sqrt()))
+}
+
+fn builtin_math_ceil(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`ceil(x)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Float(x) => Ok(Value::Int(x.ceil() as i64)),
+        Value::Int(n) => Ok(Value::Int(*n)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Float|Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`ceil(x)` espera `Float` o `Int`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+fn builtin_math_floor(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`floor(x)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Float(x) => Ok(Value::Int(x.floor() as i64)),
+        Value::Int(n) => Ok(Value::Int(*n)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Float|Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`floor(x)` espera `Float` o `Int`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            0, 0,
+            format!("`round(x)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        // Rust f64::round() es "half away from zero"; suficiente.
+        Value::Float(x) => Ok(Value::Int(x.round() as i64)),
+        Value::Int(n) => Ok(Value::Int(*n)),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Float|Int".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!("`round(x)` espera `Float` o `Int`, recibió `{}`", other.type_name()),
+        )),
+    }
+}
+
+fn builtin_math_clamp(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 3, found: args.len() },
+            0, 0,
+            format!("`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()),
+        ));
+    }
+    match (&args[0], &args[1], &args[2]) {
+        (Value::Int(x), Value::Int(lo), Value::Int(hi)) => {
+            Ok(Value::Int((*x).clamp(*lo, *hi)))
+        }
+        (Value::Float(x), Value::Float(lo), Value::Float(hi)) => {
+            Ok(Value::Float((*x).clamp(*lo, *hi)))
+        }
+        (a, b, c) => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "3 args Int|3 args Float".into(),
+                found: format!("{}+{}+{}", a.type_name(), b.type_name(), c.type_name()),
+            },
+            0, 0,
+            format!(
+                "`clamp(x, lo, hi)`: los 3 args deben ser del mismo tipo Int o Float, recibió `{}`, `{}`, `{}`",
+                a.type_name(), b.type_name(), c.type_name(),
+            ),
+        )),
+    }
 }
 
 /// `print(arg1, arg2, ...)` — imprime los args convertidos a string,
@@ -16740,5 +17231,234 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("x"), None);
         assert_eq!(env.lock().get("y"), None);
+    }
+
+    // ---- Mini-tanda Math: builtins numéricos ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn math_abs_int_y_float() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = abs(-5)\n\
+             let b: Float = abs(-3.14)\n\
+             let c: Int = abs(7)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("b"), Some(Value::Float(3.14)));
+        assert_eq!(env.lock().get("c"), Some(Value::Int(7)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn math_min_max_basicos() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = min(3, 5)\n\
+             let b: Int = max(3, 5)\n\
+             let c: Float = min(1.5, 2.5)\n\
+             let d: Float = max(1.5, 2.5)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("c"), Some(Value::Float(1.5)));
+        assert_eq!(env.lock().get("d"), Some(Value::Float(2.5)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn math_pow_y_sqrt() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Float = pow(2, 10)\n\
+             let b: Float = sqrt(16)\n\
+             let c: Float = sqrt(2)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Float(1024.0)));
+        assert_eq!(env.lock().get("b"), Some(Value::Float(4.0)));
+        // sqrt(2) ≈ 1.4142...
+        let c_val = env.lock().get("c");
+        if let Some(Value::Float(v)) = c_val {
+            assert!((v - std::f64::consts::SQRT_2).abs() < 1e-12);
+        } else {
+            panic!("c no es Float");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn math_ceil_floor_round() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = ceil(3.2)\n\
+             let b: Int = floor(3.8)\n\
+             let c: Int = round(3.5)\n\
+             let d: Int = ceil(7)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(4)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(3)));
+        assert_eq!(env.lock().get("c"), Some(Value::Int(4)));
+        assert_eq!(env.lock().get("d"), Some(Value::Int(7)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn math_clamp_lo_hi() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = clamp(5, 0, 10)\n\
+             let b: Int = clamp(-5, 0, 10)\n\
+             let c: Int = clamp(15, 0, 10)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(5)));
+        assert_eq!(env.lock().get("b"), Some(Value::Int(0)));
+        assert_eq!(env.lock().get("c"), Some(Value::Int(10)));
+    }
+
+    // ---- Mini-tanda Mb9: Str.swap_case / title / is_alpha / is_digit / is_numeric ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb9_str_swap_case() {
+        let (env, res) = parse_eval_into_env(
+            "let s: Str = \"Hola Mundo\".swap_case()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("s"), Some(Value::Str("hOLA mUNDO".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb9_str_title() {
+        let (env, res) = parse_eval_into_env(
+            "let s: Str = \"hola mundo de fitz\".title()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("s"), Some(Value::Str("Hola Mundo De Fitz".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb9_str_is_alpha_digit_numeric() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Bool = \"hola\".is_alpha()\n\
+             let b: Bool = \"hola123\".is_alpha()\n\
+             let c: Bool = \"12345\".is_digit()\n\
+             let d: Bool = \"12a\".is_digit()\n\
+             let e: Bool = \"3.14\".is_numeric()\n\
+             let f: Bool = \"-42\".is_numeric()\n\
+             let g: Bool = \"3.14.5\".is_numeric()\n\
+             let h: Bool = \"\".is_alpha()",
+        ).await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("a"), Some(Value::Bool(true)));
+        assert_eq!(env.get("b"), Some(Value::Bool(false)));
+        assert_eq!(env.get("c"), Some(Value::Bool(true)));
+        assert_eq!(env.get("d"), Some(Value::Bool(false)));
+        assert_eq!(env.get("e"), Some(Value::Bool(true)));
+        assert_eq!(env.get("f"), Some(Value::Bool(true)));
+        assert_eq!(env.get("g"), Some(Value::Bool(false)));
+        assert_eq!(env.get("h"), Some(Value::Bool(false)));
+    }
+
+    // ---- Mini-tanda Mb9: List.split_at(i) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb9_list_split_at_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let parts = xs.split_at(2)",
+        ).await;
+        res.unwrap();
+        let env = env.lock();
+        match env.get("parts") {
+            Some(Value::Tuple(items)) => {
+                assert_eq!(items.len(), 2);
+                match (&items[0], &items[1]) {
+                    (Value::List(left), Value::List(right)) => {
+                        assert_eq!(left.lock().len(), 2);
+                        assert_eq!(right.lock().len(), 3);
+                    }
+                    _ => panic!("componentes no son List: {:?}", items),
+                }
+            }
+            other => panic!("parts no es Tuple: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb9_list_split_at_clamp_extremos() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let a = xs.split_at(0)\n\
+             let b = xs.split_at(10)\n\
+             let c = xs.split_at(-1)",
+        ).await;
+        res.unwrap();
+        // (0) → ([], [1,2,3]); (10) → ([1,2,3], []); (-1) → ([], [1,2,3])
+        let env = env.lock();
+        if let Some(Value::Tuple(it)) = env.get("a") {
+            if let (Value::List(l), Value::List(r)) = (&it[0], &it[1]) {
+                assert_eq!(l.lock().len(), 0);
+                assert_eq!(r.lock().len(), 3);
+            } else { panic!(); }
+        } else { panic!(); }
+        if let Some(Value::Tuple(it)) = env.get("b") {
+            if let (Value::List(l), Value::List(r)) = (&it[0], &it[1]) {
+                assert_eq!(l.lock().len(), 3);
+                assert_eq!(r.lock().len(), 0);
+            } else { panic!(); }
+        } else { panic!(); }
+        if let Some(Value::Tuple(it)) = env.get("c") {
+            if let (Value::List(l), Value::List(r)) = (&it[0], &it[1]) {
+                assert_eq!(l.lock().len(), 0);
+                assert_eq!(r.lock().len(), 3);
+            } else { panic!(); }
+        } else { panic!(); }
+    }
+
+    // ---- Mini-tanda Mb9: Map.has_value(v) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb9_map_has_value() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
+             let yes: Bool = m.has_value(2)\n\
+             let no: Bool = m.has_value(99)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("yes"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("no"), Some(Value::Bool(false)));
+    }
+
+    // ---- Mini-tanda Math+Mb9: métodos sobre Int ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn int_methods_abs_to_str_to_str_base() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Int = (-5).abs()\n\
+             let b: Str = (42).to_str()\n\
+             let c: Str = (255).to_str_base(16)\n\
+             let d: Str = (10).to_str_base(2)\n\
+             let e: Str = (8).to_str_base(8)",
+        ).await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("a"), Some(Value::Int(5)));
+        assert_eq!(env.get("b"), Some(Value::Str("42".into())));
+        assert_eq!(env.get("c"), Some(Value::Str("ff".into())));
+        assert_eq!(env.get("d"), Some(Value::Str("1010".into())));
+        assert_eq!(env.get("e"), Some(Value::Str("10".into())));
+    }
+
+    // ---- Mini-tanda Math+Mb9: métodos sobre Float ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn float_methods_abs_to_str_is_nan_is_finite() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Float = (-3.14).abs()\n\
+             let b: Str = (3.14).to_str()\n\
+             let c: Bool = (1.0).is_nan()\n\
+             let d: Bool = (1.0).is_finite()",
+        ).await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("a"), Some(Value::Float(3.14)));
+        assert_eq!(env.get("b"), Some(Value::Str("3.14".into())));
+        assert_eq!(env.get("c"), Some(Value::Bool(false)));
+        assert_eq!(env.get("d"), Some(Value::Bool(true)));
     }
 }

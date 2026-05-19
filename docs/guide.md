@@ -4971,6 +4971,119 @@ print("{1234567890.0:G}")                        // 1.23457E9
 Ver [examples/guide/13t-mb8-bits-y-fmt-g.fitz](../examples/guide/13t-mb8-bits-y-fmt-g.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Math + Mb9 + métodos sobre Int/Float (mini-tanda Math + Mb9)
+
+Bundle numérico + polish final. Tres bloques que destraban code
+chains comunes en aritmética, validación de strings, y dispatch de
+método sobre primitivos (que antes era deuda).
+
+**Builtins numéricos globales (`abs`, `min`, `max`, `pow`, `sqrt`,
+`ceil`, `floor`, `round`, `clamp`)**:
+
+| Builtin                 | Tipo de retorno           | Notas                                  |
+|-------------------------|---------------------------|----------------------------------------|
+| `abs(n)`                | `Int` o `Float`           | Mismo tipo que el arg.                 |
+| `min(a, b) / max(a, b)` | `Int` o `Float`           | Ambos args deben ser del mismo tipo.   |
+| `pow(base, exp)`        | `Float`                   | Siempre Float, incluso con args Int.   |
+| `sqrt(x)`               | `Float`                   | Siempre Float.                         |
+| `ceil(x) / floor(x) / round(x)` | `Int`             | Siempre Int. Pasa Int de largo.        |
+| `clamp(x, lo, hi)`      | `Int` o `Float`           | Tres args del mismo tipo numérico.     |
+
+```fitz
+print(abs(-5))                                    // 5
+print(abs(-3.14))                                 // 3.14
+print(min(3, 5))                                  // 3
+print(pow(2, 10))                                 // 1024.0
+print(sqrt(16))                                   // 4.0
+print(ceil(3.2))                                  // 4
+print(floor(3.8))                                 // 3
+print(round(3.5))                                 // 4
+print(clamp(5, 0, 10))                            // 5
+print(clamp(-5, 0, 10))                           // 0
+print(clamp(15, 0, 10))                           // 10
+```
+
+**Métodos sobre `Str` (mini-tanda Mb9)**:
+
+**`Str.swap_case() / Str.title()`** — manipulación de case.
+
+```fitz
+print("Hola Mundo".swap_case())                   // "hOLA mUNDO"
+print("hola mundo de fitz".title())               // "Hola Mundo De Fitz"
+```
+
+**`Str.is_alpha() / is_digit() / is_numeric()`** — predicates de
+contenido. Útiles para validación rápida sin regex. Vacío → false
+en los tres (vacuous truth invertida, paralelo a Python).
+
+| Método         | Acepta                                              |
+|----------------|-----------------------------------------------------|
+| `is_alpha()`   | Todos chars son letras ASCII (`[a-zA-Z]+`).         |
+| `is_digit()`   | Todos chars son dígitos `[0-9]+` (estricto).        |
+| `is_numeric()` | El string completo parsea como número (Int o Float, signo opcional). |
+
+```fitz
+print("hola".is_alpha())                          // true
+print("hola123".is_alpha())                       // false
+print("12345".is_digit())                         // true
+print("3.14".is_numeric())                        // true (parsea como Float)
+print("-42".is_numeric())                         // true (signo OK)
+print("3.14.5".is_numeric())                      // false
+```
+
+**`List.split_at(i)`** — parte la lista en dos en idx, devuelve
+**Tuple** de dos lists nuevas. Clamp safe en ambos extremos.
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4, 5]
+let parts = xs.split_at(2)
+print(parts)                                      // ([1, 2], [3, 4, 5])
+
+print(xs.split_at(0))                             // ([], [1, 2, 3, 4, 5])
+print(xs.split_at(99))                            // ([1, 2, 3, 4, 5], [])
+```
+
+**`Map.has_value(v)`** — chequea si `v` está presente como value
+en algún par del map. Complementa `has(k)` (chequea por key).
+
+```fitz
+let scores: Map<Str, Int> = {"ada": 92, "bob": 85, "cam": 92}
+print(scores.has_value(92))                       // true
+print(scores.has_value(0))                        // false
+```
+
+**Métodos sobre primitivos `Int` y `Float`**:
+
+Cierra deuda: ahora podés hacer `n.abs()`, `x.is_nan()`, etc.
+sobre Int y Float directamente. Útil para method chaining y
+APIs uniformes.
+
+| Receptor | Método           | Descripción                                  |
+|----------|------------------|----------------------------------------------|
+| `Int`    | `n.abs()`        | Equivalente a `abs(n)`.                      |
+| `Int`    | `n.to_str()`     | Convierte a `Str`.                           |
+| `Int`    | `n.to_str_base(b)` | Convierte a `Str` en base 2/8/10/16.        |
+| `Float`  | `x.abs()`        | Equivalente a `abs(x)`.                      |
+| `Float`  | `x.to_str()`     | Convierte a `Str` (mismo formato que print). |
+| `Float`  | `x.is_nan()`     | `true` si es NaN.                            |
+| `Float`  | `x.is_finite()`  | `true` si NO es NaN ni infinito.             |
+
+```fitz
+let n: Int = -42
+print(n.abs())                                    // 42
+print((42).to_str())                              // "42"
+print((255).to_str_base(16))                      // "ff"
+print((10).to_str_base(2))                        // "1010"
+
+let x: Float = -3.14
+print(x.abs())                                    // 3.14
+print((1.0).is_nan())                             // false
+print((1.0).is_finite())                          // true
+```
+
+Ver [examples/guide/13u-math-mb9-y-int-float.fitz](../examples/guide/13u-math-mb9-y-int-float.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
 ### Lo que todavía no anda
 
 - **`return` adentro de un brazo de `match` como expresión** —

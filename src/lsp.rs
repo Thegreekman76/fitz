@@ -514,6 +514,19 @@ fn after_dot_completions(
             }
             items
         }
+        // Mini-tanda Math+Mb9 — métodos sobre primitivos Int/Float.
+        // Int: abs/to_str/to_str_base. Float: abs/to_str/is_nan/is_finite.
+        Type::Int => method_items(&[
+            ("abs", "fn() -> Int".into()),
+            ("to_str", "fn() -> Str".into()),
+            ("to_str_base", "fn(base: Int) -> Str  // base ∈ {2, 8, 10, 16}".into()),
+        ]),
+        Type::Float => method_items(&[
+            ("abs", "fn() -> Float".into()),
+            ("to_str", "fn() -> Str".into()),
+            ("is_nan", "fn() -> Bool".into()),
+            ("is_finite", "fn() -> Bool".into()),
+        ]),
         Type::List(t) => method_items(
             &[
                 ("push", format!("fn({}) -> Null", t.display(type_env))),
@@ -544,9 +557,7 @@ fn after_dot_completions(
                     t.display(type_env)
                 )),
                 // Mini-tanda Mb — flatten + sort_by.
-                ("flatten", format!(
-                    "fn() -> List<U>  // requiere List<List<U>>"
-                )),
+                ("flatten", "fn() -> List<U>  // requiere List<List<U>>".to_string()),
                 ("sort_by", format!(
                     "fn(fn({}, {}) -> Int) -> Null",
                     t.display(type_env),
@@ -628,6 +639,12 @@ fn after_dot_completions(
                 ("insert_at", format!("fn(idx: Int, v: {}) -> List<{}>", t.display(type_env), t.display(type_env))),
                 ("remove_at", format!("fn(idx: Int) -> List<{}>", t.display(type_env))),
                 ("zip_to_map", format!("fn(values: List<V>) -> Map<{}, V>", t.display(type_env))),
+                // Mini-tanda Mb9 — split_at(i): parte la lista en dos en idx.
+                ("split_at", format!(
+                    "fn(idx: Int) -> (List<{}>, List<{}>)",
+                    t.display(type_env),
+                    t.display(type_env),
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -708,6 +725,11 @@ fn after_dot_completions(
                     k.display(type_env),
                     v.display(type_env),
                 )),
+                // Mini-tanda Mb9 — has_value: chequea si V está presente.
+                ("has_value", format!(
+                    "fn({}) -> Bool",
+                    v.display(type_env),
+                )),
             ],
         ),
         Type::Str => method_items(&[
@@ -747,6 +769,12 @@ fn after_dot_completions(
             ("left", "fn(n: Int) -> Str".into()),
             ("right", "fn(n: Int) -> Str".into()),
             ("center", "fn(width: Int, ch: Str) -> Str".into()),
+            // Mini-tanda Mb9 — swap_case/title/is_alpha/is_digit/is_numeric.
+            ("swap_case", "fn() -> Str".into()),
+            ("title", "fn() -> Str".into()),
+            ("is_alpha", "fn() -> Bool".into()),
+            ("is_digit", "fn() -> Bool".into()),
+            ("is_numeric", "fn() -> Bool".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -860,6 +888,16 @@ fn scope_level_completions(program: &Program, type_env: &TypeEnv) -> Vec<Complet
         ("assert_eq", "fn(a, b) -> Null"),
         ("assert_ne", "fn(a, b) -> Null"),
         ("assert_throws", "fn(callback: fn() -> Any) -> Null"),
+        // Mini-tanda Math — builtins numéricos polimórficos.
+        ("abs", "fn(n: Int|Float) -> Int|Float"),
+        ("min", "fn(a, b) -> Int|Float  // mismo tipo"),
+        ("max", "fn(a, b) -> Int|Float  // mismo tipo"),
+        ("pow", "fn(base, exp) -> Float"),
+        ("sqrt", "fn(x: Int|Float) -> Float"),
+        ("ceil", "fn(x: Int|Float) -> Int"),
+        ("floor", "fn(x: Int|Float) -> Int"),
+        ("round", "fn(x: Int|Float) -> Int"),
+        ("clamp", "fn(x, lo, hi) -> Int|Float  // mismo tipo"),
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -1974,7 +2012,74 @@ mod tests {
         assert_eq!(it_fetch.kind, Some(CompletionItemKind::METHOD));
         // Detail: firma con prefix `fn` o `async fn` y tipos de params.
         assert_eq!(it_greet.detail.as_deref(), Some("fn() -> Str"));
-        assert_eq!(it_double.detail.as_deref(), Some("fn(Int) -> Int"));
+        assert_eq!(it_double.detail.as_deref(), Some("fn(n: Int) -> Int"));
         assert_eq!(it_fetch.detail.as_deref(), Some("async fn() -> Result<Str>"));
+    }
+
+    // ---- Mini-tanda Math + Mb9 + Int/Float methods ----
+
+    #[test]
+    fn mb9_after_dot_sobre_str_incluye_swap_case_title_is_alpha_is_digit_is_numeric() {
+        let src = "let s: Str = \"x\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["swap_case", "title", "is_alpha", "is_digit", "is_numeric"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (Mb9) en Str: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb9_after_dot_sobre_list_incluye_split_at() {
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"split_at"), "falta `split_at` en List: {labels:?}");
+    }
+
+    #[test]
+    fn mb9_after_dot_sobre_map_incluye_has_value() {
+        let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"has_value"), "falta `has_value` en Map: {labels:?}");
+    }
+
+    #[test]
+    fn after_dot_sobre_int_incluye_abs_to_str_to_str_base() {
+        let src = "let n: Int = 5\nn.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["abs", "to_str", "to_str_base"] {
+            assert!(labels.contains(&expected), "falta `{expected}` en Int: {labels:?}");
+        }
+    }
+
+    #[test]
+    fn after_dot_sobre_float_incluye_abs_to_str_is_nan_is_finite() {
+        let src = "let x: Float = 3.14\nx.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["abs", "to_str", "is_nan", "is_finite"] {
+            assert!(labels.contains(&expected), "falta `{expected}` en Float: {labels:?}");
+        }
+    }
+
+    #[test]
+    fn scope_level_incluye_math_builtins() {
+        let src = "let a = 1\n\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["abs", "min", "max", "pow", "sqrt", "ceil", "floor", "round", "clamp"] {
+            assert!(labels.contains(&expected), "falta builtin `{expected}`: {labels:?}");
+        }
     }
 }

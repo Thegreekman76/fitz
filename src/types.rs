@@ -1166,6 +1166,23 @@ impl<'a> CheckCtx<'a> {
                 },
             );
         }
+        // Mini-tanda Math — abs/min/max/clamp son polimórficos
+        // (Int|Float); pow/sqrt devuelven Float; ceil/floor/round
+        // devuelven Int. Hoy todos `Any` por la complejidad de
+        // modelar polimorfismo en el sistema actual; el evaluator
+        // y codegen los validan en cada call site.
+        for name in &[
+            "abs", "min", "max", "pow", "sqrt", "ceil", "floor", "round", "clamp",
+        ] {
+            self.scopes[0].insert(
+                (*name).into(),
+                VarBinding {
+                    ty: Type::Any,
+                    annotated: false,
+                    def_span: Span::ZERO,
+                },
+            );
+        }
     }
 
     fn push_scope(&mut self) {
@@ -2241,6 +2258,9 @@ fn infer_method_call(
         // de iteradores que tiene sentido (enumerate/zip/chain) + `len`.
         // El evaluator materializa el Range a List<Int> y delega.
         Type::Range => Some(infer_range_method(ctx, method, args_ty, span)),
+        // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
+        Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
+        Type::Float => Some(infer_float_method(ctx, method, args_ty, span)),
         // Gradual: no chequeamos sobre Any (no sabemos nada).
         Type::Any => None,
         other => {
@@ -2253,6 +2273,73 @@ fn infer_method_call(
                 method
             ));
             Some(Type::Any)
+        }
+    }
+}
+
+/// Mini-tanda Mb9 — signatures de métodos sobre primitivos Int/Float.
+/// Lista acotada por simplicidad; ampliar si entra demanda.
+fn infer_int_method(
+    ctx: &mut CheckCtx,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    match method {
+        "abs" => {
+            check_method_arity(ctx, "abs", args_ty, 0, span);
+            Type::Int
+        }
+        "to_str" => {
+            check_method_arity(ctx, "to_str", args_ty, 0, span);
+            Type::Str
+        }
+        "to_str_base" => {
+            if check_method_arity(ctx, "to_str_base", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`Int.to_str_base()` espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Str
+        }
+        _ => {
+            ctx.error_at(span, format!(
+                "`Int` no tiene el método `{}` (hoy: abs/to_str/to_str_base)",
+                method,
+            ));
+            Type::Any
+        }
+    }
+}
+
+fn infer_float_method(
+    ctx: &mut CheckCtx,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    match method {
+        "abs" => {
+            check_method_arity(ctx, "abs", args_ty, 0, span);
+            Type::Float
+        }
+        "to_str" => {
+            check_method_arity(ctx, "to_str", args_ty, 0, span);
+            Type::Str
+        }
+        "is_nan" | "is_finite" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Bool
+        }
+        _ => {
+            ctx.error_at(span, format!(
+                "`Float` no tiene el método `{}` (hoy: abs/to_str/is_nan/is_finite)",
+                method,
+            ));
+            Type::Any
         }
     }
 }
@@ -2759,6 +2846,22 @@ fn infer_list_method(
             }
             Type::List(Box::new(Type::List(Box::new(t.clone()))))
         }
+        // Mini-tanda Mb9 — `split_at(i) -> (List<T>, List<T>)`:
+        // divide en `i`, clamp safe (paralelo a Str.split_at de Mb4).
+        "split_at" => {
+            if check_method_arity(ctx, "split_at", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`List.split_at()` espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Tuple(vec![
+                Type::List(Box::new(t.clone())),
+                Type::List(Box::new(t.clone())),
+            ])
+        }
         // Mini-tanda Mb8 — `starts_with(prefix)` / `ends_with(suffix)`:
         // arg `List<T>`, devuelven `Bool`.
         "starts_with" | "ends_with" => {
@@ -3084,6 +3187,20 @@ fn infer_map_method(
             check_method_arity(ctx, "invert", args_ty, 0, span);
             Type::Map(Box::new(v.clone()), Box::new(k.clone()))
         }
+        // Mini-tanda Mb9 — `has_value(v) -> Bool`: chequea si v está
+        // como value en algún par del Map. Paralelo a `has(k)`.
+        "has_value" => {
+            if check_method_arity(ctx, "has_value", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], v)
+            {
+                ctx.error_at(span, format!(
+                    "`Map.has_value()` espera `{}`, recibió `{}`",
+                    v.display(ctx.types),
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Bool
+        }
         // Mini-tanda Mb7 — `with(k, v) -> Map<K, V>`: functional update.
         // Devuelve Map nuevo con `k → v`. Si `k` existe, sobreescribe.
         "with" => {
@@ -3392,6 +3509,16 @@ fn infer_str_method(
         }
         "is_empty" => {
             check_method_arity(ctx, "is_empty", args_ty, 0, span);
+            Type::Bool
+        }
+        // Mini-tanda Mb9 — `swap_case() / title() -> Str` y
+        // `is_alpha() / is_digit() / is_numeric() -> Bool`.
+        "swap_case" | "title" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
+            Type::Str
+        }
+        "is_alpha" | "is_digit" | "is_numeric" => {
+            check_method_arity(ctx, method, args_ty, 0, span);
             Type::Bool
         }
         // Mini-tanda Mb8 — `left(n)` / `right(n)`: primeros/últimos n
@@ -9373,5 +9500,90 @@ print(total)
         let src = "let xs: List<Str> = [\"a\", \"b\"]\nfor (i, x) in xs.enumerate() {\n    let idx: Int = i\n    let val: Str = x\n}\n";
         let errors = check_recovering(src);
         assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
+    }
+
+    // ---- Mini-tanda Math + Mb9 + Int/Float methods ----
+
+    #[test]
+    fn math_builtins_polimorficos_aceptan_int_y_float() {
+        // Los builtins de Math tipan como Any en el scope[0] — el codegen
+        // hace el dispatch concreto. El checker solo valida que existan.
+        assert_ok("let a = abs(-5)");
+        assert_ok("let b = min(3, 5)");
+        assert_ok("let c = pow(2, 10)");
+        assert_ok("let d = sqrt(16)");
+        assert_ok("let e = clamp(5, 0, 10)");
+    }
+
+    #[test]
+    fn mb9_str_swap_case_tipa_str() {
+        assert_ok("let s: Str = \"Hola\".swap_case()");
+    }
+
+    #[test]
+    fn mb9_str_title_tipa_str() {
+        assert_ok("let s: Str = \"hola mundo\".title()");
+    }
+
+    #[test]
+    fn mb9_str_is_alpha_digit_numeric_tipan_bool() {
+        assert_ok(
+            "let a: Bool = \"hola\".is_alpha()\n\
+             let b: Bool = \"123\".is_digit()\n\
+             let c: Bool = \"3.14\".is_numeric()",
+        );
+    }
+
+    #[test]
+    fn mb9_list_split_at_tipa_tuple_de_dos_lists() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let parts: (List<Int>, List<Int>) = xs.split_at(2)",
+        );
+    }
+
+    #[test]
+    fn mb9_map_has_value_tipa_bool() {
+        assert_ok(
+            "let m: Map<Str, Int> = {\"a\": 1}\n\
+             let r: Bool = m.has_value(1)",
+        );
+    }
+
+    #[test]
+    fn int_method_abs_y_to_str_tipan_correctamente() {
+        assert_ok(
+            "let n: Int = 5\n\
+             let a: Int = n.abs()\n\
+             let s: Str = n.to_str()\n\
+             let b: Str = n.to_str_base(16)",
+        );
+    }
+
+    #[test]
+    fn float_method_abs_to_str_is_nan_is_finite_tipan_correctamente() {
+        assert_ok(
+            "let x: Float = 3.14\n\
+             let a: Float = x.abs()\n\
+             let s: Str = x.to_str()\n\
+             let n: Bool = x.is_nan()\n\
+             let f: Bool = x.is_finite()",
+        );
+    }
+
+    #[test]
+    fn int_method_inexistente_es_error() {
+        assert_error_with(
+            "let n: Int = 5\nlet r = n.foobar()",
+            &["Int", "foobar"],
+        );
+    }
+
+    #[test]
+    fn float_method_inexistente_es_error() {
+        assert_error_with(
+            "let x: Float = 3.14\nlet r = x.foobar()",
+            &["Float", "foobar"],
+        );
     }
 }

@@ -5920,6 +5920,146 @@ impl<'a> CodegenCtx<'a> {
                 Type::Int,
             ));
         }
+        // Mini-tanda Math — builtins matemáticos polimórficos.
+        // abs/min/max/clamp aceptan Int|Float (mismo tipo en todos los
+        // args, devuelven ese tipo). pow/sqrt devuelven Float.
+        // ceil/floor/round devuelven Int.
+        if matches!(name.as_str(), "abs") && !self.fn_sigs.contains_key(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`abs(x)` espera 1 argumento, recibió {}", args.len()
+                )));
+            }
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            return match arg_ty {
+                Type::Int => Ok((format!("({}).wrapping_abs()", arg_code), Type::Int)),
+                Type::Float => Ok((format!("({}).abs()", arg_code), Type::Float)),
+                other => Err(self.err_at(call_span, format!(
+                    "`abs(x)` espera `Int` o `Float`, recibió `{}`",
+                    display_type(&other, self.env)
+                ))),
+            };
+        }
+        if matches!(name.as_str(), "min" | "max") && !self.fn_sigs.contains_key(name) {
+            if args.len() != 2 {
+                return Err(self.err_at(call_span, format!(
+                    "`{}(a, b)` espera 2 args, recibió {}", name, args.len()
+                )));
+            }
+            let (a_code, a_ty) = self.gen_expr(&args[0])?;
+            let (b_code, b_ty) = self.gen_expr(&args[1])?;
+            let is_max = name == "max";
+            // Misma rama para Int+Int y Float+Float; rechazamos mix.
+            return match (&a_ty, &b_ty) {
+                (Type::Int, Type::Int) => {
+                    let rust = if is_max { "max" } else { "min" };
+                    Ok((format!("({a_code}).{rust}({b_code})"), Type::Int))
+                }
+                (Type::Float, Type::Float) => {
+                    let cmp = if is_max { ">" } else { "<" };
+                    Ok((
+                        format!("{{ let __a: f64 = {a_code}; let __b: f64 = {b_code}; if __a {cmp} __b {{ __a }} else {{ __b }} }}"),
+                        Type::Float,
+                    ))
+                }
+                (a, b) => Err(self.err_at(call_span, format!(
+                    "`{}(a, b)`: args deben ser ambos Int o ambos Float, recibió `{}` y `{}`",
+                    name,
+                    display_type(a, self.env),
+                    display_type(b, self.env)
+                ))),
+            };
+        }
+        if matches!(name.as_str(), "pow") && !self.fn_sigs.contains_key(name) {
+            if args.len() != 2 {
+                return Err(self.err_at(call_span, format!(
+                    "`pow(base, exp)` espera 2 args, recibió {}", args.len()
+                )));
+            }
+            let (a_code, a_ty) = self.gen_expr(&args[0])?;
+            let (b_code, b_ty) = self.gen_expr(&args[1])?;
+            let a_f = match a_ty {
+                Type::Int => format!("({} as f64)", a_code),
+                Type::Float => a_code,
+                other => return Err(self.err_at(call_span, format!(
+                    "`pow(base, exp)`: base debe ser Int o Float, recibió `{}`",
+                    display_type(&other, self.env)
+                ))),
+            };
+            let b_f = match b_ty {
+                Type::Int => format!("({} as f64)", b_code),
+                Type::Float => b_code,
+                other => return Err(self.err_at(call_span, format!(
+                    "`pow(base, exp)`: exp debe ser Int o Float, recibió `{}`",
+                    display_type(&other, self.env)
+                ))),
+            };
+            return Ok((format!("({a_f}).powf({b_f})"), Type::Float));
+        }
+        if matches!(name.as_str(), "sqrt") && !self.fn_sigs.contains_key(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`sqrt(x)` espera 1 argumento, recibió {}", args.len()
+                )));
+            }
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            let coerced = match arg_ty {
+                Type::Int => format!("({} as f64)", arg_code),
+                Type::Float => arg_code,
+                other => return Err(self.err_at(call_span, format!(
+                    "`sqrt(x)` espera `Int` o `Float`, recibió `{}`",
+                    display_type(&other, self.env)
+                ))),
+            };
+            return Ok((format!("({}).sqrt()", coerced), Type::Float));
+        }
+        if matches!(name.as_str(), "ceil" | "floor" | "round")
+            && !self.fn_sigs.contains_key(name)
+        {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`{}(x)` espera 1 argumento, recibió {}", name, args.len()
+                )));
+            }
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            return match arg_ty {
+                Type::Int => Ok((arg_code, Type::Int)),
+                Type::Float => Ok((
+                    format!("({}).{}() as i64", arg_code, name),
+                    Type::Int,
+                )),
+                other => Err(self.err_at(call_span, format!(
+                    "`{}(x)` espera `Float` o `Int`, recibió `{}`",
+                    name, display_type(&other, self.env)
+                ))),
+            };
+        }
+        if matches!(name.as_str(), "clamp") && !self.fn_sigs.contains_key(name) {
+            if args.len() != 3 {
+                return Err(self.err_at(call_span, format!(
+                    "`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()
+                )));
+            }
+            let (x_code, x_ty) = self.gen_expr(&args[0])?;
+            let (lo_code, lo_ty) = self.gen_expr(&args[1])?;
+            let (hi_code, hi_ty) = self.gen_expr(&args[2])?;
+            return match (&x_ty, &lo_ty, &hi_ty) {
+                (Type::Int, Type::Int, Type::Int) => Ok((
+                    format!("({x_code}).clamp({lo_code}, {hi_code})"),
+                    Type::Int,
+                )),
+                (Type::Float, Type::Float, Type::Float) => Ok((
+                    format!("({x_code}).clamp({lo_code}, {hi_code})"),
+                    Type::Float,
+                )),
+                (a, b, c) => Err(self.err_at(call_span, format!(
+                    "`clamp(x, lo, hi)`: los 3 args deben ser del mismo tipo Int o Float, recibió `{}`, `{}`, `{}`",
+                    display_type(a, self.env),
+                    display_type(b, self.env),
+                    display_type(c, self.env),
+                ))),
+            };
+        }
         // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
         // usuario definió una fn `sleep` propia, `fn_sigs` la captura
         // antes y el builtin no dispara — misma política que `len`.
@@ -6314,6 +6454,54 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Str))
             }
+            // Mini-tanda Mb9 — swap_case / title / is_alpha / is_digit /
+            // is_numeric. Reusan métodos `char::is_*` de Rust.
+            (Type::Str, "swap_case") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "({}).chars().map(|c| if c.is_uppercase() {{ c.to_lowercase().collect::<String>() }} \
+                       else if c.is_lowercase() {{ c.to_uppercase().collect::<String>() }} \
+                       else {{ c.to_string() }}).collect::<String>()",
+                    obj_code,
+                );
+                Ok((code, Type::Str))
+            }
+            (Type::Str, "title") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let mut __out = String::with_capacity(__s.len()); \
+                       let mut __start = true; \
+                       for __c in __s.chars() {{ \
+                           if __c.is_whitespace() {{ __out.push(__c); __start = true; }} \
+                           else if __start {{ __out.extend(__c.to_uppercase()); __start = false; }} \
+                           else {{ __out.extend(__c.to_lowercase()); }} \
+                       }} \
+                       __out }}"
+                );
+                Ok((code, Type::Str))
+            }
+            (Type::Str, "is_alpha") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; !__s.is_empty() && __s.chars().all(|c| c.is_alphabetic()) }}"
+                );
+                Ok((code, Type::Bool))
+            }
+            (Type::Str, "is_digit") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; !__s.is_empty() && __s.chars().all(|c| c.is_ascii_digit()) }}"
+                );
+                Ok((code, Type::Bool))
+            }
+            (Type::Str, "is_numeric") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; !__s.is_empty() && __s.parse::<f64>().is_ok() }}"
+                );
+                Ok((code, Type::Bool))
+            }
             // Mini-tanda Mb8 — `left(n)` / `right(n)`: primeros/últimos
             // n chars. n <= 0 → vacío; n >= len → string completo.
             (Type::Str, "left") => {
@@ -6389,7 +6577,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with/left/right/center)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at/lines/is_empty/repeat_with/left/right/center/swap_case/title/is_alpha/is_digit/is_numeric)",
                 other
             ))),
 
@@ -7002,6 +7190,31 @@ impl<'a> CodegenCtx<'a> {
                     Type::List(Box::new(Type::List(Box::new((**t).clone())))),
                 ))
             }
+            // Mini-tanda Mb9 — split_at(i) → (List<T>, List<T>). Clamp
+            // safe en ambos extremos.
+            (Type::List(t), "split_at") => {
+                check_method_arity(method, args, 1)?;
+                let (idx_code, idx_ty) = self.gen_expr(&args[0])?;
+                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __idx: i64 = {idx_c}; \
+                       let __clamped = if __idx <= 0 {{ 0 }} \
+                           else if (__idx as usize) >= __snap.len() {{ __snap.len() }} \
+                           else {{ __idx as usize }}; \
+                       let __left: Vec<{t_rs}> = __snap[..__clamped].to_vec(); \
+                       let __right: Vec<{t_rs}> = __snap[__clamped..].to_vec(); \
+                       (Arc::new(Mutex::new(__left)), Arc::new(Mutex::new(__right))) }}"
+                );
+                Ok((
+                    code,
+                    Type::Tuple(vec![
+                        Type::List(Box::new((**t).clone())),
+                        Type::List(Box::new((**t).clone())),
+                    ]),
+                ))
+            }
             // Mini-tanda Mb8 — starts_with(prefix) / ends_with(suffix):
             // arg `List<T>`, devuelve `Bool`.
             (Type::List(t), "starts_with") | (Type::List(t), "ends_with") => {
@@ -7191,7 +7404,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::List(Box::new((**t).clone()))))
             }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle/starts_with/ends_with/insert_at/remove_at/zip_to_map)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows/take/drop/init/tail/intersperse/cycle/starts_with/ends_with/insert_at/remove_at/zip_to_map/split_at)",
                 other
             ))),
 
@@ -7397,6 +7610,19 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::List(Box::new(Type::Tuple(vec![(**k).clone(), (**v).clone()])))))
             }
+            // Mini-tanda Mb9 — has_value(v) -> Bool: chequea si v está
+            // como value en algún par del Map.
+            (Type::Map(_, v), "has_value") => {
+                check_method_arity(method, args, 1)?;
+                let (val_code, val_ty) = self.gen_expr(&args[0])?;
+                let val_c = coerce(&val_code, &val_ty, v);
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let __target: {v_rs} = {val_c}; \
+                       ({obj_code}).lock().unwrap().iter().any(|__p| __p.1 == __target) }}"
+                );
+                Ok((code, Type::Bool))
+            }
             // Mini-tanda Mb7 — with(k, v) -> Map<K, V>: functional update.
             (Type::Map(k, v), "with") => {
                 check_method_arity(method, args, 2)?;
@@ -7420,10 +7646,52 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with/with/has_value)",
                 other
             ))),
 
+            // ---- Mini-tanda Mb9 — métodos sobre primitivos Int/Float ----
+            (Type::Int, "abs") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).wrapping_abs()", obj_code), Type::Int))
+            }
+            (Type::Int, "to_str") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).to_string()", obj_code), Type::Str))
+            }
+            (Type::Int, "to_str_base") => {
+                check_method_arity(method, args, 1)?;
+                let (base_code, base_ty) = self.gen_expr(&args[0])?;
+                let base_c = coerce(&base_code, &base_ty, &Type::Int);
+                let code = format!(
+                    "{{ let __n: i64 = {obj_code}; let __base: i64 = {base_c}; \
+                       match __base {{ \
+                           2 => format!(\"{{:b}}\", __n), \
+                           8 => format!(\"{{:o}}\", __n), \
+                           10 => __n.to_string(), \
+                           16 => format!(\"{{:x}}\", __n), \
+                           _ => panic!(\"`Int.to_str_base()` solo soporta bases 2, 8, 10 o 16; recibió {{}}\", __base), \
+                       }} }}"
+                );
+                Ok((code, Type::Str))
+            }
+            (Type::Float, "abs") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).abs()", obj_code), Type::Float))
+            }
+            (Type::Float, "to_str") => {
+                check_method_arity(method, args, 0)?;
+                // Mismo formato que `__fitz_fmt_float` del preludio.
+                Ok((format!("__fitz_fmt_float({})", obj_code), Type::Str))
+            }
+            (Type::Float, "is_nan") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).is_nan()", obj_code), Type::Bool))
+            }
+            (Type::Float, "is_finite") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).is_finite()", obj_code), Type::Bool))
+            }
             // ---- Tipos custom (R.3 mini-fase R) ----
             (Type::Nominal(id), m) => {
                 let type_name = self.env.info(*id).name.clone();
@@ -12293,6 +12561,27 @@ fn show_expr(code: &str, ty: &Type) -> String {
                 }})",
                 code, ok_show
             )
+        }
+        // Tuple → `(<inline T1>, <inline T2>, ...)`. Cada componente
+        // usa `show_expr_inline` para que los strings vayan entre
+        // comillas igual que adentro de listas/mapas — paridad bit-a-bit
+        // con `write_inline_value` del intérprete.
+        Type::Tuple(items) => {
+            let mut s = String::from("{ let __t = ");
+            s.push_str(&format!("({}).clone()", code));
+            s.push_str("; let mut __s = String::from(\"(\"); ");
+            for (i, it_ty) in items.iter().enumerate() {
+                if i > 0 {
+                    s.push_str("__s.push_str(\", \"); ");
+                }
+                let pick = format!("(__t.{}).clone()", i);
+                let inline = show_expr_inline("__x", it_ty);
+                s.push_str(&format!(
+                    "{{ let __x = {pick}; __s.push_str(&({inline})); }} "
+                ));
+            }
+            s.push_str("__s.push(')'); __s }");
+            s
         }
         // Range, Any, Function — fallback. Si el AST cuela algo que llega
         // acá, el error principal viene de otro lado.

@@ -1,0 +1,95 @@
+// Mini-tanda Math + Mb9 + Int/Float methods — numéricos y polish final.
+//
+//   - Math (9 builtins globales numéricos):
+//     * `abs(n)` → |n|, polimórfico Int/Float
+//     * `min(a, b)` / `max(a, b)` → Int o Float (mismo tipo)
+//     * `pow(base, exp)` → Float (siempre)
+//     * `sqrt(x)` → Float (siempre)
+//     * `ceil(x)` / `floor(x)` / `round(x)` → Int (siempre)
+//     * `clamp(x, lo, hi)` → x acotado al rango [lo, hi]
+//
+//   - Mb9 (7 métodos chicos sobre colecciones y Str):
+//     * `Str.swap_case()` / `Str.title()` → Str
+//     * `Str.is_alpha()` / `Str.is_digit()` / `Str.is_numeric()` → Bool
+//     * `List.split_at(i)` → (List<T>, List<T>)
+//     * `Map.has_value(v)` → Bool
+//
+//   - Métodos sobre primitivos Int/Float (cierra deuda de dispatch):
+//     * `n.abs()` / `n.to_str()` / `n.to_str_base(b)` para Int
+//     * `x.abs()` / `x.to_str()` / `x.is_nan()` / `x.is_finite()` para Float
+
+// --- Math builtins -----------------------------------------------
+
+print(abs(-5))                                    // 5
+print(abs(-3.14))                                 // 3.14
+
+print(min(3, 5))                                  // 3
+print(max(3, 5))                                  // 5
+print(min(1.5, 2.5))                              // 1.5
+
+print(pow(2, 10))                                 // 1024.0
+print(sqrt(16))                                   // 4.0
+print(sqrt(2))                                    // 1.4142135623730951
+
+print(ceil(3.2))                                  // 4
+print(floor(3.8))                                 // 3
+print(round(3.5))                                 // 4
+
+print(clamp(5, 0, 10))                            // 5
+print(clamp(-5, 0, 10))                           // 0
+print(clamp(15, 0, 10))                           // 10
+
+// --- Str.swap_case / title ---------------------------------------
+
+print("Hola Mundo".swap_case())                   // hOLA mUNDO
+print("hola mundo de fitz".title())               // Hola Mundo De Fitz
+
+// --- Str.is_alpha / is_digit / is_numeric ------------------------
+
+print("hola".is_alpha())                          // true
+print("hola123".is_alpha())                       // false
+print("".is_alpha())                              // false (vacío → false)
+
+print("12345".is_digit())                         // true
+print("12a".is_digit())                           // false
+
+// is_numeric es más permisivo: acepta signo y decimal.
+print("3.14".is_numeric())                        // true
+print("-42".is_numeric())                         // true
+print("3.14.5".is_numeric())                      // false
+
+// --- List.split_at: parte la lista en dos en idx -----------------
+
+let xs: List<Int> = [1, 2, 3, 4, 5]
+let parts = xs.split_at(2)
+print(parts)                                      // ([1, 2], [3, 4, 5])
+
+// Extremos: clamp a [0, len].
+print(xs.split_at(0))                             // ([], [1, 2, 3, 4, 5])
+print(xs.split_at(99))                            // ([1, 2, 3, 4, 5], [])
+
+// --- Map.has_value: chequea si V está presente -------------------
+
+let scores: Map<Str, Int> = {"ada": 92, "bob": 85, "cam": 92}
+print(scores.has_value(92))                       // true
+print(scores.has_value(0))                        // false
+
+// --- Métodos sobre Int -------------------------------------------
+
+let n: Int = -42
+print(n.abs())                                    // 42
+print((42).to_str())                              // 42
+
+// to_str_base soporta bases 2/8/10/16.
+print((255).to_str_base(16))                      // ff
+print((10).to_str_base(2))                        // 1010
+print((8).to_str_base(8))                         // 10
+
+// --- Métodos sobre Float -----------------------------------------
+
+let x: Float = -3.14
+print(x.abs())                                    // 3.14
+print((3.14).to_str())                            // 3.14
+
+print((1.0).is_nan())                             // false
+print((1.0).is_finite())                          // true

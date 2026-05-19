@@ -1131,6 +1131,113 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Math builtins + Mb9 + dispatch sobre Int/Float~~ ✓ CERRADO 2026-05-19 (mini-tanda Math + Mb9 + Int/Float methods)
+
+Bundle numérico + polish final: 9 builtins globales de Math + 7
+métodos chicos (Mb9) + dispatch sobre primitivos Int/Float (cierra
+deuda explícita de Mb8 que comentaba "Fitz no tiene dispatch sobre
+primitivos hoy — esa decisión queda como deuda futura").
+
+**Parte 1 — Math (9 builtins globales numéricos)**:
+
+- ~~**`abs(n)`**~~ ✓ Polimórfico: `Int → Int` o `Float → Float`.
+  `Int::MIN` usa `wrapping_abs` (paralelo a Rust); evita panic en
+  edge case. Heterogéneos en min/max no aplica (un solo arg).
+- ~~**`min(a, b) / max(a, b)`**~~ ✓ Polimórficos. Mismos tipos
+  obligatorio (`Int+Int` o `Float+Float`); mix → error claro.
+- ~~**`pow(base, exp) -> Float`**~~ ✓ Siempre Float. Coerce ambos
+  args a f64 + `.powf()`. Acepta cualquier combinación numérica.
+- ~~**`sqrt(x) -> Float`**~~ ✓ Siempre Float. Coerce a f64.
+- ~~**`ceil(x) / floor(x) / round(x) -> Int`**~~ ✓ Siempre Int.
+  Pasa Int de largo; Float aplica el método y casta a i64.
+- ~~**`clamp(x, lo, hi)`**~~ ✓ Polimórfico (Int o Float, mismos
+  3 args). Emite `.clamp()` de Rust nativo.
+
+Decisión polimorfismo: Math builtins tipados como `Type::Any` en
+scope[0] del checker (no extendimos el sistema de tipos para
+polimorfismo paramétrico real). El **codegen** hace el dispatch
+concreto por nombre + tipos de args (`Int+Int → wrapping_abs`,
+`Float → .abs()`, etc.). Trade-off: el checker no captura mix de
+tipos como error (corre OK en intérprete polimórfico, falla
+estático en codegen con mensaje claro). Esto matchea el patrón
+ya establecido por `len` (poly-Any en checker, dispatch en codegen).
+
+**Parte 2 — Mb9 (7 métodos chicos)**:
+
+- ~~**`Str.swap_case() -> Str`**~~ ✓ Invierte mayúsculas y
+  minúsculas char por char (estilo Python `str.swapcase`).
+- ~~**`Str.title() -> Str`**~~ ✓ Capitaliza la primera letra de
+  cada palabra. Split por whitespace, capitaliza con `.next()` +
+  collect (paralelo a `str.title` Python).
+- ~~**`Str.is_alpha() -> Bool`**~~ ✓ Todos chars son letras
+  (ASCII alphabetic). Vacío → false (vacuous truth invertida,
+  paralelo a Python).
+- ~~**`Str.is_digit() -> Bool`**~~ ✓ Todos chars son `[0-9]`
+  ASCII estricto. Vacío → false.
+- ~~**`Str.is_numeric() -> Bool`**~~ ✓ El string completo parsea
+  como número (Int o Float, con signo opcional). Más permisivo
+  que `is_digit`: acepta `-42`, `3.14`. Decidimos parse-based
+  porque Unicode-digit (`c.is_numeric()` de Rust) era casi
+  redundante con `is_digit`. Vacío → false.
+- ~~**`List.split_at(i) -> (List<T>, List<T>)`**~~ ✓ Parte la
+  lista en char idx. Devuelve **Tuple** de dos lists nuevas
+  (preserva semantics funcionales). Clamp safe en ambos
+  extremos: `idx ≤ 0 → ([], xs)`, `idx ≥ len → (xs, [])`.
+- ~~**`Map.has_value(v) -> Bool`**~~ ✓ Chequea si V está en
+  algún value del map. Igualdad estructural via `PartialEq`.
+
+**Parte 3 — Dispatch sobre primitivos Int/Float**:
+
+Cierra deuda explícita de Mb8 (la nota decía "decisión futura si
+aparece demanda"). Apareció.
+
+- ~~**`n.abs()` para Int**~~ ✓ Equivalente a `abs(n)` pero como
+  método. Útil para method chaining: `delta.abs() > threshold`.
+- ~~**`n.to_str()` para Int**~~ ✓ Convierte a Str. Equivalente
+  a `"{n}"` interp pero sin alocar template; nicer en chains.
+- ~~**`n.to_str_base(b)` para Int**~~ ✓ Soporta bases 2/8/10/16
+  (las que `format!("{:b/o/x}", n)` cubre nativamente). Bases
+  inválidas → error de runtime claro. Salida sin prefijo (`ff`
+  no `0xff`) para uniformidad cross-base.
+- ~~**`x.abs() / x.to_str()` para Float**~~ ✓ Análogos a Int.
+  `to_str` usa `__fitz_fmt_float` (bit-a-bit con `print`).
+- ~~**`x.is_nan() / x.is_finite()` para Float**~~ ✓ Predicates
+  útiles para validación numérica (output de divisiones,
+  cálculos que podrían overflow, JSON con `NaN`/`Infinity`).
+
+Implementación cross-cutting: el evaluator extiende
+`dispatch_method` con ramas `(Value::Int(_), "method")` /
+`(Value::Float(_), "method")`. El checker agrega
+`infer_int_method` / `infer_float_method` y dispatcha en
+`infer_method_call`. El codegen agrega ramas en `gen_method_call`
+con coerción `Int → wrapping_abs / .to_string() / format!("{:b}")`.
+
+**Bonus que entró en la misma mini-tanda**: arregla bug del
+`show_expr` que no tenía rama para `Type::Tuple` y caía al fallback
+Debug — split_at producía `(Mutex { data: [1, 2], poisoned: false,
+.. }, ...)` en `fitz build`. Agregada rama dedicada que itera los
+componentes del Tuple con `show_expr_inline` (strings entre comillas
+adentro de tuples paralelo a listas/maps). Paridad bit-a-bit
+recuperada.
+
+Implementación: ~600 LoC entre evaluator (12 fns nuevas + 11 ramas
+de dispatch), types (9 Math en scope[0] + helpers `infer_int_method`
+/`infer_float_method` + 7 ramas Mb9), codegen (9 builtins Math en
+`gen_call` + 7 ramas Mb9 + 7 ramas Int/Float en `gen_method_call`
++ rama `Type::Tuple` en `show_expr`), LSP (9 Math entries +
+métodos para Int/Float + 7 Mb9).
+
+**31 unit tests** (13 evaluator + 12 checker + 6 LSP) + **7
+compile_e2e** bit-a-bit `fitz run` ↔ `fitz build`. Ejemplo runnable
+`examples/guide/13u-math-mb9-y-int-float.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE`.
+
+Cap 13 de la guía: filas nuevas en tabla `Str` (5 Mb9), `List<T>`
+(split_at), `Map<K,V>` (has_value); tabla nueva para métodos sobre
+Int/Float. Sub-sección dedicada con ejemplos para los 9 Math
+builtins. VSCode extension: grammar TextMate sin cambios; LSP
+autocomplete refleja todo via rebuild.
+
 ### ~~Métodos sub-lista + functional updates + bits + g/G~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb8 + Bits-extras + Fmt-g)
 
 Bundle final de polish del lenguaje base: 8 métodos chicos (Mb8) +
