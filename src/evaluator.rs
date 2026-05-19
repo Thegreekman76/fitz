@@ -2105,6 +2105,147 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
     }
 }
 
+/// Mini-tanda Cmp+ — Helper recursivo que recorre los `for` clauses
+/// de una list comprehension (cartesian product) y aplica el `expr`
+/// en el nivel más interno. El filter (si está) se evalúa adentro
+/// del último loop, antes del expr final. Devuelve la lista final.
+#[async_recursion]
+async fn run_list_comp(
+    expr: &Expr,
+    clauses: &[(crate::ast::Pattern, Expr)],
+    filter: Option<&Expr>,
+    env: EnvRef,
+) -> EvalResult<Vec<Value>> {
+    if clauses.is_empty() {
+        // Nivel más interno: evaluar filter (si está) y el expr.
+        if let Some(f) = filter {
+            let fv = eval_expr(f, env.clone()).await?;
+            match fv {
+                Value::Bool(true) => {}
+                Value::Bool(false) => return Ok(Vec::new()),
+                other => {
+                    let s = f.span();
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Bool".into(),
+                            found: other.type_name().into(),
+                        },
+                        s.line, s.column,
+                        format!(
+                            "el filtro `if` de la list comprehension debe ser `Bool`, no `{}`",
+                            other.type_name()
+                        ),
+                    )));
+                }
+            }
+        }
+        let v = eval_expr(expr, env).await?;
+        return Ok(vec![v]);
+    }
+    let (var, iter) = &clauses[0];
+    let iter_v = eval_expr(iter, env.clone()).await?;
+    let items: Vec<Value> = match iter_v {
+        Value::List(items) => items.lock().clone(),
+        Value::Range { start, end } => (start..end).map(Value::Int).collect(),
+        other => {
+            let s = iter.span();
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List o Range".into(),
+                    found: other.type_name().into(),
+                },
+                s.line, s.column,
+                format!(
+                    "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                    other.type_name()
+                ),
+            )));
+        }
+    };
+    let mut out: Vec<Value> = Vec::new();
+    for item in items {
+        let child = Environment::new_child(env.clone());
+        bind_for_pattern(var, item, &child)?;
+        let sub = run_list_comp(expr, &clauses[1..], filter, child).await?;
+        out.extend(sub);
+    }
+    Ok(out)
+}
+
+/// Mini-tanda Cmp+ — análogo de `run_list_comp` para map comprehensions.
+/// Construye un `Vec<(Value, Value)>` con last-write-wins en duplicados
+/// (mismo approach que `List.to_map`).
+#[async_recursion]
+async fn run_map_comp(
+    key_expr: &Expr,
+    value_expr: &Expr,
+    clauses: &[(crate::ast::Pattern, Expr)],
+    filter: Option<&Expr>,
+    env: EnvRef,
+) -> EvalResult<Vec<(Value, Value)>> {
+    if clauses.is_empty() {
+        if let Some(f) = filter {
+            let fv = eval_expr(f, env.clone()).await?;
+            match fv {
+                Value::Bool(true) => {}
+                Value::Bool(false) => return Ok(Vec::new()),
+                other => {
+                    let s = f.span();
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Bool".into(),
+                            found: other.type_name().into(),
+                        },
+                        s.line, s.column,
+                        format!(
+                            "el filtro `if` de la map comprehension debe ser `Bool`, no `{}`",
+                            other.type_name()
+                        ),
+                    )));
+                }
+            }
+        }
+        let k = eval_expr(key_expr, env.clone()).await?;
+        let v = eval_expr(value_expr, env).await?;
+        return Ok(vec![(k, v)]);
+    }
+    let (var, iter) = &clauses[0];
+    let iter_v = eval_expr(iter, env.clone()).await?;
+    let items: Vec<Value> = match iter_v {
+        Value::List(items) => items.lock().clone(),
+        Value::Range { start, end } => (start..end).map(Value::Int).collect(),
+        other => {
+            let s = iter.span();
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "List o Range".into(),
+                    found: other.type_name().into(),
+                },
+                s.line, s.column,
+                format!(
+                    "map comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                    other.type_name()
+                ),
+            )));
+        }
+    };
+    let mut out: Vec<(Value, Value)> = Vec::new();
+    for item in items {
+        let child = Environment::new_child(env.clone());
+        bind_for_pattern(var, item, &child)?;
+        let sub = run_map_comp(key_expr, value_expr, &clauses[1..], filter, child).await?;
+        // Last-write-wins: sobreescribimos keys existentes.
+        for (k, v) in sub {
+            if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &k) {
+                slot.1 = v;
+            } else {
+                out.push((k, v));
+            }
+        }
+    }
+    Ok(out)
+}
+
 /// Ejecuta los stmts del body en orden. Si alguno emite `Break` o `Continue`,
 /// los traduce a control local SI el label matchea el del loop owner; sino
 /// propaga arriba. Cualquier otro signal (Error, Return) sube como
@@ -2573,65 +2714,36 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
             Ok(Value::new_list(values))
         }
 
-        // Mini-tanda C — `[expr for var in iter [if filter]]`. Itera
-        // como el `for ... in`, evalúa filter (si está), y push al
-        // resultado. A diferencia del `for ... in` (que deja el var
-        // definido en el env del caller), comprehensions abren un env
-        // hijo dedicado — estilo Python — para que el var no escape
-        // ni shadowee variables del scope contenedor después de
-        // evaluar.
-        Expr::ListComp { expr, var, iter, filter, span: _ } => {
-            let iter_v = eval_expr(iter, env.clone()).await?;
-            let items: Vec<Value> = match iter_v {
-                Value::List(items) => items.lock().clone(),
-                Value::Range { start, end } => (start..end).map(Value::Int).collect(),
-                other => {
-                    let s = iter.span();
-                    return Err(EvalSignal::Error(FitzError::new(
-                        ErrorKind::TypeMismatch {
-                            expected: "List o Range".into(),
-                            found: other.type_name().into(),
-                        },
-                        s.line, s.column,
-                        format!(
-                            "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
-                            other.type_name()
-                        ),
-                    )));
-                }
-            };
-            let comp_env = Environment::new_child(env);
-            let mut result = Vec::new();
-            for item in items {
-                // Mini-tanda Up — bind via Pattern (paralelo a `for`
-                // de Md). Reusa `bind_for_pattern` para soportar
-                // Ident/Wildcard/Tuple destructuring.
-                bind_for_pattern(var, item, &comp_env)?;
-                if let Some(f) = filter {
-                    let f_v = eval_expr(f, comp_env.clone()).await?;
-                    match f_v {
-                        Value::Bool(true) => {}
-                        Value::Bool(false) => continue,
-                        other => {
-                            let s = f.span();
-                            return Err(EvalSignal::Error(FitzError::new(
-                                ErrorKind::TypeMismatch {
-                                    expected: "Bool".into(),
-                                    found: other.type_name().into(),
-                                },
-                                s.line, s.column,
-                                format!(
-                                    "el filtro `if` de la list comprehension debe ser `Bool`, no `{}`",
-                                    other.type_name()
-                                ),
-                            )));
-                        }
-                    }
-                }
-                let v = eval_expr(expr, comp_env.clone()).await?;
-                result.push(v);
+        // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) [if cond]?]`.
+        // Multi-for clauses producen cartesian product. Cada `for` abre
+        // un env hijo dedicado (estilo Python — el var no escapa al
+        // caller). El filter (si está) se evalúa en el loop más interno.
+        Expr::ListComp { expr, var, iter, extra_clauses, filter, span: _ } => {
+            // Armamos un Vec<(Pattern, Expr)> con el primer clause +
+            // los extras y delegamos al helper recursivo.
+            let mut all_clauses: Vec<(crate::ast::Pattern, Expr)> =
+                Vec::with_capacity(1 + extra_clauses.len());
+            all_clauses.push((var.clone(), (**iter).clone()));
+            for (p, it) in extra_clauses {
+                all_clauses.push((p.clone(), it.clone()));
             }
+            let result = run_list_comp(expr, &all_clauses, filter.as_deref(), env).await?;
             Ok(Value::new_list(result))
+        }
+
+        // Mini-tanda Cmp+ — `{key: value for ...}`. Análogo a ListComp
+        // pero produce un `Map<K, V>`. Last-write-wins en duplicados
+        // (mismo approach que `List.to_map`). Soporta múltiples `for`
+        // clauses + filter opcional.
+        Expr::MapComp { key, value, var, iter, extra_clauses, filter, span: _ } => {
+            let mut all_clauses: Vec<(crate::ast::Pattern, Expr)> =
+                Vec::with_capacity(1 + extra_clauses.len());
+            all_clauses.push((var.clone(), (**iter).clone()));
+            for (p, it) in extra_clauses {
+                all_clauses.push((p.clone(), it.clone()));
+            }
+            let pairs = run_map_comp(key, value, &all_clauses, filter.as_deref(), env).await?;
+            Ok(Value::new_map(pairs))
         }
 
         // `{k1: v1, ...}` — evaluamos cada par en orden (clave, valor).
@@ -3177,6 +3289,9 @@ async fn dispatch_method(
         (Value::List(_), "reduce") => list_reduce(receiver, args, span).await,
         (Value::List(_), "product") => list_product(receiver, args, span),
         (Value::List(_), "to_map") => list_to_map(receiver, args, span),
+        // Mini-tanda Mb4 — unique + partition.
+        (Value::List(_), "unique") => list_unique(receiver, args, span),
+        (Value::List(_), "partition") => list_partition(receiver, args, span).await,
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3226,6 +3341,8 @@ async fn dispatch_method(
         (Value::Map(_), "keys_sorted") => map_keys_sorted(receiver, args, span),
         // Mini-tanda Mb3 — entries: List<(K, V)> con los pares.
         (Value::Map(_), "entries") => map_entries(receiver, args, span),
+        // Mini-tanda Mb4 — invert: Map<V, K> con pares intercambiados.
+        (Value::Map(_), "invert") => map_invert(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -3238,6 +3355,8 @@ async fn dispatch_method(
         (Value::Str(_), "split") => str_split(receiver, args, span),
         // Mini-tanda Mb3 — chars: List<Str> con cada caracter.
         (Value::Str(_), "chars") => str_chars(receiver, args, span),
+        // Mini-tanda Mb4 — split_at: divide en char idx → (Str, Str).
+        (Value::Str(_), "split_at") => str_split_at(receiver, args, span),
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
         // Mini-tanda Mb — variantes parciales de trim.
         (Value::Str(_), "trim_start") => str_trim_start(receiver, args, span),
@@ -4375,6 +4494,68 @@ fn list_product(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     Ok(total)
 }
 
+/// Mini-tanda Mb4 — `xs.unique()`: devuelve `List<T>` con los
+/// elementos en el orden de primera aparición, sin duplicados.
+/// Usa igualdad estructural (`PartialEq` de Value). O(n²) en el
+/// peor caso por la búsqueda lineal; para listas chicas (<1000)
+/// está bien. Paralelo a Python `list(dict.fromkeys(xs))`.
+fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("unique", &args, 0, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut out: Vec<Value> = Vec::with_capacity(snapshot.len());
+    for v in snapshot {
+        if !out.iter().any(|x| x == &v) {
+            out.push(v);
+        }
+    }
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb4 — `xs.partition(pred)`: devuelve `(List<T>, List<T>)`
+/// con los elementos para los que `pred` da `true` en el primer slot
+/// y los `false` en el segundo. Preserva orden relativo.
+#[async_recursion]
+async fn list_partition(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("partition", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let callback = &args[0];
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut truthy: Vec<Value> = Vec::new();
+    let mut falsy: Vec<Value> = Vec::new();
+    for item in snapshot {
+        let item_clone = item.clone();
+        let r = invoke_callback(callback, item_clone, "partition", span).await?;
+        match r {
+            Value::Bool(true) => truthy.push(item),
+            Value::Bool(false) => falsy.push(item),
+            other => {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Bool".into(),
+                        found: other.type_name().into(),
+                    },
+                    span.line, span.column,
+                    format!(
+                        "la callback de `.partition()` tiene que devolver Bool, devolvió `{}`",
+                        other.type_name(),
+                    ),
+                )));
+            }
+        }
+    }
+    Ok(Value::Tuple(vec![
+        Value::new_list(truthy),
+        Value::new_list(falsy),
+    ]))
+}
+
 /// Mini-tanda Mb3 — `xs.to_map()`: convierte `List<(K, V)>` en
 /// `Map<K, V>`. Política last-write-wins si hay keys duplicadas
 /// (paralelo a Python `dict(items)` que también sobrescribe).
@@ -4603,6 +4784,29 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     Ok(Value::new_map(out))
 }
 
+/// Mini-tanda Mb4 — `m.invert()`: devuelve `Map<V, K>` con los pares
+/// intercambiados (value pasa a key, key pasa a value). Si hay values
+/// duplicados, last-write-wins (paralelo a `to_map()`). Útil para
+/// "reverse lookup" — `{nombre: id}` → `{id: nombre}`.
+fn map_invert(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("invert", &args, 0, span)?;
+    let pairs = match receiver {
+        Value::Map(p) => p,
+        _ => unreachable!(),
+    };
+    let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
+    let mut out: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+    for (k, v) in snapshot {
+        // El value pasa a key, la key pasa a value.
+        if let Some(slot) = out.iter_mut().find(|(ek, _)| ek == &v) {
+            slot.1 = k;
+        } else {
+            out.push((v, k));
+        }
+    }
+    Ok(Value::new_map(out))
+}
+
 /// Mini-tanda Mb3 — `m.entries()`: devuelve `List<(K, V)>` con los
 /// pares clave-valor en orden de inserción. Paralelo a Python
 /// `dict.items()` o JS `Object.entries(obj)`. Inversa de
@@ -4779,6 +4983,45 @@ fn str_split(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         .map(|p| Value::Str(p.to_string()))
         .collect();
     Ok(Value::new_list(parts))
+}
+
+/// Mini-tanda Mb4 — `s.split_at(idx)`: divide el string en posición
+/// `idx` (en CHARS, no bytes) y devuelve `(Str, Str)`. `idx == 0` →
+/// `("", s)`; `idx >= len(s)` → `(s, "")`. `idx < 0` → error claro.
+/// Paralelo a `str::split_at` Rust (que opera sobre bytes) pero con
+/// char-based indexing para uniformar con el resto de los métodos
+/// Str de Fitz.
+fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("split_at", &args, 1, span)?;
+    let s = match receiver {
+        Value::Str(s) => s,
+        _ => unreachable!(),
+    };
+    let idx = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`Str.split_at()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    if idx < 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("`Str.split_at()` no acepta índice negativo: recibió {}", idx),
+        )));
+    }
+    let len = s.chars().count() as i64;
+    let clamped = idx.min(len) as usize;
+    let left: String = s.chars().take(clamped).collect();
+    let right: String = s.chars().skip(clamped).collect();
+    Ok(Value::Tuple(vec![Value::Str(left), Value::Str(right)]))
 }
 
 /// Mini-tanda Mb3 — `s.chars()`: devuelve `List<Str>` con cada char
@@ -14545,5 +14788,269 @@ let r = match n {
             Value::Result(ResultVariant::Ok(b)) => assert_eq!(*b, Value::Int(2)),
             other => panic!("esperaba Ok(2), vi {:?}", other),
         }
+    }
+
+    // ---- Mini-tanda Mb4: unique + partition + invert + split_at ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_list_unique_preserva_orden_de_1ra_aparicion() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 2, 3, 1, 4, 3]\n\
+             let r: List<Int> = xs.unique()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            assert_eq!(nums, vec![1, 2, 3, 4]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_list_unique_str() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Str> = [\"a\", \"b\", \"a\", \"c\", \"b\"]\n\
+             let r: List<Str> = xs.unique()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            assert_eq!(items.lock().len(), 3);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_list_partition_divide_en_truthy_falsy() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5, 6]\n\
+             let split: (List<Int>, List<Int>) = xs.partition(fn(n: Int) => n % 2 == 0)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("split").unwrap();
+        if let Value::Tuple(items) = v {
+            assert_eq!(items.len(), 2);
+            // Truthy (pares).
+            if let Value::List(t) = &items[0] {
+                let nums: Vec<i64> = t.lock().iter().filter_map(|x| {
+                    if let Value::Int(n) = x { Some(*n) } else { None }
+                }).collect();
+                assert_eq!(nums, vec![2, 4, 6]);
+            }
+            // Falsy (impares).
+            if let Value::List(f) = &items[1] {
+                let nums: Vec<i64> = f.lock().iter().filter_map(|x| {
+                    if let Value::Int(n) = x { Some(*n) } else { None }
+                }).collect();
+                assert_eq!(nums, vec![1, 3, 5]);
+            }
+        } else {
+            panic!("esperaba Tuple");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_map_invert_swap_k_v() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Int, Str> = {1: \"a\", 2: \"b\", 3: \"c\"}\n\
+             let inv: Map<Str, Int> = m.invert()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("inv").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 3);
+            // El primer par debería ser ("a", 1).
+            assert_eq!(g[0].0, Value::Str("a".into()));
+            assert_eq!(g[0].1, Value::Int(1));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_map_invert_values_duplicados_last_write_wins() {
+        let (env, res) = parse_eval_into_env(
+            "let m: Map<Str, Int> = {\"a\": 1, \"b\": 1}\n\
+             let inv: Map<Int, Str> = m.invert()",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("inv").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 1);
+            // value 1 → ahora key, último value gana ("b").
+            assert_eq!(g[0].0, Value::Int(1));
+            assert_eq!(g[0].1, Value::Str("b".into()));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_str_split_at_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let pair: (Str, Str) = \"hola mundo\".split_at(4)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("pair").unwrap();
+        if let Value::Tuple(items) = v {
+            assert_eq!(items[0], Value::Str("hola".into()));
+            assert_eq!(items[1], Value::Str(" mundo".into()));
+        } else {
+            panic!("esperaba Tuple");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_str_split_at_idx_0_y_len() {
+        let (env, res) = parse_eval_into_env(
+            "let a: (Str, Str) = \"abc\".split_at(0)\n\
+             let b: (Str, Str) = \"abc\".split_at(3)\n\
+             let c: (Str, Str) = \"abc\".split_at(99)",
+        ).await;
+        res.unwrap();
+        for (name, want_left, want_right) in &[
+            ("a", "", "abc"),
+            ("b", "abc", ""),
+            ("c", "abc", ""),  // idx > len → clamp a len
+        ] {
+            let v = env.lock().get(name).unwrap();
+            if let Value::Tuple(items) = v {
+                assert_eq!(items[0], Value::Str((*want_left).into()), "left de `{}`", name);
+                assert_eq!(items[1], Value::Str((*want_right).into()), "right de `{}`", name);
+            } else {
+                panic!("esperaba Tuple para {}", name);
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb4_str_split_at_negativo_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "let pair: (Str, Str) = \"abc\".split_at(-1)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("negativo"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    // ---- Mini-tanda Cmp+: multi-for + Map comprehensions ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_multi_for_cartesian_product() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let ys: List<Int> = [10, 20]\n\
+             let r: List<Int> = [x + y for x in xs for y in ys]",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            // (1,10), (1,20), (2,10), (2,20), (3,10), (3,20)
+            assert_eq!(nums, vec![11, 21, 12, 22, 13, 23]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_multi_for_con_filter() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let ys: List<Int> = [10, 20]\n\
+             let r: List<Int> = [x * y for x in xs for y in ys if x % 2 == 1]",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            // x impar: 1, 3 → (1,10), (1,20), (3,10), (3,20)
+            assert_eq!(nums, vec![10, 20, 30, 60]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_map_comp_basico() {
+        let (env, res) = parse_eval_into_env(
+            "let squares: Map<Int, Int> = {n: n * n for n in 1..=4}",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("squares").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 4);
+            // 1->1, 2->4, 3->9, 4->16
+            assert_eq!(g[0], (Value::Int(1), Value::Int(1)));
+            assert_eq!(g[1], (Value::Int(2), Value::Int(4)));
+            assert_eq!(g[3], (Value::Int(4), Value::Int(16)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_map_comp_con_filter() {
+        let (env, res) = parse_eval_into_env(
+            "let big: Map<Int, Int> = {n: n * 10 for n in 0..10 if n > 5}",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("big").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            assert_eq!(g.len(), 4);  // 6, 7, 8, 9
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_map_comp_last_write_wins_en_duplicados() {
+        // Si la key se repite, gana el último value.
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 1, 3]\n\
+             let m: Map<Int, Int> = {x: x * 100 for x in xs}",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("m").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            // Keys únicas: 1, 2, 3. La key 1 mantiene posición pero value
+            // se sobrescribe.
+            assert_eq!(g.len(), 3);
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cmp_var_de_for_anidado_no_escapa() {
+        // Después de evaluar, ni `x` ni `y` están en el caller.
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2]\n\
+             let ys: List<Int> = [10]\n\
+             let r: List<Int> = [x + y for x in xs for y in ys]",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("x"), None);
+        assert_eq!(env.lock().get("y"), None);
     }
 }

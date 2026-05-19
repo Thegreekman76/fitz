@@ -2593,40 +2593,19 @@ impl Parser {
         Ok(Expr::List(items, span))
     }
 
-    /// Mini-tanda C — parsea la cola de una list comprehension después
-    /// del expr inicial: `for <var> in <iter> [if <filter>]?]`. El `[`
-    /// y el primer expr ya fueron consumidos por el caller. Asume que
-    /// el `for` que sigue en `peek()` SÍ es el marcador de
-    /// comprehension (el caller ya validó `items.is_empty()`).
+    /// Mini-tanda C + Cmp+ — parsea la cola de una list comprehension
+    /// después del expr inicial: `for <var> in <iter> [for ...]* [if cond]?]`.
+    /// El primer `[` y el `expr` ya fueron consumidos por el caller.
+    /// Mini-tanda Cmp+ extiende esto para múltiples `for` clauses
+    /// (cartesian product); el `if` opcional al final se evalúa adentro
+    /// del loop más interno.
     fn parse_list_comprehension_tail(
         &mut self,
         span: Span,
         expr: Expr,
     ) -> FitzResult<Expr> {
-        self.expect(&Token::For, "se esperaba 'for' en list comprehension")?;
-        // Mini-tanda Up — el var ahora es un Pattern (paralelo a
-        // `Stmt::For.var` de Md). Acepta Ident, Wildcard, Tuple.
-        // Reusa `parse_pattern` (el general usado por match), aunque
-        // el checker rechaza cualquier pattern fuera de
-        // Ident/Wildcard/Tuple.
-        let var = self.parse_pattern()?;
-        self.expect(
-            &Token::In,
-            "se esperaba 'in' después de la variable en list comprehension",
-        )?;
-        self.skip_newlines();
-        // El iter es una expresión cualquiera. Permitimos struct lits
-        // adentro porque estamos entre corchetes (no hay ambigüedad).
-        let iter = self.expression()?;
-        self.skip_newlines();
-        let filter = if matches!(self.peek(), Token::If) {
-            self.advance(); // consume `if`
-            self.skip_newlines();
-            Some(Box::new(self.expression()?))
-        } else {
-            None
-        };
-        self.skip_newlines();
+        let (var, iter, extra_clauses, filter) =
+            self.parse_comprehension_clauses(&Token::RBracket, "list comprehension")?;
         self.expect(
             &Token::RBracket,
             "se esperaba ']' para cerrar la list comprehension",
@@ -2635,9 +2614,67 @@ impl Parser {
             expr: Box::new(expr),
             var,
             iter: Box::new(iter),
+            extra_clauses,
             filter,
             span,
         })
+    }
+
+    /// Mini-tanda Cmp+ — parsea las clauses `for <pat> in <iter>` (1 o
+    /// más) y un `if <cond>` opcional al final. Comparte la lógica entre
+    /// list comprehension (`[expr for ...]`) y map comprehension
+    /// (`{k: v for ...}`). Devuelve `(var, iter, extra_clauses, filter)`:
+    /// el primer for sale separado por compatibilidad con el shape AST
+    /// actual; las clauses 2+ van en `extra_clauses`. No consume el
+    /// delimitador de cierre (`]` o `}`); el caller lo expecta.
+    #[allow(clippy::type_complexity)]
+    fn parse_comprehension_clauses(
+        &mut self,
+        _terminator: &Token,
+        context: &str,
+    ) -> FitzResult<(
+        crate::ast::Pattern,
+        Expr,
+        Vec<(crate::ast::Pattern, Expr)>,
+        Option<Box<Expr>>,
+    )> {
+        self.expect(
+            &Token::For,
+            format!("se esperaba 'for' en {}", context),
+        )?;
+        let var = self.parse_pattern()?;
+        self.expect(
+            &Token::In,
+            format!("se esperaba 'in' después de la variable en {}", context),
+        )?;
+        self.skip_newlines();
+        let iter = self.expression()?;
+        self.skip_newlines();
+
+        let mut extra_clauses: Vec<(crate::ast::Pattern, Expr)> = Vec::new();
+        // Múltiples `for` clauses: `[expr for a in xs for b in ys]`.
+        while matches!(self.peek(), Token::For) {
+            self.advance(); // consume `for`
+            let extra_var = self.parse_pattern()?;
+            self.expect(
+                &Token::In,
+                format!("se esperaba 'in' después de la variable extra en {}", context),
+            )?;
+            self.skip_newlines();
+            let extra_iter = self.expression()?;
+            self.skip_newlines();
+            extra_clauses.push((extra_var, extra_iter));
+        }
+
+        let filter = if matches!(self.peek(), Token::If) {
+            self.advance(); // consume `if`
+            self.skip_newlines();
+            Some(Box::new(self.expression()?))
+        } else {
+            None
+        };
+        self.skip_newlines();
+        Ok((var, iter, extra_clauses, filter))
     }
 
     /// `{"k": v, ...}` — mapa literal. Acepta vacío `{}`, trailing
@@ -2662,17 +2699,41 @@ impl Parser {
             self.advance();
             return Ok(Expr::Map(pairs, span));
         }
-        loop {
-            self.skip_newlines();
-            let key = self.expression()?;
+        // Primer par: `key: value`.
+        self.skip_newlines();
+        let key = self.expression()?;
+        self.expect(
+            &Token::Colon,
+            "se esperaba ':' entre clave y valor en mapa",
+        )?;
+        self.skip_newlines();
+        let value = self.expression()?;
+        self.skip_newlines();
+
+        // Mini-tanda Cmp+ — después del primer par, si viene `for`,
+        // es una map comprehension `{k: v for ...}`. Si viene `,` o
+        // `}`, es un map literal normal y seguimos parseando pares.
+        if matches!(self.peek(), Token::For) {
+            let (var, iter, extra_clauses, filter) =
+                self.parse_comprehension_clauses(&Token::RBrace, "map comprehension")?;
             self.expect(
-                &Token::Colon,
-                "se esperaba ':' entre clave y valor en mapa",
+                &Token::RBrace,
+                "se esperaba '}' para cerrar la map comprehension",
             )?;
-            self.skip_newlines();
-            let value = self.expression()?;
-            pairs.push((key, value));
-            self.skip_newlines();
+            return Ok(Expr::MapComp {
+                key: Box::new(key),
+                value: Box::new(value),
+                var,
+                iter: Box::new(iter),
+                extra_clauses,
+                filter,
+                span,
+            });
+        }
+
+        pairs.push((key, value));
+        // Resto de pares del map literal normal.
+        loop {
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
                 self.skip_newlines();
@@ -2683,6 +2744,16 @@ impl Parser {
             } else {
                 break;
             }
+            self.skip_newlines();
+            let key = self.expression()?;
+            self.expect(
+                &Token::Colon,
+                "se esperaba ':' entre clave y valor en mapa",
+            )?;
+            self.skip_newlines();
+            let value = self.expression()?;
+            pairs.push((key, value));
+            self.skip_newlines();
         }
         self.expect(
             &Token::RBrace,

@@ -1966,6 +1966,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13m-min-max-sum-pad-keys-step.fitz",
     "13n-reduce-product-chars-entries-to-map.fitz",
     "13o-higher-order-y-consts-globales.fitz",
+    "13p-mb4-y-comprehensions-extendidas.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -3936,6 +3937,94 @@ fn cd_f12_const_eval_con_binop_compila() {
     let (stdout, exit) = build_and_run("cd_f12_const_eval_binop", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "true\nfalse");
+}
+
+// ---- Mini-tanda Mb4 + Cmp+ ----------------------------------
+
+#[test]
+fn mb4_list_unique_compila() {
+    let src = "let xs: List<Int> = [1, 2, 2, 3, 1, 4, 3]\n\
+               let r: List<Int> = xs.unique()\n\
+               print(r)\n";
+    let (stdout, exit) = build_and_run("mb4_list_unique", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 2, 3, 4]");
+}
+
+#[test]
+fn mb4_list_partition_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5, 6]\n\
+               let split: (List<Int>, List<Int>) = xs.partition(fn(n: Int) => n % 2 == 0)\n\
+               print(split.0)\n\
+               print(split.1)\n";
+    let (stdout, exit) = build_and_run("mb4_list_partition", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[2, 4, 6]\n[1, 3, 5]");
+}
+
+#[test]
+fn mb4_map_invert_compila() {
+    let src = "let m: Map<Int, Str> = {1: \"a\", 2: \"b\"}\n\
+               let inv: Map<Str, Int> = m.invert()\n\
+               print(inv[\"a\"])\n\
+               print(inv[\"b\"])\n";
+    let (stdout, exit) = build_and_run("mb4_map_invert", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n2");
+}
+
+#[test]
+fn mb4_str_split_at_compila() {
+    let src = "let p: (Str, Str) = \"hola mundo\".split_at(4)\n\
+               print(p.0)\n\
+               print(p.1)\n";
+    let (stdout, exit) = build_and_run("mb4_str_split_at", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "hola\n mundo");
+}
+
+#[test]
+fn cmp_multi_for_clauses_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3]\n\
+               let ys: List<Int> = [10, 20]\n\
+               let r: List<Int> = [x + y for x in xs for y in ys]\n\
+               print(r)\n";
+    let (stdout, exit) = build_and_run("cmp_multi_for", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[11, 21, 12, 22, 13, 23]");
+}
+
+#[test]
+fn cmp_multi_for_con_filter_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3]\n\
+               let ys: List<Int> = [10, 20]\n\
+               let r: List<Int> = [x * y for x in xs for y in ys if x % 2 == 1]\n\
+               print(r)\n";
+    let (stdout, exit) = build_and_run("cmp_multi_for_filter", src);
+    assert_eq!(exit, 0);
+    // x impar (1, 3): (1*10, 1*20, 3*10, 3*20) = [10, 20, 30, 60].
+    assert_eq!(stdout.trim(), "[10, 20, 30, 60]");
+}
+
+#[test]
+fn cmp_map_comp_basico_compila() {
+    let src = "let squares: Map<Int, Int> = {n: n * n for n in 1..=4}\n\
+               print(squares[1])\n\
+               print(squares[2])\n\
+               print(squares[4])\n";
+    let (stdout, exit) = build_and_run("cmp_map_comp", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n4\n16");
+}
+
+#[test]
+fn cmp_map_comp_con_filter_compila() {
+    let src = "let big: Map<Int, Int> = {n: n * 10 for n in 0..10 if n > 5}\n\
+               print(big[6])\n\
+               print(big[9])\n";
+    let (stdout, exit) = build_and_run("cmp_map_comp_filter", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "60\n90");
 }
 
 #[test]

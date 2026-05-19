@@ -99,25 +99,47 @@ pub enum Expr {
     /// desazucarado a `.map()`) para que el fmt preserve la sintaxis
     /// original y los errores del checker apunten al `for` real.
     ///
-    /// Cobertura del MVP:
+    /// Cobertura post-Cmp+:
     ///   - `iter` puede ser `List<T>` o `Range` (misma semántica que
     ///     `for ... in`).
-    ///   - `var` es un solo identificador (sin destructuring de tuples
-    ///     en el MVP — deuda residual).
+    ///   - `var` es un Pattern (Ident, Wildcard, Tuple para destructure).
     ///   - Filter inline opcional con `if cond`.
-    ///   - Una sola `for` clause (no múltiples — deuda residual).
+    ///   - Múltiples `for` clauses (cartesian product) via `extra_clauses`.
     ListComp {
         /// La expresión que se evalúa por cada iteración y se acumula
         /// en la lista resultado.
         expr: Box<Expr>,
-        /// Binding del for. Pre-Up era `String` (sin destructuring);
-        /// post-Up es `Pattern` (paralelo a `Stmt::For.var` de Md).
-        /// Acepta `Ident`, `Wildcard`, y `Tuple` para destructuring.
+        /// Binding del PRIMER for. Pattern (Ident/Wildcard/Tuple).
         var: crate::ast::Pattern,
-        /// Iterable: `List<T>` o `Range`.
+        /// Iterable del primer for: `List<T>` o `Range`.
         iter: Box<Expr>,
-        /// Filtro opcional `if cond`. Si está, se evalúa antes del
-        /// expr; si retorna false, esa iteración se skipea.
+        /// Mini-tanda Cmp+ — `for` clauses adicionales para cartesian
+        /// product: `[expr for a in xs for b in ys]`. Cada elemento
+        /// es `(pattern, iter)`. Vacío en el caso single-for.
+        extra_clauses: Vec<(crate::ast::Pattern, Expr)>,
+        /// Filtro opcional `if cond` al final. Se evalúa adentro del
+        /// loop más interno; si retorna false, esa combinación se skipea.
+        filter: Option<Box<Expr>>,
+        span: Span,
+    },
+
+    /// Mini-tanda Cmp+ — Map comprehension `{k: v for x in xs}`.
+    /// Análogo de ListComp pero produce un `Map<K, V>` con expresiones
+    /// separadas para key y value. Soporta múltiples `for` clauses
+    /// (cartesian product) y filter opcional. Last-write-wins en
+    /// duplicados (paralelo a la conversión `List.to_map`).
+    MapComp {
+        /// Expresión que se evalúa para la KEY del par.
+        key: Box<Expr>,
+        /// Expresión que se evalúa para el VALUE del par.
+        value: Box<Expr>,
+        /// Binding del primer for.
+        var: crate::ast::Pattern,
+        /// Iterable del primer for.
+        iter: Box<Expr>,
+        /// Clauses adicionales (cartesian product).
+        extra_clauses: Vec<(crate::ast::Pattern, Expr)>,
+        /// Filter opcional.
         filter: Option<Box<Expr>>,
         span: Span,
     },
@@ -254,6 +276,7 @@ impl Expr {
             Expr::Loop { span, .. } => *span,
             Expr::List(_, s) => *s,
             Expr::ListComp { span, .. } => *span,
+            Expr::MapComp { span, .. } => *span,
             Expr::Map(_, s) => *s,
             Expr::Range { span, .. } => *span,
             Expr::If { span, .. } => *span,

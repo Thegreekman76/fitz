@@ -578,6 +578,14 @@ fn after_dot_completions(
                 )),
                 ("product", format!("fn() -> {}  // List<Int> o List<Float>", t.display(type_env))),
                 ("to_map", "fn() -> Map<K, V>  // requiere List<(K, V)>".into()),
+                // Mini-tanda Mb4 — unique + partition.
+                ("unique", format!("fn() -> List<{}>  // dedup preservando orden", t.display(type_env))),
+                ("partition", format!(
+                    "fn(fn({}) -> Bool) -> (List<{}>, List<{}>)",
+                    t.display(type_env),
+                    t.display(type_env),
+                    t.display(type_env),
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -633,6 +641,12 @@ fn after_dot_completions(
                     k.display(type_env),
                     v.display(type_env),
                 )),
+                // Mini-tanda Mb4 — invert: swap K ↔ V.
+                ("invert", format!(
+                    "fn() -> Map<{}, {}>",
+                    v.display(type_env),
+                    k.display(type_env),
+                )),
             ],
         ),
         Type::Str => method_items(&[
@@ -661,6 +675,8 @@ fn after_dot_completions(
             ("pad_end", "fn(width: Int, ch: Str) -> Str".into()),
             // Mini-tanda Mb3 — chars: List<Str> con cada char.
             ("chars", "fn() -> List<Str>".into()),
+            // Mini-tanda Mb4 — split_at: divide en char idx → (Str, Str).
+            ("split_at", "fn(idx: Int) -> (Str, Str)".into()),
         ]),
         // Mini-tanda T (tuples): después de `t.` sugerimos los índices
         // de los campos como labels numéricos (`0`, `1`, ...) con el
@@ -1660,6 +1676,46 @@ mod tests {
         );
         let entries = items.iter().find(|i| i.label == "entries").unwrap();
         assert_eq!(entries.detail.as_deref(), Some("fn() -> List<(Str, Int)>"));
+    }
+
+    #[test]
+    fn mb4_after_dot_sobre_list_incluye_unique_y_partition() {
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["unique", "partition"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb4) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb4_after_dot_sobre_map_incluye_invert() {
+        let src = "let m: Map<Int, Str> = {1: \"a\"}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"invert"),
+            "falta `invert` (mini-tanda Mb4) en Map: {labels:?}",
+        );
+        let invert = items.iter().find(|i| i.label == "invert").unwrap();
+        assert_eq!(invert.detail.as_deref(), Some("fn() -> Map<Str, Int>"));
+    }
+
+    #[test]
+    fn mb4_after_dot_sobre_str_incluye_split_at() {
+        let src = "let s: Str = \"abc\"\ns.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"split_at"),
+            "falta `split_at` (mini-tanda Mb4) en Str: {labels:?}",
+        );
     }
 
     #[test]

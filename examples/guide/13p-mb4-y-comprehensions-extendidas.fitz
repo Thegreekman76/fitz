@@ -1,0 +1,119 @@
+// Mini-tanda Mb4 + Cmp+ — métodos chicos + comprehensions extendidas.
+//
+// Bundle de polish que combina:
+//
+//   - 4 métodos chicos (Mb4):
+//     * `List.unique()` → deduplicación preservando orden de 1ra
+//       aparición.
+//     * `List.partition(pred)` → `(List<T>, List<T>)` con truthy/falsy.
+//     * `Map.invert()` → `Map<V, K>` con keys/values intercambiados.
+//     * `Str.split_at(idx)` → `(Str, Str)` divide en char idx.
+//
+//   - Comprehensions extendidas (Cmp+):
+//     * Múltiples `for` clauses: `[expr for x in xs for y in ys]`
+//       (cartesian product, paralelo a Python).
+//     * Map comprehensions: `{k: v for x in xs}` con filter opcional.
+
+// --- List.unique: dedup preservando orden ----------------------
+
+let raw: List<Int> = [3, 1, 2, 3, 1, 4, 2, 5]
+let uniq: List<Int> = raw.unique()
+print(uniq)                                      // [3, 1, 2, 4, 5]
+
+// Trabaja con cualquier tipo comparable (igualdad estructural).
+let names: List<Str> = ["ada", "bob", "ada", "cam", "bob"]
+print(names.unique())                            // ["ada", "bob", "cam"]
+
+// --- List.partition: divide en truthy/falsy --------------------
+
+let numeros: List<Int> = [1, 2, 3, 4, 5, 6, 7, 8]
+let split: (List<Int>, List<Int>) = numeros.partition(fn(n: Int) => n % 2 == 0)
+print(split.0)                                   // [2, 4, 6, 8] (pares)
+print(split.1)                                   // [1, 3, 5, 7] (impares)
+
+// Útil para clasificar antes de procesar por grupo:
+type User {
+    name: Str = ""
+    is_admin: Bool = false
+}
+
+let users: List<User> = [
+    User { name: "Ada", is_admin: true },
+    User { name: "Bob", is_admin: false },
+    User { name: "Cam", is_admin: true },
+]
+let by_role: (List<User>, List<User>) = users.partition(fn(u: User) => u.is_admin)
+print(by_role.0.len())                           // 2 (admins)
+print(by_role.1.len())                           // 1 (no-admins)
+
+// --- Map.invert: swap K ↔ V ------------------------------------
+
+let id_to_name: Map<Int, Str> = {1: "Ada", 2: "Bob", 3: "Cam"}
+let name_to_id: Map<Str, Int> = id_to_name.invert()
+print(name_to_id["Ada"])                         // 1
+print(name_to_id["Bob"])                         // 2
+
+// Si hay values duplicados, gana el último (paralelo a `to_map`).
+let with_dups: Map<Str, Int> = {"a": 1, "b": 1}
+print(with_dups.invert()[1])                     // "b"
+
+// --- Str.split_at: divide en char idx --------------------------
+//
+// Paralelo a `str::split_at` Rust pero char-based (uniformidad con
+// el resto de los métodos Str de Fitz que cuentan chars, no bytes).
+
+let pair: (Str, Str) = "hola, mundo".split_at(5)
+print(pair.0)                                    // hola,
+print(pair.1)                                    //  mundo
+
+// idx >= len → segundo elemento vacío.
+let edge: (Str, Str) = "hi".split_at(10)
+print(edge.0)                                    // hi
+print(edge.1)                                    // (vacío)
+
+// Útil para parsear "key=value", paths con prefix conocido, etc.
+let line: Str = "name=Ada"
+let parts: (Str, Str) = line.split_at(4)
+print(parts.0)                                   // name
+print(parts.1)                                   // =Ada
+
+// --- Multi-for comprehensions: cartesian product ---------------
+//
+// Paralelo a `[expr for x in xs for y in ys]` de Python. Las
+// variables del segundo for ven los bindings del primero — útil
+// para listas dependientes.
+
+let xs: List<Int> = [1, 2, 3]
+let ys: List<Int> = [10, 20]
+
+let combos: List<Int> = [x + y for x in xs for y in ys]
+print(combos)                                    // [11, 21, 12, 22, 13, 23]
+
+// Con filter al final (aplica al loop más interno):
+let mostly_big: List<Int> = [x * y for x in xs for y in ys if x % 2 == 1]
+print(mostly_big)                                // [10, 20, 30, 60]
+
+// El segundo iter puede depender del primero:
+let triangular: List<(Int, Int)> = [(i, j) for i in 1..=3 for j in 1..=i]
+print(triangular)                                // [(1, 1), (2, 1), (2, 2), (3, 1), (3, 2), (3, 3)]
+
+// --- Map comprehensions ----------------------------------------
+//
+// `{key_expr: value_expr for var in iter}`. Soporta múltiples for
+// clauses y filter opcional (igual que list comprehensions). En
+// duplicados de key, last-write-wins (paralelo a Python).
+
+let squares: Map<Int, Int> = {n: n * n for n in 1..=5}
+print(squares[3])                                // 9
+print(squares[5])                                // 25
+
+// Con filter:
+let big_squares: Map<Int, Int> = {n: n * n for n in 1..=10 if n > 5}
+print(big_squares[6])                            // 36
+print(big_squares[10])                           // 100
+
+// Construir map desde una lista, transformando cada elemento:
+let nombres: List<Str> = ["Ada", "Bob", "Cam"]
+let lens: Map<Str, Int> = {name: name.len() for name in nombres}
+print(lens["Ada"])                               // 3
+print(lens["Bob"])                               // 3

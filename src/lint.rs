@@ -248,16 +248,30 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
                 collect_uses_in_expr(i, uses);
             }
         }
-        // Mini-tanda C — list comprehension. Walkeamos iter, filter
-        // y expr. El `var` se BINDEA adentro, no es un uso (paralelo
-        // a cómo Stmt::For trata su var: el target del binding NO
-        // cuenta como uso).
-        Expr::ListComp { expr, iter, filter, .. } => {
+        // Mini-tanda C + Cmp+ — list comprehension. Walkeamos iter
+        // del primer clause + extras + filter + expr. Los `var`s se
+        // BINDEAN adentro, no son usos.
+        Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
             collect_uses_in_expr(iter, uses);
+            for (_, it) in extra_clauses {
+                collect_uses_in_expr(it, uses);
+            }
             if let Some(f) = filter {
                 collect_uses_in_expr(f, uses);
             }
             collect_uses_in_expr(expr, uses);
+        }
+        // Mini-tanda Cmp+ — map comprehension.
+        Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            collect_uses_in_expr(iter, uses);
+            for (_, it) in extra_clauses {
+                collect_uses_in_expr(it, uses);
+            }
+            if let Some(f) = filter {
+                collect_uses_in_expr(f, uses);
+            }
+            collect_uses_in_expr(key, uses);
+            collect_uses_in_expr(value, uses);
         }
         Expr::Map(pairs, _) => {
             for (k, v) in pairs {
@@ -644,13 +658,29 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(i, f);
             }
         }
-        // Mini-tanda C — list comprehension. Walkeamos los 3 sub-Exprs.
-        Expr::ListComp { expr, iter, filter, .. } => {
+        // Mini-tanda C + Cmp+ — list comprehension. Walkeamos los
+        // sub-Exprs de cada clause + filter + expr.
+        Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
             walk_expr(iter, f);
+            for (_, it) in extra_clauses {
+                walk_expr(it, f);
+            }
             if let Some(flt) = filter {
                 walk_expr(flt, f);
             }
             walk_expr(expr, f);
+        }
+        // Mini-tanda Cmp+ — map comprehension.
+        Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            walk_expr(iter, f);
+            for (_, it) in extra_clauses {
+                walk_expr(it, f);
+            }
+            if let Some(flt) = filter {
+                walk_expr(flt, f);
+            }
+            walk_expr(key, f);
+            walk_expr(value, f);
         }
         Expr::Map(pairs, _) => {
             for (k, v) in pairs {

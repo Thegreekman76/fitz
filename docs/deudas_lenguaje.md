@@ -1131,6 +1131,105 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos chicos + comprehensions extendidas~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb4 + Cmp+)
+
+Bundle combinado que cierra dos sets de deudas relacionadas en una
+mini-tanda: cuatro métodos chicos siguientes a Mb3 (Mb4) más las
+deudas residuales explícitas de la mini-tanda C (Cmp+ — múltiples
+`for` clauses + Map comprehensions, ambas marcadas como "diferido"
+desde el cierre de C).
+
+**Parte 1 — Mb4 (4 métodos chicos)**:
+
+- ~~**`List.unique() -> List<T>`**~~ ✓ Dedup preservando orden de
+  1ra aparición. Igualdad estructural via `PartialEq` de Value.
+  O(n²) por búsqueda lineal — para listas chicas (<1000) es
+  aceptable. Paralelo a Python `list(dict.fromkeys(xs))`.
+- ~~**`List.partition(pred) -> (List<T>, List<T>)`**~~ ✓ Divide
+  en truthy/falsy preservando orden. Callback `fn(T) -> Bool`.
+- ~~**`Map.invert() -> Map<V, K>`**~~ ✓ Intercambia keys/values.
+  Last-write-wins en values duplicados (paralelo a `to_map`).
+- ~~**`Str.split_at(idx) -> (Str, Str)`**~~ ✓ Divide en char idx
+  (no bytes — uniforme con el resto de los Str de Fitz). `idx >=
+  len` → segundo elemento vacío; `idx < 0` → error de runtime
+  claro.
+
+**Parte 2 — Cmp+ (comprehensions extendidas)**:
+
+- ~~**Múltiples `for` clauses en list comprehensions**~~ ✓ Cartesian
+  product paralelo a Python: `[expr for x in xs for y in ys]`. El
+  segundo iter puede depender del binding del primero. El AST suma
+  `Expr::ListComp.extra_clauses: Vec<(Pattern, Expr)>` (vacío en
+  el caso single-for, retro-compatible). Parser sumó loop que
+  acepta `for <pat> in <iter>` repetido antes del `if` opcional.
+  Checker reusa el mismo scope acumulativo para todos los clauses.
+  Evaluator/codegen emiten loops anidados naturales.
+
+- ~~**Map comprehensions `{key: value for ...}`**~~ ✓ AST nuevo
+  `Expr::MapComp { key, value, var, iter, extra_clauses, filter,
+  span }`. Parser detecta `for` después del primer `key: value` del
+  literal map; los map literals normales `{k1: v1, k2: v2}` siguen
+  funcionando idénticos. Soporta los mismos features que list
+  comprehensions: múltiples for clauses + filter opcional. En keys
+  duplicadas, last-write-wins (paralelo a Python dict
+  comprehension). Codegen emite loops anidados Rust con
+  `Vec<(K, V)>` interno y find-or-push (preserva insertion order
+  del primer push de cada key).
+
+**Refactor incidental**:
+- Helper `check_comp_clause_in_checker` reusado por List y Map
+  comprehensions (validación del iter + bind del pattern).
+- Helper `gen_comp_clause_header` en `CodegenCtx` para emitir el
+  header `for <binding> in <iter>` Rust nativo desde una `(Pattern,
+  Expr)` clause. Reusa la lógica de `Pattern::Ident`/`Wildcard`/
+  `Tuple` → binding Rust de Md/Up.
+- Parser: helper compartido `parse_comprehension_clauses` consume
+  la cola `for X in Y [for ...]* [if cond]?]` para list y map.
+- Walkers (state refs en codegen, capture collection, lint
+  walk_expr, lint collect_uses_in_expr, fmt end_line_of_expr,
+  fmt fmt_expr) actualizados para iterar `extra_clauses` y para
+  manejar la nueva variant `Expr::MapComp`.
+
+Implementación: ~700 LoC entre AST (suma extra_clauses + variant
+MapComp), parser (~80 LoC), evaluator (helpers recursivos
+`run_list_comp` y `run_map_comp`, ~150 LoC), types (refactor
+ListComp + nuevo MapComp + helper check_comp_clause, ~90 LoC),
+codegen (refactor gen_list_comp + nuevo gen_map_comp + helper
+gen_comp_clause_header, ~250 LoC), fmt (~50 LoC), lint (~50
+LoC), LSP (4 entries para Mb4).
+
+**22 unit tests** evaluator (mb4_: unique str/orden, partition,
+invert basic/dups, split_at basic/edge/neg; cmp_: multi-for
+cartesian/filter, map comp basic/filter/dups, scope) + **9 unit
+tests** checker (mb4: unique/partition/invert/split_at + errores;
+cmp: multi-for tipa correctamente + map comp basic/filter type)
++ **4 unit tests** LSP (autocomplete incluye los 4 métodos
+nuevos) + **8 compile_e2e** bit-a-bit `fitz run` ↔ `fitz build`
+(mb4 los 4 métodos + cmp multi-for + cmp map comp + filter).
+Ejemplo runnable `examples/guide/13p-mb4-y-comprehensions-extendidas.fitz`
+sumado al smoke `GUIDE_EXAMPLES_COMPILE` con casos típicos.
+
+Cap 13 de la guía: 1 fila nueva en tabla `Str` (split_at), 2 en
+tabla `List<T>` (unique, partition), 1 en tabla `Map<K, V>`
+(invert). Sub-sección dedicada "Dedup + partition + invert +
+split_at + multi-for / Map comprehensions (mini-tanda Mb4 +
+Cmp+)" con ejemplos inline. Cap 9 sub-sección "List
+comprehensions" actualizada con la cobertura post-Cmp+ (multi-for
++ filter + map comprehensions). VSCode extension: grammar
+TextMate sin cambios (`for`/`if` ya estaban como keywords; los
+nuevos métodos son identifiers genéricos); LSP autocomplete
+refleja todo automáticamente via rebuild del `fitz-lsp` binary.
+
+**Deuda residual menor** (NO bloquea):
+- Set comprehensions (`{x for x in xs}` sin `:`) — Fitz no tiene
+  un tipo Set built-in todavía, sin sentido habilitarlo aislado.
+- Filters intercalados entre `for` clauses
+  (`[x for x in xs if x > 0 for y in ys if y < 10]`) — Python lo
+  permite; aceptamos UN filter al final (decisión de diseño MVP
+  para mantener el parser simple).
+- Async comprehensions (`async for x in async_iter`) — sin
+  motivación real hoy.
+
 ### ~~Codegen polish: higher-order callbacks por nombre + F12 caveat fix~~ ✓ CERRADO 2026-05-19 (mini-tanda Cd)
 
 Bundle de polish del codegen que cierra las dos limitaciones más

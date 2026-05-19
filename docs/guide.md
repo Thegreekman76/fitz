@@ -2520,17 +2520,26 @@ scope contenedor sin querer. El `for ... in` clásico de Fitz NO
 tiene esta propiedad (su var queda visible afuera del loop) —
 diferencia documentada pero intencional.
 
-**Cobertura del MVP**:
-- Una sola `for` clause (no `[x*y for x in xs for y in ys]`).
+**Cobertura post-Cmp+**:
+- **Múltiples `for` clauses** (cartesian product, mini-tanda Cmp+):
+  `[x*y for x in xs for y in ys]`. El segundo iter puede depender
+  del binding del primero, así que `[(i, j) for i in 1..=3 for j in 1..=i]`
+  produce los pares triangulares.
 - **El `var` acepta tuple destructuring** (mini-tanda Up):
   `[a+b for (a, b) in pairs]` o `[a for (a, _) in pairs]`.
   Paralelo al `for ... in ...` destructure de Md.
 - `iter` puede ser `List<T>` o `Range` (igual que `for ... in`).
-- Filter inline `if cond` opcional al final.
+- Filter inline `if cond` opcional al final — se aplica en el loop
+  más interno.
+- **Map comprehensions** `{key: value for var in iter}` (mini-tanda
+  Cmp+) — produce un `Map<K, V>` con last-write-wins en duplicados
+  de key. Ver cap 13 sub-sección dedicada para ejemplos.
 
 Ver [examples/guide/09d-comprehensions.fitz](../examples/guide/09d-comprehensions.fitz)
-para el ejemplo completo y validado bit-a-bit `fitz run` ↔
-`fitz build`.
+para el ejemplo simple y
+[examples/guide/13p-mb4-y-comprehensions-extendidas.fitz](../examples/guide/13p-mb4-y-comprehensions-extendidas.fitz)
+para multi-for + map comprehensions (validados bit-a-bit `fitz run`
+↔ `fitz build`).
 
 > Lo que **sí anda** y antes era deuda (mini-tanda I post-S):
 > **índices negativos** `xs[-1]` para listas y strings + **slicing**
@@ -3733,6 +3742,7 @@ print(xs)                          // [1, 2, 3]
 | `update(k, fn(v))`  | Map nuevo: aplica `fn` al value de `k` si existe, no-op si no (Up). |
 | `keys_sorted()`     | `List<K>` con las keys ordenadas; K ∈ {Int, Float, Str, Bool} (Mb2). |
 | `entries()`         | `List<(K, V)>` con los pares en orden de inserción; inversa de `to_map` (Mb3). |
+| `invert()`          | `Map<V, K>` con keys/values intercambiados; last-write-wins en values dups (Mb4). |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -4135,6 +4145,7 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.pad_start(w, c)`  | `Int`, `Str` | `Str`         | padding a la izquierda; `c` debe ser 1 char (Mb2) |
 | `.pad_end(w, c)`    | `Int`, `Str` | `Str`         | padding a la derecha; `c` debe ser 1 char (Mb2) |
 | `.chars()`          | —            | `List<Str>`   | cada char como Str de 1 caracter (Mb3) |
+| `.split_at(i)`      | `Int`        | `(Str, Str)`  | divide en char idx; idx >= len → segundo vacío (Mb4) |
 
 **Sobre `List<T>`** (S.3 + Mb + Lx):
 
@@ -4158,6 +4169,8 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.product()`        | —                 | `T`           | producto numérico; `T ∈ {Int, Float}`; vacía → `1` (Mb3) |
 | `.reduce(init, fn)` | `Acc`, `fn(Acc, T) -> Acc` | `Acc` | fold canónico; Acc puede ser distinto de T (Mb3) |
 | `.to_map()`         | —                 | `Map<K, V>`   | requiere `List<(K, V)>`; last-write-wins (Mb3) |
+| `.unique()`         | —                 | `List<T>`     | dedup preservando orden de 1ra aparición (Mb4) |
+| `.partition(pred)`  | `fn(T) -> Bool`   | `(List<T>, List<T>)` | divide en truthy/falsy preservando orden (Mb4) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4474,6 +4487,95 @@ print(check(20))        // true
   compartido (`thread_local`) ya cubre el caso.
 
 Ver [examples/guide/13o-higher-order-y-consts-globales.fitz](../examples/guide/13o-higher-order-y-consts-globales.fitz)
+para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
+
+### Dedup + partition + invert + split_at + multi-for / Map comprehensions (mini-tanda Mb4 + Cmp+)
+
+Bundle que combina cuatro métodos chicos (Mb4) con extensiones de
+comprehensions (Cmp+) — son features chicos pero suman valor visible
+para el día a día.
+
+**`List.unique()`** — dedup preservando orden de 1ra aparición.
+Usa igualdad estructural; cualquier `T`. Paralelo a Python
+`list(dict.fromkeys(xs))`.
+
+```fitz
+let raw: List<Int> = [3, 1, 2, 3, 1, 4]
+print(raw.unique())              // [3, 1, 2, 4]
+```
+
+**`List.partition(pred)`** — divide en `(truthy, falsy)` preservando
+orden. Callback `fn(T) -> Bool`.
+
+```fitz
+let nums: List<Int> = [1, 2, 3, 4, 5, 6]
+let split: (List<Int>, List<Int>) = nums.partition(fn(n: Int) => n % 2 == 0)
+print(split.0)                   // [2, 4, 6] (pares)
+print(split.1)                   // [1, 3, 5] (impares)
+```
+
+**`Map.invert()`** — intercambia keys ↔ values. Devuelve
+`Map<V, K>`. Last-write-wins en values duplicados (paralelo a
+`to_map`).
+
+```fitz
+let id_to_name: Map<Int, Str> = {1: "Ada", 2: "Bob"}
+let name_to_id: Map<Str, Int> = id_to_name.invert()
+print(name_to_id["Ada"])         // 1
+```
+
+**`Str.split_at(idx)`** — divide el string en char idx (no bytes)
+y devuelve `(Str, Str)`. `idx >= len` → segundo elemento vacío;
+`idx < 0` → error de runtime.
+
+```fitz
+let p: (Str, Str) = "hola mundo".split_at(4)
+print(p.0)                       // hola
+print(p.1)                       //  mundo
+```
+
+**Comprehensions con múltiples `for` clauses** — cartesian product
+estilo Python. Las variables del segundo `for` ven los bindings del
+primero (útil para listas dependientes):
+
+```fitz
+let xs: List<Int> = [1, 2, 3]
+let ys: List<Int> = [10, 20]
+
+let combos: List<Int> = [x + y for x in xs for y in ys]
+print(combos)                    // [11, 21, 12, 22, 13, 23]
+
+// Con filter al final (aplica en el loop más interno):
+let mostly: List<Int> = [x * y for x in xs for y in ys if x % 2 == 1]
+print(mostly)                    // [10, 20, 30, 60]
+
+// El segundo iter puede depender del primero (triangular).
+let tri: List<(Int, Int)> = [(i, j) for i in 1..=3 for j in 1..=i]
+print(tri.len())                 // 6 — pares (1,1), (2,1), (2,2), (3,1), (3,2), (3,3)
+```
+
+**Map comprehensions** — sintaxis `{key_expr: value_expr for var in iter}`.
+Soporta múltiples `for` clauses y filter opcional (igual que list
+comprehensions). En keys duplicadas, last-write-wins (paralelo a
+Python `dict comprehension`).
+
+```fitz
+// Tabla de cuadrados 1..=5:
+let squares: Map<Int, Int> = {n: n * n for n in 1..=5}
+print(squares[3])                // 9
+print(squares[5])                // 25
+
+// Con filter:
+let big: Map<Int, Int> = {n: n * n for n in 1..=10 if n > 5}
+print(big[10])                   // 100
+
+// Construir map desde una lista, transformando cada elemento:
+let nombres: List<Str> = ["Ada", "Bob", "Cam"]
+let lens: Map<Str, Int> = {name: name.len() for name in nombres}
+print(lens["Ada"])               // 3
+```
+
+Ver [examples/guide/13p-mb4-y-comprehensions-extendidas.fitz](../examples/guide/13p-mb4-y-comprehensions-extendidas.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda

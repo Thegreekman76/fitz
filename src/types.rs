@@ -1439,35 +1439,16 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             }
         }
 
-        // Mini-tanda C — `[expr for var in iter [if filter]]`. Tipa el
-        // iter como `List<T>` o `Range` (paralelo a Stmt::For), bindea
-        // `var: T` en un scope dedicado, valida `filter: Bool` y tipa
-        // `expr: U`. Devuelve `List<U>`. El scope se descarta al salir
-        // — `var` no escapa al caller, consistente con la decisión
-        // estilo Python del evaluator.
-        Expr::ListComp { expr, var, iter, filter, span } => {
-            let iter_ty = infer_expr(ctx, iter);
-            // El tipo del var sale del iter.
-            let var_ty = match iter_ty.base() {
-                Type::List(t) => (**t).clone(),
-                Type::Range => Type::Int,
-                // Any pasa silencioso (gradual) — paralelo al for.
-                Type::Any => Type::Any,
-                other => {
-                    ctx.error_at(iter.span(), format!(
-                        "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
-                        other.display(ctx.types)
-                    ));
-                    Type::Any
-                }
-            };
+        // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) [if cond]?]`.
+        // Tipa cada `for` clause (iter como List/Range, var via pattern),
+        // bindeando en scopes anidados; valida `filter: Bool` adentro
+        // del scope más interno; tipa `expr: U` y devuelve `List<U>`.
+        Expr::ListComp { expr, var, iter, extra_clauses, filter, span } => {
             ctx.push_scope();
-            // El span del binding apunta al span de la comprehension
-            // (sin span propio para `var` en el AST — deuda S1).
-            // Mini-tanda Up — `var` ahora es Pattern. Reusa
-            // `bind_for_pattern_in_checker` (Ident/Wildcard/Tuple).
-            bind_for_pattern_in_checker(ctx, var, &var_ty, *span);
-            // Filter opcional: debe tipar `Bool` (Any pasa por gradual).
+            check_comp_clause_in_checker(ctx, var, iter, *span);
+            for (extra_var, extra_iter) in extra_clauses {
+                check_comp_clause_in_checker(ctx, extra_var, extra_iter, *span);
+            }
             if let Some(f) = filter {
                 let f_ty = infer_expr(ctx, f);
                 if !is_compatible(&f_ty, &Type::Bool) {
@@ -1480,6 +1461,30 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             let elem_ty = infer_expr(ctx, expr);
             ctx.pop_scope();
             Type::List(Box::new(elem_ty))
+        }
+
+        // Mini-tanda Cmp+ — `{key: value for ...}`. Análogo a ListComp:
+        // tipa cada clause, valida filter, y tipa key+value en el scope
+        // más interno. Devuelve `Map<K, V>`.
+        Expr::MapComp { key, value, var, iter, extra_clauses, filter, span } => {
+            ctx.push_scope();
+            check_comp_clause_in_checker(ctx, var, iter, *span);
+            for (extra_var, extra_iter) in extra_clauses {
+                check_comp_clause_in_checker(ctx, extra_var, extra_iter, *span);
+            }
+            if let Some(f) = filter {
+                let f_ty = infer_expr(ctx, f);
+                if !is_compatible(&f_ty, &Type::Bool) {
+                    ctx.error_at(f.span(), format!(
+                        "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
+                        f_ty.display(ctx.types)
+                    ));
+                }
+            }
+            let key_ty = infer_expr(ctx, key);
+            let val_ty = infer_expr(ctx, value);
+            ctx.pop_scope();
+            Type::Map(Box::new(key_ty), Box::new(val_ty))
         }
 
         Expr::Map(pairs, _) => {
@@ -2597,6 +2602,22 @@ fn infer_list_method(
                 }
             }
         }
+        // Mini-tanda Mb4 — `unique()`: dedup preservando orden. Cualquier T.
+        "unique" => {
+            check_method_arity(ctx, "unique", args_ty, 0, span);
+            Type::List(Box::new(t.clone()))
+        }
+        // Mini-tanda Mb4 — `partition(pred)`: divide en dos listas.
+        // Callback `fn(T) -> Bool`. Ret: `(List<T>, List<T>)`.
+        "partition" => {
+            if check_method_arity(ctx, "partition", args_ty, 1, span) {
+                check_unary_callback(ctx, &args_ty[0], t, "partition", Some(&Type::Bool), span);
+            }
+            Type::Tuple(vec![
+                Type::List(Box::new(t.clone())),
+                Type::List(Box::new(t.clone())),
+            ])
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -2805,6 +2826,11 @@ fn infer_map_method(
         "entries" => {
             check_method_arity(ctx, "entries", args_ty, 0, span);
             Type::List(Box::new(Type::Tuple(vec![k.clone(), v.clone()])))
+        }
+        // Mini-tanda Mb4 — `invert()`: swap K ↔ V. Ret: `Map<V, K>`.
+        "invert" => {
+            check_method_arity(ctx, "invert", args_ty, 0, span);
+            Type::Map(Box::new(v.clone()), Box::new(k.clone()))
         }
         "values" => {
             check_method_arity(ctx, "values", args_ty, 0, span);
@@ -3029,6 +3055,19 @@ fn infer_str_method(
             check_method_arity(ctx, "chars", args_ty, 0, span);
             Type::List(Box::new(Type::Str))
         }
+        // Mini-tanda Mb4 — `split_at(idx)`: divide en char idx →
+        // `(Str, Str)`. `idx` debe ser Int.
+        "split_at" => {
+            if check_method_arity(ctx, "split_at", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`Str.split_at()` espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::Tuple(vec![Type::Str, Type::Str])
+        }
         // S.2 — manipulación de strings:
         "split" => {
             if check_method_arity(ctx, "split", args_ty, 1, span)
@@ -3149,6 +3188,33 @@ fn update_result_coverage(
 /// scope actual. Cubre Ident/Wildcard/Tuple recursivo. Otros patterns
 /// (literales, Ok/Err, Range) emiten error "patrón no admitido en
 /// for".
+/// Mini-tanda Cmp+ — chequea una clause `for <pat> in <iter>` de una
+/// comprehension: tipa el iter como List/Range, deriva el tipo del
+/// elemento, y bindea el pattern en el scope actual. Para múltiples
+/// `for` clauses se llama una vez por cada (todas comparten el mismo
+/// scope acumulativo del checker).
+fn check_comp_clause_in_checker(
+    ctx: &mut CheckCtx,
+    pat: &crate::ast::Pattern,
+    iter: &Expr,
+    fallback_span: Span,
+) {
+    let iter_ty = infer_expr(ctx, iter);
+    let var_ty = match iter_ty.base() {
+        Type::List(t) => (**t).clone(),
+        Type::Range => Type::Int,
+        Type::Any => Type::Any,
+        other => {
+            ctx.error_at(iter.span(), format!(
+                "comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                other.display(ctx.types)
+            ));
+            Type::Any
+        }
+    };
+    bind_for_pattern_in_checker(ctx, pat, &var_ty, fallback_span);
+}
+
 fn bind_for_pattern_in_checker(
     ctx: &mut CheckCtx,
     pat: &crate::ast::Pattern,
@@ -6609,6 +6675,90 @@ mod tests {
             "let xs: List<Int> = [1, 2]\n\
              let m = xs.to_map()",
             &["to_map", "Tuple"],
+        );
+    }
+
+    // ---- Mini-tanda Mb4 + Cmp+ ----
+
+    #[test]
+    fn mb4_list_unique_devuelve_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 1, 2]\n\
+             let r: List<Int> = xs.unique()",
+        );
+    }
+
+    #[test]
+    fn mb4_list_partition_devuelve_tuple_de_listas() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: (List<Int>, List<Int>) = xs.partition(fn(n: Int) => n > 1)",
+        );
+    }
+
+    #[test]
+    fn mb4_list_partition_callback_no_bool_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\n\
+             let r = xs.partition(fn(n: Int) => n)",
+            &["partition", "Bool"],
+        );
+    }
+
+    #[test]
+    fn mb4_map_invert_swap_k_v() {
+        assert_ok(
+            "let m: Map<Int, Str> = {1: \"a\"}\n\
+             let r: Map<Str, Int> = m.invert()",
+        );
+    }
+
+    #[test]
+    fn mb4_str_split_at_devuelve_tuple_str_str() {
+        assert_ok(
+            "let r: (Str, Str) = \"abc\".split_at(1)",
+        );
+    }
+
+    #[test]
+    fn mb4_str_split_at_con_arg_no_int_es_error() {
+        assert_error_with(
+            "let r = \"abc\".split_at(\"x\")",
+            &["split_at", "Int"],
+        );
+    }
+
+    #[test]
+    fn cmp_multi_for_clauses_tipan_list_int() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2]\n\
+             let ys: List<Int> = [10, 20]\n\
+             let r: List<Int> = [x + y for x in xs for y in ys]",
+        );
+    }
+
+    #[test]
+    fn cmp_multi_for_var_anidado_visible_en_expr() {
+        // El binding `y` del segundo for está visible en el expr.
+        assert_ok(
+            "let xs: List<Int> = [1, 2]\n\
+             let ys: List<Int> = [10]\n\
+             let r: List<Int> = [y for x in xs for y in ys]",
+        );
+    }
+
+    #[test]
+    fn cmp_map_comp_tipa_como_map_k_v() {
+        assert_ok(
+            "let m: Map<Int, Int> = {n: n * n for n in 1..=3}",
+        );
+    }
+
+    #[test]
+    fn cmp_map_comp_filter_no_bool_es_error() {
+        assert_error_with(
+            "let m = {n: n for n in 0..3 if n}",
+            &["filtro", "Bool"],
         );
     }
 

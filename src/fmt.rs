@@ -413,8 +413,23 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             Some(m)
         }
         Expr::List(items, _) => items.iter().map(end_line_of_expr).max(),
-        Expr::ListComp { expr, iter, filter, .. } => {
+        Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
             let mut m = end_line_of_expr(expr).max(end_line_of_expr(iter));
+            for (_, it) in extra_clauses {
+                m = m.max(end_line_of_expr(it));
+            }
+            if let Some(f) = filter {
+                m = m.max(end_line_of_expr(f));
+            }
+            Some(m)
+        }
+        Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            let mut m = end_line_of_expr(key)
+                .max(end_line_of_expr(value))
+                .max(end_line_of_expr(iter));
+            for (_, it) in extra_clauses {
+                m = m.max(end_line_of_expr(it));
+            }
             if let Some(f) = filter {
                 m = m.max(end_line_of_expr(f));
             }
@@ -833,23 +848,49 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write(&parts.join(", "));
             ctx.write("]");
         }
-        // Mini-tanda C — `[expr for var in iter (if filter)?]`. Una
-        // línea con espacios canónicos. Multi-línea queda como deuda
-        // residual si entra demanda.
-        Expr::ListComp { expr, var, iter, filter, .. } => {
+        // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) (if filter)?]`.
+        // Una línea con espacios canónicos. Multi-línea queda como
+        // deuda residual si entra demanda.
+        Expr::ListComp { expr, var, iter, extra_clauses, filter, .. } => {
             ctx.write("[");
             ctx.write(&expr_to_inline_string(expr));
             ctx.write(" for ");
-            // Mini-tanda Up — `var` ahora es Pattern. Reusa
-            // `fmt_pattern` para soportar Ident/Tuple/Wildcard.
             fmt_pattern(ctx, var);
             ctx.write(" in ");
             ctx.write(&expr_to_inline_string(iter));
+            for (extra_var, extra_iter) in extra_clauses {
+                ctx.write(" for ");
+                fmt_pattern(ctx, extra_var);
+                ctx.write(" in ");
+                ctx.write(&expr_to_inline_string(extra_iter));
+            }
             if let Some(f) = filter {
                 ctx.write(" if ");
                 ctx.write(&expr_to_inline_string(f));
             }
             ctx.write("]");
+        }
+        // Mini-tanda Cmp+ — `{key: value for var in iter (for ...)* (if cond)?}`.
+        Expr::MapComp { key, value, var, iter, extra_clauses, filter, .. } => {
+            ctx.write("{");
+            ctx.write(&expr_to_inline_string(key));
+            ctx.write(": ");
+            ctx.write(&expr_to_inline_string(value));
+            ctx.write(" for ");
+            fmt_pattern(ctx, var);
+            ctx.write(" in ");
+            ctx.write(&expr_to_inline_string(iter));
+            for (extra_var, extra_iter) in extra_clauses {
+                ctx.write(" for ");
+                fmt_pattern(ctx, extra_var);
+                ctx.write(" in ");
+                ctx.write(&expr_to_inline_string(extra_iter));
+            }
+            if let Some(f) = filter {
+                ctx.write(" if ");
+                ctx.write(&expr_to_inline_string(f));
+            }
+            ctx.write("}");
         }
         Expr::Map(entries, _) => {
             ctx.write("{");

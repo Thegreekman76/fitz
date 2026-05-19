@@ -306,9 +306,17 @@ fn program_uses_async(program: &Program) -> bool {
                     || end.as_ref().is_some_and(|e| expr_uses_async(e))
             }
             Expr::List(items, _) => items.iter().any(expr_uses_async),
-            Expr::ListComp { expr, iter, filter, .. } => {
+            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
                 expr_uses_async(expr)
                     || expr_uses_async(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_async(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_async(f))
+            }
+            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+                expr_uses_async(key)
+                    || expr_uses_async(value)
+                    || expr_uses_async(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_async(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_async(f))
             }
             Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
@@ -732,13 +740,25 @@ fn walk_expr_for_state_refs(
         // Mini-tanda C — list comprehension. El `var` introducido es
         // local adentro del expr/filter, lo sumamos a locals para no
         // marcar falso positivo si shadowea un state var del scope.
-        Expr::ListComp { expr, var, iter, filter, .. } => {
+        Expr::ListComp { expr, var, iter, extra_clauses, filter, .. } => {
             walk_expr_for_state_refs(iter, candidates, locals, refs);
             // Mini-tanda Up — `var` ahora es Pattern. Recolectamos todos
             // los nombres del pattern (Ident/Tuple recursivo) y los
             // agregamos a `locals` mientras walkeamos el cuerpo.
             let mut added: Vec<String> = Vec::new();
             collect_pattern_bindings(var, &mut added);
+            // Mini-tanda Cmp+ — extra clauses: walkeamos cada iter
+            // (que puede referenciar vars del clause anterior) y
+            // sumamos los nombres de su pattern a locals.
+            for (extra_var, extra_iter) in extra_clauses {
+                for name in &added {
+                    if !locals.contains(name) {
+                        locals.insert(name.clone());
+                    }
+                }
+                walk_expr_for_state_refs(extra_iter, candidates, locals, refs);
+                collect_pattern_bindings(extra_var, &mut added);
+            }
             for name in &added {
                 if !locals.contains(name) {
                     locals.insert(name.clone());
@@ -749,6 +769,34 @@ fn walk_expr_for_state_refs(
             }
             walk_expr_for_state_refs(expr, candidates, locals, refs);
             // Quitamos solo los que NO estaban antes (preserva outer).
+            for name in &added {
+                locals.remove(name);
+            }
+        }
+        // Mini-tanda Cmp+ — map comprehension análoga a ListComp.
+        Expr::MapComp { key, value, var, iter, extra_clauses, filter, .. } => {
+            walk_expr_for_state_refs(iter, candidates, locals, refs);
+            let mut added: Vec<String> = Vec::new();
+            collect_pattern_bindings(var, &mut added);
+            for (extra_var, extra_iter) in extra_clauses {
+                for name in &added {
+                    if !locals.contains(name) {
+                        locals.insert(name.clone());
+                    }
+                }
+                walk_expr_for_state_refs(extra_iter, candidates, locals, refs);
+                collect_pattern_bindings(extra_var, &mut added);
+            }
+            for name in &added {
+                if !locals.contains(name) {
+                    locals.insert(name.clone());
+                }
+            }
+            if let Some(f) = filter {
+                walk_expr_for_state_refs(f, candidates, locals, refs);
+            }
+            walk_expr_for_state_refs(key, candidates, locals, refs);
+            walk_expr_for_state_refs(value, candidates, locals, refs);
             for name in &added {
                 locals.remove(name);
             }
@@ -5203,8 +5251,11 @@ impl<'a> CodegenCtx<'a> {
                 "`Range` solo se acepta como iterable de `for`; otros usos no se generan",
             )),
             Expr::List(items, span) => self.gen_list_lit(items, *span),
-            Expr::ListComp { expr, var, iter, filter, span } => {
-                self.gen_list_comp(expr, var, iter, filter.as_deref(), *span)
+            Expr::ListComp { expr, var, iter, extra_clauses, filter, span } => {
+                self.gen_list_comp(expr, var, iter, extra_clauses, filter.as_deref(), *span)
+            }
+            Expr::MapComp { key, value, var, iter, extra_clauses, filter, span } => {
+                self.gen_map_comp(key, value, var, iter, extra_clauses, filter.as_deref(), *span)
             }
             Expr::Map(pairs, span) => self.gen_map_lit(pairs, *span),
             Expr::Index { object, index, span } => self.gen_index(object, index, *span),
@@ -5868,6 +5919,24 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::List(Box::new(Type::Str))))
             }
+            // Mini-tanda Mb4 — `split_at(idx)`: divide en char idx →
+            // `(Str, Str)`. idx negativo → panic; idx > len → ("s", "").
+            (Type::Str, "split_at") => {
+                check_method_arity(method, args, 1)?;
+                let (i_code, i_ty) = self.gen_expr(&args[0])?;
+                let i_c = coerce(&i_code, &i_ty, &Type::Int);
+                let code = format!(
+                    "{{ let __s: String = {obj_code}; \
+                       let __idx: i64 = {i_c}; \
+                       if __idx < 0 {{ panic!(\"`Str.split_at()` no acepta índice negativo: recibió {{}}\", __idx); }} \
+                       let __len: i64 = __s.chars().count() as i64; \
+                       let __clamped: usize = __idx.min(__len) as usize; \
+                       let __left: String = __s.chars().take(__clamped).collect(); \
+                       let __right: String = __s.chars().skip(__clamped).collect(); \
+                       (__left, __right) }}"
+                );
+                Ok((code, Type::Tuple(vec![Type::Str, Type::Str])))
+            }
             // S.2 — `split` devuelve `List<Str>` = `Arc<Mutex<Vec<String>>>`.
             // Rust `str::split` devuelve un iterator de `&str`; lo
             // materializamos a `Vec<String>` via `.map(String::from)`.
@@ -5981,7 +6050,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Str))
             }
             (Type::Str, other) => Err(self.err_at(call_span, format!(
-                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars)",
+                "Str no tiene el método `{}` en el subset compilado (hoy: len/upper/lower/contains/starts_with/ends_with/split/trim/trim_start/trim_end/replace/repeat/find/index_of/last_index_of/pad_start/pad_end/chars/split_at)",
                 other
             ))),
 
@@ -6349,6 +6418,47 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, acc_ty))
             }
+            // Mini-tanda Mb4 — `unique()`: dedup preservando orden de
+            // 1ra aparición. Cualquier T. O(n²) por linear scan (mismo
+            // approach que el evaluator). Para listas chicas (<1000)
+            // es aceptable.
+            (Type::List(t), "unique") => {
+                check_method_arity(method, args, 0)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let mut __out: Vec<{t_rs}> = Vec::with_capacity(__items.len()); \
+                       for __v in __items.into_iter() {{ \
+                           if !__out.iter().any(|__x| *__x == __v) {{ __out.push(__v); }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new((**t).clone()))))
+            }
+            // Mini-tanda Mb4 — `partition(pred)`: divide en (truthy, falsy).
+            // Callback `fn(T) -> Bool`. Devuelve `(List<T>, List<T>)`.
+            (Type::List(t), "partition") => {
+                check_method_arity(method, args, 1)?;
+                let (cb_code, _) = self.gen_callback_inline(&args[0], t, Some(&Type::Bool), "partition")?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __t: Vec<{t_rs}> = Vec::new(); \
+                       let mut __f: Vec<{t_rs}> = Vec::new(); \
+                       for __it in __items.into_iter() {{ \
+                           if __cb(__it.clone()) {{ __t.push(__it); }} else {{ __f.push(__it); }} \
+                       }} \
+                       (Arc::new(Mutex::new(__t)), Arc::new(Mutex::new(__f))) }}"
+                );
+                Ok((
+                    code,
+                    Type::Tuple(vec![
+                        Type::List(Box::new((**t).clone())),
+                        Type::List(Box::new((**t).clone())),
+                    ]),
+                ))
+            }
             // Mini-tanda Mb3 — `to_map()`: convierte `List<(K, V)>` →
             // `Map<K, V>`. Política last-write-wins (paralelo a Python
             // `dict(items)`). El tipo `T` del receptor debe ser
@@ -6385,7 +6495,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::Map(Box::new(k_ty), Box::new(v_ty))))
             }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition)",
                 other
             ))),
 
@@ -6526,6 +6636,26 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::Map(k.clone(), v.clone())))
             }
+            // Mini-tanda Mb4 — `invert()`: swap K ↔ V. Last-write-wins
+            // si hay values duplicados. Devuelve `Map<V, K>`.
+            (Type::Map(k, v), "invert") => {
+                check_method_arity(method, args, 0)?;
+                let k_rs = rust_type_for(k, self.env)?;
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let __snapshot: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let mut __out: Vec<({v_rs}, {k_rs})> = Vec::with_capacity(__snapshot.len()); \
+                       for (__k, __v) in __snapshot.into_iter() {{ \
+                           if let Some(__slot) = __out.iter_mut().find(|(__ek, _)| *__ek == __v) {{ \
+                               __slot.1 = __k; \
+                           }} else {{ \
+                               __out.push((__v, __k)); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::Map(v.clone(), k.clone())))
+            }
             // Mini-tanda Mb3 — `entries()`: devuelve `List<(K, V)>`.
             // Inversa de `xs.to_map()`. Emite snapshot del Vec<(K, V)>
             // del Map adentro de un Arc<Mutex<>>.
@@ -6539,7 +6669,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::List(Box::new(Type::Tuple(vec![(**k).clone(), (**v).clone()])))))
             }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert)",
                 other
             ))),
 
@@ -8019,11 +8149,137 @@ impl<'a> CodegenCtx<'a> {
         expr: &Expr,
         var: &crate::ast::Pattern,
         iter: &Expr,
+        extra_clauses: &[(crate::ast::Pattern, Expr)],
         filter: Option<&Expr>,
         span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        // Resolver el iter: Range o List<T>. Devuelve `(iter_code,
-        // elem_ty)`. Mismo set de casos que `gen_for`.
+        // Scope dedicado para todas las clauses; pop al salir.
+        self.push_scope();
+        // Primer clause + extras: emitir loops anidados de afuera hacia
+        // adentro. El expr y filter se evalúan adentro del más interno.
+        let mut loop_headers: Vec<String> = Vec::with_capacity(1 + extra_clauses.len());
+        loop_headers.push(self.gen_comp_clause_header(var, iter)?);
+        for (extra_var, extra_iter) in extra_clauses {
+            loop_headers.push(self.gen_comp_clause_header(extra_var, extra_iter)?);
+        }
+        // Filter (opcional). Adentro del scope para que vea bindings.
+        let filter_code = if let Some(f) = filter {
+            let (fc, ft) = self.gen_expr(f)?;
+            if !matches!(ft, Type::Bool) {
+                self.pop_scope();
+                return Err(self.err_at(f.span(), format!(
+                    "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                    display_type(&ft, self.env)
+                )));
+            }
+            Some(fc)
+        } else {
+            None
+        };
+        let (expr_code, expr_ty) = self.gen_expr(expr)?;
+        self.pop_scope();
+        if matches!(expr_ty, Type::Any) {
+            return Err(self.err_at(span,
+                "la expresión de la list comprehension tipa como `Any`: el subset compilado exige tipo concreto"
+                    .to_string(),
+            ));
+        }
+        // Cuerpo más interno: push del expr (con o sin filter).
+        let inner = if let Some(fc) = filter_code {
+            format!("if {fc} {{ __fitz_comp.push({expr_code}); }}")
+        } else {
+            format!("__fitz_comp.push({expr_code});")
+        };
+        // Anidamos los loops desde afuera hacia adentro.
+        let mut nested = inner;
+        for header in loop_headers.iter().rev() {
+            nested = format!("{header} {{ {nested} }}");
+        }
+        let block = format!(
+            "{{ let mut __fitz_comp = Vec::new(); {nested} Arc::new(Mutex::new(__fitz_comp)) }}"
+        );
+        Ok((block, Type::List(Box::new(expr_ty))))
+    }
+
+    /// Mini-tanda Cmp+ — codegen análogo para map comprehensions.
+    /// Emite loops anidados como `gen_list_comp`, pero el cuerpo interno
+    /// construye pares `(k, v)` y los inserta en un `Vec<(K, V)>` con
+    /// last-write-wins en duplicados.
+    #[allow(clippy::too_many_arguments)]
+    fn gen_map_comp(
+        &mut self,
+        key: &Expr,
+        value: &Expr,
+        var: &crate::ast::Pattern,
+        iter: &Expr,
+        extra_clauses: &[(crate::ast::Pattern, Expr)],
+        filter: Option<&Expr>,
+        span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        self.push_scope();
+        let mut loop_headers: Vec<String> = Vec::with_capacity(1 + extra_clauses.len());
+        loop_headers.push(self.gen_comp_clause_header(var, iter)?);
+        for (extra_var, extra_iter) in extra_clauses {
+            loop_headers.push(self.gen_comp_clause_header(extra_var, extra_iter)?);
+        }
+        let filter_code = if let Some(f) = filter {
+            let (fc, ft) = self.gen_expr(f)?;
+            if !matches!(ft, Type::Bool) {
+                self.pop_scope();
+                return Err(self.err_at(f.span(), format!(
+                    "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
+                    display_type(&ft, self.env)
+                )));
+            }
+            Some(fc)
+        } else {
+            None
+        };
+        let (k_code, k_ty) = self.gen_expr(key)?;
+        let (v_code, v_ty) = self.gen_expr(value)?;
+        self.pop_scope();
+        if matches!(k_ty, Type::Any) || matches!(v_ty, Type::Any) {
+            return Err(self.err_at(span,
+                "key/value de la map comprehension tipan como `Any`: el subset compilado exige tipos concretos"
+                    .to_string(),
+            ));
+        }
+        let k_rs = rust_type_for(&k_ty, self.env)?;
+        let v_rs = rust_type_for(&v_ty, self.env)?;
+        // Body interno: last-write-wins push.
+        let push_pair = format!(
+            "{{ let __k: {k_rs} = {k_code}; let __v: {v_rs} = {v_code}; \
+               if let Some(__slot) = __fitz_comp.iter_mut().find(|__pair| __pair.0 == __k) {{ \
+                   __slot.1 = __v; \
+               }} else {{ \
+                   __fitz_comp.push((__k, __v)); \
+               }} }}"
+        );
+        let inner = if let Some(fc) = filter_code {
+            format!("if {fc} {push_pair}")
+        } else {
+            push_pair
+        };
+        let mut nested = inner;
+        for header in loop_headers.iter().rev() {
+            nested = format!("{header} {{ {nested} }}");
+        }
+        let block = format!(
+            "{{ let mut __fitz_comp: Vec<({k_rs}, {v_rs})> = Vec::new(); {nested} Arc::new(Mutex::new(__fitz_comp)) }}"
+        );
+        Ok((block, Type::Map(Box::new(k_ty), Box::new(v_ty))))
+    }
+
+    /// Mini-tanda Cmp+ — helper que emite el header de un loop Rust
+    /// `for <binding> in <iter_code>` para una clause de comprehension.
+    /// Declara los bindings del pattern en el scope actual del ctx.
+    /// El caller envuelve el body con `{ ... }`.
+    fn gen_comp_clause_header(
+        &mut self,
+        var: &crate::ast::Pattern,
+        iter: &Expr,
+    ) -> Result<String, FitzError> {
+        // Resolver el iter: Range o List<T>.
         let (iter_code, elem_ty) = if let Expr::Range { start, end, inclusive, .. } = iter {
             let (s_code, _) = self.gen_expr(start)?;
             let (e_code, _) = self.gen_expr(end)?;
@@ -8033,33 +8289,28 @@ impl<'a> CodegenCtx<'a> {
                 Type::Int,
             )
         } else {
-            let (iter_code, iter_ty) = self.gen_expr(iter)?;
-            let elem_ty = match &iter_ty {
+            let (ic, it_ty) = self.gen_expr(iter)?;
+            let elem_ty = match &it_ty {
                 Type::List(inner) => (**inner).clone(),
                 other => {
                     return Err(self.err_at(iter.span(), format!(
-                        "list comprehension necesita un iterable (`Range` o `List<T>`), recibió `{}`",
+                        "comprehension necesita un iterable (`Range` o `List<T>`), recibió `{}`",
                         display_type(other, self.env)
                     )));
                 }
             };
             if matches!(elem_ty, Type::Any) {
                 return Err(self.err_at(iter.span(),
-                    "list comprehension sobre `List<Any>`: el subset compilado exige tipo homogéneo concreto"
+                    "comprehension sobre `List<Any>`: el subset compilado exige tipo homogéneo concreto"
                         .to_string(),
                 ));
             }
             (
-                format!("({iter_code}).lock().unwrap().clone().into_iter()"),
+                format!("({ic}).lock().unwrap().clone().into_iter()"),
                 elem_ty,
             )
         };
-        // Scope nuevo para el var. El filter y el expr lo ven; nada más.
-        self.push_scope();
-        // Mini-tanda Up — `var` ahora es Pattern. Construimos el binding
-        // Rust + declaramos las vars en el scope. Para Pattern::Ident
-        // emite `mut <name>`; Wildcard → `_`; Tuple → `(mut a, mut b, ...)`
-        // con destructuring nativo Rust (paralelo a `gen_for` post-Md).
+        // Pattern → binding Rust. Reusa la lógica de Up (Ident/Wildcard/Tuple).
         let var_binding = match var {
             crate::ast::Pattern::Tuple(subs) => {
                 let slot_tys: Vec<Type> = match &elem_ty {
@@ -8088,40 +8339,7 @@ impl<'a> CodegenCtx<'a> {
                 format!("{}{}", mut_prefix, b)
             }
         };
-        // Filter (opcional).
-        let filter_code = if let Some(f) = filter {
-            let (fc, ft) = self.gen_expr(f)?;
-            if !matches!(ft, Type::Bool) {
-                self.pop_scope();
-                return Err(self.err_at(f.span(), format!(
-                    "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
-                    display_type(&ft, self.env)
-                )));
-            }
-            Some(fc)
-        } else {
-            None
-        };
-        // Expr final. Su tipo determina T del `List<T>` resultado.
-        let (expr_code, expr_ty) = self.gen_expr(expr)?;
-        self.pop_scope();
-        if matches!(expr_ty, Type::Any) {
-            return Err(self.err_at(span,
-                "la expresión de la list comprehension tipa como `Any`: el subset compilado exige tipo concreto"
-                    .to_string(),
-            ));
-        }
-        // Emitimos un bloque que devuelve el Arc<Mutex<Vec<T>>>.
-        let block = if let Some(fc) = filter_code {
-            format!(
-                "{{ let mut __fitz_comp = Vec::new(); for {var_binding} in {iter_code} {{ if {fc} {{ __fitz_comp.push({expr_code}); }} }} Arc::new(Mutex::new(__fitz_comp)) }}",
-            )
-        } else {
-            format!(
-                "{{ let mut __fitz_comp = Vec::new(); for {var_binding} in {iter_code} {{ __fitz_comp.push({expr_code}); }} Arc::new(Mutex::new(__fitz_comp)) }}",
-            )
-        };
-        Ok((block, Type::List(Box::new(expr_ty))))
+        Ok(format!("for {var_binding} in {iter_code}"))
     }
 
     /// `{k1: v1, k2: v2, ...}` → `Arc::new(Mutex::new(vec![(k1, v1), ...]))`.
@@ -10519,10 +10737,19 @@ fn collect_captures_expr(
         // adentro del expr/filter (paralelo a walk_expr_for_state_refs).
         // Mini-tanda Up — `var` ahora es Pattern; recolectamos sus
         // nombres y los marcamos locals para el walk del body.
-        Expr::ListComp { expr, var, iter, filter, .. } => {
+        Expr::ListComp { expr, var, iter, extra_clauses, filter, .. } => {
             collect_captures_expr(iter, params, locals, ctx, seen, out);
             let mut added: Vec<String> = Vec::new();
             collect_pattern_bindings(var, &mut added);
+            for (extra_var, extra_iter) in extra_clauses {
+                for name in &added {
+                    if !locals.contains(name) {
+                        locals.insert(name.clone());
+                    }
+                }
+                collect_captures_expr(extra_iter, params, locals, ctx, seen, out);
+                collect_pattern_bindings(extra_var, &mut added);
+            }
             for name in &added {
                 if !locals.contains(name) {
                     locals.insert(name.clone());
@@ -10532,6 +10759,34 @@ fn collect_captures_expr(
                 collect_captures_expr(f, params, locals, ctx, seen, out);
             }
             collect_captures_expr(expr, params, locals, ctx, seen, out);
+            for name in &added {
+                locals.remove(name);
+            }
+        }
+        // Mini-tanda Cmp+ — map comprehension.
+        Expr::MapComp { key, value, var, iter, extra_clauses, filter, .. } => {
+            collect_captures_expr(iter, params, locals, ctx, seen, out);
+            let mut added: Vec<String> = Vec::new();
+            collect_pattern_bindings(var, &mut added);
+            for (extra_var, extra_iter) in extra_clauses {
+                for name in &added {
+                    if !locals.contains(name) {
+                        locals.insert(name.clone());
+                    }
+                }
+                collect_captures_expr(extra_iter, params, locals, ctx, seen, out);
+                collect_pattern_bindings(extra_var, &mut added);
+            }
+            for name in &added {
+                if !locals.contains(name) {
+                    locals.insert(name.clone());
+                }
+            }
+            if let Some(f) = filter {
+                collect_captures_expr(f, params, locals, ctx, seen, out);
+            }
+            collect_captures_expr(key, params, locals, ctx, seen, out);
+            collect_captures_expr(value, params, locals, ctx, seen, out);
             for name in &added {
                 locals.remove(name);
             }
