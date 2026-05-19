@@ -1968,6 +1968,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13o-higher-order-y-consts-globales.fitz",
     "13p-mb4-y-comprehensions-extendidas.fitz",
     "13q-mb5-y-async-closures.fitz",
+    "13r-mb6-y-async-build.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -4097,33 +4098,184 @@ fn mb5_str_is_empty_compila() {
     assert_eq!(stdout.trim(), "true\nfalse");
 }
 
+// ---- Mini-tanda Mb6 — scan + windows + merge_with --------
+
 #[test]
-fn async_cl_inline_aborta_en_codegen_con_mensaje_claro() {
-    // async closures inline NO se soportan en codegen 5b (boxing
-    // de Future<T> requiere Pin<Box<dyn Future>>). El mensaje
-    // sugiere el workaround: declarar la fn async top-level.
-    let src = "let f = async fn(n: Int) -> Int { return n }\n\
-               print(0)\n";
-    let mut sanitized = src.to_string();
-    let _ = &mut sanitized;
-    // Usamos build directo para capturar el error de codegen.
-    let dir = std::env::temp_dir().join("fitz-build-async-cl-reject");
-    let _ = std::fs::create_dir_all(&dir);
-    let path = dir.join("test.fitz");
-    std::fs::write(&path, src).expect("write src");
-    let out = std::process::Command::new(env!("CARGO_BIN_EXE_fitz"))
-        .arg("build")
-        .arg(&path)
-        .output()
-        .expect("run fitz build");
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    let combined = format!("{stderr}{stdout}");
-    assert!(
-        combined.contains("async closure inline")
-            || combined.contains("async fn nombre"),
-        "esperaba mensaje específico de async closure inline, fue:\nstderr: {stderr}\nstdout: {stdout}",
+fn mb6_list_scan_acumula_outputs_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4]\n\
+               let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)\n\
+               print(r)\n";
+    let (stdout, exit) = build_and_run("mb6_scan", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[1, 3, 6, 10]");
+}
+
+#[test]
+fn mb6_list_windows_compila() {
+    let src = "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+               let r: List<List<Int>> = xs.windows(3)\n\
+               print(r)\n\
+               print(r.len())\n";
+    let (stdout, exit) = build_and_run("mb6_windows", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "[[1, 2, 3], [2, 3, 4], [3, 4, 5]]\n3");
+}
+
+#[test]
+fn mb6_map_merge_with_callback_resuelve_conflicts_compila() {
+    let src = "let a: Map<Str, Int> = {\"x\": 1, \"y\": 2}\n\
+               let b: Map<Str, Int> = {\"y\": 10, \"z\": 3}\n\
+               let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)\n\
+               print(r[\"x\"])\n\
+               print(r[\"y\"])\n\
+               print(r[\"z\"])\n";
+    let (stdout, exit) = build_and_run("mb6_merge_with", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "1\n12\n3");
+}
+
+// ---- Mini-tanda HTTP-Cors — echo Origin sin filtro --------
+
+#[test]
+fn http_cors_echo_origin_hace_echo_sin_filtro() {
+    // allow_origin: "echo" (Str literal) → echo del Origin recibido
+    // sin filtro. Cualquier Origin que llegue se eco-emite en la
+    // response. Si no llega Origin header, no se emite el header.
+    let src = "\
+@server(43392)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": \"echo\"}))
+@get(\"/api\")
+fn h() -> Str => \"ok\"
+";
+    // Request CON Origin → echo en response.
+    let (status, raw_headers) = build_spawn_request_raw_with_headers(
+        "http-cors-echo-with-origin",
+        src,
+        43392,
+        "GET",
+        "/api",
+        &[("Origin", "https://anything.example.com")],
     );
+    assert_eq!(status, 200);
+    let lower = raw_headers.to_lowercase();
+    assert!(
+        lower.contains("access-control-allow-origin: https://anything.example.com"),
+        "headers no contienen echo del Origin: {}",
+        raw_headers
+    );
+}
+
+#[test]
+fn http_cors_echo_sin_origin_no_emite_header() {
+    let src = "\
+@server(43393)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": \"echo\"}))
+@get(\"/api\")
+fn h() -> Str => \"ok\"
+";
+    // Request SIN Origin → no se emite header.
+    let (status, raw_headers) = build_spawn_request_raw(
+        "http-cors-echo-no-origin",
+        src,
+        43393,
+        "GET",
+        "/api",
+    );
+    assert_eq!(status, 200);
+    let lower = raw_headers.to_lowercase();
+    assert!(
+        !lower.contains("access-control-allow-origin:"),
+        "Echo sin Origin no debería emitir el header: {}",
+        raw_headers
+    );
+}
+
+// ---- Mini-tanda HTTP-Err — status codes específicos por Err ----
+
+#[test]
+fn http_err_instance_con_status_field_devuelve_ese_status() {
+    // Convención: Err con Instance con field `status: Int` → ese
+    // status code se usa en la response. Body = Instance serializada.
+    let src = "\
+type ApiErr {
+    status: Int = 500
+    message: Str = \"\"
+}
+
+@server(43390)
+fn main() => 0
+
+@get(\"/users/{id}\")
+fn get_user(id: Int) -> Result<Str, ApiErr> {
+    if (id == 0) { return Err(ApiErr { status: 404, message: \"no encontrado\" }) }
+    return Ok(\"Ada\")
+}
+";
+    let (status, body) = build_spawn_request(
+        "http-err-404",
+        src,
+        43390,
+        "GET",
+        "/users/0",
+        None,
+    );
+    assert_eq!(status, 404);
+    assert!(body.contains("no encontrado"), "body fue: {}", body);
+    // El body es el Instance serializado (no envuelto en `{"error": ...}`).
+    assert!(body.contains("\"status\":404"), "body fue: {}", body);
+}
+
+#[test]
+fn http_err_instance_con_status_field_400_y_ok_path() {
+    let src = "\
+type ApiErr {
+    status: Int = 500
+    message: Str = \"\"
+}
+
+@server(43391)
+fn main() => 0
+
+@get(\"/users/{id}\")
+fn get_user(id: Int) -> Result<Str, ApiErr> {
+    if (id < 0) { return Err(ApiErr { status: 400, message: \"id inválido\" }) }
+    return Ok(\"hola\")
+}
+";
+    // Caso OK: status 200.
+    let (status_ok, body_ok) = build_spawn_request(
+        "http-err-ok",
+        src,
+        43391,
+        "GET",
+        "/users/5",
+        None,
+    );
+    assert_eq!(status_ok, 200);
+    assert!(body_ok.contains("hola"));
+}
+
+#[test]
+fn async_cl_inline_dentro_de_fn_async_compila() {
+    // Async-cl build: async closures inline compilan adentro de
+    // fns async. Emitidas como `move |...| -> Pin<Box<dyn Future +
+    // Send>> { Box::pin(async move { ... }) }`.
+    let src = "async fn run() -> Int {\n\
+                   let f = async fn(n: Int) -> Int {\n\
+                       sleep(1).await\n\
+                       return n * 2\n\
+                   }\n\
+                   let r = f(21).await\n\
+                   return r\n\
+               }\n\
+               print(run().await)\n";
+    let (stdout, exit) = build_and_run("async_cl_inline_dentro_de_fn", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42");
 }
 
 #[test]

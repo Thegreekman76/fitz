@@ -3743,6 +3743,7 @@ print(xs)                          // [1, 2, 3]
 | `keys_sorted()`     | `List<K>` con las keys ordenadas; K ∈ {Int, Float, Str, Bool} (Mb2). |
 | `entries()`         | `List<(K, V)>` con los pares en orden de inserción; inversa de `to_map` (Mb3). |
 | `invert()`          | `Map<V, K>` con keys/values intercambiados; last-write-wins en values dups (Mb4). |
+| `merge_with(o, fn)` | `Map<K, V>` con merge de `other`; el callback `fn(V, V) -> V` decide en conflicts (Mb6). |
 
 ```fitz
 let m = {"a": 1, "b": 2}
@@ -4177,6 +4178,8 @@ Resumen de los métodos cerrados en la mini-tanda S (post-R):
 | `.zip_with(ys, fn)` | `List<U>`, `fn(T, U) -> V` | `List<V>` | zip + map en un paso; trunca al más corto (Mb5) |
 | `.max_by(fn)`       | `fn(T) -> Int`    | `Result<T>`   | item con max ranking; vacía → `Err` (Mb5) |
 | `.min_by(fn)`       | `fn(T) -> Int`    | `Result<T>`   | item con min ranking; vacía → `Err` (Mb5) |
+| `.scan(init, fn)`   | `Acc`, `fn(Acc, T) -> Acc` | `List<Acc>` | fold con outputs intermedios (cumulative) (Mb6) |
+| `.windows(n)`       | `Int`             | `List<List<T>>` | sliding windows de tamaño n; `len < n` → vacía (Mb6) |
 
 Ver [examples/guide/13c-metodos-extras.fitz](../examples/guide/13c-metodos-extras.fitz)
 para los métodos S,
@@ -4668,6 +4671,106 @@ fn async top-level y referenciarla por nombre.
 Ver [examples/guide/13q-mb5-y-async-closures.fitz](../examples/guide/13q-mb5-y-async-closures.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`
 para los métodos Mb5; las async closures sólo en `fitz run`).
+
+### scan + windows + merge_with + async closures en build (mini-tanda Mb6 + Async-cl build + HTTP refinements)
+
+Bundle combinado de polish: 3 métodos analíticos adicionales (Mb6),
+cierre del caveat de Async-cl build (async closures inline ahora
+compilan en `fitz build`), y dos refinamientos del stack HTTP.
+
+**`List.scan(init, fn(acc, x) -> Acc) -> List<Acc>`** — fold con
+outputs intermedios. Devuelve una lista con cada estado del
+acumulador después de procesar cada elemento. Útil para sumas
+parciales, máximos acumulados, etc. Paralelo a `Iterator::scan`
+de Rust (sin la sutileza del Option).
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4]
+let prefix_sums: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)
+print(prefix_sums)                               // [1, 3, 6, 10]
+```
+
+**`List.windows(n) -> List<List<T>>`** — sliding windows de tamaño
+`n`. Cada ventana es una `List<T>` con `n` elementos consecutivos.
+Si `len(xs) < n`, devuelve lista vacía. `n <= 0` → error claro.
+Paralelo a `slice::windows` de Rust.
+
+```fitz
+let xs: List<Int> = [1, 2, 3, 4, 5]
+print(xs.windows(3))                             // [[1, 2, 3], [2, 3, 4], [3, 4, 5]]
+```
+
+**`Map.merge_with(other, fn(V, V) -> V) -> Map<K, V>`** — merge
+generalizado: el callback decide qué value queda cuando hay
+conflict de keys (caso típico: `fn(a, b) => a + b` para sumar
+valores). Generaliza `merge` (que es last-write-wins).
+
+```fitz
+let counts_a: Map<Str, Int> = {"x": 5, "y": 3}
+let counts_b: Map<Str, Int> = {"y": 7, "z": 2}
+let total: Map<Str, Int> = counts_a.merge_with(counts_b,
+    fn(a: Int, b: Int) => a + b)
+print(total["x"])                                // 5
+print(total["y"])                                // 10 — sumados
+print(total["z"])                                // 2
+```
+
+**Async closures inline en `fitz build`** — el caveat de Async-cl
+(la mini-tanda anterior) está cerrado: `async fn(...)` como
+expresión ahora compila a binario nativo. El codegen emite
+`move |args| -> Pin<Box<dyn Future<Output=T> + Send>> { Box::pin(
+async move { ... }) }`. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
+```fitz
+async fn run() -> Int {
+    let f = async fn(n: Int) -> Int {
+        sleep(1).await
+        return n * 2
+    }
+    return f(21).await
+}
+print(run().await)                               // 42
+```
+
+**HTTP — Status codes específicos por kind de `Err`** — cuando un
+handler retorna `Result<T, ApiErr>` y la `ApiErr` es un `type` con
+field `status: Int`, el runtime HTTP usa ese status code en lugar
+del 500 histórico. El body de la response es la Instance
+serializada íntegra (no envuelta en `{"error": ...}`):
+
+```fitz
+type ApiErr {
+    status: Int = 500
+    message: Str = ""
+}
+
+@get("/users/{id}")
+fn get_user(id: Int) -> Result<Str, ApiErr> {
+    if (id == 0) { return Err(ApiErr { status: 404, message: "no encontrado" }) }
+    if (id < 0)  { return Err(ApiErr { status: 400, message: "id inválido" }) }
+    return Ok("Ada")
+}
+```
+
+Sin field `status` o con status fuera de rango (100..1000), fallback
+al 500 histórico con `{"error": <inner>}`.
+
+**HTTP — CORS request-aware con echo del Origin sin filtro** — el
+config `allow_origin: "echo"` (Str literal especial) hace echo del
+Origin recibido sin filtro (acepta cualquier Origin). Útil para dev
+local donde no se conoce la lista de frontends a priori. Si la
+request no manda Origin, NO se emite el header (paralelo a `Set`
+sin match).
+
+```fitz
+@middleware(cors({"allow_origin": "echo"}))
+@get("/api")
+fn h() -> Str => "ok"
+```
+
+Ver [examples/guide/13r-mb6-y-async-build.fitz](../examples/guide/13r-mb6-y-async-build.fitz)
+para el ejemplo completo de Mb6 + async closures (validado bit-a-bit
+`fitz run` ↔ `fitz build`).
 
 ### Lo que todavía no anda
 

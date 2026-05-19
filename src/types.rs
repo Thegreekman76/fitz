@@ -2698,6 +2698,38 @@ fn infer_list_method(
             }
             Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
         }
+        // Mini-tanda Mb6 — `scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
+        // Fold con outputs intermedios. Mismo shape que reduce salvo
+        // que retorna una List<Acc> con cada estado del acc.
+        "scan" => {
+            if !check_method_arity(ctx, "scan", args_ty, 2, span) {
+                return Type::List(Box::new(Type::Any));
+            }
+            let acc_ty = args_ty[0].clone();
+            check_binary_callback(
+                ctx,
+                &args_ty[1],
+                &acc_ty,
+                t,
+                "scan",
+                Some(&acc_ty),
+                span,
+            );
+            Type::List(Box::new(acc_ty))
+        }
+        // Mini-tanda Mb6 — `windows(n) -> List<List<T>>`. Cada ventana
+        // es una List<T> con `n` elementos consecutivos.
+        "windows" => {
+            if check_method_arity(ctx, "windows", args_ty, 1, span)
+                && !is_compatible(&args_ty[0], &Type::Int)
+            {
+                ctx.error_at(span, format!(
+                    "`.windows()` espera `Int`, recibió `{}`",
+                    args_ty[0].display(ctx.types),
+                ));
+            }
+            Type::List(Box::new(Type::List(Box::new(t.clone()))))
+        }
         // S.3 (mini-tanda S) — `sort`/`reverse` mutan in-place y
         // devuelven `Null`. `contains(v)` devuelve `Bool`. El
         // chequeo de "tipo comparable" para sort se hace en runtime
@@ -2911,6 +2943,49 @@ fn infer_map_method(
         "invert" => {
             check_method_arity(ctx, "invert", args_ty, 0, span);
             Type::Map(Box::new(v.clone()), Box::new(k.clone()))
+        }
+        // Mini-tanda Mb6 — `merge_with(other, fn(V, V) -> V) -> Map<K, V>`.
+        // Generaliza merge: el callback decide qué value queda cuando
+        // hay conflict.
+        "merge_with" => {
+            if !check_method_arity(ctx, "merge_with", args_ty, 2, span) {
+                return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
+            }
+            match args_ty[0].base() {
+                Type::Map(k2, v2) => {
+                    if !is_compatible(k2, k) {
+                        ctx.error_at(span, format!(
+                            "`.merge_with()`: keys deben coincidir, recibió `Map<{}, _>` vs `Map<{}, _>`",
+                            k2.display(ctx.types),
+                            k.display(ctx.types),
+                        ));
+                    }
+                    if !is_compatible(v2, v) {
+                        ctx.error_at(span, format!(
+                            "`.merge_with()`: values deben coincidir, recibió `Map<_, {}>` vs `Map<_, {}>`",
+                            v2.display(ctx.types),
+                            v.display(ctx.types),
+                        ));
+                    }
+                }
+                Type::Any => {}
+                other => {
+                    ctx.error_at(span, format!(
+                        "`.merge_with()` espera otro `Map`, recibió `{}`",
+                        other.display(ctx.types),
+                    ));
+                }
+            }
+            check_binary_callback(
+                ctx,
+                &args_ty[1],
+                v,
+                v,
+                "merge_with",
+                Some(v),
+                span,
+            );
+            Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
         "values" => {
             check_method_arity(ctx, "values", args_ty, 0, span);
@@ -6921,6 +6996,60 @@ mod tests {
                  let f = async fn(n: Int) -> Int { return n * 2 }\n\
                  return f(21).await\n\
              }",
+        );
+    }
+
+    // ---- Mini-tanda Mb6 ----
+
+    #[test]
+    fn mb6_list_scan_devuelve_list_acc() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
+        );
+    }
+
+    #[test]
+    fn mb6_list_scan_callback_ret_distinto_de_acc_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2]\n\
+             let r = xs.scan(0, fn(acc: Int, x: Int) => \"oops\")",
+            &["scan", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb6_list_windows_devuelve_list_list_t() {
+        assert_ok(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<List<Int>> = xs.windows(2)",
+        );
+    }
+
+    #[test]
+    fn mb6_list_windows_arg_no_int_es_error() {
+        assert_error_with(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r = xs.windows(\"oops\")",
+            &["windows", "Int"],
+        );
+    }
+
+    #[test]
+    fn mb6_map_merge_with_devuelve_map_k_v() {
+        assert_ok(
+            "let a: Map<Str, Int> = {\"x\": 1}\n\
+             let b: Map<Str, Int> = {\"x\": 2}\n\
+             let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)",
+        );
+    }
+
+    #[test]
+    fn mb6_map_merge_with_arg_no_map_es_error() {
+        assert_error_with(
+            "let a: Map<Str, Int> = {\"x\": 1}\n\
+             let r = a.merge_with(42, fn(va: Int, vb: Int) => va)",
+            &["merge_with", "Map"],
         );
     }
 

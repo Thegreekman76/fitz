@@ -1,0 +1,78 @@
+// Mini-tanda Mb6 + Async-cl build — métodos chicos + async closures
+// inline ahora también en `fitz build`.
+//
+//   - Mb6 (3 métodos sobre colecciones):
+//     * `List.scan(init, fn(acc, x) -> Acc) -> List<Acc>` fold con
+//       outputs intermedios (sumas parciales, máximos acumulados, etc.)
+//     * `List.windows(n) -> List<List<T>>` sliding windows.
+//     * `Map.merge_with(other, fn(V, V) -> V) -> Map<K, V>` merge con
+//       resolución de conflictos via callback.
+//
+//   - Async-cl build: las async closures inline ahora compilan a binario
+//     nativo (`Pin<Box<dyn Future<Output=T> + Send>>` con `Box::pin(async
+//     move { ... })`). Cierra el caveat de Async-cl.
+
+// --- List.scan: fold con outputs intermedios -------------------
+
+// Sumas parciales (prefix sums).
+let xs: List<Int> = [1, 2, 3, 4, 5]
+let acumulado: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)
+print(acumulado)                                 // [1, 3, 6, 10, 15]
+
+// Máximos acumulados.
+let alturas: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]
+let max_running: List<Int> = alturas.scan(0,
+    fn(acc: Int, x: Int) => if (x > acc) { x } else { acc })
+print(max_running)                               // [3, 3, 4, 4, 5, 9, 9, 9]
+
+// --- List.windows: sliding windows -----------------------------
+
+let serie: List<Int> = [10, 20, 30, 40, 50]
+let triplas: List<List<Int>> = serie.windows(3)
+print(triplas)                                   // [[10, 20, 30], [20, 30, 40], [30, 40, 50]]
+print(triplas.len())                             // 3
+
+// Combinar con scan + map para detectar tendencias:
+let diffs: List<List<Int>> = serie.windows(2)
+print(diffs.len())                               // 4 — pares consecutivos
+
+// Si len(xs) < n, devuelve lista vacía.
+let chico: List<Int> = [1, 2]
+print(chico.windows(5))                          // []
+
+// --- Map.merge_with: resolución de conflicts -------------------
+
+// Caso típico: combinar contadores. Llaves duplicadas se suman.
+let counts_uno: Map<Str, Int> = {"alpha": 5, "beta": 3}
+let counts_dos: Map<Str, Int> = {"beta": 7, "gamma": 2}
+let total: Map<Str, Int> = counts_uno.merge_with(counts_dos,
+    fn(a: Int, b: Int) => a + b)
+print(total["alpha"])                            // 5
+print(total["beta"])                             // 10 — sumados
+print(total["gamma"])                            // 2
+
+// Otro patrón: tomar el máximo de las dos copias.
+let m1: Map<Str, Int> = {"score": 80}
+let m2: Map<Str, Int> = {"score": 95}
+let max_score: Map<Str, Int> = m1.merge_with(m2,
+    fn(a: Int, b: Int) => if (a > b) { a } else { b })
+print(max_score["score"])                        // 95
+
+// --- Async closures inline ahora también en fitz build ---------
+//
+// Caveat de Async-cl cerrado: las async closures inline emiten
+// como `Pin<Box<dyn Future<Output=T> + Send>>` con `Box::pin(async
+// move { ... })` en `fitz build` (paridad bit-a-bit con `fitz run`).
+
+async fn run_async_demo() -> Int {
+    // Async closure inline asignado a var.
+    let doubled = async fn(n: Int) -> Int {
+        sleep(1).await
+        return n * 2
+    }
+    let r = doubled(21).await
+    return r
+}
+
+let demo: Int = run_async_demo().await
+print(demo)                                      // 42

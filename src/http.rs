@@ -158,9 +158,10 @@ pub struct MiddlewareSpec {
     pub handler: Value,
 }
 
-/// Mini-fase Q.3: la política de `Access-Control-Allow-Origin` admite
-/// dos modos: literal (valor fijo, como hasta MW.2) o set de orígenes
-/// permitidos (echo del `Origin` del request si pertenece al set).
+/// Mini-fase Q.3 + mini-tanda HTTP-Cors: la política de
+/// `Access-Control-Allow-Origin` admite tres modos: literal (valor
+/// fijo, como hasta MW.2), set de orígenes permitidos (echo si está
+/// en la lista), y echo sin filtro (acepta cualquier Origin recibido).
 ///
 ///       - `Literal("*")` o `Literal("https://x.com")` → emite el valor
 ///         tal cual (modo previo).
@@ -171,6 +172,11 @@ pub struct MiddlewareSpec {
 ///         CORS estricto). Útil cuando se necesitan credenciales (cookies/
 ///         Authorization) sobre múltiples frontends: `Allow-Origin: *`
 ///         incompatible con credentials, echo del Origin específico sí.
+///       - `Echo` → eco del Origin recibido sin filtro. Equivalente a
+///         escribir `Set(...)` con todos los frontends posibles. Útil
+///         para dev local donde no se conoce la lista a priori. Si la
+///         request NO tiene header `Origin`, NO emite el header
+///         (mismo comportamiento que Set sin match).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AllowOrigin {
     /// Valor literal, emitido idéntico en cada response.
@@ -178,6 +184,9 @@ pub enum AllowOrigin {
     /// Set de orígenes permitidos. El runtime echo si el `Origin` del
     /// request está en la lista.
     Set(Vec<String>),
+    /// Mini-tanda HTTP-Cors — echo del Origin recibido sin filtro.
+    /// Construido vía `allow_origin: "echo"` en el config Map.
+    Echo,
 }
 
 impl AllowOrigin {
@@ -186,6 +195,8 @@ impl AllowOrigin {
     ///       - Literal → siempre el valor, sin importar el request.
     ///       - Set → el valor del request si está en la lista; `None`
     ///         si no.
+    ///       - Echo → el valor del request tal cual (sin filtro);
+    ///         `None` si no llega Origin header.
     pub fn resolve(&self, request_origin: Option<&str>) -> Option<String> {
         match self {
             AllowOrigin::Literal(s) => Some(s.clone()),
@@ -197,6 +208,7 @@ impl AllowOrigin {
                     None
                 }
             }
+            AllowOrigin::Echo => request_origin.map(|s| s.to_string()),
         }
     }
 }
@@ -760,7 +772,11 @@ impl HandlerOutcome {
 ///
 /// Reglas:
 ///   - `Value::Result(Ok(v))`  → status 200, body = `v` serializado.
-///   - `Value::Result(Err(e))` → status 500, body = `{"error": e}`.
+///   - `Value::Result(Err(e))` → mini-tanda HTTP-Err: si `e` es
+///     `Value::Instance` con field `status: Int`, usa ese status code
+///     y el body es la Instance serializada (intacta — el usuario
+///     decide el shape). Si no tiene `status`, fallback a 500 con
+///     `{"error": e}` (comportamiento histórico).
 ///   - Cualquier otro `Value`  → status 200, body = ese valor
 ///     serializado directo (sin envolver). Esto permite handlers que
 ///     no usan `Result` y devuelven `Str`, `Int`, `Instance`, etc.
@@ -789,9 +805,32 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
     let (status, payload) = match value {
         Value::Result(ResultVariant::Ok(inner)) => (200, inner.as_ref()),
         Value::Result(ResultVariant::Err(inner)) => {
-            // Mismo formato que `internal_error` pero usando el inner
-            // del Err como mensaje (idealmente Str, pero serializamos
-            // lo que venga).
+            // Mini-tanda HTTP-Err — convención: si el Err lleva una
+            // `Instance` con field `status: Int`, usar ese status
+            // (e.g. `Err(ApiErr { status: 404, message: "..." })`).
+            // El body se serializa íntegro — el usuario decide el
+            // shape final. Sin field `status`, fallback al 500 con
+            // `{"error": e}` (comportamiento histórico).
+            if let Value::Instance { fields, .. } = inner.as_ref() {
+                let status_opt = {
+                    let g = fields.lock();
+                    g.iter()
+                        .find(|(k, _)| k == "status")
+                        .and_then(|(_, v)| if let Value::Int(n) = v {
+                            Some(*n)
+                        } else {
+                            None
+                        })
+                };
+                if let Some(s) = status_opt {
+                    if (100..1000).contains(&s) {
+                        return match value_to_json(inner) {
+                            Ok(j) => HandlerOutcome::json(s as u16, j),
+                            Err(msg) => HandlerOutcome::internal_error(msg),
+                        };
+                    }
+                }
+            }
             return match value_to_json(inner) {
                 Ok(j) => HandlerOutcome::json(500, serde_json::json!({ "error": j })),
                 Err(msg) => HandlerOutcome::internal_error(msg),

@@ -606,6 +606,15 @@ fn after_dot_completions(
                     t.display(type_env),
                     t.display(type_env),
                 )),
+                // Mini-tanda Mb6 — scan + windows.
+                ("scan", format!(
+                    "fn(init: Acc, fn(Acc, {}) -> Acc) -> List<Acc>",
+                    t.display(type_env),
+                )),
+                ("windows", format!(
+                    "fn(n: Int) -> List<List<{}>>",
+                    t.display(type_env),
+                )),
             ],
         ),
         Type::Map(k, v) => method_items(
@@ -666,6 +675,17 @@ fn after_dot_completions(
                     "fn() -> Map<{}, {}>",
                     v.display(type_env),
                     k.display(type_env),
+                )),
+                // Mini-tanda Mb6 — merge_with: merge con callback.
+                ("merge_with", format!(
+                    "fn(Map<{}, {}>, fn({}, {}) -> {}) -> Map<{}, {}>",
+                    k.display(type_env),
+                    v.display(type_env),
+                    v.display(type_env),
+                    v.display(type_env),
+                    v.display(type_env),
+                    k.display(type_env),
+                    v.display(type_env),
                 )),
             ],
         ),
@@ -1753,6 +1773,32 @@ mod tests {
                 "falta método `{expected}` (mini-tanda Mb5) en List: {labels:?}"
             );
         }
+    }
+
+    #[test]
+    fn mb6_after_dot_sobre_list_incluye_scan_y_windows() {
+        let src = "let xs: List<Int> = [1, 2, 3]\nxs.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["scan", "windows"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` (mini-tanda Mb6) en List: {labels:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn mb6_after_dot_sobre_map_incluye_merge_with() {
+        let src = "let m: Map<Str, Int> = {\"a\": 1}\nm.\n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(
+            labels.contains(&"merge_with"),
+            "falta `merge_with` (mini-tanda Mb6) en Map: {labels:?}",
+        );
     }
 
     #[test]

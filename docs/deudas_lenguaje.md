@@ -1131,6 +1131,109 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Métodos analíticos extra + async closures en build + HTTP refinements~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb6 + Async-cl build + HTTP refinements)
+
+Bundle combinado de polish: 3 métodos analíticos (Mb6) + cierre del
+caveat de Async-cl build (async closures inline en `fitz build`) + 2
+refinamientos del stack HTTP. Cierra el plan original de "HTTP
+refinements + async closures + más métodos" en una sola mini-tanda.
+
+**Parte 1 — Mb6 (3 métodos chicos)**:
+
+- ~~**`List.scan(init, fn(acc, x) -> Acc) -> List<Acc>`**~~ ✓ Fold
+  con outputs intermedios. Devuelve una lista con cada estado del
+  acumulador. Paralelo a `Iterator::scan` Rust (sin Option). Casos
+  canónicos: sumas parciales, máximos acumulados, running averages.
+- ~~**`List.windows(n) -> List<List<T>>`**~~ ✓ Sliding windows.
+  Paralelo a `slice::windows` Rust. `len < n` → lista vacía;
+  `n <= 0` → error claro de runtime.
+- ~~**`Map.merge_with(other, fn(V, V) -> V) -> Map<K, V>`**~~ ✓
+  Generaliza `merge`. El callback decide qué value queda en
+  conflicts (caso típico: `(a, b) => a + b` para sumar valores).
+
+**Parte 2 — Async-cl build (cierra caveat de Async-cl)**:
+
+- ~~**Async closures inline en `fitz build`**~~ ✓ El codegen ahora
+  emite `move |args| -> Pin<Box<dyn Future<Output=T> + Send>> {
+  Box::pin(async move { ... }) }`. Paridad bit-a-bit `fitz run` ↔
+  `fitz build`. Refactor menor: `gen_fn_expr_as_value` toma un
+  parámetro `is_async`; cuando es true, envuelve el body en
+  `Box::pin(async move { ... })` y ajusta el return type al `Pin<...>`
+  boxed. `Type::Future` se cambió a emitir con `+ Send` siempre
+  (multi-threaded safe, paralelo al post-F17 modelo).
+
+**Parte 3 — HTTP refinements**:
+
+- ~~**Status codes específicos por kind de `Err`**~~ ✓ Convención:
+  si el `Err` lleva una `Instance` con field `status: Int`, el
+  runtime HTTP usa ese status code (clamp a `100..1000`, fuera de
+  rango fallback a 500). El body es la Instance serializada
+  íntegra (no envuelta en `{"error": ...}`). Sin field `status`,
+  fallback al 500 histórico con `{"error": e}`.
+  
+  Implementación: `HandlerSig` suma `err_has_status_field: bool`
+  detectado estáticamente vía nuevo helper `err_type_has_status_field`
+  (busca `Nominal` con field `status: Int`); el wrapper emite
+  código que lee `__e.lock().unwrap().status` y arma la response.
+  Runtime análogo en `value_to_outcome` para el path `fitz run`.
+
+- ~~**CORS request-aware con echo del Origin sin filtro**~~ ✓
+  Nuevo variant `AllowOrigin::Echo` (paralelo a `Literal` y `Set`
+  pre-existentes). Construido cuando el config Map tiene
+  `allow_origin: "echo"` (Str literal especial). Hace echo del
+  Origin recibido sin filtro (acepta cualquier Origin). Útil para
+  dev local. Si la request NO manda Origin, NO se emite el header
+  (paralelo a `Set` sin match — CORS estricto).
+
+**Refactor incidental**:
+- `Type::Future` → `Pin<Box<dyn Future<Output=T> + Send>>` (con
+  `+ Send`). Antes no llevaba `+ Send`; ahora sí, requerido por
+  el bound `+ Send + Sync` del `Arc<dyn Fn>` que envuelve async
+  closures. Los `async move` Rust producen futures Send siempre
+  que las capturas sean Send (que post-F17 todas lo son).
+- `BuildAllowOrigin` (codegen) suma variant `Echo` paralelo a
+  `AllowOrigin::Echo` del runtime.
+
+Implementación: ~450 LoC entre evaluator (3 fns Mb6 + helper +
+match arm `AllowOrigin::Echo` + parsing del Str "echo" del config
+CORS), types (3 ramas Mb6 + ya estaban los tipos para Async-cl),
+codegen (3 ramas Mb6 + refactor de `gen_fn_expr_as_value` para
+async + lookup del field `status` en err handler + parsing "echo"
++ emit del Echo case en `__cors_resolve_*`), http.rs (variant
+`Echo` + resolve + status code lookup en `value_to_outcome`).
+
+**26 unit tests** (10 evaluator + 9 checker + 7 nuevos para HTTP
+[3 status + 2 cors echo + 2 LSP Mb6]) + **8 compile_e2e** bit-a-bit:
+3 Mb6 (scan + windows + merge_with) + 1 async closure inline en
+build + 2 HTTP-Err (404 con body Instance, OK path) + 2 HTTP-Cors
+echo (con/sin Origin). Ejemplo runnable
+`examples/guide/13r-mb6-y-async-build.fitz` sumado al smoke
+`GUIDE_EXAMPLES_COMPILE` con casos típicos.
+
+Cap 13 de la guía: 2 filas nuevas en tabla `List<T>` (scan,
+windows), 1 en tabla `Map<K, V>` (merge_with). Sub-sección
+dedicada "scan + windows + merge_with + async closures en build
++ HTTP refinements" con ejemplos inline para Mb6, async closures,
+HTTP-Err y CORS echo. VSCode extension: grammar TextMate sin
+cambios (los métodos son identifiers genéricos; `async` ya es
+keyword); LSP autocomplete refleja todo via rebuild del `fitz-lsp`.
+
+**Deuda residual menor** (NO bloquea):
+- **Middleware con `next` callable (post-process)**: hoy los
+  middlewares son gate-only (return null → continúa, return status
+  → short-circuit). El modelo wrap-style donde el middleware
+  recibe `next` y puede hacer post-process es invasivo (cambia el
+  shape de la cadena de middlewares + sintaxis nueva del callback
+  binario). Sub-paso futuro dedicado — alcance ~4-6h aparte.
+- **`Err` con status fuera de 100..1000**: hoy fallback a 500. Si
+  aparece presión real (e.g. status codes custom 600+ para apps
+  internas), refinable.
+- **Status codes en el OpenAPI schema**: el schema OpenAPI no
+  refleja los status codes específicos por Err type. Para SDK
+  generators que infieren la respuesta de error, requiere
+  documentar el shape del Err en el `responses` del operation.
+  Deuda menor.
+
 ### ~~Métodos analíticos + async closures inline~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb5 + Async-cl)
 
 Bundle combinado siguiente a Mb4 + Cmp+: cuatro métodos analíticos

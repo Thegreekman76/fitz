@@ -1781,6 +1781,24 @@ fn infer_literal_type(e: &Expr) -> Option<Type> {
 /// `&str` literal sí lo es pero hace falta type diferente), calls
 /// a fns, StringInterp, StructLit, List/Map literals (necesitan
 /// `Arc::new`), Idents (sin resolución estática).
+/// Mini-tanda HTTP-Err — detecta si un type es `Nominal` con un field
+/// `status: Int`. Lo usa el codegen del handler wrapper para decidir
+/// si emitir lookup dinámico del status code del Err o caer al 500
+/// histórico. El field debe llamarse exactamente `status` y tener
+/// tipo `Int` (no Nullable<Int>).
+fn err_type_has_status_field(ty: &Type, env: &TypeEnv) -> bool {
+    let Type::Nominal(id) = ty.base() else {
+        return false;
+    };
+    let info = env.info(*id);
+    let Some(fields) = info.fields.as_ref() else {
+        return false;
+    };
+    fields
+        .iter()
+        .any(|f| f.name == "status" && matches!(f.type_, Type::Int))
+}
+
 fn is_const_eval_expr(e: &Expr) -> bool {
     match e {
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Bool(_, _) | Expr::Null(_) => true,
@@ -2526,6 +2544,12 @@ struct HandlerSig {
     /// `true` si el return type del handler es `Result<T>` — afecta el
     /// dispatch en `emit_handler_dispatch_and_response`.
     returns_result: bool,
+    /// Mini-tanda HTTP-Err — `true` si el `E` del `Result<T, E>` es un
+    /// Nominal con field `status: Int`. Cuando es así, el wrapper emite
+    /// código que lee `.status` del Instance Err y lo usa como HTTP
+    /// status code (con fallback a 500 si está fuera de 100..1000).
+    /// Sin status field → 500 histórico.
+    err_has_status_field: bool,
     /// MW.3: nombres de las fns user-middleware encadenadas en orden de
     /// declaración. Vacío si no hay `@middleware(fn)`.
     mw_user_fns: Vec<String>,
@@ -5303,12 +5327,11 @@ impl<'a> CodegenCtx<'a> {
             // valor: `let f = fn(n) => ...`, `apply(fn(n) => ..., 7)`,
             // `return fn(y) => x + y`.
             Expr::FnExpr { params, body, is_async, span } => {
-                if *is_async {
-                    return Err(self.err_at(*span,
-                        "async closure inline (`async fn(...) => ...`) como valor: no soportado en codegen todavía. Por ahora, declará la fn async como top-level: `async fn nombre(...) -> T { ... }` y referenciála por nombre.".to_string(),
-                    ));
-                }
-                self.gen_fn_expr_as_value(params, body, *span)
+                // Mini-tanda Async-cl build — async closures inline
+                // ahora compilan. El closure se emite como
+                // `move |...| -> Pin<Box<dyn Future<Output=R> + Send>>
+                // { Box::pin(async move { ... }) }`.
+                self.gen_fn_expr_as_value(params, body, *is_async, *span)
             }
             // Fase 9.0.1 (F15): defensa — `fitz build` no debería ver
             // `Expr::Error` (strict parser nunca lo produce).
@@ -6634,8 +6657,60 @@ impl<'a> CodegenCtx<'a> {
                     },
                 ))
             }
+            // Mini-tanda Mb6 — scan(init, fn(acc, x) -> Acc) -> List<Acc>.
+            // Loop manual con snapshot que va acumulando outputs
+            // intermedios. Reusa `gen_binary_callback_inline_with_ret`.
+            (Type::List(t), "scan") => {
+                check_method_arity(method, args, 2)?;
+                let (init_code, init_ty) = self.gen_expr(&args[0])?;
+                let acc_ty = init_ty.clone();
+                let cb_code = self.gen_binary_callback_inline_with_ret(
+                    &args[1], &acc_ty, t, &acc_ty, "scan",
+                )?;
+                let acc_rs = rust_type_for(&acc_ty, self.env)?;
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       let mut __acc: {acc_rs} = {init_code}; \
+                       let mut __out: Vec<{acc_rs}> = Vec::with_capacity(__items.len()); \
+                       for __it in __items.into_iter() {{ \
+                           __acc = __cb(__acc, __it); \
+                           __out.push(__acc.clone()); \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::List(Box::new(acc_ty))))
+            }
+            // Mini-tanda Mb6 — windows(n) -> List<List<T>>. Sliding
+            // windows de tamaño n. Si len < n, lista vacía. n <= 0 →
+            // panic.
+            (Type::List(t), "windows") => {
+                check_method_arity(method, args, 1)?;
+                let (n_code, n_ty) = self.gen_expr(&args[0])?;
+                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let t_rs = rust_type_for(t, self.env)?;
+                let code = format!(
+                    "{{ let __n: i64 = {n_c}; \
+                       if __n <= 0 {{ panic!(\"`.windows()` requiere n > 0, recibió {{}}\", __n); }} \
+                       let __items: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
+                       let __w = __n as usize; \
+                       let mut __out: Vec<Arc<Mutex<Vec<{t_rs}>>>> = Vec::new(); \
+                       if __items.len() >= __w {{ \
+                           for __i in 0..=(__items.len() - __w) {{ \
+                               let __win: Vec<{t_rs}> = __items[__i..__i + __w].to_vec(); \
+                               __out.push(Arc::new(Mutex::new(__win))); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((
+                    code,
+                    Type::List(Box::new(Type::List(Box::new((**t).clone())))),
+                ))
+            }
             (Type::List(_), other) => Err(self.err_at(call_span, format!(
-                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by)",
+                "List no tiene el método `{}` en el subset compilado (hoy: push/pop/len/map/filter/find/sort/sort_by/reverse/contains/enumerate/zip/chain/flatten/any/all/count/find_index/flat_map/first/last/min/max/sum/product/reduce/to_map/unique/partition/group_by/zip_with/max_by/min_by/scan/windows)",
                 other
             ))),
 
@@ -6748,6 +6823,39 @@ impl<'a> CodegenCtx<'a> {
                 );
                 Ok((code, Type::List(Box::new((**k).clone()))))
             }
+            // Mini-tanda Mb6 — merge_with(other, fn(V, V) -> V) -> Map<K, V>.
+            // Generaliza merge: callback decide qué value queda cuando
+            // hay conflict. Útil para "sumar values" en duplicados.
+            (Type::Map(k, v), "merge_with") => {
+                check_method_arity(method, args, 2)?;
+                let (other_code, other_ty) = self.gen_expr(&args[0])?;
+                if !matches!(&other_ty, Type::Map(_, _) | Type::Any) {
+                    return Err(self.err_at(call_span, format!(
+                        "`.merge_with()` espera otro `Map`, recibió `{}`",
+                        display_type(&other_ty, self.env)
+                    )));
+                }
+                let cb_code = self.gen_binary_callback_inline_with_ret(
+                    &args[1], v, v, v, "merge_with",
+                )?;
+                let k_rs = rust_type_for(k, self.env)?;
+                let v_rs = rust_type_for(v, self.env)?;
+                let code = format!(
+                    "{{ let mut __out: Vec<({k_rs}, {v_rs})> = ({obj_code}).lock().unwrap().clone(); \
+                       let __other = ({other_code}).lock().unwrap().clone(); \
+                       let __cb = {cb_code}; \
+                       for (__k, __v_other) in __other.into_iter() {{ \
+                           if let Some(__idx) = __out.iter().position(|__p| __p.0 == __k) {{ \
+                               let __v_self = __out[__idx].1.clone(); \
+                               __out[__idx].1 = __cb(__v_self, __v_other); \
+                           }} else {{ \
+                               __out.push((__k, __v_other)); \
+                           }} \
+                       }} \
+                       Arc::new(Mutex::new(__out)) }}"
+                );
+                Ok((code, Type::Map(k.clone(), v.clone())))
+            }
             // Mini-tanda Ex2 — merge: combina dos Maps last-write-wins.
             // Iteramos los pares de `other` y actualizamos/insertamos en
             // un clone del `obj`. Devuelve Map nuevo.
@@ -6809,7 +6917,7 @@ impl<'a> CodegenCtx<'a> {
                 Ok((code, Type::List(Box::new(Type::Tuple(vec![(**k).clone(), (**v).clone()])))))
             }
             (Type::Map(_, _), other) => Err(self.err_at(call_span, format!(
-                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert)",
+                "Map no tiene el método `{}` en el subset compilado (hoy: has/keys/values/len/get/filter/map_values/merge/update/keys_sorted/entries/invert/merge_with)",
                 other
             ))),
 
@@ -7632,10 +7740,17 @@ impl<'a> CodegenCtx<'a> {
     /// referenciadas en el body (y no shadowed por param/local), el
     /// helper detecta capturas, las clona afuera y deja que la
     /// closure capture la copia.
+    /// Mini-tanda Async-cl build — emite un FnExpr como valor.
+    /// Cuando `is_async = true`, el closure devuelve un `Pin<Box<dyn
+    /// Future<Output=T> + Send>>` (boxing requerido porque `async move`
+    /// produce un opaque type que no se puede nombrar). El body se
+    /// envuelve en `Box::pin(async move { ... })`. Para el caso sync
+    /// (`is_async = false`), comportamiento idéntico al de pre-Async-cl.
     fn gen_fn_expr_as_value(
         &mut self,
         params: &[crate::ast::Param],
         body: &[Stmt],
+        is_async: bool,
         fn_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         // Cada param exige anotación de tipo — sin contexto bidireccional
@@ -7717,12 +7832,35 @@ impl<'a> CodegenCtx<'a> {
             .map(|(p, t)| Ok(format!("{}: {}", p.name, rust_type_for(t, self.env)?)))
             .collect::<Result<Vec<_>, FitzError>>()?
             .join(", ");
+        // Mini-tanda Async-cl build: para async closures, el closure
+        // devuelve `Pin<Box<dyn Future<Output=R> + Send>>` (boxing
+        // requerido porque `async move` produce un opaque type sin
+        // nombre). El body se envuelve en `Box::pin(async move { ... })`.
+        // El Type Fitz también se envuelve: `Function { ret: Future<R> }`.
+        let (closure_ret_ty_rs, closure_body, fitz_ret_ty) = if is_async {
+            let pinned = format!(
+                "std::pin::Pin<Box<dyn std::future::Future<Output = {ret_ty_rs}> + Send>>",
+            );
+            // Rust requiere que el body del closure esté entre `{}`
+            // cuando hay return type explícito. Por eso envolvemos:
+            // `|...| -> Pin<...> { Box::pin(async move { ... }) }`.
+            let body_wrapped = format!(
+                "{{ Box::pin(async move {{ {body_str} }}) }}"
+            );
+            (pinned, body_wrapped, Type::Future(Box::new(ret_ty.clone())))
+        } else {
+            (
+                ret_ty_rs.clone(),
+                format!("{{ {body_str} }}"),
+                ret_ty.clone(),
+            )
+        };
         let cast_target = {
             let ps: Vec<String> = param_types
                 .iter()
                 .map(|p| rust_type_for(p, self.env))
                 .collect::<Result<_, _>>()?;
-            format!("Arc<dyn Fn({}) -> {} + Send + Sync>", ps.join(", "), ret_ty_rs)
+            format!("Arc<dyn Fn({}) -> {} + Send + Sync>", ps.join(", "), closure_ret_ty_rs)
         };
 
         // Si hay capturas no-Copy, emitimos un bloque que cline las
@@ -7738,10 +7876,7 @@ impl<'a> CodegenCtx<'a> {
         }
 
         let closure = format!(
-            "|{params_sig}| -> {ret_ty_rs} {{ {body_str} }}",
-            params_sig = params_sig,
-            ret_ty_rs = ret_ty_rs,
-            body_str = body_str
+            "|{params_sig}| -> {closure_ret_ty_rs} {closure_body}",
         );
         let code = if clones.is_empty() {
             format!("(Arc::new(move {closure}) as {cast_target})", closure = closure, cast_target = cast_target)
@@ -7758,7 +7893,7 @@ impl<'a> CodegenCtx<'a> {
             code,
             Type::Function {
                 params: param_types,
-                ret: Box::new(ret_ty),
+                ret: Box::new(fitz_ret_ty),
             },
         ))
     }
@@ -9461,6 +9596,13 @@ impl<'a> CodegenCtx<'a> {
             None => Type::Null,
         };
         let returns_result = matches!(resolved_ret, Type::Result { .. });
+        // Mini-tanda HTTP-Err — detectar si el E del Result<T, E> es
+        // Nominal con field `status: Int`. Habilita la convención de
+        // status codes específicos por kind de Err.
+        let err_has_status_field = match &resolved_ret {
+            Type::Result { err, .. } => err_type_has_status_field(err, self.env),
+            _ => false,
+        };
 
         Ok(HandlerSig {
             name: name.clone(),
@@ -9473,6 +9615,7 @@ impl<'a> CodegenCtx<'a> {
             body_param,
             resolved_params,
             returns_result,
+            err_has_status_field,
             mw_user_fns,
             mw_cors,
             has_middleware,
@@ -9758,10 +9901,28 @@ impl<'a> CodegenCtx<'a> {
             self.emit("            axum::http::StatusCode::OK,\n");
             self.emit("            axum::Json(__v.__to_fitz_json()),\n");
             self.emit("        ).into_response(),\n");
-            self.emit("        Err(__e) => (\n");
-            self.emit("            axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
-            self.emit("            axum::Json(serde_json::json!({\"error\": __e})),\n");
-            self.emit("        ).into_response(),\n");
+            // Mini-tanda HTTP-Err — convención: si el E del Result es
+            // un Nominal con field `status: Int`, leemos ese field y
+            // usamos su valor como HTTP status code (clamped a 100..1000).
+            // El body es el Instance serializado (sin envolver en
+            // `{"error": ...}`). Sin status field → 500 histórico.
+            if sig.err_has_status_field {
+                self.emit("        Err(__e) => {\n");
+                self.emit("            let __raw_status = __e.lock().unwrap().status;\n");
+                self.emit("            let __status_code = if (100i64..1000i64).contains(&__raw_status) {\n");
+                self.emit("                axum::http::StatusCode::from_u16(__raw_status as u16)\n");
+                self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)\n");
+                self.emit("            } else {\n");
+                self.emit("                axum::http::StatusCode::INTERNAL_SERVER_ERROR\n");
+                self.emit("            };\n");
+                self.emit("            (__status_code, axum::Json(__e.__to_fitz_json())).into_response()\n");
+                self.emit("        },\n");
+            } else {
+                self.emit("        Err(__e) => (\n");
+                self.emit("            axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
+                self.emit("            axum::Json(serde_json::json!({\"error\": __e})),\n");
+                self.emit("        ).into_response(),\n");
+            }
             self.emit("    };\n");
             writeln!(
                 &mut self.output,
@@ -9832,6 +9993,14 @@ impl<'a> CodegenCtx<'a> {
                 self.emit("        if __set.iter().any(|s| *s == __req) {\n");
                 self.emit("            __out.push((\"access-control-allow-origin\", __req.to_string()));\n");
                 self.emit("        }\n");
+                self.emit("    }\n");
+            }
+            // Mini-tanda HTTP-Cors — echo del Origin sin filtro.
+            // Si la request no manda Origin, no emitimos el header
+            // (mismo comportamiento que Set sin match).
+            BuildAllowOrigin::Echo => {
+                self.emit("    if let Some(__req) = origin {\n");
+                self.emit("        __out.push((\"access-control-allow-origin\", __req.to_string()));\n");
                 self.emit("    }\n");
             }
         }
@@ -10292,6 +10461,8 @@ fn extract_path_template_names(template: &str) -> Vec<String> {
 enum BuildAllowOrigin {
     Literal(String),
     Set(Vec<String>),
+    /// Mini-tanda HTTP-Cors — echo del Origin recibido sin filtro.
+    Echo,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -10372,8 +10543,15 @@ fn parse_build_cors_args(args: &[Expr]) -> Result<BuildCorsConfig, FitzError> {
             match key.as_str() {
                 "allow_origin" => match v {
                     // Q.3: Str → Literal (modo previo, valor fijo).
+                    // Mini-tanda HTTP-Cors — el valor especial `"echo"`
+                    // construye `BuildAllowOrigin::Echo` para echo
+                    // sin filtro del Origin recibido.
                     Expr::Str(s, _) => {
-                        cfg.allow_origin = Some(BuildAllowOrigin::Literal(s.clone()));
+                        cfg.allow_origin = Some(if s == "echo" {
+                            BuildAllowOrigin::Echo
+                        } else {
+                            BuildAllowOrigin::Literal(s.clone())
+                        });
                     }
                     // Q.3: List<Str> → Set, echo del Origin del request.
                     Expr::List(items, _) => {
@@ -11350,8 +11528,15 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
             } else {
                 rust_type_for(inner, env)?
             };
+            // Mini-tanda Async-cl build — `+ Send` requerido para que
+            // `Future<T>` como ret type de un closure async pueda
+            // vivir adentro de `Arc<dyn Fn(...) -> Pin<...> + Send +
+            // Sync>` (el bound `+ Send + Sync` del Arc<dyn Fn> exige
+            // que el Output sea Send). Los `async move` Rust producen
+            // futures Send siempre que sus capturas sean Send (que en
+            // Fitz post-F17 lo son: Arc/Mutex everywhere).
             Ok(format!(
-                "std::pin::Pin<Box<dyn std::future::Future<Output = {}>>>",
+                "std::pin::Pin<Box<dyn std::future::Future<Output = {}> + Send>>",
                 inner_rs
             ))
         }

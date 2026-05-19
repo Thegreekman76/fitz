@@ -3296,6 +3296,9 @@ async fn dispatch_method(
         (Value::List(_), "zip_with") => list_zip_with(receiver, args, span).await,
         (Value::List(_), "max_by") => list_max_by(receiver, args, span).await,
         (Value::List(_), "min_by") => list_min_by(receiver, args, span).await,
+        // Mini-tanda Mb6 — scan (fold con outputs intermedios) + windows.
+        (Value::List(_), "scan") => list_scan(receiver, args, span).await,
+        (Value::List(_), "windows") => list_windows(receiver, args, span),
         // Mini-tanda Ir — iteradores sobre Range. Materializa el rango
         // como `List<Int>` y delega a los métodos de List. Más simple
         // que duplicar la lógica; el overhead es solo el `Vec` extra.
@@ -3347,6 +3350,9 @@ async fn dispatch_method(
         (Value::Map(_), "entries") => map_entries(receiver, args, span),
         // Mini-tanda Mb4 — invert: Map<V, K> con pares intercambiados.
         (Value::Map(_), "invert") => map_invert(receiver, args, span),
+        // Mini-tanda Mb6 — merge_with: merge con callback para
+        // resolver conflicts.
+        (Value::Map(_), "merge_with") => map_merge_with(receiver, args, span).await,
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -4522,6 +4528,73 @@ fn list_unique(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     Ok(Value::new_list(out))
 }
 
+/// Mini-tanda Mb6 — `xs.scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
+/// Fold con outputs intermedios — devuelve una lista con cada
+/// estado del acumulador después de procesar cada elemento. Útil
+/// para sumas parciales, máximos acumulados, etc. Paralelo a Rust
+/// `Iterator::scan` (sin la sutileza del Option de Rust — siempre
+/// emite un valor por elemento). Lista vacía → lista vacía.
+#[async_recursion]
+async fn list_scan(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("scan", &args, 2, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let mut acc = it.next().unwrap();
+    let cb = it.next().unwrap();
+    let snapshot: Vec<Value> = items.lock().clone();
+    let mut out: Vec<Value> = Vec::with_capacity(snapshot.len());
+    for item in snapshot {
+        acc = invoke_value(cb.clone(), vec![acc, item], "scan", span).await?;
+        out.push(acc.clone());
+    }
+    Ok(Value::new_list(out))
+}
+
+/// Mini-tanda Mb6 — `xs.windows(n) -> List<List<T>>`: sliding windows
+/// de tamaño `n`. Cada ventana es una `List<T>` con `n` elementos
+/// consecutivos. Si `len(xs) < n`, lista vacía. `n <= 0` → error
+/// claro. Paralelo a Rust `slice::windows`.
+fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("windows", &args, 1, span)?;
+    let items = match receiver {
+        Value::List(items) => items,
+        _ => unreachable!(),
+    };
+    let n = match args.into_iter().next().unwrap() {
+        Value::Int(n) => n,
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.windows()` espera `Int`, recibió `{}`", other.type_name()),
+            )));
+        }
+    };
+    if n <= 0 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line, span.column,
+            format!("`.windows()` requiere n > 0, recibió {}", n),
+        )));
+    }
+    let snapshot: Vec<Value> = items.lock().clone();
+    let win_size = n as usize;
+    let mut out: Vec<Value> = Vec::new();
+    if snapshot.len() >= win_size {
+        for i in 0..=(snapshot.len() - win_size) {
+            let window: Vec<Value> = snapshot[i..i + win_size].to_vec();
+            out.push(Value::new_list(window));
+        }
+    }
+    Ok(Value::new_list(out))
+}
+
 /// Mini-tanda Mb5 — `xs.group_by(fn(T) -> K)`: agrupa los elementos
 /// por la key que devuelve el callback. Output: `Map<K, List<T>>`.
 /// Preserva orden — el primer item con key K define posición en el
@@ -4917,6 +4990,56 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
             slot.1 = v.clone();
         } else {
             out.push((k.clone(), v.clone()));
+        }
+    }
+    Ok(Value::new_map(out))
+}
+
+/// Mini-tanda Mb6 — `m.merge_with(other, fn(V, V) -> V) -> Map<K, V>`:
+/// merge con resolución de conflictos via callback. Para cada key
+/// que aparece en ambos maps, el callback decide qué value queda
+/// (e.g. `fn(a, b) => a + b` para sumar valores). Keys que están
+/// solo en uno de los dos maps pasan tal cual. Preserva orden:
+/// keys del receiver primero, keys nuevas de `other` al final.
+/// Generaliza `merge` (que es last-write-wins).
+#[async_recursion]
+async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("merge_with", &args, 2, span)?;
+    let pairs = match receiver {
+        Value::Map(p) => p,
+        _ => unreachable!(),
+    };
+    let mut it = args.into_iter();
+    let other = it.next().unwrap();
+    let cb = it.next().unwrap();
+    let other_pairs = match other {
+        Value::Map(p) => p,
+        v => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Map".into(),
+                    found: v.type_name().into(),
+                },
+                span.line, span.column,
+                format!("`.merge_with()` espera Map, recibió `{}`", v.type_name()),
+            )));
+        }
+    };
+    let mut out: Vec<(Value, Value)> = pairs.lock().clone();
+    let other_snap: Vec<(Value, Value)> = other_pairs.lock().clone();
+    for (k, v_other) in other_snap {
+        if let Some(slot_idx) = out.iter().position(|(ek, _)| ek == &k) {
+            // Key duplicada: el callback decide.
+            let v_self = out[slot_idx].1.clone();
+            let resolved = invoke_value(
+                cb.clone(),
+                vec![v_self, v_other],
+                "merge_with",
+                span,
+            ).await?;
+            out[slot_idx].1 = resolved;
+        } else {
+            out.push((k, v_other));
         }
     }
     Ok(Value::new_map(out))
@@ -6324,8 +6447,15 @@ fn builtin_cors(args: &[Value]) -> FitzResult<Value> {
             match key_str.as_str() {
                 "allow_origin" => match value {
                     // Q.3: Str → literal (modo previo: emite valor fijo).
+                    // Mini-tanda HTTP-Cors — el valor especial `"echo"`
+                    // (case-sensitive) construye `AllowOrigin::Echo` que
+                    // hace echo del Origin recibido sin filtro.
                     Value::Str(s) => {
-                        config.allow_origin = crate::http::AllowOrigin::Literal(s.clone());
+                        config.allow_origin = if s == "echo" {
+                            crate::http::AllowOrigin::Echo
+                        } else {
+                            crate::http::AllowOrigin::Literal(s.clone())
+                        };
                     }
                     // Q.3: List<Str> → set de orígenes permitidos. El
                     // dispatch HTTP echo del Origin del request si está
@@ -15202,6 +15332,203 @@ let r = match n {
         } else {
             panic!("esperaba Map");
         }
+    }
+
+    // ---- Mini-tanda Mb6 — scan + windows + merge_with ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb6_list_scan_acumula_outputs_intermedios() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4]\n\
+             let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            let g = items.lock();
+            let nums: Vec<i64> = g.iter().filter_map(|x| {
+                if let Value::Int(n) = x { Some(*n) } else { None }
+            }).collect();
+            // Cada paso del acc: 0+1=1, 1+2=3, 3+3=6, 6+4=10.
+            assert_eq!(nums, vec![1, 3, 6, 10]);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb6_list_scan_lista_vacia_devuelve_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = []\n\
+             let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            assert!(items.lock().is_empty());
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb6_list_windows_size_3_sobre_lista_de_5() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
+             let r: List<List<Int>> = xs.windows(3)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            assert_eq!(items.lock().len(), 3);
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb6_list_windows_n_mayor_que_len_devuelve_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2]\n\
+             let r: List<List<Int>> = xs.windows(5)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::List(items) = v {
+            assert!(items.lock().is_empty());
+        } else {
+            panic!("esperaba List");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb6_list_windows_n_cero_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "let xs: List<Int> = [1, 2, 3]\n\
+             let r: List<List<Int>> = xs.windows(0)",
+        ).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("n > 0"),
+            "mensaje inesperado: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mb6_map_merge_with_resuelve_conflicts_via_callback() {
+        let (env, res) = parse_eval_into_env(
+            "let a: Map<Str, Int> = {\"x\": 1, \"y\": 2}\n\
+             let b: Map<Str, Int> = {\"y\": 10, \"z\": 3}\n\
+             let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)",
+        ).await;
+        res.unwrap();
+        let v = env.lock().get("r").unwrap();
+        if let Value::Map(pairs) = v {
+            let g = pairs.lock();
+            // x: 1 (solo en a), y: 2+10=12 (conflict), z: 3 (solo en b).
+            assert_eq!(g.len(), 3);
+            let y_val = g.iter().find(|(k, _)| k == &Value::Str("y".into())).map(|(_, v)| v.clone());
+            assert_eq!(y_val, Some(Value::Int(12)));
+        } else {
+            panic!("esperaba Map");
+        }
+    }
+
+    // ---- Mini-tanda HTTP-Cors — echo del Origin sin filtro ----
+
+    #[test]
+    fn http_cors_allow_origin_echo_devuelve_request_origin() {
+        use crate::http::AllowOrigin;
+        let echo = AllowOrigin::Echo;
+        assert_eq!(
+            echo.resolve(Some("https://a.com")),
+            Some("https://a.com".to_string())
+        );
+        assert_eq!(
+            echo.resolve(Some("https://anything.example.com")),
+            Some("https://anything.example.com".to_string())
+        );
+    }
+
+    #[test]
+    fn http_cors_allow_origin_echo_sin_request_origin_es_none() {
+        use crate::http::AllowOrigin;
+        let echo = AllowOrigin::Echo;
+        assert_eq!(echo.resolve(None), None);
+    }
+
+    // ---- Mini-tanda HTTP-Err — status codes específicos por Err ----
+
+    #[test]
+    fn http_err_value_to_outcome_con_instance_status_field_usa_ese_status() {
+        // Construir Value::Result(Err(Instance { status: 404, message: "..." }))
+        // y verificar que `value_to_outcome` lo mapea a HandlerOutcome con
+        // status 404 (y body = Instance serializada, no `{"error": ...}`).
+        use crate::value::{ResultVariant, Value};
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+
+        let instance = Value::Instance {
+            type_name: "ApiErr".to_string(),
+            fields: Arc::new(Mutex::new(vec![
+                ("status".to_string(), Value::Int(404)),
+                ("message".to_string(), Value::Str("no encontrado".into())),
+            ])),
+        };
+        let err = Value::Result(ResultVariant::Err(Box::new(instance)));
+        let outcome = crate::http::value_to_outcome(&err);
+        assert_eq!(outcome.status, 404);
+        // El body debería serializar la Instance, no envolverla en
+        // `{"error": ...}`.
+        let body_str = outcome.body.to_string();
+        assert!(
+            body_str.contains("\"status\":404")
+                && body_str.contains("\"message\":\"no encontrado\""),
+            "esperaba body de Instance serializada, fue: {}",
+            body_str
+        );
+    }
+
+    #[test]
+    fn http_err_sin_status_field_cae_al_500_historico() {
+        // Sin field `status`, fallback a 500 con `{"error": e}`.
+        use crate::value::{ResultVariant, Value};
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+
+        let instance = Value::Instance {
+            type_name: "Simple".to_string(),
+            fields: Arc::new(Mutex::new(vec![(
+                "message".to_string(),
+                Value::Str("oops".into()),
+            )])),
+        };
+        let err = Value::Result(ResultVariant::Err(Box::new(instance)));
+        let outcome = crate::http::value_to_outcome(&err);
+        assert_eq!(outcome.status, 500);
+        let body_str = outcome.body.to_string();
+        assert!(
+            body_str.contains("\"error\":"),
+            "esperaba `{{\"error\": ...}}`, fue: {}",
+            body_str
+        );
+    }
+
+    #[test]
+    fn http_err_status_fuera_de_rango_cae_al_500() {
+        // status: 99 (fuera de 100..1000) → 500.
+        use crate::value::{ResultVariant, Value};
+        use parking_lot::Mutex;
+        use std::sync::Arc;
+
+        let instance = Value::Instance {
+            type_name: "Bad".to_string(),
+            fields: Arc::new(Mutex::new(vec![("status".to_string(), Value::Int(99))])),
+        };
+        let err = Value::Result(ResultVariant::Err(Box::new(instance)));
+        let outcome = crate::http::value_to_outcome(&err);
+        assert_eq!(outcome.status, 500);
     }
 
     // ---- Mini-tanda Mb5: group_by + zip_with + max_by/min_by +
