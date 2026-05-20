@@ -1988,11 +1988,9 @@ fn uc_http_post_urlencoded_con_url_encoding() {
 #[test]
 fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
     // Mini-tanda HA: el msg del 415 cubre los formatos no soportados.
-    // Mini-tanda MP2 — el codegen ya no rechaza `multipart/form-data`
-    // con el mismo error que tipos como `text/plain` — el binario
-    // nativo no soporta multipart todavía, pero el msg ahora menciona
-    // explícitamente la asimetría con `fitz run`. Probamos con
-    // `text/plain` que el codegen rechaza inequívocamente.
+    // Mini-tanda MP-Build — multipart ya es soportado por el codegen
+    // también (paridad bit-a-bit con `fitz run`). Probamos con
+    // `text/plain` que sigue siendo rechazado.
     let src = "@server(43242)\nfn main() => 0\n\
                type Input { msg: Str }\n\
                @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
@@ -2013,15 +2011,9 @@ fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
     );
     assert!(
         body.contains("application/json")
-            && body.contains("application/x-www-form-urlencoded"),
-        "esperaba que el mensaje mencione JSON y urlencoded, fue: {}",
-        body
-    );
-    // Mini-tanda MP2 — el nuevo msg del codegen menciona el path
-    // `fitz run` como workaround para multipart.
-    assert!(
-        body.contains("Multipart") && body.contains("fitz run"),
-        "esperaba que el mensaje mencione Multipart + fitz run como workaround, fue: {}",
+            && body.contains("application/x-www-form-urlencoded")
+            && body.contains("multipart/form-data"),
+        "esperaba que el mensaje mencione los 3 CTs soportados, fue: {}",
         body
     );
 }
@@ -2144,29 +2136,80 @@ print(false != \"f\")
 }
 
 #[test]
-fn mp2_codegen_multipart_devuelve_415_con_msg_que_cita_fitz_run() {
-    // Mini-tanda MP2 — el codegen sigue rechazando multipart con
-    // 415, pero el msg nuevo cita `fitz run` como workaround
-    // (asimetría documentada como deuda residual del codegen).
-    let src = "@server(43260)\nfn main() => 0\n\
-               type Input { msg: Str }\n\
-               @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
+fn mp_build_multipart_text_field_compila_y_parsea() {
+    // Mini-tanda MP-Build — multipart text-only en `fitz build`.
+    // Paridad bit-a-bit con `fitz run` (que ya lo soportaba en MP2).
+    let src = "@server(43370)\nfn main() => 0\n\
+               @post(\"/form\") fn form(body: Map<Str, Str>) -> Str {\n\
+                   let n = body[\"name\"]\n\
+                   return \"got \" + n\n\
+               }\n";
     let (status, body) = build_spawn_request_with_ct(
-        "mp2-codegen-multipart-415",
+        "mp-build-text",
         src,
-        43260,
+        43370,
         "POST",
-        "/echo",
-        Some("--X\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nv\r\n--X--"),
+        "/form",
+        Some("--X\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFitz\r\n--X--"),
         Some("multipart/form-data; boundary=X"),
     );
-    assert_eq!(status, 415, "esperaba 415, fue: status={} body={}", status, body);
+    assert_eq!(status, 200, "esperaba 200, fue: {} body={}", status, body);
     assert!(
-        body.contains("Multipart") && body.contains("fitz run"),
-        "esperaba que el msg mencione Multipart + fitz run, fue: {}",
+        body.contains("got Fitz"),
+        "esperaba body con `got Fitz`, fue: {}",
         body
     );
 }
+
+#[test]
+fn mp_build_multipart_file_field_compila_y_parsea() {
+    // Mini-tanda MP-Build — multipart con file field. El handler
+    // lee `len(f.content)` (no usa `f.name` que es Str? — para
+    // evitar el caveat de narrowing del checker en este test E2E).
+    let src = "@server(43371)\nfn main() => 0\n\
+               @post(\"/upload\") fn upload(body: Map<Str, File>) -> Str {\n\
+                   let f = body[\"doc\"]\n\
+                   let n = len(f.content)\n\
+                   return \"size={n}\"\n\
+               }\n";
+    let (status, body) = build_spawn_request_with_ct(
+        "mp-build-file",
+        src,
+        43371,
+        "POST",
+        "/upload",
+        Some("--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents\r\n--X--"),
+        Some("multipart/form-data; boundary=X"),
+    );
+    assert_eq!(status, 200, "esperaba 200, fue: {} body={}", status, body);
+    assert!(
+        body.contains("size=13"),
+        "esperaba `size=13` (len de 'file contents'), fue: {}",
+        body
+    );
+}
+
+#[test]
+fn mp_build_multipart_sin_boundary_es_400() {
+    let src = "@server(43372)\nfn main() => 0\n\
+               @post(\"/form\") fn form(body: Map<Str, Str>) -> Str => \"ok\"\n";
+    let (status, body) = build_spawn_request_with_ct(
+        "mp-build-no-boundary",
+        src,
+        43372,
+        "POST",
+        "/form",
+        Some("--X\r\n--X--"),
+        Some("multipart/form-data"),
+    );
+    assert_eq!(status, 400, "esperaba 400, fue: {} body={}", status, body);
+    assert!(
+        body.contains("boundary"),
+        "esperaba mención de boundary, fue: {}",
+        body
+    );
+}
+
 
 #[test]
 fn oapi_return_ident_a_const_top_level_compila_y_emite_schema() {

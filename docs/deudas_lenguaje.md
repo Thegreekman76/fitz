@@ -1227,6 +1227,80 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~MP-Build: multipart en `fitz build` (paridad bit-a-bit run↔build)~~ ✓ CERRADO 2026-05-20 (mini-tanda MP-Build)
+
+Cierra la deuda residual del codegen que quedó abierta en MP2. El
+binario nativo (`fitz build`) ahora acepta `multipart/form-data`
+con el mismo comportamiento que el intérprete (`fitz run`). Mw-Wrap,
+Bytes y F13 quedan como mini-tandas dedicadas futuras (cada una
+tiene decisiones de diseño que arrastran).
+
+**Implementación**:
+
+- ~~**Helper `__parse_multipart(bytes, boundary)` en el preludio**~~ ✓
+  Paralelo a `parse_multipart_body` del intérprete (`http.rs`).
+  Mismo algoritmo: split por `--<boundary>`, skip preámbulo y
+  epílogo, parse de headers (`Content-Disposition`/`Content-Type`),
+  distinción text/file por presencia de `filename`. Para files, el
+  resultado es un `serde_json::Value::Object` con shape de
+  `FileData` (`name`, `content_type`, `content`), que
+  `__FromFitzJson for FileData` consume. Para text fields, un
+  `Value::String` plano. Body no-UTF8 → `Err`.
+- ~~**Helper `__extract_multipart_boundary(ct)` en el preludio**~~ ✓
+  Paralelo a `extract_multipart_boundary` del intérprete. Skip del
+  primer token, parse de `boundary=<value>` o `boundary="<value>"`,
+  case-sensitive del valor. Devuelve `None` si no se encuentra.
+- ~~**Dispatch en `emit_param_coercions`**~~ ✓ Tercera rama del
+  matching de Content-Type, paralelo a JSON y urlencoded. Sin
+  boundary → 400 claro. Body inválido (no-UTF8, malformado) → 400.
+  Body válido → `serde_json::Value` que alimenta el
+  `__from_fitz_json` ya existente.
+- ~~**415 message actualizado**~~ ✓ Ahora cita los **3 CTs
+  soportados** (JSON, urlencoded, multipart) en lugar de los 2 +
+  workaround a `fitz run` (mensaje viejo de MP2 cuando codegen no
+  soportaba multipart). Paridad bit-a-bit con el intérprete.
+
+**Tests**: **2 unit + 3 compile_e2e nuevos**:
+
+- 2 codegen unit (`mp_build_codegen_emite_helpers_multipart`,
+  `mp_build_codegen_dispatch_incluye_multipart_branch`).
+- 3 compile_e2e (`mp_build_multipart_text_field_compila_y_parsea`,
+  `mp_build_multipart_file_field_compila_y_parsea`,
+  `mp_build_multipart_sin_boundary_es_400`).
+- Tests ajustados:
+  `uc_http_body_415_msg_matchea_interprete` actualizado al msg
+  nuevo (incluye los 3 CTs); `ha_http_content_type_text_plain_es_415_con_msg_claro`
+  actualizado para verificar que el msg menciona los 3 CTs;
+  el test viejo `mp2_codegen_multipart_devuelve_415_con_msg_que_cita_fitz_run`
+  se removió (ya no aplica — multipart deja de ser 415 en codegen).
+
+**Cap 17 de la guía actualizado**: la sub-sección de multipart
+cambia "Limitación de `fitz build`" por "Paridad `fitz run` ↔
+`fitz build`". El ejemplo `17c-multipart.fitz` actualiza el comment
+de cierre. Sigue en el smoke `GUIDE_EXAMPLES_COMPILE`.
+
+**VSCode extension**: SIN cambios. Cambios server-side (codegen).
+
+**Total al cierre: 2012 unit sin feature, 2102 con --features lsp,
+245+ compile_e2e (3 nuevos − 1 obsoleto = +2 netos).** Clippy `-D
+warnings` limpio en lib + bin `fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w)** — restantes después de MP-Build:
+
+- **Mw-Wrap (wrap-style middleware con `next` callable)**: ~6-8h.
+  Decisión de diseño grande — requiere `Value::NativeFn` nuevo
+  (async + Send + Sync) en el value system, integración en
+  `http.rs::handle_task`, codegen paralelo emitiendo `Box<dyn Fn() -> BoxFuture>`
+  para el `next`. Mini-tanda dedicada futura.
+- **`Value::Bytes` para files binarios**: ~5-8h. Primitivo nuevo
+  del lenguaje (`b"..."` literal syntax, métodos `.len()`/`.to_str()`,
+  codegen mapping a `Vec<u8>`). Mini-tanda dedicada futura.
+- **Listas/mapas heterogéneos en `fitz build` (F13)**: ~15-20h.
+  Decisión grande — requiere `FitzValue` tagged runtime en el
+  output del codegen + impacto en cada helper `__to_fitz_json`/
+  `__from_fitz_json`. Mini-tanda dedicada futura (probable spike de
+  diseño primero).
+
 ### ~~MP2 + Docs refresh + VSCode rebuild: multipart en intérprete + guide cap 17/18 + nuevo ejemplo + extensión actualizada~~ ✓ CERRADO 2026-05-20 (mini-tanda MP2 + DocsRefresh + VSCode)
 
 Bundle de polish post-OAPI. Cierra **MP2** (multipart con files en

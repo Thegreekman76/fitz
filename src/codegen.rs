@@ -11134,15 +11134,45 @@ impl<'a> CodegenCtx<'a> {
             self.emit("                axum::Json(serde_json::json!({\"error\": e})),\n");
             self.emit("            ).into_response(),\n");
             self.emit("        }\n");
+            // Mini-tanda MP-Build — multipart/form-data ahora también
+            // funciona en `fitz build` (paridad bit-a-bit con el
+            // intérprete). El helper `__parse_multipart` devuelve un
+            // `serde_json::Value::Object` con cada part como text
+            // (Value::String) o file (Value::Object con shape de
+            // FileData), que `__FromFitzJson` puede consumir.
+            writeln!(
+                &mut self.output,
+                "    }} else if {}_ct_primary == \"multipart/form-data\" {{",
+                bn,
+            )
+            .unwrap();
+            self.emit("        let __ct_full = __hmap.get(\"content-type\").and_then(|v| v.to_str().ok()).unwrap_or(\"\");\n");
+            self.emit("        let __boundary = match __extract_multipart_boundary(__ct_full) {\n");
+            self.emit("            Some(b) => b,\n");
+            self.emit("            None => return (\n");
+            self.emit("                axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": \"multipart/form-data: falta el parámetro `boundary` en Content-Type\"})),\n");
+            self.emit("            ).into_response(),\n");
+            self.emit("        };\n");
+            writeln!(
+                &mut self.output,
+                "        match __parse_multipart(&{}_body_bytes, &__boundary) {{",
+                bn,
+            )
+            .unwrap();
+            self.emit("            Ok(v) => v,\n");
+            self.emit("            Err(e) => return (\n");
+            self.emit("                axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": e})),\n");
+            self.emit("            ).into_response(),\n");
+            self.emit("        }\n");
             self.emit("    } else {\n");
             self.emit("        let __ct_display = __hmap.get(\"content-type\").and_then(|v| v.to_str().ok()).unwrap_or(\"(sin header)\").to_string();\n");
             self.emit("        return (\n");
             self.emit("            axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,\n");
-            // Mini-tanda MP2 — el intérprete (`fitz run`) acepta
-            // `multipart/form-data` pero el binario nativo
-            // (`fitz build`) todavía no. Asimetría documentada como
-            // deuda residual.
-            self.emit("            axum::Json(serde_json::json!({\"error\": format!(\"Content-Type no soportado: '{}'. El binario nativo `fitz build` acepta JSON (`application/json`) o urlencoded (`application/x-www-form-urlencoded`). Multipart (`multipart/form-data`) corre solo en `fitz run` por ahora — sub-paso futuro del codegen.\", __ct_display)})),\n");
+            // Mini-tanda MP-Build — paridad bit-a-bit con `fitz run`:
+            // los tres CTs soportados, otros formatos → 415.
+            self.emit("            axum::Json(serde_json::json!({\"error\": format!(\"Content-Type no soportado: '{}'. El handler espera JSON (`application/json`), urlencoded (`application/x-www-form-urlencoded`) o multipart (`multipart/form-data`). Otros formatos quedan como sub-paso futuro.\", __ct_display)})),\n");
             self.emit("        ).into_response();\n");
             self.emit("    };\n");
 
@@ -12256,6 +12286,112 @@ fn __url_decode(s: &str) -> Result<String, String> {
         }
     }
     Ok(out)
+}
+
+/// Mini-tanda MP-Build — extracta el `boundary=<token>` del
+/// Content-Type para `multipart/form-data`. Paralelo a
+/// `extract_multipart_boundary` del intérprete.
+fn __extract_multipart_boundary(content_type: &str) -> Option<String> {
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        let lower = part.to_ascii_lowercase();
+        if let Some(stripped) = lower.strip_prefix("boundary=") {
+            let orig_offset = part.len() - stripped.len();
+            let value = &part[orig_offset..];
+            let trimmed = value.trim_matches('"');
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Mini-tanda MP-Build — parser de `multipart/form-data`. Paralelo a
+/// `parse_multipart_body` del intérprete. Devuelve un
+/// `serde_json::Value::Object` con cada entry como text field
+/// (Value::String) o file field (Value::Object con name/content_type/
+/// content). Files binarios no-UTF8 → Err.
+fn __parse_multipart(bytes: &[u8], boundary: &str) -> Result<serde_json::Value, String> {
+    let delimiter = format!("--{}", boundary);
+    let s = std::str::from_utf8(bytes)
+        .map_err(|e| format!("multipart: body no es UTF-8 válido: {}", e))?;
+    let parts_raw: Vec<&str> = s.split(&delimiter).collect();
+    let mut map = serde_json::Map::new();
+    for raw in parts_raw.iter().skip(1) {
+        if raw.starts_with("--") {
+            break;
+        }
+        let body = raw.strip_prefix("\r\n").unwrap_or(raw);
+        let body = body.strip_suffix("\r\n").unwrap_or(body);
+        let Some((headers_str, content)) = body.split_once("\r\n\r\n") else {
+            return Err(
+                "multipart: part malformada — falta `\\r\\n\\r\\n` entre headers y body"
+                    .to_string(),
+            );
+        };
+        let mut name_field: Option<String> = None;
+        let mut filename: Option<String> = None;
+        let mut content_type_part: Option<String> = None;
+        for line in headers_str.split("\r\n") {
+            let lower = line.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("content-disposition:") {
+                let orig_offset = line.len() - rest.len();
+                let value = &line[orig_offset..];
+                for part in value.split(';').skip(1) {
+                    let part = part.trim();
+                    let Some(eq_idx) = part.find('=') else { continue; };
+                    let key = part[..eq_idx].trim().to_ascii_lowercase();
+                    let val = part[eq_idx + 1..].trim().trim_matches('"');
+                    if key == "name" {
+                        name_field = Some(val.to_string());
+                    } else if key == "filename" {
+                        filename = Some(val.to_string());
+                    }
+                }
+            } else if let Some(rest) = lower.strip_prefix("content-type:") {
+                let orig_offset = line.len() - rest.len();
+                let value = &line[orig_offset..];
+                content_type_part = Some(value.trim().to_string());
+            }
+        }
+        let Some(name) = name_field else {
+            return Err(
+                "multipart: part sin `name` en Content-Disposition".to_string(),
+            );
+        };
+        let entry = match filename {
+            None => serde_json::Value::String(content.to_string()),
+            Some(fname) => {
+                // Construir un objeto que matchea el shape de `FileData`
+                // (`name`, `content_type`, `content`). `__FromFitzJson for
+                // FileData` lo consume tal cual.
+                let mut obj = serde_json::Map::new();
+                obj.insert(
+                    "name".to_string(),
+                    if fname.is_empty() {
+                        serde_json::Value::Null
+                    } else {
+                        serde_json::Value::String(fname)
+                    },
+                );
+                obj.insert(
+                    "content_type".to_string(),
+                    content_type_part
+                        .map(serde_json::Value::String)
+                        .unwrap_or(serde_json::Value::Null),
+                );
+                obj.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(content.to_string()),
+                );
+                serde_json::Value::Object(obj)
+            }
+        };
+        map.insert(name, entry);
+    }
+    Ok(serde_json::Value::Object(map))
 }
 
 impl __ToFitzJson for i64 {
@@ -17188,21 +17324,18 @@ mod tests {
 
     #[test]
     fn uc_http_body_415_msg_matchea_interprete() {
-        // Mini-tanda HA: el msg del 415 del codegen contiene las
-        // frases clave que el usuario espera ver.
-        // Mini-tanda MP2 — el msg del codegen ahora menciona que
-        // multipart corre solo en `fitz run` (intérprete acepta MP,
-        // codegen no — asimetría documentada como deuda residual).
+        // Mini-tanda HA + MP-Build — el msg del 415 del codegen
+        // contiene las frases clave que el usuario espera ver, y
+        // cita los 3 CTs soportados (JSON, urlencoded, multipart)
+        // tal cual el intérprete (`http::handle_task`).
         let src = "type Input { msg: Str }\n\
                    @post(\"/echo\") fn echo(body: Input) -> Input => body";
         let code = gen(src).unwrap();
         let key_phrases = [
             "Content-Type no soportado",
             "application/json",
-            "urlencoded",
             "application/x-www-form-urlencoded",
-            "Multipart",
-            "fitz run",
+            "multipart/form-data",
             "sub-paso futuro",
         ];
         for phrase in &key_phrases {
@@ -17212,6 +17345,40 @@ mod tests {
                 phrase
             );
         }
+    }
+
+    #[test]
+    fn mp_build_codegen_emite_helpers_multipart() {
+        // Mini-tanda MP-Build — los helpers `__parse_multipart` y
+        // `__extract_multipart_boundary` se emiten en el preludio
+        // junto con los de urlencoded.
+        let src = "@get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("fn __parse_multipart(bytes: &[u8]"),
+            "esperaba helper `__parse_multipart` en el preludio HTTP"
+        );
+        assert!(
+            code.contains("fn __extract_multipart_boundary("),
+            "esperaba helper `__extract_multipart_boundary` en el preludio HTTP"
+        );
+    }
+
+    #[test]
+    fn mp_build_codegen_dispatch_incluye_multipart_branch() {
+        // El wrapper del handler con body ahora dispatcha entre
+        // JSON, urlencoded y multipart (3 branches), con 415 al final.
+        let src = "type Input { msg: Str }\n\
+                   @post(\"/echo\") fn echo(body: Input) -> Input => body";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("\"multipart/form-data\""),
+            "esperaba branch para multipart en el dispatch"
+        );
+        assert!(
+            code.contains("__parse_multipart"),
+            "esperaba llamada a `__parse_multipart` en el dispatch"
+        );
     }
 
     #[test]

@@ -6786,12 +6786,15 @@ curl -X POST http://127.0.0.1:3000/upload \
 **Limitación MVP**: el `content` de los files es `Str`, así que solo
 se admiten files cuyo contenido sea UTF-8 válido. Files binarios
 (imágenes, PDFs, zips) hacen el parse fallar con 400. `Value::Bytes`
-es deuda residual.
+es deuda residual (mini-tanda dedicada futura).
 
-**Limitación de `fitz build`**: el binario nativo todavía no soporta
-multipart. Si compilás un handler que espera multipart y el cliente
-manda multipart, el binario devuelve 415 con un mensaje que cita
-`fitz run` como workaround. Multipart en codegen es deuda residual.
+**Paridad `fitz run` ↔ `fitz build`** (mini-tanda MP-Build): el
+binario nativo también acepta multipart. Los helpers
+`__parse_multipart` y `__extract_multipart_boundary` se emiten en el
+preludio HTTP del codegen, paralelos a los del intérprete. El
+dispatcher de Content-Type del wrapper async incluye la rama
+multipart con el mismo flow de 400 (sin boundary) / 415 (CT no
+soportado).
 
 `File` es un nominal built-in del runtime HTTP (igual que `Request` y
 `Response`). No hace falta declararlo ni importarlo.

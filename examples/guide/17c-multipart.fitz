@@ -11,11 +11,12 @@
 // Limitación MVP: el `content` de los files es `Str`, así que solo se
 // admiten files cuyo contenido sea UTF-8 válido. Files binarios
 // (imágenes, PDFs) hacen el parse del request fallar con 400.
-// `Value::Bytes` queda como sub-paso futuro.
+// `Value::Bytes` queda como sub-paso futuro (mini-tanda dedicada).
 //
-// Asimetría: hoy multipart corre SOLO en `fitz run`. `fitz build`
-// (binario nativo) sigue respondiendo 415 con un msg que cita
-// `fitz run` como workaround. Codegen multipart es deuda residual.
+// Paridad bit-a-bit `fitz run` ↔ `fitz build` (mini-tanda MP-Build):
+// el binario nativo también acepta multipart con los mismos helpers
+// emitidos en el preludio HTTP. El handler que ves abajo compila a
+// binario y corre idéntico al intérprete.
 
 @server(3000)
 fn main() => 0
