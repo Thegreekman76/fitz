@@ -1227,6 +1227,109 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~F13.A + F13.B + base64 JSON: Bytes/Nominales/Map heterogéneo + Bytes JSON estándar~~ ✓ CERRADO 2026-05-20 (mini-tanda F13.A + F13.B + base64)
+
+Bundle de expansión del SPIKE de F13 + quick win. Cierra el caso
+**90% del lenguaje** para heterogéneos en `fitz build` y reemplaza
+una representación JSON no-estándar de Bytes por base64.
+
+**Parte 1 — F13.A.1: Bytes en heterogéneos**:
+
+- ~~**`__FitzValue::Bytes(Vec<u8>)`** nueva variante~~ ✓ Display
+  delega a `__fitz_fmt_bytes` (helper ya existente desde
+  mini-tanda Bytes). PartialEq byte a byte.
+- ~~**`wrap_as_fitz_value(_, Type::Bytes)`**~~ ✓ Emite
+  `__FitzValue::Bytes(code)` (el `code` ya es `Vec<u8>` por
+  `rust_type_for(Bytes)`).
+- Habilita `[1, b"raw", "hola"]` compilando bit-a-bit con
+  `fitz run`.
+
+**Parte 2 — F13.A.2: Map heterogéneo**:
+
+- ~~**`rust_type_for(Type::Map(Any, _))`** o `Map(_, Any)`~~ ✓
+  Mapea a `Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>`. Mapas
+  homogéneos siguen sin overhead.
+- ~~**`gen_map_lit` con sticky bit**~~ ✓ Paralelo a `gen_list_lit`:
+  una vez que lub de keys o values falla, lockea `Type::Any`.
+  Cuando AL MENOS UNO es Any, wrapea AMBOS lados como FitzValue
+  (uniforma el tipo Rust).
+- ~~**Pre-walker extendido**~~ ✓ `map_is_heterogeneous(pairs)`
+  detecta keys o values con tipos AST distintos.
+- Habilita `{"name": "fitz", "count": 7, "on": true}` y
+  `{1: "uno", "dos": "dos"}` compilando.
+
+**Parte 3 — F13.B: Nominales en heterogéneos**:
+
+- ~~**`__FitzValue::Nominal(String)`** nueva variante~~ ✓ Captura
+  el Display del instance como String. Display de la variant
+  imprime el String directamente.
+- ~~**`wrap_as_fitz_value(_, Type::Nominal(_))`**~~ ✓ Emite
+  `__FitzValue::Nominal(format!("{}", &*({}).lock().unwrap()))`,
+  que invoca el `Display for FooData` ya emitido por el codegen.
+- **Trade-off documentado**: pierde field access tipado en
+  heterogéneos pero evita dependencia en `serde_json` (que solo se
+  emite con HTTP). Alternativa más completa (Nominal con
+  `serde_json::Value`) queda como deuda menor.
+- Habilita `[User { id: 1, name: "ana" }, 42]` compilando.
+
+**Parte 4 — Quick win: Bytes JSON via base64**:
+
+- ~~**`value_to_json(Value::Bytes)` emite base64 string**~~ ✓ Antes:
+  array de Int (cada byte un i64) — no-estándar, infla ~4x. Ahora:
+  base64 string (RFC 4648, estándar de facto para bytes en JSON).
+- ~~**Encoder inline `b64_encode_standard(bytes)`**~~ ✓ Sin dep
+  externa (`base64` crate). ~25 LoC. RFC 4648 con padding `=`.
+
+**Implementación cross-cutting**:
+
+- **`src/codegen.rs`**: `__FitzValue` enum extendido con Bytes +
+  Nominal. `wrap_as_fitz_value` cubre los tipos nuevos. `gen_map_lit`
+  con sticky bit + wrap dual. `rust_type_for(Map(Any, _))` emite
+  el tipo tagged. Pre-walker `map_is_heterogeneous` para
+  auto-detect. `wrap_as_fitz_value_with_env` simplificada a wrapper
+  que ignora env (la simplificación de Nominal con Display no
+  necesita resolver el nombre desde TypeEnv).
+- **`src/http.rs`**: `b64_encode_standard` helper inline.
+  `value_to_json(Value::Bytes)` cambia de array a base64 string.
+- **`docs/design-fitzvalue.md`**: actualizado con el progreso
+  acumulado. Follow-up reducido a F13.C (HTTP body con
+  heterogéneos), F13.D (method dispatch), F13.E (anidados con
+  mix interno).
+
+**Tests**: **8 unit + 2 compile_e2e nuevos**:
+
+- 4 codegen unit: `f13_a_bytes_en_lista_heterogenea_se_envuelve`,
+  `f13_a_map_heterogeneo_emite_vec_fv_fv`,
+  `f13_a_mapa_homogeneo_no_emite_fitz_value`,
+  `f13_b_nominal_en_lista_heterogenea_captura_display`.
+- 4 http unit: `b64_encode_empty`, `b64_encode_basico` (RFC 4648
+  test vectors), `b64_encode_binarios`,
+  `value_to_json_bytes_emite_base64`.
+- 2 compile_e2e:
+  `f13_a_bytes_y_nominal_en_lista_heterogenea_paridad_run_vs_build`,
+  `f13_a_map_heterogeneo_paridad_run_vs_build`.
+- Test viejo `map_literal_valores_heterogeneos_es_error`
+  reemplazado por `map_literal_valores_heterogeneos_emite_fitz_value`.
+- Test viejo `f13_spike_lista_con_tipo_no_soportado_aborta_con_msg_claro`
+  reemplazado por `f13_lista_con_tipo_complejo_aborta_con_msg_claro`
+  (Bytes ya es soportado; ahora probamos con List anidada que
+  sigue como follow-up).
+
+**Cap 20 de la guía** actualizado: el bullet de "Heterogéneos con
+tipos avanzados" ahora cubre primitivos + Bytes + Nominales. Lo que
+todavía no compila (anidados con mix interno, Functions/Tuples en
+heterogéneos) queda explícito. Bloque "sí anda y antes era deuda"
+suma F13.A+F13.B + base64.
+
+**Total al cierre: 2044 unit sin feature, ~2134 con --features lsp,
+252+ compile_e2e (2 nuevos − 0 obsoletos = +2).** Clippy
+`-D warnings` limpio.
+
+**Próximo norte estratégico**: **Fase 9.w** (Stack web first-class:
+`@authenticated`/`@admin`, `@ws("/chat")`, `@cron`, `@background`).
+F13.C/D/E quedan como follow-ups chicos refinables si entra demanda
+real para el subset cubierto por ellos.
+
 ### ~~F13 SPIKE: design doc + prototipo mínimo de `FitzValue` (listas heterogéneas con primitivos)~~ ✓ CERRADO 2026-05-20 (mini-tanda F13 SPIKE)
 
 **ÚLTIMA deuda residual del bloque post-Fase-8**. Spike de diseño +

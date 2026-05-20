@@ -7923,20 +7923,15 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   del param (`fn double(n) { return n * 2 }`), el codegen falla.
   Workaround: anotar al menos el return type (`fn double(n) -> Int { ... }`),
   o anotar el param (`fn double(n: Int) { ... }`).
-- **Mapas heterogéneos** — `{"a": 1, "b": "dos"}` corre en el
-  intérprete (cada value conserva su tipo). El compilador exige
-  homogéneo (`Map<Str, Int>`, etc.) porque Rust no tiene un tipo
-  "Value" genérico tagged en runtime sin un refactor mayor.
-  Workaround: armar dos mapas, o usar `fitz run`. Cierre completo
-  como follow-up de F13.
-- **Listas heterogéneas con tipos avanzados** — el SPIKE de F13
-  (mini-tanda F13 SPIKE) cubre primitivos (Int/Float/Str/Bool/Null)
-  en listas heterogéneas — `[1, "dos", true]` compila y produce
-  output bit-a-bit idéntico a `fitz run`. Bytes, listas anidadas
-  con mix, mapas heterogéneos, tipos custom (Nominal) adentro de
-  heterogéneos quedan como follow-up dedicado de F13. El mensaje
-  del codegen cita el subset cubierto + workaround `fitz run` si
-  te tropezás.
+- **Heterogéneos con tipos avanzados** — F13 SPIKE + F13.A + F13.B
+  cubren primitivos, Bytes y Nominales en listas/mapas
+  heterogéneos: `[1, "dos", true, b"raw", User { id: 1 }]` y
+  `{"name": "fitz", "count": 7, "on": true}` compilan a binario
+  nativo con paridad bit-a-bit `fitz run` ↔ `fitz build`. **Lo que
+  todavía no compila**: listas/mapas anidados con mix interno
+  (`[1, [2, 3]]`), Functions adentro de heterogéneos, Tuples
+  adentro de heterogéneos. Para esos, el mensaje del codegen cita
+  el subset cubierto + workaround `fitz run`.
 
 > Lo que **sí anda** y antes era deuda: `let X = <expr>` no literal
 > a nivel top de un módulo (cerrado en F14 — la RHS puede ser una
@@ -7949,11 +7944,14 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
 > intérprete (mini-tanda DZ), **comparar valores de tipos
 > distintos** (`1 == "1"`, `true != 0`) compila y devuelve
 > `false`/`true` literal sin error E0308 (mini-tanda CT), y
-> **listas heterogéneas con primitivos** (`[1, "dos", true]`)
-> compilan a binario nativo con un enum tagged `__FitzValue`
-> emitido en el preludio (mini-tanda F13 SPIKE — primer paso
-> del cierre completo de F13). Ver `docs/design-fitzvalue.md`
-> para el diseño y el roadmap del follow-up.
+> **listas y mapas heterogéneos con primitivos, Bytes y Nominales**
+> compilan a binario nativo con un enum tagged `__FitzValue` emitido
+> en el preludio (mini-tandas F13 SPIKE + F13.A + F13.B). El caso
+> 90% del lenguaje compila bit-a-bit con `fitz run`. Listas anidadas
+> con mix interno, Functions y Tuples en heterogéneos siguen como
+> follow-up de F13. Ver `docs/design-fitzvalue.md` para el diseño y
+> el roadmap. **`Value::Bytes` en JSON** ahora se serializa como
+> base64 string (estándar de facto, antes era array de Int).
 
 Si te tropezás con algo de esta lista, el mensaje del codegen lo
 cita explícitamente. La salida tiene la forma:

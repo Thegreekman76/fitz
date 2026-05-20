@@ -2268,15 +2268,103 @@ print(len(ys))
 }
 
 #[test]
-fn f13_spike_lista_con_tipo_no_soportado_aborta_con_msg_claro() {
-    // F13 SPIKE — Bytes en una lista heterogénea todavía no es
-    // soportado (queda como follow-up de F13). Mensaje claro cita
-    // el subset cubierto + workaround `fitz run`.
-    let dir = std::env::temp_dir().join("fitz-e2e-f13-spike-bytes");
+fn f13_a_bytes_y_nominal_en_lista_heterogenea_paridad_run_vs_build() {
+    // F13.A + F13.B — Bytes y Nominales adentro de listas
+    // heterogéneas. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+    let dir = std::env::temp_dir().join("fitz-e2e-f13-a-b");
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("tempdir");
     let src_path = dir.join("prog.fitz");
-    let src = "let xs = [1, b\"raw\"]\nprint(xs)\n";
+    let src = "\
+type User { id: Int, name: Str }
+let u = User { id: 1, name: \"ana\" }
+let xs = [1, b\"raw\", u, true]
+print(xs)
+";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    assert!(out_run.status.success());
+    let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
+
+    let out_build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out_build.status.success(),
+        "build falló: {}",
+        String::from_utf8_lossy(&out_build.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let exec = Command::new(&bin).output().expect("run prog");
+    assert!(exec.status.success());
+    let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+
+    assert_eq!(
+        run_stdout.replace("\r\n", "\n"),
+        build_stdout.replace("\r\n", "\n"),
+        "F13.A+B: esperaba paridad bit-a-bit"
+    );
+    assert!(run_stdout.contains("b\"raw\""));
+    assert!(run_stdout.contains("User { id: 1, name: \"ana\" }"));
+}
+
+#[test]
+fn f13_a_map_heterogeneo_paridad_run_vs_build() {
+    // F13.A — Map heterogéneo (values mixtos) paridad bit-a-bit.
+    let dir = std::env::temp_dir().join("fitz-e2e-f13-a-map");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "let cfg = {\"name\": \"fitz\", \"count\": 7, \"on\": true}\nprint(cfg)\n";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    assert!(out_run.status.success());
+    let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
+
+    let out_build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(out_build.status.success());
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let exec = Command::new(&bin).output().expect("run prog");
+    assert!(exec.status.success());
+    let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+
+    assert_eq!(
+        run_stdout.replace("\r\n", "\n"),
+        build_stdout.replace("\r\n", "\n"),
+    );
+    assert!(run_stdout.contains("\"name\": \"fitz\""));
+    assert!(run_stdout.contains("\"count\": 7"));
+    assert!(run_stdout.contains("\"on\": true"));
+}
+
+#[test]
+fn f13_lista_con_tipo_complejo_aborta_con_msg_claro() {
+    // F13 SPIKE + F13.A + F13.B — el subset cubierto en heterogéneos
+    // es Int/Float/Str/Bool/Null/Bytes/Nominal. Tipos complejos
+    // (List anidada, Function, etc.) siguen abortando con msg
+    // claro citando el follow-up. Probamos con List anidada en
+    // heterogéneo.
+    let dir = std::env::temp_dir().join("fitz-e2e-f13-no-soportado");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "let xs = [1, [2, 3]]\nprint(xs)\n";
     std::fs::write(&src_path, src).expect("write");
 
     let out = Command::new(fitz_bin())
@@ -2286,12 +2374,12 @@ fn f13_spike_lista_con_tipo_no_soportado_aborta_con_msg_claro() {
         .expect("fitz build");
     assert!(
         !out.status.success(),
-        "esperaba que `fitz build` rechace Bytes en lista heterogénea (SPIKE)"
+        "esperaba que `fitz build` rechace List anidada en heterogéneo"
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.contains("F13 SPIKE") && stderr.contains("fitz run"),
-        "esperaba msg de F13 SPIKE + workaround `fitz run`, fue: {}",
+        stderr.contains("F13") && stderr.contains("fitz run"),
+        "esperaba msg con F13 + workaround `fitz run`, fue: {}",
         stderr
     );
 }

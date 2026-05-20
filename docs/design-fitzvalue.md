@@ -156,47 +156,62 @@ impl __FromFitzJson for __FitzValue { ... }
    keys de map. Decisión: solo primitivos hashables (Int, Float,
    Str, Bool); Nominal/List/Map como keys → error de codegen claro.
 
-## Prototipo mínimo (SPIKE)
+## Prototipo mínimo (SPIKE) + extensión F13.A + F13.B
 
-Alcance del spike incluido en esta mini-tanda:
+Alcance acumulado al cierre de las mini-tandas SPIKE + F13.A + F13.B:
 
 - [x] Design doc (este archivo).
-- [x] Detección en codegen: `Type::List(Type::Any)` triggerea
-  emisión del helper `__FitzValue`.
-- [x] Helper `__FitzValue` mínimo en el preludio (variantes
-  primitivas + List, sin Map ni Nominal por ahora).
-- [x] Display + PartialEq + constructores por primitivo.
-- [x] Literal heterogéneo `[1, "dos", true]` compila y produce
-  output bit-a-bit idéntico a `fitz run`.
-- [x] 1 test compile_e2e validando paridad bit-a-bit.
+- [x] Detección en codegen: `Type::List(Type::Any)` y `Type::Map(Any, _)` /
+  `Map(_, Any)` triggerean emisión del helper `__FitzValue`.
+- [x] Helper `__FitzValue` con 7 variantes: Int/Float/Str/Bool/Null/
+  Bytes/Nominal.
+- [x] Display + PartialEq + constructores por variant.
+- [x] Literal heterogéneo `[1, "dos", true, b"raw", User { ... }]`
+  compila y produce output bit-a-bit idéntico a `fitz run`.
+- [x] Map heterogéneo `{"name": "fitz", "count": 7, "on": true}`
+  compila y produce paridad bit-a-bit (ambos lados — keys y values
+  — se wrapean como FitzValue cuando al menos uno es Any).
+- [x] Nominales adentro de heterogéneos: `__FitzValue::Nominal(String)`
+  captura el Display del Data como String. Trade-off: pierde field
+  access tipado en heterogéneos pero evita dependencia en
+  `serde_json` (que solo se emite con HTTP) y mantiene el bundle
+  manejable.
+- [x] Bytes en heterogéneos: `__FitzValue::Bytes(Vec<u8>)`.
+- [x] Quick win: `Value::Bytes` en JSON ahora se serializa como
+  base64 string (encoder inline, sin dep externa).
+- [x] 4 tests compile_e2e validando paridad bit-a-bit + reject
+  de tipos no soportados.
 
-**NO incluido** en el spike (queda como follow-up dedicado):
+**NO incluido** todavía (queda como follow-up dedicado):
 
-- Map heterogéneo (`Map<Str, Any>`, `Map<Any, V>`).
-- Nominales en heterogéneos (`Nominal` variant).
-- HTTP serialization (`__ToFitzJson` / `__FromFitzJson` para FitzValue).
-- Method dispatch sobre FitzValue (downcasting ergonómico).
-- Bytes en heterogéneos (la variant `Bytes` está pero falta el
-  glue del literal `b"..."` adentro de lista mixta).
-- Float en literal mixto sin coerción.
+- HTTP body con heterogéneos (`body: List<Any>` deserializado
+  desde JSON entrante).
+- Method dispatch sobre FitzValue (downcasting ergonómico:
+  `xs[0].as_int() -> Option<Int>`, type checks dinámicos).
+- Listas/Mapas anidados con mix interno (`[1, [2, 3]]` — el
+  segundo item es List que el FitzValue actual no soporta).
+- Functions y Tuples adentro de heterogéneos.
+- Round-trip nominal vía JSON (hoy es lossy: captura Display,
+  no preserva structure tipada).
 
-## Follow-up estimado
+## Follow-up estimado (post-F13.A + F13.B)
 
-Para cerrar F13 completo (no solo el spike): ~10-15h adicionales.
-Sub-pasos:
+Para cerrar F13 completo: ~4-6h adicionales. Sub-pasos restantes:
 
-1. **F13.A — Map heterogéneo** (~3h): aplicar el patrón de List
-   a Map<K, V>. Soporte de Hash sobre `__FitzValue` para keys.
-2. **F13.B — Nominales en FitzValue** (~3h): `FitzValue::Nominal(
-   serde_json::Value)` con conversión via `__ToFitzJson` /
-   `__FromFitzJson`.
+1. ~~**F13.A — Map heterogéneo**~~ ✓ CERRADO 2026-05-20 (mini-tanda
+   F13.A+B+base64).
+2. ~~**F13.B — Nominales en FitzValue**~~ ✓ CERRADO 2026-05-20.
+   Variante Nominal(String) que captura Display. Trade-off
+   documentado (lossy).
 3. **F13.C — HTTP body con heterogéneos** (~2h): `body: List<Any>`
    funciona end-to-end (JSON in → Vec<FitzValue>).
 4. **F13.D — Method dispatch básico** (~2h): `xs[0].to_str()`,
    `xs[0].as_int()`, `xs[0].type_name()`. Sin pattern matching
    sobre variants (que requeriría syntax nueva del lenguaje).
-5. **F13.E — Docs + ejemplos + smoke** (~2h): cap 9 de la guía
-   con ejemplo runnable.
+5. **F13.E — Listas/Mapas anidados con mix interno** (~2h):
+   `[1, [2, 3]]` requiere `FitzValue::List(Vec<FitzValue>)` y
+   `FitzValue::Map(Vec<(FitzValue, FitzValue)>)`. Recursion en
+   el enum.
 
 ## Por qué este spike
 

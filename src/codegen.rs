@@ -326,6 +326,16 @@ fn program_uses_fitz_value(program: &Program) -> bool {
         }
         false
     }
+    /// F13.A — detecta heterogeneidad en pares de un Map literal.
+    /// Triggerea si las keys son de tipos AST distintos O los values
+    /// son de tipos AST distintos.
+    fn map_is_heterogeneous(pairs: &[(Expr, Expr)]) -> bool {
+        let keys: Vec<&Expr> = pairs.iter().map(|(k, _)| k).collect();
+        let values: Vec<&Expr> = pairs.iter().map(|(_, v)| v).collect();
+        let keys_owned: Vec<Expr> = keys.iter().map(|e| (**e).clone()).collect();
+        let vals_owned: Vec<Expr> = values.iter().map(|e| (**e).clone()).collect();
+        list_is_heterogeneous(&keys_owned) || list_is_heterogeneous(&vals_owned)
+    }
     fn expr_uses_fv(e: &Expr) -> bool {
         match e {
             Expr::List(items, _) => {
@@ -349,7 +359,10 @@ fn program_uses_fitz_value(program: &Program) -> bool {
                     || start.as_ref().is_some_and(|s| expr_uses_fv(s))
                     || end.as_ref().is_some_and(|e| expr_uses_fv(e))
             }
-            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_fv(k) || expr_uses_fv(v)),
+            Expr::Map(pairs, _) => {
+                map_is_heterogeneous(pairs)
+                    || pairs.iter().any(|(k, v)| expr_uses_fv(k) || expr_uses_fv(v))
+            }
             Expr::Tuple(items, _) => items.iter().any(expr_uses_fv),
             Expr::TupleField { tuple, .. } => expr_uses_fv(tuple),
             Expr::Range { start, end, .. } => expr_uses_fv(start) || expr_uses_fv(end),
@@ -3696,15 +3709,27 @@ impl<'a> CodegenCtx<'a> {
         // comillas adentro de colecciones via `__fitz_fmt_value_inline`,
         // Float con `.0` si fract=0 via `__fitz_fmt_float`).
         if self.uses_fitz_value {
+            // F13.A + F13.B — variantes extendidas:
+            //   - Bytes(Vec<u8>): Bytes adentro de heterogéneos.
+            //   - Nominal(String): captura el Display del nominal
+            //     como String. Trade-off SPIKE/F13.B: pierde field
+            //     access tipado en heterogéneos pero evita la
+            //     dependencia en `serde_json` (que solo se emite
+            //     cuando hay rutas HTTP). El usuario que necesite
+            //     acceso tipado debe sacar el item con type check
+            //     dinámico (follow-up F13.D) o serializar/
+            //     deserializar via JSON manual.
             self.emit(
                 "#[derive(Clone, Debug)]\n\
+                 #[allow(dead_code)]\n\
                  enum __FitzValue {\n    \
                      Int(i64),\n    \
                      Float(f64),\n    \
                      Str(String),\n    \
                      Bool(bool),\n    \
-                     #[allow(dead_code)]\n    \
-                     Null,\n\
+                     Null,\n    \
+                     Bytes(Vec<u8>),\n    \
+                     Nominal(String),\n\
                  }\n\n\
                  impl std::fmt::Display for __FitzValue {\n    \
                      fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        \
@@ -3713,7 +3738,9 @@ impl<'a> CodegenCtx<'a> {
                              Self::Float(x) => write!(f, \"{}\", __fitz_fmt_float(*x)),\n            \
                              Self::Str(s) => write!(f, \"\\\"{}\\\"\", s),\n            \
                              Self::Bool(b) => write!(f, \"{}\", b),\n            \
-                             Self::Null => write!(f, \"null\"),\n        \
+                             Self::Null => write!(f, \"null\"),\n            \
+                             Self::Bytes(bs) => write!(f, \"{}\", __fitz_fmt_bytes(bs)),\n            \
+                             Self::Nominal(repr) => write!(f, \"{}\", repr),\n        \
                          }\n    \
                      }\n\
                  }\n\n\
@@ -3727,6 +3754,8 @@ impl<'a> CodegenCtx<'a> {
                              (Self::Str(a), Self::Str(b)) => a == b,\n            \
                              (Self::Bool(a), Self::Bool(b)) => a == b,\n            \
                              (Self::Null, Self::Null) => true,\n            \
+                             (Self::Bytes(a), Self::Bytes(b)) => a == b,\n            \
+                             (Self::Nominal(a), Self::Nominal(b)) => a == b,\n            \
                              _ => false,\n        \
                          }\n    \
                      }\n\
@@ -9937,16 +9966,16 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         if matches!(common_ty, Type::Any) {
-            // F13 SPIKE — el tipo común no se puede resolver homogéneo;
-            // emitimos `Vec<__FitzValue>` con cada item wrapeado en su
-            // variante. Habilita `[1, "dos", true]` compilando.
-            // Limitación SPIKE: cada item debe ser un primitivo
-            // soportado (Int/Float/Str/Bool/Null) o el codegen falla
-            // con un mensaje específico citando el follow-up.
+            // F13 SPIKE + F13.A + F13.B — el tipo común no se puede
+            // resolver homogéneo; emitimos `Vec<__FitzValue>` con cada
+            // item wrapeado en su variante. Cubre Int/Float/Str/Bool/
+            // Null/Bytes/Nominales. List/Map/Function anidados como
+            // items siguen siendo follow-up.
             self.uses_fitz_value = true;
+            let env = self.env;
             let wrapped: Vec<String> = item_codes_tys
                 .iter()
-                .map(|(c, t)| wrap_as_fitz_value(c, t))
+                .map(|(c, t)| wrap_as_fitz_value_with_env(c, t, env))
                 .collect::<Result<Vec<_>, FitzError>>()?;
             let code = format!(
                 "Arc::new(Mutex::new(vec![{}]))",
@@ -10185,31 +10214,61 @@ impl<'a> CodegenCtx<'a> {
             let vt = self.gen_expr(v)?;
             entries.push((kt, vt));
         }
+        // F13.A — sticky bit para Map (paralelo a List): si `lub`
+        // falla entre dos keys o values, lockeamos a `Type::Any` y
+        // emitimos Vec<(__FitzValue, __FitzValue)>.
+        let _ = map_span;
         let mut common_k = entries[0].0 .1.clone();
         let mut common_v = entries[0].1 .1.clone();
+        let mut heterogeneous_k = false;
+        let mut heterogeneous_v = false;
         for ((_, kt), (_, vt)) in &entries[1..] {
-            common_k = lub(&common_k, kt).map_err(|_| {
-                self.err_at(map_span, format!(
-                    "mapa con claves de tipos incompatibles (`{}` y `{}`): el subset compilado \
-                     exige claves homogéneas",
-                    display_type(&common_k, self.env),
-                    display_type(kt, self.env),
-                ))
-            })?;
-            common_v = lub(&common_v, vt).map_err(|_| {
-                self.err_at(map_span, format!(
-                    "mapa con valores de tipos incompatibles (`{}` y `{}`): el subset compilado \
-                     exige valores homogéneos",
-                    display_type(&common_v, self.env),
-                    display_type(vt, self.env),
-                ))
-            })?;
+            if !heterogeneous_k {
+                match lub(&common_k, kt) {
+                    Ok(j) => common_k = j,
+                    Err(_) => {
+                        heterogeneous_k = true;
+                        common_k = Type::Any;
+                    }
+                }
+            }
+            if !heterogeneous_v {
+                match lub(&common_v, vt) {
+                    Ok(j) => common_v = j,
+                    Err(_) => {
+                        heterogeneous_v = true;
+                        common_v = Type::Any;
+                    }
+                }
+            }
         }
+
         if matches!(common_k, Type::Any) || matches!(common_v, Type::Any) {
-            return Err(self.err_at(map_span,
-                "mapa con claves o valores cuyo tipo común es `Any`: el subset compilado exige \
-                 tipos homogéneos concretos. Anotá el tipo o usá `fitz run` para interpretarlo \
-                 sin restricción.",
+            // F13.A — Map heterogéneo. Emitimos Vec<(FV, FV)>.
+            // Cuando solo UNO de K o V es Any, igual wrapeamos AMBOS
+            // lados como `__FitzValue` (el rust_type_for emite
+            // `Vec<(FV, FV)>` para ambos casos — la cara más simple
+            // del Map heterogéneo). Esto pierde info estática del
+            // lado homogéneo pero simplifica el path.
+            self.uses_fitz_value = true;
+            let env = self.env;
+            let pieces: Vec<String> = entries
+                .iter()
+                .map(|((kc, kt), (vc, vt))| {
+                    let k_wrap = wrap_as_fitz_value_with_env(kc, kt, env)?;
+                    let v_wrap = wrap_as_fitz_value_with_env(vc, vt, env)?;
+                    Ok::<_, FitzError>(format!("({}, {})", k_wrap, v_wrap))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let code = format!(
+                "Arc::new(Mutex::new(vec![{}]))",
+                pieces.join(", ")
+            );
+            return Ok((
+                code,
+                // El tipo resultante es Map<Any, Any> sintáctico, que
+                // mapea a Vec<(FV, FV)> en rust_type_for.
+                Type::Map(Box::new(Type::Any), Box::new(Type::Any)),
             ));
         }
         let pieces: Vec<String> = entries
@@ -13774,11 +13833,24 @@ fn sanitize_python_binding_lower(name: &str) -> String {
     out
 }
 
-/// F13 SPIKE — envuelve una expresión Fitz primitiva (Int/Float/Str/
-/// Bool/Null) en su variante de `__FitzValue`. Usado para emitir
-/// items de listas heterogéneas. Tipos no soportados en el SPIKE
-/// (Bytes, List, Map, Nominal, Function, etc.) → error claro
-/// citando el follow-up de F13.
+/// F13 SPIKE + F13.A + F13.B — envuelve una expresión Fitz en su
+/// variante de `__FitzValue`. Usado para emitir items de listas/
+/// mapas heterogéneos.
+///
+/// Cobertura post-F13.A+B:
+/// - Primitivos (Int/Float/Str/Bool/Null): variantes directas.
+/// - Bytes: `__FitzValue::Bytes(Vec<u8>)` con clone explícito.
+/// - Nominales: `__FitzValue::Nominal(type_name, json)`. El nombre
+///   se preserva para Display bit-a-bit con el intérprete; los
+///   fields van como `serde_json::Value::Object` via
+///   `__ToFitzJson`. Round-trip implícito a JSON pierde field
+///   access tipado adentro del heterogéneo — el usuario que
+///   necesite acceso tipado debe sacar el item con `as_<T>()` o
+///   serializar/deserializar (follow-up F13.D para method dispatch).
+///
+/// Tipos NO cubiertos (follow-up de F13): List/Map/Function/Tuple/
+/// Range/Future. La lista anidada `[[1, 2], "x"]` y el callable en
+/// heterogéneo siguen abortando con error claro.
 fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
     let wrapped = match ty {
         Type::Int => format!("__FitzValue::Int({})", code),
@@ -13786,22 +13858,48 @@ fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
         Type::Str => format!("__FitzValue::Str({})", code),
         Type::Bool => format!("__FitzValue::Bool({})", code),
         Type::Null => "__FitzValue::Null".to_string(),
+        // F13.A — Bytes en heterogéneos. El `code` ya es `Vec<u8>`
+        // (rust_type_for(Bytes)); clone es O(n) pero correcto.
+        Type::Bytes => format!("__FitzValue::Bytes({})", code),
+        // F13.B — Nominales: capturamos el Display del instance
+        // como String. El Display nativo de cada tipo nominal ya
+        // formatea `User { id: 1, name: "x" }` bit-a-bit con el
+        // intérprete (codegen emite `impl Display for FooData`).
+        // El `code` típicamente es un `Arc<Mutex<FooData>>` así
+        // que primero hacemos lock para llegar al Data.
+        Type::Nominal(_) => format!(
+            "__FitzValue::Nominal(format!(\"{{}}\", &*({}).lock().unwrap()))",
+            code
+        ),
         _ => {
             return Err(FitzError::new(
                 ErrorKind::TypeError,
                 0,
                 0,
                 format!(
-                    "F13 SPIKE: el tipo `{}` adentro de un literal heterogéneo \
-                     todavía no es soportado en `fitz build` — el SPIKE cubre \
-                     solo Int/Float/Str/Bool/Null. Bytes/List/Map/tipos custom \
-                     son follow-up dedicado de F13. Workaround: usar `fitz run`.",
+                    "F13: el tipo `{}` adentro de un literal heterogéneo \
+                     todavía no es soportado en `fitz build` — F13.A+B \
+                     cubren Int/Float/Str/Bool/Null/Bytes/Nominales. \
+                     List/Map/Function anidados en heterogéneos quedan \
+                     como follow-up. Workaround: usar `fitz run`.",
                     type_name(ty)
                 ),
             ));
         }
     };
     Ok(wrapped)
+}
+
+/// F13.A + F13.B — alias para mantener compatibilidad con call sites
+/// que pasaban `env`. Tras simplificar el Nominal a capturar Display
+/// directo, `wrap_as_fitz_value` no necesita el env, pero los call
+/// sites lo pasan por uniformidad — el wrapper ignora el env.
+fn wrap_as_fitz_value_with_env(
+    code: &str,
+    ty: &Type,
+    _env: &TypeEnv,
+) -> Result<String, FitzError> {
+    wrap_as_fitz_value(code, ty)
 }
 
 fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
@@ -13840,17 +13938,14 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
             Ok(format!("Arc<Mutex<Vec<{}>>>", rust_type_for(inner, env)?))
         }
         Type::Map(k, v) => {
+            // F13.A — `Map<Any, V>` o `Map<K, Any>` (o ambos) →
+            // `Vec<(__FitzValue, __FitzValue)>`. El caller que decida
+            // usar este tipo debe setear `uses_fitz_value` (`gen_map_lit`
+            // sobre `Map` con keys/values heterogéneos lo hace
+            // automáticamente). Mapas homogéneos siguen como
+            // `Vec<(K, V)>` (sin overhead).
             if matches!(**k, Type::Any) || matches!(**v, Type::Any) {
-                return Err(FitzError::new(
-                    ErrorKind::TypeError,
-                    0,
-                    0,
-                    "mapas con claves o valores de tipos mixtos (`Map<Any, ...>` o \
-                     `Map<..., Any>`): el subset compilado necesita tipos homogéneos \
-                     concretos. Anotá el tipo o usá `fitz run` para interpretarlo \
-                     sin restricción."
-                        .to_string(),
-                ));
+                return Ok("Arc<Mutex<Vec<(__FitzValue, __FitzValue)>>>".to_string());
             }
             Ok(format!(
                 "Arc<Mutex<Vec<({}, {})>>>",
@@ -16434,6 +16529,67 @@ mod tests {
         );
     }
 
+    // ---- F13.A — Bytes y Map heterogéneo ----
+
+    #[test]
+    fn f13_a_bytes_en_lista_heterogenea_se_envuelve() {
+        // F13.A — Bytes adentro de lista heterogénea se envuelve
+        // como `__FitzValue::Bytes(_)`.
+        let code = gen("let xs = [1, b\"raw\"]").unwrap();
+        assert!(
+            code.contains("__FitzValue::Bytes("),
+            "esperaba wrap `__FitzValue::Bytes(...)` para Bytes en heterogéneo"
+        );
+    }
+
+    #[test]
+    fn f13_a_map_heterogeneo_emite_vec_fv_fv() {
+        // F13.A — Map<Str, Any> emite Vec<(FV, FV)>: ambos lados
+        // wrapeados (incluso el lado homogéneo se wrappea para
+        // uniformar el tipo).
+        let code = gen("let m = {\"a\": 1, \"b\": \"x\"}").unwrap();
+        assert!(
+            code.contains("Vec<(__FitzValue, __FitzValue)>"),
+            "esperaba Vec<(__FitzValue, __FitzValue)> para mapa heterogéneo"
+        );
+        assert!(
+            code.contains("__FitzValue::Str(String::from(\"a\"))"),
+            "esperaba wrap del lado homogéneo de keys"
+        );
+    }
+
+    #[test]
+    fn f13_a_mapa_homogeneo_no_emite_fitz_value() {
+        // Sanity: mapas homogéneos siguen sin overhead.
+        let code = gen("let m = {\"a\": 1, \"b\": 2}").unwrap();
+        assert!(
+            !code.contains("__FitzValue"),
+            "mapa homogéneo NO debe gatillar emisión de `__FitzValue`"
+        );
+    }
+
+    // ---- F13.B — Nominales en heterogéneos ----
+
+    #[test]
+    fn f13_b_nominal_en_lista_heterogenea_captura_display() {
+        // F13.B — Nominal adentro de lista heterogénea se captura
+        // como String via Display del Data.
+        let code = gen(
+            "type User { id: Int }\n\
+             let u = User { id: 1 }\n\
+             let xs = [u, 42]",
+        )
+        .unwrap();
+        assert!(
+            code.contains("__FitzValue::Nominal(format!"),
+            "esperaba wrap `__FitzValue::Nominal(format!(...))` para Nominal en heterogéneo"
+        );
+        assert!(
+            code.contains(".lock().unwrap()"),
+            "esperaba lock del Arc<Mutex<UserData>> antes de Display"
+        );
+    }
+
     #[test]
     fn map_literal_emite_vec_pares() {
         // `{"a": 1, "b": 2}` se modela como
@@ -16485,10 +16641,20 @@ mod tests {
     }
 
     #[test]
-    fn map_literal_valores_heterogeneos_es_error() {
-        assert_err_contains(
-            "let m = {\"a\": 1, \"b\": \"x\"}",
-            &["homogéneos"],
+    fn map_literal_valores_heterogeneos_emite_fitz_value() {
+        // F13.A — `{"a": 1, "b": "x"}` con values heterogéneos ya no
+        // es error; emite Vec<(__FitzValue, __FitzValue)> con cada
+        // par envuelto. Antes del F13.A el codegen abortaba "valores
+        // homogéneos requeridos".
+        let code = gen("let m = {\"a\": 1, \"b\": \"x\"}").unwrap();
+        assert!(
+            code.contains("Vec<(__FitzValue, __FitzValue)>"),
+            "esperaba tipo `Vec<(__FitzValue, __FitzValue)>` para mapa heterogéneo, código:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__FitzValue::Int(1i64)"),
+            "esperaba wrap `__FitzValue::Int(1i64)` para value Int"
         );
     }
 

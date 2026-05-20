@@ -918,10 +918,16 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         Value::Str(s) => J::String(s.clone()),
         Value::Bool(b) => J::Bool(*b),
         Value::Null => J::Null,
-        // Mini-tanda Bytes — Bytes se serializa como array de Int en
-        // JSON (cada byte un Int en 0..256). Alternativa común
-        // (base64) queda como deuda menor si entra demanda.
-        Value::Bytes(bs) => J::Array(bs.iter().map(|b| J::from(*b as i64)).collect()),
+        // Mini-tanda Bytes + quick win F13 bundle — Bytes se
+        // serializa como base64 string (estándar de facto para
+        // bytes en JSON). Antes se emitía como array de Int (cada
+        // byte un i64), que funciona pero infla la representación
+        // ~4x y es no-estándar. Decodificación implementada manual
+        // (alfabeto RFC 4648 sin padding, sin '+' / '/' problemáticos
+        // — se usa el `base64-standard`). Para mantener la deuda de
+        // dep ligera, no agregamos la crate `base64`; encodeamos
+        // inline.
+        Value::Bytes(bs) => J::String(b64_encode_standard(bs)),
 
         Value::List(items) => {
             let mut out = Vec::with_capacity(items.lock().len());
@@ -2411,6 +2417,35 @@ fn parse_cd_params(s: &str) -> std::collections::HashMap<String, String> {
 /// Mini-tanda MP — URL-decode (formato `application/x-www-form-urlencoded`):
 /// `+` → espacio, `%XX` → byte hex. Errores de %XX malformado se
 /// reportan con offset claro.
+/// Quick win F13 bundle — encoder base64 estándar (RFC 4648, sin
+/// URL-safe alphabet, con padding). Inline para evitar dep `base64`.
+/// Acepta cualquier slice de bytes, devuelve String ASCII.
+fn b64_encode_standard(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut chunks = bytes.chunks(3);
+    for c in chunks.by_ref() {
+        let b0 = c[0];
+        let b1 = if c.len() > 1 { c[1] } else { 0 };
+        let b2 = if c.len() > 2 { c[2] } else { 0 };
+        let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(TABLE[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(TABLE[((triple >> 12) & 0x3f) as usize] as char);
+        if c.len() > 1 {
+            out.push(TABLE[((triple >> 6) & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+        if c.len() > 2 {
+            out.push(TABLE[(triple & 0x3f) as usize] as char);
+        } else {
+            out.push('=');
+        }
+    }
+    out
+}
+
 fn url_decode(s: &str) -> Result<String, String> {
     let mut out = String::with_capacity(s.len());
     let mut chars = s.chars().peekable();
@@ -4855,6 +4890,40 @@ mod tests {
             "esperaba mención de boundary, fue: {}",
             outcome.body
         );
+    }
+
+    // ---- Quick win F13 bundle — base64 encoder ----
+
+    #[test]
+    fn b64_encode_empty() {
+        assert_eq!(b64_encode_standard(b""), "");
+    }
+
+    #[test]
+    fn b64_encode_basico() {
+        // RFC 4648 test vectors estándar.
+        assert_eq!(b64_encode_standard(b"f"), "Zg==");
+        assert_eq!(b64_encode_standard(b"fo"), "Zm8=");
+        assert_eq!(b64_encode_standard(b"foo"), "Zm9v");
+        assert_eq!(b64_encode_standard(b"foob"), "Zm9vYg==");
+        assert_eq!(b64_encode_standard(b"fooba"), "Zm9vYmE=");
+        assert_eq!(b64_encode_standard(b"foobar"), "Zm9vYmFy");
+    }
+
+    #[test]
+    fn b64_encode_binarios() {
+        // Bytes binarios arbitrarios.
+        assert_eq!(b64_encode_standard(&[0u8]), "AA==");
+        assert_eq!(b64_encode_standard(&[0xff, 0xff, 0xff]), "////");
+    }
+
+    #[test]
+    fn value_to_json_bytes_emite_base64() {
+        // Mini-tanda Bytes + quick win F13: `Value::Bytes` se
+        // serializa como base64 string (no como array de Int).
+        let v = Value::Bytes(b"hola".to_vec());
+        let j = value_to_json(&v).unwrap();
+        assert_eq!(j, serde_json::json!("aG9sYQ=="));
     }
 
     #[test]
