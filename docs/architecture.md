@@ -312,6 +312,15 @@ Componentes:
 - `build_router(metas, registry, openapi_schema)`: arma el
   `Router` con un closure por ruta + CORS preflight (mini-fase
   MW) + middleware chain.
+- `MiddlewareKind::{Pre, Post}` + `MiddlewareSpec.kind`: mini-tanda
+  Mw.next clasifica middlewares por aridad. Pre (1 arg) corre antes
+  del handler con semántica gate-only; Post (2 args
+  `(Request, Response)`) corre después del handler en reverse order
+  para modificar la response. `run_middleware_chain` filtra Pre;
+  `run_post_middlewares` corre los Post tras el handler.
+- `parse_urlencoded_body`: mini-tanda MP parsea
+  `application/x-www-form-urlencoded` body como `Value::Map<Str, Str>`.
+  Soporte de Content-Type 415 estricto para no-JSON/no-urlencoded.
 - `value_to_json` / `json_to_value` / `json_to_instance`:
   traducen entre `Value` y `serde_json::Value`. Con schema (`type`
   declarado), `json_to_instance` valida campos / aplica defaults /
@@ -323,9 +332,33 @@ Componentes:
 
 ### codegen.rs — transpile a Rust
 
-Genera un Cargo project completo a partir del AST + `TypeEnv`.
-`generate_project(path, program, type_env)` devuelve `Cargo.toml`
-+ `src/main.rs` + módulos auxiliares.
+Genera un Cargo project completo a partir del AST + `TypeEnv` +
+`TypeInfo` (mini-tanda Hpx.2 — el codegen consulta el side-table
+para inferir return types de fns sin anotar).
+`generate_project(path, program, type_env, type_info, dep_registry)`
+devuelve `Cargo.toml` + `src/main.rs` + módulos auxiliares.
+
+**Helpers para inferencia** (mini-tandas Hpx.2 + 5b.1 + P2):
+- `infer_return_type_from_body(body, type_info)`: walkea
+  `Stmt::Return(e)` en el body, consulta `e.span()` en `TypeInfo`,
+  unifica con `lub`.
+- `infer_param_type_from_call_sites(program, fn_name, idx, type_info)`:
+  scanea el programa por calls a `fn_name`, extrae el tipo del arg
+  `idx`-ésimo.
+- `has_unannotated_fn_params(program)` + `fill_inferred_param_types(program, type_info)`:
+  el `build_file` usa estos para mutar el AST in-place tras la
+  primera pasada del checker, llenando params inferidos. Se re-corre
+  el checker para refinar `TypeInfo` y soportar la cadena 5b.1+Hpx.2
+  (ambos param y return inferidos cuando el return depende del param).
+
+**Mw.next codegen** (mini-tanda P1 + RP): `HandlerSig.mw_user_fns_post`
+guarda nombres de post mws. `CodegenCtx.middleware_post_fn_names`
+tracks fns marcadas como Post (clasificadas por aridad en post-scan
+de `pre_register_fns`). `gen_top_fn` emite Post mws con return
+`__FitzResponse` (no Option). `emit_handler_dispatch_and_response`
+construye un `__FitzResponse` intermedio, corre la chain de Post mws
+en reverse, y convierte a axum Response al final. Cubre handlers
+con return plain T, returns_response (ReturnStatus), y Result<T>.
 
 Mapping de tipos (post-F17.4b):
 - `Int → i64`, `Float → f64`, `Str → String`, `Bool → bool`,

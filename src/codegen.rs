@@ -11112,18 +11112,61 @@ impl<'a> CodegenCtx<'a> {
             .unwrap();
             self.emit("\n");
         } else if sig.returns_result && has_post_mws {
-            // Mini-tanda P1 — handler `-> Result<T>` con post-mws no
-            // está soportado en codegen todavía. El path Result construye
-            // `__built` via match Ok/Err inline; refactorizar para
-            // construir __FitzResponse primero + chain de post-mws +
-            // axum response es invasivo. Sub-paso futuro.
-            return self.emit(&format!(
-                "    return (\n\
-                 \x20       axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n\
-                 \x20       axum::Json(serde_json::json!({{\"error\": \"handler `{}` con `-> Result<T>` + middleware post-process no compila todavía en `fitz build` (sub-paso futuro de P1). Workaround: usar `return <status> {{ ... }}` en lugar de Result, o quitar el post-middleware.\"}})),\n\
-                 \x20   ).into_response();\n}}\n\n",
-                sig.name,
-            ));
+            // Mini-tanda RP — Result<T> + post mws: construir
+            // `__resp: __FitzResponse` via match Ok/Err, correr post
+            // mws en reverse, y convertir a axum Response. Mismo set
+            // de casos que el path Result regular (Ok+200, Err con/sin
+            // status field, status fuera de rango), pero produciendo
+            // __FitzResponse en lugar de axum Response inline.
+            self.emit("    let mut __resp: __FitzResponse = match __result {\n");
+            self.emit("        Ok(__v) => __FitzResponse {\n");
+            self.emit("            status: 200,\n");
+            self.emit("            body: __v.__to_fitz_json(),\n");
+            self.emit("        },\n");
+            if sig.err_has_status_field {
+                self.emit("        Err(__e) => {\n");
+                self.emit("            let __raw_status = __e.lock().unwrap().status;\n");
+                self.emit("            if (100i64..1000i64).contains(&__raw_status) {\n");
+                self.emit("                __FitzResponse {\n");
+                self.emit("                    status: __raw_status as u16,\n");
+                self.emit("                    body: __e.__to_fitz_json(),\n");
+                self.emit("                }\n");
+                self.emit("            } else {\n");
+                self.emit("                let __msg = format!(\"status code inválido en Err: {} (debe estar en 100..1000)\", __raw_status);\n");
+                self.emit("                __FitzResponse {\n");
+                self.emit("                    status: 500,\n");
+                self.emit("                    body: serde_json::json!({\"error\": __msg}),\n");
+                self.emit("                }\n");
+                self.emit("            }\n");
+                self.emit("        },\n");
+            } else {
+                self.emit("        Err(__e) => __FitzResponse {\n");
+                self.emit("            status: 500,\n");
+                self.emit("            body: serde_json::json!({\"error\": __e}),\n");
+                self.emit("        },\n");
+            }
+            self.emit("    };\n");
+            // Post mws en reverse order — semántica wrap.
+            for mw_name in sig.mw_user_fns_post.iter().rev() {
+                writeln!(
+                    &mut self.output,
+                    "    __resp = {}(__req.clone(), __resp);",
+                    mw_name,
+                )
+                .unwrap();
+            }
+            self.emit("    let __built = (\n");
+            self.emit("        axum::http::StatusCode::from_u16(__resp.status)\n");
+            self.emit("            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+            self.emit("        axum::Json(__resp.body),\n");
+            self.emit("    ).into_response();\n");
+            writeln!(
+                &mut self.output,
+                "    __apply_cors_and_respond(__built, {})",
+                cors_arg
+            )
+            .unwrap();
+            self.emit("\n");
         } else if sig.returns_result {
             self.emit("    let __built = match __result {\n");
             self.emit("        Ok(__v) => (\n");

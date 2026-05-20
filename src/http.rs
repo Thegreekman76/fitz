@@ -1857,30 +1857,54 @@ async fn handle_task(
     // claro. Si NO hay header (body crudo), aceptamos (clientes
     // tipo curl sin -H lo emiten así, y Fitz nunca prometió Content-
     // Type estricto). Sub-paso futuro dedicado para multipart/form.
+    //
+    // Mini-tanda MP — sumamos soporte para `application/x-www-form-urlencoded`:
+    // se parsea como `Map<Str, Str>` y se asigna al body param.
+    // Multipart con files queda como sub-paso futuro (más complejo).
     let body_value: Option<Value> = if let Some(bp) = &route.body_param {
-        if let Some(ct) = raw_headers.get("content-type") {
-            let primary = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
-            if !primary.is_empty() && primary != "application/json" {
-                return HandlerOutcome::json(
-                    415,
-                    serde_json::json!({
-                        "error": format!(
-                            "Content-Type no soportado: '{}'. El handler espera JSON \
-                             (`application/json`). Multipart, urlencoded y otros formatos \
-                             quedan como sub-paso futuro.",
-                            ct
-                        ),
-                    }),
-                );
-            }
+        let ct_primary = raw_headers
+            .get("content-type")
+            .map(|ct| ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+            .unwrap_or_default();
+
+        let is_urlencoded = ct_primary == "application/x-www-form-urlencoded";
+        let is_json_or_empty = ct_primary.is_empty() || ct_primary == "application/json";
+
+        if !is_json_or_empty && !is_urlencoded {
+            // Multipart, text/plain, custom, etc. → 415.
+            return HandlerOutcome::json(
+                415,
+                serde_json::json!({
+                    "error": format!(
+                        "Content-Type no soportado: '{}'. El handler espera JSON \
+                         (`application/json`) o urlencoded \
+                         (`application/x-www-form-urlencoded`). Multipart y otros formatos \
+                         quedan como sub-paso futuro.",
+                        raw_headers.get("content-type").map(|s| s.as_str()).unwrap_or("(sin header)")
+                    ),
+                }),
+            );
         }
-        match parse_body(&body_bytes, bp) {
-            Ok(v) => Some(v),
-            Err(msg) => {
-                return HandlerOutcome::json(
-                    400,
-                    serde_json::json!({ "error": msg }),
-                );
+
+        if is_urlencoded {
+            match parse_urlencoded_body(&body_bytes) {
+                Ok(v) => Some(v),
+                Err(msg) => {
+                    return HandlerOutcome::json(
+                        400,
+                        serde_json::json!({ "error": msg }),
+                    );
+                }
+            }
+        } else {
+            match parse_body(&body_bytes, bp) {
+                Ok(v) => Some(v),
+                Err(msg) => {
+                    return HandlerOutcome::json(
+                        400,
+                        serde_json::json!({ "error": msg }),
+                    );
+                }
             }
         }
     } else {
@@ -2021,6 +2045,67 @@ async fn handle_task(
 ///     validamos contra el type (campos faltantes, extras, etc.) y
 ///     construimos un `Value::Instance`.
 ///   - Si no, deserializamos a `Value` libre (Map/List/primitivos).
+///
+/// Mini-tanda MP — parsea `application/x-www-form-urlencoded` body
+/// (formato `key1=value1&key2=value2`) a un `Value::Map<Str, Str>`.
+/// URL-decoding aplicado a keys y valores. Body vacío → Map vacío.
+/// Duplicados: last-wins (paralelo a la convención de `serde_urlencoded`).
+fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
+    use crate::value::shared;
+    let s = std::str::from_utf8(bytes).map_err(|e| {
+        format!("body urlencoded inválido (UTF-8): {}", e)
+    })?;
+    let mut pairs: Vec<(Value, Value)> = Vec::new();
+    if s.is_empty() {
+        return Ok(Value::Map(shared(pairs)));
+    }
+    for kv in s.split('&') {
+        let mut parts = kv.splitn(2, '=');
+        let raw_k = parts.next().unwrap_or("");
+        let raw_v = parts.next().unwrap_or("");
+        let k = url_decode(raw_k)?;
+        let v = url_decode(raw_v)?;
+        // Duplicados: last-wins. Eliminamos entry previa con misma key.
+        pairs.retain(|(existing_k, _)| {
+            !matches!(existing_k, Value::Str(s) if s == &k)
+        });
+        pairs.push((Value::Str(k), Value::Str(v)));
+    }
+    Ok(Value::Map(shared(pairs)))
+}
+
+/// Mini-tanda MP — URL-decode (formato `application/x-www-form-urlencoded`):
+/// `+` → espacio, `%XX` → byte hex. Errores de %XX malformado se
+/// reportan con offset claro.
+fn url_decode(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    let mut idx: usize = 0;
+    while let Some(c) = chars.next() {
+        match c {
+            '+' => out.push(' '),
+            '%' => {
+                let h1 = chars.next().ok_or_else(|| {
+                    format!("urlencoded: %XX incompleto en offset {}", idx)
+                })?;
+                let h2 = chars.next().ok_or_else(|| {
+                    format!("urlencoded: %XX incompleto en offset {}", idx)
+                })?;
+                let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16).map_err(|_| {
+                    format!("urlencoded: %{}{} no es hex válido", h1, h2)
+                })?;
+                // Acumular bytes para chars multi-byte UTF-8.
+                out.push(byte as char);
+                idx += 3;
+                continue;
+            }
+            other => out.push(other),
+        }
+        idx += 1;
+    }
+    Ok(out)
+}
+
 fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
     // Body vacío para un handler que espera body → error claro. Esto
     // pasa con `POST /users` sin body cuando el handler declara
@@ -4333,6 +4418,93 @@ mod tests {
         let outcome = run_post_middlewares(&mws, &request, original.clone()).await;
         assert_eq!(outcome.status, original.status);
         assert_eq!(outcome.body, original.body);
+    }
+
+    // ---- Mini-tanda MP — urlencoded bodies ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mp_urlencoded_basico_parsea_a_map() {
+        let reg = registry_with_post_body_route();
+        let body = b"name=Fitz&age=25".to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "application/x-www-form-urlencoded".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 200, "esperaba 200, fue {} con body {}", outcome.status, outcome.body);
+        assert!(
+            outcome.body.contains("\"name\":\"Fitz\"") && outcome.body.contains("\"age\":\"25\""),
+            "esperaba name/age en body, fue: {}",
+            outcome.body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mp_urlencoded_con_url_encoding() {
+        let reg = registry_with_post_body_route();
+        // "hola mundo" + "Fitz Roy" con encoding (espacios como +)
+        let body = b"greeting=hola+mundo&place=Fitz%20Roy".to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "application/x-www-form-urlencoded".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 200);
+        assert!(
+            outcome.body.contains("\"greeting\":\"hola mundo\""),
+            "esperaba `+` decodificado a espacio: {}",
+            outcome.body
+        );
+        assert!(
+            outcome.body.contains("\"place\":\"Fitz Roy\""),
+            "esperaba `%20` decodificado a espacio: {}",
+            outcome.body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mp_urlencoded_body_vacio_es_map_vacio() {
+        let reg = registry_with_post_body_route();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "application/x-www-form-urlencoded".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            Vec::new(),
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 200);
+        assert_eq!(outcome.body, "{}");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mp_multipart_sigue_rechazado_con_415() {
+        let reg = registry_with_post_body_route();
+        let body = b"--boundary\r\n".to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "multipart/form-data; boundary=---".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 415);
+        assert!(outcome.body.contains("Multipart"));
     }
 
     #[tokio::test(flavor = "current_thread")]

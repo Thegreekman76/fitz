@@ -1131,6 +1131,103 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~RP + MP + roadmap/architecture refresh — paridad HTTP + docs al día~~ ✓ CERRADO 2026-05-20 (mini-tanda RP + MP + Docs refresh)
+
+Mega-bundle final pre-9.w. Cierra las dos asimétrias HTTP restantes
++ refresh masivo de roadmap y architecture docs.
+
+**Parte 1 — RP: Result<T> + post mws codegen**:
+
+- ~~**`-> Result<T>` con post middlewares ahora compila en
+  `fitz build`**~~ ✓ El path Result construye un `__resp:
+  __FitzResponse` intermedio via match Ok/Err, corre los post mws
+  en reverse order, y convierte a axum Response al final. Cubre
+  los mismos casos que el path Result sin post-mws:
+  Ok → 200 + body, Err con `status` field → status validado +
+  body, Err sin status field → 500 + `{"error": e}`, status fuera
+  de rango → 500 + msg claro.
+- **End-to-end paridad** ✓ Smoke manual: `fn maybe(n: Int) ->
+  Result<Str> { if n>0 return Ok("pos") else return Err("neg") }`
+  con post-mw `wrap` que devuelve `{"wrapped":"yes","method":req.method}`
+  → ambos Ok y Err cases retornan la response wrappeada
+  bit-a-bit en `fitz run` y `fitz build`.
+
+**Parte 2 — MP: urlencoded bodies**:
+
+- ~~**`application/x-www-form-urlencoded` body parsing**~~ ✓ Helper
+  nuevo `parse_urlencoded_body` en `http.rs` parsea
+  `key1=val1&key2=val2` a un `Value::Map<Str, Str>`. URL-decoding
+  aplicado a keys y valores (`+` → espacio, `%XX` → byte hex).
+  Duplicados: last-wins (paralelo a `serde_urlencoded`). Body
+  vacío → Map vacío.
+- ~~**Content-Type 415 actualizado**~~ ✓ Acepta JSON, urlencoded,
+  o body sin Content-Type. Otros formatos (multipart, text/plain,
+  etc.) → 415 con mensaje claro citando ambos formatos soportados
+  y multipart como sub-paso futuro.
+- **Codegen**: NO soporta urlencoded todavía. `axum::Json` rechaza
+  con 415 default antes de llegar al handler. Deuda residual menor
+  (la mayoría de los handlers JSON funcionan; urlencoded en codegen
+  requiere swap del extractor a Bytes + manual parse).
+- **Multipart con files**: sigue diferido. Requiere infrastructure
+  adicional (manejo de file uploads, boundaries, parts). Sub-paso
+  futuro dedicado (~4-6h) si entra demanda real.
+
+**Parte 3 — Roadmap refresh masivo**:
+
+- `docs/roadmap.md` sumó sección final "Mini-tandas post-Fase 8 —
+  polish del lenguaje base (2026-05-17 → 2026-05-20)" con tabla
+  cronológica de las ~25 mini-tandas cerradas en la serie:
+  R.1/R.2/R.3, S/I/T/L, Md/It/Ex/Up/Mb-series, C/Fm/Err+/Re+,
+  Bits/Cmp/Xor/Núm/Lit/F8/F9, Mln/F14/F15/F16, Rt/Lt, Math+Mb9,
+  Fp+Sp/Fp.2/Fp.3/Sp.2, Vp/Vm/St/CM/Cd, HC.1/HC.2, LSPx/LSPy,
+  Hpx.1/Hpx.2, Mw.next/5b.1/P2, P1, RP, MP. Stats al cierre:
+  1983 unit sin feature, 2073 con `--features lsp`, 233+ compile_e2e.
+
+**Parte 4 — architecture.md refresh**:
+
+- Sumadas referencias a `MiddlewareKind::{Pre, Post}`,
+  `parse_urlencoded_body`, `infer_return_type_from_body`,
+  `infer_param_type_from_call_sites`, `has_unannotated_fn_params`,
+  `fill_inferred_param_types`, Mw.next codegen helpers
+  (`mw_user_fns_post`, `middleware_post_fn_names`,
+  `emit_handler_dispatch_and_response` con post-chain). El doc
+  ahora refleja las APIs públicas/privadas relevantes para
+  contribuyentes del compilador.
+
+**Implementación cross-cutting**:
+
+- **`http.rs`**: helpers `parse_urlencoded_body` y `url_decode`.
+  Content-Type matching actualizado en `handle_task`. 4 unit tests
+  nuevos en `mp_*`.
+- **`codegen.rs`**: branch `sig.returns_result && has_post_mws`
+  construye `__resp: __FitzResponse` via match con todos los casos
+  de Err (status field con validación, sin status field, fuera
+  de rango), corre post-mws en reverse, convierte a axum Response.
+- **`docs/roadmap.md`**: +~80 LoC en sección nueva con tabla
+  cronológica.
+- **`docs/architecture.md`**: +~40 LoC en módulo HTTP + codegen
+  con las nuevas APIs.
+
+**VSCode extension**: SIN cambios. Cambios server-side.
+
+**Tests**: **4 unit nuevos** (`mp_urlencoded_basico_parsea_a_map`,
+`mp_urlencoded_con_url_encoding`, `mp_urlencoded_body_vacio_es_map_vacio`,
+`mp_multipart_sigue_rechazado_con_415`). Smoke manual del codegen
+RP validó Ok+Err cases bit-a-bit `fitz run` ↔ `fitz build`.
+
+**Total al cierre: 1983 sin feature, 2073 con --features lsp.**
+Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w):**
+
+- **Multipart/form-data con files**: sub-paso futuro dedicado
+  (~4-6h). Requiere parser de multipart + decisión sobre file
+  storage.
+- **urlencoded en codegen**: hoy solo `fitz run`. Codegen sigue
+  con `axum::Json` extractor que rechaza. Refinable si entra
+  demanda (~2-3h refactor del extractor).
+- **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
+
 ### ~~P1: Mw.next codegen + cleanup roadmap-ready~~ ✓ CERRADO 2026-05-20 (mini-tanda P1 + Cleanup final)
 
 **Mega-bundle FINAL pre-9.w**. Cierra el último punto asimétrico

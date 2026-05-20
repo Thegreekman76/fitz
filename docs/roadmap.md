@@ -7172,3 +7172,70 @@ Deudas residuales que NO bloquean Fase 8:
   cache de módulos — re-cargando los archivos. Wasteful pero
   correcto. Si aparece presión, migrar a `LazyLock<Mutex<...>>`
   igual que el state HTTP del codegen.
+
+---
+
+## Mini-tandas post-Fase 8 — polish del lenguaje base (2026-05-17 → 2026-05-20)
+
+Serie de bundles de polish cerrados consecutivamente, llevando al
+lenguaje + LSP + HTTP a un estado pulido antes de Fase 9.w (Stack
+web first-class). Detalle completo de cada mini-tanda con design
+decisions, implementación cross-cutting, tests y deudas residuales
+vive en [`docs/deudas_lenguaje.md`](deudas_lenguaje.md) — esta
+sección es índice resumen + cronología.
+
+**Cronología:**
+
+| Fecha | Mini-tanda | Sumario |
+|-------|------------|---------|
+| 2026-05-17 | R.1 (R.1.1 → R.1.5) | Sintaxis polish: `not`, `%`, `xs[i] = v`, `0..=10`, `"""..."""` |
+| 2026-05-17 | R.2 (R.2.1 → R.2.4) | Match expressivo: or-patterns, guards, `+=`/`-=`, return/break/continue checker |
+| 2026-05-17 | R.3 | Métodos custom sobre `type` (opción A: fields como locales) |
+| 2026-05-17 | V | VSCode catch-up: grammar TextMate + LSP autocomplete |
+| 2026-05-17 | S | Métodos de Str + List (sort/reverse/contains) |
+| 2026-05-17 | I, T, L | Index/slicing, tuples + Pattern::Tuple, loops con labels |
+| 2026-05-18 | Md, It, Ex, Up | For sobre Map destructuring, iteradores, extras de API |
+| 2026-05-18 | Mb2 → Mb4 | Métodos chicos + Range.step_by + comprehensions extendidas |
+| 2026-05-18 | C, Fm, Err+, Re+ | Comprehensions, format specs, Result avanzado |
+| 2026-05-18 | Bits, Cmp, Xor | Operadores `& | ^ << >> ~`, ops compuestos, `xor` lógico |
+| 2026-05-18 | Núm, Lit, F8, F9 | Separadores `1_000`, hex/bin/oct, identifiers Unicode, escapes `\u{}`/`\x` |
+| 2026-05-18 | Mln, F14, F15, F16 | Import multi-línea, `let X = expr` mod top, imports transitivos, IR tipado |
+| 2026-05-18 | Rt, Lt | Tuple patterns ricos en match, `let` destructuring rico |
+| 2026-05-18/19 | Mb5, Mb6, Mb7, Mb8 | Bundles analíticos + async closures + HTTP + bits-extras + g/G |
+| 2026-05-19 | Math + Mb9 + Int/Float | Builtins numéricos + dispatch sobre primitivos |
+| 2026-05-19 | Fp.1, Fp.2, Fp.3, Sp.2 | Default params, varargs, named args, `return` en match arm |
+| 2026-05-19 | Vp, Vm, St, CM, Cd | Visibility, static methods, métodos cross-module, codegen polish |
+| 2026-05-20 | HC.1, HC.2 | HTTP polish: status fuera de rango + custom en schema OpenAPI |
+| 2026-05-20 | LSPx, LSPy | LSP cross-module go-to-def, Range exacto, scope-aware autocomplete |
+| 2026-05-20 | Hpx.1, Hpx.2 | Content-Type 415 validation, return type inference en handlers `fitz build` |
+| 2026-05-20 | Mw.next, 5b.1, P2 | Middleware post-process (run), param type inference, chained fix |
+| 2026-05-20 | P1, RP, MP | Mw.next codegen, Result+post mws codegen, urlencoded bodies |
+
+**Estado al cierre de la serie (2026-05-20):**
+
+- **1979 unit tests** sin feature, **2069 con `--features lsp`**.
+- **233+ compile_e2e tests** validan bit-a-bit `fitz run` ↔ `fitz build`.
+- Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
+- **Paridad run↔build**: completa modulo decisiones grandes (traits,
+  herencia, operator overloading, F13 heterogéneos) y deudas
+  residuales documentadas en `deudas_lenguaje.md`.
+- **LSP MVP**: completo (diagnostics + hover + go-to-def +
+  autocomplete + cross-module + Range exacto + scope-aware).
+- **HTTP stack**: completo para uso real (handlers + middlewares
+  Pre/Post + CORS + headers + OpenAPI + status codes custom +
+  Content-Type validation + body JSON/urlencoded).
+- **Interop Python**: completo end-to-end (Fase 8.1 → 8.8).
+
+**Deudas residuales (NO bloquean Fase 9.w):**
+
+- Wrap-style `next` callable middleware (~6-8h dedicado).
+- Multipart con files (multipart/form-data) en HTTP (~4-6h).
+- Heterogéneos `[1, "dos", true]` en `fitz build` (F13, ~12-15h —
+  requiere `FitzValue` tagged runtime).
+- Traits/herencia/operator overloading (decisiones grandes, cada
+  uno ~10-15h cuando aparezca caso de uso real).
+
+**Próximo norte: Fase 9.w — Stack web first-class** (WebSockets
+`@ws`, streaming HTTP/SSE, `@authenticated`/`@admin` auth nativa
+JWT, `@cron`, `@background` jobs sin Celery, etc.). ORM nativo +
+migraciones autogeneradas escala a Fase 10.
