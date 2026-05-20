@@ -1131,6 +1131,80 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Paridad run↔build: 5b.1/Hpx.2 chained fix + cleanup masivo~~ ✓ CERRADO 2026-05-20 (mini-tanda P2 + Cleanup)
+
+Mini-tanda final pre-9.w. Cierra el chained dependency entre 5b.1
+(param type inference) y Hpx.2 (return type inference): cuando AMBOS
+están sin anotar Y el return depende del param, antes fallaba por
+order de ejecución (Hpx.2 corría con TypeInfo donde param era Any).
+
+**Parte 1 — P2: 5b.1/Hpx.2 chained fix**:
+
+- ~~**Re-check pass tras inferencia de params**~~ ✓ Implementación
+  en `main.rs::build_file`: tras el primer `check_program`, si hay
+  fns con params sin anotar, llamar a `codegen::fill_inferred_param_types`
+  (muta el AST en-place fillingo `Param.type_` con tipos inferidos)
+  y re-correr `check_program` para producir un TypeInfo refinado.
+  Costo extra: 1 check pass solo cuando hay fns sin anotar. Para
+  programas anotados: gratis.
+- ~~**Helpers públicos en codegen**~~ ✓ `has_unannotated_fn_params(program)`
+  y `fill_inferred_param_types(program, type_info)`. El segundo
+  walkea el program, infiere tipos de params via call sites
+  (reusa `infer_param_type_from_call_sites` de 5b.1), y convierte
+  el `Type` resuelto a `TypeExpr` sintáctico via
+  `type_to_type_expr`. Tipos cubiertos: primitivos, Nullable,
+  List/Map, Result. Nominal queda como deuda menor (requiere
+  acceso al TypeEnv).
+- **`fn double(n) { return n * 2 }` ahora compila** ✓ con
+  `double(21)` en algún punto del programa. La primera pasada del
+  checker tipa `n` como Any → `n * 2` como Any. La inferencia 5b.1
+  detecta `n: Int` desde el call site, mutamos `Param.type_ =
+  Some(TypeExpr::named("Int"))`, re-corremos el checker que ahora
+  tipa `n * 2` como Int, y Hpx.2 toma Int como ret type.
+
+**Parte 2 — Cleanup masivo**:
+
+- README "Estado del proyecto": sumada sección "Mini-tandas
+  post-Fase 8 (polish del lenguaje base)" con bullet de la serie
+  completa de mini-tandas (R.x, S/Mb-series, Math+Mb9, It/Cmp+/Up/Ex,
+  Bits/Núm/Lit/F8/F9/Fmt-build, Cd/F11-F19, Fp+Sp/Fp.2/Fp.3/Sp.2,
+  HC/LSPx/LSPy, Hpx.1/Hpx.2, Mw.next/5b.1/P2). Detalle en este
+  archivo.
+- **P1 (Mw.next codegen)**: DEFERIDO. Estimado original ~3-4h,
+  refinado a ~4-5h tras evaluar el shape de la mw fn signature
+  emitida por el codegen (Pre vs Post devuelven shapes distintos).
+  Documentado como sub-paso futuro dedicado.
+
+**Implementación**:
+
+- **`main.rs::build_file`**: `let mut program = ...` (mutable),
+  primera pasada del checker, si hay fns sin anotar correr
+  `fill_inferred_param_types` y re-check. Si el re-check genera
+  errores, surfacearlos.
+- **`codegen.rs`**: 3 helpers públicos nuevos. El walker reusa
+  el patrón de `infer_param_type_from_call_sites` (mini-tanda
+  5b.1) sin duplicar lógica.
+
+**VSCode extension**: SIN cambios. Cambio interno del pipeline de
+build.
+
+**Tests**: 0 unit nuevos (cubierto por compile_e2e existentes — el
+test `fp_5b1_param_int_se_infiere_con_return_anotado` ya valida el
+patrón con return anotado; el nuevo caso "ambos inferidos" se
+valida via smoke manual `d:/tmp/p2-quick.fitz`). Smoke validó que
+`fn double(n) { return n * 2 }` + `double(21)` compila bit-a-bit.
+
+**Deuda residual (NO bloquea 9.w)**:
+
+- **P1 (Mw.next codegen)**: post-mws en `fitz build` requieren
+  mw fn signature distinta (return `__FitzResponse` en lugar de
+  `Option<__FitzResponse>`). ~4-5h dedicado.
+- **type_to_type_expr para Nominal**: hoy devuelve None (deja el
+  param sin inferir). Requiere acceso al TypeEnv durante el
+  `fill_inferred_param_types`. Refinable si entra demanda.
+- **Wrap-style `next` callable**: el modelo completo donde el mw
+  controla la invocación del handler sigue diferido (~6-8h).
+
 ### ~~Mw.next (post-process middleware) + Codegen 5b.1 (param type inference) + cleanup~~ ✓ CERRADO 2026-05-20 (mini-tanda Mw.next + 5b.1 + Cleanup)
 
 Mega-bundle pre-9.w. Cierra 2 deudas medianas + cleanup chico. Algunas

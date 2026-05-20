@@ -429,6 +429,25 @@ CRUD (8.8).
 con `fitz build` + 3 openapi_e2e). **1219 + 79 + 3** sin feature.
 Clippy `-D warnings` limpio en ambos modos.
 
+**Mini-tandas post-Fase 8 (polish del lenguaje base, 2026-05-17/20)**:
+una serie de bundles cerrados consecutivamente que llevaron al
+lenguaje + LSP + HTTP a un estado pulido antes de Fase 9.w (Stack
+web first-class). Incluye: **R.1/R.2/R.3** (sintaxis polish, métodos
+custom sobre `type`), **S/Mb-series/Math+Mb9** (~40+ métodos chicos
+sobre `Str`/`List`/`Map`/`Range`/`Int`/`Float`), **It/Cmp+/Up/Ex**
+(iteradores + comprehensions + tuple destruct + Map.update),
+**Bits/Núm/Lit/F8/F9/Fmt-build** (operadores de bit, separadores en
+números, hex/bin/oct, identifiers Unicode, escapes extendidos, format
+specs), **Cd/F11-F19** (codegen polish: higher-order completo, state
+HTTP shared, módulos transitivos, identifiers Unicode, error
+recovery, IR tipado, codegen interop Python), **Fp+Sp/Fp.2/Fp.3/Sp.2**
+(default params, varargs, named args, return en match arm), **HC/LSPx**
+(HTTP polish + LSP cross-module go-to-def), **LSPy** (Range exacto +
+scope-aware autocomplete), **Hpx.1/Hpx.2** (Content-Type 415 + return
+type inference), **Mw.next/5b.1/P2** (post-process middleware + param
+type inference + chained fix). **~2070 unit tests + ~230 compile_e2e**
+al cierre. Detalle en [docs/deudas_lenguaje.md](docs/deudas_lenguaje.md).
+
 **Fase 9 (Ecosistema) — pre-reqs LSP (F15 + F16) y LSP MVP entero
 CERRADOS (2026-05-15/16)**: error recovery del parser, side-table
 `TypeInfo` por nodo, server `fitz-lsp` (tower-lsp), extensión

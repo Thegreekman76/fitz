@@ -4731,6 +4731,24 @@ fn fp_5b1_param_sin_anotar_se_infiere_desde_call_site() {
 }
 
 #[test]
+fn p2_param_y_return_ambos_inferidos_via_re_check() {
+    // Mini-tanda P2 — chained fix 5b.1 + Hpx.2. Sin anotar param
+    // NI return type, el codegen re-corre el checker tras inferir
+    // el param desde el call site para refinar el return type.
+    let src = "fn double(n) {\n\
+                   return n * 2\n\
+               }\n\
+               fn greet(name) {\n\
+                   return \"Hola, {name}\"\n\
+               }\n\
+               print(double(21))\n\
+               print(greet(\"Fitz\"))\n";
+    let (stdout, exit) = build_and_run("p2_both_inferred", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42\nHola, Fitz");
+}
+
+#[test]
 fn fp_5b1_param_int_se_infiere_con_return_anotado() {
     // Cuando el return type está anotado pero el param no,
     // 5b.1 infiere el param sin colidir con Hpx.2.

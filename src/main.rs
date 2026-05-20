@@ -663,7 +663,7 @@ fn build_file(
             std::process::exit(1);
         }
     };
-    let program = match parser::parse(tokens) {
+    let mut program = match parser::parse(tokens) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("{}", e);
@@ -685,6 +685,35 @@ fn build_file(
         eprintln!("   Usá `fitz check` para revisar antes de buildear.");
         std::process::exit(1);
     }
+
+    // Mini-tanda P2 — 5b.1/Hpx.2 chained fix. Si hay fns con params
+    // sin anotar (5b.1) Y return type sin anotar (Hpx.2), la primera
+    // pasada del checker tipa el body asumiendo params como Any, y
+    // Hpx.2 falla porque el body retorna Any. Estrategia: inferir
+    // params via call sites (codegen::infer_param_type_from_call_sites)
+    // y mutar el AST en-place fillingo Param.type_, después re-correr
+    // el checker para refinar TypeInfo. Cost extra: ~1 check pass para
+    // programas con unannotated fns; gratis para programas anotados.
+    let (env, types) = if codegen::has_unannotated_fn_params(&program) {
+        codegen::fill_inferred_param_types(&mut program, &types);
+        let (env2, types2, _defs2, errs2) = types::check_program(&program);
+        if !errs2.is_empty() {
+            // Si el re-check genera nuevos errores con los tipos
+            // inferidos, surfacearlos.
+            eprintln!(
+                "✗ {} — {} error(es) de tipo tras inferencia de params (5b.1):",
+                path.display(),
+                errs2.len()
+            );
+            for e in &errs2 {
+                eprintln!("  {}", e);
+            }
+            std::process::exit(1);
+        }
+        (env2, types2)
+    } else {
+        (env, types)
+    };
 
     // Codegen a Cargo project. Mini-tanda Hpx.2 — TypeInfo del checker
     // se pasa al codegen para inferir return types de fns sin anotar.

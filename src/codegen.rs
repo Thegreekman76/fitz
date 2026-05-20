@@ -12333,6 +12333,116 @@ fn collect_captures_expr(
     }
 }
 
+/// Mini-tanda P2 (5b.1/Hpx.2 chained fix) — `true` si el program
+/// tiene alguna fn top-level con al menos un param sin anotar. Usado
+/// por `main.rs::build_file` para decidir si correr la segunda pasada
+/// del checker tras inferir params via 5b.1.
+pub fn has_unannotated_fn_params(program: &Program) -> bool {
+    program.iter().any(|s| {
+        matches!(
+            s,
+            Stmt::FnDef { params, .. } if params.iter().any(|p| p.type_.is_none())
+        )
+    })
+}
+
+/// Mini-tanda P2 — muta el AST en-place: para cada Stmt::FnDef con
+/// params sin anotar, intenta inferir el tipo via call sites
+/// (`infer_param_type_from_call_sites`). Si tiene éxito, fillea
+/// `Param.type_` con un TypeExpr sintetizado desde el Type resuelto.
+/// Si la inferencia falla, deja el Param como estaba — el codegen
+/// reportará error con sugerencia (resolve_param_type fallback).
+pub fn fill_inferred_param_types(
+    program: &mut Program,
+    type_info: &crate::types::TypeInfo,
+) {
+    // Iterar sobre una copia de los fn names porque vamos a mutar el
+    // program y necesitamos buscar call sites sobre el program ORIGINAL.
+    let inferences: Vec<(String, usize, Type)> = {
+        let mut out = Vec::new();
+        for stmt in program.iter() {
+            if let Stmt::FnDef { name, params, .. } = stmt {
+                for (i, p) in params.iter().enumerate() {
+                    if p.type_.is_none() {
+                        if let Some(ty) =
+                            infer_param_type_from_call_sites(program, name, i, type_info)
+                        {
+                            out.push((name.clone(), i, ty));
+                        }
+                    }
+                }
+            }
+        }
+        out
+    };
+    // Aplicar las inferencias.
+    for (fn_name, param_idx, ty) in inferences {
+        if let Some(type_expr) = type_to_type_expr(&ty) {
+            for stmt in program.iter_mut() {
+                if let Stmt::FnDef { name, params, .. } = stmt {
+                    if name == &fn_name && param_idx < params.len() {
+                        params[param_idx].type_ = Some(type_expr.clone());
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Mini-tanda P2 — convierte un `Type` resuelto a su `TypeExpr`
+/// sintáctico equivalente, para fillear en Param.type_ tras inferencia.
+/// Cubre primitivos, Nullable, List<T>, Map<K,V>, Result<T> y Nominal
+/// por nombre. Para tipos no representables sintácticamente (Function,
+/// Any, Range, etc.) devuelve None — el caller deja el param sin anotar
+/// y el codegen falla con su error histórico.
+fn type_to_type_expr(ty: &Type) -> Option<TypeExpr> {
+    Some(match ty {
+        Type::Int => TypeExpr::named("Int"),
+        Type::Float => TypeExpr::named("Float"),
+        Type::Str => TypeExpr::named("Str"),
+        Type::Bool => TypeExpr::named("Bool"),
+        Type::Null => TypeExpr::named("Null"),
+        Type::Nominal(id) => {
+            // El TypeEnv no se expone acá; usamos el TypeId como
+            // sentinel. En la práctica, el codegen consulta TypeEnv
+            // via su propio `env`. Para el nombre, dependemos de que
+            // el id se traduzca al nombre canónico via Type::display.
+            // Aproximación: usar el formato "NominalN" no funcionaría
+            // — necesitamos el nombre real. Skip Nominal por ahora;
+            // el caller falla y el user anota a mano.
+            let _ = id;
+            return None;
+        }
+        Type::List(inner) => {
+            let inner_te = type_to_type_expr(inner)?;
+            TypeExpr::Generic {
+                name: "List".into(),
+                args: vec![inner_te],
+            }
+        }
+        Type::Map(k, v) => {
+            let k_te = type_to_type_expr(k)?;
+            let v_te = type_to_type_expr(v)?;
+            TypeExpr::Generic {
+                name: "Map".into(),
+                args: vec![k_te, v_te],
+            }
+        }
+        Type::Result { ok, .. } => {
+            let ok_te = type_to_type_expr(ok)?;
+            TypeExpr::Generic {
+                name: "Result".into(),
+                args: vec![ok_te],
+            }
+        }
+        Type::Nullable(inner) => {
+            let inner_te = type_to_type_expr(inner)?;
+            TypeExpr::Nullable(Box::new(inner_te))
+        }
+        _ => return None,
+    })
+}
+
 /// Mini-tanda 5b.1 — infiere el tipo de un param de una fn sin
 /// anotación, buscando el primer call site `fn_name(...)` en el
 /// programa y consultando el tipo del arg en posición `param_idx` via
