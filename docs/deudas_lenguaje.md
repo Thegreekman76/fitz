@@ -1131,6 +1131,93 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~HTTP polish + LSP cross-module go-to-def + cleanup docs~~ ✓ CERRADO 2026-05-20 (mini-tanda HC + LSPx + Cleanup)
+
+Mega-bundle pre-9.w: tres áreas distintas pero todas chicas/medianas.
+Cierra 3 deudas residuales que venían arrastrándose y limpia docs
+stale antes de arrancar Fase 9.w (stack web first-class).
+
+**Parte 1 — HC.1: Err status fuera de 100..1000**:
+
+- ~~**Fallback silencioso a 500 reemplazado por error claro**~~ ✓
+  Cuando `return Err(X { status: 50, ... })` o `... status: 1500`
+  (fuera del rango HTTP válido 100-999), el runtime ya no cae a
+  500 con `{"error": e}` opaco. Emite 500 con body explícito:
+  `{"error": "status code inválido en Err: 50 (debe estar en 100..1000)"}`.
+- **Paridad bit-a-bit** ✓ El handler wrapper del codegen
+  (`fitz build`) emite el mismo mensaje cuando detecta status
+  out-of-range, no caída silenciosa.
+
+**Parte 2 — HC.2: Status codes custom en OpenAPI schema**:
+
+- ~~**`return Err(X { status: 404, ... })` aparece en `responses`**~~ ✓
+  El walker `collect_status_codes_expr` de `openapi.rs` ya cubría
+  `Stmt::ReturnStatus` (Q.4). Sumamos cobertura para
+  `Expr::Err(StructLit { status: <Int literal>, ... })`. Si el
+  status es literal Int en rango [100..599], se registra en el
+  schema bajo el code correspondiente. Si es una variable
+  (`Err(X { status: code, ... })`), no se resuelve estáticamente
+  — sigue solo el 500 default.
+- **Body polimórfico** ✓ El schema del response custom queda como
+  `{}` (any) — el usuario lo refina con docs externas si necesita.
+  Mismo enfoque que Q.4 hizo para ReturnStatus.
+
+**Parte 3 — LSPx: Cross-module go-to-definition**:
+
+- ~~**F12 sobre `User` en `from foo import User` salta a foo.fitz**~~ ✓
+  Cierra la deuda visible que el LSP MVP (Fase 9.x.3) dejaba: hasta
+  ahora go-to-def apuntaba al span del `Stmt::FromImport` local.
+  Ahora resuelve al `type User { ... }` real adentro del módulo
+  importado. Funciona también para fns importadas y consts (let X
+  top-level).
+- **Implementación acotada al LSP** ✓ Pure-function nueva
+  `resolve_cross_module_definition(program, doc_uri, target_span,
+  target_name) -> Option<(Url, Span)>` en `fitz::lsp`. El backend
+  del `fitz-lsp.rs` extrae el ident bajo el cursor con un helper
+  `ident_under_cursor`, busca el Stmt::Import/FromImport
+  correspondiente, resuelve el path target relativo al doc, parsea
+  el archivo con `parse_with_recovery` y busca la decl top-level
+  por nombre (`Stmt::FnDef`/`TypeDef`/`Assign(Ident)`).
+- **Robustez** ✓ Si el path no resuelve (módulo movido, name no
+  exportado), fallback al Location local — sin crash, sin loop.
+  Solo `file://` URIs son soportados (deuda menor para URIs
+  remotos / virtual fs).
+
+**Parte 4 — Cleanup de docs stale**:
+
+- Cap 20 ("Qué todavía no anda con `fitz build`"): removidos
+  bullets de **F14** (let X = expr no literal en módulo —
+  cerrado) e **F15** (imports transitivos — cerrado). Bloque
+  "sí anda y antes era deuda" agregado al final mencionando ambos.
+- Cap 17 ("HTTP nativo" — "Qué todavía no anda"): bullet sobre
+  middleware `next` post-process explícitamente declarado como
+  futuro. Bloque "sí anda" suma HC.1 (status codes inválidos
+  con msg claro) y HC.2 (status codes en schema OpenAPI).
+- Cap 22 ("Soporte para editores"): actualizada la descripción
+  de go-to-definition para mencionar cross-module: "F12 sobre
+  `User` en `from foo import User` salta al `type User` real
+  adentro de foo.fitz".
+
+**Tests**: **8 unit nuevos** (4 HC.1 en `http::tests` + 2 HC.2
+en `openapi::tests` + 2 LSPx en `lsp::tests`). Total al cierre:
+1972 unit sin feature, 2052 con `--features lsp`.
+
+**Deuda residual (NO bloquea Fase 9.w)**:
+
+- **Status codes en Err con variable** (no literal): hoy solo
+  literales aparecen en el schema. Si el user hace
+  `return Err(X { status: code, ... })` con `code: Int` var, el
+  schema solo lista 500. Refinable si entra demanda — requiere
+  análisis de flujo (qué valores puede tomar `code`).
+- **Cross-module go-to-def sobre URIs virtuales** (`untitled:`,
+  `inmemory:`, etc.): hoy solo `file://`. La mayoría de los
+  setups del LSP usan archivos reales; URIs virtuales son edge
+  case.
+- **Cross-module hover** sigue mostrando solo el tipo del nodo
+  local. Para mostrar la doc del símbolo importado del módulo
+  remoto, hace falta capturar comments del módulo target —
+  refactor más grande (~3-4h).
+
 ### ~~Varargs + named args + return-en-match — cierre del cap 11 y cap 13~~ ✓ CERRADO 2026-05-19 (mini-tanda Fp.2 + Fp.3 + Sp.2)
 
 Bundle final de funciones polish + match expressivo antes de Fase
@@ -1738,14 +1825,15 @@ keyword); LSP autocomplete refleja todo via rebuild del `fitz-lsp`.
   recibe `next` y puede hacer post-process es invasivo (cambia el
   shape de la cadena de middlewares + sintaxis nueva del callback
   binario). Sub-paso futuro dedicado — alcance ~4-6h aparte.
-- **`Err` con status fuera de 100..1000**: hoy fallback a 500. Si
-  aparece presión real (e.g. status codes custom 600+ para apps
-  internas), refinable.
-- **Status codes en el OpenAPI schema**: el schema OpenAPI no
-  refleja los status codes específicos por Err type. Para SDK
-  generators que infieren la respuesta de error, requiere
-  documentar el shape del Err en el `responses` del operation.
-  Deuda menor.
+- ~~**`Err` con status fuera de 100..1000**~~ ✓ CERRADO 2026-05-20
+  (mini-tanda HC.1). Ya no cae silenciosamente a 500 con `{"error":
+  e}`. Emite 500 + body con mensaje explícito citando el status
+  inválido. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+- ~~**Status codes en el OpenAPI schema**~~ ✓ CERRADO 2026-05-20
+  (mini-tanda HC.2). `return Err(X { status: 404, ... })` con
+  literal Int aparece en el schema bajo el code correspondiente.
+  Vars dinámicos (`status: code`) siguen solo en el 500 default
+  — deuda residual menor.
 
 ### ~~Métodos analíticos + async closures inline~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb5 + Async-cl)
 
@@ -2893,9 +2981,11 @@ encaje en mini-tanda futura tipo "Sp" sin compromiso):
   visibles según posición del cursor) sigue como deuda
   del LSP. Refactor del checker para persistir scope-table
   por posición. ~4-6h.
-- **Cross-module go-to-definition** sigue apuntando al
-  `Stmt::Import` local en vez del símbolo remoto. Deuda
-  documentada desde 9.x.3.
+- ~~**Cross-module go-to-definition**~~ ✓ CERRADO 2026-05-20
+  (mini-tanda LSPx). F12 sobre `User` en `from foo import User`
+  ahora salta al `type User { ... }` real adentro de foo.fitz,
+  no al stmt de import local. Solo `file://` URIs soportados —
+  URIs virtuales (`untitled:`, `inmemory:`) son edge case.
 - **Highlighting de `0..=10`**: el `=` del `..=` no se
   distingue visualmente del `=` de asignación. Aceptable
   como trade-off del grammar.

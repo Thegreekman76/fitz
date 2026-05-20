@@ -156,6 +156,34 @@ fn collect_status_codes_expr(expr: &crate::ast::Expr, out: &mut Vec<u16>) {
                 }
             }
         }
+        // Mini-tanda HC.2 — detectar `Err(StructLit { status: <Int
+        // literal>, ... })` y registrar el status code en el schema.
+        // El patrón canónico es `return Err(ApiErr { status: 404, ... })`
+        // donde el tipo E del Result tiene un field `status: Int`. El
+        // status code se infiere del literal en cada call site. Si el
+        // user usa una variable (`Err(ApiErr { status: code, ... })`),
+        // no podemos resolver estáticamente — se documenta solo el
+        // 500 default histórico.
+        Expr::Err(inner, _) => {
+            if let Expr::StructLit { fields, .. } = inner.as_ref() {
+                for (name, val) in fields {
+                    if name == "status" {
+                        if let Expr::Int(n, _) = val {
+                            if (100..=599).contains(n) {
+                                out.push(*n as u16);
+                            }
+                        }
+                        break;
+                    }
+                }
+            }
+        }
+        // Recursión simétrica para que `Ok`/`Err` que envuelven otros
+        // exprs no oculten ReturnStatus anidado (no es el caso típico,
+        // pero la cobertura cuesta poco).
+        Expr::Ok(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+            collect_status_codes_expr(inner, out);
+        }
         // Los demás Expr no tienen bodies anidados con stmts (calls,
         // literales, binops, etc.).
         _ => {}
@@ -1198,5 +1226,47 @@ mod tests {
         assert!(responses.contains_key("500"));
         let ok_schema = &responses["200"]["content"]["application/json"]["schema"];
         assert_eq!(ok_schema, &json!({ "$ref": "#/components/schemas/User" }));
+    }
+
+    // ---- Mini-tanda HC.2 — status codes de Err({ status: ... }) en schema ----
+
+    #[test]
+    fn err_con_status_field_literal_aparece_en_schema_responses() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            type ApiErr { status: Int, message: Str }\n\
+            @get(\"/users/{id}\")\n\
+            fn get_user(id: Int) -> Result<User> {\n\
+                if id == 0 { return Err(ApiErr { status: 404, message: \"not found\" }) }\n\
+                return Ok(User { id: id, name: \"x\" })\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = schema["paths"]["/users/{id}"]["get"]["responses"]
+            .as_object()
+            .unwrap();
+        assert!(responses.contains_key("200"), "esperaba 200 (Ok)");
+        assert!(responses.contains_key("500"), "esperaba 500 (Err fallback)");
+        assert!(responses.contains_key("404"), "esperaba 404 (Err con status literal)");
+    }
+
+    #[test]
+    fn err_status_codes_varios_aparecen_todos_en_schema() {
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            type ApiErr { status: Int, message: Str }\n\
+            @get(\"/users/{id}\")\n\
+            fn get_user(id: Int) -> Result<User> {\n\
+                if id == 0 { return Err(ApiErr { status: 404, message: \"not found\" }) }\n\
+                if id < 0 { return Err(ApiErr { status: 400, message: \"bad\" }) }\n\
+                return Ok(User { id: id, name: \"x\" })\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = schema["paths"]["/users/{id}"]["get"]["responses"]
+            .as_object()
+            .unwrap();
+        assert!(responses.contains_key("400"));
+        assert!(responses.contains_key("404"));
     }
 }

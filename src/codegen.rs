@@ -10978,19 +10978,28 @@ impl<'a> CodegenCtx<'a> {
             self.emit("        ).into_response(),\n");
             // Mini-tanda HTTP-Err — convención: si el E del Result es
             // un Nominal con field `status: Int`, leemos ese field y
-            // usamos su valor como HTTP status code (clamped a 100..1000).
+            // usamos su valor como HTTP status code (validado a 100..1000).
             // El body es el Instance serializado (sin envolver en
             // `{"error": ...}`). Sin status field → 500 histórico.
+            //
+            // Mini-tanda HC.1 — status fuera de 100..1000 ya NO cae
+            // silenciosamente a 500. Emitimos 500 + body con un msg
+            // claro citando el status inválido. Paridad con el path
+            // del intérprete (`value_to_outcome` en `http.rs`).
             if sig.err_has_status_field {
                 self.emit("        Err(__e) => {\n");
                 self.emit("            let __raw_status = __e.lock().unwrap().status;\n");
-                self.emit("            let __status_code = if (100i64..1000i64).contains(&__raw_status) {\n");
-                self.emit("                axum::http::StatusCode::from_u16(__raw_status as u16)\n");
-                self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR)\n");
+                self.emit("            if (100i64..1000i64).contains(&__raw_status) {\n");
+                self.emit("                let __status_code = axum::http::StatusCode::from_u16(__raw_status as u16)\n");
+                self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR);\n");
+                self.emit("                (__status_code, axum::Json(__e.__to_fitz_json())).into_response()\n");
                 self.emit("            } else {\n");
-                self.emit("                axum::http::StatusCode::INTERNAL_SERVER_ERROR\n");
-                self.emit("            };\n");
-                self.emit("            (__status_code, axum::Json(__e.__to_fitz_json())).into_response()\n");
+                self.emit("                let __msg = format!(\"status code inválido en Err: {} (debe estar en 100..1000)\", __raw_status);\n");
+                self.emit("                (\n");
+                self.emit("                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
+                self.emit("                    axum::Json(serde_json::json!({\"error\": __msg})),\n");
+                self.emit("                ).into_response()\n");
+                self.emit("            }\n");
                 self.emit("        },\n");
             } else {
                 self.emit("        Err(__e) => (\n");

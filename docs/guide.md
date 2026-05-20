@@ -6869,6 +6869,19 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 - **Inferencia de return type en handlers para `fitz build`** —
   las fns HTTP compiladas necesitan anotación de return type
   explícita. El intérprete sí infiere desde el body.
+- **Middleware `next` (post-process)** — hoy los middlewares son
+  gate-only (`return null` continúa, `return status { ... }`
+  short-circuit). Modelo wrap con `next` callable para medir
+  tiempos / agregar headers después del handler queda como
+  sub-paso futuro dedicado.
+
+> Lo que **sí anda** y antes era deuda residual: **status codes
+> custom fuera de 100..1000** ya no caen silenciosamente a 500 —
+> emiten 500 + body con mensaje claro citando el valor inválido
+> (HC.1). **Status codes específicos de cada `Err`** aparecen en
+> el schema OpenAPI cuando el handler hace `return Err(X { status:
+> 404, ... })` con un literal — el schema incluye una entrada por
+> cada code detectado (HC.2).
 
 > Lo que **sí anda** y antes era deuda (cerrado fase tras fase):
 > async/await reales en handlers (Fase 6), paralelismo HTTP real
@@ -7659,18 +7672,18 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
   tiene un tipo "Value" genérico tagged en runtime sin un
   refactor. Workaround: armar dos colecciones, o usar `fitz run`.
-- **`let X = <expr>` no literal a nivel top de un módulo** — las
-  constantes top-level de un módulo deben tener una RHS literal
-  (`"texto"`, `42`, `3.14`, `true`, `null`). `let X = compute()`
-  no compila.
-- **Imports transitivos** — un módulo cargado por el main no
-  puede tener su propio `import`. Workaround: aplaná los imports.
 - **División por cero literal** — `print(10 / 0)` no compila
   (rustc rechaza la operación en compile-time). En el intérprete
   es un error de runtime explícito.
 - **Comparar valores de tipos distintos** — `1 == "1"` corre en
   el intérprete (devuelve `false` porque los tipos no coinciden);
   el compilador rechaza la comparación.
+
+> Lo que **sí anda** y antes era deuda: `let X = <expr>` no literal
+> a nivel top de un módulo (cerrado en F14 — la RHS puede ser una
+> expresión arbitraria que se evalúa lazy via accessor fn), e
+> **imports transitivos** (cerrado en F15 — un módulo cargado
+> puede tener su propio `import`, con detección de ciclos).
 
 Si te tropezás con algo de esta lista, el mensaje del codegen lo
 cita explícitamente. La salida tiene la forma:
@@ -8205,10 +8218,12 @@ VSCode** que lo aprovecha.
   Funciona sobre variables locales (`let x = ...`), funciones
   top-level (`fn foo(...)`), tipos custom (`type User { ... }`),
   parámetros de fn, variables del `for ... in`, bindings de
-  `match` (`Ok(x)`, `Err(e)`, `Ident pat`), e imports
-  (apuntando al `from foo import X` local — cross-module def
-  remota es deuda visible). Los built-ins (`print`/`len`/
-  `sleep`/`cors`) no resuelven (no hay archivo donde saltar).
+  `match` (`Ok(x)`, `Err(e)`, `Ident pat`), e imports (incluido
+  **cross-module**: F12 sobre `User` cuando el import es
+  `from foo import User` salta a la línea del `type User { ... }`
+  adentro de `foo.fitz`, no al stmt de import local). Los
+  built-ins (`print`/`len`/`sleep`/`cors`) no resuelven (no hay
+  archivo donde saltar).
 - **Autocomplete contextual** — al tipear, VSCode te muestra una
   lista de sugerencias según el contexto:
   - Tras `.` (caso *after-dot*): si el receiver es un tipo custom

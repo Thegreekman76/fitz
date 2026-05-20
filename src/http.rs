@@ -823,11 +823,24 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
                         })
                 };
                 if let Some(s) = status_opt {
+                    // Mini-tanda HC.1 — status válido `[100, 1000)`
+                    // matchea axum y la spec HTTP. Si el usuario
+                    // provee un status fuera de rango, ya no caemos
+                    // silenciosamente a 500 — emitimos 500 con un
+                    // mensaje explícito citando el valor inválido.
+                    // Esto destraba debugging cuando el usuario hace
+                    // `Err({ status: 999 })` por typo o convención
+                    // distinta.
                     if (100..1000).contains(&s) {
                         return match value_to_json(inner) {
                             Ok(j) => HandlerOutcome::json(s as u16, j),
                             Err(msg) => HandlerOutcome::internal_error(msg),
                         };
+                    } else {
+                        return HandlerOutcome::internal_error(format!(
+                            "status code inválido en Err: {} (debe estar en 100..1000)",
+                            s
+                        ));
                     }
                 }
             }
@@ -3949,5 +3962,49 @@ mod tests {
         assert_eq!(reg.routes.len(), 1);
         assert_eq!(reg.routes[0].method, HttpMethod::Get);
         assert_eq!(reg.routes[0].handler_name, "index");
+    }
+
+    // ---- Mini-tanda HC.1 — status fuera de 100..1000 ----
+
+    fn err_instance_with_status(status: i64) -> Value {
+        let fields = vec![
+            ("status".into(), Value::Int(status)),
+            ("message".into(), Value::Str("test".into())),
+        ];
+        let instance = Value::Instance {
+            type_name: "ApiErr".into(),
+            fields: std::sync::Arc::new(parking_lot::Mutex::new(fields)),
+        };
+        Value::Result(ResultVariant::Err(Box::new(instance)))
+    }
+
+    #[test]
+    fn hc1_err_con_status_valido_usa_ese_status() {
+        let outcome = value_to_outcome(&err_instance_with_status(404));
+        assert_eq!(outcome.status, 404);
+    }
+
+    #[test]
+    fn hc1_err_con_status_fuera_de_rango_emite_500_con_msg_claro() {
+        let outcome = value_to_outcome(&err_instance_with_status(50));
+        assert_eq!(outcome.status, 500);
+        let body_str = outcome.body.to_string();
+        assert!(
+            body_str.contains("inválido") && body_str.contains("50"),
+            "esperaba mensaje claro, fue: {}",
+            body_str
+        );
+    }
+
+    #[test]
+    fn hc1_err_con_status_99_es_fuera_de_rango() {
+        let outcome = value_to_outcome(&err_instance_with_status(99));
+        assert_eq!(outcome.status, 500);
+    }
+
+    #[test]
+    fn hc1_err_con_status_1500_es_fuera_de_rango() {
+        let outcome = value_to_outcome(&err_instance_with_status(1500));
+        assert_eq!(outcome.status, 500);
     }
 }

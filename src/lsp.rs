@@ -205,11 +205,9 @@ pub fn definition_for_position(
 /// caracter porque sin `end_span` no podemos devolver el rango exacto
 /// del identificador declarado (paralelo a `error_to_diagnostic`).
 ///
-/// `uri` es el del documento actual: cross-module def queda como deuda
-/// visible del MVP — los imports `from foo import X` registran el def
-/// como el span del `Stmt::Import` local, no como la declaración real
-/// en el módulo `foo`. Mapear paths del loader a URIs requiere
-/// resolución cross-file que pertenece a una sub-fase posterior.
+/// `uri` es el del documento del def_span: el caller pasa el URI del
+/// documento abierto para defs locales, o un URI distinto para defs
+/// cross-module resueltas via `resolve_cross_module_definition`.
 pub fn make_definition_location(uri: Url, def_span: Span) -> Location {
     let line = (def_span.line.saturating_sub(1)) as u32;
     let col = (def_span.column.saturating_sub(1)) as u32;
@@ -220,6 +218,115 @@ pub fn make_definition_location(uri: Url, def_span: Span) -> Location {
             end: Position::new(line, col + 1),
         },
     }
+}
+
+/// Mini-tanda LSPx — cross-module go-to-definition. Si `def_span`
+/// apunta a un `Stmt::Import` o `Stmt::FromImport` del `program`,
+/// resuelve el archivo target, parsea, y busca la declaración real
+/// del símbolo. Devuelve `(Url del módulo target, Span de la decl
+/// adentro del módulo)`. Si la resolución falla (path no existe,
+/// símbolo no encontrado, etc.), devuelve `None` — el caller usa el
+/// Location local como fallback.
+///
+/// `doc_uri` es el URI del documento abierto; lo usamos solo para
+/// resolver el `base_dir` desde el que se buscan los imports
+/// relativos. El URI del result es el del módulo target.
+///
+/// `target_name` es el ident bajo el cursor en el momento del
+/// goto-def. Para `import foo` el name puede ser `foo` (namespace);
+/// para `from foo import X, Y` debe ser `X` o `Y`.
+pub fn resolve_cross_module_definition(
+    program: &Program,
+    doc_uri: &Url,
+    target_span: Span,
+    target_name: &str,
+) -> Option<(Url, Span)> {
+    // Solo tiene sentido si el doc es un `file://`.
+    let doc_path = doc_uri.to_file_path().ok()?;
+    let base_dir = doc_path.parent()?;
+
+    // Buscar el Stmt::Import / Stmt::FromImport cuyo span coincide.
+    // `module_path` = segments del path importado.
+    // `target_item` = nombre del símbolo a buscar en el módulo target,
+    //                 o None si es un `import` namespace (apunta al
+    //                 top del módulo).
+    let (module_path, target_item): (Vec<String>, Option<String>) = {
+        let mut found: Option<(Vec<String>, Option<String>)> = None;
+        for stmt in program {
+            match stmt {
+                Stmt::Import { path, span, .. } if *span == target_span => {
+                    let last = path.last()?;
+                    if target_name == last {
+                        found = Some((path.clone(), None));
+                    }
+                    break;
+                }
+                Stmt::FromImport { path, names, span, .. } if *span == target_span => {
+                    let item = names.iter().find_map(|(n, alias)| {
+                        if alias.as_deref() == Some(target_name) || n == target_name {
+                            Some(n.clone())
+                        } else {
+                            None
+                        }
+                    });
+                    if let Some(it) = item {
+                        found = Some((path.clone(), Some(it)));
+                    }
+                    break;
+                }
+                _ => {}
+            }
+        }
+        found?
+    };
+
+    // Resolver el path a un archivo `.fitz` real. Convención del
+    // loader: `path = ["foo", "bar"]` → `<base>/foo/bar.fitz`.
+    let mut target_path = base_dir.to_path_buf();
+    if module_path.is_empty() {
+        return None;
+    }
+    for (i, comp) in module_path.iter().enumerate() {
+        if i + 1 == module_path.len() {
+            target_path.push(format!("{}.fitz", comp));
+        } else {
+            target_path.push(comp);
+        }
+    }
+    let target_path = target_path.canonicalize().ok()?;
+
+    // Parsear el archivo target y buscar la declaración.
+    let source = std::fs::read_to_string(&target_path).ok()?;
+    let tokens = tokenize(&source).ok()?;
+    let (target_program, _errs) = parse_with_recovery(tokens);
+
+    let target_decl_span = match target_item {
+        Some(item) => find_top_level_decl(&target_program, &item)?,
+        // Import namespace: apuntar al primer stmt del módulo (top).
+        None => target_program.first().map(|s| s.span())?,
+    };
+
+    let target_uri = Url::from_file_path(&target_path).ok()?;
+    Some((target_uri, target_decl_span))
+}
+
+/// Busca una declaración top-level con el nombre dado en el AST de un
+/// módulo. Cubre `Stmt::FnDef`, `Stmt::TypeDef`, y `Stmt::Assign` con
+/// target Ident (consts del módulo). Devuelve el span de la declaración
+/// para go-to-def cross-module.
+fn find_top_level_decl(program: &Program, name: &str) -> Option<Span> {
+    use crate::ast::AssignTarget;
+    for stmt in program {
+        match stmt {
+            Stmt::FnDef { name: n, span, .. } if n == name => return Some(*span),
+            Stmt::TypeDef { name: n, span, .. } if n == name => return Some(*span),
+            Stmt::Assign { target: AssignTarget::Ident(n), span, .. } if n == name => {
+                return Some(*span);
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -2122,6 +2229,95 @@ mod tests {
         for expected in ["abs", "to_str", "is_nan", "is_finite"] {
             assert!(labels.contains(&expected), "falta `{expected}` en Float: {labels:?}");
         }
+    }
+
+    // ---- Mini-tanda LSPx — cross-module go-to-definition ----
+
+    #[test]
+    fn lspx_cross_module_resuelve_from_import() {
+        // Setup: dos archivos temporales en un tmpdir único.
+        // `foo.fitz` declara `type User { ... }` y una const.
+        // `app.fitz` hace `from foo import User`.
+        // Verificamos que `resolve_cross_module_definition` apunte
+        // al span de la decl real adentro de foo.fitz.
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fitz-lspx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let foo_path = dir.join("foo.fitz");
+        let app_path = dir.join("app.fitz");
+        let mut f = std::fs::File::create(&foo_path).unwrap();
+        writeln!(f, "type User {{ id: Int, name: Str }}").unwrap();
+        writeln!(f, "let CAP: Int = 100").unwrap();
+        drop(f);
+        let mut a = std::fs::File::create(&app_path).unwrap();
+        writeln!(a, "from foo import User, CAP").unwrap();
+        writeln!(a, "let u = User {{ id: 1, name: \"x\" }}").unwrap();
+        drop(a);
+
+        let app_src = std::fs::read_to_string(&app_path).unwrap();
+        let (program, _env, _ti, _di, _errs) = check_source_with_types(&app_src);
+        let doc_uri = Url::from_file_path(&app_path).unwrap();
+
+        // Buscar el span del FromImport (línea 1 col 1).
+        let import_span = program
+            .iter()
+            .find_map(|s| match s {
+                Stmt::FromImport { span, .. } => Some(*span),
+                _ => None,
+            })
+            .expect("debería haber FromImport");
+
+        // Resolver `User`: debe apuntar a foo.fitz línea 1.
+        let resolved =
+            resolve_cross_module_definition(&program, &doc_uri, import_span, "User")
+                .expect("esperaba resolución cross-module");
+        let (target_uri, target_span) = resolved;
+        // El target_uri es file:// del foo.fitz canonicalizado.
+        let target_path = target_uri.to_file_path().unwrap();
+        assert_eq!(
+            target_path.canonicalize().unwrap(),
+            foo_path.canonicalize().unwrap(),
+            "esperaba target_uri = foo.fitz, dio: {:?}", target_path
+        );
+        assert_eq!(target_span.line, 1, "esperaba línea 1 (type User), dio: {}", target_span.line);
+
+        // Resolver `CAP`: línea 2 (let CAP = 100).
+        let resolved_cap =
+            resolve_cross_module_definition(&program, &doc_uri, import_span, "CAP")
+                .expect("esperaba resolución de CAP");
+        assert_eq!(resolved_cap.1.line, 2, "esperaba línea 2 (let CAP), dio: {}", resolved_cap.1.line);
+
+        // Cleanup.
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lspx_cross_module_name_inexistente_devuelve_none() {
+        use std::io::Write;
+        let dir = std::env::temp_dir().join(format!("fitz-lspx-none-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let foo_path = dir.join("foo.fitz");
+        let app_path = dir.join("app.fitz");
+        std::fs::write(&foo_path, "type User { id: Int }").unwrap();
+        let mut a = std::fs::File::create(&app_path).unwrap();
+        writeln!(a, "from foo import User").unwrap();
+        drop(a);
+        let app_src = std::fs::read_to_string(&app_path).unwrap();
+        let (program, _env, _ti, _di, _errs) = check_source_with_types(&app_src);
+        let doc_uri = Url::from_file_path(&app_path).unwrap();
+        let import_span = program
+            .iter()
+            .find_map(|s| match s {
+                Stmt::FromImport { span, .. } => Some(*span),
+                _ => None,
+            })
+            .unwrap();
+        // `NotImported` no figura en el import list → None.
+        let resolved = resolve_cross_module_definition(&program, &doc_uri, import_span, "NotImported");
+        assert!(resolved.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

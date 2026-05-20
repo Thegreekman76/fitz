@@ -33,6 +33,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 use fitz::lsp::{
     check_source_with_types, completion_at_position, definition_for_position,
     fitz_errors_to_diagnostics, hover_for_position, make_definition_location, make_hover,
+    resolve_cross_module_definition,
 };
 use fitz::ast::Program;
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
@@ -202,11 +203,13 @@ impl LanguageServer for Backend {
         &self,
         params: GotoDefinitionParams,
     ) -> LspResult<Option<GotoDefinitionResponse>> {
-        // Resolvemos `(uri, pos) → def_span` bajo el lock, construimos
-        // el `Location` con el URI del documento abierto (cross-module
-        // def queda como deuda visible — `from foo import X` apunta al
-        // span del Stmt::Import local, no al módulo remoto). Sin
-        // awaits adentro del lock.
+        // Resolvemos `(uri, pos) → def_span` bajo el lock. Para defs
+        // locales, devolvemos el Location del doc abierto. Mini-tanda
+        // LSPx — si el def_span apunta a un Stmt::Import/FromImport,
+        // intentamos resolver el módulo target y apuntar a la
+        // declaración real en ese archivo. El nombre del ident bajo
+        // el cursor se extrae heurísticamente desde la línea — basta
+        // con la "palabra" alphanum bajo la posición.
         let uri = params.text_document_position_params.text_document.uri;
         let pos = params.text_document_position_params.position;
         let documents = self.documents.lock();
@@ -214,10 +217,23 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        let location = definition_for_position(&state.def_info, pos.line, pos.character)
-            .map(|def_span| make_definition_location(uri.clone(), def_span))
-            .map(GotoDefinitionResponse::Scalar);
-        Ok(location)
+        let Some(def_span) =
+            definition_for_position(&state.def_info, pos.line, pos.character)
+        else {
+            return Ok(None);
+        };
+        // Intentar cross-module resolution si el def_span coincide con
+        // un Stmt::Import / Stmt::FromImport del program. Extraemos el
+        // nombre del ident bajo el cursor de la línea del documento.
+        let target_name = ident_under_cursor(&state.text, pos.line as usize, pos.character as usize);
+        let cross = target_name.as_deref().and_then(|name| {
+            resolve_cross_module_definition(&state.program, &uri, def_span, name)
+        });
+        let location = match cross {
+            Some((target_uri, target_span)) => make_definition_location(target_uri, target_span),
+            None => make_definition_location(uri.clone(), def_span),
+        };
+        Ok(Some(GotoDefinitionResponse::Scalar(location)))
     }
 
     async fn completion(
@@ -244,6 +260,37 @@ impl LanguageServer for Backend {
         );
         Ok(Some(CompletionResponse::Array(items)))
     }
+}
+
+/// Mini-tanda LSPx — extrae el identificador (run de chars alphanum +
+/// `_`) bajo el cursor `(line, character)` (ambos 0-based LSP). Usado
+/// por `goto_definition` para nombrar el símbolo a resolver
+/// cross-module. Si el cursor cae sobre un char no-ident, busca el
+/// run a la IZQUIERDA inmediata. Devuelve `None` si no hay ident
+/// adyacente.
+fn ident_under_cursor(text: &str, line_idx: usize, char_idx: usize) -> Option<String> {
+    let line = text.lines().nth(line_idx)?;
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return None;
+    }
+    let is_ident_char = |c: char| c.is_alphanumeric() || c == '_';
+    let cursor = char_idx.min(chars.len());
+
+    // Si el cursor está sobre o adyacente a un char ident, encontrar
+    // los límites del run.
+    let mut start = cursor;
+    while start > 0 && is_ident_char(chars[start - 1]) {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < chars.len() && is_ident_char(chars[end]) {
+        end += 1;
+    }
+    if start == end {
+        return None;
+    }
+    Some(chars[start..end].iter().collect())
 }
 
 #[tokio::main(flavor = "current_thread")]
