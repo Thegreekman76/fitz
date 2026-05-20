@@ -5797,11 +5797,10 @@ impl<'a> CodegenCtx<'a> {
                     )))?;
                 Ok((format!("({} + {})", l, r), t))
             }
-            BinOpKind::Sub | BinOpKind::Mul | BinOpKind::Div => {
+            BinOpKind::Sub | BinOpKind::Mul => {
                 let sym = match op {
                     BinOpKind::Sub => "-",
                     BinOpKind::Mul => "*",
-                    BinOpKind::Div => "/",
                     _ => unreachable!(),
                 };
                 let (l, r, t) = numeric_coerce(&lc, &lt, &rc, &rt)
@@ -5810,6 +5809,35 @@ impl<'a> CodegenCtx<'a> {
                         sym, type_name(&lt), type_name(&rt)
                     )))?;
                 Ok((format!("({} {} {})", l, sym, r), t))
+            }
+            // Mini-tanda DZ — chequeo explícito de divisor 0 para
+            // emitir el mismo mensaje `"división por cero"` del
+            // intérprete (`eval_div` en evaluator.rs). Sin este
+            // wrap: (a) `10 / 0` literal hace rustc rechazar con
+            // `unconditional_panic` en const-eval, y (b) `a / 0`
+            // dinámico paniquearía con el msg crudo de Rust
+            // (`attempt to divide by zero`) para Int, o produciría
+            // `inf`/`NaN` silencioso para Float.
+            BinOpKind::Div => {
+                let (l, r, t) = numeric_coerce(&lc, &lt, &rc, &rt)
+                    .ok_or_else(|| self.err_at(span, format!(
+                        "operador `/` no aplicable a `{}` y `{}` en codegen",
+                        type_name(&lt), type_name(&rt)
+                    )))?;
+                let (ty_rs, zero_lit) = match &t {
+                    Type::Int => ("i64", "0"),
+                    Type::Float => ("f64", "0.0"),
+                    _ => unreachable!(),
+                };
+                Ok((
+                    format!(
+                        "{{ let __a: {ty} = {l}; let __b: {ty} = {r}; \
+                         if __b == {z} {{ panic!(\"división por cero\"); }} \
+                         (__a / __b) }}",
+                        ty = ty_rs, z = zero_lit, l = l, r = r
+                    ),
+                    t,
+                ))
             }
             // R.1.2 — operador `%` con semántica euclidean. Emitimos
             // `i64::rem_euclid` para paridad bit-a-bit con el
@@ -5906,6 +5934,26 @@ impl<'a> CodegenCtx<'a> {
                 // Numéricos con posible coerción Int↔Float.
                 if let Some((l, r, _)) = numeric_coerce(&lc, &lt, &rc, &rt) {
                     return Ok((format!("({} {} {})", l, sym, r), Type::Bool));
+                }
+                // Mini-tanda CT — comparación entre tipos primitivos
+                // incompatibles (Int vs Str, Bool vs Int, Str vs Null
+                // sin Nullable, etc.). El intérprete devuelve `false`
+                // sin error (`Value::PartialEq` distingue por variant).
+                // Codegen: emite el literal (`false` para `==`,
+                // `true` para `!=`) evaluando ambos lados con
+                // `let _` para preservar side effects (calls, prints).
+                // Rustc rechazaría `Int == String` con E0308; este
+                // wrap alinea con la semántica del intérprete sin
+                // panicar.
+                if ct_incompatible_eq(&lt, &rt) {
+                    let result_lit = if is_eq { "false" } else { "true" };
+                    return Ok((
+                        format!(
+                            "{{ let _ = {}; let _ = {}; {} }}",
+                            lc, rc, result_lit
+                        ),
+                        Type::Bool,
+                    ));
                 }
                 // Bools, Null directos.
                 Ok((format!("({} {} {})", lc, sym, rc), Type::Bool))
@@ -13491,6 +13539,35 @@ fn numeric_coerce(
     }
 }
 
+/// Mini-tanda CT — detecta cuando dos tipos primitivos son
+/// incompatibles para `==`/`!=`. Llamado en `gen_binop` después de
+/// que las ramas estructuradas (Str==Str, num coerce Int↔Float,
+/// Nominal==Nominal, Nullable==Null) ya fallaron. El intérprete
+/// devuelve `false` sin error para estas combinaciones; el codegen
+/// debe alinearse para no producir Rust E0308. Lista exhaustiva
+/// sobre primitivos: Int/Float/Str/Bool/Null. Tipos no primitivos
+/// (Nominal, List, Map, Function, Any, PyAny, Range, etc.) NO
+/// se consideran incompatibles acá — caen al fallback del `==`
+/// directo y rustc decide. Any se trata como gradual escape:
+/// nunca incompatible.
+fn ct_incompatible_eq(lt: &Type, rt: &Type) -> bool {
+    use Type::*;
+    fn is_primitive(t: &Type) -> bool {
+        matches!(t, Int | Float | Str | Bool | Null)
+    }
+    if !is_primitive(lt) || !is_primitive(rt) {
+        return false;
+    }
+    match (lt, rt) {
+        // Mismos primitivos → no incompatibles (manejado upstream).
+        (Int, Int) | (Float, Float) | (Str, Str) | (Bool, Bool) | (Null, Null) => false,
+        // Int↔Float ya coerciona vía `numeric_coerce`.
+        (Int, Float) | (Float, Int) => false,
+        // Resto: combinaciones entre distintos primitivos → incompatible.
+        _ => true,
+    }
+}
+
 /// Devuelve una **expresión Rust** que evalúa a `String` y representa
 /// el valor `code` (de tipo Fitz `ty`) en formato `print` top-level:
 /// strings sin comillas, null como `"null"`, floats con `.0` si tienen
@@ -17096,6 +17173,127 @@ mod tests {
         assert!(
             code.contains("__hmap: axum::http::HeaderMap"),
             "esperaba que se extraiga el HeaderMap cuando hay body_param"
+        );
+    }
+
+    // ---- Mini-tanda DZ — división por cero con msg alineado al intérprete ----
+
+    #[test]
+    fn dz_div_int_emite_check_de_cero() {
+        // `a / b` para Int emite un bloque con check explícito de 0
+        // que panica con "división por cero" — paralelo a `eval_div`
+        // del intérprete y antes de que rustc rechace `10/0` literal
+        // con `unconditional_panic`.
+        let src = "let x = 10 / 2\nprint(x)";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("__b == 0") && code.contains("división por cero"),
+            "esperaba check `__b == 0` + panic `división por cero`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn dz_div_float_emite_check_de_cero_float() {
+        // Float division por 0.0 también chequea — sin este wrap,
+        // rustc emite `inf`/`NaN` silencioso.
+        let src = "let x = 10.0 / 2.0\nprint(x)";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("__b == 0.0") && code.contains("división por cero"),
+            "esperaba check `__b == 0.0` + panic, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn dz_division_literal_por_cero_compila_aunque_paniquea_en_runtime() {
+        // El wrap del check de cero evita que rustc rechace
+        // `10 / 0` con `unconditional_panic`. El programa compila;
+        // el panic ocurre en runtime con el msg alineado.
+        let src = "print(10 / 0)";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("división por cero"),
+            "esperaba panic msg `división por cero` en el output, got:\n{}",
+            code
+        );
+    }
+
+    // ---- Mini-tanda CT — comparar tipos distintos: codegen emite literal ----
+
+    #[test]
+    fn ct_int_vs_str_eq_emite_false_literal() {
+        // `1 == "1"` en el intérprete devuelve false; el codegen
+        // debe alinearse y emitir false literal en lugar de un Rust
+        // `==` entre tipos distintos (E0308).
+        let src = "print(1 == \"1\")";
+        let code = gen(src).unwrap();
+        // Esperamos el patrón `{ let _ = ...; let _ = ...; false }`.
+        assert!(
+            code.contains("let _ = ") && code.contains("false }"),
+            "esperaba wrap CT con `let _` + literal false, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ct_int_vs_str_neq_emite_true_literal() {
+        let src = "print(1 != \"1\")";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let _ = ") && code.contains("true }"),
+            "esperaba wrap CT con `let _` + literal true para `!=`, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ct_bool_vs_int_eq_emite_false_literal() {
+        let src = "print(true == 1)";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let _ = ") && code.contains("false }"),
+            "esperaba wrap CT con `let _` + literal false, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ct_str_vs_null_eq_emite_false_literal() {
+        // `"x" == null` (Str no es Nullable, así que no cae al
+        // `is_none/is_some` path) → CT incompatible → false.
+        let src = "print(\"x\" == null)";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("let _ = ") && code.contains("false }"),
+            "esperaba wrap CT con `let _` + literal false, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ct_str_eq_str_sigue_emitiendo_comparacion_normal() {
+        // Para Str==Str (mismo tipo) NO aplica el wrap CT — debe
+        // emitir `==` directo entre &String.
+        let src = "print(\"a\" == \"a\")";
+        let code = gen(src).unwrap();
+        assert!(
+            !code.contains("let _ ="),
+            "Str==Str no debe disparar el wrap CT, got:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ct_int_eq_float_sigue_coercionando_no_dispara_wrap() {
+        // Int↔Float coerciona vía numeric_coerce, NO es incompatible.
+        let src = "print(1 == 1.0)";
+        let code = gen(src).unwrap();
+        assert!(
+            !code.contains("let _ ="),
+            "Int==Float coerce, no debe disparar el wrap CT, got:\n{}",
+            code
         );
     }
 

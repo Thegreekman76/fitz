@@ -1227,6 +1227,146 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~DZ + CT + OAPI: paridad chica run↔build + OpenAPI con consts~~ ✓ CERRADO 2026-05-20 (mini-tanda DZ + CT + OAPI)
+
+Mini-tanda de polish chico que cierra 3 asimétrias entre `fitz run` y
+`fitz build`. **MP2 (multipart con files) y TM (métodos custom sobre
+type en build) quedaron fuera del bundle**: el primero por scope (requiere
+`Value::Bytes` o `type File` built-in, ~8-12h dedicados); el segundo
+fue verificado y resultó **ya cerrado** desde R.3 — los métodos custom
+sobre `type` ya compilan a binario nativo, mi test inicial falló por
+usar la sintaxis equivocada (`fn greet(self)` cuando Fitz usa fields-
+como-locales).
+
+**Parte 1 — DZ: división por cero literal**:
+
+- ~~**`10 / 0`, `10 % 0`, `10.0 / 0.0` literal compilan en `fitz build`
+  y panican en runtime con `división por cero`**~~ ✓ Pre-DZ: rustc
+  rechazaba con `unconditional_panic` en const-eval, programa no
+  compilaba. Post-DZ: `gen_binop` para `BinOp::Div` emite `{ let
+  __a: <ty> = lhs; let __b: <ty> = rhs; if __b == <0|0.0> { panic!(
+  "división por cero"); } (__a / __b) }`. La rama `BinOp::Mod` ya
+  tenía este patrón desde R.1.2. El check se aplica también a Float
+  (sin él, `f64 / 0.0` produce `inf`/`NaN` silencioso, divergencia
+  con el intérprete que retorna error explícito).
+- **Refactor**: la rama compartida `Sub | Mul | Div` se splittea —
+  Div tiene su path dedicado con el wrap del check de cero.
+
+**Parte 2 — CT: comparar tipos distintos**:
+
+- ~~**`1 == "1"`, `true == 0`, `"x" == null` compilan y devuelven
+  `false`/`true` literal**~~ ✓ Pre-CT: el codegen emitía `Rust` con
+  `1i64 == String::from("1")` que rustc rechazaba con E0308. Post-CT:
+  detector `ct_incompatible_eq(lt, rt)` para combinaciones primitivas
+  incompatibles (Int↔Str, Bool↔Int, Str↔Null sin Nullable, etc.).
+  Emite `{ let _ = lhs; let _ = rhs; false }` (o `true` para `!=`),
+  preservando side effects de ambas expresiones. Alineado bit-a-bit
+  con el intérprete que devuelve `false` por `Value::PartialEq`
+  distinguiendo variants.
+- **Scope**: cubre exhaustivamente pares de primitivos
+  Int/Float/Str/Bool/Null. Int↔Float sigue coercionando vía
+  `numeric_coerce`. Tipos no primitivos (Nominal, List, Map, etc.)
+  caen al fallback original.
+
+**Parte 3 — OAPI: status codes dinámicos en schema OpenAPI**:
+
+- ~~**Pre-scan top-level Int consts**~~ ✓ `collect_top_level_int_consts(
+  program) -> HashMap<String, i64>` walkea el program AST extrayendo
+  bindings `let X = <Int literal>` y `let Y = -<Int literal>` (con
+  UnaryOp::Neg). Otros RHS (expresiones complejas, vars, llamadas)
+  se omiten — quedan invisibles para el schema.
+- ~~**`Err({ status: <Ident>, ... })` resuelve a Int desde la tabla**~~
+  ✓ `resolve_status_value(expr, consts)` acepta `Expr::Int(n)` directo
+  o `Expr::Ident(name)` con lookup en `consts`. El walker de OpenAPI
+  consulta esta función en lugar del match Int-only de HC.2. Patrón
+  canónico: `let NOT_FOUND = 404; ... return Err(ApiErr { status:
+  NOT_FOUND, ... })` ahora aparece en el schema como `responses.404`.
+- ~~**`Stmt::ReturnStatus` con Ident**~~ ✓ El parser ahora acepta
+  `return NOT_FOUND { "error": "x" }` (antes solo Int literal).
+  Disambiguación clave: la `expression()` greedea `Ident { ... }` como
+  struct literal — para evitar la colisión, en `parse_return`
+  agregamos lookahead específico ANTES de invocar `expression()`:
+  peek 3 tokens (`<Int|Ident>` `{` `<Str|RBrace|Newline>`) → ReturnStatus;
+  caso contrario → path normal con `expression()`. Esto preserva
+  `return P { x: 1 }` (struct lit, primera clave Ident) sin cambios.
+- ~~**Runtime + codegen ya soportaban Ident**~~ ✓ `eval_expr`
+  evalúa el `status` como expr arbitrario y chequea que sea Int; el
+  codegen `gen_return_status` también pasa el status por `gen_expr`
+  general. Ningún cambio adicional necesario en evaluator/codegen.
+- **APIs públicas**: `collect_status_codes(body)` se mantiene como
+  wrapper back-compat (delega con tabla vacía). Nueva
+  `collect_status_codes_with_consts(body, consts)`. `routes_from_registry`
+  ahora toma `&Program` como param adicional (firma cambió). 2 call
+  sites actualizados (`http.rs::serve`, `main.rs::Commands::Openapi`).
+- **Limitación**: solo resuelve Idents que apunten a `let X = <Int literal>`
+  top-level. Vars locales del handler, params, expresiones derivadas
+  (`let X = compute_code()`) siguen invisibles. Caen al 500 default
+  histórico.
+
+**MP2 — DEFERIDA con scope claro** (NO bloquea 9.w):
+
+- `multipart/form-data` con file uploads requiere:
+  1. Nuevo `Value::Bytes` o convención `type File { name: Str?, content: ?, content_type: Str? }` built-in.
+  2. Parser de multipart en `http.rs` (boundary extraction, parts splitting,
+     per-part headers, Content-Disposition con `name` y `filename`,
+     decoded content per part).
+  3. Codegen paralelo en `gen_param_coercions` (similar al de urlencoded).
+  4. 415 alineado para casos malformados.
+  5. Decisión sobre file representation y memoria (¿streaming?
+     ¿in-memory?).
+- Total estimado: ~8-12h. Mini-tanda dedicada cuando entre demanda real.
+- Hoy: multipart sigue rechazado con 415 + msg claro (cerrado en
+  UC + HA).
+
+**Implementación cross-cutting**:
+
+- **`codegen.rs::gen_binop`**: rama `Sub | Mul | Div` se splitea;
+  rama `Div` nueva con check de cero. Nueva fn `ct_incompatible_eq`
+  + rama nueva en `BinOpKind::Eq | NotEq` que emite literal `false`/
+  `true` cuando los tipos son incompatibles. 13 unit tests nuevos
+  (`dz_*` x3, `ct_*` x6, `oapi_*` x4).
+- **`openapi.rs`**: nuevas APIs `collect_status_codes_with_consts`,
+  `collect_top_level_int_consts`, `resolve_status_value`. Walker
+  acepta `&HashMap<String, i64>` para resolver Idents.
+- **`parser.rs::parse_return`**: lookahead específico (3 tokens) para
+  detectar el patrón ReturnStatus con Ident como status. Sin tocar
+  `expression()`.
+- **`http.rs::serve` + `main.rs::Commands::Openapi`**: pass `&program`
+  a `routes_from_registry`.
+
+**Tests**: **13 unit + 5 compile_e2e nuevos**:
+
+- 3 codegen DZ (Int check, Float check, literal compila aunque panique).
+- 6 codegen CT (Int↔Str eq/neq, Bool↔Int, Str↔Null, Str==Str sigue ==,
+  Int↔Float sigue coerce).
+- 4 openapi OAPI (recolecta consts top-level, return Ident en schema,
+  Err StructLit con Ident en schema, Ident no resuelve se omite).
+- 5 compile_e2e:
+  `dz_division_int_por_cero_compila_y_panica_con_msg_alineado`,
+  `dz_division_float_por_cero_compila_y_panica_con_msg_alineado`,
+  `ct_comparar_int_vs_str_compila_y_devuelve_false`,
+  `ct_paridad_bit_a_bit_run_vs_build_comparaciones_incompatibles`,
+  `oapi_return_ident_a_const_top_level_compila_y_emite_schema`.
+
+**VSCode extension**: SIN cambios. Cambios server-side (codegen +
+parser + openapi). Grammar TextMate y client TS sin updates.
+
+**Total al cierre: 2001 unit sin feature, 2091 con --features lsp,
+241+ compile_e2e (5 nuevos).** Clippy `-D warnings` limpio en lib +
+bin `fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w)**:
+
+- **Multipart/form-data con files**: ~8-12h. Sub-paso futuro dedicado.
+- **Status codes con expresiones complejas** (no literales ni Idents
+  a consts): `let X = compute()` con `compute()` no resoluble
+  estáticamente. Caen al 500 default histórico — refinable solo con
+  un mini-evaluator estático sobre expresiones puras (complejidad
+  no justificada por el caso).
+- **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
+- **Listas/mapas heterogéneos en `fitz build`**: requiere `FitzValue`
+  tagged runtime (decisión grande, F13).
+
 ### ~~UC + HA: urlencoded en codegen + Hpx.1 msg alignment — paridad HTTP completa~~ ✓ CERRADO 2026-05-20 (mini-tanda UC + HA)
 
 Cierra las DOS asimétrias HTTP restantes entre `fitz run` y

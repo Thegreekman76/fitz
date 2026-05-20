@@ -1526,29 +1526,62 @@ impl Parser {
         // `return` sin valor devuelve null implícito. Detectamos los
         // terminadores válidos para una sentencia: fin de línea, cierre
         // de bloque o fin de archivo.
-        let value = match self.peek() {
+        match self.peek() {
             Token::Newline | Token::RBrace | Token::EOF => {
                 return Ok(Stmt::Return(Expr::Null(span), span));
             }
-            _ => self.expression()?,
-        };
-        // Status code custom (spec): `return <Int> { ... }`.
-        // Disparamos `Stmt::ReturnStatus` solo cuando la expr es un Int
-        // literal Y el siguiente token es `{` (un map/struct lit como
-        // body). Body siempre presente — para "no content" usar
-        // `return 204 {}` (map vacío). El checker valida que el
-        // ReturnStatus esté adentro de un handler HTTP; fuera de eso
-        // es error.
-        if matches!(self.peek(), Token::LBrace) {
-            if let Expr::Int(_, _) = &value {
-                let body = self.expression()?;
-                return Ok(Stmt::ReturnStatus {
-                    status: value,
-                    body: Some(body),
-                    span,
-                });
-            }
+            _ => {}
         }
+
+        // Mini-tanda OAPI — lookahead específico para detectar el
+        // patrón ReturnStatus ANTES de invocar `expression()` (que
+        // greedea `Ident { ... }` como struct literal). El patrón es:
+        //   `<Int> { ... }` o `<Ident> { ... }` donde el `{...}` es un
+        //   map literal (primera clave Str), no un struct lit (primera
+        //   clave Ident).
+        // Disambiguación robusta: peek a tokens 0, 1, 2:
+        //   - tok0: Int o Ident
+        //   - tok1: LBrace
+        //   - tok2: Str literal o RBrace (map vacío) o Newline (multi-línea)
+        // Si matchea, parseamos el status como atom y el body como
+        // expression. Si NO matchea, caemos al path normal de
+        // `expression()` que preserva la semántica anterior
+        // (`return P { x: 1 }` sigue siendo struct lit).
+        let looks_like_return_status = {
+            let t0 = self.peek_at(0);
+            let t1 = self.peek_at(1);
+            let t2 = self.peek_at(2);
+            let head_ok = matches!(t0, Token::Int(_) | Token::Ident(_));
+            let brace_next = matches!(t1, Token::LBrace);
+            let map_body =
+                matches!(t2, Token::Str(_) | Token::RBrace | Token::Newline);
+            head_ok && brace_next && map_body
+        };
+
+        if looks_like_return_status {
+            // Parsear el status como un atom — Int o Ident solo,
+            // SIN postfix (sin call, sin field, sin struct lit).
+            let status_span = self.cur_span();
+            let status = match self.peek().clone() {
+                Token::Int(n) => {
+                    self.advance();
+                    Expr::Int(n, status_span)
+                }
+                Token::Ident(name) => {
+                    self.advance();
+                    Expr::Ident(name, status_span)
+                }
+                _ => unreachable!("lookahead garantiza Int o Ident"),
+            };
+            let body = self.expression()?;
+            return Ok(Stmt::ReturnStatus {
+                status,
+                body: Some(body),
+                span,
+            });
+        }
+
+        let value = self.expression()?;
         Ok(Stmt::Return(value, span))
     }
 

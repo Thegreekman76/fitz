@@ -2022,6 +2022,169 @@ fn ha_http_content_type_no_soportado_es_415_con_msg_alineado() {
 }
 
 // ---------------------------------------------------------------------------
+// Mini-tandas DZ + CT + OAPI — paridad chica run↔build
+// ---------------------------------------------------------------------------
+
+#[test]
+fn dz_division_int_por_cero_compila_y_panica_con_msg_alineado() {
+    // Pre-DZ: `print(10 / 0)` rechaza rustc con `unconditional_panic`.
+    // Post-DZ: compila y panica en runtime con el mismo msg que el
+    // intérprete ("división por cero").
+    let dir = std::env::temp_dir().join("fitz-e2e-dz-int");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    std::fs::write(&src_path, "print(10 / 0)\n").expect("write");
+    let out = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out.status.success(),
+        "esperaba que `fitz build` con `10/0` compile (no const-eval reject), stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    assert!(bin.exists(), "binario no existe: {}", bin.display());
+    let run = Command::new(&bin).output().expect("run prog");
+    assert!(
+        !run.status.success(),
+        "esperaba exit code != 0 (panic), fue: {:?}",
+        run.status
+    );
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("división por cero"),
+        "esperaba msg `división por cero`, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn dz_division_float_por_cero_compila_y_panica_con_msg_alineado() {
+    let dir = std::env::temp_dir().join("fitz-e2e-dz-float");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    std::fs::write(&src_path, "print(3.14 / 0.0)\n").expect("write");
+    let out = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(out.status.success());
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let run = Command::new(&bin).output().expect("run");
+    assert!(!run.status.success(), "esperaba panic");
+    let stderr = String::from_utf8_lossy(&run.stderr);
+    assert!(
+        stderr.contains("división por cero"),
+        "esperaba msg `división por cero`, stderr: {}",
+        stderr
+    );
+}
+
+#[test]
+fn ct_comparar_int_vs_str_compila_y_devuelve_false() {
+    // `1 == "1"` y `1 != "1"` ahora compilan a literal false/true.
+    let src = "print(1 == \"1\")\nprint(1 != \"1\")\nprint(true == 0)\n";
+    let (stdout, exit) = build_and_run("ct-incompat", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["false", "true", "false"]);
+}
+
+#[test]
+fn ct_paridad_bit_a_bit_run_vs_build_comparaciones_incompatibles() {
+    // Paridad bit-a-bit `fitz run` ↔ `fitz build` para `==`/`!=`
+    // entre tipos primitivos incompatibles.
+    let dir = std::env::temp_dir().join("fitz-e2e-ct-parity");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "\
+print(1 == \"1\")
+print(\"x\" != 1.5)
+print(true == null)
+print(false != \"f\")
+";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    assert!(out_run.status.success());
+    let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
+
+    let out_build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(out_build.status.success());
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let exec = Command::new(&bin).output().expect("run prog");
+    assert!(exec.status.success());
+    let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+
+    assert_eq!(
+        run_stdout.replace("\r\n", "\n"),
+        build_stdout.replace("\r\n", "\n"),
+        "esperaba paridad bit-a-bit `run` ↔ `build`"
+    );
+    assert!(run_stdout.contains("false"));
+    assert!(run_stdout.contains("true"));
+}
+
+#[test]
+fn oapi_return_ident_a_const_top_level_compila_y_emite_schema() {
+    // `return NOT_FOUND { ... }` con NOT_FOUND const top-level
+    // ahora parsea, compila a binario, y entra al schema OpenAPI.
+    let dir = std::env::temp_dir().join("fitz-e2e-oapi-ident-build");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "\
+let NOT_FOUND = 404
+@server(43250)
+fn main() => 0
+@get(\"/u/{id}\")
+fn h(id: Int) -> Int {
+    if (id == 0) {
+        return NOT_FOUND {\"error\": \"x\"}
+    }
+    return id
+}
+";
+    std::fs::write(&src_path, src).expect("write");
+    let out = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out.status.success(),
+        "esperaba compile OK, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let openapi = Command::new(fitz_bin())
+        .args(["openapi"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz openapi");
+    assert!(openapi.status.success());
+    let schema = String::from_utf8_lossy(&openapi.stdout);
+    assert!(
+        schema.contains("\"404\""),
+        "esperaba 404 en el schema OpenAPI, fue: {}",
+        schema
+    );
+}
+
+// ---------------------------------------------------------------------------
 // F12 — higher-order completo (closures, fn como valor/param/retorno)
 // ---------------------------------------------------------------------------
 

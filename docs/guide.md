@@ -6883,8 +6883,12 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 > emiten 500 + body con mensaje claro citando el valor inválido
 > (HC.1). **Status codes específicos de cada `Err`** aparecen en
 > el schema OpenAPI cuando el handler hace `return Err(X { status:
-> 404, ... })` con un literal — el schema incluye una entrada por
-> cada code detectado (HC.2). **Validación de Content-Type
+> 404, ... })` con un literal Int O con un Ident que apunta a una
+> const top-level Int (`let NOT_FOUND = 404; ...status: NOT_FOUND...`)
+> — el schema incluye una entrada por cada code detectado (HC.2 +
+> OAPI). El mismo Ident funciona también como status directo de
+> `Stmt::ReturnStatus`: `return NOT_FOUND {"error": "..."}` parsea,
+> ejecuta y aparece en el schema (mini-tanda OAPI). **Validación de Content-Type
 > estricta** — body no-JSON ni urlencoded recibe 415 con msg claro
 > (Hpx.1 + HA, paridad bit-a-bit `fitz run` ↔ `fitz build`).
 > **`application/x-www-form-urlencoded`** — bodies tipo
@@ -7690,19 +7694,18 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
   tiene un tipo "Value" genérico tagged en runtime sin un
   refactor. Workaround: armar dos colecciones, o usar `fitz run`.
-- **División por cero literal** — `print(10 / 0)` no compila
-  (rustc rechaza la operación en compile-time). En el intérprete
-  es un error de runtime explícito.
-- **Comparar valores de tipos distintos** — `1 == "1"` corre en
-  el intérprete (devuelve `false` porque los tipos no coinciden);
-  el compilador rechaza la comparación.
 
 > Lo que **sí anda** y antes era deuda: `let X = <expr>` no literal
 > a nivel top de un módulo (cerrado en F14 — la RHS puede ser una
 > expresión arbitraria que se evalúa lazy via accessor fn),
-> **imports transitivos** (cerrado en F15), y **return type
+> **imports transitivos** (cerrado en F15), **return type
 > inference para handlers** (cerrado en Hpx.2 — `fn create(u: User)
-> { return ... }` infiere `-> X` del body via TypeInfo del checker).
+> { return ... }` infiere `-> X` del body via TypeInfo del checker),
+> **división por cero** literal (`print(10 / 0)`) panica con
+> `división por cero` en runtime — paridad bit-a-bit con el
+> intérprete (mini-tanda DZ), y **comparar valores de tipos
+> distintos** (`1 == "1"`, `true != 0`) compila y devuelve
+> `false`/`true` literal sin error E0308 (mini-tanda CT).
 
 Si te tropezás con algo de esta lista, el mensaje del codegen lo
 cita explícitamente. La salida tiene la forma:

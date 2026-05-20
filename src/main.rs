@@ -568,7 +568,7 @@ fn openapi_file(path: &PathBuf) {
         std::process::exit(1);
     }
 
-    let routes = openapi::routes_from_registry(&registry);
+    let routes = openapi::routes_from_registry(&registry, &program);
     // Q.2: `@server(api_version=...)` override.
     let api_version = registry
         .server_config

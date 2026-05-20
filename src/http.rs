@@ -2165,7 +2165,7 @@ pub fn serve(
         .as_ref()
         .and_then(|c| c.api_version.clone());
     let openapi_schema = if enable_docs {
-        let routes = crate::openapi::routes_from_registry(&registry);
+        let routes = crate::openapi::routes_from_registry(&registry, &program);
         Some(crate::openapi::generate_openapi_with_version(
             &routes,
             &program,

@@ -62,11 +62,23 @@ pub struct OpenApiRouteInfo {
 }
 
 /// Adapter: del registry runtime a vistas livianas.
-pub fn routes_from_registry(reg: &HttpRegistry) -> Vec<OpenApiRouteInfo> {
-    reg.routes.iter().map(route_info_from_spec).collect()
+///
+/// Mini-tanda OAPI — recibe el `&Program` para extraer constantes
+/// top-level Int (`let NOT_FOUND = 404`) y resolver Idents en los
+/// status codes de Err/ReturnStatus. Cero overhead cuando no hay
+/// consts (tabla vacía).
+pub fn routes_from_registry(reg: &HttpRegistry, program: &Program) -> Vec<OpenApiRouteInfo> {
+    let consts = collect_top_level_int_consts(program);
+    reg.routes
+        .iter()
+        .map(|s| route_info_from_spec(s, &consts))
+        .collect()
 }
 
-fn route_info_from_spec(s: &RouteSpec) -> OpenApiRouteInfo {
+fn route_info_from_spec(
+    s: &RouteSpec,
+    consts: &std::collections::HashMap<String, i64>,
+) -> OpenApiRouteInfo {
     OpenApiRouteInfo {
         method: s.method,
         path: s.path.clone(),
@@ -85,8 +97,11 @@ fn route_info_from_spec(s: &RouteSpec) -> OpenApiRouteInfo {
         // El handler runtime es un `Value::Function { body, ... }`; si
         // por alguna razón no lo es (registro inconsistente), tratamos
         // como sin status codes (defensivo).
+        // OAPI: usar la tabla de consts para resolver Idents.
         custom_status_codes: match &s.handler {
-            crate::value::Value::Function { body, .. } => collect_status_codes(body),
+            crate::value::Value::Function { body, .. } => {
+                collect_status_codes_with_consts(body, consts)
+            }
             _ => Vec::new(),
         },
     }
@@ -98,61 +113,147 @@ fn route_info_from_spec(s: &RouteSpec) -> OpenApiRouteInfo {
 /// adentro de loops, if/match, etc.; FnExpr inline NO se sigue (otro
 /// scope, otra fn). El Vec devuelto está deduplicado y en orden
 /// ascendente para que el schema sea determinista.
+///
+/// Mini-tanda OAPI — wrapper que delega a la versión con tabla de
+/// constantes vacía (back-compat con tests y `routes_from_registry`
+/// del path runtime, donde no hay AST top-level disponible).
 pub fn collect_status_codes(body: &[crate::ast::Stmt]) -> Vec<u16> {
+    let empty = std::collections::HashMap::new();
+    collect_status_codes_with_consts(body, &empty)
+}
+
+/// Mini-tanda OAPI — variante que acepta una tabla `const_name → Int`
+/// con las constantes top-level del programa (`let NOT_FOUND = 404`).
+/// Cuando el `status` field de un `Err(StructLit { ... })` o el status
+/// de un `Stmt::ReturnStatus` es un `Expr::Ident` cuyo nombre matchea
+/// una entrada de la tabla, se resuelve al valor literal y se incluye
+/// en el schema. Idents que no resuelven (vars locales, expresiones
+/// dinámicas) se siguen omitiendo silenciosamente como antes.
+pub fn collect_status_codes_with_consts(
+    body: &[crate::ast::Stmt],
+    consts: &std::collections::HashMap<String, i64>,
+) -> Vec<u16> {
     let mut out: Vec<u16> = Vec::new();
     for s in body {
-        collect_status_codes_stmt(s, &mut out);
+        collect_status_codes_stmt(s, &mut out, consts);
     }
     out.sort_unstable();
     out.dedup();
     out
 }
 
-fn collect_status_codes_stmt(stmt: &crate::ast::Stmt, out: &mut Vec<u16>) {
+/// Mini-tanda OAPI — pre-scan del programa para extraer top-level
+/// `let X = <Int literal>` (incluyendo `Expr::UnaryOp::Neg` envolviendo
+/// un Int para casos negativos como `let TIMEOUT = -1` — irrelevante
+/// para status codes pero coherente). Devuelve una `HashMap<nombre,
+/// valor>` lista para pasar a `collect_status_codes_with_consts`. Vars
+/// con RHS no literal o tipo distinto se omiten silenciosamente. Solo
+/// scope top-level (no const inside fn / inside type).
+pub fn collect_top_level_int_consts(
+    program: &crate::ast::Program,
+) -> std::collections::HashMap<String, i64> {
+    use crate::ast::{Expr, Stmt, UnaryOpKind};
+    let mut out = std::collections::HashMap::new();
+    for s in program {
+        if let Stmt::Assign { target, value, .. } = s {
+            // Solo bindings simples `let X = ...` (no field assign).
+            let crate::ast::AssignTarget::Ident(name) = target else {
+                continue;
+            };
+            let resolved = match value {
+                Expr::Int(n, _) => Some(*n),
+                Expr::UnaryOp {
+                    op: UnaryOpKind::Neg,
+                    operand,
+                    ..
+                } => {
+                    if let Expr::Int(n, _) = operand.as_ref() {
+                        Some(-*n)
+                    } else {
+                        None
+                    }
+                }
+                _ => None,
+            };
+            if let Some(n) = resolved {
+                out.insert(name.clone(), n);
+            }
+        }
+    }
+    out
+}
+
+fn collect_status_codes_stmt(
+    stmt: &crate::ast::Stmt,
+    out: &mut Vec<u16>,
+    consts: &std::collections::HashMap<String, i64>,
+) {
     use crate::ast::Stmt;
     match stmt {
         Stmt::ReturnStatus { status, body, .. } => {
-            if let crate::ast::Expr::Int(n, _) = status {
+            if let Some(n) = resolve_status_value(status, consts) {
                 // Status fuera de rango HTTP válido (100-599) lo
                 // skipeamos también — el runtime/parser lo cazaría.
-                if (100..=599).contains(n) {
-                    out.push(*n as u16);
+                if (100..=599).contains(&n) {
+                    out.push(n as u16);
                 }
             }
             // El body puede contener otro ReturnStatus anidado vía
             // if/match — recorremos.
             if let Some(b) = body {
-                collect_status_codes_expr(b, out);
+                collect_status_codes_expr(b, out, consts);
             }
         }
         Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
             for s in body {
-                collect_status_codes_stmt(s, out);
+                collect_status_codes_stmt(s, out, consts);
             }
         }
-        Stmt::Assign { value, .. } => collect_status_codes_expr(value, out),
-        Stmt::Return(e, _) | Stmt::Expr(e, _) => collect_status_codes_expr(e, out),
+        Stmt::Assign { value, .. } => collect_status_codes_expr(value, out, consts),
+        Stmt::Return(e, _) | Stmt::Expr(e, _) => collect_status_codes_expr(e, out, consts),
         _ => {}
     }
 }
 
-fn collect_status_codes_expr(expr: &crate::ast::Expr, out: &mut Vec<u16>) {
+/// Mini-tanda OAPI — resuelve un value de `status:` o
+/// `Stmt::ReturnStatus.status` a un Int. Acepta literales directos
+/// (`Expr::Int`) y referencias a constantes top-level
+/// (`Expr::Ident` con lookup en la tabla). Cualquier otra cosa
+/// (BinOp, llamadas, vars locales) devuelve None — el schema cae
+/// al 500 default.
+fn resolve_status_value(
+    e: &crate::ast::Expr,
+    consts: &std::collections::HashMap<String, i64>,
+) -> Option<i64> {
+    use crate::ast::Expr;
+    match e {
+        Expr::Int(n, _) => Some(*n),
+        Expr::Ident(name, _) => consts.get(name).copied(),
+        _ => None,
+    }
+}
+
+fn collect_status_codes_expr(
+    expr: &crate::ast::Expr,
+    out: &mut Vec<u16>,
+    consts: &std::collections::HashMap<String, i64>,
+) {
     use crate::ast::Expr;
     match expr {
         Expr::If { then, else_, .. } => {
             for s in then {
-                collect_status_codes_stmt(s, out);
+                collect_status_codes_stmt(s, out, consts);
             }
             if let Some(els) = else_ {
                 for s in els {
-                    collect_status_codes_stmt(s, out);
+                    collect_status_codes_stmt(s, out, consts);
                 }
             }
         }
         Expr::Match { arms, .. } => {
             for a in arms {
                 for s in &a.body {
-                    collect_status_codes_stmt(s, out);
+                    collect_status_codes_stmt(s, out, consts);
                 }
             }
         }
@@ -160,17 +261,20 @@ fn collect_status_codes_expr(expr: &crate::ast::Expr, out: &mut Vec<u16>) {
         // literal>, ... })` y registrar el status code en el schema.
         // El patrón canónico es `return Err(ApiErr { status: 404, ... })`
         // donde el tipo E del Result tiene un field `status: Int`. El
-        // status code se infiere del literal en cada call site. Si el
-        // user usa una variable (`Err(ApiErr { status: code, ... })`),
-        // no podemos resolver estáticamente — se documenta solo el
-        // 500 default histórico.
+        // status code se infiere del literal en cada call site.
+        //
+        // Mini-tanda OAPI — además del Int literal, ahora aceptamos
+        // referencias a constantes top-level (`let NOT_FOUND = 404`).
+        // El patrón `Err(ApiErr { status: NOT_FOUND, ... })` se
+        // resuelve a 404 vía la tabla `consts`. Vars locales o
+        // expresiones complejas siguen omitidas (caen al 500 default).
         Expr::Err(inner, _) => {
             if let Expr::StructLit { fields, .. } = inner.as_ref() {
                 for (name, val) in fields {
                     if name == "status" {
-                        if let Expr::Int(n, _) = val {
-                            if (100..=599).contains(n) {
-                                out.push(*n as u16);
+                        if let Some(n) = resolve_status_value(val, consts) {
+                            if (100..=599).contains(&n) {
+                                out.push(n as u16);
                             }
                         }
                         break;
@@ -182,7 +286,7 @@ fn collect_status_codes_expr(expr: &crate::ast::Expr, out: &mut Vec<u16>) {
         // exprs no oculten ReturnStatus anidado (no es el caso típico,
         // pero la cobertura cuesta poco).
         Expr::Ok(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
-            collect_status_codes_expr(inner, out);
+            collect_status_codes_expr(inner, out, consts);
         }
         // Los demás Expr no tienen bodies anidados con stmts (calls,
         // literales, binops, etc.).
@@ -249,6 +353,12 @@ pub fn pseudo_routes_from_ast(
     use crate::ast::Stmt;
     use crate::http::parse_path_template;
 
+    // Mini-tanda OAPI — pre-scan de constantes top-level Int para
+    // resolver `status: NOT_FOUND` adentro de Err({...}) y
+    // ReturnStatus dinámicos. Tabla vacía si el programa no tiene
+    // consts (caso típico) — cero overhead.
+    let consts = collect_top_level_int_consts(program);
+
     let mut out = Vec::new();
     for s in program {
         let Stmt::FnDef {
@@ -309,7 +419,8 @@ pub fn pseudo_routes_from_ast(
                 param_type_exprs,
                 return_type_expr: return_type.clone(),
                 // Q.4: escanear el body del FnDef por ReturnStatus.
-                custom_status_codes: collect_status_codes(body),
+                // OAPI: resolver Idents que apunten a consts top-level.
+                custom_status_codes: collect_status_codes_with_consts(body, &consts),
             });
         }
     }
@@ -956,6 +1067,93 @@ mod tests {
     }
 
     #[test]
+    fn oapi_collect_top_level_int_consts_recolecta_lets_int() {
+        // Mini-tanda OAPI — el pre-scan detecta `let X = <Int>` y
+        // `let Y = -<Int>` a nivel top-level del programa. Otras formas
+        // (RHS no literal, RHS no Int) se omiten.
+        let src = "\
+            let NOT_FOUND = 404\n\
+            let CUSTOM = -42\n\
+            let GREETING = \"hola\"\n\
+            let SUM = 1 + 2\n\
+            @get(\"/\")\n\
+            fn h() -> Int => 0\n\
+        ";
+        let program = parse(tokenize(src).expect("lex")).expect("parse");
+        let consts = collect_top_level_int_consts(&program);
+        assert_eq!(consts.get("NOT_FOUND").copied(), Some(404));
+        assert_eq!(consts.get("CUSTOM").copied(), Some(-42));
+        assert!(consts.get("GREETING").is_none());
+        assert!(consts.get("SUM").is_none()); // RHS BinOp no es literal
+    }
+
+    #[test]
+    fn oapi_returnstatus_con_ident_a_const_top_level_aparece_en_schema() {
+        // `return NOT_FOUND { ... }` donde NOT_FOUND es una const Int
+        // top-level se resuelve a 404 y entra al schema.
+        let src = "\
+            let NOT_FOUND = 404\n\
+            @get(\"/u/{id}\")\n\
+            fn h(id: Int) -> Int {\n\
+                return NOT_FOUND {\"error\": \"x\"}\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = &schema["paths"]["/u/{id}"]["get"]["responses"];
+        assert!(
+            responses.get("404").is_some(),
+            "esperaba 404 en el schema, fue: {:?}",
+            responses
+        );
+    }
+
+    #[test]
+    fn oapi_err_struct_con_status_ident_aparece_en_schema() {
+        // `Err(ApiErr { status: NOT_FOUND, ... })` con NOT_FOUND const
+        // top-level se resuelve.
+        let src = "\
+            let NOT_FOUND = 404\n\
+            type ApiErr { status: Int, message: Str }\n\
+            @get(\"/u/{id}\")\n\
+            fn h(id: Int) -> Result<Int, ApiErr> {\n\
+                if (id == 0) {\n\
+                    return Err(ApiErr { status: NOT_FOUND, message: \"no\" })\n\
+                }\n\
+                return Ok(id)\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = &schema["paths"]["/u/{id}"]["get"]["responses"];
+        assert!(
+            responses.get("404").is_some(),
+            "esperaba 404 en el schema, fue: {:?}",
+            responses
+        );
+    }
+
+    #[test]
+    fn oapi_ident_no_resuelve_se_omite_silenciosamente() {
+        // Si el Ident no apunta a una const top-level Int (var local,
+        // fn param, etc.), se omite — schema cae al 500 default.
+        let src = "\
+            @get(\"/x\")\n\
+            fn h(code: Int) -> Int {\n\
+                return code {\"error\": \"x\"}\n\
+            }\n\
+        ";
+        let schema = schema_for(src);
+        let responses = &schema["paths"]["/x"]["get"]["responses"];
+        // 200 del return type, 500 default, sin codes adicionales.
+        // El `return code { ... }` no resuelve estáticamente.
+        let codes: Vec<&str> = responses.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        assert!(
+            !codes.iter().any(|c| *c == "400" || *c == "404" || *c == "401"),
+            "esperaba sin codes específicos del Ident dinámico, fue: {:?}",
+            codes
+        );
+    }
+
+    #[test]
     fn schema_para_handler_con_returnstatus_emite_codes() {
         let src = "\
             @get(\"/p\")\n\
@@ -1076,7 +1274,7 @@ mod tests {
             .as_ref()
             .and_then(|c| c.api_version.clone());
         generate_openapi_with_version(
-            &routes_from_registry(&registry),
+            &routes_from_registry(&registry, &program),
             &program,
             api_version.as_deref(),
         )
