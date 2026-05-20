@@ -1131,6 +1131,85 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~P1: Mw.next codegen + cleanup roadmap-ready~~ ✓ CERRADO 2026-05-20 (mini-tanda P1 + Cleanup final)
+
+**Mega-bundle FINAL pre-9.w**. Cierra el último punto asimétrico
+entre `fitz run` y `fitz build`: post-process middlewares ahora
+compilan a binario nativo. Mw.next está COMPLETO end-to-end (no
+solo el intérprete como en la mini-tanda anterior).
+
+**Parte 1 — P1: Mw.next codegen**:
+
+- ~~**`HandlerSig` separa Pre y Post middlewares**~~ ✓ Campo nuevo
+  `mw_user_fns_post: Vec<String>` paralelo a `mw_user_fns` (Pre).
+  `collect_route_middlewares` clasifica por aridad del mw fn (1 arg
+  = Pre gate-only, 2 args = Post wrap-style).
+- ~~**`CodegenCtx.middleware_post_fn_names`**~~ ✓ Tracking de fns
+  marcadas como Post. Post-scan después de `pre_register_fns`
+  reclasifica las que tienen 2 params.
+- ~~**`gen_top_fn` emite Post mws con return `__FitzResponse`**~~ ✓
+  En lugar de `Option<__FitzResponse>` (que Pre mws usan). Sin
+  trailing `None` (no aplica). `in_middleware_fn=false` +
+  `response_mode=true` para que `Stmt::ReturnStatus` se emita como
+  `return __FitzResponse { ... }` directo.
+- ~~**Segundo param `res: Response` se emite como `__FitzResponse`**~~ ✓
+  Special case en gen_top_fn cuando `is_middleware_post && i == 1`.
+  Esto permite que el call site del wrapper pase `__FitzResponse`
+  directo sin conversión.
+- ~~**`emit_handler_dispatch_and_response` emite la post-mw chain
+  AFTER handler dispatch**~~ ✓ Cubre dos paths: `returns_response`
+  (ya construía __FitzResponse) y plain-T (construye `__FitzResponse
+  { status: 200, body: __to_fitz_json(__result) }`). Post mws corren
+  en reverse order modificando `__resp` en cada call. Después se
+  convierte a axum Response y se aplica CORS.
+- **Limitación: `Result<T>` + post mws**: emite error de codegen
+  claro citando "sub-paso futuro". El path Result construye `__built`
+  via match inline; refactorizar para construir __FitzResponse
+  intermedio es invasivo, dejado para si entra demanda real.
+
+**Validación**: smoke manual con `fn wrap(req, res) { return 200 {
+"wrapped": "yes", "method": req.method } } @middleware(wrap) @get(...)`
++ curl → response wrappeada bit-a-bit como en `fitz run`.
+
+**Parte 2 — Cleanup final**:
+
+- README "Estado del proyecto" actualizado: sumada sección
+  "Mini-tandas post-Fase 8" (cerrado en cleanup anterior P2);
+  Estado de Mw.next reflejado.
+- Cap 17 de la guía: bullet de wrap-style con `next` callable
+  actualizado — Mw.next post-process ahora marca "end-to-end run + build"
+  con limitación documentada para Result.
+- deudas_lenguaje.md: cierre del bullet de "Middleware con `next`
+  callable" en dos pasos (intérprete + codegen). P1 cierra el codegen.
+
+**Implementación cross-cutting**:
+
+- **`http.rs`**: SIN cambios nuevos en esta tanda (Mw.next
+  intérprete cerrado en mini-tanda anterior).
+- **`codegen.rs`**: ~80 LoC nuevas. `HandlerSig` suma `mw_user_fns_post`.
+  `CodegenCtx` suma `middleware_post_fn_names`. `gen_top_fn` switch
+  para emit del return type + param signature de Post mws.
+  `emit_handler_dispatch_and_response` añade post-chain emission
+  en returns_response + plain-T paths; error claro para Result+post.
+  `collect_route_middlewares` clasifica por aridad.
+
+**VSCode extension**: SIN cambios. Cambios server-side.
+
+**Tests**: smoke manual bit-a-bit `fitz run` ↔ `fitz build` validó
+el caso canónico. **1979 unit sin feature, 2069 con --features lsp**
+sin regresiones. Clippy `-D warnings` limpio en lib + bin
+`fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w)**:
+
+- **`Result<T>` + post mws en `fitz build`**: error claro citando
+  sub-paso futuro. ~2-3h refactor del path Result para construir
+  __FitzResponse intermedio.
+- **Wrap-style `next` callable**: el modelo completo donde el mw
+  controla la invocación del handler sigue diferido (~6-8h).
+- **Multipart/urlencoded bodies**: 415 hoy. Sub-paso futuro
+  cuando aparezca presión real.
+
 ### ~~Paridad run↔build: 5b.1/Hpx.2 chained fix + cleanup masivo~~ ✓ CERRADO 2026-05-20 (mini-tanda P2 + Cleanup)
 
 Mini-tanda final pre-9.w. Cierra el chained dependency entre 5b.1

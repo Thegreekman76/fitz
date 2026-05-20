@@ -2581,6 +2581,11 @@ struct CodegenCtx<'a> {
     /// El handler wrapper invoca cada uno en orden y short-circuita
     /// con la primera response.
     middleware_fn_names: std::collections::HashSet<String>,
+    /// Mini-tanda P1 (Mw.next codegen) — nombres de fns usadas como
+    /// `@middleware(fn)` con aridad 2 (post-process). El return type
+    /// emitido para estas fns es `__FitzResponse` (no `Option<...>`)
+    /// porque siempre devuelven una Response.
+    middleware_post_fn_names: std::collections::HashSet<String>,
     /// Fase 6.6: `true` si el programa usa async — cualquier `async fn`
     /// declarada, `.await` adentro de un body, o llamada al builtin
     /// `sleep`. Habilita el preludio `__fitz_sleep`, el `#[tokio::main]`
@@ -2698,9 +2703,15 @@ struct HandlerSig {
     /// status code (con fallback a 500 si está fuera de 100..1000).
     /// Sin status field → 500 histórico.
     err_has_status_field: bool,
-    /// MW.3: nombres de las fns user-middleware encadenadas en orden de
-    /// declaración. Vacío si no hay `@middleware(fn)`.
+    /// MW.3: nombres de las fns user-middleware Pre (gate-only, 1 arg)
+    /// encadenadas en orden de declaración. Vacío si no hay
+    /// `@middleware(fn)` con 1 param.
     mw_user_fns: Vec<String>,
+    /// Mini-tanda P1 (Mw.next codegen): nombres de las fns user-middleware
+    /// Post (post-process, 2 args `(Request, Response)`) en orden de
+    /// declaración. Corren DESPUÉS del handler (en reverse) modificando
+    /// la response final. Vacío si no hay middlewares Post.
+    mw_user_fns_post: Vec<String>,
     /// MW.2/Q.3: config CORS si la ruta declara `@middleware(cors(...))`.
     mw_cors: Option<BuildCorsConfig>,
     has_middleware: bool,
@@ -2731,6 +2742,7 @@ impl<'a> CodegenCtx<'a> {
             in_middleware_fn: false,
             http_handlers_returning_response: std::collections::HashSet::new(),
             middleware_fn_names: std::collections::HashSet::new(),
+            middleware_post_fn_names: std::collections::HashSet::new(),
             uses_async: false,
             uses_fmt_helpers: false,
             uses_python: false,
@@ -3887,6 +3899,27 @@ impl<'a> CodegenCtx<'a> {
                 );
             }
         }
+
+        // Mini-tanda P1 — post-scan: clasificar middlewares por aridad.
+        // Si un middleware tiene 2 params, lo movemos de
+        // `middleware_fn_names` a `middleware_post_fn_names` para que
+        // `gen_top_fn` emita la firma correcta (__FitzResponse en lugar
+        // de Option<__FitzResponse>).
+        let post_mws: Vec<String> = self
+            .middleware_fn_names
+            .iter()
+            .filter(|n| {
+                self.fn_sigs
+                    .get(n.as_str())
+                    .map(|s| s.params.len() == 2)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        for n in post_mws {
+            self.middleware_fn_names.remove(&n);
+            self.middleware_post_fn_names.insert(n);
+        }
         Ok(())
     }
 
@@ -4158,6 +4191,10 @@ impl<'a> CodegenCtx<'a> {
         // un handler con ReturnStatus (gate-only: None = continúa,
         // Some = short-circuit). Ver `gen_middleware_return_*`.
         let is_middleware = self.middleware_fn_names.contains(name);
+        // Mini-tanda P1 (Mw.next codegen) — middleware Post: return
+        // type es `__FitzResponse` directo (no Option). El body siempre
+        // termina en `Stmt::ReturnStatus` (devuelve Response).
+        let is_middleware_post = self.middleware_post_fn_names.contains(name);
         let has_return_status_inner = contains_return_status_stmts(body);
 
         // Status codes custom: si la fn HTTP contiene al menos un
@@ -4165,11 +4202,14 @@ impl<'a> CodegenCtx<'a> {
         // `__FitzResponse` (en vez del declarado) y todos los returns
         // se envuelven. El handler wrapper lo detecta vía la tabla
         // `http_handlers_returning_response` para emitir el destructuring
-        // apropiado. Para middlewares (MW.3) reusamos el mismo flag
+        // apropiado. Para middlewares Pre (MW.3) reusamos el mismo flag
         // `response_mode` para envolver `Stmt::ReturnStatus`, pero la
-        // emisión final difiere — los middlewares retornan
-        // `Option<__FitzResponse>`, no `__FitzResponse`.
-        let has_return_status = (is_http_handler || is_middleware) && has_return_status_inner;
+        // emisión final difiere — los middlewares Pre retornan
+        // `Option<__FitzResponse>`, no `__FitzResponse`. Para Post mws
+        // (P1) el wrapping también aplica, pero la return type emitida
+        // es __FitzResponse directo.
+        let has_return_status =
+            (is_http_handler || is_middleware || is_middleware_post) && has_return_status_inner;
         if has_return_status && is_http_handler {
             self.http_handlers_returning_response.insert(name.clone());
         }
@@ -4207,11 +4247,18 @@ impl<'a> CodegenCtx<'a> {
             self.emit("mut ");
             self.emit(&param.name);
             self.emit(": ");
-            // Fp.2 — varargs: el tipo en `sig.params` es el elemento T
-            // (para que el call-site valide cada arg contra T), pero la
-            // fn recibe `List<T>` (`Arc<Mutex<Vec<T>>>`). Wrap en List
-            // al emitir el tipo Rust del param.
-            let rust_ty = if param.varargs {
+            // Mini-tanda P1 (Mw.next codegen) — post mw segundo param
+            // (`res: Response`) se emite como `__FitzResponse` para que
+            // el call site del wrapper pueda pasarlo directo. El body
+            // no debería acceder a `res.field` — el caso típico es
+            // `return <status> { ... }` que reconstruye la response.
+            let rust_ty = if is_middleware_post && i == 1 {
+                "__FitzResponse".to_string()
+            } else if param.varargs {
+                // Fp.2 — varargs: el tipo en `sig.params` es el elemento T
+                // (para que el call-site valide cada arg contra T), pero la
+                // fn recibe `List<T>` (`Arc<Mutex<Vec<T>>>`). Wrap en List
+                // al emitir el tipo Rust del param.
                 rust_type_for(&Type::List(Box::new(pty.clone())), self.env)?
             } else {
                 rust_type_for(pty, self.env)?
@@ -4240,11 +4287,16 @@ impl<'a> CodegenCtx<'a> {
             sig.ret.clone()
         };
         if is_middleware {
-            // MW.3: middlewares siempre retornan Option<__FitzResponse>,
+            // MW.3: middlewares Pre retornan Option<__FitzResponse>,
             // sin importar el return type declarado por el usuario. El
             // checker ya validó la signatura (Request param, retorno
             // implícito `()` o `Response?` decorativo).
             self.emit(" -> Option<__FitzResponse>");
+        } else if is_middleware_post {
+            // Mini-tanda P1 (Mw.next codegen) — middleware Post retorna
+            // __FitzResponse directo. Siempre tiene un Stmt::ReturnStatus
+            // que construye la response final.
+            self.emit(" -> __FitzResponse");
         } else if has_return_status {
             self.emit(" -> __FitzResponse");
         } else if !matches!(emit_ret, Type::Null) {
@@ -4305,17 +4357,23 @@ impl<'a> CodegenCtx<'a> {
         self.ret_stack.push(emit_ret.clone());
         let saved_response_mode = self.response_mode;
         let saved_in_middleware = self.in_middleware_fn;
-        self.response_mode = has_return_status;
+        // P1 — Post mws: response_mode true para wrappear ReturnStatus
+        // como __FitzResponse, pero in_middleware_fn false para que
+        // el wrap NO use Some(...). (Pre mws usan in_middleware_fn=true
+        // que envuelve en Some(...).)
+        self.response_mode = has_return_status || is_middleware_post;
         self.in_middleware_fn = is_middleware;
         for stmt in body {
             self.gen_stmt_in_fn(stmt, &emit_ret)?;
         }
-        // MW.3: tail-fall del body de un middleware sin return explícito.
-        // El return type es `Option<__FitzResponse>` y el body cae al
-        // final sin generar `None;`. Rust quejaría con "expected
-        // Option<...>, found ()". Emitimos `None` siempre — si el body
-        // ya hizo un return explícito esto es código muerto que rustc
-        // elimina sin warning (porque viene después de un `return`).
+        // MW.3: tail-fall del body de un middleware Pre sin return
+        // explícito. El return type es `Option<__FitzResponse>` y el
+        // body cae al final sin generar `None;`. Rust quejaría con
+        // "expected Option<...>, found ()". Emitimos `None` siempre —
+        // si el body ya hizo un return explícito esto es código muerto
+        // que rustc elimina sin warning. Post mws (P1) NO necesitan
+        // tail-fall — siempre tienen return explícito por construcción
+        // (response_mode true exige ReturnStatus).
         if is_middleware {
             self.emit_indent();
             self.emit("None\n");
@@ -10487,12 +10545,16 @@ impl<'a> CodegenCtx<'a> {
     /// Dos `cors(...)` sobre la misma ruta → error "uno por ruta".
     /// El orden de la chain refleja el orden de los decoradores
     /// (top-down igual que MW.1).
+    #[allow(clippy::type_complexity)]
     fn collect_route_middlewares(
         &self,
         fn_name: &str,
         decorators: &[Decorator],
-    ) -> Result<(Vec<String>, Option<BuildCorsConfig>), FitzError> {
-        let mut user_fns: Vec<String> = Vec::new();
+    ) -> Result<(Vec<String>, Vec<String>, Option<BuildCorsConfig>), FitzError> {
+        // Mini-tanda P1 — devolvemos (pre, post, cors). Pre y Post se
+        // distinguen por aridad de la fn middleware (1 vs 2 args).
+        let mut user_fns_pre: Vec<String> = Vec::new();
+        let mut user_fns_post: Vec<String> = Vec::new();
         let mut cors: Option<BuildCorsConfig> = None;
         for deco in decorators {
             if deco.name != "middleware" {
@@ -10521,25 +10583,26 @@ impl<'a> CodegenCtx<'a> {
                             n, fn_name
                         )));
                     }
-                    // Mini-tanda Mw.next — detectar post-middlewares
-                    // (2 args) y rechazar en codegen. El intérprete
-                    // ya los soporta (`fitz run`); `fitz build` queda
-                    // como sub-paso futuro dedicado por el invasivo
-                    // refactor del emit del wrapper.
+                    // Mini-tanda P1 — detectar aridad para clasificar
+                    // Pre (1 arg) vs Post (2 args). Pre corre antes
+                    // del handler con semántica gate-only; Post corre
+                    // después con (Request, Response) → Response.
                     let mw_arity = self.fn_sigs
                         .get(n.as_str())
                         .map(|s| s.params.len())
                         .unwrap_or(1);
-                    if mw_arity == 2 {
-                        return Err(self.err(format!(
-                            "@middleware(`{}`) sobre fn `{}`: middleware post-process \
-                             (2 args: `(Request, Response)`) no compila en `fitz build` \
-                             todavía — corre OK en `fitz run`. Sub-paso futuro de Mw.next \
-                             para codegen.",
-                            n, fn_name
-                        )));
+                    match mw_arity {
+                        1 => user_fns_pre.push(n.clone()),
+                        2 => user_fns_post.push(n.clone()),
+                        n_args => {
+                            return Err(self.err(format!(
+                                "@middleware(`{}`) sobre fn `{}`: aridad inválida ({} args). \
+                                 Aceptados: 1 (pre-process gate-only) o 2 (post-process \
+                                 con `(Request, Response)`).",
+                                n, fn_name, n_args
+                            )));
+                        }
                     }
-                    user_fns.push(n.clone());
                 }
                 // cors(...) build-time
                 Expr::Call { callee, args, .. } => {
@@ -10570,7 +10633,7 @@ impl<'a> CodegenCtx<'a> {
                 }
             }
         }
-        Ok((user_fns, cors))
+        Ok((user_fns_pre, user_fns_post, cors))
     }
 
     /// Genera el wrapper `async fn __handler_<name>(...)` para un
@@ -10643,8 +10706,9 @@ impl<'a> CodegenCtx<'a> {
         // (slot dedicado). `has_middleware` decide si el wrapper extrae
         // HeaderMap incluso cuando no hay headers declarados (necesario
         // para construir el Request del middleware).
-        let (mw_user_fns, mw_cors) = self.collect_route_middlewares(name, decorators)?;
-        let has_middleware = !mw_user_fns.is_empty();
+        let (mw_user_fns, mw_user_fns_post, mw_cors) =
+            self.collect_route_middlewares(name, decorators)?;
+        let has_middleware = !mw_user_fns.is_empty() || !mw_user_fns_post.is_empty();
         let has_cors = mw_cors.is_some();
 
         // Resolver tipos resueltos de cada param.
@@ -10753,6 +10817,7 @@ impl<'a> CodegenCtx<'a> {
             returns_result,
             err_has_status_field,
             mw_user_fns,
+            mw_user_fns_post,
             mw_cors,
             has_middleware,
             has_cors,
@@ -11017,8 +11082,23 @@ impl<'a> CodegenCtx<'a> {
         } else {
             "None".to_string()
         };
+        let has_post_mws = !sig.mw_user_fns_post.is_empty();
         if returns_response {
-            self.emit("    let __resp: __FitzResponse = __result;\n");
+            self.emit("    let mut __resp: __FitzResponse = __result;\n");
+            // Mini-tanda P1 (Mw.next codegen) — emit post-mw chain.
+            // Cada post mw recibe `(Request, Response)` y devuelve un
+            // nuevo `__FitzResponse`. Reverse order (semántica de wrap:
+            // último registrado ve la response primero).
+            if has_post_mws {
+                for mw_name in sig.mw_user_fns_post.iter().rev() {
+                    writeln!(
+                        &mut self.output,
+                        "    __resp = {}(__req.clone(), __resp);",
+                        mw_name,
+                    )
+                    .unwrap();
+                }
+            }
             self.emit("    let __built = (\n");
             self.emit("        axum::http::StatusCode::from_u16(__resp.status)\n");
             self.emit("            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
@@ -11031,6 +11111,19 @@ impl<'a> CodegenCtx<'a> {
             )
             .unwrap();
             self.emit("\n");
+        } else if sig.returns_result && has_post_mws {
+            // Mini-tanda P1 — handler `-> Result<T>` con post-mws no
+            // está soportado en codegen todavía. El path Result construye
+            // `__built` via match Ok/Err inline; refactorizar para
+            // construir __FitzResponse primero + chain de post-mws +
+            // axum response es invasivo. Sub-paso futuro.
+            return self.emit(&format!(
+                "    return (\n\
+                 \x20       axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n\
+                 \x20       axum::Json(serde_json::json!({{\"error\": \"handler `{}` con `-> Result<T>` + middleware post-process no compila todavía en `fitz build` (sub-paso futuro de P1). Workaround: usar `return <status> {{ ... }}` en lugar de Result, o quitar el post-middleware.\"}})),\n\
+                 \x20   ).into_response();\n}}\n\n",
+                sig.name,
+            ));
         } else if sig.returns_result {
             self.emit("    let __built = match __result {\n");
             self.emit("        Ok(__v) => (\n");
@@ -11077,10 +11170,33 @@ impl<'a> CodegenCtx<'a> {
             .unwrap();
             self.emit("\n");
         } else {
-            self.emit("    let __built = (\n");
-            self.emit("        axum::http::StatusCode::OK,\n");
-            self.emit("        axum::Json(__result.__to_fitz_json()),\n");
-            self.emit("    ).into_response();\n");
+            // Mini-tanda P1 — emit post mws sobre el response del
+            // handler plain-T. Construimos __FitzResponse intermedio
+            // si hay post mws para encadenar.
+            if has_post_mws {
+                self.emit("    let mut __resp = __FitzResponse {\n");
+                self.emit("        status: 200,\n");
+                self.emit("        body: __result.__to_fitz_json(),\n");
+                self.emit("    };\n");
+                for mw_name in sig.mw_user_fns_post.iter().rev() {
+                    writeln!(
+                        &mut self.output,
+                        "    __resp = {}(__req.clone(), __resp);",
+                        mw_name,
+                    )
+                    .unwrap();
+                }
+                self.emit("    let __built = (\n");
+                self.emit("        axum::http::StatusCode::from_u16(__resp.status)\n");
+                self.emit("            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+                self.emit("        axum::Json(__resp.body),\n");
+                self.emit("    ).into_response();\n");
+            } else {
+                self.emit("    let __built = (\n");
+                self.emit("        axum::http::StatusCode::OK,\n");
+                self.emit("        axum::Json(__result.__to_fitz_json()),\n");
+                self.emit("    ).into_response();\n");
+            }
             writeln!(
                 &mut self.output,
                 "    __apply_cors_and_respond(__built, {})",

@@ -6871,11 +6871,12 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 - **Middleware wrap-style con `next` callable** — el modelo donde
   el middleware controla la invocación del handler (`fn mw(req,
   next) -> Response`) queda como sub-paso futuro. Sí está
-  soportado el modelo **post-process** desde mini-tanda Mw.next:
-  un middleware con 2 args `(Request, Response)` corre DESPUÉS
+  soportado el modelo **post-process** desde mini-tanda Mw.next +
+  P1: un middleware con 2 args `(Request, Response)` corre DESPUÉS
   del handler y puede modificar el body, agregar headers, etc.
-  (`fitz run` only — `fitz build` queda como sub-paso futuro
-  adicional ~3-4h).
+  Funciona end-to-end en `fitz run` y `fitz build` (P1 cerró el
+  codegen). **Limitación**: handlers `-> Result<T>` + post mws no
+  compila en `fitz build` todavía (sub-paso futuro adicional).
 
 > Lo que **sí anda** y antes era deuda residual: **status codes
 > custom fuera de 100..1000** ya no caen silenciosamente a 500 —
