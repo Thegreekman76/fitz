@@ -11138,7 +11138,11 @@ impl<'a> CodegenCtx<'a> {
             self.emit("        let __ct_display = __hmap.get(\"content-type\").and_then(|v| v.to_str().ok()).unwrap_or(\"(sin header)\").to_string();\n");
             self.emit("        return (\n");
             self.emit("            axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,\n");
-            self.emit("            axum::Json(serde_json::json!({\"error\": format!(\"Content-Type no soportado: '{}'. El handler espera JSON (`application/json`) o urlencoded (`application/x-www-form-urlencoded`). Multipart y otros formatos quedan como sub-paso futuro.\", __ct_display)})),\n");
+            // Mini-tanda MP2 — el intérprete (`fitz run`) acepta
+            // `multipart/form-data` pero el binario nativo
+            // (`fitz build`) todavía no. Asimetría documentada como
+            // deuda residual.
+            self.emit("            axum::Json(serde_json::json!({\"error\": format!(\"Content-Type no soportado: '{}'. El binario nativo `fitz build` acepta JSON (`application/json`) o urlencoded (`application/x-www-form-urlencoded`). Multipart (`multipart/form-data`) corre solo en `fitz run` por ahora — sub-paso futuro del codegen.\", __ct_display)})),\n");
             self.emit("        ).into_response();\n");
             self.emit("    };\n");
 
@@ -12123,6 +12127,69 @@ impl std::fmt::Display for ResponseData {
 impl __ToFitzJson for ResponseData {
     fn __to_fitz_json(&self) -> serde_json::Value {
         serde_json::Value::Null
+    }
+}
+
+/// Mini-tanda MP2 — `File` built-in para multipart bodies.
+/// Sub-paso futuro del codegen: hoy el dispatcher de Content-Type
+/// rechaza multipart con 415 + msg que cita `fitz run` como
+/// workaround, así que `FileData` solo es relevante si el usuario
+/// declara una signature con `Map<Str, File>` (compila pero no se
+/// poblará via multipart). Existe para que la anotación de tipo
+/// resuelva. Fields paralelos al intérprete.
+#[derive(Clone, PartialEq)]
+#[allow(dead_code)]
+struct FileData {
+    name: Option<String>,
+    content_type: Option<String>,
+    content: String,
+}
+#[allow(dead_code)]
+type File = std::sync::Arc<std::sync::Mutex<FileData>>;
+
+impl std::fmt::Display for FileData {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            f,
+            "File {{ name: {}, content_type: {}, content: \"{}\" }}",
+            self.name.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string()),
+            self.content_type.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string()),
+            self.content,
+        )
+    }
+}
+
+impl __ToFitzJson for FileData {
+    fn __to_fitz_json(&self) -> serde_json::Value {
+        let mut obj = serde_json::Map::new();
+        obj.insert("name".to_string(), self.name.__to_fitz_json());
+        obj.insert("content_type".to_string(), self.content_type.__to_fitz_json());
+        obj.insert("content".to_string(), serde_json::Value::String(self.content.clone()));
+        serde_json::Value::Object(obj)
+    }
+}
+
+impl __FromFitzJson for FileData {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let obj = json
+            .as_object()
+            .ok_or_else(|| format!("File: se esperaba Object, se recibió {}", __json_shape(json)))?;
+        let name = obj
+            .get("name")
+            .map(|v| <Option<String> as __FromFitzJson>::__from_fitz_json(v))
+            .transpose()?
+            .unwrap_or(None);
+        let content_type = obj
+            .get("content_type")
+            .map(|v| <Option<String> as __FromFitzJson>::__from_fitz_json(v))
+            .transpose()?
+            .unwrap_or(None);
+        let content = obj
+            .get("content")
+            .map(|v| <String as __FromFitzJson>::__from_fitz_json(v))
+            .transpose()?
+            .unwrap_or_default();
+        Ok(FileData { name, content_type, content })
     }
 }
 
@@ -17121,20 +17188,21 @@ mod tests {
 
     #[test]
     fn uc_http_body_415_msg_matchea_interprete() {
-        // Mini-tanda HA (Hpx.1 alignment): el mensaje del 415 del
-        // codegen debe matchear bit-a-bit el del intérprete
-        // (`http::handle_task` con CT no soportado).
+        // Mini-tanda HA: el msg del 415 del codegen contiene las
+        // frases clave que el usuario espera ver.
+        // Mini-tanda MP2 — el msg del codegen ahora menciona que
+        // multipart corre solo en `fitz run` (intérprete acepta MP,
+        // codegen no — asimetría documentada como deuda residual).
         let src = "type Input { msg: Str }\n\
                    @post(\"/echo\") fn echo(body: Input) -> Input => body";
         let code = gen(src).unwrap();
-        // Fragmentos clave del mensaje del intérprete (en http.rs).
         let key_phrases = [
             "Content-Type no soportado",
-            "El handler espera JSON",
             "application/json",
             "urlencoded",
             "application/x-www-form-urlencoded",
-            "Multipart y otros formatos",
+            "Multipart",
+            "fitz run",
             "sub-paso futuro",
         ];
         for phrase in &key_phrases {

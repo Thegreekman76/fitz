@@ -1539,23 +1539,44 @@ impl Parser {
         //   `<Int> { ... }` o `<Ident> { ... }` donde el `{...}` es un
         //   map literal (primera clave Str), no un struct lit (primera
         //   clave Ident).
-        // Disambiguación robusta: peek a tokens 0, 1, 2:
+        //
+        // Disambiguación robusta:
         //   - tok0: Int o Ident
         //   - tok1: LBrace
-        //   - tok2: Str literal o RBrace (map vacío) o Newline (multi-línea)
-        // Si matchea, parseamos el status como atom y el body como
-        // expression. Si NO matchea, caemos al path normal de
-        // `expression()` que preserva la semántica anterior
-        // (`return P { x: 1 }` sigue siendo struct lit).
+        //   - primer token no-newline después de LBrace: Str (map lit)
+        //     o RBrace (map vacío)
+        //
+        // Si la primera key es Ident → struct lit (`return P { x: 1 }`),
+        // NO es ReturnStatus.
+        // Si es Str → map lit (`return NOT_FOUND { "error": "..." }`),
+        // SÍ es ReturnStatus.
         let looks_like_return_status = {
             let t0 = self.peek_at(0);
             let t1 = self.peek_at(1);
-            let t2 = self.peek_at(2);
             let head_ok = matches!(t0, Token::Int(_) | Token::Ident(_));
             let brace_next = matches!(t1, Token::LBrace);
-            let map_body =
-                matches!(t2, Token::Str(_) | Token::RBrace | Token::Newline);
-            head_ok && brace_next && map_body
+            if head_ok && brace_next {
+                // Skip newlines después del LBrace (bound: 16 para
+                // evitar walks largos sobre archivos patológicos).
+                const MAX_SKIP: usize = 16;
+                let mut i = 2usize;
+                let mut is_map_body = false;
+                while i < 2 + MAX_SKIP {
+                    match self.peek_at(i) {
+                        Token::Newline => {
+                            i += 1;
+                        }
+                        Token::Str(_) | Token::RBrace => {
+                            is_map_body = true;
+                            break;
+                        }
+                        _ => break,
+                    }
+                }
+                is_map_body
+            } else {
+                false
+            }
         };
 
         if looks_like_return_status {

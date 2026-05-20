@@ -1986,23 +1986,26 @@ fn uc_http_post_urlencoded_con_url_encoding() {
 }
 
 #[test]
-fn ha_http_content_type_no_soportado_es_415_con_msg_alineado() {
-    // Mini-tanda HA (Hpx.1 alignment): `multipart/form-data` (sin soporte)
-    // debe devolver 415 con el mismo mensaje del intérprete.
+fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
+    // Mini-tanda HA: el msg del 415 cubre los formatos no soportados.
+    // Mini-tanda MP2 — el codegen ya no rechaza `multipart/form-data`
+    // con el mismo error que tipos como `text/plain` — el binario
+    // nativo no soporta multipart todavía, pero el msg ahora menciona
+    // explícitamente la asimetría con `fitz run`. Probamos con
+    // `text/plain` que el codegen rechaza inequívocamente.
     let src = "@server(43242)\nfn main() => 0\n\
                type Input { msg: Str }\n\
                @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
     let (status, body) = build_spawn_request_with_ct(
-        "ha-post-415-multipart",
+        "ha-post-415-text-plain",
         src,
         43242,
         "POST",
         "/echo",
-        Some("---boundary\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nv\r\n---boundary--\r\n"),
-        Some("multipart/form-data; boundary=---boundary"),
+        Some("hola mundo"),
+        Some("text/plain"),
     );
     assert_eq!(status, 415, "esperaba 415, fue: status={} body={}", status, body);
-    // Mensaje alineado con el intérprete (`http::handle_task`).
     assert!(
         body.contains("Content-Type no soportado"),
         "esperaba `Content-Type no soportado`, fue: {}",
@@ -2014,9 +2017,11 @@ fn ha_http_content_type_no_soportado_es_415_con_msg_alineado() {
         "esperaba que el mensaje mencione JSON y urlencoded, fue: {}",
         body
     );
+    // Mini-tanda MP2 — el nuevo msg del codegen menciona el path
+    // `fitz run` como workaround para multipart.
     assert!(
-        body.contains("Multipart") && body.contains("sub-paso futuro"),
-        "esperaba que el mensaje mencione Multipart y sub-paso futuro, fue: {}",
+        body.contains("Multipart") && body.contains("fitz run"),
+        "esperaba que el mensaje mencione Multipart + fitz run como workaround, fue: {}",
         body
     );
 }
@@ -2136,6 +2141,31 @@ print(false != \"f\")
     );
     assert!(run_stdout.contains("false"));
     assert!(run_stdout.contains("true"));
+}
+
+#[test]
+fn mp2_codegen_multipart_devuelve_415_con_msg_que_cita_fitz_run() {
+    // Mini-tanda MP2 — el codegen sigue rechazando multipart con
+    // 415, pero el msg nuevo cita `fitz run` como workaround
+    // (asimetría documentada como deuda residual del codegen).
+    let src = "@server(43260)\nfn main() => 0\n\
+               type Input { msg: Str }\n\
+               @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
+    let (status, body) = build_spawn_request_with_ct(
+        "mp2-codegen-multipart-415",
+        src,
+        43260,
+        "POST",
+        "/echo",
+        Some("--X\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nv\r\n--X--"),
+        Some("multipart/form-data; boundary=X"),
+    );
+    assert_eq!(status, 415, "esperaba 415, fue: status={} body={}", status, body);
+    assert!(
+        body.contains("Multipart") && body.contains("fitz run"),
+        "esperaba que el msg mencione Multipart + fitz run, fue: {}",
+        body
+    );
 }
 
 #[test]
@@ -2341,6 +2371,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "16d-import-multilinea.fitz",
     "17-http.fitz",
     "17b-middleware.fitz",
+    "17c-multipart.fitz",
     "18-docs.fitz",
     "19-async.fitz",
     "19b-paralelismo.fitz",

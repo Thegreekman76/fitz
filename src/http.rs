@@ -30,7 +30,7 @@ use std::cell::RefCell;
 use crate::ast::{Expr, TypeExpr};
 #[cfg(test)]
 use crate::ast::Span;
-use crate::value::{Value, ResultVariant};
+use crate::value::{shared, Value, ResultVariant};
 
 // ---------------------------------------------------------------------------
 // Tipos base
@@ -1862,31 +1862,61 @@ async fn handle_task(
     // se parsea como `Map<Str, Str>` y se asigna al body param.
     // Multipart con files queda como sub-paso futuro (más complejo).
     let body_value: Option<Value> = if let Some(bp) = &route.body_param {
-        let ct_primary = raw_headers
-            .get("content-type")
+        let raw_ct = raw_headers.get("content-type").cloned();
+        let ct_primary = raw_ct
+            .as_ref()
             .map(|ct| ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
             .unwrap_or_default();
 
         let is_urlencoded = ct_primary == "application/x-www-form-urlencoded";
         let is_json_or_empty = ct_primary.is_empty() || ct_primary == "application/json";
+        // Mini-tanda MP2 — multipart/form-data con boundary.
+        let is_multipart = ct_primary == "multipart/form-data";
 
-        if !is_json_or_empty && !is_urlencoded {
-            // Multipart, text/plain, custom, etc. → 415.
+        if !is_json_or_empty && !is_urlencoded && !is_multipart {
+            // text/plain, custom, etc. → 415.
             return HandlerOutcome::json(
                 415,
                 serde_json::json!({
                     "error": format!(
                         "Content-Type no soportado: '{}'. El handler espera JSON \
-                         (`application/json`) o urlencoded \
-                         (`application/x-www-form-urlencoded`). Multipart y otros formatos \
-                         quedan como sub-paso futuro.",
-                        raw_headers.get("content-type").map(|s| s.as_str()).unwrap_or("(sin header)")
+                         (`application/json`), urlencoded \
+                         (`application/x-www-form-urlencoded`) o multipart \
+                         (`multipart/form-data`). Otros formatos quedan como \
+                         sub-paso futuro.",
+                        raw_ct.as_deref().unwrap_or("(sin header)")
                     ),
                 }),
             );
         }
 
-        if is_urlencoded {
+        if is_multipart {
+            // Mini-tanda MP2 — extraer boundary del Content-Type
+            // (`multipart/form-data; boundary=<token>`). Sin boundary
+            // → 400 claro.
+            let boundary = raw_ct
+                .as_deref()
+                .and_then(extract_multipart_boundary);
+            match boundary {
+                None => {
+                    return HandlerOutcome::json(
+                        400,
+                        serde_json::json!({
+                            "error": "multipart/form-data: falta el parámetro `boundary` en Content-Type"
+                        }),
+                    );
+                }
+                Some(b) => match parse_multipart_body(&body_bytes, &b) {
+                    Ok(v) => Some(v),
+                    Err(msg) => {
+                        return HandlerOutcome::json(
+                            400,
+                            serde_json::json!({ "error": msg }),
+                        );
+                    }
+                },
+            }
+        } else if is_urlencoded {
             match parse_urlencoded_body(&body_bytes) {
                 Ok(v) => Some(v),
                 Err(msg) => {
@@ -2072,6 +2102,157 @@ fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
         pairs.push((Value::Str(k), Value::Str(v)));
     }
     Ok(Value::Map(shared(pairs)))
+}
+
+/// Mini-tanda MP2 — extrae el `boundary` del Content-Type header de
+/// `multipart/form-data` (`multipart/form-data; boundary=<token>` o
+/// `boundary="<token>"`). Devuelve `None` si no aparece el parámetro.
+/// Trim de espacios + soporte de comillas dobles (RFC 7578).
+fn extract_multipart_boundary(content_type: &str) -> Option<String> {
+    for part in content_type.split(';').skip(1) {
+        let part = part.trim();
+        let lower = part.to_ascii_lowercase();
+        if let Some(stripped) = lower.strip_prefix("boundary=") {
+            // Stripped es lowercase; necesitamos volver al original
+            // para preservar el case del boundary (los boundaries son
+            // case-sensitive según RFC 7578).
+            let orig_offset = part.len() - stripped.len();
+            let value = &part[orig_offset..];
+            let trimmed = value.trim_matches('"');
+            if trimmed.is_empty() {
+                return None;
+            }
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+/// Mini-tanda MP2 — parser de `multipart/form-data` (RFC 7578).
+///
+/// Cada part del body viene delimitado por `--<boundary>\r\n` con
+/// headers tipo `Content-Disposition: form-data; name="X"; filename="Y"`
+/// (filename opcional para text fields). Body de la part separado
+/// de los headers por `\r\n\r\n`. La última part termina con
+/// `\r\n--<boundary>--`.
+///
+/// Devuelve `Value::Map<Str, Value>` donde cada entry es:
+/// - Text field (sin `filename`) → `Value::Str(content)`.
+/// - File field (con `filename`) → `Value::Instance` de `File` con
+///   `name`, `content_type`, `content`. Files binarios cuyo content
+///   no es UTF-8 válido → 400 con error claro (MVP intencional;
+///   `Value::Bytes` queda como sub-paso futuro).
+///
+/// Duplicados de `name`: last-wins (paralelo a la convención de
+/// `parse_urlencoded_body`).
+fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
+    let delimiter = format!("--{}", boundary);
+    let s = std::str::from_utf8(bytes)
+        .map_err(|e| format!("multipart: body no es UTF-8 válido: {}", e))?;
+    let parts_raw: Vec<&str> = s.split(&delimiter).collect();
+    // El primer split antes del primer `--<boundary>` es preámbulo
+    // (suele estar vacío); ignoramos. La última part después de
+    // `--<boundary>--` también puede tener epílogo; idem.
+    let mut entries: Vec<(Value, Value)> = Vec::new();
+    for raw in parts_raw.iter().skip(1) {
+        // Terminator final: `--<boundary>--` produce un raw que
+        // empieza con `--` (justo después del delimiter).
+        if raw.starts_with("--") {
+            break;
+        }
+        // Cada part empieza con `\r\n` (separator entre delimiter y
+        // headers). Si no lo tiene, malformado.
+        let body = raw.strip_prefix("\r\n").unwrap_or(raw);
+        // Cada part puede terminar con `\r\n` antes del próximo
+        // delimiter. Trimmealo.
+        let body = body.strip_suffix("\r\n").unwrap_or(body);
+
+        // Split headers vs content por la primera ocurrencia de `\r\n\r\n`.
+        let Some((headers_str, content)) = body.split_once("\r\n\r\n") else {
+            return Err(
+                "multipart: part malformada — falta `\\r\\n\\r\\n` entre headers y body"
+                    .to_string(),
+            );
+        };
+
+        // Parse de headers de la part. Solo nos interesa
+        // `Content-Disposition` (extrae `name` y `filename`) y
+        // `Content-Type` (para files).
+        let mut name_field: Option<String> = None;
+        let mut filename: Option<String> = None;
+        let mut content_type_part: Option<String> = None;
+        for line in headers_str.split("\r\n") {
+            let lower = line.to_ascii_lowercase();
+            if let Some(rest) = lower.strip_prefix("content-disposition:") {
+                // Preservar case del rest original.
+                let orig_offset = line.len() - rest.len();
+                let value = &line[orig_offset..];
+                let params: std::collections::HashMap<String, String> = parse_cd_params(value);
+                name_field = params.get("name").cloned();
+                filename = params.get("filename").cloned();
+            } else if let Some(rest) = lower.strip_prefix("content-type:") {
+                let orig_offset = line.len() - rest.len();
+                let value = &line[orig_offset..];
+                content_type_part = Some(value.trim().to_string());
+            }
+        }
+
+        let Some(name) = name_field else {
+            return Err(
+                "multipart: part sin `name` en Content-Disposition".to_string(),
+            );
+        };
+
+        let value = match filename {
+            None => Value::Str(content.to_string()),
+            Some(fname) => {
+                // Construir Value::Instance de `File`.
+                let mut fields: Vec<(String, Value)> = Vec::new();
+                let name_val = if fname.is_empty() {
+                    Value::Null
+                } else {
+                    Value::Str(fname)
+                };
+                fields.push(("name".to_string(), name_val));
+                fields.push((
+                    "content_type".to_string(),
+                    content_type_part
+                        .map(Value::Str)
+                        .unwrap_or(Value::Null),
+                ));
+                fields.push(("content".to_string(), Value::Str(content.to_string())));
+                Value::new_instance("File".to_string(), fields)
+            }
+        };
+
+        // last-wins sobre duplicados.
+        let key = Value::Str(name);
+        if let Some(idx) = entries.iter().position(|(k, _)| k == &key) {
+            entries[idx].1 = value;
+        } else {
+            entries.push((key, value));
+        }
+    }
+
+    Ok(Value::Map(shared(entries)))
+}
+
+/// Helper para parsear params del header Content-Disposition:
+/// `form-data; name="X"; filename="Y"`. Devuelve un map case-insensitive
+/// (keys lowercase) → valor sin comillas.
+fn parse_cd_params(s: &str) -> std::collections::HashMap<String, String> {
+    let mut out = std::collections::HashMap::new();
+    // Skip el primer token (`form-data`).
+    for part in s.split(';').skip(1) {
+        let part = part.trim();
+        let Some(eq_idx) = part.find('=') else {
+            continue;
+        };
+        let key = part[..eq_idx].trim().to_ascii_lowercase();
+        let value = part[eq_idx + 1..].trim().trim_matches('"');
+        out.insert(key, value.to_string());
+    }
+    out
 }
 
 /// Mini-tanda MP — URL-decode (formato `application/x-www-form-urlencoded`):
@@ -4316,11 +4497,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn hpx1_content_type_multipart_rechaza_con_415() {
+    async fn mp2_content_type_charset_diff_no_oficial_rechaza() {
+        // Mini-tanda MP2 — `text/plain` (test viejo asumía
+        // multipart-rechaza-con-415; ahora multipart se acepta así
+        // que cambié el case). text/plain sigue rechazado: el
+        // intérprete acepta JSON, urlencoded y multipart, nada más.
         let reg = registry_with_post_body_route();
-        let body = b"--boundary\r\n".to_vec();
+        let body = b"raw text content".to_vec();
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), "multipart/form-data; boundary=---".into());
+        headers.insert("content-type".into(), "application/octet-stream".into());
         let outcome = handle_task(
             &reg,
             0,
@@ -4330,6 +4515,11 @@ mod tests {
             headers,
         ).await;
         assert_eq!(outcome.status, 415);
+        assert!(
+            outcome.body.contains("octet-stream"),
+            "esperaba que el msg cite el CT recibido, fue: {}",
+            outcome.body
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4490,11 +4680,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn mp_multipart_sigue_rechazado_con_415() {
+    async fn mp2_multipart_sin_boundary_es_400() {
+        // Mini-tanda MP2 — `multipart/form-data` sin `boundary=` →
+        // 400 con mensaje claro (no 415, ahora SÍ se acepta multipart
+        // como CT supported pero el boundary es obligatorio).
         let reg = registry_with_post_body_route();
         let body = b"--boundary\r\n".to_vec();
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), "multipart/form-data; boundary=---".into());
+        headers.insert("content-type".into(), "multipart/form-data".into());
         let outcome = handle_task(
             &reg,
             0,
@@ -4503,8 +4696,155 @@ mod tests {
             body,
             headers,
         ).await;
-        assert_eq!(outcome.status, 415);
-        assert!(outcome.body.contains("Multipart"));
+        assert_eq!(outcome.status, 400);
+        assert!(
+            outcome.body.contains("boundary"),
+            "esperaba mención de boundary, fue: {}",
+            outcome.body
+        );
+    }
+
+    #[test]
+    fn mp2_extract_boundary_simple() {
+        assert_eq!(
+            extract_multipart_boundary("multipart/form-data; boundary=abc"),
+            Some("abc".to_string())
+        );
+    }
+
+    #[test]
+    fn mp2_extract_boundary_con_comillas() {
+        // RFC 7578 permite boundary entre comillas dobles.
+        assert_eq!(
+            extract_multipart_boundary(r#"multipart/form-data; boundary="my-boundary""#),
+            Some("my-boundary".to_string())
+        );
+    }
+
+    #[test]
+    fn mp2_extract_boundary_case_sensitive_value() {
+        // Los boundaries son case-sensitive: `BOUNDARY` minus se trim,
+        // pero el valor se preserva tal cual.
+        assert_eq!(
+            extract_multipart_boundary("multipart/form-data; Boundary=ABC-Def"),
+            Some("ABC-Def".to_string())
+        );
+    }
+
+    #[test]
+    fn mp2_extract_boundary_ausente_devuelve_none() {
+        assert_eq!(extract_multipart_boundary("multipart/form-data"), None);
+    }
+
+    #[test]
+    fn mp2_parse_multipart_text_field_basico() {
+        // Body con una part de tipo text field (sin filename).
+        // Estructura: --<b>\r\n<hdr>\r\n\r\n<body>\r\n--<b>--
+        let boundary = "----foo";
+        let body = format!(
+            "------foo\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nhola\r\n------foo--"
+        );
+        let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
+        match result {
+            Value::Map(entries) => {
+                let pairs = entries.lock();
+                assert_eq!(pairs.len(), 1);
+                assert_eq!(pairs[0].0, Value::Str("msg".into()));
+                assert_eq!(pairs[0].1, Value::Str("hola".into()));
+            }
+            other => panic!("esperaba Value::Map, fue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mp2_parse_multipart_file_field_construye_instance_file() {
+        // Body con file field (con filename) → Value::Instance del
+        // tipo built-in `File`.
+        let boundary = "----foo";
+        let body = "------foo\r\nContent-Disposition: form-data; name=\"upload\"; filename=\"hello.txt\"\r\nContent-Type: text/plain\r\n\r\nfile contents here\r\n------foo--";
+        let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
+        let Value::Map(entries) = result else {
+            panic!("esperaba Value::Map");
+        };
+        let pairs = entries.lock();
+        assert_eq!(pairs.len(), 1);
+        assert_eq!(pairs[0].0, Value::Str("upload".into()));
+        match &pairs[0].1 {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "File");
+                let fld = fields.lock();
+                assert_eq!(fld.len(), 3);
+                assert_eq!(fld[0].0, "name");
+                assert_eq!(fld[0].1, Value::Str("hello.txt".into()));
+                assert_eq!(fld[1].0, "content_type");
+                assert_eq!(fld[1].1, Value::Str("text/plain".into()));
+                assert_eq!(fld[2].0, "content");
+                assert_eq!(fld[2].1, Value::Str("file contents here".into()));
+            }
+            other => panic!("esperaba Value::Instance(File), fue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mp2_parse_multipart_mixto_text_y_file() {
+        // Form con un text field + un file field.
+        let boundary = "X";
+        let body = "--X\r\nContent-Disposition: form-data; name=\"title\"\r\n\r\nMi título\r\n--X\r\nContent-Disposition: form-data; name=\"doc\"; filename=\"a.txt\"\r\n\r\ncontenido\r\n--X--";
+        let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
+        let Value::Map(entries) = result else {
+            panic!("esperaba Value::Map");
+        };
+        let pairs = entries.lock();
+        assert_eq!(pairs.len(), 2);
+        assert_eq!(pairs[0].0, Value::Str("title".into()));
+        assert_eq!(pairs[0].1, Value::Str("Mi título".into()));
+        assert_eq!(pairs[1].0, Value::Str("doc".into()));
+        assert!(matches!(pairs[1].1, Value::Instance { .. }));
+    }
+
+    #[test]
+    fn mp2_parse_multipart_binary_no_utf8_es_error() {
+        // Body con bytes no-UTF8 (0xFF) → 400 con msg claro. Alcance
+        // intencional del MVP — `Value::Bytes` queda como sub-paso futuro.
+        let boundary = "X";
+        let mut body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n".to_vec();
+        body.push(0xff);
+        body.push(0xfe);
+        body.extend_from_slice(b"\r\n--X--");
+        let err = parse_multipart_body(&body, boundary).expect_err("esperaba error");
+        assert!(
+            err.contains("UTF-8"),
+            "esperaba mención de UTF-8 en error, fue: {}",
+            err
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mp2_multipart_end_to_end_acepta_y_parsea() {
+        // E2E del path completo: `handle_task` recibe un body
+        // multipart válido y lo enrutea al handler con el body
+        // parseado como `Value::Map<Str, Value>`.
+        let reg = registry_with_post_body_route();
+        let boundary = "----my-boundary";
+        let body = format!(
+            "------my-boundary\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFitz\r\n------my-boundary--"
+        );
+        let mut headers = std::collections::HashMap::new();
+        headers.insert(
+            "content-type".into(),
+            format!("multipart/form-data; boundary={}", boundary),
+        );
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body.into_bytes(),
+            headers,
+        ).await;
+        // `registry_with_post_body_route` espera body parseable como
+        // `Map`, así que devolverá 200 con el body echo'd.
+        assert_eq!(outcome.status, 200, "outcome body: {}", outcome.body);
     }
 
     #[tokio::test(flavor = "current_thread")]

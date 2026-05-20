@@ -6726,6 +6726,78 @@ fn update(id: Int, body: UserInput) {
 
 `id` viene del path, `body` del cuerpo de la request.
 
+#### Body: `application/x-www-form-urlencoded` (mini-tandas MP + UC)
+
+Los handlers también aceptan bodies tipo `key=value&key2=value2` —
+el formato que mandan los browsers cuando un `<form>` HTML usa
+`method="POST"` sin `enctype`:
+
+```fitz
+@post("/login")
+fn login(body: Map<Str, Str>) -> Str {
+    let user = body["username"]
+    let pass = body["password"]
+    return "hola {user}"
+}
+```
+
+```bash
+curl -X POST http://127.0.0.1:3000/login \
+    -d "username=fitz&password=secret"
+# "hola fitz"
+```
+
+El runtime detecta el header `Content-Type: application/x-www-form-urlencoded`
+y parsea el body a un `Map<Str, Str>` (paralelo a JSON). URL-decoding
+aplicado: `+` → espacio, `%XX` → byte hex.
+
+Funciona end-to-end tanto en `fitz run` como en `fitz build` —
+paridad bit-a-bit.
+
+#### Body: `multipart/form-data` (mini-tanda MP2)
+
+Cuando un `<form>` HTML usa `enctype="multipart/form-data"`
+(necesario para uploads de archivos), el body llega como múltiples
+"parts" delimitados por un boundary. Fitz lo parsea automáticamente
+a un `Map<Str, ...>` donde cada entry es:
+
+- **Text field** (sin `filename` en `Content-Disposition`) →
+  `Value::Str` con el contenido.
+- **File field** (con `filename`) → instancia del tipo built-in
+  `File` con `name: Str?`, `content_type: Str?` y `content: Str`.
+
+```fitz
+@post("/upload")
+fn upload(body: Map<Str, File>) -> Str {
+    let f = body["doc"]
+    if (f.name == null) {
+        return "sin filename"
+    }
+    return "subiste '{f.name}' ({len(f.content)} caracteres)"
+}
+```
+
+```bash
+curl -X POST http://127.0.0.1:3000/upload \
+    -F "doc=@notas.txt"
+# "subiste 'notas.txt' (123 caracteres)"
+```
+
+**Limitación MVP**: el `content` de los files es `Str`, así que solo
+se admiten files cuyo contenido sea UTF-8 válido. Files binarios
+(imágenes, PDFs, zips) hacen el parse fallar con 400. `Value::Bytes`
+es deuda residual.
+
+**Limitación de `fitz build`**: el binario nativo todavía no soporta
+multipart. Si compilás un handler que espera multipart y el cliente
+manda multipart, el binario devuelve 415 con un mensaje que cita
+`fitz run` como workaround. Multipart en codegen es deuda residual.
+
+`File` es un nominal built-in del runtime HTTP (igual que `Request` y
+`Response`). No hace falta declararlo ni importarlo.
+
+Ejemplo runnable completo: [`examples/guide/17c-multipart.fitz`](../examples/guide/17c-multipart.fitz).
+
 ### Respuestas: serialización JSON automática
 
 Lo que devolvés del handler se serializa a JSON, sin que tengas
@@ -7056,9 +7128,11 @@ curl -i http://127.0.0.1:3000/users/2
    con error claro.
 2. El body es obligatorio. Para "no content" (204), usá `{}`
    explícito: `return 204 {}`.
-3. El status debe ser un literal Int. El parser solo dispara la
-   sintaxis nueva cuando ve `Int { ... }`; `return 200 user`
-   (sin braces) sigue siendo un `Return` normal del lenguaje.
+3. El status puede ser un literal Int **o un identificador** que
+   apunta a una constante top-level Int (mini-tanda OAPI). El parser
+   distingue por la forma del body: `{"key": ...}` (Str primero) →
+   ReturnStatus; `{key: ...}` (Ident primero) → struct literal.
+   `return 200 user` (sin braces) sigue siendo un `Return` normal.
 4. El return type formal del handler se ignora en este path —
    un handler `-> Str` puede mezclar `return "ok"` con
    `return 404 { ... }` en la misma fn.
@@ -7066,6 +7140,35 @@ curl -i http://127.0.0.1:3000/users/2
 Las claves del map literal van entre comillas dobles porque la
 sintaxis de map literal en Fitz exige que la key sea un valor
 (`{"x": 1}`), no un identificador (`{x: 1}` lee la variable `x`).
+
+**Status codes vía constantes** (mini-tanda OAPI):
+
+Si tenés varios handlers que usan los mismos códigos, nombrarlos
+mejora la legibilidad y permite que el schema OpenAPI los detecte:
+
+```fitz
+let NOT_FOUND = 404
+let UNAUTHORIZED = 401
+
+@get("/protected")
+fn protected() -> Str {
+    return UNAUTHORIZED {"message": "no autorizado"}
+}
+
+@get("/users/{id}")
+fn get_user(id: Int) -> Str {
+    if (id == 1) {
+        return "alice"
+    }
+    return NOT_FOUND {"error": "no encontrado"}
+}
+```
+
+Solo `let X = <Int literal>` top-level califica. Una variable local,
+un cálculo o un argumento del handler **no** se resuelven al schema
+— el schema cae al `500` default histórico. Para resolver el patrón
+`return Err({status: NOT_FOUND, ...})` (con un `type` propio para
+errores), ver cap 18.
 
 ### Query params
 
@@ -7391,6 +7494,37 @@ open http://127.0.0.1:3000/docs        # macOS — abrí la UI en el browser
 - **Status codes custom en el schema**: un handler con
   `return 404 { ... }` produce ahora un entry `"404"` en
   `responses`, con description vía reason phrase HTTP.
+
+**Cerrado en mini-tanda OAPI (2026-05-20)**:
+
+- **Status codes vía constantes top-level**: el schema resuelve
+  no solo literales (`return 404 { ... }`) sino también
+  identificadores que apuntan a una `let X = <Int>` top-level del
+  programa. Útil para nombrar los códigos:
+
+  ```fitz
+  let NOT_FOUND = 404
+  let UNAUTHORIZED = 401
+
+  type ApiErr { status: Int, message: Str }
+
+  @get("/users/{id}")
+  fn h(id: Int) -> Result<User, ApiErr> {
+      if (id == 0) {
+          return Err(ApiErr { status: NOT_FOUND, message: "no user" })
+      }
+      ...
+  }
+  ```
+
+  El schema OpenAPI incluye los responses `200` (return type),
+  `401` y `404` (resueltos desde la tabla de consts). La sintaxis
+  `return NOT_FOUND { ... }` (Stmt::ReturnStatus directo con Ident
+  como status) también funciona y entra al schema.
+
+  Vars locales del handler o expresiones complejas (`return
+  compute_status() { ... }`) siguen invisibles para el schema —
+  caen al 500 default.
 
 ---
 

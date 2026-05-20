@@ -1227,6 +1227,147 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~MP2 + Docs refresh + VSCode rebuild: multipart en intérprete + guide cap 17/18 + nuevo ejemplo + extensión actualizada~~ ✓ CERRADO 2026-05-20 (mini-tanda MP2 + DocsRefresh + VSCode)
+
+Bundle de polish post-OAPI. Cierra **MP2** (multipart con files en
+el intérprete con representación File) + refresh masivo de docs +
+nuevo ejemplo + rebuild de la extensión VSCode.
+
+**Parte 1 — MP2: multipart/form-data en el intérprete**:
+
+- ~~**Tipo built-in `File`**~~ ✓ Tercer nominal del runtime HTTP
+  (paralelo a `Request` y `Response`), pre-registrado por
+  `register_http_builtin_types` en `types.rs`. Fields: `name:
+  Str?` (filename del Content-Disposition, `null` si no es file),
+  `content_type: Str?` (MIME de la part), `content: Str`. El usuario
+  lo referencia sin declararlo ni importarlo.
+- ~~**Parser de multipart en `http.rs`**~~ ✓ `parse_multipart_body(
+  bytes, boundary)` parsea cada part: extrae headers
+  (`Content-Disposition`, `Content-Type`), valida `name=`, distingue
+  text field (sin `filename`) de file (con `filename`), construye
+  `Value::Str` o `Value::Instance` de File. Last-wins sobre
+  duplicados de `name`. Helper `extract_multipart_boundary(ct)`
+  parsea el header Content-Type para sacar el `boundary=<token>`
+  (con o sin comillas, case-sensitive del valor).
+- ~~**Dispatcher de Content-Type extendido**~~ ✓ `handle_task` ahora
+  acepta `multipart/form-data` como tercer CT soportado (junto con
+  JSON y urlencoded). Sin `boundary=` → 400 claro. Body no-UTF8 →
+  400 (limitación intencional del MVP — `Value::Bytes` queda como
+  sub-paso futuro). 415 actualizado para mencionar los tres CTs.
+- ~~**Asimetría en `fitz build`**~~ ✓ El codegen sigue rechazando
+  multipart con 415, pero el msg ahora cita `fitz run` como
+  workaround. `FileData` se emite en el preludio HTTP del codegen
+  para que `Map<Str, File>` tipos compilen (aunque el path runtime
+  no se pueble vía multipart). Multipart en codegen es deuda
+  residual.
+
+**Parte 2 — Fix de regresión del parser OAPI**:
+
+- ~~**Lookahead robusto en `parse_return`**~~ ✓ La versión inicial
+  de OAPI usaba `expression_no_struct_lit()` que rompía
+  `return P { x: 1 }` (struct literal legítimo). Refactor: el
+  lookahead específico (3 tokens: head Int/Ident + LBrace + Str|
+  RBrace skipping newlines) detecta el patrón ReturnStatus antes
+  de invocar `expression()`. Preserva struct lits multi-línea
+  (`return HttpClientReq {\n method: ...,\n ... }`).
+- Smoke `GUIDE_EXAMPLES_COMPILE` ahora green con todos los ejemplos
+  incluido `11d-named-args.fitz` que tenía multi-línea struct lit.
+
+**Parte 3 — Cap 17 (HTTP) refresh masivo**:
+
+- ~~**Sub-sección urlencoded**~~ ✓ Nueva entre "Body JSON" y
+  "Respuestas". Cubre el caso canónico (`Map<Str, Str>`),
+  URL-decoding (`+`/`%XX`), curl ejemplo, paridad bit-a-bit
+  `fitz run` ↔ `fitz build`.
+- ~~**Sub-sección multipart**~~ ✓ Cubre las dos variantes (text vs
+  file), tipo built-in `File`, limitación UTF-8, asimetría
+  intérprete vs codegen, link al ejemplo runnable nuevo.
+- ~~**Status codes con consts (mini-tanda OAPI)**~~ ✓ Extendido el
+  bloque "Reglas" para mencionar que el status acepta Int literal
+  O Ident a const top-level. Ejemplo `let NOT_FOUND = 404; return
+  NOT_FOUND { ... }`. Limitación documentada (solo top-level Int
+  literal — vars locales/expresiones complejas siguen invisibles
+  al schema).
+
+**Parte 4 — Cap 18 (Docs automáticas) refresh**:
+
+- ~~**Nueva sección "Cerrado en mini-tanda OAPI"**~~ ✓ Documenta el
+  patrón `Err({status: NOT_FOUND, ...})` y `return NOT_FOUND
+  { ... }` con consts. Ejemplo `ApiErr` + `Result<T, ApiErr>`.
+  Aclara qué entra al schema (Int literal + Ident a const) vs qué
+  no (vars locales, expresiones).
+
+**Parte 5 — Ejemplo nuevo `17c-multipart.fitz`**:
+
+- ~~**Ejemplo runnable cubriendo los dos casos canónicos**~~ ✓ Form
+  text-only (`Map<Str, Str>`) + form con file field
+  (`Map<Str, File>`). Comentado en detalle (decisiones de diseño
+  + limitaciones). Sumado al smoke `GUIDE_EXAMPLES_COMPILE`
+  (compila a binario en `fitz build` — el rechazo de multipart es
+  solo runtime). Validado bit-a-bit `fitz run` con multipart real.
+
+**Parte 6 — VSCode extension rebuild**:
+
+- ~~**Grammar TextMate**~~ ✓ Agregado `File` a la lista de
+  built-in types junto con `Request`, `Response`, etc.
+  (`editors/vscode/syntaxes/fitz.tmLanguage.json`).
+- ~~**LSP autocomplete**~~ ✓ Agregado `File` al array de built-in
+  types en `lsp.rs::completion_items`.
+- ~~**`.vsix` rebuilt**~~ ✓ Plataforma actual (win32-x64) regenerada
+  via `npm run build:vsix`. Compila el `fitz-lsp.exe` con el
+  cambio del autocomplete + empaqueta grammar + extension client.
+  Genera `fitz-language-win32-x64-0.9.2.vsix` (1.62 MB, 211 files).
+
+**Implementación cross-cutting**:
+
+- **`types.rs::register_http_builtin_types`**: tercer nominal `File`
+  pre-registrado con sus 3 fields. `nominal_count()` ahora es 3.
+- **`http.rs`**: helpers `parse_multipart_body`,
+  `extract_multipart_boundary`, `parse_cd_params`. Dispatcher
+  `handle_task` extiende el branch de Content-Type para multipart.
+- **`parser.rs::parse_return`**: lookahead robusto con skip de
+  newlines (max 16 tokens) para distinguir map literal (ReturnStatus)
+  de struct literal (return normal).
+- **`codegen.rs`**: `FileData` emitido en el HTTP runtime preludio
+  (Display + ToFitzJson + FromFitzJson). El 415 del codegen
+  actualiza su msg para citar `fitz run` como workaround para
+  multipart.
+- **`lsp.rs`**: `File` en la lista de built-in types para
+  autocomplete.
+
+**Tests**: **10 unit MP2 nuevos** (8 en `http::tests::mp2_*` +
+1 e2e en `compile_e2e::mp2_codegen_multipart_devuelve_415_*` +
+1 ajuste de `programa_vacio_no_da_errores` para nominal_count=3).
+Tests viejos actualizados:
+- `mp_multipart_sigue_rechazado_con_415` → `mp2_multipart_sin_boundary_es_400`
+  (multipart ahora se acepta; sin boundary → 400 distinto a 415).
+- `hpx1_content_type_multipart_rechaza_con_415` → `mp2_content_type_charset_diff_no_oficial_rechaza`
+  (multipart ya no rechaza; probamos con `application/octet-stream`).
+- `uc_http_body_415_msg_matchea_interprete` actualizado al nuevo msg
+  (incluye `fitz run` como workaround).
+- `ha_http_content_type_no_soportado_es_415_con_msg_alineado` →
+  `ha_http_content_type_text_plain_es_415_con_msg_claro` (multipart
+  ya no es el caso de 415 — text/plain sí).
+
+**Total al cierre: 2010 unit sin feature, 2100 con --features lsp,
+243+ compile_e2e (1 nuevo + 1 renombrado), 74 ejemplos en el
+smoke (1 nuevo).** Clippy `-D warnings` limpio en lib + bin
+`fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w)**:
+
+- **Multipart en `fitz build`**: el codegen rechaza con 415 + msg
+  que cita `fitz run`. ~4-6h para implementar el helper
+  `__parse_multipart` en el preludio + dispatch en
+  `emit_param_coercions`. Sub-paso futuro dedicado.
+- **`Value::Bytes` para files binarios**: el MVP solo admite files
+  UTF-8. PDFs, imágenes, zips fallan con 400. Requiere decisión
+  grande del lenguaje (`Value::Bytes` o `List<Int>`). Sub-paso
+  futuro grande.
+- **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
+- **Listas/mapas heterogéneos en `fitz build`**: requiere
+  `FitzValue` tagged runtime (F13).
+
 ### ~~DZ + CT + OAPI: paridad chica run↔build + OpenAPI con consts~~ ✓ CERRADO 2026-05-20 (mini-tanda DZ + CT + OAPI)
 
 Mini-tanda de polish chico que cierra 3 asimétrias entre `fitz run` y

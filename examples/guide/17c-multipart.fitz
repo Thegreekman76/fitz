@@ -1,0 +1,54 @@
+// 17c-multipart.fitz — bodies `multipart/form-data` (mini-tanda MP2).
+//
+// El handler recibe el body como `Map<Str, ...>` donde cada entry es:
+//   - text field (sin `filename`) → `Str` con el contenido.
+//   - file field (con `filename`) → instancia del tipo built-in `File`
+//     con `name`, `content_type` y `content`.
+//
+// `File` es un tipo built-in del runtime HTTP de Fitz (igual que
+// `Request` y `Response`). No hace falta declararlo ni importarlo.
+//
+// Limitación MVP: el `content` de los files es `Str`, así que solo se
+// admiten files cuyo contenido sea UTF-8 válido. Files binarios
+// (imágenes, PDFs) hacen el parse del request fallar con 400.
+// `Value::Bytes` queda como sub-paso futuro.
+//
+// Asimetría: hoy multipart corre SOLO en `fitz run`. `fitz build`
+// (binario nativo) sigue respondiendo 415 con un msg que cita
+// `fitz run` como workaround. Codegen multipart es deuda residual.
+
+@server(3000)
+fn main() => 0
+
+// Form text-only: cada entry es un Str.
+@post("/comment")
+fn add_comment(body: Map<Str, Str>) -> Str {
+    let title = body["title"]
+    let content = body["content"]
+    return "comment '{title}': {content}"
+}
+
+// Form con un file field. `body["upload"]` es una instancia de File.
+@post("/upload")
+fn upload(body: Map<Str, File>) -> Str {
+    let f = body["upload"]
+    let name = f.name
+    if (name == null) {
+        return "file sin filename"
+    }
+    let bytes = len(f.content)
+    return "subiste '{name}' ({bytes} caracteres UTF-8)"
+}
+
+// curl -F "title=Hola" -F "content=mi comentario" http://127.0.0.1:3000/comment
+//   → "comment 'Hola': mi comentario"
+//
+// curl -F "upload=@archivo.txt" http://127.0.0.1:3000/upload
+//   → "subiste 'archivo.txt' (123 caracteres UTF-8)"
+//
+// curl -F "upload=@imagen.png" http://127.0.0.1:3000/upload
+//   → 400 con `{"error": "multipart: body no es UTF-8 válido: ..."}`
+//
+// Si el handler espera JSON pero el cliente manda multipart, el server
+// devuelve 415 con un mensaje que cita los CTs soportados — JSON,
+// urlencoded, multipart.

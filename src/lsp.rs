@@ -1320,7 +1320,7 @@ fn scope_level_completions(
     // Tipos built-in: visibles como nombres en posición de anotación.
     for name in [
         "Int", "Float", "Str", "Bool", "Null", "Range", "Any", "List", "Map", "Result",
-        "Future", "Request", "Response", "PyAny",
+        "Future", "Request", "Response", "File", "PyAny",
     ] {
         items.push(CompletionItem {
             label: name.into(),

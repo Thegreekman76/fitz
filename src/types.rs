@@ -617,6 +617,35 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
         .declare_nominal("Response".to_string())
         .expect("Response es el segundo nominal — no puede colisionar");
     env.set_fields(resp_id, vec![]);
+
+    // Mini-tanda MP2 — `File`: nominal built-in para representar files
+    // de multipart/form-data bodies. El dispatcher lo construye al
+    // parsear `multipart/form-data` requests. Fields:
+    //   - `name`: filename del Content-Disposition (`filename="..."`),
+    //     `null` si la part no es file (form text field).
+    //   - `content_type`: MIME del Content-Type de la part, `null` si
+    //     no estaba presente.
+    //   - `content`: contenido UTF-8 de la part. Files binarios no
+    //     UTF-8 hacen el parse del request fallar con 400 — alcance
+    //     intencional del MVP (`Value::Bytes` queda como sub-paso
+    //     futuro).
+    let file_id = env
+        .declare_nominal("File".to_string())
+        .expect("File es el tercer nominal built-in — no puede colisionar");
+    env.set_fields(
+        file_id,
+        vec![
+            ResolvedField {
+                name: "name".into(),
+                type_: Type::Nullable(Box::new(Type::Str)),
+            },
+            ResolvedField {
+                name: "content_type".into(),
+                type_: Type::Nullable(Box::new(Type::Str)),
+            },
+            ResolvedField { name: "content".into(), type_: Type::Str },
+        ],
+    );
 }
 
 fn arity_error(name: &str, expected: usize, found: usize) -> FitzError {
@@ -5686,10 +5715,12 @@ mod tests {
         assert!(errors.is_empty());
         // Mini-fase MW.1: `Request` y `Response` se pre-registran como
         // nominales built-in del runtime HTTP, incluso en programas
-        // vacíos. El usuario los puede referenciar sin declararlos.
-        assert_eq!(env.nominal_count(), 2);
+        // vacíos. Mini-tanda MP2 sumó `File` como tercer built-in.
+        // El usuario los puede referenciar sin declararlos.
+        assert_eq!(env.nominal_count(), 3);
         assert!(env.lookup("Request").is_some());
         assert!(env.lookup("Response").is_some());
+        assert!(env.lookup("File").is_some());
     }
 
     #[test]
