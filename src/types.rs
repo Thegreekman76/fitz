@@ -18,7 +18,7 @@
 
 use std::collections::HashMap;
 
-use crate::ast::{Expr, Program, Span, Stmt, TypeExpr};
+use crate::ast::{Decorator, Expr, Param, Program, Span, Stmt, TypeExpr};
 use crate::error::{ErrorKind, FitzError};
 
 /// Identidad única para los tipos nominales (los declarados con
@@ -1012,6 +1012,14 @@ struct CheckCtx<'a> {
     /// `Stmt::ReturnStatus` (un middleware puede hacer `return 401 { ... }`
     /// para short-circuitear el handler). Introducido en mini-fase MW.1.
     middleware_fn_names: std::collections::HashSet<String>,
+    /// Fase 9.w.1 — Auth nativo. `Some(info)` cuando el programa declara
+    /// una fn con `@auth_provider`. Recolectado por `collect_auth_provider`
+    /// antes del walk del checker. Lo consulta el chequeo de
+    /// `@authenticated`/`@admin` para validar que cada handler protegido
+    /// declare un param compatible con el `User` que retorna el provider,
+    /// y que el `User` tenga campo `role: Str` cuando hay `@admin` en el
+    /// programa.
+    auth_provider: Option<AuthProviderInfo>,
     /// Mini-tanda L — stack paralelo a los `Expr::Loop` actualmente
     /// siendo chequeados. Cada frame recolecta los tipos de los
     /// valores de `break <v>` adentro. `Expr::Loop` consume el
@@ -1059,6 +1067,7 @@ impl<'a> CheckCtx<'a> {
             in_http_handler: Vec::new(),
             await_stack: Vec::new(),
             middleware_fn_names: std::collections::HashSet::new(),
+            auth_provider: None,
             loop_depth: 0,
             break_value_stack: Vec::new(),
             errors: Vec::new(),
@@ -4747,6 +4756,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let is_http_handler = decorators.iter().any(|d| {
                 matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
             }) || ctx.middleware_fn_names.contains(fn_name);
+            // Fase 9.w.1 — validar `@authenticated`/`@admin` contra el
+            // `@auth_provider` recolectado pre-walk. Errores van a
+            // `ctx.errors`; no interrumpe el chequeo del body.
+            check_auth_decorators(ctx, fn_name, params, decorators, *fn_span);
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
@@ -5018,6 +5031,10 @@ pub fn check_program(
         let mut ctx = CheckCtx::new(&env);
         preregister_fn_signatures(&mut ctx, program);
         collect_middleware_fn_names(&mut ctx, program);
+        // Fase 9.w.1 — recolectar `@auth_provider` (singleton) y exponer
+        // su info en `ctx.auth_provider`. El walk posterior chequea
+        // `@authenticated`/`@admin` contra esta info.
+        collect_auth_provider(&mut ctx, program);
         check_block(&mut ctx, program);
         // R.3 — chequear bodies de los métodos custom de cada
         // `type`. Esto sucede DESPUÉS del check_block normal para
@@ -5093,6 +5110,299 @@ fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
             ctx.in_http_handler.pop();
             ctx.await_stack.pop();
             ctx.pop_scope();
+        }
+    }
+}
+
+/// Fase 9.w.1 — Información del `@auth_provider` registrado en el
+/// programa. Lo construye `collect_auth_provider` al pre-scanear el
+/// programa antes del walk del checker. Si hay más de un
+/// `@auth_provider`, se reporta error y se preserva el primero.
+///
+/// Lo consulta el chequeo de `@authenticated`/`@admin` para:
+/// - Exigir que cada handler protegido declare un param compatible con
+///   `user_type_id` (el `T` del `Result<T>` que retorna el provider).
+/// - Validar que `T` tenga campo `role: Str` cuando aparece `@admin` en
+///   el programa.
+///
+/// Privado al módulo: el evaluator (`fitz run`, 9.w.1.c) y el codegen
+/// (`fitz build`, 9.w.1.d) re-recolectan por su cuenta. El checker no
+/// necesita exportar la info; solo valida estáticamente.
+#[derive(Debug, Clone)]
+#[allow(dead_code)]
+struct AuthProviderInfo {
+    /// Nombre de la fn marcada con `@auth_provider`.
+    name: String,
+    /// Span de la fn (para mensajes de error sobre duplicados).
+    span: Span,
+    /// `TypeId` del `T` nominal en el `Result<T>` que retorna el
+    /// provider. Los handlers `@authenticated`/`@admin` deben declarar
+    /// un param de este tipo (el `user` inyectado por el runtime).
+    user_type_id: TypeId,
+    /// Nombre del tipo `T`, para mensajes de error.
+    user_type_name: String,
+    /// `true` si `T` tiene un campo `role: Str` (no nullable). Lo exige
+    /// `@admin` para discriminar admins; los `@authenticated` puros no
+    /// lo necesitan.
+    has_role_field: bool,
+}
+
+/// Fase 9.w.1 — Pre-scan del programa para encontrar el `@auth_provider`
+/// único registrado. Valida:
+/// - Decorator sin args ni kwargs.
+/// - La fn tiene exactamente 1 param de tipo `Map<Str, Str>` (headers
+///   HTTP).
+/// - El return type es `Result<T>` con `T` nominal (un `type` custom).
+/// - Hay como máximo un `@auth_provider` en el programa.
+///
+/// Errores van directo a `ctx.errors`. La info del primer provider
+/// válido se persiste en `ctx.auth_provider` (consumida por el walk
+/// posterior al chequear handlers `@authenticated`/`@admin`).
+fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
+    let mut first: Option<(String, Span)> = None;
+    for stmt in program {
+        let Stmt::FnDef {
+            name,
+            params,
+            return_type,
+            decorators,
+            span: fn_span,
+            ..
+        } = stmt
+        else {
+            continue;
+        };
+        for deco in decorators {
+            if deco.name != "auth_provider" {
+                continue;
+            }
+            // 1) Sin args ni kwargs (`@auth_provider` puro, sin paréntesis
+            // o con `()`).
+            if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@auth_provider sobre fn '{}': no admite args ni kwargs. \
+                         Sintaxis: `@auth_provider\\nfn nombre(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+                        name
+                    ),
+                ));
+                continue;
+            }
+            // 2) Singleton.
+            if let Some((prev_name, prev_span)) = &first {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@auth_provider duplicado: la fn '{}' (línea {}) ya fue declarada como provider; \
+                         la fn '{}' (línea {}) es un segundo provider. Solo se admite uno por programa.",
+                        prev_name, prev_span.line, name, fn_span.line
+                    ),
+                ));
+                continue;
+            }
+            // 3) Exactamente 1 param Map<Str, Str>.
+            if params.len() != 1 {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@auth_provider sobre fn '{}': debe tener exactamente 1 param de tipo `Map<Str, Str>` (headers HTTP), tiene {}. \
+                         Sintaxis: `fn {}(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+                        name,
+                        params.len(),
+                        name
+                    ),
+                ));
+                continue;
+            }
+            let p = &params[0];
+            let param_ty = ann_to_type(p.type_.as_ref(), ctx.types);
+            let expected = Type::Map(Box::new(Type::Str), Box::new(Type::Str));
+            if !is_compatible(&param_ty, &expected) {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@auth_provider sobre fn '{}': el param '{}' debe ser `Map<Str, Str>` (headers HTTP), es `{}`.",
+                        name,
+                        p.name,
+                        param_ty.display(ctx.types)
+                    ),
+                ));
+                continue;
+            }
+            // 4) Return type Result<T> con T nominal.
+            let ret = match return_type {
+                Some(r) => match resolve_type_expr(r, ctx.types) {
+                    Ok(t) => t,
+                    Err(_) => continue, // resolve_program ya reportó el error
+                },
+                None => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@auth_provider sobre fn '{}': falta el return type. Debe ser `Result<User>` donde `User` es un type custom.",
+                            name
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            let user_id = match &ret {
+                Type::Result { ok, .. } => match ok.as_ref() {
+                    Type::Nominal(id) => *id,
+                    other => {
+                        ctx.errors.push(FitzError::new(
+                            ErrorKind::TypeError,
+                            fn_span.line,
+                            fn_span.column,
+                            format!(
+                                "@auth_provider sobre fn '{}': el return debe ser `Result<T>` donde `T` es un type custom; T es `{}`.",
+                                name,
+                                other.display(ctx.types)
+                            ),
+                        ));
+                        continue;
+                    }
+                },
+                other => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@auth_provider sobre fn '{}': el return debe ser `Result<T>` donde `T` es un type custom; es `{}`.",
+                            name,
+                            other.display(ctx.types)
+                        ),
+                    ));
+                    continue;
+                }
+            };
+            // 5) Persistir info para la validación de handlers.
+            let info = ctx.types.info(user_id);
+            let user_type_name = info.name.clone();
+            let has_role_field = info
+                .fields
+                .as_ref()
+                .map(|fs| fs.iter().any(|f| f.name == "role" && matches!(f.type_, Type::Str)))
+                .unwrap_or(false);
+            first = Some((name.clone(), *fn_span));
+            ctx.auth_provider = Some(AuthProviderInfo {
+                name: name.clone(),
+                span: *fn_span,
+                user_type_id: user_id,
+                user_type_name,
+                has_role_field,
+            });
+        }
+    }
+}
+
+/// Fase 9.w.1 — Valida los decoradores `@authenticated` y `@admin` sobre
+/// un `Stmt::FnDef` candidato a handler HTTP. Se invoca desde el walker
+/// de `Stmt::FnDef` adentro de `check_block`, después de que el provider
+/// haya sido recolectado por `collect_auth_provider`.
+///
+/// Errores van a `ctx.errors`. No interrumpe el chequeo del body de la
+/// fn — los chequeos del body siguen su curso normal.
+fn check_auth_decorators(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    for deco in decorators {
+        let kind = match deco.name.as_str() {
+            "authenticated" | "admin" => deco.name.as_str(),
+            _ => continue,
+        };
+        // 1) Sin args ni kwargs en el MVP.
+        if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{} sobre fn '{}': no admite args ni kwargs en el MVP. Sintaxis: `@{}\\n@get(\"/...\")\\nfn ...`.",
+                    kind, fn_name, kind
+                ),
+            ));
+            continue;
+        }
+        // 2) Solo sobre handlers HTTP.
+        let is_handler = decorators.iter().any(|d| {
+            matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
+        });
+        if !is_handler {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{} sobre fn '{}': solo se aplica a handlers HTTP (`@get`/`@post`/`@put`/`@delete`).",
+                    kind, fn_name
+                ),
+            ));
+            continue;
+        }
+        // 3) Exige provider registrado.
+        let provider = match &ctx.auth_provider {
+            Some(p) => p.clone(),
+            None => {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@{} sobre fn '{}': no hay `@auth_provider` registrado en el programa. \
+                         Declará una fn con `@auth_provider\\nfn nombre(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+                        kind, fn_name
+                    ),
+                ));
+                continue;
+            }
+        };
+        // 4) Handler debe declarar un param compatible con el User type.
+        let user_ty = Type::Nominal(provider.user_type_id);
+        let has_user_param = params.iter().any(|p| {
+            let pty = ann_to_type(p.type_.as_ref(), ctx.types);
+            is_compatible(&pty, &user_ty)
+        });
+        if !has_user_param {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@{} sobre fn '{}': falta param de tipo `{}` (inyectado tras autenticación exitosa). \
+                     Declarálo en la signature: `fn {}(..., user: {}) -> ...`.",
+                    kind, fn_name, provider.user_type_name, fn_name, provider.user_type_name
+                ),
+            ));
+        }
+        // 5) `@admin` exige campo `role: Str` en el User type.
+        if kind == "admin" && !provider.has_role_field {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@admin sobre fn '{}': el tipo `{}` (return del `@auth_provider`) debe tener un campo `role: Str` para discriminar admins. \
+                     Agregalo a la declaración de `{}`.",
+                    fn_name, provider.user_type_name, provider.user_type_name
+                ),
+            ));
         }
     }
 }
@@ -10015,5 +10325,241 @@ print(total)
             "fn f(x: Int = 5) -> Int { return x }\n\
              let r: Int = f()",
         );
+    }
+
+    // ----------------------------------------------------------------
+    // Fase 9.w.1.a — Auth nativa: checker para
+    // `@auth_provider` / `@authenticated` / `@admin`.
+    // ----------------------------------------------------------------
+
+    /// Helper: chequea que el programa pase sin errores.
+    fn assert_auth_ok(src: &str) {
+        let errors = errors_of(src);
+        assert!(
+            errors.is_empty(),
+            "esperaba sin errores, fue: {:?}",
+            errors
+        );
+    }
+
+    /// Helper: chequea que el programa produzca al menos un error cuyo
+    /// mensaje contenga el substring esperado.
+    fn assert_auth_err(src: &str, expected_substr: &str) {
+        let errors = errors_of(src);
+        let matched = errors
+            .iter()
+            .any(|e| e.message.contains(expected_substr));
+        assert!(
+            matched,
+            "esperaba error con substring '{}', errores fueron: {:?}",
+            expected_substr, errors
+        );
+    }
+
+    #[test]
+    fn auth_provider_signature_valida_no_da_error() {
+        // Provider mínimo: 1 param Map<Str,Str>, return Result<User>.
+        // Cualquier `type User { ... }` declarado en el programa basta;
+        // el provider NO ejecuta — solo registra la firma.
+        let src = "type User { id: Int, name: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"sin auth\")\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn auth_provider_con_args_es_error() {
+        // `@auth_provider` no admite args ni kwargs en el MVP.
+        let src = "type User { id: Int }\n\
+                   @auth_provider(123)\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }";
+        assert_auth_err(src, "no admite args ni kwargs");
+    }
+
+    #[test]
+    fn auth_provider_param_incorrecto_es_error() {
+        // El param debe ser `Map<Str, Str>` (headers HTTP).
+        let src = "type User { id: Int }\n\
+                   @auth_provider\n\
+                   fn check(token: Str) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }";
+        assert_auth_err(src, "Map<Str, Str>");
+    }
+
+    #[test]
+    fn auth_provider_aridad_incorrecta_es_error() {
+        // Debe tener exactamente 1 param.
+        let src = "type User { id: Int }\n\
+                   @auth_provider\n\
+                   fn check() -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }";
+        assert_auth_err(src, "exactamente 1 param");
+    }
+
+    #[test]
+    fn auth_provider_return_no_result_es_error() {
+        // El return debe ser `Result<T>` con T nominal.
+        let src = "type User { id: Int }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> User {\n\
+                       return User { id: 1 }\n\
+                   }";
+        assert_auth_err(src, "Result<T>");
+    }
+
+    #[test]
+    fn auth_provider_result_de_primitivo_es_error() {
+        // `Result<Str>` no sirve — T debe ser un type custom (nominal).
+        let src = "@auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<Str> {\n\
+                       return Ok(\"sin user type\")\n\
+                   }";
+        assert_auth_err(src, "type custom");
+    }
+
+    #[test]
+    fn auth_provider_duplicado_es_error() {
+        // Solo un `@auth_provider` por programa.
+        let src = "type User { id: Int }\n\
+                   @auth_provider\n\
+                   fn check1(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @auth_provider\n\
+                   fn check2(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"y\")\n\
+                   }";
+        assert_auth_err(src, "@auth_provider duplicado");
+    }
+
+    #[test]
+    fn authenticated_sin_provider_es_error() {
+        // `@authenticated` exige que haya un `@auth_provider` en el
+        // programa.
+        let src = "type User { id: Int }\n\
+                   @authenticated\n\
+                   @get(\"/me\")\n\
+                   fn me(user: User) -> User { return user }";
+        assert_auth_err(src, "no hay `@auth_provider`");
+    }
+
+    #[test]
+    fn admin_sin_provider_es_error() {
+        // `@admin` exige que haya un `@auth_provider` en el programa.
+        let src = "type User { id: Int, role: Str }\n\
+                   @admin\n\
+                   @delete(\"/x\")\n\
+                   fn del(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "no hay `@auth_provider`");
+    }
+
+    #[test]
+    fn authenticated_handler_sin_param_user_es_error() {
+        // El handler protegido debe declarar un param compatible con el
+        // tipo que retorna el provider (`User`). El runtime lo inyecta
+        // tras autenticación exitosa.
+        let src = "type User { id: Int }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @authenticated\n\
+                   @get(\"/me\")\n\
+                   fn me() -> Str { return \"hola\" }";
+        assert_auth_err(src, "falta param de tipo `User`");
+    }
+
+    #[test]
+    fn authenticated_handler_con_param_user_no_da_error() {
+        // Handler con param `user: User` (mismo tipo que retorna el
+        // provider) chequea limpio.
+        let src = "type User { id: Int, name: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @authenticated\n\
+                   @get(\"/me\")\n\
+                   fn me(user: User) -> User { return user }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn authenticated_sin_handler_http_es_error() {
+        // `@authenticated` sobre una fn que NO tiene
+        // `@get`/`@post`/`@put`/`@delete` no tiene sentido.
+        let src = "type User { id: Int }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @authenticated\n\
+                   fn algo(user: User) -> Str { return \"x\" }";
+        assert_auth_err(src, "solo se aplica a handlers HTTP");
+    }
+
+    #[test]
+    fn admin_sin_role_field_en_user_es_error() {
+        // `@admin` exige que el `User` (return del provider) tenga campo
+        // `role: Str` para discriminar admins. Sin ese campo, error.
+        let src = "type User { id: Int, name: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @admin\n\
+                   @delete(\"/x/{id}\")\n\
+                   fn del(id: Int, user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "campo `role: Str`");
+    }
+
+    #[test]
+    fn admin_con_role_field_no_da_error() {
+        // Programa válido completo: provider + handler `@admin` con
+        // `User { ..., role: Str }`.
+        let src = "type User { id: Int, name: Str, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @admin\n\
+                   @delete(\"/users/{id}\")\n\
+                   fn del(id: Int, user: User) -> Str { return \"ok\" }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn auth_decorators_con_args_son_error() {
+        // `@authenticated` y `@admin` no admiten args ni kwargs.
+        let src = "type User { id: Int, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @authenticated(scope=\"x\")\n\
+                   @get(\"/me\")\n\
+                   fn me(user: User) -> User { return user }";
+        assert_auth_err(src, "no admite args ni kwargs");
+    }
+
+    #[test]
+    fn auth_provider_con_role_field_nullable_no_basta_para_admin() {
+        // El campo `role` debe ser `Str` (no nullable). Si es `Str?`,
+        // discriminar admins no compone (un Null no es admin).
+        let src = "type User { id: Int, role: Str? }\n\
+                   @auth_provider\n\
+                   fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+                       return Err(\"x\")\n\
+                   }\n\
+                   @admin\n\
+                   @get(\"/x\")\n\
+                   fn h(user: User) -> Str { return \"ok\" }";
+        assert_auth_err(src, "campo `role: Str`");
     }
 }
