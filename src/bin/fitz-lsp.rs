@@ -32,7 +32,8 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::lsp::{
     check_source_with_types, completion_at_position, definition_for_position,
-    fitz_errors_to_diagnostics, hover_for_position, make_definition_location, make_hover,
+    fitz_errors_to_diagnostics_with_source, hover_for_position,
+    make_definition_location_with_source, make_hover_with_range,
     resolve_cross_module_definition,
 };
 use fitz::ast::Program;
@@ -76,7 +77,10 @@ impl Backend {
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
         let (program, type_env, type_info, def_info, errors) =
             check_source_with_types(&text);
-        let diagnostics = fitz_errors_to_diagnostics(&errors);
+        // LSPy — diagnostics con Range exacto del símbolo bajo el
+        // cursor (no 1-char dummy). Requiere el source para extraer
+        // el ident en cada posición.
+        let diagnostics = fitz_errors_to_diagnostics_with_source(&errors, &text);
         self.documents.lock().insert(
             uri.clone(),
             DocumentState {
@@ -194,8 +198,11 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
+        // LSPy — hover con Range del símbolo bajo el cursor para
+        // que VSCode highlightee el token en lugar de solo mostrar
+        // el tooltip aislado.
         let hover = hover_for_position(&state.type_info, pos.line, pos.character)
-            .map(|ty| make_hover(ty, &state.type_env));
+            .map(|ty| make_hover_with_range(ty, &state.type_env, &state.text, pos.line, pos.character));
         Ok(hover)
     }
 
@@ -229,9 +236,26 @@ impl LanguageServer for Backend {
         let cross = target_name.as_deref().and_then(|name| {
             resolve_cross_module_definition(&state.program, &uri, def_span, name)
         });
+        // LSPy — Location con Range exacto del ident en la línea
+        // del def. Para defs locales, source = doc abierto; para
+        // cross-module, source = archivo target (re-leemos del FS).
         let location = match cross {
-            Some((target_uri, target_span)) => make_definition_location(target_uri, target_span),
-            None => make_definition_location(uri.clone(), def_span),
+            Some((target_uri, target_span)) => {
+                let target_source = target_uri
+                    .to_file_path()
+                    .ok()
+                    .and_then(|p| std::fs::read_to_string(p).ok());
+                make_definition_location_with_source(
+                    target_uri,
+                    target_span,
+                    target_source.as_deref(),
+                )
+            }
+            None => make_definition_location_with_source(
+                uri.clone(),
+                def_span,
+                Some(&state.text),
+            ),
         };
         Ok(Some(GotoDefinitionResponse::Scalar(location)))
     }

@@ -8206,13 +8206,14 @@ VSCode** que lo aprovecha.
   Problems panel de VSCode).
 - **Hover con tipos** — pasás el mouse sobre una variable o
   expresión y aparece su tipo en un tooltip (renderizado como
-  bloque de código Fitz, con syntax highlighting). Funciona sobre
-  literales (`42` → `Int`), identificadores en uso (`nombre` →
-  `Str`), expresiones compuestas (`xs.map(...)` → `List<U>`),
-  tipos nominales (`u` → `User`). Heurística pragmática: el último
-  Expr iniciado antes del cursor en la misma línea. Cubre el 90%
-  del caso; refinable con span completo cuando aterrice esa
-  deuda del AST.
+  bloque de código Fitz, con syntax highlighting). El símbolo bajo
+  el cursor se **highlightea visualmente** (mini-tanda LSPy — el
+  Range del hover cubre exactamente el ident, ya no es `None`).
+  Funciona sobre literales (`42` → `Int`), identificadores en uso
+  (`nombre` → `Str`), expresiones compuestas (`xs.map(...)` →
+  `List<U>`), tipos nominales (`u` → `User`). Heurística
+  pragmática: el último Expr iniciado antes del cursor en la
+  misma línea.
 - **Go-to-definition** — F12 (o Ctrl+Click) sobre el uso de una
   variable, función o tipo te lleva a la línea de su declaración.
   Funciona sobre variables locales (`let x = ...`), funciones
@@ -8243,10 +8244,11 @@ VSCode** que lo aprovecha.
     declarados, los símbolos importados, los builtins (`print`/
     `len`/`sleep`/`cors`), los tipos built-in (`Int`/`Float`/`Str`/
     `Bool`/`List`/`Map`/...), y los keywords del lenguaje (`let`/
-    `fn`/`if`/`match`/...).
-  El autocomplete no es scope-aware todavía: vars locales y params
-  no aparecen en la lista scope-level, pero el usuario puede
-  tipearlas igual sin que el LSP las marque como error.
+    `fn`/`if`/`match`/...). **Vars locales y params del scope
+    contenedor también aparecen** (mini-tanda LSPy.4 — scope-aware):
+    si estás tipeando adentro del body de `fn greet(name: Str) {
+    ... }`, `name` aparece en la lista; `let local = 42` previo
+    también; `for item in xs { ... }` agrega `item` dentro del body.
 
 ### Lo que viene
 

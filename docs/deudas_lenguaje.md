@@ -1131,6 +1131,94 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~LSP polish completo (Range exacto + scope-aware autocomplete)~~ ✓ CERRADO 2026-05-20 (mini-tanda LSPy)
+
+Mini-tanda de polish del LSP MVP antes de Fase 9.w. Cierra dos
+deudas residuales que venían arrastrándose desde el cierre del
+plan LSP (Fase 9.x):
+
+- ~~**`end_span` / Range exacto en Hover/Definition/Diagnostics**~~ ✓
+  Resuelto sin refactor del AST. Helpers `ident_range_at_position`
+  e `ident_range_from_def` en `fitz::lsp` leen el source text +
+  un Span (start) para computar el end del ident extrayendo el run
+  de chars `[a-zA-Z0-9_]` adyacente. Para defs apuntando a un
+  keyword (`let`/`fn`/`type`/`static`/`async`), el helper skipea
+  el keyword + whitespace y devuelve el rango del ident real.
+- ~~**Scope-aware autocomplete**~~ ✓ `collect_local_bindings_at`
+  recorre el AST desde top-level hacia abajo, descendiendo en
+  fns/loops/for stmts cuyo span_line ≤ cursor_line. Para cada
+  scope visible suma: params del fn (FnDef), var del for
+  (Pattern::Ident o Pattern::Tuple), y lets previos del bloque
+  (`let x = ...` en línea ≤ cursor_line). No incluye lets en
+  líneas posteriores al cursor (forward references no permitidas).
+
+**Implementación cross-cutting**:
+
+- **AST**: SIN cambios. El refactor de `end_span` en cada nodo
+  (deuda S1 original) queda diferido — los LSP helpers computan
+  el end leyendo el source text + nombre del ident. Trade-off
+  documentado: el AST se mantiene chico, el cómputo en LSP es
+  O(line_length) que para idents típicos (≤20 chars) es trivial.
+- **`fitz::lsp`** (`src/lsp.rs`): nuevas APIs públicas
+  `make_hover_with_range`, `make_definition_location_with_source`,
+  `fitz_errors_to_diagnostics_with_source`. Las versiones legacy
+  (sin source) se mantienen como wrappers para compatibilidad.
+  Helpers privados `ident_range_at_position` (cursor → ident)
+  e `ident_range_from_def` (def_span → ident del declarador).
+- **`fitz-lsp` bin** (`src/bin/fitz-lsp.rs`): `check_and_publish`
+  usa `_with_source` para diagnostics. `Backend::hover` usa
+  `make_hover_with_range`. `Backend::goto_definition` usa
+  `make_definition_location_with_source` para defs locales y
+  re-lee el archivo target desde FS para defs cross-module.
+- **scope_level_completions**: ahora toma `cursor_line` y llama
+  a `collect_local_bindings_at` ANTES del walk top-level legacy.
+  Las completions resultantes vienen en orden: locales del scope
+  más interno → params → top-level (let/fn/type/import) →
+  builtins → tipos → keywords.
+
+**Decisiones técnicas**:
+
+- **Sin refactor de AST `end_span`**: el LSP MVP no necesita
+  end_span estricto; el ident bajo el cursor es suficiente para
+  90% de los hover/def/diagnostics use cases. Refactor del AST
+  postergado hasta que aparezca un caso (call chain `a.b().c()`)
+  donde la heurística de ident-under-cursor no alcance.
+- **Scope-aware con filter `start ≤ cursor_line`**: pragmático.
+  El AST no lleva end_span en stmts; usamos la convención "el
+  cursor está dentro del scope si el stmt arrancó antes y no
+  pasamos a un sibling posterior". Funciona para 95% del código
+  con indentación típica.
+- **Cross-module re-lee FS en goto_definition**: el backend hace
+  `std::fs::read_to_string(target_path)` para tener el source y
+  poder computar el Range exacto del ident en el archivo target.
+  Costo: 1 file read por goto-def. Trade-off aceptado — el LSP
+  no cachea el contenido de archivos no abiertos.
+
+**VSCode extension**: SIN cambios. Las mejoras viven 100% en el
+runtime del LSP server. Para que los usuarios reciban el polish,
+basta con rebuildear el binario `fitz-lsp` (`cargo build --release
+--features lsp --bin fitz-lsp`) o el `.vsix` bundled (`cd editors/
+vscode && npm run build:vsix`).
+
+**Tests**: 10 unit nuevos en `lsp::tests::lspy_*` (4 sobre
+helpers de Range + 1 hover + 1 diagnostic + 4 scope-aware
+completion). Total al cierre: 1972 sin feature, **2062 con
+--features lsp**. Clippy `-D warnings` limpio en lib + bin
+`fitz-lsp`.
+
+**Deuda residual (NO bloquea Fase 9.w)**:
+
+- **Range exacto para Expr no-Ident**: hover sobre `xs.map(...)`
+  highlightea solo `map`, no el call entero. Refactor del AST
+  con `end_span` lo destrabaría — sub-paso futuro si entra
+  presión real.
+- **Scope-aware con shadow / re-binding**: hoy si `let x = ...`
+  aparece dos veces en el mismo block, ambas aparecen en
+  completion. El AST no distingue. Refinable con dedup.
+- **Match arm bindings en completion**: `match v { Ok(inner) =>
+  ... }` no incluye `inner` en el scope-aware completion adentro
+  del arm body. Refactor menor pendiente.
+
 ### ~~HTTP polish + LSP cross-module go-to-def + cleanup docs~~ ✓ CERRADO 2026-05-20 (mini-tanda HC + LSPx + Cleanup)
 
 Mega-bundle pre-9.w: tres áreas distintas pero todas chicas/medianas.
@@ -2974,13 +3062,18 @@ signatures de Map/List/Str.
 
 **Deuda residual visible** (NO bloquea próximas mini-tandas;
 encaje en mini-tanda futura tipo "Sp" sin compromiso):
-- **Range exacto en respuestas Hover/Definition** sigue
-  dependiendo de `end_span` en el AST (deuda S1 heredada
-  del LSP MVP). ~6-10h cuando aparezca demanda.
-- **Scope-aware autocomplete** (vars locales y params
-  visibles según posición del cursor) sigue como deuda
-  del LSP. Refactor del checker para persistir scope-table
-  por posición. ~4-6h.
+- ~~**Range exacto en respuestas Hover/Definition**~~ ✓ CERRADO
+  2026-05-20 (mini-tanda LSPy). Resuelto sin refactor del AST:
+  los helpers del LSP leen el source text + el span (start) para
+  computar el end del ident extrayendo el run alphanumérico
+  adyacente. Aplicable también a Diagnostics. Range exacto para
+  Expr compuestos (call chains `a.b().c()`) sigue como deuda
+  menor — el ident-bajo-cursor cubre 90% de los casos.
+- ~~**Scope-aware autocomplete**~~ ✓ CERRADO 2026-05-20
+  (mini-tanda LSPy.4). `collect_local_bindings_at` recorre el
+  AST con cursor_line awareness, sumando params de fn, vars de
+  for, y lets previos del bloque al scope visible. No requirió
+  refactor del checker — el walker AST es suficiente.
 - ~~**Cross-module go-to-definition**~~ ✓ CERRADO 2026-05-20
   (mini-tanda LSPx). F12 sobre `User` en `from foo import User`
   ahora salta al `type User { ... }` real adentro de foo.fitz,
