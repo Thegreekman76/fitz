@@ -1227,6 +1227,98 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~Mw-Wrap: wrap-style middleware con `next` callable (intérprete only)~~ ✓ CERRADO 2026-05-20 (mini-tanda Mw-Wrap)
+
+Cierra la deuda residual del modelo wrap-style middleware. El
+intérprete (`fitz run`) ahora soporta `fn mw(req: Request, next:
+Fn() -> Response) -> Response`. El codegen rechaza con un msg claro
+citando `fitz run` como workaround — codegen real para Wrap mws es
+deuda residual menor (refinable si entra demanda). Queda **F13 como
+última residual** del bloque post-Fase-8.
+
+**Implementación en 5 capas**:
+
+- ~~**`Value::NativeFn(NativeAsyncFn)`**~~ ✓ Nueva variante del value
+  system. `NativeAsyncFn` es wrapper struct sobre
+  `Arc<dyn Fn(Vec<Value>) -> FitzFuture + Send + Sync>` (no type
+  alias porque necesitamos impl Debug manual). Send + Sync para
+  fluir por tokio multi-thread (post-F17.4). type_name = "Function",
+  Display = `<native function>`, PartialEq cae al catch-all
+  (siempre false — funciones no se comparan por valor).
+- ~~**`MiddlewareKind::Wrap`**~~ ✓ Tercera variante (paralela a Pre,
+  Post). El chain runner la distingue.
+- ~~**Classifier `classify_2_arg_middleware`**~~ ✓ Inspecciona el
+  tipo del segundo param: `TypeExpr::Function { ... }` o
+  `TypeExpr::Generic { name: "Fn", ... }` (con Nullable opcional)
+  → Wrap. Cualquier otro tipo (incluido `Response` o sin anotación)
+  → Post. Preserva la semántica histórica de Post mws sin
+  anotación.
+- ~~**`invoke_value` dispatch**~~ ✓ Nueva rama en
+  `evaluator::invoke_value` que invoca el callback de NativeFn con
+  los args provistos (típicamente 0 args para `next: Fn() ->
+  Response`). El callback devuelve `FitzFuture` que se await-ea
+  asíncronamente.
+- ~~**`run_wrap_chain` recursivo**~~ ✓ Nuevo en `http.rs`. Caso base:
+  sin wraps → invocar handler + post chain. Caso recursivo: pop
+  primer wrap, construir `Value::NativeFn(next)` capturando el
+  resto de la chain por clone, invocar el wrap con `(req, next)`.
+  La closure de `next` re-clonea las capturas en cada invocación
+  (puede llamarse 0+ veces). El return del wrap se convierte a
+  HandlerOutcome.
+
+**Integración en `handle_task`**:
+
+- Detecta si hay wrap-style mws en la ruta. Si sí, invoca
+  `run_wrap_chain` que reemplaza el flujo clásico (handler +
+  post). Si no, sigue el flujo histórico (handler directo, post
+  mws después).
+- Pre mws siguen corriendo ANTES de todo (gate-only sin cambios).
+- Wraps + Post coexisten: wraps envuelven al handler, posts siguen
+  corriendo después como sub-paso del caso base de
+  `run_wrap_chain`.
+
+**Codegen — rejected con msg claro**:
+
+`collect_route_middlewares` del codegen detecta wrap-style mws
+(`fn_sigs[mw].params[1]` es `Type::Function`) y aborta con:
+
+```
+@middleware(`<mw>`) sobre fn `<handler>`: wrap-style middleware
+(segundo param `Fn() -> Response`) corre solo en `fitz run` por
+ahora. Codegen es deuda residual menor — refinable si entra
+demanda. Para `fitz build`, usá post-process (segundo param tipo
+`Response`) o pre-process (1 arg).
+```
+
+**Tests**: **4 unit + 1 e2e nuevos**:
+
+- 4 unit en `http::tests::mw_wrap_classifier_*` (param Fn → Wrap,
+  param Response → Post, sin anotación → Post, Fn nullable → Wrap).
+- 1 compile_e2e `mw_wrap_codegen_rechaza_con_msg_que_cita_fitz_run`
+  que valida el reject del codegen.
+- Smoke manual end-to-end con curl: 3 casos (handler con timing
+  mw, gate condicional sin auth = 401, gate con auth = 200).
+
+**Ejemplo nuevo**: `examples/guide/17d-middleware-wrap.fitz`. NO se
+suma al smoke `GUIDE_EXAMPLES_COMPILE` porque el codegen rechaza
+(`fitz run`-only por ahora — paralelo a otros ejemplos
+intencionalmente no-compilables documentados en cap 18).
+
+**Cap 17 (HTTP)**: nueva sub-sección "Variantes" en Middleware
+con tabla Pre/Post/Wrap + ejemplo de Wrap + caveat de
+`fitz build`.
+
+**Total al cierre: 2034 unit sin feature, 2124 con --features lsp,
+247+ compile_e2e (1 nuevo), 75 ejemplos en smoke (sin cambio — el
+nuevo es run-only).** Clippy `-D warnings` limpio.
+
+**Deuda residual restante (NO bloquea 9.w)** — ÚLTIMA:
+
+- **F13 — listas/mapas heterogéneos en `fitz build`**: ~15-20h.
+  Decisión grande: `FitzValue` tagged runtime en codegen output.
+  Probable spike de diseño primero. Última residual del bloque
+  post-Fase-8 antes de empujar 9.w (Stack web first-class).
+
 ### ~~Bytes: primitivo nuevo del lenguaje + paridad run↔build + VSCode~~ ✓ CERRADO 2026-05-20 (mini-tanda Bytes)
 
 Cierra la deuda residual `Value::Bytes` que quedó abierta desde MP2.

@@ -10718,10 +10718,29 @@ impl<'a> CodegenCtx<'a> {
                     // Pre (1 arg) vs Post (2 args). Pre corre antes
                     // del handler con semántica gate-only; Post corre
                     // después con (Request, Response) → Response.
-                    let mw_arity = self.fn_sigs
-                        .get(n.as_str())
-                        .map(|s| s.params.len())
-                        .unwrap_or(1);
+                    //
+                    // Mini-tanda Mw-Wrap — wrap-style mw (2 args con
+                    // segundo param `Fn() -> Response`) corre solo en
+                    // `fitz run` por ahora. El codegen lo rechaza con
+                    // un mensaje claro citando el workaround.
+                    let sig = self.fn_sigs.get(n.as_str()).cloned();
+                    let mw_arity = sig.as_ref().map(|s| s.params.len()).unwrap_or(1);
+                    let is_wrap = sig
+                        .as_ref()
+                        .and_then(|s| s.params.get(1))
+                        .map(|p| matches!(p, Type::Function { .. }))
+                        .unwrap_or(false);
+                    if is_wrap {
+                        return Err(self.err(format!(
+                            "@middleware(`{}`) sobre fn `{}`: wrap-style middleware \
+                             (segundo param `Fn() -> Response`) corre solo en \
+                             `fitz run` por ahora. Codegen es deuda residual \
+                             menor — refinable si entra demanda. Para `fitz build`, \
+                             usá post-process (segundo param tipo `Response`) o \
+                             pre-process (1 arg).",
+                            n, fn_name
+                        )));
+                    }
                     match mw_arity {
                         1 => user_fns_pre.push(n.clone()),
                         2 => user_fns_post.push(n.clone()),

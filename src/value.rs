@@ -51,6 +51,25 @@ use crate::error::FitzResult;
 /// bound de antes. Habilita `tokio::spawn` y `rt-multi-thread`.
 pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>> + Send>>;
 
+/// Mini-tanda Mw-Wrap — wrapper opaco para el callback de
+/// `Value::NativeFn`. El `Arc` permite clone barato (los `Value` se
+/// clonan a lo largo del pipeline). Send + Sync para fluir a través
+/// de tokio runtimes multi-thread (post-F17.4). El input es
+/// `Vec<Value>` para uniformar con la convención del resto de las
+/// llamadas (aridad 0 = vec vacío); para `next: Fn() -> Response`
+/// siempre llega vacío. Wrapper struct (no type alias) para poder
+/// implementar `Debug` (el `dyn Fn` no lo deriva).
+#[derive(Clone)]
+pub struct NativeAsyncFn(
+    pub Arc<dyn Fn(Vec<Value>) -> FitzFuture + Send + Sync>,
+);
+
+impl std::fmt::Debug for NativeAsyncFn {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "NativeAsyncFn(<native>)")
+    }
+}
+
 /// Wrapper sobre el future pendiente que aporta `Debug` manual. El
 /// `dyn Future` no implementa `Debug` así que no podemos derivarlo
 /// en `Value`. La celda envuelve `Option<...>` para que `.take()`
@@ -166,6 +185,16 @@ pub enum Value {
     /// `bytes_from_str(s)`. Inmutable de hecho (no se expone `push`
     /// para mantener el modelo simple). Clone es O(n).
     Bytes(Vec<u8>),
+
+    /// Mini-tanda Mw-Wrap — función nativa async construida por el
+    /// runtime y pasada como Value al usuario. Hoy se usa solo para
+    /// el `next` callable de los wrap-style middlewares: el chain
+    /// runner construye un `NativeFn` que captura el resto de la
+    /// chain + el handler y lo pasa al middleware, que decide cuándo
+    /// invocarlo (antes/después del handler, condicionalmente,
+    /// midiendo tiempo, etc.). Send + Sync para que pueda fluir a
+    /// través de tokio runtimes.
+    NativeFn(NativeAsyncFn),
 
     /// Función nativa implementada en Rust (ej: `print`).
     /// La firma recibe los args ya evaluados y devuelve un valor o error.
@@ -403,6 +432,7 @@ impl Value {
             Value::Bool(_) => "Bool",
             Value::Null => "Null",
             Value::Bytes(_) => "Bytes",
+            Value::NativeFn(_) => "Function",
             Value::Builtin { .. } => "Function",
             Value::Function { .. } => "Function",
             Value::Type { .. } => "Type",
@@ -547,6 +577,7 @@ impl std::fmt::Display for Value {
             },
             Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
+            Value::NativeFn(_) => write!(f, "<native function>"),
             #[cfg(feature = "python")]
             Value::PyObject(_) => write!(f, "<python object>"),
         }

@@ -173,8 +173,18 @@ pub struct RouteSpec {
 /// en una sola fn — queda como sub-paso futuro.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MiddlewareKind {
+    /// 1 arg, gate-only: `fn mw(req: Request) -> Response?`. Null
+    /// → continúa la chain, Response → short-circuit.
     Pre,
+    /// 2 args post-process: `fn mw(req: Request, resp: Response) -> Response`.
+    /// Corre DESPUÉS del handler.
     Post,
+    /// Mini-tanda Mw-Wrap — 2 args wrap-style:
+    /// `fn mw(req: Request, next: Fn() -> Response) -> Response`.
+    /// El middleware controla la invocación del handler con `next()`.
+    /// Habilita timing, observability, response wrapping, decisión
+    /// condicional de continuar la chain.
+    Wrap,
 }
 
 #[derive(Debug, Clone)]
@@ -994,6 +1004,14 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         Value::Future(_) => {
             return Err(
                 "Future pendiente no es serializable — falta `.await` en algún lado del handler".to_string(),
+            );
+        }
+        // Mini-tanda Mw-Wrap — `Value::NativeFn` es el callable
+        // `next` que se pasa a wrap-style middlewares. Si llega al
+        // serializer, el handler lo devolvió por error.
+        Value::NativeFn(_) => {
+            return Err(
+                "función nativa no es serializable — `next` solo se puede invocar, no devolver".to_string(),
             );
         }
         // CorsConfig (MW.2): opaco, no se serializa. Si llega acá,
@@ -1819,6 +1837,100 @@ async fn run_post_middlewares(
     outcome
 }
 
+/// Mini-tanda Mw-Wrap — corre la chain de wrap-style middlewares
+/// envolviendo el handler + post chain. Cada Wrap recibe
+/// `(request, next)` donde `next` es un `Value::NativeFn` que ejecuta
+/// el resto: los wraps restantes + el handler + los post mws.
+///
+/// El Wrap mw decide cuándo invocar `next()` (antes/después del
+/// handler, condicionalmente, midiendo tiempo, etc.). Su return value
+/// (`Response`) se convierte al outcome final.
+///
+/// Estructura recursiva: caso base = sin wraps → invocar handler + post.
+/// Caso recursivo = pop primer wrap, construir NativeFn que recursea
+/// con los wraps restantes, invocar wrap actual.
+fn run_wrap_chain(
+    wraps: Vec<MiddlewareSpec>,
+    handler: Value,
+    handler_args: Vec<Value>,
+    handler_name: String,
+    request: Value,
+    post_mws: Vec<MiddlewareSpec>,
+) -> std::pin::Pin<Box<dyn std::future::Future<Output = HandlerOutcome> + Send>> {
+    Box::pin(async move {
+        if wraps.is_empty() {
+            // Caso base: invocar handler + post chain.
+            let outcome = match call_handler(handler, handler_args, &handler_name).await {
+                Ok(value) => value_to_outcome(&value),
+                Err(err) => HandlerOutcome::internal_error(err.message),
+            };
+            return run_post_middlewares(&post_mws, &request, outcome).await;
+        }
+        // Pop first wrap; el resto va a la closure del NativeFn.
+        let mut iter = wraps.into_iter();
+        let current = iter.next().unwrap();
+        let remaining: Vec<MiddlewareSpec> = iter.collect();
+
+        // Construir el `next` callable. Capturamos por valor (clone)
+        // todo lo que la closure va a necesitar la próxima vez.
+        let req_clone = request.clone();
+        let handler_clone = handler.clone();
+        let handler_name_clone = handler_name.clone();
+        let handler_args_clone = handler_args.clone();
+        let post_clone = post_mws.clone();
+        let remaining_clone = remaining.clone();
+        let next: crate::value::NativeAsyncFn = crate::value::NativeAsyncFn(
+            std::sync::Arc::new(move |_args: Vec<Value>| {
+                // Re-clone para cada invocación (puede llamarse 0+ veces).
+                let req2 = req_clone.clone();
+                let h2 = handler_clone.clone();
+                let p2 = post_clone.clone();
+                let r2 = remaining_clone.clone();
+                let hn2 = handler_name_clone.clone();
+                let ha2 = handler_args_clone.clone();
+                Box::pin(async move {
+                    let outcome = run_wrap_chain(r2, h2, ha2, hn2, req2, p2).await;
+                    // Convertir outcome → Value::HttpResponse para que el
+                    // mw lo consuma como `Response`.
+                    let body = serde_json::from_str::<serde_json::Value>(&outcome.body)
+                        .ok()
+                        .map(|j| Box::new(json_to_value(&j)));
+                    Ok(Value::HttpResponse {
+                        status: outcome.status,
+                        body,
+                    })
+                }) as crate::value::FitzFuture
+            }),
+        );
+
+        // Invocar el Wrap mw con (request, next).
+        let args = vec![request.clone(), Value::NativeFn(next)];
+        let label = format!("middleware wrap '{}'", current.name);
+        match call_handler(current.handler.clone(), args, &label).await {
+            Ok(Value::HttpResponse { status, body }) => {
+                let payload = match body {
+                    Some(b) => match value_to_json(b.as_ref()) {
+                        Ok(j) => j,
+                        Err(msg) => return HandlerOutcome::internal_error(msg),
+                    },
+                    None => serde_json::Value::Null,
+                };
+                HandlerOutcome::json(status, payload)
+            }
+            Ok(other) => HandlerOutcome::internal_error(format!(
+                "middleware wrap '{}' devolvió un valor inesperado ({}); \
+                 debe devolver `Response` (un `return <status> {{ ... }}`)",
+                current.name,
+                other.type_name(),
+            )),
+            Err(err) => HandlerOutcome::internal_error(format!(
+                "middleware wrap '{}' falló: {}",
+                current.name, err.message,
+            )),
+        }
+    })
+}
+
 /// Procesa un único task. Aislado del loop para testearlo sin canal.
 async fn handle_task(
     registry: &HttpRegistry,
@@ -2032,27 +2144,64 @@ async fn handle_task(
         }
     }
 
-    // Invocar el handler. Errores del handler (return propio, error
-    // de runtime) se traducen a 500 con el mensaje.
-    let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await {
-        Ok(value) => value_to_outcome(&value),
-        Err(err) => HandlerOutcome::internal_error(err.message),
-    };
-
-    // Mw.next — correr los post-middlewares (kind = Post, 2-arg)
-    // DESPUÉS del handler. Reciben `(Request, Response)` y pueden
-    // modificar el body o agregar headers. Si hay middlewares Pre que
-    // short-circuit, este path no corre (ya retornamos arriba con la
-    // response del Pre).
-    if route.middlewares.iter().any(|m| m.kind == MiddlewareKind::Post) {
+    // Mini-tanda Mw-Wrap — si hay wrap-style middlewares, el chain
+    // runner los envuelve alrededor del handler + post mws. Si no
+    // hay wraps, seguimos con el flujo clásico (handler + post).
+    let has_wraps = route
+        .middlewares
+        .iter()
+        .any(|m| m.kind == MiddlewareKind::Wrap);
+    let mut outcome = if has_wraps {
+        let wraps: Vec<MiddlewareSpec> = route
+            .middlewares
+            .iter()
+            .filter(|m| m.kind == MiddlewareKind::Wrap)
+            .cloned()
+            .collect();
+        let post_mws: Vec<MiddlewareSpec> = route
+            .middlewares
+            .iter()
+            .filter(|m| m.kind == MiddlewareKind::Post)
+            .cloned()
+            .collect();
         let request = build_request_value(
             route.method,
             &route.path,
             &raw_path_params,
             &raw_headers,
         );
-        outcome = run_post_middlewares(&route.middlewares, &request, outcome).await;
-    }
+        run_wrap_chain(
+            wraps,
+            route.handler.clone(),
+            args,
+            route.handler_name.clone(),
+            request,
+            post_mws,
+        )
+        .await
+    } else {
+        // Flujo clásico: invocar handler + post mws.
+        let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await {
+            Ok(value) => value_to_outcome(&value),
+            Err(err) => HandlerOutcome::internal_error(err.message),
+        };
+
+        // Mw.next — correr los post-middlewares (kind = Post, 2-arg)
+        // DESPUÉS del handler. Reciben `(Request, Response)` y pueden
+        // modificar el body o agregar headers. Si hay middlewares Pre que
+        // short-circuit, este path no corre (ya retornamos arriba con la
+        // response del Pre).
+        if route.middlewares.iter().any(|m| m.kind == MiddlewareKind::Post) {
+            let request = build_request_value(
+                route.method,
+                &route.path,
+                &raw_path_params,
+                &raw_headers,
+            );
+            outcome = run_post_middlewares(&route.middlewares, &request, outcome).await;
+        }
+        outcome
+    };
 
     // MW.2: si la ruta declara CORS, agregar los headers
     // `Access-Control-Allow-*` a la response real. Incluido en
@@ -4866,5 +5015,77 @@ mod tests {
             headers,
         ).await;
         assert_eq!(outcome.status, 200);
+    }
+
+    // ---- Mini-tanda Mw-Wrap — clasificación + chain runner ----
+
+    #[test]
+    fn mw_wrap_classifier_param_fn_es_wrap() {
+        // Segundo param `Fn() -> Response` → Wrap.
+        use crate::ast::{Param, TypeExpr};
+        let p = Param {
+            name: "next".into(),
+            type_: Some(TypeExpr::Function {
+                params: vec![],
+                ret: Box::new(TypeExpr::Named("Response".into())),
+            }),
+            default: None,
+            varargs: false,
+        };
+        assert_eq!(
+            crate::evaluator::classify_2_arg_middleware(&p),
+            MiddlewareKind::Wrap,
+        );
+    }
+
+    #[test]
+    fn mw_wrap_classifier_param_response_es_post() {
+        // Segundo param `Response` (nominal) → Post.
+        use crate::ast::{Param, TypeExpr};
+        let p = Param {
+            name: "resp".into(),
+            type_: Some(TypeExpr::Named("Response".into())),
+            default: None,
+            varargs: false,
+        };
+        assert_eq!(
+            crate::evaluator::classify_2_arg_middleware(&p),
+            MiddlewareKind::Post,
+        );
+    }
+
+    #[test]
+    fn mw_wrap_classifier_param_sin_anotacion_es_post() {
+        // Sin anotación → default Post (preserva semántica histórica).
+        use crate::ast::Param;
+        let p = Param {
+            name: "resp".into(),
+            type_: None,
+            default: None,
+            varargs: false,
+        };
+        assert_eq!(
+            crate::evaluator::classify_2_arg_middleware(&p),
+            MiddlewareKind::Post,
+        );
+    }
+
+    #[test]
+    fn mw_wrap_classifier_param_fn_nullable_es_wrap() {
+        // `Fn() -> Response?` también clasifica como Wrap.
+        use crate::ast::{Param, TypeExpr};
+        let p = Param {
+            name: "next".into(),
+            type_: Some(TypeExpr::Nullable(Box::new(TypeExpr::Function {
+                params: vec![],
+                ret: Box::new(TypeExpr::Named("Response".into())),
+            }))),
+            default: None,
+            varargs: false,
+        };
+        assert_eq!(
+            crate::evaluator::classify_2_arg_middleware(&p),
+            MiddlewareKind::Wrap,
+        );
     }
 }

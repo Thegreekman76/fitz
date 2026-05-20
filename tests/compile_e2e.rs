@@ -2212,6 +2212,46 @@ fn mp_build_multipart_sin_boundary_es_400() {
 
 
 #[test]
+fn mw_wrap_codegen_rechaza_con_msg_que_cita_fitz_run() {
+    // Mini-tanda Mw-Wrap — el codegen rechaza wrap-style mws con
+    // un mensaje claro citando `fitz run` como workaround.
+    // El intérprete sí los soporta (deuda residual del codegen).
+    let dir = std::env::temp_dir().join("fitz-e2e-mw-wrap-codegen");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "\
+@server(43500)
+fn main() => 0
+
+fn timing(req: Request, next: Fn() -> Response) -> Response {
+    let r = next()
+    return 200 {\"ok\": true}
+}
+
+@middleware(timing)
+@get(\"/wrapped\")
+fn wrapped() -> Str => \"handler\"
+";
+    std::fs::write(&src_path, src).expect("write");
+    let out = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        !out.status.success(),
+        "esperaba que `fitz build` rechace wrap-style mws"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("wrap-style") && stderr.contains("fitz run"),
+        "esperaba msg sobre wrap-style + workaround `fitz run`, fue: {}",
+        stderr
+    );
+}
+
+#[test]
 fn bytes_paridad_bit_a_bit_run_vs_build() {
     // Mini-tanda Bytes — el output de `fitz run` y `fitz build`
     // deben coincidir bit-a-bit para todos los casos canónicos:

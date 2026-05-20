@@ -1,0 +1,60 @@
+// 17d-middleware-wrap.fitz — Wrap-style middleware con `next` callable.
+//
+// Mini-tanda Mw-Wrap. El middleware controla cuándo invocar el resto
+// de la chain. Habilita patrones que ni Pre (gate) ni Post
+// (post-process) cubren: medir tiempo de toda la chain, decidir
+// condicionalmente, envolver con un response distinto.
+//
+// Limitación: hoy wrap-style middleware corre SOLO en `fitz run`.
+// `fitz build` rechaza con msg claro citando `fitz run` como
+// workaround. Codegen real es deuda residual menor.
+
+@server(3000)
+fn main() => 0
+
+// Wrap mw: timing simple. Mide cuánto tarda el resto de la chain.
+// El segundo param `next: Fn() -> Response` es lo que clasifica al
+// mw como Wrap (vs Post que tendría tipo `Response`).
+fn timing(req: Request, next: Fn() -> Response) -> Response {
+    // Llamar `next()` ejecuta el resto: wraps restantes, handler,
+    // post mws. La response que devuelve viene del último paso.
+    let r = next()
+    // Acá podríamos medir tiempo, agregar logging, etc.
+    // Devolvemos una response nueva que envuelve el resultado.
+    return 200 {"wrapped_by": "timing", "method": req.method, "path": req.path}
+}
+
+// Wrap mw: gate condicional. Decide si invocar `next()` según un
+// header. Si no, corta sin ejecutar el handler.
+fn auth_gate(req: Request, next: Fn() -> Response) -> Response {
+    let token = req.headers.get("x-auth")
+    match token {
+        Ok(_) => next(),
+        Err(_) => return 401 {"error": "auth required"},
+    }
+}
+
+// Aplicado al handler. El mw envuelve la llamada.
+@middleware(timing)
+@get("/wrapped")
+fn wrapped() -> Str => "handler ran"
+
+@middleware(auth_gate)
+@get("/protected")
+fn protected() -> Str => "secret data"
+
+// curl http://127.0.0.1:3000/wrapped
+//   → 200 {"wrapped_by":"timing","method":"GET","path":"/wrapped"}
+//
+// curl http://127.0.0.1:3000/protected
+//   → 401 {"error":"auth required"}
+//
+// curl -H "X-Auth: token" http://127.0.0.1:3000/protected
+//   → 200 "secret data"  (resultado del handler, sin envolver)
+//
+// Wrap vs Post:
+// - Wrap: 2 args, segundo = `Fn() -> Response`. Decide cuándo
+//   invocar el handler.
+// - Post: 2 args, segundo = `Response`. Corre DESPUÉS del handler,
+//   puede modificar la response.
+// - Pre: 1 arg `Request`. Gate solo, no ve la response.

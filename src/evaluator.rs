@@ -763,6 +763,38 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 /// Async porque ahora evalúa la expresión del arg con `eval_expr`
 /// (necesario para que `cors(allow_origin="*")` y cualquier factoría
 /// que devuelva Function tipen).
+/// Mini-tanda Mw-Wrap — clasifica un middleware de 2 argumentos como
+/// Post o Wrap según el tipo del segundo parámetro:
+/// - `Fn(...) -> ...` (cualquier signature de función) → **Wrap**.
+///   El middleware controla la invocación del handler via `next()`.
+/// - Cualquier otro tipo (`Response`, sin anotar, etc.) → **Post**.
+///   El middleware corre después del handler y recibe la response.
+///
+/// Si el usuario quiere un Post explícito con un segundo param de
+/// tipo `Fn(...)` (raro), debe usar otro nombre o anotar como
+/// `Response` para evitar la auto-clasificación a Wrap.
+pub(crate) fn classify_2_arg_middleware(second_param: &crate::ast::Param) -> crate::http::MiddlewareKind {
+    use crate::ast::TypeExpr;
+    if let Some(ty) = &second_param.type_ {
+        // Recursar adentro de Nullable por simetría con otros walkers.
+        // `Fn(...) -> ...` se parsea como TypeExpr::Generic con head "Fn"
+        // O como TypeExpr::Function (depende del parser; cubrimos ambos
+        // por defensa).
+        fn is_fn_type(t: &TypeExpr) -> bool {
+            match t {
+                TypeExpr::Function { .. } => true,
+                TypeExpr::Generic { name, .. } if name == "Fn" => true,
+                TypeExpr::Nullable(inner) => is_fn_type(inner),
+                _ => false,
+            }
+        }
+        if is_fn_type(ty) {
+            return crate::http::MiddlewareKind::Wrap;
+        }
+    }
+    crate::http::MiddlewareKind::Post
+}
+
 async fn collect_middlewares(
     decorators: &[Decorator],
     fn_name: &str,
@@ -825,16 +857,18 @@ async fn collect_middlewares(
             Value::Function { ref params, .. } => {
                 // Mw.next — detectar kind por aridad:
                 //   1 arg → Pre (gate-only, clásico).
-                //   2 args → Post (post-process, recibe Response).
+                //   2 args → Post o Wrap, según tipo del 2do param:
+                //     - `Response` (o sin anotar) → Post (post-process).
+                //     - `Fn() -> Response` → Wrap (Mw-Wrap).
                 let kind = match params.len() {
                     1 => crate::http::MiddlewareKind::Pre,
-                    2 => crate::http::MiddlewareKind::Post,
+                    2 => classify_2_arg_middleware(&params[1]),
                     n => {
                         return Err(err(format!(
                             "@middleware sobre fn '{}': la fn referenciada ({}) debe \
                              tener 1 o 2 parámetros (1 = pre-process clásico que recibe \
-                             `Request`; 2 = post-process que recibe `(Request, Response)`); \
-                             tiene {}",
+                             `Request`; 2 = post-process `(Request, Response)` o wrap-style \
+                             `(Request, Fn() -> Response)`); tiene {}",
                             fn_name, label, n,
                         )));
                     }
@@ -3431,6 +3465,11 @@ async fn invoke_value(
             assert_throws_impl(arg_values, span).await
         }
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
+
+        // Mini-tanda Mw-Wrap — `Value::NativeFn` se invoca pasando los
+        // args al callback async. El callback es responsable de validar
+        // su propia aridad (el caso típico es 0 args = `next()`).
+        Value::NativeFn(native) => native.0(arg_values).await.map_err(EvalSignal::Error),
 
         Value::Function { params, body, closure, is_async } => {
             // Fp — default params: si faltan args trailing y los params

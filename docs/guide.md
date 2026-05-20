@@ -7340,6 +7340,46 @@ fn admin() -> Str => "datos administrativos"
 4. El orden de ejecución es **top-down**: el `@middleware(...)` más
    arriba corre primero. El último corre justo antes del handler.
 
+**Variantes** (mini-tandas Mw.next + Mw-Wrap):
+
+Hay tres clases de middleware según los args:
+
+| Aridad | Tipo del 2do param      | Kind     | Cuándo corre                    |
+|--------|-------------------------|----------|---------------------------------|
+| 1      | (solo `Request`)        | **Pre**  | ANTES del handler (gate-only)   |
+| 2      | `Response`              | **Post** | DESPUÉS del handler             |
+| 2      | `Fn() -> Response`      | **Wrap** | ENVUELVE el handler             |
+
+- **Pre** (clásico): ejemplo `auth` arriba. Útil para auth, rate
+  limiting, logging básico.
+- **Post**: recibe `(req, resp)` y devuelve una Response modificada.
+  Útil para agregar headers, modificar el body, logging con la
+  response final.
+- **Wrap**: recibe `(req, next)` donde `next` es un callable
+  `Fn() -> Response`. El middleware decide cuándo (o si) llamar
+  `next()`. Habilita medir tiempo de toda la chain, decisión
+  condicional, response wrapping.
+
+Ejemplo de Wrap:
+
+```fitz
+fn timing(req: Request, next: Fn() -> Response) -> Response {
+    let r = next()       // ejecuta el resto: wraps, handler, posts
+    return 200 {"wrapped": true, "method": req.method}
+}
+
+@middleware(timing)
+@get("/api")
+fn api() -> Str => "data"
+```
+
+**Limitación de `fitz build`** (mini-tanda Mw-Wrap): los Wrap mws
+corren solo en `fitz run`. El binario nativo rechaza con un msg
+claro citando `fitz run` como workaround. Codegen real para Wrap
+es deuda residual menor — los Pre y Post sí compilan en `fitz
+build` desde MW + P1. Ejemplo completo en
+[examples/guide/17d-middleware-wrap.fitz](../examples/guide/17d-middleware-wrap.fitz).
+
 **CORS**:
 
 Para servir APIs a un frontend (Vue, React, etc.) que vive en otro
