@@ -1747,7 +1747,30 @@ async fn handle_task(
 
     // Si el handler espera body, parsearlo y prepararlo. Lo hacemos
     // antes de armar args para fallar temprano si el JSON está roto.
+    //
+    // Mini-tanda Hpx.1 — validación de Content-Type: si el handler
+    // declara body param, exigimos `application/json`. Cualquier otro
+    // Content-Type (multipart, urlencoded, etc.) → 415 con mensaje
+    // claro. Si NO hay header (body crudo), aceptamos (clientes
+    // tipo curl sin -H lo emiten así, y Fitz nunca prometió Content-
+    // Type estricto). Sub-paso futuro dedicado para multipart/form.
     let body_value: Option<Value> = if let Some(bp) = &route.body_param {
+        if let Some(ct) = raw_headers.get("content-type") {
+            let primary = ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
+            if !primary.is_empty() && primary != "application/json" {
+                return HandlerOutcome::json(
+                    415,
+                    serde_json::json!({
+                        "error": format!(
+                            "Content-Type no soportado: '{}'. El handler espera JSON \
+                             (`application/json`). Multipart, urlencoded y otros formatos \
+                             quedan como sub-paso futuro.",
+                            ct
+                        ),
+                    }),
+                );
+            }
+        }
         match parse_body(&body_bytes, bp) {
             Ok(v) => Some(v),
             Err(msg) => {
@@ -4006,5 +4029,137 @@ mod tests {
     fn hc1_err_con_status_1500_es_fuera_de_rango() {
         let outcome = value_to_outcome(&err_instance_with_status(1500));
         assert_eq!(outcome.status, 500);
+    }
+
+    // ---- Mini-tanda Hpx.1 — Content-Type validation ----
+
+    fn registry_with_post_body_route() -> std::sync::Arc<HttpRegistry> {
+        // Setup mínimo: una ruta POST /test que espera body como
+        // Value::Map libre (sin schema).
+        let mut reg = HttpRegistry::new();
+        let handler = Value::Function {
+            params: vec![crate::ast::Param {
+                name: "body".into(),
+                type_: None,
+                default: None,
+                varargs: false,
+            }],
+            body: vec![crate::ast::Stmt::Return(
+                crate::ast::Expr::Ident("body".into(), crate::ast::Span::ZERO),
+                crate::ast::Span::ZERO,
+            )],
+            closure: crate::env::Environment::new(),
+            is_async: false,
+        };
+        reg.routes.push(RouteSpec {
+            method: HttpMethod::Post,
+            path: "/test".into(),
+            path_params: vec![],
+            query_params: vec![],
+            handler,
+            handler_name: "test".into(),
+            param_types: vec![("body".into(), None, false)],
+            body_param: Some(BodyParam {
+                name: "body".into(),
+                declared_type: None,
+                declared_type_name: None,
+            }),
+            headers: vec![],
+            param_type_exprs: vec![("body".into(), None)],
+            return_type_expr: None,
+            middlewares: vec![],
+            cors: None,
+        });
+        std::sync::Arc::new(reg)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hpx1_content_type_json_pasa() {
+        let reg = registry_with_post_body_route();
+        let body = br#"{"foo": 42}"#.to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "application/json".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 200, "esperaba 200, fue {} con body {}", outcome.status, outcome.body);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hpx1_content_type_text_plain_rechaza_con_415() {
+        let reg = registry_with_post_body_route();
+        let body = b"plain text".to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "text/plain".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 415);
+        assert!(
+            outcome.body.contains("text/plain") && outcome.body.contains("application/json"),
+            "esperaba mensaje claro, fue: {}",
+            outcome.body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hpx1_content_type_multipart_rechaza_con_415() {
+        let reg = registry_with_post_body_route();
+        let body = b"--boundary\r\n".to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "multipart/form-data; boundary=---".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 415);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hpx1_content_type_ausente_acepta() {
+        // Sin header Content-Type (curl sin -H), aceptamos JSON crudo.
+        let reg = registry_with_post_body_route();
+        let body = br#"{"foo": 42}"#.to_vec();
+        let headers = std::collections::HashMap::new();
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 200);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hpx1_content_type_con_charset_acepta() {
+        let reg = registry_with_post_body_route();
+        let body = br#"{"foo": 42}"#.to_vec();
+        let mut headers = std::collections::HashMap::new();
+        headers.insert("content-type".into(), "application/json; charset=utf-8".into());
+        let outcome = handle_task(
+            &reg,
+            0,
+            std::collections::HashMap::new(),
+            std::collections::HashMap::new(),
+            body,
+            headers,
+        ).await;
+        assert_eq!(outcome.status, 200);
     }
 }

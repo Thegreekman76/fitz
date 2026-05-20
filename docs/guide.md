@@ -6859,21 +6859,21 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 
 ### Qué todavía no anda
 
-- **Validación de Content-Type** — cualquier body se intenta
-  parsear como JSON. Multipart o urlencoded → cuando hagan falta.
 - **Streaming de respuestas** — hoy las respuestas se serializan
   completas antes de mandarse. Server-sent events y descargas
   grandes están en el roadmap.
 - **WebSockets** — `@ws("/chat")` está diseñado pero no
   implementado (Fase 9.w).
-- **Inferencia de return type en handlers para `fitz build`** —
-  las fns HTTP compiladas necesitan anotación de return type
-  explícita. El intérprete sí infiere desde el body.
+- **Multipart / urlencoded bodies** — hoy solo JSON. Cualquier
+  otro Content-Type recibe 415 con mensaje claro (mini-tanda
+  Hpx.1). Multipart queda como sub-paso futuro cuando aparezca
+  presión real.
 - **Middleware `next` (post-process)** — hoy los middlewares son
   gate-only (`return null` continúa, `return status { ... }`
   short-circuit). Modelo wrap con `next` callable para medir
   tiempos / agregar headers después del handler queda como
-  sub-paso futuro dedicado.
+  sub-paso futuro dedicado (~6-8h, requiere chain composition
+  recursiva con `next` callable Fitz).
 
 > Lo que **sí anda** y antes era deuda residual: **status codes
 > custom fuera de 100..1000** ya no caen silenciosamente a 500 —
@@ -6881,7 +6881,12 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 > (HC.1). **Status codes específicos de cada `Err`** aparecen en
 > el schema OpenAPI cuando el handler hace `return Err(X { status:
 > 404, ... })` con un literal — el schema incluye una entrada por
-> cada code detectado (HC.2).
+> cada code detectado (HC.2). **Validación de Content-Type
+> estricta** — body no-JSON recibe 415 con msg claro (Hpx.1).
+> **Return type inference en handlers para `fitz build`** —
+> `fn create(u: User) { ... return User { ... } }` ya no exige
+> `-> User` explícito; el codegen infiere del body usando el
+> TypeInfo del checker (Hpx.2).
 
 > Lo que **sí anda** y antes era deuda (cerrado fase tras fase):
 > async/await reales en handlers (Fase 6), paralelismo HTTP real
@@ -7666,7 +7671,9 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
 
 - **Funciones sin anotar params** — `fn greet(name)` corre en el
   intérprete (el tipo se infiere desde el body). El compilador
-  exige `fn greet(name: Str) -> Str`. Workaround: anotar.
+  exige `fn greet(name: Str)`. Workaround: anotar los params. (El
+  return type SÍ se infiere — `fn greet(name: Str) { return ... }`
+  funciona sin `-> Str` desde mini-tanda Hpx.2.)
 - **Listas/mapas heterogéneos** — `[1, "dos", true]` corre en el
   intérprete (cada item conserva su tipo). El compilador exige
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no
@@ -7681,9 +7688,10 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
 
 > Lo que **sí anda** y antes era deuda: `let X = <expr>` no literal
 > a nivel top de un módulo (cerrado en F14 — la RHS puede ser una
-> expresión arbitraria que se evalúa lazy via accessor fn), e
-> **imports transitivos** (cerrado en F15 — un módulo cargado
-> puede tener su propio `import`, con detección de ciclos).
+> expresión arbitraria que se evalúa lazy via accessor fn),
+> **imports transitivos** (cerrado en F15), y **return type
+> inference para handlers** (cerrado en Hpx.2 — `fn create(u: User)
+> { return ... }` infiere `-> X` del body via TypeInfo del checker).
 
 Si te tropezás con algo de esta lista, el mensaje del codegen lo
 cita explícitamente. La salida tiene la forma:

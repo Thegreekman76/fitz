@@ -672,7 +672,7 @@ fn build_file(
     };
 
     // Checker en modo strict — no hay `--no-typecheck` en build.
-    let (env, _types, _defs, type_errors) = types::check_program(&program);
+    let (env, types, _defs, type_errors) = types::check_program(&program);
     if !type_errors.is_empty() {
         eprintln!(
             "✗ {} — {} error(es) de tipo:",
@@ -686,8 +686,9 @@ fn build_file(
         std::process::exit(1);
     }
 
-    // Codegen a Cargo project.
-    let project = match codegen::generate_project(path, &program, &env, dep_registry) {
+    // Codegen a Cargo project. Mini-tanda Hpx.2 — TypeInfo del checker
+    // se pasa al codegen para inferir return types de fns sin anotar.
+    let project = match codegen::generate_project(path, &program, &env, &types, dep_registry) {
         Ok(p) => p,
         Err(e) => {
             eprintln!("✗ codegen: {}", e);

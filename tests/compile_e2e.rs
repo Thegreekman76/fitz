@@ -4717,6 +4717,45 @@ fn sp2_return_en_match_arm_compila() {
     assert_eq!(stdout.trim(), "cero\nchico\ngrande");
 }
 
+// ---- Mini-tanda Hpx.2 — return type inference en handlers ------
+
+#[test]
+fn hpx2_fn_sin_anotacion_de_return_infiere_del_body_compila() {
+    let src = "fn greet(name: Str) {\n\
+                   return \"Hola, {name}\"\n\
+               }\n\
+               print(greet(\"Fitz\"))\n";
+    let (stdout, exit) = build_and_run("hpx2_no_ret_str", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "Hola, Fitz");
+}
+
+#[test]
+fn hpx2_fn_sin_anotacion_infiere_int_compila() {
+    let src = "fn double(n: Int) {\n\
+                   return n * 2\n\
+               }\n\
+               print(double(21))\n";
+    let (stdout, exit) = build_and_run("hpx2_no_ret_int", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42");
+}
+
+#[test]
+fn hpx2_fn_con_if_else_infiere_lub() {
+    let src = "fn maybe(b: Bool) {\n\
+                   if b {\n\
+                       return 42\n\
+                   }\n\
+                   return 0\n\
+               }\n\
+               print(maybe(true))\n\
+               print(maybe(false))\n";
+    let (stdout, exit) = build_and_run("hpx2_if_else", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42\n0");
+}
+
 #[test]
 fn sp2_match_arm_con_block_compila() {
     let src = "fn f(n: Int) -> Int {\n\

@@ -93,6 +93,7 @@ pub fn generate_project(
     src_path: &Path,
     program: &Program,
     env: &TypeEnv,
+    type_info: &crate::types::TypeInfo,
     dep_registry: crate::manifest::DepRegistry,
 ) -> Result<ProjectArtifacts, FitzError> {
     let raw_stem = src_path
@@ -147,7 +148,7 @@ pub fn generate_project(
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
     // importados con sus fields completos.
-    let main_rs = generate_main_rs(program, env, &loader, &python_imports)?;
+    let main_rs = generate_main_rs(program, env, type_info, &loader, &python_imports)?;
 
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
@@ -1623,7 +1624,12 @@ fn generate_module_rs_with_bindings(
     local_bindings: &HashMap<String, ResolvedBinding>,
     loaded_modules: &[LoadedModule],
 ) -> Result<String, FitzError> {
-    let mut ctx = CodegenCtx::new_for_module(env);
+    // Hpx.2 — para módulos compilados via loader, computar TypeInfo
+    // fresco. El loader corrió `resolve_program` antes pero no
+    // `check_program`. Hacemos un check rápido solo para tener el
+    // side-table; los errores ya fueron reportados arriba.
+    let (_e, type_info, _d, _errs) = crate::types::check_program(program);
+    let mut ctx = CodegenCtx::new_for_module(env, &type_info);
     // F15 — instalar firmas + bindings ANTES del pre-registro, porque
     // los pre-pases pueden tener que resolver tipos cross-module al
     // armar las firmas locales de fns/types/consts.
@@ -1947,7 +1953,12 @@ fn is_const_eval_expr(e: &Expr) -> bool {
 pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzError> {
     let loader = ModuleLoader::new(PathBuf::from("."), crate::manifest::DepRegistry::new());
     let python_imports = collect_python_imports(program);
-    generate_main_rs(program, env, &loader, &python_imports)
+    // Para tests unit que llaman directamente a `generate_rust`,
+    // computamos TypeInfo fresco. En el path real (`generate_project`)
+    // se reusa el que ya computó el checker en main.rs.
+    let (_env_ignored, type_info, _defs, _errs) = crate::types::check_program(program);
+    let _ = _env_ignored;
+    generate_main_rs(program, env, &type_info, &loader, &python_imports)
 }
 
 /// Genera el `src/main.rs` del Cargo project. Si hay módulos cargados,
@@ -1958,6 +1969,7 @@ pub fn generate_rust(program: &Program, env: &TypeEnv) -> Result<String, FitzErr
 fn generate_main_rs(
     program: &Program,
     env: &TypeEnv,
+    type_info: &crate::types::TypeInfo,
     loader: &ModuleLoader,
     python_imports: &[PythonImport],
 ) -> Result<String, FitzError> {
@@ -1971,7 +1983,7 @@ fn generate_main_rs(
     let uses_python = !python_imports.is_empty();
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
 
-    let mut ctx = CodegenCtx::new(env);
+    let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
     ctx.uses_fmt_helpers = uses_fmt_helpers;
@@ -2443,6 +2455,10 @@ struct LoadedModuleSigs {
 
 struct CodegenCtx<'a> {
     env: &'a TypeEnv,
+    /// Mini-tanda Hpx.2 — TypeInfo del checker para inferir return
+    /// types de fns sin anotación (`fn greet(name: Str) { return name }`
+    /// pre-Hpx.2: codegen error; post-Hpx.2: infiere `Str` via TypeInfo).
+    type_info: &'a crate::types::TypeInfo,
     output: String,
     indent: usize,
     mode: GenMode,
@@ -2692,9 +2708,10 @@ struct HandlerSig {
 }
 
 impl<'a> CodegenCtx<'a> {
-    fn new(env: &'a TypeEnv) -> Self {
+    fn new(env: &'a TypeEnv, type_info: &'a crate::types::TypeInfo) -> Self {
         Self {
             env,
+            type_info,
             output: String::new(),
             indent: 0,
             mode: GenMode::Main,
@@ -2725,8 +2742,8 @@ impl<'a> CodegenCtx<'a> {
         }
     }
 
-    fn new_for_module(env: &'a TypeEnv) -> Self {
-        let mut ctx = Self::new(env);
+    fn new_for_module(env: &'a TypeEnv, type_info: &'a crate::types::TypeInfo) -> Self {
+        let mut ctx = Self::new(env, type_info);
         ctx.mode = GenMode::Module;
         ctx
     }
@@ -3816,6 +3833,7 @@ impl<'a> CodegenCtx<'a> {
                 name,
                 params,
                 return_type,
+                body,
                 is_async,
                 ..
             } = stmt
@@ -3837,7 +3855,12 @@ impl<'a> CodegenCtx<'a> {
                             ),
                         )
                     })?,
-                    None => Type::Null,
+                    // Mini-tanda Hpx.2 — sin anotación: inferir del body
+                    // walkeando los `Stmt::Return` y consultando TypeInfo
+                    // del checker. Si no hay returns explícitos, fallback
+                    // a Null (igual al comportamiento histórico).
+                    None => infer_return_type_from_body(body, self.type_info)
+                        .unwrap_or(Type::Null),
                 };
                 // Fase 6.6: la firma EXTERNA de una `async fn` envuelve
                 // su return type en `Future<T>` — espejo de lo que hace
@@ -12272,6 +12295,90 @@ fn collect_captures_expr(
     }
 }
 
+/// Mini-tanda Hpx.2 — infiere el return type de una fn walkeando el
+/// body, buscando todos los `Stmt::Return(expr)` y consultando el tipo
+/// del expr en `TypeInfo` (poblado por el checker). Unifica con `lub`.
+/// Si el body no tiene return explícito, devuelve `None` (caller usa
+/// fallback). Si algún return da `Type::Any` o no tiene entry en
+/// TypeInfo, también devuelve None para que el caller decida.
+///
+/// El walker es shallow para Stmts comunes (Return, ReturnStatus, Expr,
+/// Assign) y descende en Stmts con cuerpos (If/Match/While/Loop/For)
+/// para capturar returns anidados.
+fn infer_return_type_from_body(
+    body: &[Stmt],
+    type_info: &crate::types::TypeInfo,
+) -> Option<Type> {
+    let mut collected: Vec<Type> = Vec::new();
+    collect_return_types(body, type_info, &mut collected);
+    if collected.is_empty() {
+        return None;
+    }
+    // Unificar con `lub`. Si alguna unificación falla, fallback a None.
+    let mut current = collected[0].clone();
+    for ty in collected.iter().skip(1) {
+        match lub(&current, ty) {
+            Ok(unified) => current = unified,
+            Err(_) => return None,
+        }
+    }
+    // Si terminamos en Any (gradual), descartamos — el caller fallback
+    // a Null mantiene el comportamiento pre-Hpx.2 para signaturas
+    // demasiado vagas.
+    if matches!(current, Type::Any) {
+        return None;
+    }
+    Some(current)
+}
+
+fn collect_return_types(
+    stmts: &[Stmt],
+    type_info: &crate::types::TypeInfo,
+    out: &mut Vec<Type>,
+) {
+    for stmt in stmts {
+        match stmt {
+            Stmt::Return(e, _) => {
+                if let Some(t) = type_info.type_at(e.span()) {
+                    out.push(t.clone());
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::Loop { body, .. }
+            | Stmt::For { body, .. } => collect_return_types(body, type_info, out),
+            Stmt::Expr(e, _) | Stmt::Assign { value: e, .. } => {
+                // Algunos Expr llevan stmts adentro (If/Match/Loop body).
+                collect_returns_in_expr(e, type_info, out);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_returns_in_expr(
+    expr: &Expr,
+    type_info: &crate::types::TypeInfo,
+    out: &mut Vec<Type>,
+) {
+    match expr {
+        Expr::If { then, else_, .. } => {
+            collect_return_types(then, type_info, out);
+            if let Some(els) = else_ {
+                collect_return_types(els, type_info, out);
+            }
+        }
+        Expr::Match { arms, .. } => {
+            for arm in arms {
+                collect_return_types(&arm.body, type_info, out);
+            }
+        }
+        Expr::Loop { body, .. } | Expr::FnExpr { body, .. } => {
+            collect_return_types(body, type_info, out);
+        }
+        _ => {}
+    }
+}
+
 /// "Least upper bound" pragmático sobre dos tipos resueltos. Mismo
 /// criterio que `types.rs` para FnExpr (5.3.5) y para if-as-expression
 /// (5b.2), acotado al subset compilable hoy. Usado además para unificar
@@ -16615,9 +16722,9 @@ mod tests {
         )
         .unwrap();
         let program = crate::parser::parse(tokens).unwrap();
-        let (env, _types, _defs, errs) = crate::types::check_program(&program);
+        let (env, types_info, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty(), "checker errors: {:?}", errs);
-        let project = generate_project(Path::new("test.fitz"), &program, &env, crate::manifest::DepRegistry::new()).unwrap();
+        let project = generate_project(Path::new("test.fitz"), &program, &env, &types_info, crate::manifest::DepRegistry::new()).unwrap();
         assert!(
             project.cargo_toml.contains("axum = \"0.8\""),
             "esperaba axum en Cargo.toml, got:\n{}",
@@ -16640,9 +16747,9 @@ mod tests {
         use std::path::Path;
         let tokens = crate::lexer::tokenize("print(\"hola\")").unwrap();
         let program = crate::parser::parse(tokens).unwrap();
-        let (env, _types, _defs, errs) = crate::types::check_program(&program);
+        let (env, types_info, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty());
-        let project = generate_project(Path::new("test.fitz"), &program, &env, crate::manifest::DepRegistry::new()).unwrap();
+        let project = generate_project(Path::new("test.fitz"), &program, &env, &types_info, crate::manifest::DepRegistry::new()).unwrap();
         assert!(
             !project.cargo_toml.contains("axum"),
             "no debería haber axum en Cargo.toml sin HTTP, got:\n{}",

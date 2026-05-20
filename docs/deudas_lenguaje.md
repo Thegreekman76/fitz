@@ -1131,6 +1131,116 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~HTTP polish: Content-Type 415 + Return type inference + cleanup~~ ✓ CERRADO 2026-05-20 (mini-tanda Hpx.1 + Hpx.2 + Cleanup)
+
+Mini-tanda de polish HTTP pre-9.w. Cierra 2 deudas residuales que
+arrastraba el stack HTTP + cleanup chico de docs stale. **Mw.next
+(middleware wrap-style) quedó DEFERIDO** — el cambio es invasivo
+(requiere chain composition recursiva con `next` callable Fitz,
+~6-8h) y merece mini-tanda dedicada.
+
+**Parte 1 — Hpx.1: Validación estricta de Content-Type**:
+
+- ~~**415 con msg claro para body no-JSON**~~ ✓ El intérprete
+  (`http.rs::handle_task`) chequea el header `content-type` ANTES
+  de parsear el body. Si está presente y no es `application/json`
+  (case-insensitive, ignora `; charset=...`), responde 415 con
+  body `{"error": "Content-Type no soportado: '...'..."}`. Si el
+  header está ausente, acepta JSON crudo (paridad con clientes
+  tipo curl sin `-H`).
+- **Paridad con codegen** ✓ El `axum::Json` extractor ya emite
+  415 automáticamente para Content-Type no JSON. Los msgs difieren
+  (axum: "Expected request with `Content-Type: application/json`";
+  Fitz: msg verbose con valor inválido). Ambos 415 — deuda menor
+  de alineación textual.
+
+**Parte 2 — Hpx.2: Return type inference para `fitz build`**:
+
+- ~~**`fn create(u: User) { return User { ... } }` sin `-> User`
+  compila**~~ ✓ El codegen ahora toma `TypeInfo` del checker como
+  parámetro y, cuando una fn no tiene `return_type` anotado, walkea
+  el body buscando `Stmt::Return(e)`. Para cada uno, consulta el
+  tipo de `e` en `TypeInfo` (poblado por F16) y unifica con `lub`.
+  Si todos los returns dan un tipo concreto, ese es el ret type
+  inferido. Si no hay returns, fallback a `Type::Null` (comportamiento
+  histórico).
+- **Cubre handlers HTTP + fns regulares + módulos** ✓ El cambio
+  vive en `pre_register_fns` del codegen, que aplica a todas las
+  fns top-level del main. Para módulos, `generate_module_rs_with_bindings`
+  computa TypeInfo fresco con un `check_program` rápido del módulo.
+- **Walker recursivo** ✓ `collect_return_types` baja en
+  While/Loop/For body + If/Match/Loop/FnExpr expr stmts para
+  capturar returns anidados. FnExpr inline tiene su propio scope
+  (el ret de un closure inline NO contamina el de la fn outer).
+
+**Parte 3 — Mw.next: DEFERIDO**
+
+El modelo wrap-style (`fn mw(req, next) -> Response` con `next`
+callable que invoca el resto de la chain) requiere:
+- Detect aridad del middleware: 1 arg = gate-only (current); 2 args = wrap.
+- Construir un `next` callable Fitz en runtime (necesita un nuevo
+  Value variant tipo `NativeFunction` o un closure dinámico).
+- Refactor de `run_middleware_chain` a forma recursiva.
+- Codegen paralelo: emitir wrap-style mw como Rust fn con closure
+  argument.
+
+Total estimado ~6-8h. Quedará como mini-tanda dedicada después de
+arrancar 9.w (que igualmente trae cambios en el stack HTTP).
+
+**Parte 4 — Cleanup chico**:
+
+- Nota stale en `deudas_lenguaje.md` sobre `g`/`G` general format
+  marcada como CERRADA (cerró en Mb8+Bits-extras+Fmt-g hace varias
+  mini-tandas).
+- D2 en `deudas-post-5b.md` (cap stale citando métodos Str que
+  cap 13 no desarrollaba) marcada CERRADA: cap 13 ya cubre los 26+
+  métodos de Str via mini-tandas S/Mb/Math+Mb9.
+- Cap 17 ("HTTP nativo" — "Qué todavía no anda"): "Validación de
+  Content-Type" y "Inferencia de return type" salen de la lista
+  (cerradas en Hpx.1/Hpx.2). El bullet de middleware `next`
+  ahora explícito como sub-paso futuro.
+- Cap 20 ("Qué todavía no anda con `fitz build`"): "Funciones
+  sin anotar params" matizado a solo params (return type ya
+  infiere desde Hpx.2). Bloque "sí anda y antes era deuda" suma
+  Hpx.2.
+
+**Implementación cross-cutting**:
+
+- **`http.rs`**: en `handle_task`, validación de `content-type`
+  header ANTES de `parse_body`. 415 con `serde_json::json!`.
+- **`codegen.rs`**: `CodegenCtx` suma `type_info: &TypeInfo`,
+  `CodegenCtx::new` toma el param adicional, `new_for_module`
+  computa TypeInfo fresco para el módulo. `generate_project`
+  expone `type_info` en la signature pública. `pre_register_fns`
+  consulta el TypeInfo via helper nuevo `infer_return_type_from_body`
+  (+ `collect_return_types` + `collect_returns_in_expr`).
+  `lub` reusado (ya existía).
+- **`main.rs`**: `build_file` plumb el TypeInfo del checker al
+  codegen (antes lo descartaba como `_types`).
+
+**VSCode extension**: SIN cambios. Cambios server-side
+(intérprete + codegen). Grammar TextMate y client TS sin updates.
+
+**Tests**: **8 unit + 3 compile_e2e nuevos**:
+- 5 en `http::tests::hpx1_*` (json pasa, text/plain rechaza,
+  multipart rechaza, ausente acepta, charset acepta).
+- 3 compile_e2e bit-a-bit en `hpx2_*` (return inference para Str,
+  Int, if/else con lub).
+
+Total al cierre: **1980 sin feature, 2070 con --features lsp**.
+Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w)**:
+
+- **Mw.next (wrap-style middleware)**: comprometido como mini-tanda
+  dedicada futura. ~6-8h.
+- **Streaming HTTP / SSE**: pertenece a 9.w.
+- **WebSockets `@ws(...)`**: pertenece a 9.w.
+- **Multipart/urlencoded bodies**: 415 hoy. Sub-paso futuro si
+  aparece presión real (~3-4h).
+- **Hpx.1 msg alignment**: axum default vs Fitz msg. Cosmético —
+  ambos 415. Refinable cambiando el extractor del codegen.
+
 ### ~~LSP polish completo (Range exacto + scope-aware autocomplete)~~ ✓ CERRADO 2026-05-20 (mini-tanda LSPy)
 
 Mini-tanda de polish del LSP MVP antes de Fase 9.w. Cierra dos
@@ -1815,9 +1925,10 @@ no afecta tokens); LSP autocomplete refleja todo automáticamente
 vía rebuild del `fitz-lsp` binary.
 
 **Deuda residual menor** (NO bloquea):
-- **`g`/`G` general format** sigue solo en `fitz run`. Requiere
-  decidir entre fixed vs exponente según magnitud — lógica más
-  involucrada. Sin presión real hoy.
+- ~~**`g`/`G` general format**~~ ✓ CERRADO 2026-05-19 (mini-tanda
+  Mb8 + Bits-extras + Fmt-g). Helper `__fitz_fmt_general(x,
+  precision, upper)` bit-a-bit con `src/format.rs::general_format`
+  del intérprete.
 
 ### ~~Métodos analíticos extra + async closures en build + HTTP refinements~~ ✓ CERRADO 2026-05-19 (mini-tanda Mb6 + Async-cl build + HTTP refinements)
 
