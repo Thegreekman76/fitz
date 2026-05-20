@@ -6864,10 +6864,10 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
   grandes están en el roadmap.
 - **WebSockets** — `@ws("/chat")` está diseñado pero no
   implementado (Fase 9.w).
-- **Multipart / urlencoded bodies** — hoy solo JSON. Cualquier
-  otro Content-Type recibe 415 con mensaje claro (mini-tanda
-  Hpx.1). Multipart queda como sub-paso futuro cuando aparezca
-  presión real.
+- **Multipart bodies** — `multipart/form-data` (típicamente uploads
+  con files) queda como sub-paso futuro cuando aparezca presión
+  real. Cualquier otro Content-Type que no sea JSON o urlencoded
+  recibe 415 con mensaje claro (mini-tanda Hpx.1 + HA).
 - **Middleware wrap-style con `next` callable** — el modelo donde
   el middleware controla la invocación del handler (`fn mw(req,
   next) -> Response`) queda como sub-paso futuro. Sí está
@@ -6885,9 +6885,14 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
 > el schema OpenAPI cuando el handler hace `return Err(X { status:
 > 404, ... })` con un literal — el schema incluye una entrada por
 > cada code detectado (HC.2). **Validación de Content-Type
-> estricta** — body no-JSON recibe 415 con msg claro (Hpx.1).
-> **Return type inference en handlers para `fitz build`** —
-> `fn create(u: User) { ... return User { ... } }` ya no exige
+> estricta** — body no-JSON ni urlencoded recibe 415 con msg claro
+> (Hpx.1 + HA, paridad bit-a-bit `fitz run` ↔ `fitz build`).
+> **`application/x-www-form-urlencoded`** — bodies tipo
+> `name=Fitz&age=25` se parsean como `Map<Str, Str>` automáticamente
+> (URL-decoding `+` → espacio y `%XX` → byte hex aplicado a keys
+> y valores), tanto en `fitz run` como en `fitz build` (mini-tandas
+> MP + UC). **Return type inference en handlers para `fitz build`**
+> — `fn create(u: User) { ... return User { ... } }` ya no exige
 > `-> User` explícito; el codegen infiere del body usando el
 > TypeInfo del checker (Hpx.2).
 

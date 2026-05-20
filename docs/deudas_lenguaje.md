@@ -1223,10 +1223,109 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
 - **Multipart/form-data con files**: sub-paso futuro dedicado
   (~4-6h). Requiere parser de multipart + decisión sobre file
   storage.
-- **urlencoded en codegen**: hoy solo `fitz run`. Codegen sigue
-  con `axum::Json` extractor que rechaza. Refinable si entra
-  demanda (~2-3h refactor del extractor).
+- ~~**urlencoded en codegen**: hoy solo `fitz run`~~ ✓ CERRADO
+  2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
+
+### ~~UC + HA: urlencoded en codegen + Hpx.1 msg alignment — paridad HTTP completa~~ ✓ CERRADO 2026-05-20 (mini-tanda UC + HA)
+
+Cierra las DOS asimétrias HTTP restantes entre `fitz run` y
+`fitz build` que arrastraban las mini-tandas anteriores. Después
+de esta, el stack HTTP tiene **paridad bit-a-bit completa** entre
+intérprete y binario nativo para todo el modelo de bodies.
+
+**Parte 1 — UC: urlencoded bodies en codegen**:
+
+- ~~**Extractor del body cambia de `axum::Json` a `axum::body::Bytes`**~~
+  ✓ En `emit_axum_extractors` del codegen, cuando hay `body_param`
+  el extractor pasa de `axum::Json(<bn>_raw): axum::Json<serde_json::Value>`
+  a `<bn>_body_bytes: axum::body::Bytes`. Esto permite que el
+  wrapper inspeccione el Content-Type antes de parsear (axum::Json
+  imponía JSON parse antes de llegar al wrapper).
+- ~~**Forzamos extracción del `HeaderMap` cuando hay body**~~ ✓
+  La condición para extraer `__hmap: axum::http::HeaderMap` ahora
+  incluye `sig.body_param.is_some()` — necesitamos leer el
+  Content-Type. Antes solo se extraía si había `@header(...)`,
+  middlewares o CORS.
+- ~~**Dispatch por Content-Type en `emit_param_coercions`**~~ ✓
+  Tres ramas paralelo al intérprete (`http::handle_task`): (a) JSON
+  o vacío → `serde_json::from_slice(&<bn>_body_bytes)`; (b)
+  urlencoded → `__parse_urlencoded(&<bn>_body_bytes)` que devuelve
+  un `serde_json::Value::Object` con String values; (c) cualquier
+  otro CT → 415 con el msg verbose del intérprete. Las tres ramas
+  producen un `serde_json::Value` intermedio que alimenta el
+  `__from_fitz_json` ya existente, así que el resto del wrapper
+  queda intacto.
+- ~~**Helpers `__parse_urlencoded` y `__url_decode` en el preludio
+  HTTP**~~ ✓ Paralelos a `parse_urlencoded_body` y `url_decode` de
+  `http.rs`. URL-decoding completo (`+` → espacio, `%XX` → byte
+  hex con errores claros sobre %XX incompleto / no-hex).
+- ~~**Impls nuevos `__FromFitzJson` para `Vec<T>` y `Vec<(K, V)>`**~~
+  ✓ `Vec<T>` deserializa desde JSON Array (List body, deuda menor
+  destrabada de paso). `Vec<(K, V)>` deserializa desde JSON Object
+  parseando la clave K via trait nuevo `__MapKeyFromStr` (espejo
+  de `__MapKey`). Habilita el case canónico de urlencoded:
+  `Map<Str, Str>` como body.
+
+**Parte 2 — HA: Hpx.1 msg alignment**:
+
+- ~~**Mensaje del 415 alineado bit-a-bit con el intérprete**~~ ✓ El
+  codegen emite el mismo formato del intérprete: `"Content-Type
+  no soportado: '<ct>'. El handler espera JSON (\`application/json\`)
+  o urlencoded (\`application/x-www-form-urlencoded\`). Multipart
+  y otros formatos quedan como sub-paso futuro."`. Si falta el
+  header, se cita `(sin header)`. La asimetría textual entre
+  intérprete (msg verbose) y codegen (msg axum default) que
+  quedó como deuda menor de Hpx.1 está cerrada.
+
+**Implementación cross-cutting**:
+
+- **`codegen.rs::emit_axum_extractors`**: extractor del body pasa
+  de `axum::Json` a `axum::body::Bytes`; HeaderMap forzado cuando
+  hay body. Naming convention: `<bn>_body_bytes` para los bytes,
+  `<bn>_ct_primary` para el Content-Type primario.
+- **`codegen.rs::emit_param_coercions`**: nuevo bloque que computa
+  ct_primary, dispatchea entre JSON/urlencoded/415, y produce un
+  `<bn>_raw: serde_json::Value` que alimenta el `__from_fitz_json`
+  ya existente.
+- **`HTTP_RUNTIME_PRELUDE`**: helpers `__parse_urlencoded` y
+  `__url_decode` agregados después de `__apply_cors_and_respond`.
+  Impls `__FromFitzJson for Vec<T>` y `__FromFitzJson for Vec<(K, V)>`
+  + trait `__MapKeyFromStr` con 4 impls (String/i64/f64/bool).
+
+**VSCode extension**: SIN cambios. Cambios server-side
+(codegen). Grammar TextMate y client TS sin updates.
+
+**Tests**: **5 unit + 3 compile_e2e nuevos**:
+
+- 5 unit en `codegen::tests::uc_*`:
+  `uc_http_body_extrae_bytes_no_json`,
+  `uc_http_body_dispatch_por_content_type`,
+  `uc_http_body_415_msg_matchea_interprete`,
+  `uc_http_preludio_emite_helpers_urlencoded`,
+  `uc_http_body_fuerza_hmap_extraction`.
+- Test viejo `http_body_post_con_tipo_emite_from_fitz_json`
+  actualizado al nuevo extractor (`body_body_bytes`).
+- 3 compile_e2e end-to-end (build + spawn + raw TCP):
+  `uc_http_post_urlencoded_parsea_a_map_str_str` (form data
+  básico), `uc_http_post_urlencoded_con_url_encoding` (`+` y
+  `%20` URL-decoded), `ha_http_content_type_no_soportado_es_415_con_msg_alineado`
+  (multipart/form-data rechazado con msg alineado).
+- Helper nuevo `build_spawn_request_with_ct` en `tests/compile_e2e.rs`
+  que permite especificar Content-Type explícito (el viejo
+  hardcodeaba `application/json`).
+
+**Smoke manual**: validación bit-a-bit `fitz run` ↔ `fitz build`
+con un handler `@post("/echo") fn echo(body: Map<Str, Str>) ->
+Map<Str, Str> => body` corriendo curl con `-H "Content-Type:
+application/x-www-form-urlencoded" -d "name=Fitz&age=25"`.
+
+**Deuda residual (NO bloquea 9.w):**
+
+- **Multipart/form-data con files**: sigue diferido (~4-6h).
+  Requiere parser de multipart + decisión sobre file storage.
+- **Wrap-style `next` callable middleware**: sigue diferido
+  (~6-8h).
 
 ### ~~P1: Mw.next codegen + cleanup roadmap-ready~~ ✓ CERRADO 2026-05-20 (mini-tanda P1 + Cleanup final)
 

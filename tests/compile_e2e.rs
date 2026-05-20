@@ -1831,6 +1831,196 @@ fn http_post_body_extra_field_es_400() {
     );
 }
 
+/// Mini-tanda UC + HA — variante del helper que permite especificar
+/// el Content-Type explícitamente, para los tests de urlencoded y 415.
+#[allow(clippy::too_many_arguments)]
+fn build_spawn_request_with_ct(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    method: &str,
+    path: &str,
+    body: Option<&str>,
+    content_type: Option<&str>,
+) -> (u16, String) {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto {} en 3s", port);
+    }
+
+    use std::io::{Read, Write};
+    let request = match body {
+        Some(b) => {
+            let ct_header = match content_type {
+                Some(ct) => format!("Content-Type: {}\r\n", ct),
+                None => String::new(),
+            };
+            format!(
+                "{} {} HTTP/1.1\r\nHost: {}\r\n{}\
+                 Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                method,
+                path,
+                addr,
+                ct_header,
+                b.len(),
+                b
+            )
+        }
+        None => format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\r\n",
+            method, path, addr
+        ),
+    };
+    let mut stream =
+        std::net::TcpStream::connect(&addr).expect("connect");
+    stream
+        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+        .ok();
+    stream.write_all(request.as_bytes()).expect("send request");
+    let mut buf = Vec::new();
+    stream.read_to_end(&mut buf).ok();
+    let raw = String::from_utf8_lossy(&buf).into_owned();
+
+    let _ = child.kill();
+    let _ = child.wait();
+
+    let status_line = raw.lines().next().unwrap_or("").to_string();
+    let status: u16 = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0);
+    let body_start = raw
+        .find("\r\n\r\n")
+        .map(|i| i + 4)
+        .unwrap_or(raw.len());
+    let body = raw[body_start..].to_string();
+    (status, body)
+}
+
+#[test]
+fn uc_http_post_urlencoded_parsea_a_map_str_str() {
+    // Mini-tanda UC: `fitz build` debe aceptar bodies
+    // `application/x-www-form-urlencoded` y parsearlos como
+    // `Map<Str, Str>` igual que el intérprete.
+    let src = "@server(43240)\nfn main() => 0\n\
+               @post(\"/echo\") fn echo(body: Map<Str, Str>) -> Map<Str, Str> => body\n";
+    let (status, body) = build_spawn_request_with_ct(
+        "uc-post-urlenc-basic",
+        src,
+        43240,
+        "POST",
+        "/echo",
+        Some("name=Fitz&age=25"),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 200, "esperaba 200, fue: status={} body={}", status, body);
+    assert!(
+        body.contains("\"name\":\"Fitz\"") && body.contains("\"age\":\"25\""),
+        "esperaba body parsea pares name/age, fue: {}",
+        body
+    );
+}
+
+#[test]
+fn uc_http_post_urlencoded_con_url_encoding() {
+    // URL-decoding: `+` → espacio, `%20` → espacio.
+    let src = "@server(43241)\nfn main() => 0\n\
+               @post(\"/echo\") fn echo(body: Map<Str, Str>) -> Map<Str, Str> => body\n";
+    let (status, body) = build_spawn_request_with_ct(
+        "uc-post-urlenc-decoded",
+        src,
+        43241,
+        "POST",
+        "/echo",
+        Some("greeting=hola+mundo&place=Fitz%20Roy"),
+        Some("application/x-www-form-urlencoded"),
+    );
+    assert_eq!(status, 200);
+    assert!(
+        body.contains("\"greeting\":\"hola mundo\"") && body.contains("\"place\":\"Fitz Roy\""),
+        "esperaba URL-decoding aplicado, fue: {}",
+        body
+    );
+}
+
+#[test]
+fn ha_http_content_type_no_soportado_es_415_con_msg_alineado() {
+    // Mini-tanda HA (Hpx.1 alignment): `multipart/form-data` (sin soporte)
+    // debe devolver 415 con el mismo mensaje del intérprete.
+    let src = "@server(43242)\nfn main() => 0\n\
+               type Input { msg: Str }\n\
+               @post(\"/echo\") fn echo(body: Input) -> Input => body\n";
+    let (status, body) = build_spawn_request_with_ct(
+        "ha-post-415-multipart",
+        src,
+        43242,
+        "POST",
+        "/echo",
+        Some("---boundary\r\nContent-Disposition: form-data; name=\"x\"\r\n\r\nv\r\n---boundary--\r\n"),
+        Some("multipart/form-data; boundary=---boundary"),
+    );
+    assert_eq!(status, 415, "esperaba 415, fue: status={} body={}", status, body);
+    // Mensaje alineado con el intérprete (`http::handle_task`).
+    assert!(
+        body.contains("Content-Type no soportado"),
+        "esperaba `Content-Type no soportado`, fue: {}",
+        body
+    );
+    assert!(
+        body.contains("application/json")
+            && body.contains("application/x-www-form-urlencoded"),
+        "esperaba que el mensaje mencione JSON y urlencoded, fue: {}",
+        body
+    );
+    assert!(
+        body.contains("Multipart") && body.contains("sub-paso futuro"),
+        "esperaba que el mensaje mencione Multipart y sub-paso futuro, fue: {}",
+        body
+    );
+}
+
 // ---------------------------------------------------------------------------
 // F12 — higher-order completo (closures, fn como valor/param/retorno)
 // ---------------------------------------------------------------------------

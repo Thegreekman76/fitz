@@ -10863,17 +10863,27 @@ impl<'a> CodegenCtx<'a> {
             );
         }
         // HeaderMap: hace falta cuando el handler declara `@header(...)`
-        // (Fase 7.6), hay middlewares (MW.3) que reciben Request, o hay
+        // (Fase 7.6), hay middlewares (MW.3) que reciben Request, hay
         // CORS (Q.3) que necesita leer el `Origin` del request para
-        // resolver los headers `Access-Control-Allow-*`. Sin ninguno,
-        // axum NO extrae el HeaderMap (zero-overhead en handlers simples).
-        if !sig.header_params.is_empty() || sig.has_middleware || sig.has_cors {
+        // resolver los headers `Access-Control-Allow-*`, o hay body
+        // (mini-tanda UC: leemos Content-Type para dispatch entre
+        // JSON / urlencoded / 415). Sin ninguno, axum NO extrae el
+        // HeaderMap (zero-overhead en handlers simples).
+        if !sig.header_params.is_empty()
+            || sig.has_middleware
+            || sig.has_cors
+            || sig.body_param.is_some()
+        {
             self.emit("    __hmap: axum::http::HeaderMap,\n");
         }
         if let Some((bn, _bt)) = &sig.body_param {
+            // Mini-tanda UC — extraemos Bytes en lugar de Json para
+            // poder dispatchar por Content-Type (JSON vs urlencoded)
+            // en `emit_param_coercions`. axum::body::Bytes acepta
+            // cualquier cuerpo, sin imponer parseo.
             writeln!(
                 &mut self.output,
-                "    axum::Json({}_raw): axum::Json<serde_json::Value>,",
+                "    {}_body_bytes: axum::body::Bytes,",
                 bn,
             )
             .unwrap();
@@ -11022,11 +11032,68 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
-        // Si hay body con tipo declarado, deserializar primero. El
-        // `__from_fitz_json` genérico para `Arc<Mutex<T>>` ya envuelve
-        // el resultado, así que para tipos Nominal el binding queda en
-        // la representación correcta (`Foo = Arc<Mutex<FooData>>`).
+        // Si hay body con tipo declarado, dispatchar primero por
+        // Content-Type (mini-tanda UC + Hpx.1): JSON o vacío → parsear
+        // como JSON; urlencoded → parsear con `__parse_urlencoded` que
+        // devuelve un `serde_json::Value::Object`; otro → 415 con el
+        // mismo mensaje del intérprete (`http::handle_task`). El
+        // `__from_fitz_json` genérico consume el `serde_json::Value`
+        // intermedio (Map<Str, Str> para urlencoded; estructura libre
+        // para JSON), así que el resto del path queda intacto.
         if let Some((bn, bt)) = &sig.body_param {
+            writeln!(
+                &mut self.output,
+                "    let {}_ct_primary: String = __hmap.get(\"content-type\")",
+                bn,
+            )
+            .unwrap();
+            self.emit("        .and_then(|v| v.to_str().ok())\n");
+            self.emit("        .map(|ct| ct.split(';').next().unwrap_or(\"\").trim().to_ascii_lowercase())\n");
+            self.emit("        .unwrap_or_default();\n");
+            writeln!(
+                &mut self.output,
+                "    let {}_raw: serde_json::Value = if {}_ct_primary.is_empty() || {}_ct_primary == \"application/json\" {{",
+                bn, bn, bn,
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "        match serde_json::from_slice(&{}_body_bytes) {{",
+                bn,
+            )
+            .unwrap();
+            self.emit("            Ok(v) => v,\n");
+            self.emit("            Err(e) => return (\n");
+            self.emit("                axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": format!(\"body JSON inválido: {}\", e)})),\n");
+            self.emit("            ).into_response(),\n");
+            self.emit("        }\n");
+            writeln!(
+                &mut self.output,
+                "    }} else if {}_ct_primary == \"application/x-www-form-urlencoded\" {{",
+                bn,
+            )
+            .unwrap();
+            writeln!(
+                &mut self.output,
+                "        match __parse_urlencoded(&{}_body_bytes) {{",
+                bn,
+            )
+            .unwrap();
+            self.emit("            Ok(v) => v,\n");
+            self.emit("            Err(e) => return (\n");
+            self.emit("                axum::http::StatusCode::BAD_REQUEST,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": e})),\n");
+            self.emit("            ).into_response(),\n");
+            self.emit("        }\n");
+            self.emit("    } else {\n");
+            self.emit("        let __ct_display = __hmap.get(\"content-type\").and_then(|v| v.to_str().ok()).unwrap_or(\"(sin header)\").to_string();\n");
+            self.emit("        return (\n");
+            self.emit("            axum::http::StatusCode::UNSUPPORTED_MEDIA_TYPE,\n");
+            self.emit("            axum::Json(serde_json::json!({\"error\": format!(\"Content-Type no soportado: '{}'. El handler espera JSON (`application/json`) o urlencoded (`application/x-www-form-urlencoded`). Multipart y otros formatos quedan como sub-paso futuro.\", __ct_display)})),\n");
+            self.emit("        ).into_response();\n");
+            self.emit("    };\n");
+
             let rust_ty = rust_type_for(bt, self.env)?;
             writeln!(
                 &mut self.output,
@@ -12032,6 +12099,50 @@ fn __apply_cors_and_respond(
     resp
 }
 
+/// Mini-tanda UC — parsea `application/x-www-form-urlencoded` body
+/// como un `serde_json::Value::Object` con todas las keys/values como
+/// strings. Esto permite reusar el path `__from_fitz_json` para
+/// deserializar a tipos Fitz (`Map<Str, Str>` o structs con fields
+/// todos `Str`). URL-decoding: `+` → espacio, `%XX` → byte hex.
+/// Duplicados: last-wins. Body vacío → Object vacío.
+fn __parse_urlencoded(bytes: &[u8]) -> Result<serde_json::Value, String> {
+    let s = std::str::from_utf8(bytes).map_err(|e| {
+        format!("body urlencoded inválido (UTF-8): {}", e)
+    })?;
+    let mut map = serde_json::Map::new();
+    if s.is_empty() {
+        return Ok(serde_json::Value::Object(map));
+    }
+    for kv in s.split('&') {
+        let mut parts = kv.splitn(2, '=');
+        let raw_k = parts.next().unwrap_or("");
+        let raw_v = parts.next().unwrap_or("");
+        let k = __url_decode(raw_k)?;
+        let v = __url_decode(raw_v)?;
+        map.insert(k, serde_json::Value::String(v));
+    }
+    Ok(serde_json::Value::Object(map))
+}
+
+fn __url_decode(s: &str) -> Result<String, String> {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        match c {
+            '+' => out.push(' '),
+            '%' => {
+                let h1 = chars.next().ok_or_else(|| "urlencoded: %XX incompleto".to_string())?;
+                let h2 = chars.next().ok_or_else(|| "urlencoded: %XX incompleto".to_string())?;
+                let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
+                    .map_err(|_| format!("urlencoded: %{}{} no es hex válido", h1, h2))?;
+                out.push(byte as char);
+            }
+            other => out.push(other),
+        }
+    }
+    Ok(out)
+}
+
 impl __ToFitzJson for i64 {
     fn __to_fitz_json(&self) -> serde_json::Value {
         serde_json::Value::from(*self)
@@ -12163,6 +12274,65 @@ impl<T: __FromFitzJson> __FromFitzJson for Option<T> {
 impl<T: __FromFitzJson> __FromFitzJson for std::sync::Arc<std::sync::Mutex<T>> {
     fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
         T::__from_fitz_json(json).map(|v| std::sync::Arc::new(std::sync::Mutex::new(v)))
+    }
+}
+
+/// Mini-tanda UC — `List<T>` body deserialization desde JSON Array.
+impl<T: __FromFitzJson> __FromFitzJson for Vec<T> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let arr = json
+            .as_array()
+            .ok_or_else(|| format!("se esperaba Array, se recibió {}", __json_shape(json)))?;
+        arr.iter()
+            .map(|v| T::__from_fitz_json(v))
+            .collect()
+    }
+}
+
+/// Mini-tanda UC — `Map<K, V>` body deserialization desde JSON Object.
+/// Las claves de JSON Object son siempre `String`, así que para `K`
+/// distinto de `String` parseamos la clave desde el string. Habilita
+/// el case canónico de urlencoded: `Map<Str, Str>` con un Object
+/// `{"k": "v"}` desde `__parse_urlencoded`.
+impl<K: __MapKeyFromStr, V: __FromFitzJson> __FromFitzJson for Vec<(K, V)> {
+    fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {
+        let obj = json
+            .as_object()
+            .ok_or_else(|| format!("se esperaba Object, se recibió {}", __json_shape(json)))?;
+        let mut out = Vec::with_capacity(obj.len());
+        for (k_str, v) in obj.iter() {
+            let k = K::__from_map_key(k_str)?;
+            let v = V::__from_fitz_json(v)?;
+            out.push((k, v));
+        }
+        Ok(out)
+    }
+}
+
+/// Parseo de la clave de Map desde el string del JSON Object. Espejo
+/// de `__MapKey` (que va al revés).
+trait __MapKeyFromStr: Sized {
+    fn __from_map_key(s: &str) -> Result<Self, String>;
+}
+impl __MapKeyFromStr for String {
+    fn __from_map_key(s: &str) -> Result<Self, String> { Ok(s.to_string()) }
+}
+impl __MapKeyFromStr for i64 {
+    fn __from_map_key(s: &str) -> Result<Self, String> {
+        s.parse::<i64>()
+            .map_err(|_| format!("se esperaba Int en la clave del Map, se recibió '{}'", s))
+    }
+}
+impl __MapKeyFromStr for f64 {
+    fn __from_map_key(s: &str) -> Result<Self, String> {
+        s.parse::<f64>()
+            .map_err(|_| format!("se esperaba Float en la clave del Map, se recibió '{}'", s))
+    }
+}
+impl __MapKeyFromStr for bool {
+    fn __from_map_key(s: &str) -> Result<Self, String> {
+        s.parse::<bool>()
+            .map_err(|_| format!("se esperaba Bool en la clave del Map, se recibió '{}'", s))
     }
 }
 
@@ -16794,6 +16964,9 @@ mod tests {
 
     #[test]
     fn http_body_post_con_tipo_emite_from_fitz_json() {
+        // Mini-tanda UC: el extractor pasó de `axum::Json<serde_json::Value>`
+        // a `axum::body::Bytes` para poder dispatchar por Content-Type
+        // (JSON vs urlencoded vs 415) adentro del wrapper.
         let src = "type Input { msg: Str }\n\
                    @post(\"/echo\") fn echo(body: Input) -> Input => body";
         let code = gen(src).unwrap();
@@ -16803,12 +16976,10 @@ mod tests {
         let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
             pats_tys.iter().any(|(p, t)| {
-                p.contains("axum :: Json")
-                    && p.contains("body_raw")
-                    && t.contains("axum :: Json")
-                    && t.contains("serde_json :: Value")
+                p.contains("body_body_bytes")
+                    && t.contains("axum :: body :: Bytes")
             }),
-            "esperaba extractor body_raw: axum::Json<serde_json::Value>, got: {:?}",
+            "esperaba extractor body_body_bytes: axum::body::Bytes, got: {:?}",
             pats_tys
         );
         let body = ast_test::fn_body_text(wrapper);
@@ -16821,6 +16992,110 @@ mod tests {
             body.contains("StatusCode :: BAD_REQUEST"),
             "esperaba 400 si la deserialización falla, got:\n{}",
             body
+        );
+    }
+
+    #[test]
+    fn uc_http_body_extrae_bytes_no_json() {
+        // Mini-tanda UC: confirmamos que el extractor del body es
+        // Bytes, no Json<Value>. Esto es lo que habilita el dispatch
+        // por Content-Type adentro del wrapper.
+        let src = "type Input { msg: Str }\n\
+                   @post(\"/echo\") fn echo(body: Input) -> Input => body";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("body_body_bytes: axum::body::Bytes"),
+            "esperaba extractor `body_body_bytes: axum::body::Bytes`, no se encontró"
+        );
+        assert!(
+            !code.contains("axum::Json(body_raw):"),
+            "no esperaba el viejo extractor `axum::Json(body_raw): axum::Json<serde_json::Value>`"
+        );
+    }
+
+    #[test]
+    fn uc_http_body_dispatch_por_content_type() {
+        // Mini-tanda UC: el wrapper computa ct_primary y dispatcha
+        // entre JSON, urlencoded y 415.
+        let src = "type Input { msg: Str }\n\
+                   @post(\"/echo\") fn echo(body: Input) -> Input => body";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("body_ct_primary"),
+            "esperaba bind `body_ct_primary` para Content-Type"
+        );
+        assert!(
+            code.contains("\"application/json\""),
+            "esperaba branch para `application/json`"
+        );
+        assert!(
+            code.contains("\"application/x-www-form-urlencoded\""),
+            "esperaba branch para urlencoded"
+        );
+        assert!(
+            code.contains("__parse_urlencoded"),
+            "esperaba llamada a `__parse_urlencoded` para urlencoded"
+        );
+        assert!(
+            code.contains("UNSUPPORTED_MEDIA_TYPE"),
+            "esperaba 415 para Content-Type no soportado"
+        );
+    }
+
+    #[test]
+    fn uc_http_body_415_msg_matchea_interprete() {
+        // Mini-tanda HA (Hpx.1 alignment): el mensaje del 415 del
+        // codegen debe matchear bit-a-bit el del intérprete
+        // (`http::handle_task` con CT no soportado).
+        let src = "type Input { msg: Str }\n\
+                   @post(\"/echo\") fn echo(body: Input) -> Input => body";
+        let code = gen(src).unwrap();
+        // Fragmentos clave del mensaje del intérprete (en http.rs).
+        let key_phrases = [
+            "Content-Type no soportado",
+            "El handler espera JSON",
+            "application/json",
+            "urlencoded",
+            "application/x-www-form-urlencoded",
+            "Multipart y otros formatos",
+            "sub-paso futuro",
+        ];
+        for phrase in &key_phrases {
+            assert!(
+                code.contains(phrase),
+                "esperaba que el msg del 415 contenga `{}`, no se encontró",
+                phrase
+            );
+        }
+    }
+
+    #[test]
+    fn uc_http_preludio_emite_helpers_urlencoded() {
+        // Los helpers `__parse_urlencoded` y `__url_decode` se emiten
+        // siempre que haya rutas HTTP — son parte del preludio.
+        let src = "@get(\"/\") fn index() -> Str => \"ok\"";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("fn __parse_urlencoded(bytes: &[u8])"),
+            "esperaba helper `__parse_urlencoded` en el preludio HTTP"
+        );
+        assert!(
+            code.contains("fn __url_decode(s: &str)"),
+            "esperaba helper `__url_decode` en el preludio HTTP"
+        );
+    }
+
+    #[test]
+    fn uc_http_body_fuerza_hmap_extraction() {
+        // Mini-tanda UC: cuando hay body_param, fuerza la extracción
+        // del HeaderMap (lo necesitamos para leer Content-Type) aun
+        // sin @header / middleware / cors.
+        let src = "type Input { msg: Str }\n\
+                   @post(\"/echo\") fn echo(body: Input) -> Input => body";
+        let code = gen(src).unwrap();
+        assert!(
+            code.contains("__hmap: axum::http::HeaderMap"),
+            "esperaba que se extraiga el HeaderMap cuando hay body_param"
         );
     }
 
