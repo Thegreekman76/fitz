@@ -2212,6 +2212,91 @@ fn mp_build_multipart_sin_boundary_es_400() {
 
 
 #[test]
+fn f13_spike_lista_heterogenea_compila_y_paridad_bit_a_bit() {
+    // F13 SPIKE — última residual del bloque post-Fase-8.
+    // Listas heterogéneas (`[1, "dos", true]`) ya compilan a binario
+    // nativo y producen output bit-a-bit idéntico a `fitz run`.
+    // Antes del SPIKE el codegen rechazaba con "homogénea requerida".
+    let dir = std::env::temp_dir().join("fitz-e2e-f13-spike");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "\
+let xs = [1, \"dos\", true]
+let ys = [42, 3.14, null, false, \"hola\"]
+print(xs)
+print(ys)
+print(len(xs))
+print(len(ys))
+";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    assert!(
+        out_run.status.success(),
+        "fitz run falló: {}",
+        String::from_utf8_lossy(&out_run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
+
+    let out_build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out_build.status.success(),
+        "fitz build falló (F13 SPIKE no aplicó): {}",
+        String::from_utf8_lossy(&out_build.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let exec = Command::new(&bin).output().expect("ejecutar binario");
+    assert!(exec.status.success(), "binario fallló al ejecutar");
+    let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+
+    assert_eq!(
+        run_stdout.replace("\r\n", "\n"),
+        build_stdout.replace("\r\n", "\n"),
+        "F13 SPIKE: esperaba paridad bit-a-bit `run` ↔ `build`"
+    );
+    assert!(run_stdout.contains("[1, \"dos\", true]"));
+    assert!(run_stdout.contains("3.14"));
+}
+
+#[test]
+fn f13_spike_lista_con_tipo_no_soportado_aborta_con_msg_claro() {
+    // F13 SPIKE — Bytes en una lista heterogénea todavía no es
+    // soportado (queda como follow-up de F13). Mensaje claro cita
+    // el subset cubierto + workaround `fitz run`.
+    let dir = std::env::temp_dir().join("fitz-e2e-f13-spike-bytes");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "let xs = [1, b\"raw\"]\nprint(xs)\n";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        !out.status.success(),
+        "esperaba que `fitz build` rechace Bytes en lista heterogénea (SPIKE)"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("F13 SPIKE") && stderr.contains("fitz run"),
+        "esperaba msg de F13 SPIKE + workaround `fitz run`, fue: {}",
+        stderr
+    );
+}
+
+#[test]
 fn mw_wrap_codegen_rechaza_con_msg_que_cita_fitz_run() {
     // Mini-tanda Mw-Wrap — el codegen rechaza wrap-style mws con
     // un mensaje claro citando `fitz run` como workaround.

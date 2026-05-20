@@ -289,6 +289,140 @@ fn has_http_routes(program: &Program) -> bool {
 /// que requieren helpers custom: `,`/`_` grouping, `%` percent, `c`
 /// char. Cuando es `true`, el preludio emite los helpers
 /// `__fitz_fmt_grouping`/`__fitz_fmt_percent`/`__fitz_fmt_char`.
+/// F13 SPIKE — detecta si el programa tiene al menos un literal de
+/// lista con items de tipos AST distintos (heurística sintáctica
+/// conservadora: mira solo los tipos directos de los items del
+/// literal, sin tipar). Cubre el caso canónico `[1, "dos", true]`.
+/// Listas con elementos calculados (`[f(), g()]`) donde el tipo se
+/// resuelve solo en el checker pueden no triggerear el preludio
+/// FitzValue — limitación aceptada del SPIKE.
+fn program_uses_fitz_value(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn item_class(e: &Expr) -> Option<u8> {
+        // Clasifica un literal AST en buckets primitivos. None si no
+        // es un literal directo (el tipo viene del checker — se asume
+        // que `lub` lo resuelve).
+        match e {
+            Expr::Int(_, _) => Some(0),
+            Expr::Float(_, _) => Some(1),
+            Expr::Str(_, _) | Expr::StrInterp(_, _) => Some(2),
+            Expr::Bool(_, _) => Some(3),
+            Expr::Null(_) => Some(4),
+            _ => None,
+        }
+    }
+    fn list_is_heterogeneous(items: &[Expr]) -> bool {
+        let mut seen: Option<u8> = None;
+        for it in items {
+            if let Some(c) = item_class(it) {
+                // Int↔Float coerciona vía lub, no es heterogéneo.
+                let c = if c == 1 { 0 } else { c };
+                match seen {
+                    None => seen = Some(c),
+                    Some(prev) if prev == c => {}
+                    Some(_) => return true,
+                }
+            }
+        }
+        false
+    }
+    fn expr_uses_fv(e: &Expr) -> bool {
+        match e {
+            Expr::List(items, _) => {
+                list_is_heterogeneous(items) || items.iter().any(expr_uses_fv)
+            }
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Expr(inner, _) => expr_uses_fv(inner),
+                StrPart::Lit(_) => false,
+            }),
+            Expr::BinOp { left, right, .. } => expr_uses_fv(left) || expr_uses_fv(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_fv(operand),
+            Expr::Call { callee, args, .. } => {
+                expr_uses_fv(callee) || args.iter().any(expr_uses_fv)
+            }
+            Expr::Field { object, .. } => expr_uses_fv(object),
+            Expr::Index { object, index, .. } => {
+                expr_uses_fv(object) || expr_uses_fv(index)
+            }
+            Expr::Slice { object, start, end, .. } => {
+                expr_uses_fv(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_fv(s))
+                    || end.as_ref().is_some_and(|e| expr_uses_fv(e))
+            }
+            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_fv(k) || expr_uses_fv(v)),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_fv),
+            Expr::TupleField { tuple, .. } => expr_uses_fv(tuple),
+            Expr::Range { start, end, .. } => expr_uses_fv(start) || expr_uses_fv(end),
+            Expr::If { condition, then, else_, .. } => {
+                expr_uses_fv(condition)
+                    || then.iter().any(stmt_uses_fv)
+                    || else_.as_ref().is_some_and(|e| e.iter().any(stmt_uses_fv))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_fv(value)
+                    || arms.iter().any(|a| {
+                        a.guard.as_ref().is_some_and(expr_uses_fv)
+                            || a.body.iter().any(stmt_uses_fv)
+                    })
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_fv),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_fv),
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_fv(expr)
+                    || expr_uses_fv(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_fv(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_fv(f))
+            }
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
+                expr_uses_fv(key)
+                    || expr_uses_fv(value)
+                    || expr_uses_fv(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_fv(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_fv(f))
+            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_uses_fv(e)),
+            Expr::NamedArg { value, .. } => expr_uses_fv(value),
+            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+                expr_uses_fv(inner)
+            }
+            _ => false,
+        }
+    }
+    fn stmt_uses_fv(s: &Stmt) -> bool {
+        match s {
+            Stmt::Assign { value, .. } => expr_uses_fv(value),
+            Stmt::Destructure { value, .. } => expr_uses_fv(value),
+            Stmt::Return(e, _) | Stmt::Expr(e, _) => expr_uses_fv(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_fv(status) || body.as_ref().is_some_and(expr_uses_fv)
+            }
+            Stmt::While { condition, body, .. } => {
+                expr_uses_fv(condition) || body.iter().any(stmt_uses_fv)
+            }
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_fv),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_fv(iter) || body.iter().any(stmt_uses_fv)
+            }
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_fv),
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_fv)
+}
+
 fn program_uses_fmt_helpers(program: &Program) -> bool {
     use crate::ast::{FormatKind, StrPart};
     fn spec_needs_helper(spec: &crate::ast::FormatSpec) -> bool {
@@ -1982,11 +2116,13 @@ fn generate_main_rs(
     let uses_async = program_uses_async(program);
     let uses_python = !python_imports.is_empty();
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
+    let uses_fitz_value = program_uses_fitz_value(program);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
     ctx.uses_python = uses_python;
     ctx.uses_fmt_helpers = uses_fmt_helpers;
+    ctx.uses_fitz_value = uses_fitz_value;
     ctx.install_python_bindings(python_imports);
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
@@ -2600,6 +2736,12 @@ struct CodegenCtx<'a> {
     /// resto del codegen si es false). Se setea durante `gen_str_interp`
     /// cuando aparece un FormatSpec con grouping o kind Char/Percent.
     uses_fmt_helpers: bool,
+    /// F13 SPIKE — `true` si el programa usa al menos un literal
+    /// heterogéneo (`List<Any>` o equivalente). Habilita la emisión
+    /// del enum `__FitzValue` en el preludio + el mapping de
+    /// `Type::List(Any)` a `Arc<Mutex<Vec<__FitzValue>>>`. Solo se
+    /// setea cuando el codegen necesita emitir el wrapper.
+    uses_fitz_value: bool,
     /// Fase 8.7.1: `true` si el programa tiene al menos un import
     /// Python (`from python import X` / `import python.X`). Habilita
     /// el preludio Python (`__FitzPyObject` + helpers PyO3) y la
@@ -2745,6 +2887,7 @@ impl<'a> CodegenCtx<'a> {
             middleware_post_fn_names: std::collections::HashSet::new(),
             uses_async: false,
             uses_fmt_helpers: false,
+            uses_fitz_value: false,
             uses_python: false,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
@@ -3543,6 +3686,53 @@ impl<'a> CodegenCtx<'a> {
              out.push('\\\"');\n    \
              out\n}\n\n",
         );
+        // F13 SPIKE — enum `__FitzValue` para listas/mapas
+        // heterogéneos. Solo se emite cuando el programa usa al
+        // menos un literal `List<Any>` (auto-detectado en
+        // `gen_list_lit`). Variantes mínimas del SPIKE:
+        // Int/Float/Str/Bool/Null. Bytes/List/Map/Nominal quedan
+        // como follow-up dedicado. Display paralelo al
+        // `fmt::Display for Value` del intérprete (strings con
+        // comillas adentro de colecciones via `__fitz_fmt_value_inline`,
+        // Float con `.0` si fract=0 via `__fitz_fmt_float`).
+        if self.uses_fitz_value {
+            self.emit(
+                "#[derive(Clone, Debug)]\n\
+                 enum __FitzValue {\n    \
+                     Int(i64),\n    \
+                     Float(f64),\n    \
+                     Str(String),\n    \
+                     Bool(bool),\n    \
+                     #[allow(dead_code)]\n    \
+                     Null,\n\
+                 }\n\n\
+                 impl std::fmt::Display for __FitzValue {\n    \
+                     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        \
+                         match self {\n            \
+                             Self::Int(n) => write!(f, \"{}\", n),\n            \
+                             Self::Float(x) => write!(f, \"{}\", __fitz_fmt_float(*x)),\n            \
+                             Self::Str(s) => write!(f, \"\\\"{}\\\"\", s),\n            \
+                             Self::Bool(b) => write!(f, \"{}\", b),\n            \
+                             Self::Null => write!(f, \"null\"),\n        \
+                         }\n    \
+                     }\n\
+                 }\n\n\
+                 impl PartialEq for __FitzValue {\n    \
+                     fn eq(&self, other: &Self) -> bool {\n        \
+                         match (self, other) {\n            \
+                             (Self::Int(a), Self::Int(b)) => a == b,\n            \
+                             (Self::Float(a), Self::Float(b)) => a == b,\n            \
+                             (Self::Int(a), Self::Float(b)) => (*a as f64) == *b,\n            \
+                             (Self::Float(a), Self::Int(b)) => *a == (*b as f64),\n            \
+                             (Self::Str(a), Self::Str(b)) => a == b,\n            \
+                             (Self::Bool(a), Self::Bool(b)) => a == b,\n            \
+                             (Self::Null, Self::Null) => true,\n            \
+                             _ => false,\n        \
+                         }\n    \
+                     }\n\
+                 }\n\n",
+            );
+        }
         // Mini-tanda Fmt-build — helpers para los format specs que
         // Rust no soporta nativamente: `,`/`_` grouping, `%` percent,
         // `c` char. Solo se emiten cuando el programa los usa (gating
@@ -9708,7 +9898,7 @@ impl<'a> CodegenCtx<'a> {
     /// como en el checker (5.3.1): primer elemento define el tipo, los
     /// demás deben unificar via `lub` (Int↔Float, T↔Null). Mezcla
     /// irrecuperable o lista vacía sin contexto → error claro.
-    fn gen_list_lit(&mut self, items: &[Expr], list_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
+    fn gen_list_lit(&mut self, items: &[Expr], _list_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
         if items.is_empty() {
             // Lista vacía: no podemos sintetizar T. Emitimos un código
             // genérico `Vec::new()` y devolvemos `List<Any>`. El
@@ -9726,23 +9916,43 @@ impl<'a> CodegenCtx<'a> {
             let (c, t) = self.gen_expr(it)?;
             item_codes_tys.push((c, t));
         }
+        // F13 SPIKE — si `lub` falla entre dos items, caemos a
+        // `Type::Any` y emitimos como `List<__FitzValue>` (tagged
+        // union). El sticky bit es crítico: la regla `Any + T = T`
+        // del lub existente colapsaría el Any de vuelta a concreto,
+        // así que una vez que detectamos heterogeneidad, lockeamos
+        // el common_ty a Any sin volver a llamar lub.
         let mut common_ty = item_codes_tys[0].1.clone();
+        let mut heterogeneous = false;
         for (_, t) in &item_codes_tys[1..] {
-            common_ty = lub(&common_ty, t).map_err(|_| {
-                self.err_at(list_span, format!(
-                    "lista con elementos de tipos incompatibles (`{}` y `{}`): el subset compilado \
-                     exige una lista homogénea (todos del mismo tipo, con coerciones Int→Float y \
-                     T→T? permitidas)",
-                    display_type(&common_ty, self.env),
-                    display_type(t, self.env),
-                ))
-            })?;
+            if heterogeneous {
+                break;
+            }
+            match lub(&common_ty, t) {
+                Ok(joined) => common_ty = joined,
+                Err(_) => {
+                    heterogeneous = true;
+                    common_ty = Type::Any;
+                }
+            }
         }
         if matches!(common_ty, Type::Any) {
-            return Err(self.err_at(list_span,
-                "lista con elementos cuyo tipo común es `Any`: el subset compilado exige tipo \
-                 homogéneo concreto. Anotá el tipo o usá `fitz run` para interpretarlo sin restricción.",
-            ));
+            // F13 SPIKE — el tipo común no se puede resolver homogéneo;
+            // emitimos `Vec<__FitzValue>` con cada item wrapeado en su
+            // variante. Habilita `[1, "dos", true]` compilando.
+            // Limitación SPIKE: cada item debe ser un primitivo
+            // soportado (Int/Float/Str/Bool/Null) o el codegen falla
+            // con un mensaje específico citando el follow-up.
+            self.uses_fitz_value = true;
+            let wrapped: Vec<String> = item_codes_tys
+                .iter()
+                .map(|(c, t)| wrap_as_fitz_value(c, t))
+                .collect::<Result<Vec<_>, FitzError>>()?;
+            let code = format!(
+                "Arc::new(Mutex::new(vec![{}]))",
+                wrapped.join(", ")
+            );
+            return Ok((code, Type::List(Box::new(Type::Any))));
         }
         let coerced: Vec<String> = item_codes_tys
             .iter()
@@ -13564,6 +13774,36 @@ fn sanitize_python_binding_lower(name: &str) -> String {
     out
 }
 
+/// F13 SPIKE — envuelve una expresión Fitz primitiva (Int/Float/Str/
+/// Bool/Null) en su variante de `__FitzValue`. Usado para emitir
+/// items de listas heterogéneas. Tipos no soportados en el SPIKE
+/// (Bytes, List, Map, Nominal, Function, etc.) → error claro
+/// citando el follow-up de F13.
+fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
+    let wrapped = match ty {
+        Type::Int => format!("__FitzValue::Int({})", code),
+        Type::Float => format!("__FitzValue::Float({})", code),
+        Type::Str => format!("__FitzValue::Str({})", code),
+        Type::Bool => format!("__FitzValue::Bool({})", code),
+        Type::Null => "__FitzValue::Null".to_string(),
+        _ => {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!(
+                    "F13 SPIKE: el tipo `{}` adentro de un literal heterogéneo \
+                     todavía no es soportado en `fitz build` — el SPIKE cubre \
+                     solo Int/Float/Str/Bool/Null. Bytes/List/Map/tipos custom \
+                     son follow-up dedicado de F13. Workaround: usar `fitz run`.",
+                    type_name(ty)
+                ),
+            ));
+        }
+    };
+    Ok(wrapped)
+}
+
 fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
     match t {
         Type::Int => Ok("i64".to_string()),
@@ -13588,16 +13828,14 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // T = Any (literal mixto sin contexto) → error explícito; el
         // subset compilable exige tipo homogéneo concreto.
         Type::List(inner) => {
+            // F13 SPIKE — `List<Any>` se mapea a `Vec<__FitzValue>`
+            // (tagged union). El helper `__FitzValue` se emite en
+            // el preludio cuando `uses_fitz_value = true`. El caller
+            // que decida usar este tipo debe setear el flag (`gen_expr`
+            // sobre `Expr::List` heterogéneo lo hace automáticamente).
+            // List<T> con T concreto sigue como `Vec<T>` (sin overhead).
             if matches!(**inner, Type::Any) {
-                return Err(FitzError::new(
-                    ErrorKind::TypeError,
-                    0,
-                    0,
-                    "listas con elementos de tipos mixtos (`List<Any>`): el subset compilado \
-                     necesita tipo homogéneo concreto. Anotá el tipo o usá `fitz run` para \
-                     interpretarlo sin restricción."
-                        .to_string(),
-                ));
+                return Ok("Arc<Mutex<Vec<__FitzValue>>>".to_string());
             }
             Ok(format!("Arc<Mutex<Vec<{}>>>", rust_type_for(inner, env)?))
         }
@@ -13995,7 +14233,12 @@ fn show_expr(code: &str, ty: &Type) -> String {
             s.push_str("__s.push(')'); __s }");
             s
         }
-        // Range, Any, Function — fallback. Si el AST cuela algo que llega
+        // F13 SPIKE — `Type::Any` con código `__FitzValue` (el wrapper
+        // que `wrap_as_fitz_value` produce). Display ya está
+        // implementado en el preludio, formato bit-a-bit con el
+        // intérprete (strings con comillas adentro de colecciones).
+        Type::Any => format!("format!(\"{{}}\", {})", code),
+        // Range, Function — fallback. Si el AST cuela algo que llega
         // acá, el error principal viene de otro lado.
         _ => format!("format!(\"{{:?}}\", {})", code),
     }
@@ -16140,12 +16383,54 @@ mod tests {
     }
 
     #[test]
-    fn list_literal_heterogeneo_es_error_homogeneo_requerido() {
-        // Sin posibilidad de unificar (Int + Str), el codegen aborta
-        // con mensaje claro mencionando la heterogeneidad.
-        assert_err_contains(
-            "let xs = [1, \"dos\"]",
-            &["homogénea"],
+    fn list_literal_heterogeneo_emite_fitz_value() {
+        // F13 SPIKE — `[1, "dos"]` heterogéneo ya no es error;
+        // emite `Vec<__FitzValue>` con cada item envuelto en su
+        // variante (`__FitzValue::Int(1)`, `__FitzValue::Str("dos")`).
+        // Antes del SPIKE el codegen abortaba "homogénea requerida".
+        let code = gen("let xs = [1, \"dos\"]").unwrap();
+        assert!(
+            code.contains("Vec<__FitzValue>"),
+            "esperaba tipo `Vec<__FitzValue>` para lista heterogénea, código:\n{}",
+            code
+        );
+        assert!(
+            code.contains("__FitzValue::Int(1i64)"),
+            "esperaba wrap `__FitzValue::Int(1i64)` para Int en lista heterogénea"
+        );
+        assert!(
+            code.contains("__FitzValue::Str(String::from"),
+            "esperaba wrap `__FitzValue::Str(...)` para Str en lista heterogénea"
+        );
+    }
+
+    #[test]
+    fn f13_spike_preludio_emite_fitz_value_enum() {
+        // F13 SPIKE — el enum `__FitzValue` aparece en el preludio
+        // cuando el programa tiene listas heterogéneas.
+        let code = gen("let xs = [1, \"dos\", true]").unwrap();
+        assert!(
+            code.contains("enum __FitzValue"),
+            "esperaba definición de `enum __FitzValue` en el preludio"
+        );
+        assert!(
+            code.contains("impl PartialEq for __FitzValue"),
+            "esperaba `impl PartialEq for __FitzValue`"
+        );
+        assert!(
+            code.contains("impl std::fmt::Display for __FitzValue"),
+            "esperaba `impl Display for __FitzValue`"
+        );
+    }
+
+    #[test]
+    fn f13_spike_lista_homogenea_no_emite_fitz_value() {
+        // Sanity: listas homogéneas siguen sin emitir el enum
+        // (cero overhead para el 90% del caso).
+        let code = gen("let xs = [1, 2, 3]").unwrap();
+        assert!(
+            !code.contains("enum __FitzValue"),
+            "lista homogénea NO debe gatillar emisión de `__FitzValue`"
         );
     }
 

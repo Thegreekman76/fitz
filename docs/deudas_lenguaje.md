@@ -1227,6 +1227,113 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~F13 SPIKE: design doc + prototipo mínimo de `FitzValue` (listas heterogéneas con primitivos)~~ ✓ CERRADO 2026-05-20 (mini-tanda F13 SPIKE)
+
+**ÚLTIMA deuda residual del bloque post-Fase-8**. Spike de diseño +
+prototipo mínimo que cierra el caso visible más común y deja el
+camino claro para el cierre completo. Después de esto, el bloque
+post-Fase-8 queda CERRADO ENTERO — todos los items residuales
+documentados están cerrados o tienen design doc + scope claro.
+
+**Decisión de alcance**: en lugar de cerrar F13 entero (~15-20h con
+riesgo alto de decisiones de diseño a mitad de camino), separamos
+en SPIKE (~2h) + follow-up (~10-15h). El SPIKE valida el approach
+con un caso real mínimo (listas heterogéneas de primitivos) y
+documenta el diseño en `docs/design-fitzvalue.md`.
+
+**Parte 1 — Design doc** (`docs/design-fitzvalue.md`):
+
+- Shape del enum `__FitzValue`: variantes Int/Float/Str/Bool/Null
+  (primitivos del SPIKE) + List/Map/Bytes/Nominal (follow-up).
+- Activación auto-detectada por el checker — `Type::List(Type::Any)`
+  triggerea emisión; listas homogéneas siguen emitiendo el tipo
+  concreto sin overhead.
+- Tradeoffs documentados: nominales via JSON intermedio (pierde
+  field access tipado en heterogéneos), method dispatch sobre
+  FitzValue postergado, Hash para Map keys solo primitivos.
+- Roadmap del follow-up (F13.A-E, ~10-15h total): Map heterogéneo,
+  Nominales, HTTP body con heterogéneos, method dispatch básico,
+  docs + ejemplos + smoke.
+
+**Parte 2 — Prototipo mínimo**:
+
+- ~~**`CodegenCtx.uses_fitz_value: bool`**~~ ✓ Nuevo flag, gating
+  paralelo a `uses_fmt_helpers`/`uses_python`. Solo se emite el
+  enum cuando el flag es true.
+- ~~**Pre-walker `program_uses_fitz_value(program)`**~~ ✓ Heurística
+  sintáctica conservadora: walka el AST detectando `Expr::List`
+  con items literales de tipos distintos (Int + Str + Bool, etc.).
+  Cubre el caso canónico `[1, "dos", true]`. Listas con elementos
+  calculados pueden no triggerear el preludio — limitación
+  aceptada (refinable post-SPIKE con un pase del checker).
+- ~~**`gen_list_lit` con sticky bit**~~ ✓ La regla existente del
+  `lub` colapsa `Any + T = T`, que arruina el SPIKE. Nueva
+  estructura: una vez que `lub` falla entre dos items, lockeamos
+  `common_ty = Type::Any` SIN llamar lub para el resto. Cuando
+  `common_ty == Any`, emite `Arc<Mutex<Vec<__FitzValue>>>` con
+  cada item wrappeado vía `wrap_as_fitz_value`.
+- ~~**`wrap_as_fitz_value(code, ty)`**~~ ✓ Helper que envuelve un
+  literal en su variante FitzValue. Tipos no cubiertos por el
+  SPIKE (Bytes, List, Map, Nominal, Function) → error claro con
+  prefijo "F13 SPIKE:" + workaround `fitz run`.
+- ~~**Preludio HTTP suma `enum __FitzValue`**~~ ✓ Cuando
+  `uses_fitz_value = true`, emite el enum + `impl Display`
+  (formato paralelo a `Value` del intérprete: strings con
+  comillas adentro de listas, Float con `.0` via `__fitz_fmt_float`)
+  + `impl PartialEq` (coerción Int↔Float, igualdad estructural
+  por variant).
+- ~~**`rust_type_for(Type::List(Type::Any))`**~~ ✓ Mapea a
+  `Arc<Mutex<Vec<__FitzValue>>>` (antes: error). Listas con T
+  concreto siguen como `Arc<Mutex<Vec<T>>>` (sin overhead).
+- ~~**`show_expr(Type::Any)`**~~ ✓ Cuando un Type::Any llega al
+  formatter (caso típico: item adentro de lista heterogénea), usa
+  `format!("{}", ...)` que invoca el Display impl del `__FitzValue`.
+
+**Tests**: **3 unit + 2 compile_e2e nuevos**:
+
+- 3 codegen unit:
+  `list_literal_heterogeneo_emite_fitz_value` (verifica wrap por
+  variant), `f13_spike_preludio_emite_fitz_value_enum` (verifica
+  emisión del enum + impls), `f13_spike_lista_homogenea_no_emite_fitz_value`
+  (sanity: cero overhead para homogéneo).
+- 2 compile_e2e:
+  `f13_spike_lista_heterogenea_compila_y_paridad_bit_a_bit`
+  (paridad bit-a-bit `fitz run` ↔ `fitz build` sobre listas
+  mixtas con todos los primitivos), `f13_spike_lista_con_tipo_no_soportado_aborta_con_msg_claro`
+  (Bytes en heterogéneo → error claro citando follow-up).
+- Test viejo `list_literal_heterogeneo_es_error_homogeneo_requerido`
+  removido y reemplazado por `list_literal_heterogeneo_emite_fitz_value`
+  (cambio intencional del behavior).
+
+**Cap 20 de la guía**: actualizado. El bullet "Listas/mapas
+heterogéneos" se splittea en dos: (a) mapas heterogéneos siguen
+como follow-up; (b) listas heterogéneas con primitivos AHORA
+COMPILAN (SPIKE). Bloque "sí anda y antes era deuda" suma F13
+SPIKE con link al design doc.
+
+**Total al cierre: 2036 unit sin feature, 2126 con --features lsp,
+249+ compile_e2e (2 nuevos − 0 obsoletos = +2), 75 ejemplos en
+smoke (sin cambio).** Clippy `-D warnings` limpio en lib + bin
+`fitz-lsp`.
+
+**Cierre formal del bloque post-Fase-8**: con F13 SPIKE cerrada,
+TODAS las deudas residuales del bloque están cerradas o tienen
+design doc + scope claro:
+
+- R-series, S, I, T, L, Md, It, Ex, Up, Mb-series, C, Fm, Err+,
+  Re+, Bits, Cmp, Xor, Núm, Lit, F8, F9, Mln, F14, F15, F16, Rt,
+  Lt, Math+Mb9, Fp, Sp, Vp, Vm, St, CM, Cd, HC.1, HC.2, LSPx,
+  LSPy, Hpx.1, Hpx.2, Mw.next, 5b.1, P2, P1, RP, MP, UC, HA, DZ,
+  CT, OAPI, MP2, MP-Build, Bytes, Mw-Wrap, F13 SPIKE — **todas
+  cerradas**.
+- F13 completo: design doc + roadmap del follow-up
+  (`docs/design-fitzvalue.md`) — refinable cuando entre demanda
+  real para el subset cubierto por el follow-up (Bytes/List/Map/
+  Nominal en heterogéneos, HTTP body con heterogéneos, etc.).
+- Próximo norte: **Fase 9.w** (Stack web first-class:
+  `@authenticated`/`@admin`, `@ws("/chat")`, `@cron`,
+  `@background`).
+
 ### ~~Mw-Wrap: wrap-style middleware con `next` callable (intérprete only)~~ ✓ CERRADO 2026-05-20 (mini-tanda Mw-Wrap)
 
 Cierra la deuda residual del modelo wrap-style middleware. El
