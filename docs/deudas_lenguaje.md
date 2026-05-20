@@ -1131,6 +1131,94 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Mw.next (post-process middleware) + Codegen 5b.1 (param type inference) + cleanup~~ ✓ CERRADO 2026-05-20 (mini-tanda Mw.next + 5b.1 + Cleanup)
+
+Mega-bundle pre-9.w. Cierra 2 deudas medianas + cleanup chico. Algunas
+partes quedan acotadas (codegen de Mw.next, combinación 5b.1+Hpx.2)
+documentadas como sub-paso futuro.
+
+**Parte 1 — Mw.next: middleware post-process**:
+
+- ~~**`fn mw(req, res) -> Response` para post-process**~~ ✓ Decisión
+  de diseño: en lugar de wrap-style con `next` callable (más invasivo,
+  requiere construir un callable Fitz desde Rust en runtime), se
+  implementó **post-process model** que cubre 80% del caso real
+  (timing, headers, logging post-handler). Diferencia: el middleware
+  no controla SI invocar el handler — siempre se invoca y el
+  middleware ve la response final.
+- ~~**`MiddlewareKind::{Pre, Post}` detectado por aridad**~~ ✓ 1 arg =
+  Pre (gate-only clásico); 2 args = Post (recibe `(Request, Response)`,
+  devuelve `Response`). Validado en `collect_middlewares` del
+  evaluator.
+- ~~**`run_post_middlewares` corre AFTER handler**~~ ✓ Reverse order de
+  registración (último registrado es el más interno, ve la response
+  primero). Cada Post recibe `(Request, Response)`, devuelve un
+  nuevo Response. Extra headers (CORS, etc.) se preservan entre
+  Post calls.
+- **Codegen Mw.next**: NO soportado todavía. `fitz build` rechaza
+  con mensaje claro si encuentra un Post middleware citando que el
+  intérprete (`fitz run`) sí lo soporta. Codegen es un refactor del
+  emit del wrapper (~3-4h adicional) — sub-paso futuro dedicado.
+
+**Parte 2 — Codegen 5b.1: param type inference**:
+
+- ~~**`fn greet(name) { ... }` infiere `name` desde call sites**~~ ✓
+  Estrategia "first call site": cuando un param no tiene anotación,
+  el codegen scanea el programa por `fn_name(args)` calls y consulta
+  el tipo del arg en posición `param_idx` via `TypeInfo`. Si el tipo
+  es concreto (no Any), usa eso como tipo del param.
+- ~~**Walker recursivo cubre If/Match/While/Loop/For/BinOp/List**~~ ✓
+  No se pierden call sites anidados en condiciones, branches, ni
+  args de otros calls.
+- **Limitación: combinación con Hpx.2**: si una fn sin anotar
+  params Y sin anotar return type tiene un body cuyo return type
+  depende del param (`fn double(n) { return n * 2 }`), Hpx.2 falla
+  porque vio el body con param como Any. **Workaround**: anotar
+  explícitamente el return type (`fn double(n) -> Int { return n * 2 }`),
+  o anotar el param. Documentado en cap 20 de la guía.
+
+**Parte 3 — Cleanup**:
+
+- D6 de `deudas-post-5b.md` (deudas duplicadas en cap 13 vs cap 18):
+  marcada CERRADA — las dos deudas originales (asignación a índice +
+  state HTTP) ya cerraron via R.1.3 y F11.
+
+**Implementación cross-cutting**:
+
+- **`http.rs`**: `MiddlewareKind` enum nuevo (Pre/Post). `MiddlewareSpec`
+  suma `kind: MiddlewareKind`. `run_middleware_chain` filtra Pre.
+  Nueva fn `run_post_middlewares` corre Post en reverse order después
+  del handler. `handle_task` invoca `run_post_middlewares` post-handler.
+- **`evaluator.rs::collect_middlewares`**: detecta aridad (1 vs 2) y
+  setea `MiddlewareSpec.kind`. Aridad 0 o ≥3 → error claro.
+- **`codegen.rs`**: nuevo helper `infer_param_type_from_call_sites`
+  que scanea el program por calls a una fn y consulta TypeInfo en el
+  arg correspondiente. `resolve_param_type` lo usa como fallback antes
+  de rechazar. `collect_route_middlewares` detecta post-mws (2 args) y
+  rechaza con error claro citando "sub-paso futuro" para `fitz build`.
+- **`pre_register_fns` enumera params** para pasar `param_idx` a
+  `resolve_param_type`.
+
+**VSCode extension**: SIN cambios. Server-side improvements.
+
+**Tests**: **4 unit nuevos** (2 Mw.next en `http::tests::mwnext_*` + 2 5b.1
+en compile_e2e). Total al cierre: **1979 sin feature, 2069 con
+--features lsp**. Clippy `-D warnings` limpio en lib + bin
+`fitz-lsp`.
+
+**Deuda residual (NO bloquea 9.w)**:
+
+- **Mw.next codegen**: post-mws no compilan todavía en `fitz build`.
+  Sub-paso futuro dedicado.
+- **Mw.next wrap-style con `next` callable**: el modelo "fn(req, next)"
+  donde el middleware controla la invocación del handler queda
+  comprometido como sub-paso futuro si entra demanda real. ~6-8h
+  porque requiere construir un callable Fitz desde Rust en runtime.
+- **5b.1 + Hpx.2 combinados**: cuando AMBOS param y return type están
+  sin anotar y el return depende del param tipo, falla por order de
+  ejecución (Hpx.2 corre con TypeInfo donde param es Any). Workaround:
+  anotar al menos el return type.
+
 ### ~~HTTP polish: Content-Type 415 + Return type inference + cleanup~~ ✓ CERRADO 2026-05-20 (mini-tanda Hpx.1 + Hpx.2 + Cleanup)
 
 Mini-tanda de polish HTTP pre-9.w. Cierra 2 deudas residuales que
@@ -1833,12 +1921,15 @@ TextMate sin cambios; LSP autocomplete refleja todo via rebuild.
 
 **Deuda residual menor** (NO bloquea):
 
-- **Middleware con `next` callable (post-process)**: sigue siendo
-  sub-paso futuro dedicado. Cambia el shape de la cadena de
-  middlewares (gate vs wrap es un cambio fundamental); requiere
-  sintaxis nueva del callback binario (`fn(req, next) -> Response`)
-  y reimplementar la cadena. Sin presión real hoy — el modelo
-  gate-only cubre el 80% de los casos. Alcance ~6-8h aparte.
+- ~~**Middleware con `next` callable (post-process)**~~ ✓
+  PARCIALMENTE CERRADO 2026-05-20 (mini-tanda Mw.next). Implementado
+  **post-process model**: middlewares de 2 args `(Request, Response)`
+  corren después del handler, en reverse order. Cubre headers,
+  logging, modificación de body. Soportado en `fitz run`; `fitz
+  build` rechaza con mensaje claro (sub-paso futuro). El modelo
+  **wrap-style con `next` callable** (donde el middleware controla
+  la invocación del handler) queda como sub-paso separado — requiere
+  construir un Fitz callable desde Rust en runtime.
 - **Stubs `.pyi` parseados** (interop Python): requiere parser
   separado para archivos `.pyi` + integración con el bridge Python.
   Refactor grande. La interop Python actual funciona como `PyAny`
@@ -2018,12 +2109,12 @@ cambios (los métodos son identifiers genéricos; `async` ya es
 keyword); LSP autocomplete refleja todo via rebuild del `fitz-lsp`.
 
 **Deuda residual menor** (NO bloquea):
-- **Middleware con `next` callable (post-process)**: hoy los
-  middlewares son gate-only (return null → continúa, return status
-  → short-circuit). El modelo wrap-style donde el middleware
-  recibe `next` y puede hacer post-process es invasivo (cambia el
-  shape de la cadena de middlewares + sintaxis nueva del callback
-  binario). Sub-paso futuro dedicado — alcance ~4-6h aparte.
+- ~~**Middleware con `next` callable (post-process)**~~ ✓ PARCIALMENTE
+  CERRADO 2026-05-20 (mini-tanda Mw.next). Post-process model
+  (2-arg middleware que recibe `(Request, Response)`) funciona en
+  `fitz run`; `fitz build` queda como sub-paso futuro. El modelo
+  wrap-style con `next` callable sigue diferido — requiere refactor
+  invasivo (~6-8h).
 - ~~**`Err` con status fuera de 100..1000**~~ ✓ CERRADO 2026-05-20
   (mini-tanda HC.1). Ya no cae silenciosamente a 500 con `{"error":
   e}`. Emite 500 + body con mensaje explícito citando el status

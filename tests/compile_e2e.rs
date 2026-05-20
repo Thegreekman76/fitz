@@ -4717,6 +4717,32 @@ fn sp2_return_en_match_arm_compila() {
     assert_eq!(stdout.trim(), "cero\nchico\ngrande");
 }
 
+// ---- Mini-tanda 5b.1 — param type inference desde call sites ----
+
+#[test]
+fn fp_5b1_param_sin_anotar_se_infiere_desde_call_site() {
+    let src = "fn greet(name) {\n\
+                   return \"Hola, {name}\"\n\
+               }\n\
+               print(greet(\"Fitz\"))\n";
+    let (stdout, exit) = build_and_run("fp_5b1_str", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "Hola, Fitz");
+}
+
+#[test]
+fn fp_5b1_param_int_se_infiere_con_return_anotado() {
+    // Cuando el return type está anotado pero el param no,
+    // 5b.1 infiere el param sin colidir con Hpx.2.
+    let src = "fn double(n) -> Int {\n\
+                   return n * 2\n\
+               }\n\
+               print(double(21))\n";
+    let (stdout, exit) = build_and_run("fp_5b1_int", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "42");
+}
+
 // ---- Mini-tanda Hpx.2 — return type inference en handlers ------
 
 #[test]

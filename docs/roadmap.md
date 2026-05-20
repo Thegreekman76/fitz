@@ -6869,6 +6869,39 @@ apuesta del bloque conceptualmente.
   - ¿Migraciones reversibles?
 - Ver "Visión post-Fase 9" abajo para Fase 10 completa.
 
+#### 9.w iteración 2 (post-Fase 10) — endurecimiento para servicios críticos
+
+**Estado: PENDIENTE.** Diseño detallado se hace al arrancar, no
+ahora — diseñarlo hoy sería doble especulación (Fase 10 también
+es especulativa y su storage backend afecta directo cómo se hace
+persistencia).
+
+**Pre-requisito**: storage backend nativo de Fase 10 cerrado
+(driver Postgres + pool de conexiones + ORM básico). Sin DB
+nativa, sessions persistentes y jobs persistentes seguirían
+dependiendo de SQLAlchemy/Redis externos — contradice la
+filosofía "stack en el lenguaje" de 9.w.
+
+**Items comprometidos como post-MVP en 9.w** (ya marcados en sus
+sub-pasos correspondientes — esta sección es índice findable, no
+re-diseño):
+
+- **Sessions cookie-based** como alternativa a JWT — ver 9.w.1.
+  Requiere DB nativa para session store server-side.
+- **RBAC con roles custom** más allá de `@authenticated`/`@admin`
+  — ver 9.w.1. Modelo de permisos pluggable.
+- **Persistencia de jobs** sobre DB nativa (retry tras crash,
+  visibility de jobs) — ver 9.w.3. Reemplaza el queue in-memory
+  del MVP.
+- **WebSocket binary messages** (no solo JSON) — ver decisiones
+  globales del bloque.
+
+**Cuándo arrancar**: cuando aparezca proyecto real en Fitz que
+choque con las limitaciones del MVP (sesión que expire mal, job
+que se pierda en deploy, etc.). Sin presión real, no hay rush —
+9.w MVP cubre el caso típico de "API CRUD con login + tareas de
+mantenimiento" que es el 80% del uso esperado.
+
 ### Próximo norte tras 9.w
 
 **Fase 10** arranca con el stack DB nativo (driver Postgres puro

@@ -3841,7 +3841,10 @@ impl<'a> CodegenCtx<'a> {
                 let fn_span = stmt.span();
                 let params_tys: Vec<Type> = params
                     .iter()
-                    .map(|p| self.resolve_param_type(name, &p.name, p.type_.as_ref(), fn_span))
+                    .enumerate()
+                    .map(|(i, p)| self.resolve_param_type(
+                        name, &p.name, p.type_.as_ref(), fn_span, i, program,
+                    ))
                     .collect::<Result<_, _>>()?;
                 let inner_ret = match return_type {
                     Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
@@ -3893,6 +3896,8 @@ impl<'a> CodegenCtx<'a> {
         param_name: &str,
         type_: Option<&TypeExpr>,
         fn_span: crate::ast::Span,
+        param_idx: usize,
+        program: &Program,
     ) -> Result<Type, FitzError> {
         match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
@@ -3906,10 +3911,25 @@ impl<'a> CodegenCtx<'a> {
                     ),
                 )
             }),
-            None => Err(self.err_at(fn_span, format!(
-                "fn `{}`: el parámetro `{}` necesita una anotación de tipo para el codegen (5b.1)",
-                fn_name, param_name
-            ))),
+            // Mini-tanda 5b.1 — inferencia de tipos de params para fns
+            // sin anotación. Estrategia "first call site": scan el
+            // programa por `fn_name(args)` calls; del primer call
+            // encontrado, consultar el tipo del arg `param_idx` en
+            // TypeInfo. Si el tipo es concreto, usarlo. Sino, error
+            // claro con sugerencia.
+            None => {
+                if let Some(inferred) = infer_param_type_from_call_sites(
+                    program, fn_name, param_idx, self.type_info,
+                ) {
+                    return Ok(inferred);
+                }
+                Err(self.err_at(fn_span, format!(
+                    "fn `{}`: el parámetro `{}` necesita una anotación de tipo (5b.1) — \
+                     el codegen no pudo inferirlo desde call sites. Workaround: anotar \
+                     manualmente (`{}: Str`, `{}: Int`, etc.).",
+                    fn_name, param_name, param_name, param_name,
+                )))
+            }
         }
     }
 
@@ -10501,6 +10521,24 @@ impl<'a> CodegenCtx<'a> {
                             n, fn_name
                         )));
                     }
+                    // Mini-tanda Mw.next — detectar post-middlewares
+                    // (2 args) y rechazar en codegen. El intérprete
+                    // ya los soporta (`fitz run`); `fitz build` queda
+                    // como sub-paso futuro dedicado por el invasivo
+                    // refactor del emit del wrapper.
+                    let mw_arity = self.fn_sigs
+                        .get(n.as_str())
+                        .map(|s| s.params.len())
+                        .unwrap_or(1);
+                    if mw_arity == 2 {
+                        return Err(self.err(format!(
+                            "@middleware(`{}`) sobre fn `{}`: middleware post-process \
+                             (2 args: `(Request, Response)`) no compila en `fitz build` \
+                             todavía — corre OK en `fitz run`. Sub-paso futuro de Mw.next \
+                             para codegen.",
+                            n, fn_name
+                        )));
+                    }
                     user_fns.push(n.clone());
                 }
                 // cors(...) build-time
@@ -12293,6 +12331,123 @@ fn collect_captures_expr(
             collect_captures_expr(value, params, locals, ctx, seen, out);
         }
     }
+}
+
+/// Mini-tanda 5b.1 — infiere el tipo de un param de una fn sin
+/// anotación, buscando el primer call site `fn_name(...)` en el
+/// programa y consultando el tipo del arg en posición `param_idx` via
+/// `TypeInfo`. Si el tipo es concreto (no Any), devuelve Some. Si no
+/// hay call site o el tipo es Any, devuelve None.
+///
+/// Estrategia simple "first call site": cubre 80% del caso real
+/// (fns helper que se llaman con literales o vars tipadas). Casos no
+/// cubiertos: fns sin call site, args dinámicos, recursión sin caso
+/// base — el codegen reporta error con sugerencia de anotar.
+fn infer_param_type_from_call_sites(
+    program: &Program,
+    fn_name: &str,
+    param_idx: usize,
+    type_info: &crate::types::TypeInfo,
+) -> Option<Type> {
+    fn walk_stmts(
+        stmts: &[Stmt],
+        fn_name: &str,
+        param_idx: usize,
+        type_info: &crate::types::TypeInfo,
+    ) -> Option<Type> {
+        for stmt in stmts {
+            if let Some(t) = walk_stmt(stmt, fn_name, param_idx, type_info) {
+                return Some(t);
+            }
+        }
+        None
+    }
+    fn walk_stmt(
+        stmt: &Stmt,
+        fn_name: &str,
+        param_idx: usize,
+        type_info: &crate::types::TypeInfo,
+    ) -> Option<Type> {
+        match stmt {
+            Stmt::Expr(e, _)
+            | Stmt::Return(e, _)
+            | Stmt::Assign { value: e, .. } => walk_expr(e, fn_name, param_idx, type_info),
+            Stmt::While { body, .. }
+            | Stmt::Loop { body, .. }
+            | Stmt::For { body, .. } => walk_stmts(body, fn_name, param_idx, type_info),
+            Stmt::FnDef { body, .. } => walk_stmts(body, fn_name, param_idx, type_info),
+            _ => None,
+        }
+    }
+    fn walk_expr(
+        expr: &Expr,
+        fn_name: &str,
+        param_idx: usize,
+        type_info: &crate::types::TypeInfo,
+    ) -> Option<Type> {
+        match expr {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(n, _) = callee.as_ref() {
+                    if n == fn_name && param_idx < args.len() {
+                        // Found a call site. Get type of arg at param_idx.
+                        let arg_expr = &args[param_idx];
+                        if let Some(t) = type_info.type_at(arg_expr.span()) {
+                            if !matches!(t, Type::Any) {
+                                return Some(t.clone());
+                            }
+                        }
+                    }
+                }
+                // Recursar en args y callee.
+                if let Some(t) = walk_expr(callee, fn_name, param_idx, type_info) {
+                    return Some(t);
+                }
+                for arg in args {
+                    if let Some(t) = walk_expr(arg, fn_name, param_idx, type_info) {
+                        return Some(t);
+                    }
+                }
+                None
+            }
+            Expr::If { condition, then, else_, .. } => {
+                if let Some(t) = walk_expr(condition, fn_name, param_idx, type_info) {
+                    return Some(t);
+                }
+                if let Some(t) = walk_stmts(then, fn_name, param_idx, type_info) {
+                    return Some(t);
+                }
+                if let Some(els) = else_ {
+                    return walk_stmts(els, fn_name, param_idx, type_info);
+                }
+                None
+            }
+            Expr::Match { value, arms, .. } => {
+                if let Some(t) = walk_expr(value, fn_name, param_idx, type_info) {
+                    return Some(t);
+                }
+                for arm in arms {
+                    if let Some(t) = walk_stmts(&arm.body, fn_name, param_idx, type_info) {
+                        return Some(t);
+                    }
+                }
+                None
+            }
+            Expr::BinOp { left, right, .. } => {
+                walk_expr(left, fn_name, param_idx, type_info)
+                    .or_else(|| walk_expr(right, fn_name, param_idx, type_info))
+            }
+            Expr::List(items, _) => {
+                for it in items {
+                    if let Some(t) = walk_expr(it, fn_name, param_idx, type_info) {
+                        return Some(t);
+                    }
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+    walk_stmts(program, fn_name, param_idx, type_info)
 }
 
 /// Mini-tanda Hpx.2 — infiere el return type de una fn walkeando el

@@ -6868,12 +6868,14 @@ usaban `Rc<RefCell<>>` no-Send. F17 migró los containers a
   otro Content-Type recibe 415 con mensaje claro (mini-tanda
   Hpx.1). Multipart queda como sub-paso futuro cuando aparezca
   presión real.
-- **Middleware `next` (post-process)** — hoy los middlewares son
-  gate-only (`return null` continúa, `return status { ... }`
-  short-circuit). Modelo wrap con `next` callable para medir
-  tiempos / agregar headers después del handler queda como
-  sub-paso futuro dedicado (~6-8h, requiere chain composition
-  recursiva con `next` callable Fitz).
+- **Middleware wrap-style con `next` callable** — el modelo donde
+  el middleware controla la invocación del handler (`fn mw(req,
+  next) -> Response`) queda como sub-paso futuro. Sí está
+  soportado el modelo **post-process** desde mini-tanda Mw.next:
+  un middleware con 2 args `(Request, Response)` corre DESPUÉS
+  del handler y puede modificar el body, agregar headers, etc.
+  (`fitz run` only — `fitz build` queda como sub-paso futuro
+  adicional ~3-4h).
 
 > Lo que **sí anda** y antes era deuda residual: **status codes
 > custom fuera de 100..1000** ya no caen silenciosamente a 500 —
@@ -7669,11 +7671,14 @@ misma instancia.
 
 Cosas que sí corren con `fitz run` pero todavía no compilan:
 
-- **Funciones sin anotar params** — `fn greet(name)` corre en el
-  intérprete (el tipo se infiere desde el body). El compilador
-  exige `fn greet(name: Str)`. Workaround: anotar los params. (El
-  return type SÍ se infiere — `fn greet(name: Str) { return ... }`
-  funciona sin `-> Str` desde mini-tanda Hpx.2.)
+- **Funciones sin anotar params (con limitaciones)** — `fn greet(name)`
+  corre en el intérprete (el tipo se infiere desde el body). El
+  compilador desde mini-tanda 5b.1 también infiere `name` desde
+  call sites (`greet("Fitz")` → `name: Str`). **Limitación**: si
+  TANTO param COMO return type están sin anotar Y el return depende
+  del param (`fn double(n) { return n * 2 }`), el codegen falla.
+  Workaround: anotar al menos el return type (`fn double(n) -> Int { ... }`),
+  o anotar el param (`fn double(n: Int) { ... }`).
 - **Listas/mapas heterogéneos** — `[1, "dos", true]` corre en el
   intérprete (cada item conserva su tipo). El compilador exige
   homogéneo (`List<Int>`, `Map<Str, Int>`, etc.) porque Rust no

@@ -822,10 +822,27 @@ async fn collect_middlewares(
             _ => "<expr>".to_string(),
         };
         match value {
-            Value::Function { .. } => {
+            Value::Function { ref params, .. } => {
+                // Mw.next — detectar kind por aridad:
+                //   1 arg → Pre (gate-only, clásico).
+                //   2 args → Post (post-process, recibe Response).
+                let kind = match params.len() {
+                    1 => crate::http::MiddlewareKind::Pre,
+                    2 => crate::http::MiddlewareKind::Post,
+                    n => {
+                        return Err(err(format!(
+                            "@middleware sobre fn '{}': la fn referenciada ({}) debe \
+                             tener 1 o 2 parámetros (1 = pre-process clásico que recibe \
+                             `Request`; 2 = post-process que recibe `(Request, Response)`); \
+                             tiene {}",
+                            fn_name, label, n,
+                        )));
+                    }
+                };
                 middlewares.push(MiddlewareSpec {
                     name: label,
                     handler: value,
+                    kind,
                 });
             }
             Value::CorsConfig(config) => {

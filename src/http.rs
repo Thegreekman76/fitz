@@ -152,10 +152,36 @@ pub struct RouteSpec {
 /// que el value sea callable (clon barato del `Rc` adentro). El
 /// `name` es el identificador con el que el usuario lo referenció
 /// en `@middleware(...)`, solo para mensajes de error/log.
+/// Mini-tanda Mw.next — kind del middleware. Determinado por la
+/// aridad del Value::Function en `collect_middlewares`:
+///
+///   - **Pre (1 arg)**: gate-only clásico. Recibe `Request`, devuelve
+///     `null` para continuar o `Response` para short-circuit. NO ve
+///     la response final.
+///   - **Post (2 args)**: post-process. Corre DESPUÉS del handler.
+///     Recibe `(Request, Response)`, devuelve `Response`. Permite
+///     agregar headers, modificar el body, etc. Si varios post-mws
+///     existen, corren en orden INVERSO al de registración (semántica
+///     de wrap: el último registrado es el más interno, ve la
+///     response primero).
+///
+/// Decisión vs wrap-style con `next` callable: el modelo wrap exigiría
+/// construir un `next` callable Fitz desde Rust en runtime (refactor de
+/// 6-8h con Value variant nuevo). Post-process cubre 80% de los casos
+/// reales (timing, headers, logging post-handler) y es self-contained.
+/// El caso restante — wrap puro para catch panics o pre+post enlazado
+/// en una sola fn — queda como sub-paso futuro.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MiddlewareKind {
+    Pre,
+    Post,
+}
+
 #[derive(Debug, Clone)]
 pub struct MiddlewareSpec {
     pub name: String,
     pub handler: Value,
+    pub kind: MiddlewareKind,
 }
 
 /// Mini-fase Q.3 + mini-tanda HTTP-Cors: la política de
@@ -1677,7 +1703,9 @@ async fn run_middleware_chain(
     middlewares: &[MiddlewareSpec],
     request: &Value,
 ) -> Option<HandlerOutcome> {
-    for mw in middlewares {
+    // Mw.next — solo corremos los Pre (gate-only) en este path. Los
+    // Post se procesan en `run_post_middlewares` después del handler.
+    for mw in middlewares.iter().filter(|m| m.kind == MiddlewareKind::Pre) {
         let args = vec![request.clone()];
         let label = format!("middleware {}", mw.name);
         match call_handler(mw.handler.clone(), args, &label).await {
@@ -1710,6 +1738,81 @@ async fn run_middleware_chain(
         }
     }
     None
+}
+
+/// Mw.next — corre los middlewares Post (2 args) en orden INVERSO al
+/// de registración (semántica de wrap: el último registrado es el más
+/// interno, ve la response primero). Cada Post recibe `(Request,
+/// Response)` y devuelve un `Response`. La Response actual se
+/// representa como `Value::HttpResponse { status, body }` construido
+/// desde el `HandlerOutcome` previo. La response final retorna como
+/// HandlerOutcome.
+///
+/// Errores: si un Post no devuelve `Value::HttpResponse`, error 500
+/// claro citando el middleware. Si la chain está vacía o no hay Post
+/// mws, devuelve el outcome original sin cambios.
+async fn run_post_middlewares(
+    middlewares: &[MiddlewareSpec],
+    request: &Value,
+    mut outcome: HandlerOutcome,
+) -> HandlerOutcome {
+    let post_mws: Vec<&MiddlewareSpec> = middlewares
+        .iter()
+        .filter(|m| m.kind == MiddlewareKind::Post)
+        .collect();
+    if post_mws.is_empty() {
+        return outcome;
+    }
+    // Construir el Value::HttpResponse inicial. El body se parsea desde
+    // el JSON del outcome. Si el body no es JSON válido (caso raro), lo
+    // pasamos como Str crudo.
+    for mw in post_mws.iter().rev() {
+        let body_value: Option<Box<Value>> =
+            serde_json::from_str::<serde_json::Value>(&outcome.body)
+                .ok()
+                .map(|j| Box::new(json_to_value(&j)));
+        let response_value = Value::HttpResponse {
+            status: outcome.status,
+            body: body_value,
+        };
+        let args = vec![request.clone(), response_value];
+        let label = format!("middleware post '{}'", mw.name);
+        match call_handler(mw.handler.clone(), args, &label).await {
+            Ok(Value::HttpResponse { status, body }) => {
+                let payload_json = match body {
+                    Some(b) => match value_to_json(b.as_ref()) {
+                        Ok(j) => j,
+                        Err(msg) => return HandlerOutcome::internal_error(msg),
+                    },
+                    None => serde_json::Value::Null,
+                };
+                // Preservar headers existentes (CORS, custom ya
+                // inyectados); el Post-mw puede sumar headers via
+                // un campo adicional `extra_headers` futuro (deuda
+                // residual). Por ahora, el post-mw decide status +
+                // body, los extra_headers se preservan del outcome
+                // previo.
+                let prev_extras = std::mem::take(&mut outcome.extra_headers);
+                outcome = HandlerOutcome::json(status, payload_json);
+                outcome.extra_headers = prev_extras;
+            }
+            Ok(other) => {
+                return HandlerOutcome::internal_error(format!(
+                    "middleware post '{}' devolvió un valor inesperado ({}); \
+                     debe devolver `Response` (un `return <status> {{ ... }}`)",
+                    mw.name,
+                    other.type_name(),
+                ));
+            }
+            Err(err) => {
+                return HandlerOutcome::internal_error(format!(
+                    "middleware post '{}' falló: {}",
+                    mw.name, err.message,
+                ));
+            }
+        }
+    }
+    outcome
 }
 
 /// Procesa un único task. Aislado del loop para testearlo sin canal.
@@ -1877,6 +1980,21 @@ async fn handle_task(
         Ok(value) => value_to_outcome(&value),
         Err(err) => HandlerOutcome::internal_error(err.message),
     };
+
+    // Mw.next — correr los post-middlewares (kind = Post, 2-arg)
+    // DESPUÉS del handler. Reciben `(Request, Response)` y pueden
+    // modificar el body o agregar headers. Si hay middlewares Pre que
+    // short-circuit, este path no corre (ya retornamos arriba con la
+    // response del Pre).
+    if route.middlewares.iter().any(|m| m.kind == MiddlewareKind::Post) {
+        let request = build_request_value(
+            route.method,
+            &route.path,
+            &raw_path_params,
+            &raw_headers,
+        );
+        outcome = run_post_middlewares(&route.middlewares, &request, outcome).await;
+    }
 
     // MW.2: si la ruta declara CORS, agregar los headers
     // `Access-Control-Allow-*` a la response real. Incluido en
@@ -4144,6 +4262,77 @@ mod tests {
             headers,
         ).await;
         assert_eq!(outcome.status, 200);
+    }
+
+    // ---- Mini-tanda Mw.next — middleware post-process ----
+
+    fn make_mw_post(name: &str) -> MiddlewareSpec {
+        // Constructor minimal de un middleware Post (2 args).
+        // Body: `return 200 { "wrapped": true }`.
+        let handler = Value::Function {
+            params: vec![
+                crate::ast::Param {
+                    name: "req".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false,
+                },
+                crate::ast::Param {
+                    name: "res".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false,
+                },
+            ],
+            body: vec![crate::ast::Stmt::ReturnStatus {
+                status: crate::ast::Expr::Int(200, crate::ast::Span::ZERO),
+                body: Some(crate::ast::Expr::Map(
+                    vec![(
+                        crate::ast::Expr::Str("wrapped".into(), crate::ast::Span::ZERO),
+                        crate::ast::Expr::Bool(true, crate::ast::Span::ZERO),
+                    )],
+                    crate::ast::Span::ZERO,
+                )),
+                span: crate::ast::Span::ZERO,
+            }],
+            closure: crate::env::Environment::new(),
+            is_async: false,
+        };
+        MiddlewareSpec {
+            name: name.into(),
+            handler,
+            kind: MiddlewareKind::Post,
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mwnext_post_middleware_modifica_response() {
+        let request = build_request_value(
+            HttpMethod::Get,
+            "/test",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        let original = HandlerOutcome::json(200, serde_json::json!({"original": true}));
+        let mws = vec![make_mw_post("wrapper")];
+        let outcome = run_post_middlewares(&mws, &request, original).await;
+        assert_eq!(outcome.status, 200);
+        assert!(outcome.body.contains("wrapped"), "esperaba body con `wrapped`, fue: {}", outcome.body);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn mwnext_post_middleware_sin_post_no_modifica() {
+        let request = build_request_value(
+            HttpMethod::Get,
+            "/test",
+            &std::collections::HashMap::new(),
+            &std::collections::HashMap::new(),
+        );
+        let original = HandlerOutcome::json(200, serde_json::json!({"original": true}));
+        let mws: Vec<MiddlewareSpec> = vec![]; // empty
+        let outcome = run_post_middlewares(&mws, &request, original.clone()).await;
+        assert_eq!(outcome.status, original.status);
+        assert_eq!(outcome.body, original.body);
     }
 
     #[tokio::test(flavor = "current_thread")]
