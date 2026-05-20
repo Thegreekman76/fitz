@@ -13,7 +13,46 @@ formales; cada bump corresponde al cierre de una Fase del roadmap.
 
 En curso: ver `docs/roadmap.md` para el plan vigente. **Package
 manager (9.y.1 + 9.y.2 + 9.y.3 entera + 9.y.4) CERRADOS**, **9.z
-(DX) ENTERA CERRADA**, y **refresh masivo de docs ENTERO CERRADO**.
+(DX) ENTERA CERRADA**, **refresh masivo de docs ENTERO CERRADO**,
+y **bloque entero de mini-tandas post-Fase 8 cerrado**: ~25
+mini-tandas en 4 días (2026-05-17 → 2026-05-20) llevaron el
+lenguaje + LSP + HTTP a estado pulido. Highlights:
+
+- **R-series, S, Mb-series, Math+Mb9**: ~40+ métodos chicos sobre
+  primitivos y colecciones.
+- **Bits/Núm/Lit/F8/F9/Fmt-build**: operadores de bit, separadores
+  numéricos, hex/bin/oct, identifiers Unicode, escapes extendidos,
+  format specs en codegen.
+- **Cd/F11-F19**: codegen polish completo — higher-order, state
+  HTTP shared, módulos transitivos, error recovery del parser,
+  IR tipado per nodo, codegen interop Python.
+- **HTTP polish bundle** (HC, Hpx.1/2, Mw.next, RP/MP/P1, UC/HA):
+  status codes custom, Content-Type 415, return type inference,
+  post-process middleware, urlencoded body completo, msg alignment.
+- **DZ/CT/OAPI**: paridad chica run↔build (división por cero,
+  comparar tipos distintos) + status codes con consts.
+- **MP2/MP-Build + File.content Bytes**: multipart con files
+  binarios end-to-end (paridad bit-a-bit).
+- **Bytes**: sexto primitivo del lenguaje (`b"..."` con escapes
+  `\xHH`, métodos `.len()`/`.is_empty()`/`.to_str()`, builtin
+  `bytes(s)`, base64 en JSON).
+- **Mw-Wrap**: wrap-style middleware con `next` callable
+  (intérprete; codegen es la única deuda visible restante).
+- **F13 entero**: heterogéneos en `fitz build` con
+  `__FitzValue` tagged runtime — primitivos, Bytes, Nominales,
+  List/Map heterogéneo, anidados con mix interno, HTTP body
+  `List<Any>`/`Map<Str, Any>`, method dispatch dinámico
+  (`.as_int()`/`.as_str()`/`.type_name()`). 95%+ del lenguaje
+  compila a binario nativo con paridad bit-a-bit.
+- **OAPI-Expr**: status codes con const-eval recursivo (BinOp +
+  UnaryOp::Neg sobre consts encadenadas).
+- **LSPx/LSPy + cross-module go-to-def + scope-aware completion**.
+
+Total al cierre del bloque: **2045 unit sin feature, 2135 con
+--features lsp, 250+ compile_e2e**, 77 ejemplos guía. Clippy
+`-D warnings` limpio. Detalle exhaustivo en
+[`docs/deudas_lenguaje.md`](docs/deudas_lenguaje.md) y
+[`docs/design-fitzvalue.md`](docs/design-fitzvalue.md) (F13).
 
 Próximo norte: **9.w** (Stack web first-class — `@authenticated`,
 `@ws`, `@cron`, `@background`).

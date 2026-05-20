@@ -445,8 +445,32 @@ recovery, IR tipado, codegen interop Python), **Fp+Sp/Fp.2/Fp.3/Sp.2**
 (HTTP polish + LSP cross-module go-to-def), **LSPy** (Range exacto +
 scope-aware autocomplete), **Hpx.1/Hpx.2** (Content-Type 415 + return
 type inference), **Mw.next/5b.1/P2** (post-process middleware + param
-type inference + chained fix). **~2070 unit tests + ~230 compile_e2e**
-al cierre. Detalle en [docs/deudas_lenguaje.md](docs/deudas_lenguaje.md).
+type inference + chained fix), **RP/MP** (Result+post mws codegen +
+urlencoded body), **P1** (Mw.next codegen), **UC/HA** (urlencoded
+codegen + 415 msg alignment), **DZ/CT/OAPI** (división por cero +
+comparar tipos distintos + status codes con consts), **MP2/MP-Build**
+(multipart en intérprete + paridad bit-a-bit en codegen),
+**Bytes** (sexto primitivo del lenguaje con literal `b"..."`),
+**Mw-Wrap** (wrap-style middleware con `next` callable, intérprete),
+**F13 SPIKE/A/B/C/D/E** (heterogéneos completos en `fitz build`:
+primitivos + Bytes + Nominales + Map heterogéneo + anidados con mix
+interno + HTTP body `List<Any>`/`Map<Str, Any>` + method dispatch
+dinámico `.as_int()`/`.type_name()`), **OAPI-Expr** (status codes
+con const-eval recursivo), **File.content Bytes** (uploads binarios
+con multipart). **2045 unit + 250+ compile_e2e** sin feature, **2135
+unit con --features lsp** al cierre. Detalle en
+[docs/deudas_lenguaje.md](docs/deudas_lenguaje.md) y
+[docs/design-fitzvalue.md](docs/design-fitzvalue.md) (F13 design).
+
+**Estado del bloque post-Fase-8**: 95%+ del lenguaje compila a
+binario nativo con paridad bit-a-bit `fitz run` ↔ `fitz build`.
+**Única deuda residual visible**: Mw-Wrap codegen (wrap-style
+middleware con `next` callable en `fitz build`) — `fitz run` ya lo
+cubre end-to-end; el codegen rechaza con msg claro citando
+`fitz run` como workaround. Implementarlo en codegen requiere
+emitir cierres Rust con tipos `Arc<dyn Fn() -> Pin<Box<dyn Future
++ Send>>>` con captura recursiva (~2-3h dedicados). Sin presión
+real hoy.
 
 **Fase 9 (Ecosistema) — pre-reqs LSP (F15 + F16) y LSP MVP entero
 CERRADOS (2026-05-15/16)**: error recovery del parser, side-table

@@ -1784,7 +1784,7 @@ el usuario puede construir/manipular bytes sin tocar el path HTTP.
 - 1 compile_e2e `bytes_paridad_bit_a_bit_run_vs_build` (ejecuta ambos
   paths y compara stdout línea a línea).
 
-**Ejemplo nuevo**: `examples/guide/05c-bytes.fitz` con literal, escapes,
+**Ejemplo nuevo**: `examples/guide/05e-bytes.fitz` con literal, escapes,
 métodos, constructor, comparación bit-a-bit, integración con List.
 Sumado al smoke `GUIDE_EXAMPLES_COMPILE`.
 

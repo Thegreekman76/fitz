@@ -1055,7 +1055,17 @@ fn after_dot_completions(
             // Mini-tanda Rg — step_by(n) materializa con step.
             ("step_by", "fn(n: Int) -> List<Int>".into()),
         ]),
-        // Any, PyAny y resto: sin info para sugerir.
+        // F13.D — methods universales sobre `Type::Any` para
+        // type-check dinámico en heterogéneos.
+        Type::Any => method_items(&[
+            ("as_int", "fn() -> Result<Int>".into()),
+            ("as_float", "fn() -> Result<Float>".into()),
+            ("as_str", "fn() -> Result<Str>".into()),
+            ("as_bool", "fn() -> Result<Bool>".into()),
+            ("as_bytes", "fn() -> Result<Bytes>".into()),
+            ("type_name", "fn() -> Str".into()),
+        ]),
+        // PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }
 }

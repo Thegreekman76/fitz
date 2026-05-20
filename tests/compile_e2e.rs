@@ -2642,7 +2642,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "04c-asignacion-compuesta-bit.fitz",
     "05-strings.fitz",
     "05b-format-specs.fitz",
-    "05c-bytes.fitz",
+    "05e-bytes.fitz",
     "05d-escapes-extendidos.fitz",
     "06-logica.fitz",
     "07-if.fitz",

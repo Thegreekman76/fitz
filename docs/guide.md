@@ -1363,7 +1363,7 @@ compara byte a byte.
   de error.
 
 Ver el ejemplo completo en
-[examples/guide/05c-bytes.fitz](../examples/guide/05c-bytes.fitz).
+[examples/guide/05e-bytes.fitz](../examples/guide/05e-bytes.fitz).
 
 ---
 
