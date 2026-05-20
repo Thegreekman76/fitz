@@ -27,6 +27,8 @@ pub enum Expr {
     StrInterp(Vec<StrPart>, Span),
     Bool(bool, Span),
     Null(Span),
+    /// Mini-tanda Bytes — literal de bytes `b"..."`.
+    Bytes(Vec<u8>, Span),
 
     /// Referencia a un identificador (variable, parámetro, función, etc.).
     Ident(String, Span),
@@ -282,6 +284,7 @@ impl Expr {
             Expr::StrInterp(_, s) => *s,
             Expr::Bool(_, s) => *s,
             Expr::Null(s) => *s,
+            Expr::Bytes(_, s) => *s,
             Expr::Ident(_, s) => *s,
             Expr::BinOp { span, .. } => *span,
             Expr::UnaryOp { span, .. } => *span,

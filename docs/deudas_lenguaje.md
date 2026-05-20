@@ -1227,6 +1227,124 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~Bytes: primitivo nuevo del lenguaje + paridad run↔build + VSCode~~ ✓ CERRADO 2026-05-20 (mini-tanda Bytes)
+
+Cierra la deuda residual `Value::Bytes` que quedó abierta desde MP2.
+Sexto primitivo del lenguaje paralelo a Str/Int/Float/Bool/Null.
+Paridad bit-a-bit `fitz run` ↔ `fitz build` desde el primer día.
+Las 2 residuales restantes (Mw-Wrap, F13) quedan como mini-tandas
+dedicadas futuras.
+
+**Capas tocadas (7 capas + VSCode/LSP)**:
+
+- ~~**Value system** (`src/value.rs`)~~ ✓ Nueva variante
+  `Value::Bytes(Vec<u8>)`. Display formato `b"..."` paralelo a Rust:
+  ASCII printable directo, escapes comunes (`\n`/`\r`/`\t`/`\\`/`\"`),
+  resto como `\xHH`. PartialEq byte a byte. type_name = "Bytes".
+- ~~**Type system** (`src/types.rs`)~~ ✓ Nueva variante `Type::Bytes`
+  (primitivo, aridad 0). `resolve_type_expr` reconoce `"Bytes"` como
+  nombre del primitivo. Method type inference en
+  `infer_bytes_method`: `len() -> Int`, `is_empty() -> Bool`,
+  `to_str() -> Result<Str>`. `display`/`display_type`/`type_name`
+  actualizados.
+- ~~**Lexer** (`src/lexer.rs`)~~ ✓ Nuevo `Token::Bytes(Vec<u8>)`.
+  `read_bytes_literal()` activado cuando peek es `b` + peek_next es
+  `"`. Soporta escapes `\n`/`\r`/`\t`/`\0`/`\\`/`\"`/`\xHH`.
+  Chars Unicode en source se codifican como bytes UTF-8 (Rust
+  rechazaría eso en `b"..."`; Fitz es más permisivo).
+- ~~**AST + Parser** (`src/ast.rs`, `src/parser.rs`)~~ ✓ Nueva variante
+  `Expr::Bytes(Vec<u8>, Span)`. Parser primary añade
+  `Token::Bytes(bs) => Expr::Bytes(bs, span)`. Span impl actualizado.
+- ~~**Evaluator** (`src/evaluator.rs`)~~ ✓ Dispatch
+  `Expr::Bytes → Value::Bytes`. Métodos `bytes_len`/`bytes_is_empty`/
+  `bytes_to_str` en `dispatch_method`. Builtin global `bytes(s)` con
+  type `fn(Str) -> Bytes`. `len(...)` global suma rama Bytes.
+- ~~**Codegen** (`src/codegen.rs`)~~ ✓ `rust_type_for(Bytes) → Vec<u8>`.
+  Literal `Expr::Bytes` → `vec![<byte>u8, ...]` (caso vacío:
+  `Vec::<u8>::new()` para evitar E0282). Métodos sobre `Type::Bytes`:
+  `.len()` → `(_.len() as i64)`, `.is_empty()` → `_.is_empty()`,
+  `.to_str()` → `String::from_utf8(_)` envuelto en
+  `Result<String, String>`. Helper `__fitz_fmt_bytes` en el preludio
+  (paralelo a `__fitz_fmt_float`) para Display en `print`/interp.
+  `show_expr(Bytes)` delega al helper. `field_eq_expr` incluye
+  Bytes en la rama de `==` directo. Builtins globales `len(Bytes)`
+  y `bytes(s: Str) -> Bytes` reconocidos en el codegen.
+- ~~**LSP** (`src/lsp.rs`)~~ ✓ `Bytes` agregado a built-in types
+  para autocomplete. `bytes` builtin agregado al array de builtins
+  con signature `fn(s: Str) -> Bytes`. Method completion para
+  `Type::Bytes` agrega `len`/`is_empty`/`to_str`.
+- ~~**VSCode grammar** (`editors/vscode/syntaxes/fitz.tmLanguage.json`)~~ ✓
+  Nuevo pattern `bytes-literal` matchea `b"..."` con escapes hex.
+  Pattern incluido ANTES de `strings` para no colisionar. `Bytes`
+  agregado a `support.type.builtin`. `bytes` agregado a `builtins`
+  function names. `.vsix` rebuilt (`fitz-language-win32-x64-0.9.2.vsix`,
+  1.62 MB).
+- ~~**fmt.rs y lint.rs**~~ ✓ Walkers actualizados para incluir
+  `Expr::Bytes(...)` en las ramas catch-all de primitivos. `fmt_expr`
+  emite `b"..."` con escapes paralelos al Display.
+
+**Helper `__fitz_fmt_bytes` del codegen**: paralelo bit-a-bit al
+`fmt::Display for Value::Bytes` del intérprete. ASCII printable
+directo, escapes comunes, resto como `\xHH`. Garantiza paridad.
+
+**Limitaciones explícitas (deuda residual menor)**:
+
+- **`Bytes` como Map key**: no soportado (los Map de Fitz aceptan
+  Value como key pero el codegen requiere `__MapKey` trait que solo
+  está implementado para primitivos hash-amigables — String/i64/
+  f64/bool). Si entra demanda, agregar `__MapKey for Vec<u8>` con
+  representación hex.
+- **`Bytes` heterogéneo en `b"..."`**: no aplica — el literal es
+  homogéneo por definición.
+- **Métodos extras** (slicing, hex_encode, base64, indexing por
+  byte): no incluidos en MVP. Refinables si entra demanda real.
+- **JSON serialization**: `value_to_json(Value::Bytes)` emite array
+  de Int (cada byte como Int). Alternativa común (base64 string)
+  queda como deuda menor.
+
+**Integración con File de MP2**: el `File.content` sigue siendo
+`Str` (UTF-8 only). Cambiar a `Bytes` permitiría files binarios en
+multipart — queda como follow-up dedicado cuando aparezca demanda
+real. Hoy `Value::Bytes` está disponible como tipo independiente y
+el usuario puede construir/manipular bytes sin tocar el path HTTP.
+
+**Tests**: **18 unit + 1 compile_e2e nuevos**:
+
+- 5 unit en `value::tests::bytes_*` (display ASCII, display hex,
+  display escapes, igualdad byte a byte, distinto de Str).
+- 7 unit en `lexer::tests::bytes_literal_*` (ASCII básico, hex, escapes
+  comunes, vacío, ident `b` sin comilla, Unicode UTF-8, escape inválido).
+- 6 unit en `evaluator::tests::bytes_*` (literal evalúa, len y is_empty,
+  to_str Ok, to_str Err no-UTF8, builtin `bytes(s)`, `len(b"...")` global).
+- 1 compile_e2e `bytes_paridad_bit_a_bit_run_vs_build` (ejecuta ambos
+  paths y compara stdout línea a línea).
+
+**Ejemplo nuevo**: `examples/guide/05c-bytes.fitz` con literal, escapes,
+métodos, constructor, comparación bit-a-bit, integración con List.
+Sumado al smoke `GUIDE_EXAMPLES_COMPILE`.
+
+**Cap 3 (Variables y tipos primitivos)**: tabla actualizada a 6
+primitivos (Bytes nuevo). Nota apunta al cap 5 sub-sección para
+detalle.
+
+**Cap 5 (Strings)**: nueva sub-sección "Bytes — datos binarios" al
+final con literal, escapes soportados, métodos, constructor, diff
+con Str, criterios de uso, link al ejemplo runnable.
+
+**Total al cierre: 2030 unit sin feature, 2120 con --features lsp,
+246+ compile_e2e (1 nuevo), 75 ejemplos en smoke (1 nuevo).**
+Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
+
+**Deuda residual restante (NO bloquea 9.w)**:
+
+- **Mw-Wrap (wrap-style middleware con `next` callable)**: ~6-8h.
+  Requiere `Value::NativeFn` async + integración en
+  `http.rs::handle_task` + codegen paralelo. Mini-tanda dedicada
+  futura.
+- **F13 — listas/mapas heterogéneos en `fitz build`**: ~15-20h.
+  Decisión grande — `FitzValue` tagged runtime en codegen output.
+  Probable spike de diseño primero. Mini-tanda dedicada futura.
+
 ### ~~MP-Build: multipart en `fitz build` (paridad bit-a-bit run↔build)~~ ✓ CERRADO 2026-05-20 (mini-tanda MP-Build)
 
 Cierra la deuda residual del codegen que quedó abierta en MP2. El

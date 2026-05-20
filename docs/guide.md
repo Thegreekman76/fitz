@@ -360,9 +360,9 @@ name = "Fitz"
 No hace falta declarar nada antes. La primera asignación crea la
 variable; las siguientes la reasignan. El tipo se infiere del valor.
 
-### Los cinco tipos primitivos
+### Los seis tipos primitivos
 
-Fitz tiene cinco tipos básicos. Los compuestos (listas, mapas,
+Fitz tiene seis tipos básicos. Los compuestos (listas, mapas,
 tipos custom instanciados) los ves en capítulos posteriores.
 
 | Tipo   | Qué es                | Ejemplos             |
@@ -372,6 +372,7 @@ tipos custom instanciados) los ves en capítulos posteriores.
 | `Str`  | String UTF-8                | `"hola"`, `"Patagonia 🏔️"` |
 | `Bool` | Booleano                    | `true`, `false` |
 | `Null` | Ausencia de valor           | `null` |
+| `Bytes`| Secuencia de bytes binarios | `b"hola"`, `b"\x00\xff"` (ver cap. 5) |
 
 Algunas notas:
 
@@ -381,6 +382,8 @@ Algunas notas:
 - Los emojis y caracteres no-ASCII funcionan: el lexer es UTF-8.
 - `null` es un valor de su propio tipo (`Null`), no es un caso especial
   de otro. Imprimir `null` muestra literalmente `null`.
+- `Bytes` es paralelo a `Str` pero para datos binarios (sin asumir
+  UTF-8). Detalle completo en el cap. 5 sub-sección "Bytes".
 
 ### Números legibles (mini-tanda Núm)
 
@@ -1307,6 +1310,60 @@ dijo: "hola"
 barra: \
 config: { port: 3000 }
 ```
+
+---
+
+### Bytes — datos binarios (mini-tanda Bytes)
+
+`Bytes` es un primitivo paralelo a `Str` pero para datos binarios:
+secuencias de bytes crudos, sin asumir UTF-8. Útil para protocolos
+de red, archivos binarios, payloads opacos.
+
+**Literal**: `b"..."` con escapes hex.
+
+```fitz
+let a = b"hola"               // bytes UTF-8 del string "hola"
+let b = b"\x00\x01\xff"       // bytes binarios
+let vacio = b""
+print(a)                       // b"hola"
+print(b)                       // b"\x00\x01\xff"
+```
+
+Escapes soportados: `\n`, `\r`, `\t`, `\0`, `\\`, `\"`, `\xHH` (byte
+hex de 2 dígitos). NO admite interpolación `{...}` (los bytes
+literales son fijos).
+
+**Métodos**:
+
+| Método | Devuelve | Qué hace |
+|---|---|---|
+| `b.len()` | `Int` | Cantidad de bytes (NO chars). |
+| `b.is_empty()` | `Bool` | Atajo de `.len() == 0`. |
+| `b.to_str()` | `Result<Str>` | Decodifica como UTF-8. `Ok(s)` si es válido, `Err(msg)` si no. |
+
+**Constructor `bytes(s: Str) -> Bytes`**: encodea un Str a UTF-8 bytes.
+
+```fitz
+let b = bytes("hola")          // b"hola"
+let r = b"\xff".to_str()       // Err("Bytes.to_str(): contenido no es UTF-8 válido en offset 0")
+```
+
+**Diferencia con `Str`**: `Bytes("hola") != Str("hola")` — son tipos
+distintos aunque el contenido sea el mismo. `==`/`!=` sobre Bytes
+compara byte a byte.
+
+**Cuándo usar Bytes vs Str**:
+
+- Manipular texto (interpolar, indexar por char, métodos `.upper()`/
+  `.split()`/etc.) → usá `Str`.
+- Recibir/emitir bytes crudos (protocolos, archivos binarios,
+  uploads, payloads opacos) → usá `Bytes`.
+- Tener un `Str` y querés sus bytes UTF-8 → `bytes(s)`.
+- Tener `Bytes` que sabés que son UTF-8 → `b.to_str()` con manejo
+  de error.
+
+Ver el ejemplo completo en
+[examples/guide/05c-bytes.fitz](../examples/guide/05c-bytes.fitz).
 
 ---
 

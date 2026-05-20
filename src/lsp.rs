@@ -1038,6 +1038,12 @@ fn after_dot_completions(
                 ..CompletionItem::default()
             })
             .collect(),
+        // Mini-tanda Bytes — métodos del primitivo `Bytes`.
+        Type::Bytes => method_items(&[
+            ("len", "fn() -> Int".into()),
+            ("is_empty", "fn() -> Bool".into()),
+            ("to_str", "fn() -> Result<Str>".into()),
+        ]),
         // Mini-tanda Ir — Range expone enumerate/zip/chain/len. Es el
         // subset que tiene sentido para un iterable numérico; el resto
         // requiere materializar primero a `List<Int>`.
@@ -1294,6 +1300,7 @@ fn scope_level_completions(
         ("len", "fn(x) -> Int"),
         ("sleep", "fn(Int) -> Future<Null>"),
         ("cors", "fn(config: Map?) -> CorsConfig"),
+        ("bytes", "fn(s: Str) -> Bytes"),
         ("assert", "fn(cond: Bool, msg: Str?) -> Null"),
         ("assert_eq", "fn(a, b) -> Null"),
         ("assert_ne", "fn(a, b) -> Null"),
@@ -1319,7 +1326,7 @@ fn scope_level_completions(
 
     // Tipos built-in: visibles como nombres en posición de anotación.
     for name in [
-        "Int", "Float", "Str", "Bool", "Null", "Range", "Any", "List", "Map", "Result",
+        "Int", "Float", "Str", "Bool", "Null", "Bytes", "Range", "Any", "List", "Map", "Result",
         "Future", "Request", "Response", "File", "PyAny",
     ] {
         items.push(CompletionItem {

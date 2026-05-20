@@ -795,7 +795,7 @@ fn walk_expr_for_state_refs(
                 refs.insert(name.clone());
             }
         }
-        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) => {}
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) | Expr::Bytes(_, _) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let StrPart::Expr(inner, _) = p {
@@ -3522,6 +3522,27 @@ impl<'a> CodegenCtx<'a> {
             "fn __fitz_fmt_float(v: f64) -> String {\n    \
              if v.is_finite() && v.fract() == 0.0 { format!(\"{:.1}\", v) } else { format!(\"{}\", v) }\n}\n\n",
         );
+        // Mini-tanda Bytes — formato `b\"...\"` paralelo al Display de
+        // `Value::Bytes` del intérprete. Cada archivo emite su propio
+        // `__fitz_fmt_bytes`; no compartimos cross-module por simetría
+        // con `__fitz_fmt_float`.
+        self.emit(
+            "fn __fitz_fmt_bytes(bs: &[u8]) -> String {\n    \
+             let mut out = String::from(\"b\\\"\");\n    \
+             for &b in bs.iter() {\n        \
+                 match b {\n            \
+                     b'\\\\' => out.push_str(\"\\\\\\\\\"),\n            \
+                     b'\\\"' => out.push_str(\"\\\\\\\"\"),\n            \
+                     b'\\n' => out.push_str(\"\\\\n\"),\n            \
+                     b'\\r' => out.push_str(\"\\\\r\"),\n            \
+                     b'\\t' => out.push_str(\"\\\\t\"),\n            \
+                     0x20..=0x7e => out.push(b as char),\n            \
+                     _ => out.push_str(&format!(\"\\\\x{:02x}\", b)),\n        \
+                 }\n    \
+             }\n    \
+             out.push('\\\"');\n    \
+             out\n}\n\n",
+        );
         // Mini-tanda Fmt-build — helpers para los format specs que
         // Rust no soporta nativamente: `,`/`_` grouping, `%` percent,
         // `c` char. Solo se emiten cuando el programa los usa (gating
@@ -5362,6 +5383,24 @@ impl<'a> CodegenCtx<'a> {
             }
             Expr::Str(s, _) => Ok((format!("String::from({})", rust_str_literal(s)), Type::Str)),
             Expr::Bool(b, _) => Ok((b.to_string(), Type::Bool)),
+            // Mini-tanda Bytes — literal `b"..."` → `vec![<byte>, ...]`
+            // en Rust. Para el caso vacío emitimos `Vec::<u8>::new()` en
+            // lugar de `vec![]` para evitar que rustc pida type
+            // annotations (E0282).
+            Expr::Bytes(bs, _) => {
+                if bs.is_empty() {
+                    return Ok(("Vec::<u8>::new()".to_string(), Type::Bytes));
+                }
+                let mut s = String::from("vec![");
+                for (i, b) in bs.iter().enumerate() {
+                    if i > 0 {
+                        s.push_str(", ");
+                    }
+                    s.push_str(&format!("{}u8", b));
+                }
+                s.push(']');
+                Ok((s, Type::Bytes))
+            }
             // Mini-tanda L — `loop { body }` como expresión. Rust
             // nativo soporta `break <value>` adentro de `loop` y
             // produce el valor de la expresión. Emitimos el body
@@ -6291,15 +6330,35 @@ impl<'a> CodegenCtx<'a> {
                     format!("(({}).chars().count() as i64)", arg_code),
                     Type::Int,
                 )),
+                Type::Bytes => Ok((
+                    format!("(({}).len() as i64)", arg_code),
+                    Type::Int,
+                )),
                 Type::List(_) | Type::Map(_, _) => Ok((
                     format!("(({}).lock().unwrap().len() as i64)", arg_code),
                     Type::Int,
                 )),
                 other => Err(self.err_at(arg_span, format!(
-                    "`len(...)`: no aplica a `{}` — solo Str, List<T> y Map<K, V>",
+                    "`len(...)`: no aplica a `{}` — solo Str, Bytes, List<T> y Map<K, V>",
                     display_type(&other, self.env)
                 ))),
             };
+        }
+        // Mini-tanda Bytes — constructor builtin `bytes(s: Str) -> Bytes`.
+        // Convierte un Str a Vec<u8> Rust usando `as_bytes().to_vec()`.
+        if name == "bytes" && !self.fn_sigs.contains_key(name) && args.len() == 1 {
+            let arg_span = args[0].span();
+            let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
+            if !matches!(arg_ty, Type::Str) {
+                return Err(self.err_at(arg_span, format!(
+                    "`bytes(...)`: el argumento debe ser Str, recibió `{}`",
+                    display_type(&arg_ty, self.env)
+                )));
+            }
+            return Ok((
+                format!("({}).as_bytes().to_vec()", arg_code),
+                Type::Bytes,
+            ));
         }
         // 5b.5: si el nombre está en `module_bindings` como `Named`
         // (`from foo import greet`), la firma viene del módulo, no
@@ -6599,6 +6658,30 @@ impl<'a> CodegenCtx<'a> {
             return Ok((code, Type::Result { ok: Box::new(Type::PyAny), err: Box::new(Type::Str) }));
         }
         match (&obj_ty, method) {
+            // ---- Mini-tanda Bytes — métodos sobre `Type::Bytes` ----
+            (Type::Bytes, "len") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("(({}).len() as i64)", obj_code), Type::Int))
+            }
+            (Type::Bytes, "is_empty") => {
+                check_method_arity(method, args, 0)?;
+                Ok((format!("({}).is_empty()", obj_code), Type::Bool))
+            }
+            (Type::Bytes, "to_str") => {
+                check_method_arity(method, args, 0)?;
+                // String::from_utf8(Vec<u8>) → Result<String, FromUtf8Error>.
+                // Lo wrapeamos al shape de Fitz `Result<Str>` (Err=String).
+                // `obj_code` ya viene como `Vec<u8>` por valor (clone),
+                // así que NO agregamos otro `.clone()`.
+                let code = format!(
+                    "{{ let __r: Result<String, String> = match String::from_utf8({}) {{ \
+                        Ok(__s) => Ok(__s), \
+                        Err(__e) => Err(format!(\"Bytes.to_str(): contenido no es UTF-8 válido en offset {{}}\", __e.utf8_error().valid_up_to())) \
+                    }}; __r }}",
+                    obj_code,
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Str), err: Box::new(Type::Str) }))
+            }
             // ---- Str ----
             (Type::Str, "len") => {
                 check_method_arity(method, args, 0)?;
@@ -12741,7 +12824,7 @@ fn collect_captures_expr(
                 }
             }
         }
-        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) => {}
+        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) | Expr::Bytes(_, _) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let crate::ast::StrPart::Expr(inner, _) = p {
@@ -13344,6 +13427,7 @@ fn field_eq_expr(
         | Type::Str
         | Type::Bool
         | Type::Null
+        | Type::Bytes
         | Type::Range => Ok(format!("({} == {})", lhs, rhs)),
         Type::Nominal(_) => Ok(format!(
             "(Arc::ptr_eq(&{lhs}, &{rhs}) \
@@ -13468,6 +13552,9 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         Type::Str => Ok("String".to_string()),
         Type::Bool => Ok("bool".to_string()),
         Type::Null => Ok("()".to_string()),
+        // Mini-tanda Bytes — `Bytes` Fitz → `Vec<u8>` Rust. Clone es
+        // O(n) pero correcto. PartialEq directo.
+        Type::Bytes => Ok("Vec<u8>".to_string()),
         // Fase 8.7.1: `PyAny` Fitz → `__FitzPyObject` Rust (newtype
         // sobre `Arc<Py<PyAny>>`). El preludio Python ya define el
         // tipo si `uses_python = true`; programas sin imports Python
@@ -13617,6 +13704,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Str => "Str",
         Type::Bool => "Bool",
         Type::Null => "Null",
+        Type::Bytes => "Bytes",
         Type::Range => "Range",
         Type::Any => "Any",
         Type::PyAny => "PyAny",
@@ -13641,6 +13729,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::Str => "Str".into(),
         Type::Bool => "Bool".into(),
         Type::Null => "Null".into(),
+        Type::Bytes => "Bytes".into(),
         Type::Range => "Range".into(),
         Type::Any => "Any".into(),
         Type::PyAny => "PyAny".into(),
@@ -13782,6 +13871,10 @@ fn show_expr(code: &str, ty: &Type) -> String {
         Type::Float => format!("__fitz_fmt_float({})", code),
         Type::Str => format!("({}).clone()", code),
         Type::Null => "String::from(\"null\")".to_string(),
+        // Mini-tanda Bytes — formato `b"..."` paralelo al Display de
+        // Value::Bytes. Delegamos al helper `__fitz_fmt_bytes` que se
+        // emite en el preludio.
+        Type::Bytes => format!("__fitz_fmt_bytes(&({}))", code),
         // Fase 8.7.1: `PyAny` opaco → delegar al `Display` del newtype
         // `__FitzPyObject`, que adentro hace `Python::attach` + `__str__`.
         // Paridad bit-a-bit con `fitz run`: `print(math.pi)` produce

@@ -908,6 +908,10 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         Value::Str(s) => J::String(s.clone()),
         Value::Bool(b) => J::Bool(*b),
         Value::Null => J::Null,
+        // Mini-tanda Bytes — Bytes se serializa como array de Int en
+        // JSON (cada byte un Int en 0..256). Alternativa común
+        // (base64) queda como deuda menor si entra demanda.
+        Value::Bytes(bs) => J::Array(bs.iter().map(|b| J::from(*b as i64)).collect()),
 
         Value::List(items) => {
             let mut out = Vec::with_capacity(items.lock().len());

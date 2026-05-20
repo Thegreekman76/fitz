@@ -6,6 +6,7 @@
   "patterns": [
     { "include": "#comments" },
     { "include": "#strings-triple" },
+    { "include": "#bytes-literal" },
     { "include": "#strings" },
     { "include": "#numbers" },
     { "include": "#decorators" },
@@ -61,6 +62,21 @@
           "patterns": [
             { "include": "$self" }
           ]
+        }
+      ]
+    },
+    "bytes-literal": {
+      "name": "string.quoted.double.bytes.fitz",
+      "begin": "\\bb\"",
+      "end": "\"",
+      "patterns": [
+        {
+          "name": "constant.character.escape.hex.fitz",
+          "match": "\\\\x[0-9A-Fa-f]{2}"
+        },
+        {
+          "name": "constant.character.escape.fitz",
+          "match": "\\\\[nrt0\\\\\"]"
         }
       ]
     },
@@ -150,7 +166,7 @@
       "patterns": [
         {
           "name": "support.type.builtin.fitz",
-          "match": "\\b(Int|Float|Str|Bool|Null|Range|Any|List|Map|Result|Future|Request|Response|File|PyAny)\\b"
+          "match": "\\b(Int|Float|Str|Bool|Null|Bytes|Range|Any|List|Map|Result|Future|Request|Response|File|PyAny)\\b"
         },
         {
           "name": "entity.name.type.fitz",
@@ -176,7 +192,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.fitz",
-      "match": "\\b(print|len|sleep|cors|assert|assert_eq|assert_ne|assert_throws)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|sleep|cors|bytes|assert|assert_eq|assert_ne|assert_throws)\\b(?=\\s*\\()"
     },
     "labels": {
       "comment": "Labels de loops (mini-tanda L): `'outer:` en sitio de declaración y `'outer` en break/continue. El `:` opcional al final NO se consume — lo agarra el resto del parser.",

@@ -477,7 +477,7 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             })
             .max(),
         Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _)
-        | Expr::Null(_) | Expr::Ident(_, _) | Expr::Error(_) => None,
+        | Expr::Null(_) | Expr::Bytes(_, _) | Expr::Ident(_, _) | Expr::Error(_) => None,
     };
     start.max(nested.unwrap_or(start))
 }
@@ -795,6 +795,24 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
         Expr::Str(s, _) => ctx.write(&format_str_literal(s)),
         Expr::Bool(b, _) => ctx.write(if *b { "true" } else { "false" }),
         Expr::Null(_) => ctx.write("null"),
+        Expr::Bytes(bs, _) => {
+            // Mini-tanda Bytes — formato `b"..."` paralelo al Display
+            // de Value::Bytes. ASCII printable + escapes comunes; el
+            // resto va como `\xHH`.
+            ctx.write("b\"");
+            for &b in bs.iter() {
+                match b {
+                    b'\\' => ctx.write("\\\\"),
+                    b'"' => ctx.write("\\\""),
+                    b'\n' => ctx.write("\\n"),
+                    b'\r' => ctx.write("\\r"),
+                    b'\t' => ctx.write("\\t"),
+                    0x20..=0x7e => ctx.write(&(b as char).to_string()),
+                    _ => ctx.write(&format!("\\x{:02x}", b)),
+                }
+            }
+            ctx.write("\"");
+        }
         Expr::Ident(name, _) => ctx.write(name),
         Expr::StrInterp(parts, _) => fmt_str_interp(ctx, parts),
         Expr::BinOp { op, left, right, .. } => fmt_binop(ctx, op, left, right),

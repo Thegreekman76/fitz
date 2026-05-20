@@ -2212,6 +2212,72 @@ fn mp_build_multipart_sin_boundary_es_400() {
 
 
 #[test]
+fn bytes_paridad_bit_a_bit_run_vs_build() {
+    // Mini-tanda Bytes — el output de `fitz run` y `fitz build`
+    // deben coincidir bit-a-bit para todos los casos canónicos:
+    // literal con escapes, len, is_empty, to_str Ok/Err.
+    let dir = std::env::temp_dir().join("fitz-e2e-bytes-paridad");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("tempdir");
+    let src_path = dir.join("prog.fitz");
+    let src = "\
+let a = b\"hola\"
+let b = b\"\\x00\\xff\"
+let empty = b\"\"
+print(a)
+print(b)
+print(a.len())
+print(empty.is_empty())
+print(a.is_empty())
+let r = a.to_str()
+print(r)
+let s = bytes(\"converted\")
+print(s)
+print(len(s))
+";
+    std::fs::write(&src_path, src).expect("write");
+
+    let out_run = Command::new(fitz_bin())
+        .args(["run"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz run");
+    assert!(
+        out_run.status.success(),
+        "fitz run falló: {}",
+        String::from_utf8_lossy(&out_run.stderr)
+    );
+    let run_stdout = String::from_utf8_lossy(&out_run.stdout).into_owned();
+
+    let out_build = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&src_path)
+        .output()
+        .expect("fitz build");
+    assert!(
+        out_build.status.success(),
+        "fitz build falló: {}",
+        String::from_utf8_lossy(&out_build.stderr)
+    );
+    let bin = dir.join(if cfg!(windows) { "prog.exe" } else { "prog" });
+    let exec = Command::new(&bin).output().expect("ejecutar binario");
+    assert!(exec.status.success());
+    let build_stdout = String::from_utf8_lossy(&exec.stdout).into_owned();
+
+    assert_eq!(
+        run_stdout.replace("\r\n", "\n"),
+        build_stdout.replace("\r\n", "\n"),
+        "esperaba paridad bit-a-bit `run` ↔ `build`"
+    );
+    // Sanity sobre el contenido.
+    assert!(run_stdout.contains("b\"hola\""));
+    assert!(run_stdout.contains("b\"\\x00\\xff\""));
+    assert!(run_stdout.contains("4"));
+    assert!(run_stdout.contains("true"));
+    assert!(run_stdout.contains("Ok(\"hola\")"));
+}
+
+#[test]
 fn oapi_return_ident_a_const_top_level_compila_y_emite_schema() {
     // `return NOT_FOUND { ... }` con NOT_FOUND const top-level
     // ahora parsea, compila a binario, y entra al schema OpenAPI.
@@ -2363,6 +2429,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "04c-asignacion-compuesta-bit.fitz",
     "05-strings.fitz",
     "05b-format-specs.fitz",
+    "05c-bytes.fitz",
     "05d-escapes-extendidos.fitz",
     "06-logica.fitz",
     "07-if.fitz",

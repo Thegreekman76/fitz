@@ -198,7 +198,7 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             uses.insert(name.clone());
         }
         Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Null(_)
-        | Expr::Error(_) => {}
+        | Expr::Bytes(..) | Expr::Error(_) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let StrPart::Expr(e, _) = p {
@@ -613,6 +613,7 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         | Expr::Str(..)
         | Expr::Bool(..)
         | Expr::Null(_)
+        | Expr::Bytes(..)
         | Expr::Ident(..)
         | Expr::Error(_) => {}
         Expr::StrInterp(parts, _) => {

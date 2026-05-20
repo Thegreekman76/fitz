@@ -2670,6 +2670,7 @@ impl Parser {
             Token::Int(n) => Ok(Expr::Int(n, tok_span)),
             Token::Float(n) => Ok(Expr::Float(n, tok_span)),
             Token::Str(s) => build_string_expr(&s, tok.line, tok.column),
+            Token::Bytes(bs) => Ok(Expr::Bytes(bs, tok_span)),
             Token::True => Ok(Expr::Bool(true, tok_span)),
             Token::False => Ok(Expr::Bool(false, tok_span)),
             Token::Null => Ok(Expr::Null(tok_span)),

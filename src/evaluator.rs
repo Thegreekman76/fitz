@@ -2430,6 +2430,8 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
         Expr::Str(s, _) => Ok(Value::Str(s.clone())),
         Expr::Bool(b, _) => Ok(Value::Bool(*b)),
         Expr::Null(_) => Ok(Value::Null),
+        // Mini-tanda Bytes — literal `b"..."`.
+        Expr::Bytes(bs, _) => Ok(Value::Bytes(bs.clone())),
 
         // Mini-tanda L — `loop { body }` como expresión. El valor es
         // el `<v>` del primer `break <v>` que dispara. `break` sin
@@ -3758,6 +3760,10 @@ async fn dispatch_method(
         (Value::Map(_), "with") => map_with(receiver, args, span),
         // Mini-tanda Mb9 — has_value: chequea si v está como value.
         (Value::Map(_), "has_value") => map_has_value(receiver, args, span),
+        // Mini-tanda Bytes — métodos sobre Value::Bytes.
+        (Value::Bytes(_), "len") => bytes_len(receiver, args, span),
+        (Value::Bytes(_), "is_empty") => bytes_is_empty(receiver, args, span),
+        (Value::Bytes(_), "to_str") => bytes_to_str(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -6081,6 +6087,38 @@ fn str_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     Ok(Value::Int(s.chars().count() as i64))
 }
 
+// ---- Mini-tanda Bytes — métodos sobre Value::Bytes ----
+
+/// `bytes.len()` — cantidad de bytes.
+fn bytes_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("len", &args, 0, span)?;
+    let Value::Bytes(bs) = receiver else { unreachable!() };
+    Ok(Value::Int(bs.len() as i64))
+}
+
+/// `bytes.is_empty()` — atajo de `.len() == 0`.
+fn bytes_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("is_empty", &args, 0, span)?;
+    let Value::Bytes(bs) = receiver else { unreachable!() };
+    Ok(Value::Bool(bs.is_empty()))
+}
+
+/// `bytes.to_str() -> Result<Str>` — decodifica como UTF-8.
+/// Devuelve `Ok(s)` si el contenido es UTF-8 válido, `Err(msg)` si no.
+/// Paralelo a `String::from_utf8(...)` de Rust.
+fn bytes_to_str(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("to_str", &args, 0, span)?;
+    let _ = span;
+    let Value::Bytes(bs) = receiver else { unreachable!() };
+    match String::from_utf8(bs) {
+        Ok(s) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(s))))),
+        Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(format!(
+            "Bytes.to_str(): contenido no es UTF-8 válido en offset {}",
+            e.utf8_error().valid_up_to()
+        )))))),
+    }
+}
+
 fn str_upper(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("upper", &args, 0, span)?;
     let s = match receiver {
@@ -7410,6 +7448,15 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_len,
         },
     );
+    // Mini-tanda Bytes — constructor `bytes(s: Str) -> Bytes`.
+    // Convierte un Str a Value::Bytes usando UTF-8 encoding.
+    env.lock().define(
+        "bytes",
+        Value::Builtin {
+            name: "bytes",
+            func: builtin_bytes,
+        },
+    );
     // `cors(config: Map?)` — built-in MW.2. Construye un
     // `Value::CorsConfig` con los kwargs efectivos. El config es un
     // `Map<Str, ...>` (no kwargs runtime — el parser de calls no los
@@ -8162,11 +8209,12 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
         Value::List(items) => items.lock().len() as i64,
         Value::Map(pairs) => pairs.lock().len() as i64,
         Value::Str(s) => s.chars().count() as i64,
+        Value::Bytes(bs) => bs.len() as i64,
         Value::Range { start, end } => (end - start).max(0),
         other => {
             return Err(FitzError::new(
                 ErrorKind::TypeMismatch {
-                    expected: "List, Map, Str o Range".into(),
+                    expected: "List, Map, Str, Bytes o Range".into(),
                     found: other.type_name().into(),
                 },
                 0, 0,
@@ -8178,6 +8226,35 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
         }
     };
     Ok(Value::Int(n))
+}
+
+/// Mini-tanda Bytes — `bytes(s: Str) -> Bytes` builtin. Convierte un
+/// Str a `Value::Bytes` usando UTF-8 encoding.
+fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0, 0,
+            format!("`bytes` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    match &args[0] {
+        Value::Str(s) => Ok(Value::Bytes(s.as_bytes().to_vec())),
+        other => Err(FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Str".into(),
+                found: other.type_name().into(),
+            },
+            0, 0,
+            format!(
+                "`bytes(s)` espera Str, recibió `{}`",
+                other.type_name()
+            ),
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -12411,6 +12488,87 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         assert_eq!(env.lock().get("n"), Some(Value::Int(4)));
+    }
+
+    // ---- Mini-tanda Bytes ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_literal_se_evalua_a_value_bytes() {
+        let (env, res) = parse_eval_into_env(
+            "let a = b\"hola\"\n\
+             let b = b\"\\x00\\x01\\xff\"",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Bytes(b"hola".to_vec())));
+        assert_eq!(env.lock().get("b"), Some(Value::Bytes(vec![0, 1, 255])));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_len_y_is_empty() {
+        let (env, res) = parse_eval_into_env(
+            "let a = b\"hola\".len()\n\
+             let b = b\"\".is_empty()\n\
+             let c = b\"x\".is_empty()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("a"), Some(Value::Int(4)));
+        assert_eq!(env.lock().get("b"), Some(Value::Bool(true)));
+        assert_eq!(env.lock().get("c"), Some(Value::Bool(false)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_to_str_ok() {
+        let (env, res) = parse_eval_into_env(
+            "let r = b\"hola\".to_str()",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r").clone();
+        match r {
+            Some(Value::Result(ResultVariant::Ok(inner))) => {
+                assert_eq!(*inner, Value::Str("hola".into()));
+            }
+            other => panic!("esperaba Ok(Str), fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_to_str_err_para_no_utf8() {
+        let (env, res) = parse_eval_into_env(
+            "let r = b\"\\xff\\xfe\".to_str()",
+        ).await;
+        res.unwrap();
+        let r = env.lock().get("r").clone();
+        match r {
+            Some(Value::Result(ResultVariant::Err(inner))) => {
+                match *inner {
+                    Value::Str(s) => assert!(
+                        s.contains("UTF-8"),
+                        "esperaba mensaje sobre UTF-8, fue: {}", s
+                    ),
+                    other => panic!("Err inner no es Str: {:?}", other),
+                }
+            }
+            other => panic!("esperaba Err(Str), fue: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_builtin_constructor() {
+        let (env, res) = parse_eval_into_env(
+            "let b = bytes(\"hola\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("b"), Some(Value::Bytes(b"hola".to_vec())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn bytes_builtin_len_global_funciona() {
+        // `len(b"...")` global también funciona.
+        let (env, res) = parse_eval_into_env(
+            "let n = len(b\"abcde\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("n"), Some(Value::Int(5)));
     }
 
     #[tokio::test(flavor = "current_thread")]

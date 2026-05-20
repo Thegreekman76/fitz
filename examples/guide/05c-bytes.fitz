@@ -1,0 +1,64 @@
+// 05c-bytes.fitz — Tipo primitivo `Bytes` (mini-tanda Bytes).
+//
+// `Bytes` representa una secuencia de bytes binarios. Sirve para
+// datos crudos: protocolos de red, archivos binarios, payloads
+// arbitrarios. Es distinto de `Str` (que es texto UTF-8 válido).
+
+// --- Literal `b"..."` ---
+
+let a = b"hola"
+let b = b"\x00\x01\xff"        // bytes binarios via escapes hex
+let vacio = b""
+
+print(a)                        // b"hola"
+print(b)                        // b"\x00\x01\xff"
+print(vacio)                    // b""
+
+// Escapes soportados:
+//   \n  \r  \t  \0  \\  \"     comunes (como en Str)
+//   \xHH                       byte hex de 2 dígitos
+let con_escapes = b"linea1\nlinea2\t\xff"
+print(con_escapes)
+
+// --- Métodos ---
+
+// `len()` — cantidad de bytes (NO chars, no decodifica).
+print(b"hola".len())            // 4
+print(b"\xff\xfe".len())        // 2
+
+// `is_empty()` — atajo de `.len() == 0`.
+print(b"".is_empty())           // true
+print(b"x".is_empty())          // false
+
+// `to_str() -> Result<Str>` — decodifica como UTF-8.
+let txt = b"hola".to_str()
+print(txt)                      // Ok("hola")
+
+let bad = b"\xff\xfe".to_str()
+print(bad)                      // Err("Bytes.to_str(): contenido no es UTF-8 ...")
+
+// --- Constructor `bytes(s)` desde Str ---
+
+let from_str = bytes("hola mundo")
+print(from_str)                 // b"hola mundo"
+print(len(from_str))            // 10
+
+// --- Cuándo usar Bytes vs Str ---
+//
+// - Si vas a manipular texto (interpolar, indexar por char, etc.) →
+//   usá `Str`.
+// - Si vas a recibir o emitir bytes crudos (un protocolo, un archivo
+//   binario, un payload de red opaco) → usá `Bytes`.
+// - `bytes(s)` encodea un Str a UTF-8 bytes; `b.to_str()` decodifica
+//   bytes asumiendo UTF-8 (devuelve Result para fallar gracefully
+//   si no son UTF-8 válido).
+
+// --- Integración con el resto ---
+//
+// `len()` global también acepta Bytes (paralelo a Str/List/Map).
+// `==`/`!=` compara byte a byte.
+// Bytes en colecciones funciona como cualquier otro Value
+// (`List<Bytes>`, `Map<Str, Bytes>`, etc.).
+let secuencias = [b"\x00", b"\x01", b"\x02"]
+print(secuencias)               // [b"\x00", b"\x01", b"\x02"]
+print(len(secuencias))          // 3

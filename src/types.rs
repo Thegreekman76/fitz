@@ -46,6 +46,11 @@ pub enum Type {
     Str,
     Bool,
     Null,
+    /// Mini-tanda Bytes — secuencia de bytes binarios. Primitivo
+    /// nuevo del lenguaje. Construido vía literal `b"..."` (con
+    /// escapes hex `\xHH`) o vía builtin `bytes_from_str(s)`. Métodos
+    /// soportados: `.len()`, `.is_empty()`, `.to_str() -> Result<Str>`.
+    Bytes,
     /// `Range` solo aparece en `0..10` por ahora — no tiene parámetro.
     Range,
 
@@ -141,6 +146,7 @@ impl Type {
             Type::Str => "Str".into(),
             Type::Bool => "Bool".into(),
             Type::Null => "Null".into(),
+            Type::Bytes => "Bytes".into(),
             Type::Range => "Range".into(),
             Type::List(t) => format!("List<{}>", t.display(env)),
             Type::Map(k, v) => format!("Map<{}, {}>", k.display(env), v.display(env)),
@@ -491,6 +497,7 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         "Str" => Some(Type::Str),
         "Bool" => Some(Type::Bool),
         "Null" => Some(Type::Null),
+        "Bytes" => Some(Type::Bytes),
         "Range" => Some(Type::Range),
         _ => None,
     };
@@ -1097,6 +1104,20 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Mini-tanda Bytes — `bytes(s: Str) -> Bytes` constructor.
+        self.scopes[0].insert(
+            "bytes".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str],
+                    ret: Box::new(Type::Bytes),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
         // Hoy lo tipamos como `Any` (variádico de facto: 0 o 1 arg, y
         // el Map adentro tiene tipos heterogéneos por key). Una firma
@@ -1403,6 +1424,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         Expr::Str(_, _) => Type::Str,
         Expr::Bool(_, _) => Type::Bool,
         Expr::Null(_) => Type::Null,
+        Expr::Bytes(_, _) => Type::Bytes,
 
         // Mini-tanda L — `loop { body }` como expresión. El tipo es
         // el `lub` de los valores de `break <v>` adentro. Sin
@@ -2423,6 +2445,8 @@ fn infer_method_call(
             Some(infer_map_method(ctx, &k, &v, method, args_ty, span))
         }
         Type::Str => Some(infer_str_method(ctx, method, args_ty, span)),
+        // Mini-tanda Bytes — métodos sobre Bytes.
+        Type::Bytes => Some(infer_bytes_method(ctx, method, args_ty, span)),
         // R.3 — métodos custom sobre nominal. Buscamos en
         // `NominalInfo.methods`. Si existe: validamos aridad + tipos
         // de args, devolvemos el ret type (o `Future<T>` si async).
@@ -3666,6 +3690,39 @@ fn check_binary_callback(
                 method,
                 other.display(ctx.types),
             ));
+        }
+    }
+}
+
+/// Mini-tanda Bytes — métodos del primitivo `Bytes`.
+fn infer_bytes_method(
+    ctx: &mut CheckCtx,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    match method {
+        "len" => {
+            check_method_arity(ctx, "len", args_ty, 0, span);
+            Type::Int
+        }
+        "is_empty" => {
+            check_method_arity(ctx, "is_empty", args_ty, 0, span);
+            Type::Bool
+        }
+        "to_str" => {
+            check_method_arity(ctx, "to_str", args_ty, 0, span);
+            Type::Result {
+                ok: Box::new(Type::Str),
+                err: Box::new(Type::Str),
+            }
+        }
+        _ => {
+            ctx.error_at(span, format!(
+                "el tipo `Bytes` no tiene el método `{}` (soportados: len, is_empty, to_str)",
+                method
+            ));
+            Type::Any
         }
     }
 }

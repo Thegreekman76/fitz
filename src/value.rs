@@ -161,6 +161,12 @@ pub enum Value {
     Bool(bool),
     Null,
 
+    /// Mini-tanda Bytes — secuencia de bytes binarios. Construido vía
+    /// literal `b"..."` con escapes hex (`\xHH`) o vía builtin
+    /// `bytes_from_str(s)`. Inmutable de hecho (no se expone `push`
+    /// para mantener el modelo simple). Clone es O(n).
+    Bytes(Vec<u8>),
+
     /// Función nativa implementada en Rust (ej: `print`).
     /// La firma recibe los args ya evaluados y devuelve un valor o error.
     Builtin {
@@ -396,6 +402,7 @@ impl Value {
             Value::Str(_) => "Str",
             Value::Bool(_) => "Bool",
             Value::Null => "Null",
+            Value::Bytes(_) => "Bytes",
             Value::Builtin { .. } => "Function",
             Value::Function { .. } => "Function",
             Value::Type { .. } => "Type",
@@ -431,6 +438,26 @@ impl std::fmt::Display for Value {
             Value::Str(s) => write!(f, "{}", s),
             Value::Bool(b) => write!(f, "{}", b),
             Value::Null => write!(f, "null"),
+            Value::Bytes(bs) => {
+                // Mini-tanda Bytes — formato `b"..."` paralelo a
+                // Rust. ASCII printable + escapes comunes (`\n`, `\r`,
+                // `\t`, `\\`, `\"`) salen tal cual; el resto va como
+                // `\xHH`. Mismo criterio que Rust's
+                // `<[u8] as Debug>` para el contenido entre comillas.
+                write!(f, "b\"")?;
+                for &b in bs.iter() {
+                    match b {
+                        b'\\' => write!(f, "\\\\")?,
+                        b'"' => write!(f, "\\\"")?,
+                        b'\n' => write!(f, "\\n")?,
+                        b'\r' => write!(f, "\\r")?,
+                        b'\t' => write!(f, "\\t")?,
+                        0x20..=0x7e => write!(f, "{}", b as char)?,
+                        _ => write!(f, "\\x{:02x}", b)?,
+                    }
+                }
+                write!(f, "\"")
+            }
             Value::Builtin { name, .. } => write!(f, "<builtin {}>", name),
             Value::Function { .. } => write!(f, "<function>"),
             Value::Type { name, .. } => write!(f, "<type {}>", name),
@@ -549,6 +576,8 @@ impl PartialEq for Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Null, Value::Null) => true,
+            // Bytes: comparación byte a byte.
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
             // List y Map se comparan estructuralmente, elemento a elemento.
             // La igualdad recursiva delega en esta misma impl, así que Int↔Float
             // coerciona también adentro de listas y mapas. Si los dos `Arc`
@@ -663,6 +692,47 @@ mod tests {
         assert_eq!(Value::Str("".into()).type_name(), "Str");
         assert_eq!(Value::Bool(false).type_name(), "Bool");
         assert_eq!(Value::Null.type_name(), "Null");
+        assert_eq!(Value::Bytes(vec![]).type_name(), "Bytes");
+    }
+
+    // ---- Mini-tanda Bytes ----
+
+    #[test]
+    fn bytes_display_ascii_printable() {
+        assert_eq!(Value::Bytes(b"hola".to_vec()).to_string(), "b\"hola\"");
+    }
+
+    #[test]
+    fn bytes_display_con_escapes_hex() {
+        assert_eq!(
+            Value::Bytes(vec![0x00, 0x01, 0xff]).to_string(),
+            "b\"\\x00\\x01\\xff\""
+        );
+    }
+
+    #[test]
+    fn bytes_display_con_escapes_comunes() {
+        assert_eq!(
+            Value::Bytes(b"a\nb\tc\\d\"e".to_vec()).to_string(),
+            "b\"a\\nb\\tc\\\\d\\\"e\""
+        );
+    }
+
+    #[test]
+    fn bytes_igualdad_byte_a_byte() {
+        assert_eq!(Value::Bytes(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 3]));
+        assert_ne!(Value::Bytes(vec![1, 2, 3]), Value::Bytes(vec![1, 2, 4]));
+        assert_ne!(Value::Bytes(vec![1, 2]), Value::Bytes(vec![1, 2, 3]));
+    }
+
+    #[test]
+    fn bytes_distinto_de_str_aunque_mismo_contenido() {
+        // Bytes("hola") y Str("hola") son tipos distintos — PartialEq
+        // devuelve false (paralelo a Int vs Str).
+        assert_ne!(
+            Value::Bytes(b"hola".to_vec()),
+            Value::Str("hola".into())
+        );
     }
 
     #[test]

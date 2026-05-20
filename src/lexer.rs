@@ -20,6 +20,11 @@ pub enum Token {
     Int(i64),
     Float(f64),
     Str(String),
+    /// Mini-tanda Bytes — literal binario `b"..."`. Bytes crudo,
+    /// soporta escapes `\xHH` además de los comunes (`\n`/`\r`/`\t`/
+    /// `\\`/`\"`/`\0`). Interpolación `{...}` NO se permite (los
+    /// bytes literales son fijos).
+    Bytes(Vec<u8>),
 
     // Identificadores y keywords
     Ident(String),
@@ -885,6 +890,127 @@ impl Lexer {
         }
     }
 
+    /// Mini-tanda Bytes — lee un literal `b"..."`. Asume que el
+    /// caller ya verificó que el current char es `b` y el siguiente
+    /// es `"`. Soporta los escapes comunes (`\n`/`\r`/`\t`/`\0`/
+    /// `\\`/`\"`) más `\xHH` (byte hex de 2 dígitos). NO soporta
+    /// interpolación `{...}` (los bytes literales son fijos). Cada
+    /// char Unicode se codifica como sus bytes UTF-8 (matchea el
+    /// comportamiento de Rust `b"..."` cuando el source tiene chars
+    /// no-ASCII — Rust en realidad rechaza eso; Fitz es más permisivo).
+    fn read_bytes_literal(&mut self) -> FitzResult<Token> {
+        // Consumir `b` y la comilla de apertura.
+        self.advance();
+        self.advance();
+        let mut out: Vec<u8> = Vec::new();
+        loop {
+            match self.peek() {
+                None => {
+                    return Err(FitzError::new(
+                        crate::error::ErrorKind::UnterminatedString,
+                        self.line,
+                        self.column,
+                        "literal `b\"...\"` sin cerrar".to_string(),
+                    ));
+                }
+                Some('"') => {
+                    self.advance();
+                    return Ok(Token::Bytes(out));
+                }
+                Some('\\') => {
+                    self.advance();
+                    match self.peek() {
+                        Some('n') => {
+                            self.advance();
+                            out.push(b'\n');
+                        }
+                        Some('r') => {
+                            self.advance();
+                            out.push(b'\r');
+                        }
+                        Some('t') => {
+                            self.advance();
+                            out.push(b'\t');
+                        }
+                        Some('0') => {
+                            self.advance();
+                            out.push(0);
+                        }
+                        Some('\\') => {
+                            self.advance();
+                            out.push(b'\\');
+                        }
+                        Some('"') => {
+                            self.advance();
+                            out.push(b'"');
+                        }
+                        Some('x') => {
+                            self.advance();
+                            // Leer 2 dígitos hex.
+                            let h1 = self.peek().ok_or_else(|| {
+                                FitzError::new(
+                                    crate::error::ErrorKind::InvalidSyntax,
+                                    self.line,
+                                    self.column,
+                                    "escape `\\xHH`: hex incompleto (falta primer dígito)"
+                                        .to_string(),
+                                )
+                            })?;
+                            self.advance();
+                            let h2 = self.peek().ok_or_else(|| {
+                                FitzError::new(
+                                    crate::error::ErrorKind::InvalidSyntax,
+                                    self.line,
+                                    self.column,
+                                    "escape `\\xHH`: hex incompleto (falta segundo dígito)"
+                                        .to_string(),
+                                )
+                            })?;
+                            self.advance();
+                            let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
+                                .map_err(|_| {
+                                    FitzError::new(
+                                        crate::error::ErrorKind::InvalidSyntax,
+                                        self.line,
+                                        self.column,
+                                        format!("escape `\\x{}{}` no es hex válido", h1, h2),
+                                    )
+                                })?;
+                            out.push(byte);
+                        }
+                        Some(other) => {
+                            return Err(FitzError::new(
+                                crate::error::ErrorKind::InvalidSyntax,
+                                self.line,
+                                self.column,
+                                format!(
+                                    "escape `\\{}` no soportado en literal de bytes; \
+                                     soportados: \\n, \\r, \\t, \\0, \\\\, \\\", \\xHH",
+                                    other
+                                ),
+                            ));
+                        }
+                        None => {
+                            return Err(FitzError::new(
+                                crate::error::ErrorKind::UnterminatedString,
+                                self.line,
+                                self.column,
+                                "literal `b\"...\"` termina con `\\` sin cerrar".to_string(),
+                            ));
+                        }
+                    }
+                }
+                Some(c) => {
+                    self.advance();
+                    // Codificar el char Unicode como bytes UTF-8.
+                    let mut buf = [0u8; 4];
+                    let encoded = c.encode_utf8(&mut buf);
+                    out.extend_from_slice(encoded.as_bytes());
+                }
+            }
+        }
+    }
+
     /// Obtiene el siguiente token, o None si terminamos.
     fn next_token(&mut self) -> FitzResult<Option<TokenWithPos>> {
         self.skip_whitespace_and_comments()?;
@@ -1136,6 +1262,9 @@ impl Lexer {
             }
             '"' => self.read_string()?,
             c if c.is_ascii_digit() => self.read_number()?,
+            // Mini-tanda Bytes — `b"..."` antes que identifiers,
+            // porque `b` solo es ident si NO le sigue una comilla.
+            'b' if self.peek_next() == Some('"') => self.read_bytes_literal()?,
             c if c.is_alphabetic() || c == '_' => self.read_identifier_or_keyword(),
             other => {
                 self.advance();
@@ -1328,6 +1457,79 @@ mod tests {
         assert_eq!(
             toks("café_2"),
             vec![Token::Ident("café_2".into()), Token::EOF],
+        );
+    }
+
+    // ---- Mini-tanda Bytes — literal `b"..."` ----
+
+    #[test]
+    fn bytes_literal_ascii_basico() {
+        assert_eq!(
+            toks(r#"b"hola""#),
+            vec![Token::Bytes(b"hola".to_vec()), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn bytes_literal_con_escape_hex() {
+        assert_eq!(
+            toks(r#"b"\x00\xff""#),
+            vec![Token::Bytes(vec![0x00, 0xff]), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn bytes_literal_con_escapes_comunes() {
+        assert_eq!(
+            toks(r#"b"\n\r\t\0\\\"""#),
+            vec![
+                Token::Bytes(vec![b'\n', b'\r', b'\t', 0, b'\\', b'"']),
+                Token::EOF
+            ]
+        );
+    }
+
+    #[test]
+    fn bytes_literal_vacio() {
+        assert_eq!(
+            toks(r#"b"""#),
+            vec![Token::Bytes(vec![]), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn bytes_literal_ident_b_sin_comilla_sigue_siendo_ident() {
+        // `b` solo (sin comilla) es un identificador normal, no
+        // disparador de literal de bytes.
+        assert_eq!(
+            toks("b + 1"),
+            vec![
+                Token::Ident("b".into()),
+                Token::Plus,
+                Token::Int(1),
+                Token::EOF
+            ]
+        );
+    }
+
+    #[test]
+    fn bytes_literal_unicode_via_utf8() {
+        // Char Unicode en el source: se codifica como bytes UTF-8.
+        // `ñ` es 2 bytes (0xc3, 0xb1).
+        assert_eq!(
+            toks("b\"ñ\""),
+            vec![Token::Bytes(vec![0xc3, 0xb1]), Token::EOF]
+        );
+    }
+
+    #[test]
+    fn bytes_literal_escape_invalido_es_error() {
+        // `\z` no es un escape soportado → error claro.
+        let err = tokenize(r#"b"\z""#).unwrap_err();
+        assert!(
+            err.message.contains("escape") && err.message.contains("no soportado"),
+            "esperaba mensaje de escape no soportado, fue: {}",
+            err.message
         );
     }
 
