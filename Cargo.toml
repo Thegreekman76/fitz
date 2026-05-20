@@ -127,6 +127,35 @@ notify = "6"
 # escape sequences, history buffer).
 rustyline = "14"
 
+# Fase 9.w.1.b — auth nativa: JWT + password hashing built-ins.
+#
+# jsonwebtoken: encoding/decoding de JWTs. HS256 default (HMAC-SHA256,
+# secret simétrico) cubre el caso típico de stateless auth. HS384/HS512
+# disponibles vía kwarg `alg`. Asimétricos (RS256/ES256, par de llaves
+# PEM) quedan post-MVP. Crate más popular del ecosistema (~9M
+# downloads/sem); audit history limpio, mantenido activamente.
+#
+# argon2: password hashing. Algoritmo Argon2id (variante híbrida,
+# ganador del Password Hashing Competition 2015, recomendación OWASP
+# por sobre bcrypt para proyectos nuevos). Crate de RustCrypto, pure
+# Rust sin deps nativas. Por diseño caro en CPU + memoria — costo del
+# attacker sube proporcional al del defender.
+#
+# Ambas no-opcionales: forman parte del core "HTTP nativo" del
+# lenguaje. Cualquier programa Fitz puede usar `jwt.encode(...)` y
+# `hash.password(...)` sin opt-in features.
+jsonwebtoken = "9"
+# argon2: la feature `password-hash` (default) trae `password_hash`
+# como re-export; necesitamos ADEMÁS el feature `std` (default) y
+# explícitamente `getrandom` para que `password_hash::rand_core::OsRng`
+# esté disponible (necesario para generar salts criptográficamente
+# seguros). Sin `getrandom`, `OsRng` queda gateado out.
+argon2 = { version = "0.5", features = ["std"] }
+# `rand_core` con `getrandom` para exponer `OsRng` — `password-hash` no
+# lo activa por sí solo. Pinear en 0.6 (compatible con el re-export de
+# `password_hash::rand_core`).
+rand_core = { version = "0.6", features = ["getrandom"] }
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el

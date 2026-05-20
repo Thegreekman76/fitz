@@ -663,6 +663,29 @@ fn after_dot_completions(
     recv_line: usize,
     recv_col: usize,
 ) -> Vec<CompletionItem> {
+    // Fase 9.w.1.b — módulos built-in `jwt` y `hash` (auth nativa).
+    // Bypass del type lookup: tipan como `Any` en el checker (decisión
+    // del MVP, sin `Type::Module` dedicado), así que el dispatch por
+    // tipo no los identifica. Resolvemos por nombre del receiver acá,
+    // antes de tocar `type_info`. Si el usuario shadowea `jwt` o `hash`
+    // con un `let` propio, igual mostraríamos estos métodos — trade-off
+    // aceptado del MVP, refinable post-9.w si pasa a ser problema real.
+    match recv_name {
+        "jwt" => {
+            return method_items(&[
+                ("encode", "fn(payload: Map, secret: Str, alg: Str?) -> Str".into()),
+                ("decode", "fn(token: Str, secret: Str, alg: Str?) -> Result<Map>".into()),
+            ]);
+        }
+        "hash" => {
+            return method_items(&[
+                ("password", "fn(plain: Str) -> Str".into()),
+                ("verify", "fn(plain: Str, hashed: Str) -> Bool".into()),
+            ]);
+        }
+        _ => {}
+    }
+
     // Fallback 1: TypeInfo lookup heurístico (max col <= recv_col en la
     // misma línea).
     let recv_type = type_info
@@ -1329,6 +1352,23 @@ fn scope_level_completions(
         items.push(CompletionItem {
             label: name.into(),
             kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(detail.into()),
+            ..CompletionItem::default()
+        });
+    }
+
+    // Fase 9.w.1.b — módulos auth nativa `jwt` y `hash`, siempre
+    // disponibles como Value::Module en el env global del evaluator
+    // y como bindings `Any` en el checker. Listados como MODULE para
+    // que VSCode los muestre con el icono apropiado y los distinga
+    // de fns y vars.
+    for (name, detail) in [
+        ("jwt", "module: encode, decode"),
+        ("hash", "module: password, verify"),
+    ] {
+        items.push(CompletionItem {
+            label: name.into(),
+            kind: Some(CompletionItemKind::MODULE),
             detail: Some(detail.into()),
             ..CompletionItem::default()
         });

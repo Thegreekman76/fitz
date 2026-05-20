@@ -272,6 +272,10 @@ pub fn builtin_names() -> &'static [&'static str] {
         "floor",
         "round",
         "clamp",
+        // Fase 9.w.1.b — `jwt` y `hash` como Value::Module pre-registrados.
+        // El REPL los filtra con `:env`; el LSP los lista en completions.
+        "jwt",
+        "hash",
     ]
 }
 
@@ -7704,6 +7708,42 @@ fn register_builtins(env: &EnvRef) {
         "clamp",
         Value::Builtin { name: "clamp", func: builtin_math_clamp },
     );
+
+    // Fase 9.w.1.b — Auth nativa: módulos `jwt` y `hash` siempre
+    // disponibles en el env global. A diferencia de los builtins
+    // top-level (`print`/`len`/`sleep`/`cors`/...), `jwt` y `hash`
+    // tienen namespace propio: `jwt.encode(...)` y `hash.password(...)`.
+    // Patrón: construir un `EnvRef` fresh por módulo, registrar los
+    // builtins adentro, bindear como `Value::Module` en el env
+    // principal. El dispatcher de field access sobre `Value::Module`
+    // (ya existente desde Fase 3.5) hace el resto.
+    let jwt_env = Environment::new();
+    jwt_env.lock().define(
+        "encode",
+        Value::Builtin { name: "encode", func: builtin_jwt_encode },
+    );
+    jwt_env.lock().define(
+        "decode",
+        Value::Builtin { name: "decode", func: builtin_jwt_decode },
+    );
+    env.lock().define(
+        "jwt",
+        Value::Module { name: "jwt".into(), env: jwt_env },
+    );
+
+    let hash_env = Environment::new();
+    hash_env.lock().define(
+        "password",
+        Value::Builtin { name: "password", func: builtin_hash_password },
+    );
+    hash_env.lock().define(
+        "verify",
+        Value::Builtin { name: "verify", func: builtin_hash_verify },
+    );
+    env.lock().define(
+        "hash",
+        Value::Module { name: "hash".into(), env: hash_env },
+    );
 }
 
 /// Mini-tanda Bits-extras — `popcount(n: Int) -> Int`: cantidad de
@@ -8595,6 +8635,382 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
         ))),
         Err(_) => Ok(Value::Null),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fase 9.w.1.b — JWT y password hashing builtins.
+//
+// Los 4 builtins de auth nativa, registrados como métodos de los
+// `Value::Module` `jwt` y `hash` desde `register_builtins`. La API
+// elegida deliberadamente minimalista para el MVP — el caso típico
+// (JWT bearer auth con HS256 + Argon2id password store) es expresable
+// con estos 4 calls.
+//
+// Decisiones:
+//
+// - **Sin kwargs**. El parser de calls de Fitz no soporta kwargs (vive
+//   solo en decoradores desde Fase 4.1). Los args opcionales se modelan
+//   como positional opcional al final (ver `alg` en `jwt.encode`/`decode`).
+//
+// - **`jwt.encode/decode` solo HS256/384/512** (HMAC simétrico con
+//   secret string). Asimétricos (RS256/ES256 con par de llaves PEM)
+//   quedan post-MVP — agregar requiere parsear PEM, kid headers,
+//   rotación, etc. Para JWT bearer auth en una app monolítica con su
+//   propio secret, HS* alcanza.
+//
+// - **`jwt.decode` devuelve `Result<Map>`** (no `Map` directo). Token
+//   malformado, signature inválida, expirado son runtime events
+//   esperables — el usuario los maneja con `match` o `?`. Mensaje del
+//   `Err` viene del crate `jsonwebtoken` (claro y específico:
+//   "InvalidToken", "ExpiredSignature", etc.).
+//
+// - **`hash.password` Argon2id con params default del crate**
+//   (memory=19456 KiB, iters=2, parallelism=1) — recomendación OWASP.
+//   Override de params queda fuera del MVP. El hash de salida incluye
+//   salt + params en formato PHC string ("$argon2id$v=19$m=...$..."),
+//   listo para almacenar tal cual en la DB.
+//
+// - **`hash.verify` devuelve `Bool` (no `Result<Bool>`)**. Cualquier
+//   falla (hash malformado, mismatch, error interno) → `false`. Decisión
+//   de seguridad: no se filtra al attacker si el hash en la DB está
+//   corrupto, fuera de formato o cualquier otro detalle interno —
+//   siempre se ve igual desde afuera. El call site típico es
+//   `if hash.verify(input, stored) { ... }`.
+// ---------------------------------------------------------------------------
+
+/// `jwt.encode(payload: Map, secret: Str, alg: Str = "HS256") -> Str`.
+/// Codifica un payload Map como JWT firmado con HMAC.
+fn builtin_jwt_encode(args: &[Value]) -> FitzResult<Value> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`jwt.encode` espera 2 o 3 argumentos (payload: Map, secret: Str, alg: Str?), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let payload_json = match &args[0] {
+        Value::Map(_) => match crate::http::value_to_json(&args[0]) {
+            Ok(j) => j,
+            Err(e) => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    format!("`jwt.encode`: payload no serializable a JSON: {}", e),
+                ));
+            }
+        },
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Map".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`jwt.encode`: payload debe ser Map, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let secret = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`jwt.encode`: secret debe ser Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let alg_str = if args.len() == 3 {
+        match &args[2] {
+            Value::Str(s) => s.clone(),
+            other => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Str".into(),
+                        found: other.type_name().into(),
+                    },
+                    0,
+                    0,
+                    format!(
+                        "`jwt.encode`: alg debe ser Str, recibió `{}`",
+                        other.type_name()
+                    ),
+                ));
+            }
+        }
+    } else {
+        "HS256".to_string()
+    };
+    let algorithm = match alg_str.as_str() {
+        "HS256" => jsonwebtoken::Algorithm::HS256,
+        "HS384" => jsonwebtoken::Algorithm::HS384,
+        "HS512" => jsonwebtoken::Algorithm::HS512,
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!(
+                    "`jwt.encode`: alg `{}` no soportado en el MVP. Soportados: HS256, HS384, HS512.",
+                    other
+                ),
+            ));
+        }
+    };
+    let header = jsonwebtoken::Header::new(algorithm);
+    let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());
+    jsonwebtoken::encode(&header, &payload_json, &key)
+        .map(Value::Str)
+        .map_err(|e| {
+            FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!("`jwt.encode`: fallo al firmar: {}", e),
+            )
+        })
+}
+
+/// `jwt.decode(token: Str, secret: Str, alg: Str = "HS256") -> Result<Map>`.
+/// Verifica la firma + decodifica el payload. Devuelve siempre
+/// `Result<Map>`: cualquier falla (token malformado, signature
+/// inválida, expirado, etc.) va al `Err` con mensaje específico.
+fn builtin_jwt_decode(args: &[Value]) -> FitzResult<Value> {
+    if args.len() < 2 || args.len() > 3 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`jwt.decode` espera 2 o 3 argumentos (token: Str, secret: Str, alg: Str?), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let token = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`jwt.decode`: token debe ser Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let secret = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`jwt.decode`: secret debe ser Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let alg_str = if args.len() == 3 {
+        match &args[2] {
+            Value::Str(s) => s.clone(),
+            other => {
+                return Err(FitzError::new(
+                    ErrorKind::TypeMismatch {
+                        expected: "Str".into(),
+                        found: other.type_name().into(),
+                    },
+                    0,
+                    0,
+                    format!(
+                        "`jwt.decode`: alg debe ser Str, recibió `{}`",
+                        other.type_name()
+                    ),
+                ));
+            }
+        }
+    } else {
+        "HS256".to_string()
+    };
+    let algorithm = match alg_str.as_str() {
+        "HS256" => jsonwebtoken::Algorithm::HS256,
+        "HS384" => jsonwebtoken::Algorithm::HS384,
+        "HS512" => jsonwebtoken::Algorithm::HS512,
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!(
+                    "`jwt.decode`: alg `{}` no soportado en el MVP. Soportados: HS256, HS384, HS512.",
+                    other
+                ),
+            ));
+        }
+    };
+    let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());
+    let mut validation = jsonwebtoken::Validation::new(algorithm);
+    // Por default, `Validation::new` exige claim `exp` presente. Acá lo
+    // relajamos: tokens sin `exp` también son válidos (caso típico de
+    // "API keys long-lived"). Si `exp` está presente, sigue siendo
+    // validado por el crate (token expirado → Err). El usuario que
+    // quiera obligatoriedad de `exp` puede chequear el Map devuelto.
+    validation.required_spec_claims.clear();
+    match jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation) {
+        Ok(data) => {
+            let map = crate::http::json_to_value(&data.claims);
+            Ok(Value::Result(ResultVariant::Ok(Box::new(map))))
+        }
+        Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            e.to_string(),
+        ))))),
+    }
+}
+
+/// `hash.password(plain: Str) -> Str`. Genera un hash Argon2id con
+/// salt aleatorio. Output en formato PHC string (incluye algoritmo,
+/// params y salt), listo para guardar tal cual en la DB.
+fn builtin_hash_password(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`hash.password` espera 1 argumento (plain: Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let plain = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`hash.password`: plain debe ser Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};
+    let salt = SaltString::generate(&mut OsRng);
+    let argon2 = argon2::Argon2::default();
+    argon2
+        .hash_password(plain.as_bytes(), &salt)
+        .map(|h| Value::Str(h.to_string()))
+        .map_err(|e| {
+            FitzError::new(
+                ErrorKind::TypeError,
+                0,
+                0,
+                format!("`hash.password`: fallo al hashear: {}", e),
+            )
+        })
+}
+
+/// `hash.verify(plain: Str, hashed: Str) -> Bool`. Verifica una
+/// contraseña contra un hash PHC. Cualquier falla (hash malformado,
+/// mismatch, etc.) → `false` para no filtrar info al attacker.
+fn builtin_hash_verify(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`hash.verify` espera 2 argumentos (plain: Str, hashed: Str), recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let plain = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`hash.verify`: plain debe ser Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let hashed = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`hash.verify`: hashed debe ser Str, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    use argon2::password_hash::{PasswordHash, PasswordVerifier};
+    let parsed = match PasswordHash::new(&hashed) {
+        Ok(p) => p,
+        Err(_) => return Ok(Value::Bool(false)),
+    };
+    let ok = argon2::Argon2::default()
+        .verify_password(plain.as_bytes(), &parsed)
+        .is_ok();
+    Ok(Value::Bool(ok))
 }
 
 // ---------------------------------------------------------------------------
@@ -18335,5 +18751,282 @@ let r = match n {
         assert_eq!(env.get("b"), Some(Value::Str("3.14".into())));
         assert_eq!(env.get("c"), Some(Value::Bool(false)));
         assert_eq!(env.get("d"), Some(Value::Bool(true)));
+    }
+
+    // ----------------------------------------------------------------
+    // Fase 9.w.1.b — Auth nativa: builtins jwt + hash.
+    //
+    // Cubren: registro como Value::Module en el env global, signatures
+    // de cada builtin (aridad + tipos), round-trips encode→decode y
+    // password→verify, modelo de errores (Result::Err con mensaje
+    // específico para JWT; Bool::false para hash con input malformado).
+    // ----------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn register_builtins_define_jwt_y_hash_como_modulos() {
+        let env = Environment::new();
+        register_builtins(&env);
+        // `jwt` y `hash` están en el env global como Value::Module.
+        let jwt = env.lock().get("jwt").expect("jwt debería estar bindeado");
+        match jwt {
+            Value::Module { name, env: jwt_env } => {
+                assert_eq!(name, "jwt");
+                // El env del módulo expone `encode` y `decode`.
+                assert!(jwt_env.lock().get("encode").is_some());
+                assert!(jwt_env.lock().get("decode").is_some());
+            }
+            other => panic!("jwt debería ser Value::Module, fue {:?}", other),
+        }
+        let hash = env.lock().get("hash").expect("hash debería estar bindeado");
+        match hash {
+            Value::Module { name, env: hash_env } => {
+                assert_eq!(name, "hash");
+                assert!(hash_env.lock().get("password").is_some());
+                assert!(hash_env.lock().get("verify").is_some());
+            }
+            other => panic!("hash debería ser Value::Module, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_encode_decode_round_trip_hs256() {
+        // Encode un payload, decode con el mismo secret, recuperá el
+        // payload bit-a-bit.
+        let payload = Value::new_map(vec![
+            (Value::Str("sub".into()), Value::Str("user123".into())),
+            (Value::Str("admin".into()), Value::Bool(true)),
+        ]);
+        let secret = Value::Str("mi-secret-32-bytes-long-enough-x".into());
+        let token = builtin_jwt_encode(&[payload.clone(), secret.clone()]).unwrap();
+        let token_str = match &token {
+            Value::Str(s) => s.clone(),
+            other => panic!("encode debe devolver Str, fue {:?}", other),
+        };
+        // JWT format: 3 partes separadas por `.`.
+        assert_eq!(token_str.split('.').count(), 3);
+        // Decode devuelve Result::Ok(Map) con los mismos claims.
+        let decoded = builtin_jwt_decode(&[Value::Str(token_str), secret]).unwrap();
+        match decoded {
+            Value::Result(ResultVariant::Ok(inner)) => match *inner {
+                Value::Map(pairs) => {
+                    let pairs = pairs.lock();
+                    let sub = pairs
+                        .iter()
+                        .find(|(k, _)| matches!(k, Value::Str(s) if s == "sub"))
+                        .expect("falta sub");
+                    assert_eq!(sub.1, Value::Str("user123".into()));
+                    let admin = pairs
+                        .iter()
+                        .find(|(k, _)| matches!(k, Value::Str(s) if s == "admin"))
+                        .expect("falta admin");
+                    assert_eq!(admin.1, Value::Bool(true));
+                }
+                other => panic!("decode debe devolver Map adentro de Ok, fue {:?}", other),
+            },
+            other => panic!("decode debe devolver Result::Ok, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_decode_secret_incorrecto_devuelve_err() {
+        let payload = Value::new_map(vec![(Value::Str("k".into()), Value::Int(1))]);
+        let secret_good = Value::Str("secret-correcto-de-32-bytes-xxxx".into());
+        let secret_bad = Value::Str("secret-distinto-de-32-bytes-xxxx".into());
+        let token = match builtin_jwt_encode(&[payload, secret_good]).unwrap() {
+            Value::Str(s) => Value::Str(s),
+            _ => panic!(),
+        };
+        let decoded = builtin_jwt_decode(&[token, secret_bad]).unwrap();
+        match decoded {
+            Value::Result(ResultVariant::Err(inner)) => match *inner {
+                Value::Str(msg) => {
+                    // El crate `jsonwebtoken` emite "InvalidSignature" cuando
+                    // el secret no matchea. Verificamos que el mensaje no
+                    // sea vacío y mencione la signature.
+                    assert!(
+                        msg.to_lowercase().contains("signature") || msg.to_lowercase().contains("invalid"),
+                        "esperaba mención de signature/invalid, fue: {}",
+                        msg
+                    );
+                }
+                other => panic!("Err inner debería ser Str, fue {:?}", other),
+            },
+            other => panic!("decode con secret malo debe ser Err, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_decode_token_malformado_devuelve_err() {
+        let token = Value::Str("no-es-un-jwt-valido".into());
+        let secret = Value::Str("cualquier-secret".into());
+        let decoded = builtin_jwt_decode(&[token, secret]).unwrap();
+        assert!(matches!(decoded, Value::Result(ResultVariant::Err(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_encode_alg_desconocido_es_error() {
+        let payload = Value::new_map(vec![]);
+        let secret = Value::Str("x".into());
+        let bad_alg = Value::Str("MD5".into());
+        let result = builtin_jwt_encode(&[payload, secret, bad_alg]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("HS256"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_encode_y_decode_con_alg_explicito_hs384() {
+        let payload = Value::new_map(vec![(Value::Str("ok".into()), Value::Bool(true))]);
+        let secret = Value::Str("secret-mas-largo-para-hs384-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        let alg = Value::Str("HS384".into());
+        let token = builtin_jwt_encode(&[payload, secret.clone(), alg.clone()]).unwrap();
+        let token_str = match token {
+            Value::Str(s) => s,
+            _ => panic!(),
+        };
+        // Decode con HS256 default debería fallar (alg mismatch).
+        let dec_default = builtin_jwt_decode(&[Value::Str(token_str.clone()), secret.clone()]).unwrap();
+        assert!(matches!(dec_default, Value::Result(ResultVariant::Err(_))));
+        // Decode con HS384 explícito tiene que andar.
+        let dec_ok = builtin_jwt_decode(&[Value::Str(token_str), secret, alg]).unwrap();
+        assert!(matches!(dec_ok, Value::Result(ResultVariant::Ok(_))));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_encode_payload_no_map_es_error() {
+        let result = builtin_jwt_encode(&[
+            Value::Str("no es Map".into()),
+            Value::Str("secret".into()),
+        ]);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(err.message.contains("payload"));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_encode_secret_no_str_es_error() {
+        let result = builtin_jwt_encode(&[Value::new_map(vec![]), Value::Int(42)]);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_encode_aridad_incorrecta_es_error() {
+        let r1 = builtin_jwt_encode(&[]);
+        assert!(r1.is_err());
+        let r2 = builtin_jwt_encode(&[Value::new_map(vec![])]);
+        assert!(r2.is_err());
+        // 4 args también es error (>3).
+        let r4 = builtin_jwt_encode(&[
+            Value::new_map(vec![]),
+            Value::Str("s".into()),
+            Value::Str("HS256".into()),
+            Value::Int(0),
+        ]);
+        assert!(r4.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_password_y_verify_round_trip() {
+        let plain = "contraseña-secreta-del-usuario";
+        let hashed = builtin_hash_password(&[Value::Str(plain.into())]).unwrap();
+        let hashed_str = match &hashed {
+            Value::Str(s) => s.clone(),
+            other => panic!("password debe devolver Str, fue {:?}", other),
+        };
+        // El hash sigue el formato PHC string: `$argon2id$v=19$...`.
+        assert!(
+            hashed_str.starts_with("$argon2id$"),
+            "esperaba prefijo $argon2id$, fue: {}",
+            hashed_str
+        );
+        // Verify con el plain original devuelve true.
+        let ok = builtin_hash_verify(&[Value::Str(plain.into()), Value::Str(hashed_str.clone())]).unwrap();
+        assert_eq!(ok, Value::Bool(true));
+        // Verify con plain incorrecto devuelve false.
+        let bad = builtin_hash_verify(&[
+            Value::Str("contraseña-distinta".into()),
+            Value::Str(hashed_str),
+        ])
+        .unwrap();
+        assert_eq!(bad, Value::Bool(false));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_password_genera_salts_distintos_por_call() {
+        // Argon2id usa salt aleatorio por cada llamada, así que dos
+        // password() del mismo plain producen hashes distintos. Ambos
+        // verifican OK contra el plain original.
+        let plain = Value::Str("misma-pass".into());
+        let h1 = builtin_hash_password(&[plain.clone()]).unwrap();
+        let h2 = builtin_hash_password(&[plain.clone()]).unwrap();
+        assert_ne!(h1, h2, "hashes deberían diferir por el salt random");
+        let v1 = builtin_hash_verify(&[plain.clone(), h1]).unwrap();
+        let v2 = builtin_hash_verify(&[plain, h2]).unwrap();
+        assert_eq!(v1, Value::Bool(true));
+        assert_eq!(v2, Value::Bool(true));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_verify_hash_malformado_devuelve_false_no_error() {
+        // Hash malformado no panicquea — devuelve false. Decisión de
+        // seguridad: no se filtra al attacker que el hash en la DB
+        // está corrupto.
+        let result = builtin_hash_verify(&[
+            Value::Str("cualquier-plain".into()),
+            Value::Str("no-es-un-hash-PHC".into()),
+        ])
+        .unwrap();
+        assert_eq!(result, Value::Bool(false));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_password_no_str_es_error() {
+        let result = builtin_hash_password(&[Value::Int(42)]);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_password_aridad_incorrecta_es_error() {
+        let r0 = builtin_hash_password(&[]);
+        assert!(r0.is_err());
+        let r2 = builtin_hash_password(&[Value::Str("a".into()), Value::Str("b".into())]);
+        assert!(r2.is_err());
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn hash_verify_aridad_incorrecta_es_error() {
+        let r0 = builtin_hash_verify(&[]);
+        assert!(r0.is_err());
+        let r1 = builtin_hash_verify(&[Value::Str("a".into())]);
+        assert!(r1.is_err());
+    }
+
+    /// Test de end-to-end usando el evaluator real (no llamada directa
+    /// a la fn builtin). Verifica que `jwt.encode(...)` parseado como
+    /// expresión Fitz se ejecuta correctamente vía el dispatch normal
+    /// del field-access sobre Value::Module.
+    #[tokio::test(flavor = "current_thread")]
+    async fn jwt_y_hash_via_field_access_en_programa_fitz() {
+        let (env, res) = parse_eval_into_env(
+            "let token = jwt.encode({\"sub\": \"x\"}, \"secret-32-bytes-aaaaaaaaaaaaaaaaa\")\n\
+             let pw = hash.password(\"pass\")\n\
+             let ok = hash.verify(\"pass\", pw)\n\
+             let bad = hash.verify(\"otra\", pw)",
+        )
+        .await;
+        res.unwrap();
+        let env = env.lock();
+        // token es Str con 3 partes JWT.
+        match env.get("token").expect("token bindeado") {
+            Value::Str(s) => assert_eq!(s.split('.').count(), 3),
+            other => panic!("token debería ser Str, fue {:?}", other),
+        }
+        // pw es PHC string Argon2id.
+        match env.get("pw").expect("pw bindeado") {
+            Value::Str(s) => assert!(s.starts_with("$argon2id$")),
+            other => panic!("pw debería ser Str, fue {:?}", other),
+        }
+        assert_eq!(env.get("ok"), Some(Value::Bool(true)));
+        assert_eq!(env.get("bad"), Some(Value::Bool(false)));
     }
 }

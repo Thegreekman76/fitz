@@ -1182,6 +1182,46 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Fase 9.w.1.b — `jwt` y `hash` como módulos siempre disponibles
+        // en el scope global. El evaluator los construye como
+        // `Value::Module` con sus builtins adentro (`encode`/`decode`
+        // para jwt; `password`/`verify` para hash). El checker los tipa
+        // como `Any` por dos razones:
+        //
+        // (1) `Type::Function` actual no modela args opcionales — `alg`
+        //     en `jwt.encode/decode` es positional opcional al final
+        //     (`Str?` a nivel valor) que con la firma estática
+        //     `Type::Function { params, ret }` no expresable hoy.
+        //
+        // (2) Field access sobre `Any` cae a gradual (también `Any`), así
+        //     que `jwt.encode` y `hash.password` tipan como `Any` y los
+        //     calls no se chequean estáticamente. La pérdida es contenida
+        //     porque la validación de tipos de retorno (`Str` para encode,
+        //     `Result<Map>` para decode, etc.) sucede en runtime con
+        //     mensajes claros desde los builtins.
+        //
+        // Refinable post-MVP con union types o un tipo `Module` dedicado
+        // que carry una tabla de `Function` signatures internas.
+        self.scopes[0].insert(
+            "jwt".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        self.scopes[0].insert(
+            "hash".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         self.scopes[0].insert(
             "assert_eq".into(),
             VarBinding {
