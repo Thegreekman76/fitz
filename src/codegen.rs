@@ -144,6 +144,13 @@ pub fn generate_project(
     // `from python import` no pagan el costo de bajar/linkear pyo3.
     let uses_python = !python_imports.is_empty();
 
+    // Fase 9.w.1.d — auth nativa. Habilita el preludio de helpers
+    // `__fitz_jwt_*` / `__fitz_hash_*` y suma `jsonwebtoken` + `argon2`
+    // + `rand_core` al Cargo.toml cuando el programa usa el módulo
+    // built-in `jwt`/`hash` o cualquier decorator de auth
+    // (`@auth_provider`/`@authenticated`/`@admin`).
+    let uses_auth = program_uses_auth(program);
+
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
     // del main resuelva `foo.x` como path `foo::x` y los tipos
@@ -153,7 +160,7 @@ pub fn generate_project(
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
         output_basename: raw_stem,
-        cargo_toml: cargo_toml_for(&stem, has_http, uses_async, uses_python),
+        cargo_toml: cargo_toml_for(&stem, has_http, uses_async, uses_python, uses_auth),
         main_rs,
         mod_files: loader.into_mod_files(),
     })
@@ -271,6 +278,126 @@ fn has_http_routes(program: &Program) -> bool {
                 ))
         )
     })
+}
+
+/// Fase 9.w.1.d — `true` si el programa usa al menos uno de:
+/// - El módulo built-in `jwt` (`jwt.encode(...)` / `jwt.decode(...)`).
+/// - El módulo built-in `hash` (`hash.password(...)` / `hash.verify(...)`).
+/// - Algún decorator de auth (`@auth_provider`/`@authenticated`/`@admin`).
+///
+/// El codegen lo usa para decidir si agregar deps `jsonwebtoken` +
+/// `argon2` + `rand_core` al Cargo.toml y si emitir el preludio de
+/// helpers `__fitz_jwt_*` / `__fitz_hash_*`. Programas sin auth no
+/// pagan el costo de bajar/compilar esas crates.
+fn program_uses_auth(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_auth(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                // jwt.X(...) o hash.X(...).
+                if let Expr::Field { object, field, .. } = callee.as_ref() {
+                    if let Expr::Ident(recv, _) = object.as_ref() {
+                        if (recv == "jwt"
+                            && matches!(field.as_str(), "encode" | "decode"))
+                            || (recv == "hash"
+                                && matches!(field.as_str(), "password" | "verify"))
+                        {
+                            return true;
+                        }
+                    }
+                }
+                expr_uses_auth(callee) || args.iter().any(expr_uses_auth)
+            }
+            Expr::BinOp { left, right, .. } => {
+                expr_uses_auth(left) || expr_uses_auth(right)
+            }
+            Expr::UnaryOp { operand, .. } => expr_uses_auth(operand),
+            Expr::Field { object, .. } => expr_uses_auth(object),
+            Expr::Index { object, index, .. } => {
+                expr_uses_auth(object) || expr_uses_auth(index)
+            }
+            Expr::Slice { object, start, end, .. } => {
+                expr_uses_auth(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_auth(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_auth(x))
+            }
+            Expr::Range { start, end, .. } => {
+                expr_uses_auth(start) || expr_uses_auth(end)
+            }
+            Expr::List(items, _) => items.iter().any(expr_uses_auth),
+            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+                expr_uses_auth(expr)
+                    || expr_uses_auth(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_auth(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_auth(f))
+            }
+            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+                expr_uses_auth(key)
+                    || expr_uses_auth(value)
+                    || expr_uses_auth(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_auth(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_auth(f))
+            }
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_auth(k) || expr_uses_auth(v)),
+            Expr::StructLit { fields, .. } => {
+                fields.iter().any(|(_, v)| expr_uses_auth(v))
+            }
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_auth),
+            Expr::TupleField { tuple, .. } => expr_uses_auth(tuple),
+            Expr::If { condition, then, else_, .. } => {
+                expr_uses_auth(condition)
+                    || then.iter().any(stmt_uses_auth)
+                    || else_
+                        .as_ref()
+                        .is_some_and(|b| b.iter().any(stmt_uses_auth))
+            }
+            Expr::Match { value, arms, .. } => {
+                expr_uses_auth(value)
+                    || arms.iter().any(|a| a.body.iter().any(stmt_uses_auth))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_auth),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Lit(_) => false,
+                StrPart::Expr(inner, _) => expr_uses_auth(inner),
+            }),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_auth),
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_auth(inner),
+            _ => false,
+        }
+    }
+    fn stmt_uses_auth(s: &Stmt) -> bool {
+        match s {
+            Stmt::FnDef { decorators, body, .. } => {
+                decorators.iter().any(|d| {
+                    matches!(
+                        d.name.as_str(),
+                        "auth_provider" | "authenticated" | "admin"
+                    )
+                }) || body.iter().any(stmt_uses_auth)
+            }
+            Stmt::Assign { value, .. } => expr_uses_auth(value),
+            Stmt::Expr(e, _) => expr_uses_auth(e),
+            Stmt::Return(e, _) => expr_uses_auth(e),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_auth(status)
+                    || body.as_ref().is_some_and(expr_uses_auth)
+            }
+            Stmt::While { condition, body, .. } => {
+                expr_uses_auth(condition) || body.iter().any(stmt_uses_auth)
+            }
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_auth),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_auth(iter) || body.iter().any(stmt_uses_auth)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(stmt_uses_auth)
 }
 
 /// Fase 6.6: True si el programa usa async — cualquier `async fn`
@@ -1180,7 +1307,13 @@ fn sanitize_crate_name(raw: &str) -> String {
 /// Cargo.toml para el project generado. Si `has_http` es true,
 /// suma axum + tokio + serde + serde_json (necesarios para 5b.6).
 /// Si no, queda sin `[dependencies]` y la compilación es rápida.
-fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool, uses_python: bool) -> String {
+fn cargo_toml_for(
+    stem: &str,
+    has_http: bool,
+    uses_async: bool,
+    uses_python: bool,
+    uses_auth: bool,
+) -> String {
     let header = format!(
         "[package]\n\
          name = \"{stem}\"\n\
@@ -1211,7 +1344,21 @@ fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool, uses_python: boo
     } else {
         ""
     };
-    let needs_deps_section = has_http || uses_async || uses_python;
+    // Fase 9.w.1.d — auth deps. Si el programa usa `jwt.*`/`hash.*` o
+    // decorators de auth, sumar `jsonwebtoken` (JWT HS256/384/512),
+    // `argon2` (Argon2id password hashing) y `rand_core` (con feature
+    // `getrandom` para `OsRng` del salt). Paralelo a las deps no
+    // opcionales del binario `fitz` principal (ver Cargo.toml del
+    // workspace).
+    let auth_lines = if uses_auth {
+        "jsonwebtoken = \"9\"\n\
+         argon2 = { version = \"0.5\", features = [\"std\"] }\n\
+         rand_core = { version = \"0.6\", features = [\"getrandom\"] }\n\
+         serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
+    } else {
+        ""
+    };
+    let needs_deps_section = has_http || uses_async || uses_python || uses_auth;
     if !needs_deps_section {
         return header;
     }
@@ -1227,6 +1374,21 @@ fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool, uses_python: boo
     } else {
         String::new()
     };
+    // `serde_json` ya está en http_lines cuando hay HTTP; si solo hay
+    // auth (sin HTTP), `auth_lines` lo trae. Evitar duplicación: si
+    // ambos están, omitir el de auth.
+    let auth_lines_final = if has_http {
+        // serde_json ya está en http_lines; omitirlo de auth.
+        if uses_auth {
+            "jsonwebtoken = \"9\"\n\
+             argon2 = { version = \"0.5\", features = [\"std\"] }\n\
+             rand_core = { version = \"0.6\", features = [\"getrandom\"] }\n"
+        } else {
+            ""
+        }
+    } else {
+        auth_lines
+    };
     let http_lines = if has_http {
         "axum = \"0.8\"\n\
          serde = { version = \"1\", features = [\"derive\"] }\n\
@@ -1235,8 +1397,8 @@ fn cargo_toml_for(stem: &str, has_http: bool, uses_async: bool, uses_python: boo
         ""
     };
     format!(
-        "{}\n[dependencies]\n{}{}{}",
-        header, http_lines, tokio_line, pyo3_line
+        "{}\n[dependencies]\n{}{}{}{}",
+        header, http_lines, tokio_line, pyo3_line, auth_lines_final
     )
 }
 
@@ -2153,6 +2315,7 @@ fn generate_main_rs(
     let uses_python = !python_imports.is_empty();
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
     let uses_fitz_value = program_uses_fitz_value(program);
+    let uses_auth = program_uses_auth(program);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -2160,6 +2323,20 @@ fn generate_main_rs(
     ctx.uses_fmt_helpers = uses_fmt_helpers;
     ctx.uses_fitz_value = uses_fitz_value;
     ctx.has_http = has_http;
+    ctx.uses_auth = uses_auth;
+    // Fase 9.w.1.d — pre-scan del `@auth_provider`. Singleton; el checker
+    // (9.w.1.a) ya validó. Lo guardamos por nombre + is_async para que
+    // cada handler con `@authenticated`/`@admin` emita la invocación
+    // correcta.
+    for stmt in program {
+        if let Stmt::FnDef { name, decorators, is_async, .. } = stmt {
+            if decorators.iter().any(|d| d.name == "auth_provider") {
+                ctx.auth_provider_name = Some(name.clone());
+                ctx.auth_provider_is_async = *is_async;
+                break;
+            }
+        }
+    }
     ctx.install_python_bindings(python_imports);
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
@@ -2261,13 +2438,31 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // handler async. Solo validamos que sea un
                             // decorator HTTP de ruta válido en otro lugar.
                             "middleware" => {}
+                            // Fase 9.w.1.d — `@auth_provider` marca una
+                            // fn como el provider de auth singleton. El
+                            // pre-scan de `generate_main_rs` ya capturó
+                            // su nombre + is_async en `ctx.auth_provider_name`.
+                            // Acá la fn sigue siendo top_fn (se emite
+                            // como `pub async fn`/`pub fn` normal); el
+                            // wrapper de cada handler protegido la
+                            // invoca por nombre.
+                            "auth_provider" => {}
+                            // Fase 9.w.1.d — `@authenticated`/`@admin`
+                            // sobre handlers HTTP. El wrapper del handler
+                            // (gen_http_handler_wrapper + emit_auth_check)
+                            // los procesa; acá solo los aceptamos como
+                            // decorators válidos. NO setean http_decos
+                            // por sí solos — debe haber un `@get`/`@post`/
+                            // `@put`/`@delete` apilado (validado por el
+                            // checker 9.w.1.a y por el evaluator MVP).
+                            "authenticated" | "admin" => {}
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@server/@header)",
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@server/@header/@middleware/@auth_provider/@authenticated/@admin)",
                                         other, name
                                     ),
                                 ));
@@ -2396,6 +2591,13 @@ fn emit_main_rs_body(
     // `__FitzPyObject` queda en scope global del main.rs para
     // referenciarse desde cualquier `rust_type_for(Type::PyAny)`.
     ctx.emit_python_prelude();
+    // Fase 9.w.1.d: preludio de auth — helpers `__fitz_jwt_encode/
+    // decode` y `__fitz_hash_password/verify`. Solo se emiten si el
+    // programa usa el módulo built-in `jwt`/`hash` o cualquier
+    // decorator de auth. Va después del preludio base y antes de los
+    // mod/use decls para que las fns top-level del usuario lo
+    // referencien sin necesidad de `use` extra.
+    ctx.emit_auth_prelude();
     // Fase 8.7.2: bindings Python globales (static + getter) emitidos
     // al top-level del crate para que cualquier fn los pueda referenciar.
     let py_imports = std::mem::take(&mut ctx.python_imports_ordered);
@@ -2789,6 +2991,23 @@ struct CodegenCtx<'a> {
     /// el preludio Python (`__FitzPyObject` + helpers PyO3) y la
     /// emisión de bindings como vars locales del main body.
     uses_python: bool,
+    /// Fase 9.w.1.d: `true` si el programa usa el módulo built-in
+    /// `jwt`/`hash` (`jwt.encode(...)` / `hash.password(...)` etc.) o
+    /// cualquier decorator de auth (`@auth_provider`/`@authenticated`/
+    /// `@admin`). Habilita la emisión de los helpers
+    /// `__fitz_jwt_encode/decode` / `__fitz_hash_password/verify` en el
+    /// preludio y el wiring del wrapper auth alrededor de cada handler
+    /// HTTP con `@authenticated`/`@admin`.
+    uses_auth: bool,
+    /// Fase 9.w.1.d: nombre Rust de la fn marcada con `@auth_provider`
+    /// (singleton). `None` si el programa no la tiene. El wrapper de
+    /// cada handler con `@authenticated`/`@admin` la invoca antes del
+    /// handler. Pre-scaneado en `generate_main_rs`.
+    auth_provider_name: Option<String>,
+    /// Fase 9.w.1.d: `true` si la fn `@auth_provider` es `async fn`.
+    /// El wrapper la invoca con `.await` si es así, sync caller-side
+    /// si no.
+    auth_provider_is_async: bool,
     /// Fase 8.7.1: bindings Python detectados en el programa. Cada
     /// entry mapea `binding_name` → `dotted_path` Python. Se consulta
     /// desde `gen_expr` (Ident) para tipar el ident como
@@ -2900,6 +3119,14 @@ struct HandlerSig {
     mw_cors: Option<BuildCorsConfig>,
     has_middleware: bool,
     has_cors: bool,
+    /// Fase 9.w.1.d — política de auth de la ruta (`@authenticated` /
+    /// `@admin` o ninguno). `AuthSpec::None` (default) es ruta pública.
+    auth: crate::http::AuthSpec,
+    /// Fase 9.w.1.d — nombre del param del handler donde se inyecta el
+    /// `user` retornado por el `@auth_provider`. `Some(name)` cuando
+    /// `auth != None`; `None` cuando no hay auth. Identificado por
+    /// regla "leftover" (el param que no es path/query/header).
+    auth_user_param_name: Option<String>,
 }
 
 impl<'a> CodegenCtx<'a> {
@@ -2932,6 +3159,9 @@ impl<'a> CodegenCtx<'a> {
             uses_fitz_value: false,
             has_http: false,
             uses_python: false,
+            uses_auth: false,
+            auth_provider_name: None,
+            auth_provider_is_async: false,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
             pattern_slot_counter: 0,
@@ -3614,6 +3844,131 @@ impl<'a> CodegenCtx<'a> {
              }\n        \
              Arc::new(Mutex::new(out))\n    \
              })\n\
+             }\n\n",
+        );
+    }
+
+    /// Fase 9.w.1.d — Emite el preludio de helpers para auth nativa:
+    /// `__fitz_jwt_encode/__fitz_jwt_decode/__fitz_hash_password/
+    /// __fitz_hash_verify`. Solo se emite cuando `uses_auth` es true
+    /// (programa usa `jwt.*`/`hash.*` o algún decorator de auth). Sin
+    /// uses_auth, los helpers no se emiten y los Cargo.toml deps
+    /// quedan fuera — programas sin auth no pagan el costo.
+    ///
+    /// Política de los helpers (paralela a `register_builtins` del
+    /// intérprete, 9.w.1.b):
+    /// - Encode: payload `Map<Str, Str>` strict por MVP (heterogéneos
+    ///   en codegen requieren `__FitzValue` integration, post-MVP).
+    ///   Secret/alg como Str. Default alg HS256, también HS384/HS512.
+    ///   Encode panic en fallo (error en build-time, shouldn't happen
+    ///   con args válidos).
+    /// - Decode: token+secret+alg Str. Devuelve `Result<Map<Str, Str>,
+    ///   String>` con claims serializados como Str. Cualquier falla
+    ///   (token malformado, signature inválida, expirado) → `Err(msg)`.
+    /// - hash.password/verify igual que intérprete: Argon2id con
+    ///   params default OWASP, output PHC string, verify devuelve Bool
+    ///   (no Result — hash malformado → false por seguridad).
+    fn emit_auth_prelude(&mut self) {
+        if !self.uses_auth {
+            return;
+        }
+        // jwt.encode: payload `Arc<Mutex<Vec<(String, String)>>>` →
+        // `serde_json::Value::Object` → JWT firmado.
+        self.emit(
+            "/// 9.w.1.d — `jwt.encode(payload, secret, alg)` codegen helper.\n\
+             /// payload restringido a `Map<Str, Str>` en MVP — heterogéneos\n\
+             /// requieren `__FitzValue` integration, post-MVP.\n\
+             fn __fitz_jwt_encode(\n    \
+                 payload: Arc<Mutex<Vec<(String, String)>>>,\n    \
+                 secret: String,\n    \
+                 alg: Option<String>,\n\
+             ) -> String {\n    \
+                 let mut claims = serde_json::Map::new();\n    \
+                 {\n        \
+                     let guard = payload.lock().unwrap();\n        \
+                     for (k, v) in guard.iter() {\n            \
+                         claims.insert(k.clone(), serde_json::Value::String(v.clone()));\n        \
+                         }\n    \
+                 }\n    \
+                 let alg_str = alg.as_deref().unwrap_or(\"HS256\");\n    \
+                 let algorithm = match alg_str {\n        \
+                     \"HS256\" => jsonwebtoken::Algorithm::HS256,\n        \
+                     \"HS384\" => jsonwebtoken::Algorithm::HS384,\n        \
+                     \"HS512\" => jsonwebtoken::Algorithm::HS512,\n        \
+                     other => panic!(\"`jwt.encode`: alg `{}` no soportado en MVP. Soportados: HS256, HS384, HS512.\", other),\n    \
+                 };\n    \
+                 let header = jsonwebtoken::Header::new(algorithm);\n    \
+                 let key = jsonwebtoken::EncodingKey::from_secret(secret.as_bytes());\n    \
+                 jsonwebtoken::encode(&header, &serde_json::Value::Object(claims), &key)\n        \
+                     .unwrap_or_else(|e| panic!(\"`jwt.encode`: fallo al firmar: {}\", e))\n\
+             }\n\n",
+        );
+        // jwt.decode: verifica + decodifica → `Result<Map<Str, Str>,
+        // String>`. Los claims se serializan a Str (numbers/bools
+        // pasan por `to_string()`).
+        self.emit(
+            "/// 9.w.1.d — `jwt.decode(token, secret, alg)` codegen helper.\n\
+             /// Devuelve `Result<Map<Str, Str>, String>` con claims como Str.\n\
+             /// Cualquier falla → `Err` con mensaje del crate jsonwebtoken.\n\
+             fn __fitz_jwt_decode(\n    \
+                 token: String,\n    \
+                 secret: String,\n    \
+                 alg: Option<String>,\n\
+             ) -> Result<Arc<Mutex<Vec<(String, String)>>>, String> {\n    \
+                 let alg_str = alg.as_deref().unwrap_or(\"HS256\");\n    \
+                 let algorithm = match alg_str {\n        \
+                     \"HS256\" => jsonwebtoken::Algorithm::HS256,\n        \
+                     \"HS384\" => jsonwebtoken::Algorithm::HS384,\n        \
+                     \"HS512\" => jsonwebtoken::Algorithm::HS512,\n        \
+                     other => return Err(format!(\"`jwt.decode`: alg `{}` no soportado en MVP\", other)),\n    \
+                 };\n    \
+                 let key = jsonwebtoken::DecodingKey::from_secret(secret.as_bytes());\n    \
+                 let mut validation = jsonwebtoken::Validation::new(algorithm);\n    \
+                 validation.required_spec_claims.clear();\n    \
+                 match jsonwebtoken::decode::<serde_json::Value>(&token, &key, &validation) {\n        \
+                     Ok(data) => {\n            \
+                         let mut out: Vec<(String, String)> = Vec::new();\n            \
+                         if let serde_json::Value::Object(obj) = data.claims {\n                \
+                             for (k, v) in obj.iter() {\n                    \
+                                 let s = match v {\n                        \
+                                     serde_json::Value::String(s) => s.clone(),\n                        \
+                                     other => other.to_string(),\n                    \
+                                 };\n                    \
+                                 out.push((k.clone(), s));\n                \
+                             }\n            \
+                         }\n            \
+                         Ok(Arc::new(Mutex::new(out)))\n        \
+                     }\n        \
+                     Err(e) => Err(e.to_string()),\n    \
+                 }\n\
+             }\n\n",
+        );
+        // hash.password: Argon2id con salt random + params default.
+        self.emit(
+            "/// 9.w.1.d — `hash.password(plain)` codegen helper. Argon2id\n\
+             /// con salt random + params default (OWASP). Output PHC string.\n\
+             fn __fitz_hash_password(plain: String) -> String {\n    \
+                 use argon2::password_hash::{rand_core::OsRng, PasswordHasher, SaltString};\n    \
+                 let salt = SaltString::generate(&mut OsRng);\n    \
+                 let argon2 = argon2::Argon2::default();\n    \
+                 argon2.hash_password(plain.as_bytes(), &salt)\n        \
+                     .map(|h| h.to_string())\n        \
+                     .unwrap_or_else(|e| panic!(\"`hash.password`: fallo al hashear: {}\", e))\n\
+             }\n\n",
+        );
+        // hash.verify: devuelve Bool (no Result). Hash malformado → false.
+        self.emit(
+            "/// 9.w.1.d — `hash.verify(plain, hashed)` codegen helper.\n\
+             /// Hash malformado o mismatch → false (no panic) por seguridad.\n\
+             fn __fitz_hash_verify(plain: String, hashed: String) -> bool {\n    \
+                 use argon2::password_hash::{PasswordHash, PasswordVerifier};\n    \
+                 let parsed = match PasswordHash::new(&hashed) {\n        \
+                     Ok(p) => p,\n        \
+                     Err(_) => return false,\n    \
+                 };\n    \
+                 argon2::Argon2::default()\n        \
+                     .verify_password(plain.as_bytes(), &parsed)\n        \
+                     .is_ok()\n\
              }\n\n",
         );
     }
@@ -6435,6 +6790,25 @@ impl<'a> CodegenCtx<'a> {
         // siendo namespace de módulo, traducimos `foo.greet(args)` →
         // `foo::greet(args)` Rust con la firma del módulo.
         if let Expr::Field { object, field, .. } = callee {
+            // Fase 9.w.1.d — built-ins `jwt`/`hash`. Dispatch antes de
+            // cualquier otra cosa: el receiver es un Ident con nombre
+            // exacto `jwt`/`hash`, y los helpers del preludio aterrizan
+            // por nombre. Si el usuario shadowea con un `let jwt = ...`,
+            // el lookup de var local gana — pero el codegen del MVP no
+            // hace esa verificación (todos los programas razonables no
+            // shadowean los módulos del lenguaje). Refinable si pasa a
+            // ser problema real.
+            if let Expr::Ident(recv, _) = object.as_ref() {
+                match (recv.as_str(), field.as_str()) {
+                    ("jwt", "encode") => return self.gen_auth_jwt_encode(args, call_span),
+                    ("jwt", "decode") => return self.gen_auth_jwt_decode(args, call_span),
+                    ("hash", "password") => {
+                        return self.gen_auth_hash_password(args, call_span);
+                    }
+                    ("hash", "verify") => return self.gen_auth_hash_verify(args, call_span),
+                    _ => {}
+                }
+            }
             if let Expr::Ident(ns, _) = object.as_ref() {
                 if let Some(ResolvedBinding::Namespace { .. }) =
                     self.module_bindings.get(ns).cloned()
@@ -6928,6 +7302,139 @@ impl<'a> CodegenCtx<'a> {
         Ok((
             format!("{}({})", callee_expr, arg_codes.join(", ")),
             sig.ret.clone(),
+        ))
+    }
+
+    // -----------------------------------------------------------------
+    // Fase 9.w.1.d — Built-ins jwt + hash en codegen.
+    //
+    // Dispatchers de `jwt.encode/decode`, `hash.password/verify` desde
+    // `gen_call`. Cada uno valida aridad y tipos de los args al call
+    // site, emite la llamada al helper Rust correspondiente del
+    // preludio (`__fitz_jwt_encode`/etc.), y devuelve el tipo Fitz
+    // adecuado para que el resto del codegen lo coercione si hace
+    // falta. Política MVP:
+    //
+    // - `jwt.encode`: payload restringido a `Map<Str, Str>` strict
+    //   (heterogéneos requieren `__FitzValue`, post-MVP). Devuelve
+    //   `Type::Str`.
+    // - `jwt.decode`: devuelve `Type::Result { ok: Map<Str, Str>, err: Str }`.
+    // - `hash.password`: devuelve `Type::Str`.
+    // - `hash.verify`: devuelve `Type::Bool`.
+    // -----------------------------------------------------------------
+
+    fn gen_auth_jwt_encode(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(self.err_at(call_span, format!(
+                "`jwt.encode` espera 2 o 3 argumentos (payload: Map<Str, Str>, secret: Str, alg: Str?), recibió {}",
+                args.len()
+            )));
+        }
+        let (payload_code, payload_ty) = self.gen_expr(&args[0])?;
+        let payload_ok = matches!(
+            &payload_ty,
+            Type::Map(k, v) if matches!(k.as_ref(), Type::Str) && matches!(v.as_ref(), Type::Str)
+        );
+        if !payload_ok {
+            return Err(self.err_at(args[0].span(), format!(
+                "`jwt.encode` en `fitz build` MVP: el payload debe ser `Map<Str, Str>` strict. \
+                 Heterogéneos (`Map<Str, Any>`) son deuda post-MVP. Recibió `{}`.",
+                payload_ty.display(self.env)
+            )));
+        }
+        let (secret_code, secret_ty) = self.gen_expr(&args[1])?;
+        let secret_c = coerce(&secret_code, &secret_ty, &Type::Str);
+        let alg_code = if args.len() == 3 {
+            let (a_code, a_ty) = self.gen_expr(&args[2])?;
+            let a_c = coerce(&a_code, &a_ty, &Type::Str);
+            format!("Some({})", a_c)
+        } else {
+            "None".to_string()
+        };
+        Ok((
+            format!(
+                "__fitz_jwt_encode({}, {}, {})",
+                payload_code, secret_c, alg_code
+            ),
+            Type::Str,
+        ))
+    }
+
+    fn gen_auth_jwt_decode(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() < 2 || args.len() > 3 {
+            return Err(self.err_at(call_span, format!(
+                "`jwt.decode` espera 2 o 3 argumentos (token: Str, secret: Str, alg: Str?), recibió {}",
+                args.len()
+            )));
+        }
+        let (token_code, token_ty) = self.gen_expr(&args[0])?;
+        let token_c = coerce(&token_code, &token_ty, &Type::Str);
+        let (secret_code, secret_ty) = self.gen_expr(&args[1])?;
+        let secret_c = coerce(&secret_code, &secret_ty, &Type::Str);
+        let alg_code = if args.len() == 3 {
+            let (a_code, a_ty) = self.gen_expr(&args[2])?;
+            let a_c = coerce(&a_code, &a_ty, &Type::Str);
+            format!("Some({})", a_c)
+        } else {
+            "None".to_string()
+        };
+        Ok((
+            format!(
+                "__fitz_jwt_decode({}, {}, {})",
+                token_c, secret_c, alg_code
+            ),
+            Type::Result {
+                ok: Box::new(Type::Map(Box::new(Type::Str), Box::new(Type::Str))),
+                err: Box::new(Type::Str),
+            },
+        ))
+    }
+
+    fn gen_auth_hash_password(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(call_span, format!(
+                "`hash.password` espera 1 argumento (plain: Str), recibió {}",
+                args.len()
+            )));
+        }
+        let (code, ty) = self.gen_expr(&args[0])?;
+        let coerced = coerce(&code, &ty, &Type::Str);
+        Ok((
+            format!("__fitz_hash_password({})", coerced),
+            Type::Str,
+        ))
+    }
+
+    fn gen_auth_hash_verify(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 2 {
+            return Err(self.err_at(call_span, format!(
+                "`hash.verify` espera 2 argumentos (plain: Str, hashed: Str), recibió {}",
+                args.len()
+            )));
+        }
+        let (plain_code, plain_ty) = self.gen_expr(&args[0])?;
+        let plain_c = coerce(&plain_code, &plain_ty, &Type::Str);
+        let (hashed_code, hashed_ty) = self.gen_expr(&args[1])?;
+        let hashed_c = coerce(&hashed_code, &hashed_ty, &Type::Str);
+        Ok((
+            format!("__fitz_hash_verify({}, {})", plain_c, hashed_c),
+            Type::Bool,
         ))
     }
 
@@ -11288,10 +11795,97 @@ impl<'a> CodegenCtx<'a> {
         let sig = self.resolve_handler_signature(stmt)?;
         self.emit_axum_extractors(&sig)?;
         self.emit_middleware_chain(&sig);
+        // Fase 9.w.1.d — auth check después de middlewares y antes de
+        // body parsing. Si la ruta tiene `@authenticated`/`@admin`,
+        // invoca al provider con un `Map<Str,Str>` de headers, valida
+        // `Result<User>` → 401/403 según corresponda, y bindea el
+        // `user` para que el handler lo reciba como arg. No-op si
+        // `sig.auth == AuthSpec::None`.
+        self.emit_auth_check(&sig);
         self.emit_param_coercions(&sig)?;
         self.emit_handler_dispatch_and_response(&sig);
         self.emit_cors_helpers(&sig);
         Ok(())
+    }
+
+    /// Fase 9.w.1.d — emite el código de auth check del wrapper. No-op
+    /// si la ruta es pública. Llamado entre `emit_middleware_chain` y
+    /// `emit_param_coercions` para que: middlewares short-circuit antes
+    /// que auth (CORS preflight, logging genérico no necesitan auth);
+    /// pero body parsing y args coercion no se hagan si auth falla
+    /// (fail-fast).
+    ///
+    /// Emite:
+    /// 1. `let __auth_headers = ...` — construye `Arc<Mutex<Vec<(String, String)>>>`
+    ///    a partir del `__hmap` HeaderMap.
+    /// 2. `let __auth_result = <provider>(__auth_headers)[.await]` —
+    ///    invoca al provider singleton.
+    /// 3. `match __auth_result { Ok(u) => ..., Err(msg) => 401 }`.
+    /// 4. Para `@admin`: chequea `user.role == "admin"` → 403.
+    /// 5. Bindea `let <user_param_name> = u;` para el handler.
+    fn emit_auth_check(&mut self, sig: &HandlerSig) {
+        if sig.auth == crate::http::AuthSpec::None {
+            return;
+        }
+        let user_name = sig
+            .auth_user_param_name
+            .clone()
+            .expect("auth_user_param_name siempre Some cuando auth != None");
+        let provider = self
+            .auth_provider_name
+            .clone()
+            .expect("auth_provider_name pre-scaneado en generate_main_rs");
+        let provider_await = if self.auth_provider_is_async {
+            ".await"
+        } else {
+            ""
+        };
+        // Build Map<Str,Str> de headers.
+        self.emit("    let __auth_headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = {\n");
+        self.emit("        let mut __pairs: Vec<(String, String)> = Vec::with_capacity(__hmap.len());\n");
+        self.emit("        for (k, v) in __hmap.iter() {\n");
+        self.emit("            if let Ok(vs) = v.to_str() {\n");
+        self.emit("                __pairs.push((k.as_str().to_string(), vs.to_string()));\n");
+        self.emit("            }\n");
+        self.emit("        }\n");
+        self.emit("        std::sync::Arc::new(std::sync::Mutex::new(__pairs))\n");
+        self.emit("    };\n");
+        // Invoke provider.
+        writeln!(
+            &mut self.output,
+            "    let __auth_result = {}(__auth_headers){};",
+            provider, provider_await,
+        )
+        .unwrap();
+        // Match result.
+        writeln!(
+            &mut self.output,
+            "    let {} = match __auth_result {{",
+            user_name,
+        )
+        .unwrap();
+        self.emit("        Ok(u) => u,\n");
+        self.emit("        Err(__msg) => return (\n");
+        self.emit("            axum::http::StatusCode::UNAUTHORIZED,\n");
+        self.emit("            axum::Json(serde_json::json!({\"error\": __msg})),\n");
+        self.emit("        ).into_response(),\n");
+        self.emit("    };\n");
+        // Admin role check.
+        if sig.auth == crate::http::AuthSpec::Admin {
+            writeln!(
+                &mut self.output,
+                "    {{\n        let __guard = {}.lock().unwrap();\n        if __guard.role != \"admin\" {{",
+                user_name,
+            )
+            .unwrap();
+            self.emit("            drop(__guard);\n");
+            self.emit("            return (\n");
+            self.emit("                axum::http::StatusCode::FORBIDDEN,\n");
+            self.emit("                axum::Json(serde_json::json!({\"error\": \"acceso prohibido — se requiere rol admin\"})),\n");
+            self.emit("            ).into_response();\n");
+            self.emit("        }\n");
+            self.emit("    }\n");
+        }
     }
 
     /// Resuelve toda la info del handler que `gen_http_handler_wrapper`
@@ -11409,7 +12003,61 @@ impl<'a> CodegenCtx<'a> {
             }
         }
 
-        // Categorizar: cada param es path / query / header / body.
+        // Fase 9.w.1.d — recolectar política de auth de la ruta antes de
+        // categorizar params. Si la ruta tiene `@authenticated`/`@admin`,
+        // el "leftover" (el param que no es path/query/header) se trata
+        // como `auth_user_param_name` (no como body). Política MVP
+        // espejo del intérprete: handler protegido NO admite body
+        // separado del user.
+        let mut auth = crate::http::AuthSpec::None;
+        for d in decorators {
+            match d.name.as_str() {
+                "authenticated" if auth == crate::http::AuthSpec::None => {
+                    auth = crate::http::AuthSpec::Authenticated;
+                }
+                "admin" => auth = crate::http::AuthSpec::Admin,
+                _ => {}
+            }
+        }
+        if auth != crate::http::AuthSpec::None && self.auth_provider_name.is_none() {
+            return Err(self.err_at(fn_span, format!(
+                "fn `{}`: `@authenticated`/`@admin` exige declarar un \
+                 `@auth_provider` antes en el archivo.",
+                name,
+            )));
+        }
+        let auth_user_param_name: Option<String> =
+            if auth != crate::http::AuthSpec::None {
+                let candidates: Vec<&str> = resolved_params
+                    .iter()
+                    .filter(|(n, _)| {
+                        !template_params.iter().any(|tp| tp == n)
+                            && !query_template_params.iter().any(|q| q == n)
+                            && !header_specs.iter().any(|(_, fp, _)| fp == n)
+                    })
+                    .map(|(n, _)| n.as_str())
+                    .collect();
+                if candidates.is_empty() {
+                    return Err(self.err_at(fn_span, format!(
+                        "fn `{}`: falta param del tipo `User` (inyectado por auth).",
+                        name,
+                    )));
+                }
+                if candidates.len() > 1 {
+                    return Err(self.err_at(fn_span, format!(
+                        "fn `{}`: hay {} params que no son path/query/header. \
+                         En MVP, un handler protegido por auth admite solo el \
+                         param `user` y NO body separado.",
+                        name,
+                        candidates.len(),
+                    )));
+                }
+                Some(candidates[0].to_string())
+            } else {
+                None
+            };
+
+        // Categorizar: cada param es path / query / header / body / auth_user.
         let mut path_params: Vec<(String, Type)> = Vec::new();
         let mut query_params: Vec<(String, Type)> = Vec::new();
         let mut header_params: Vec<(String, String, bool)> = Vec::new();
@@ -11423,6 +12071,9 @@ impl<'a> CodegenCtx<'a> {
                 header_specs.iter().find(|(_, fp, _)| fp == n)
             {
                 header_params.push((http_name.clone(), n.clone(), *is_nullable));
+            } else if auth_user_param_name.as_deref() == Some(n.as_str()) {
+                // Auth-injected user — NO es body, lo maneja el wrapper auth.
+                continue;
             } else if body_param.is_some() {
                 return Err(self.err_at(fn_span, format!(
                     "fn `{}`: solo se admite un body param por handler",
@@ -11465,6 +12116,8 @@ impl<'a> CodegenCtx<'a> {
             mw_cors,
             has_middleware,
             has_cors,
+            auth,
+            auth_user_param_name,
         })
     }
 
@@ -11511,12 +12164,15 @@ impl<'a> CodegenCtx<'a> {
         // CORS (Q.3) que necesita leer el `Origin` del request para
         // resolver los headers `Access-Control-Allow-*`, o hay body
         // (mini-tanda UC: leemos Content-Type para dispatch entre
-        // JSON / urlencoded / 415). Sin ninguno, axum NO extrae el
-        // HeaderMap (zero-overhead en handlers simples).
+        // JSON / urlencoded / 415), o el handler exige auth nativa
+        // (9.w.1.d: el provider recibe Map<Str,Str> de headers). Sin
+        // ninguno, axum NO extrae el HeaderMap (zero-overhead en
+        // handlers simples).
         if !sig.header_params.is_empty()
             || sig.has_middleware
             || sig.has_cors
             || sig.body_param.is_some()
+            || sig.auth != crate::http::AuthSpec::None
         {
             self.emit("    __hmap: axum::http::HeaderMap,\n");
         }
@@ -15098,7 +15754,7 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/true, /*uses_python=*/false);
+        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/true, /*uses_python=*/false, /*uses_auth=*/false);
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -15106,7 +15762,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", /*has_http=*/true, /*uses_async=*/true, /*uses_python=*/false);
+        let toml = cargo_toml_for("foo", /*has_http=*/true, /*uses_async=*/true, /*uses_python=*/false, /*uses_auth=*/false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -15114,7 +15770,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
-        let toml = cargo_toml_for("foo", false, false, /*uses_python=*/false);
+        let toml = cargo_toml_for("foo", false, false, /*uses_python=*/false, /*uses_auth=*/false);
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
     }
@@ -15127,7 +15783,7 @@ mod tests {
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
-        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/false, /*uses_python=*/true);
+        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/false, /*uses_python=*/true, /*uses_auth=*/false);
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
         assert!(toml.contains("\"abi3-py310\""), "esperaba feature abi3-py310");
@@ -15141,7 +15797,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
-        let toml = cargo_toml_for("foo", true, false, true);
+        let toml = cargo_toml_for("foo", true, false, true, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
         assert!(toml.contains("tokio"));
@@ -15149,7 +15805,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
-        let toml = cargo_toml_for("foo", true, false, false);
+        let toml = cargo_toml_for("foo", true, false, false, false);
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
     }

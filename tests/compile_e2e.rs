@@ -5539,3 +5539,227 @@ fn fp_multiples_defaults_compila() {
     assert_eq!(stdout.trim(), "x-3\ny-3\nz-5\nw:7");
 }
 
+// ---------------------------------------------------------------------------
+// Fase 9.w.1.d — Auth nativa en `fitz build`.
+//
+// Tests E2E que validan que un programa con `@auth_provider` +
+// `@authenticated`/`@admin` compila a binario nativo y responde con
+// los códigos esperados (200/401/403). Paridad bit-a-bit con los
+// tests del intérprete en `src/http.rs::tests::auth_*`.
+// ---------------------------------------------------------------------------
+
+/// Spawn del server + barrido de requests con distintos Authorization
+/// headers. Una sola compilación + un solo spawn para ahorrar tiempo;
+/// los 5 requests se hacen sobre el mismo server vivo.
+fn build_spawn_auth_requests(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    requests: &[(&str, &str, Option<&str>)], // (method, path, optional bearer token)
+) -> Vec<(u16, String)> {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server no abrió el puerto {} en 3s", port);
+    }
+
+    use std::io::{Read, Write};
+    let mut results: Vec<(u16, String)> = Vec::with_capacity(requests.len());
+    for (method, path, token) in requests {
+        let auth_header = match token {
+            Some(t) => format!("Authorization: Bearer {}\r\n", t),
+            None => String::new(),
+        };
+        let request = format!(
+            "{} {} HTTP/1.1\r\nHost: {}\r\n{}Connection: close\r\n\r\n",
+            method, path, addr, auth_header,
+        );
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
+        stream
+            .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+            .ok();
+        stream
+            .write_all(request.as_bytes())
+            .expect("send request");
+        let mut buf = Vec::new();
+        stream.read_to_end(&mut buf).ok();
+        let raw = String::from_utf8_lossy(&buf).into_owned();
+        let status_line = raw.lines().next().unwrap_or("").to_string();
+        let status: u16 = status_line
+            .split_whitespace()
+            .nth(1)
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(0);
+        let body_start = raw
+            .find("\r\n\r\n")
+            .map(|i| i + 4)
+            .unwrap_or(raw.len());
+        let body = raw[body_start..].to_string();
+        results.push((status, body));
+    }
+
+    let _ = child.kill();
+    let _ = child.wait();
+    results
+}
+
+#[test]
+fn auth_codegen_flujo_completo_end_to_end() {
+    // Programa de referencia: provider que matchea Authorization contra
+    // dos tokens hardcoded (admin, user); ruta pública sin auth, una con
+    // `@authenticated` y otra con `@admin`. El programa entero compila a
+    // binario nativo con `fitz build`, se spawn-ea el server, y se le
+    // hacen 6 requests cubriendo los casos del wrapper auth.
+    let src = "\
+@server(43901)\n\
+fn main() => 0\n\
+\n\
+type User { id: Int, name: Str, role: Str }\n\
+\n\
+@auth_provider\n\
+fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+    match headers.get(\"authorization\") {\n\
+        Ok(token) => {\n\
+            if (token == \"Bearer admin-token\") {\n\
+                return Ok(User { id: 1, name: \"Admin\", role: \"admin\" })\n\
+            }\n\
+            if (token == \"Bearer user-token\") {\n\
+                return Ok(User { id: 2, name: \"Alice\", role: \"user\" })\n\
+            }\n\
+            return Err(\"token inválido\")\n\
+        }\n\
+        Err(_) => return Err(\"falta Authorization\")\n\
+    }\n\
+}\n\
+\n\
+@get(\"/public\")\n\
+fn public_route() -> Str => \"sin auth\"\n\
+\n\
+@authenticated\n\
+@get(\"/me\")\n\
+fn me(user: User) -> Str => user.name\n\
+\n\
+@admin\n\
+@get(\"/admin\")\n\
+fn admin_route(user: User) -> Str => \"hola admin\"\n\
+";
+    let results = build_spawn_auth_requests(
+        "auth_codegen_flujo",
+        src,
+        43901,
+        &[
+            ("GET", "/public", None),
+            ("GET", "/me", None),
+            ("GET", "/me", Some("wrong-token")),
+            ("GET", "/me", Some("user-token")),
+            ("GET", "/admin", Some("user-token")),
+            ("GET", "/admin", Some("admin-token")),
+        ],
+    );
+    // /public sin auth → 200 con body "sin auth"
+    assert_eq!(results[0].0, 200, "public route 200, fue {:?}", results[0]);
+    assert!(results[0].1.contains("sin auth"), "body /public: {:?}", results[0].1);
+
+    // /me sin Authorization → 401 con "falta Authorization"
+    assert_eq!(results[1].0, 401, "/me sin auth 401, fue {:?}", results[1]);
+    assert!(
+        results[1].1.contains("falta Authorization"),
+        "/me sin header body: {:?}",
+        results[1].1
+    );
+
+    // /me con token inválido → 401 con "token inválido"
+    assert_eq!(results[2].0, 401, "/me token inválido 401, fue {:?}", results[2]);
+    assert!(
+        results[2].1.contains("token inválido"),
+        "/me con token wrong body: {:?}",
+        results[2].1
+    );
+
+    // /me con user válido → 200 con "Alice"
+    assert_eq!(results[3].0, 200, "/me user válido 200, fue {:?}", results[3]);
+    assert!(results[3].1.contains("Alice"), "/me user body: {:?}", results[3].1);
+
+    // /admin con rol user → 403
+    assert_eq!(results[4].0, 403, "/admin user → 403, fue {:?}", results[4]);
+    assert!(
+        results[4].1.contains("admin"),
+        "/admin con rol user body: {:?}",
+        results[4].1
+    );
+
+    // /admin con rol admin → 200 con "hola admin"
+    assert_eq!(results[5].0, 200, "/admin admin → 200, fue {:?}", results[5]);
+    assert!(results[5].1.contains("hola admin"), "/admin admin body: {:?}", results[5].1);
+}
+
+#[test]
+fn auth_codegen_jwt_y_hash_builtins_cli() {
+    // CLI puro: usa `jwt.encode`/`jwt.decode` + `hash.password`/
+    // `hash.verify` sin handlers HTTP. Verifica que las deps se sumen
+    // condicional al Cargo.toml generado y que los helpers estén en el
+    // preludio. El binario imprime el shape esperado de cada salida.
+    let src = "\
+let secret = \"secret-32-bytes-long-test-aaaaaa\"\n\
+let claims: Map<Str, Str> = {\"sub\": \"u42\", \"role\": \"admin\"}\n\
+let token = jwt.encode(claims, secret)\n\
+print(\"jwt-len-gt-20: {len(token) > 20}\")\n\
+let pw = hash.password(\"supersecret\")\n\
+print(\"argon2id-prefix: {pw[0..10]}\")\n\
+let ok = hash.verify(\"supersecret\", pw)\n\
+let bad = hash.verify(\"wrong\", pw)\n\
+print(\"verify-ok: {ok}\")\n\
+print(\"verify-bad: {bad}\")\n\
+";
+    let (stdout, exit) = build_and_run("auth_jwt_hash_cli", src);
+    assert_eq!(exit, 0, "exit code: {} stdout: {}", exit, stdout);
+    assert!(stdout.contains("jwt-len-gt-20: true"), "stdout: {}", stdout);
+    assert!(
+        stdout.contains("argon2id-prefix: $argon2id$"),
+        "stdout: {}",
+        stdout
+    );
+    assert!(stdout.contains("verify-ok: true"), "stdout: {}", stdout);
+    assert!(stdout.contains("verify-bad: false"), "stdout: {}", stdout);
+}
+
