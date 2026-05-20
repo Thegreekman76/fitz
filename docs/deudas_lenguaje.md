@@ -1227,6 +1227,169 @@ Clippy `-D warnings` limpio en lib + bin `fitz-lsp`.
   2026-05-20 en mini-tanda UC + HA (ver entrada propia más abajo).
 - **Wrap-style `next` callable middleware**: sigue diferido (~6-8h).
 
+### ~~F13.C+D+E + OAPI Expr + File.content Bytes — cierre del bloque post-Fase-8~~ ✓ CERRADO 2026-05-20 (mini-tanda Final-Bundle)
+
+**Bundle final ambicioso** que cierra **5 deudas restantes** del
+bloque post-Fase-8 en una sola sesión. La única deuda que queda
+visible es **Mw-Wrap codegen** — diferida con design + scope claro
+porque requiere ~2-3h de trabajo invasivo sobre tipos async/Send/Sync
+recursivos en Rust.
+
+**Parte 1 — F13.E: List/Map anidados con mix interno**:
+
+- ~~**`__FitzValue::List(Vec<__FitzValue>)`** y `Map(Vec<(FV, FV)>)`~~
+  ✓ Variantes recursivas en el enum. Display recursivo + PartialEq
+  byte a byte. Habilita `[1, [2, 3], "hola"]` y
+  `[{"a": 1}, 42, [true, false]]` compilando bit-a-bit con
+  `fitz run`.
+- ~~**`wrap_as_fitz_value(_, Type::List | Type::Map)`**~~ ✓
+  Recursión sobre el inner type. Bind del `Arc` antes del `.lock()`
+  para extender el temporal (paralelo al patrón de show_expr).
+- ~~**`Type::Any` como item de heterogéneo**~~ ✓ Passthrough sin
+  re-wrap (el item ya es FitzValue de una lista anidada que ya
+  disparó FitzValue).
+
+**Parte 2 — F13.D: Method dispatch dinámico sobre Any/FitzValue**:
+
+- ~~**`.as_int()` / `.as_float()` / `.as_str()` / `.as_bool()` /
+  `.as_bytes()` / `.type_name()`**~~ ✓ Methods universales sobre
+  cualquier `Value` (intérprete) y sobre `Type::Any` (codegen, que
+  dispatcha por variant de FitzValue). Devuelven `Result<T>` con
+  `Ok(v)` si match, `Err(Str)` si no. `type_name()` devuelve `Str`
+  directo. Paridad bit-a-bit run↔build (incluso los mensajes de
+  Err).
+- ~~**Helper `__fv_type_name(v)` en el preludio**~~ ✓ Devuelve el
+  nombre del tipo de un FitzValue como `&'static str`. Usado por
+  los métodos `as_*` para mensajes de error consistentes.
+- **Checker extendido**: `infer_method_call` sobre `Type::Any` ahora
+  reconoce los 6 métodos universales con sus signatures explícitas;
+  otros métodos siguen gradual (None).
+
+**Parte 3 — F13.C: HTTP body heterogéneo**:
+
+- ~~**`impl __FromFitzJson for __FitzValue`** en el preludio HTTP~~ ✓
+  Dispatch por shape JSON: Null/Bool/Number(Int o Float)/String/
+  Array (List)/Object (Map). Habilita `body: List<Any>` y
+  `body: Map<Str, Any>` deserializando desde JSON entrante.
+- ~~**`impl __ToFitzJson for __FitzValue`**~~ ✓ Simétrico para
+  serializar. Bytes como base64 string; Nominal como string.
+- ~~**`Type::Any` aceptado en `resolve_named` del checker**~~ ✓ El
+  usuario ahora puede anotar `List<Any>` / `Map<Str, Any>` en
+  parámetros de handlers (antes era "tipo desconocido Any").
+- ~~**Pre-walker `program_uses_fitz_value` extendido**~~ ✓ Detecta
+  `Any` adentro de anotaciones de tipo en `FnDef.params` y
+  `FnDef.return_type` (no solo en literales de listas).
+- **Smoke E2E**: handler `@post("/echo") fn echo(body: List<Any>)`
+  con `body[0].as_int()` valida int en posición 0; curl con
+  `[42, "hola", true]` → "first int: 42"; con `["nope", ...]` →
+  "first not int". Paridad bit-a-bit con intérprete.
+
+**Parte 4 — OAPI-Expr: status codes con expresiones simples**:
+
+- ~~**`resolve_status_value` extendido**~~ ✓ Acepta `Expr::Int`,
+  `Expr::Ident` (lookup en tabla), `UnaryOp::Neg`, y `BinOp` con
+  Add/Sub/Mul. Const-eval recursivo. División/módulo evitados
+  por simplicidad (división por 0). Overflow detectado via
+  `checked_*` ops → None.
+- ~~**`collect_top_level_int_consts` extendido**~~ ✓ Reusa
+  `resolve_status_value` con walk en orden. Una const puede
+  referenciar consts previas: `let BASE = 400; let NOT_FOUND =
+  BASE + 4` resuelve NOT_FOUND a 404.
+- **Test viejo actualizado**: `oapi_collect_top_level_int_consts_recolecta_lets_int`
+  ahora espera que `SUM = 1+2` resuelva a 3 (antes era None).
+- Habilita patrones del estilo `let TENANT_ERROR = BASE + 50` para
+  status codes legibles.
+
+**Parte 5 — File.content como Bytes**:
+
+- ~~**`File.content` cambia de `Type::Str` a `Type::Bytes`**~~ ✓
+  Habilita uploads binarios (imágenes, PDFs, zips) end-to-end.
+  Para texto UTF-8, el usuario llama `f.content.to_str() ->
+  Result<Str>`. Text fields (sin `filename=`) siguen exigiendo
+  UTF-8 — para bytes binarios usar `filename=` para que se
+  clasifique como file.
+- ~~**`parse_multipart_body` refactor a raw bytes**~~ ✓ Antes
+  hacía `from_utf8` sobre todo el body (rechazaba binarios).
+  Ahora trabaja byte-por-byte: helpers `split_bytes_by`,
+  `find_bytes`, `strip_prefix_bytes`, `strip_suffix_bytes`.
+  Headers se parsean como ASCII (per RFC 7578). Content de file
+  fields se guarda como `Value::Bytes(Vec<u8>)` sin requerir
+  UTF-8.
+- ~~**`FileData` en codegen**~~ ✓ `content: Vec<u8>`. Display
+  delega a `__fitz_fmt_bytes`. `__ToFitzJson` serializa
+  `content` como base64 string. `__FromFitzJson` acepta tanto
+  base64 string como array de Int (round-trip legacy).
+- ~~**Helpers `b64_encode_for_file` / `b64_decode_for_file`**~~
+  ✓ Inline en codegen, sin deps externas.
+- Tests viejos actualizados:
+  `mp2_parse_multipart_file_field_construye_instance_file` verifica
+  `Value::Bytes`; `mp2_parse_multipart_binary_no_utf8_es_error` →
+  `mp2_parse_multipart_binary_file_field_funciona` (binary FILE
+  field ahora funciona); test nuevo
+  `mp2_parse_multipart_text_field_sin_filename_sigue_exigiendo_utf8`
+  documenta la regla para text fields.
+
+**Mw-Wrap codegen — DEFERIDO con design explícito**:
+
+La única deuda residual visible que queda. Por qué se difiere:
+- Requiere emit de cierre Rust con tipos `Arc<dyn Fn() -> Pin<Box<dyn Future<Output = __FitzResponse> + Send>> + Send + Sync>` para el `next` callable.
+- Necesita captura recursiva: cada wrap nivel-N construye un
+  callable que llama al nivel N+1, hasta llegar al handler + post
+  chain.
+- Implementación realista: emit recursivo (helper `async fn
+  __wrap_chain_<route>(...)`) o cadena inline con clones de
+  `Arc<dyn Fn>`.
+- Tiempo estimado real: ~2-3h dedicados con tests.
+- Sin presión real hoy: `fitz run` ya cubre wrap-style end-to-end;
+  el codegen rechaza con msg claro citando `fitz run` como
+  workaround. Mini-tanda dedicada futura cuando aparezca demanda.
+
+**Implementación cross-cutting** (~700 LoC):
+
+- **`src/codegen.rs`**: `__FitzValue` con 9 variantes (recursivas
+  para List/Map). `__fv_type_name` helper. `wrap_as_fitz_value`
+  cubre List/Map/Bytes/Nominal. `__FromFitzJson`/`__ToFitzJson`
+  para FitzValue (gating: solo con HTTP). Type::Any como receiver
+  de los 6 methods universales. `FileData.content: Vec<u8>` +
+  base64 inline.
+- **`src/http.rs`**: `parse_multipart_body` refactor a raw bytes.
+  4 helpers de slice manipulation.
+- **`src/evaluator.rs`**: 6 methods `fv_*` universales sobre Value.
+  Dispatch en `dispatch_method` con tupla `(_, "as_int")` que
+  matchea cualquier Value.
+- **`src/types.rs`**: `File.content` → `Type::Bytes`. `Type::Any`
+  como receiver en `infer_method_call` con 6 ramas para los
+  methods universales. `"Any"` reconocido en `resolve_named`.
+- **`src/openapi.rs`**: `resolve_status_value` con const-eval
+  recursivo (BinOp + UnaryOp). `collect_top_level_int_consts`
+  usa la nueva fn con walk en orden.
+
+**Tests**: **~15 unit + 3 compile_e2e nuevos** (acumulados con los
+de F13.A+B): cobertura del nuevo enum, methods, HTTP body,
+const-eval, multipart binario. Test viejo de "no_utf8_es_error"
+reemplazado por "binary_file_field_funciona". Test viejo de
+"map_literal_valores_heterogeneos_es_error" reemplazado por
+"emite_fitz_value". Test viejo de `SUM = 1+2 → None` ahora espera
+Some(3).
+
+**Cap 20 de la guía** actualizado: el bullet de heterogéneos
+ahora dice "solo falta Functions y Tuples". Bloque "sí anda y
+antes era deuda" es masivo, suma F13.C/D/E + OAPI-Expr +
+File.content Bytes. La nueva deuda visible es Mw-Wrap codegen.
+
+**Total al cierre: 2045 unit sin feature, ~2135 con --features
+lsp, 250+ compile_e2e.** Clippy `-D warnings` limpio en lib + bin
+`fitz-lsp`.
+
+**Estado final del bloque post-Fase-8**: 95%+ del lenguaje
+compila a binario nativo con paridad bit-a-bit. Solo wrap-style
+middleware queda en `fitz run`-only por la complejidad técnica
+del codegen (no por design — el diseño está claro).
+
+**Próximo norte estratégico**: **Fase 9.w** (Stack web first-class).
+Mw-Wrap codegen quedará como mini-tanda dedicada cuando entre
+demanda real.
+
 ### ~~F13.A + F13.B + base64 JSON: Bytes/Nominales/Map heterogéneo + Bytes JSON estándar~~ ✓ CERRADO 2026-05-20 (mini-tanda F13.A + F13.B + base64)
 
 Bundle de expansión del SPIKE de F13 + quick win. Cierra el caso

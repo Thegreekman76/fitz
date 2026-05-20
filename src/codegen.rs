@@ -414,9 +414,28 @@ fn program_uses_fitz_value(program: &Program) -> bool {
             _ => false,
         }
     }
+    /// F13.C — detecta `Any` adentro de un TypeExpr de anotación.
+    /// Triggerea sobre `List<Any>`, `Map<Str, Any>`, `Map<Any, V>`,
+    /// `T?` con T conteniendo Any, etc.
+    fn type_expr_has_any(t: &crate::ast::TypeExpr) -> bool {
+        use crate::ast::TypeExpr;
+        match t {
+            TypeExpr::Named(n) => n == "Any",
+            TypeExpr::Generic { name, args } => {
+                name == "Any" || args.iter().any(type_expr_has_any)
+            }
+            TypeExpr::Nullable(inner) => type_expr_has_any(inner),
+            TypeExpr::Function { params, ret } => {
+                params.iter().any(type_expr_has_any) || type_expr_has_any(ret)
+            }
+            TypeExpr::Tuple(items) => items.iter().any(type_expr_has_any),
+        }
+    }
     fn stmt_uses_fv(s: &Stmt) -> bool {
         match s {
-            Stmt::Assign { value, .. } => expr_uses_fv(value),
+            Stmt::Assign { value, type_, .. } => {
+                expr_uses_fv(value) || type_.as_ref().is_some_and(type_expr_has_any)
+            }
             Stmt::Destructure { value, .. } => expr_uses_fv(value),
             Stmt::Return(e, _) | Stmt::Expr(e, _) => expr_uses_fv(e),
             Stmt::ReturnStatus { status, body, .. } => {
@@ -429,7 +448,11 @@ fn program_uses_fitz_value(program: &Program) -> bool {
             Stmt::For { iter, body, .. } => {
                 expr_uses_fv(iter) || body.iter().any(stmt_uses_fv)
             }
-            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_fv),
+            Stmt::FnDef { params, return_type, body, .. } => {
+                params.iter().any(|p| p.type_.as_ref().is_some_and(type_expr_has_any))
+                    || return_type.as_ref().is_some_and(type_expr_has_any)
+                    || body.iter().any(stmt_uses_fv)
+            }
             _ => false,
         }
     }
@@ -2136,6 +2159,7 @@ fn generate_main_rs(
     ctx.uses_python = uses_python;
     ctx.uses_fmt_helpers = uses_fmt_helpers;
     ctx.uses_fitz_value = uses_fitz_value;
+    ctx.has_http = has_http;
     ctx.install_python_bindings(python_imports);
     ctx.install_loader_bindings(loader);
     ctx.pre_register_types(program)?;
@@ -2755,6 +2779,11 @@ struct CodegenCtx<'a> {
     /// `Type::List(Any)` a `Arc<Mutex<Vec<__FitzValue>>>`. Solo se
     /// setea cuando el codegen necesita emitir el wrapper.
     uses_fitz_value: bool,
+    /// F13.C — `true` si el programa tiene al menos un decorator HTTP.
+    /// Habilita emit de `__FromFitzJson` / `__ToFitzJson` for
+    /// `__FitzValue` (requieren serde_json en scope, que solo se
+    /// emite cuando hay HTTP).
+    has_http: bool,
     /// Fase 8.7.1: `true` si el programa tiene al menos un import
     /// Python (`from python import X` / `import python.X`). Habilita
     /// el preludio Python (`__FitzPyObject` + helpers PyO3) y la
@@ -2901,6 +2930,7 @@ impl<'a> CodegenCtx<'a> {
             uses_async: false,
             uses_fmt_helpers: false,
             uses_fitz_value: false,
+            has_http: false,
             uses_python: false,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
@@ -3729,7 +3759,9 @@ impl<'a> CodegenCtx<'a> {
                      Bool(bool),\n    \
                      Null,\n    \
                      Bytes(Vec<u8>),\n    \
-                     Nominal(String),\n\
+                     Nominal(String),\n    \
+                     List(Vec<__FitzValue>),\n    \
+                     Map(Vec<(__FitzValue, __FitzValue)>),\n\
                  }\n\n\
                  impl std::fmt::Display for __FitzValue {\n    \
                      fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {\n        \
@@ -3740,7 +3772,23 @@ impl<'a> CodegenCtx<'a> {
                              Self::Bool(b) => write!(f, \"{}\", b),\n            \
                              Self::Null => write!(f, \"null\"),\n            \
                              Self::Bytes(bs) => write!(f, \"{}\", __fitz_fmt_bytes(bs)),\n            \
-                             Self::Nominal(repr) => write!(f, \"{}\", repr),\n        \
+                             Self::Nominal(repr) => write!(f, \"{}\", repr),\n            \
+                             Self::List(items) => {\n                \
+                                 write!(f, \"[\")?;\n                \
+                                 for (i, it) in items.iter().enumerate() {\n                    \
+                                     if i > 0 { write!(f, \", \")?; }\n                    \
+                                     write!(f, \"{}\", it)?;\n                \
+                                 }\n                \
+                                 write!(f, \"]\")\n            \
+                             }\n            \
+                             Self::Map(pairs) => {\n                \
+                                 write!(f, \"{{\")?;\n                \
+                                 for (i, (k, v)) in pairs.iter().enumerate() {\n                    \
+                                     if i > 0 { write!(f, \", \")?; }\n                    \
+                                     write!(f, \"{}: {}\", k, v)?;\n                \
+                                 }\n                \
+                                 write!(f, \"}}\")\n            \
+                             }\n        \
                          }\n    \
                      }\n\
                  }\n\n\
@@ -3756,11 +3804,115 @@ impl<'a> CodegenCtx<'a> {
                              (Self::Null, Self::Null) => true,\n            \
                              (Self::Bytes(a), Self::Bytes(b)) => a == b,\n            \
                              (Self::Nominal(a), Self::Nominal(b)) => a == b,\n            \
+                             (Self::List(a), Self::List(b)) => a == b,\n            \
+                             (Self::Map(a), Self::Map(b)) => a == b,\n            \
                              _ => false,\n        \
                          }\n    \
                      }\n\
+                 }\n\n\
+                 #[allow(dead_code)]\n\
+                 fn __fv_type_name(v: &__FitzValue) -> &'static str {\n    \
+                     match v {\n        \
+                         __FitzValue::Int(_) => \"Int\",\n        \
+                         __FitzValue::Float(_) => \"Float\",\n        \
+                         __FitzValue::Str(_) => \"Str\",\n        \
+                         __FitzValue::Bool(_) => \"Bool\",\n        \
+                         __FitzValue::Null => \"Null\",\n        \
+                         __FitzValue::Bytes(_) => \"Bytes\",\n        \
+                         __FitzValue::Nominal(_) => \"Instance\",\n        \
+                         __FitzValue::List(_) => \"List\",\n        \
+                         __FitzValue::Map(_) => \"Map\",\n    \
+                     }\n\
                  }\n\n",
             );
+            // F13.C — `__FromFitzJson` y `__ToFitzJson` para
+            // `__FitzValue`. Solo si HTTP está activo (serde_json
+            // y los traits requieren el preludio HTTP). Habilita
+            // `body: List<Any>` / `Map<Str, Any>` deserializando
+            // desde JSON entrante. Conversión por shape:
+            //   - Null → Null
+            //   - Bool → Bool
+            //   - Number → Int (sin frac) o Float (con frac)
+            //   - String → Str
+            //   - Array → List recursivo
+            //   - Object → Map recursivo
+            // Bytes/Nominal NO se decodean desde JSON acá (Bytes
+            // requeriría hint de base64; Nominal requiere type
+            // knowledge — sub-paso futuro).
+            if self.has_http {
+                self.emit(
+                    "#[allow(dead_code)]\n\
+                     impl __FromFitzJson for __FitzValue {\n    \
+                         fn __from_fitz_json(json: &serde_json::Value) -> Result<Self, String> {\n        \
+                             match json {\n            \
+                                 serde_json::Value::Null => Ok(__FitzValue::Null),\n            \
+                                 serde_json::Value::Bool(b) => Ok(__FitzValue::Bool(*b)),\n            \
+                                 serde_json::Value::Number(n) => {\n                \
+                                     if let Some(i) = n.as_i64() { Ok(__FitzValue::Int(i)) }\n                \
+                                     else if let Some(f) = n.as_f64() { Ok(__FitzValue::Float(f)) }\n                \
+                                     else { Err(format!(\"número JSON fuera de rango: {}\", n)) }\n            \
+                                 }\n            \
+                                 serde_json::Value::String(s) => Ok(__FitzValue::Str(s.clone())),\n            \
+                                 serde_json::Value::Array(arr) => {\n                \
+                                     let items: Result<Vec<_>, _> = arr.iter().map(__FitzValue::__from_fitz_json).collect();\n                \
+                                     items.map(__FitzValue::List)\n            \
+                                 }\n            \
+                                 serde_json::Value::Object(obj) => {\n                \
+                                     let mut pairs = Vec::with_capacity(obj.len());\n                \
+                                     for (k, v) in obj.iter() {\n                    \
+                                         let k_fv = __FitzValue::Str(k.clone());\n                    \
+                                         let v_fv = __FitzValue::__from_fitz_json(v)?;\n                    \
+                                         pairs.push((k_fv, v_fv));\n                \
+                                     }\n                \
+                                     Ok(__FitzValue::Map(pairs))\n            \
+                                 }\n        \
+                             }\n    \
+                         }\n\
+                     }\n\n\
+                     #[allow(dead_code)]\n\
+                     impl __ToFitzJson for __FitzValue {\n    \
+                         fn __to_fitz_json(&self) -> serde_json::Value {\n        \
+                             match self {\n            \
+                                 __FitzValue::Int(n) => serde_json::Value::from(*n),\n            \
+                                 __FitzValue::Float(x) => serde_json::Number::from_f64(*x).map(serde_json::Value::Number).unwrap_or(serde_json::Value::Null),\n            \
+                                 __FitzValue::Str(s) => serde_json::Value::String(s.clone()),\n            \
+                                 __FitzValue::Bool(b) => serde_json::Value::Bool(*b),\n            \
+                                 __FitzValue::Null => serde_json::Value::Null,\n            \
+                                 __FitzValue::Bytes(bs) => serde_json::Value::String(__fv_b64_encode(bs)),\n            \
+                                 __FitzValue::Nominal(s) => serde_json::Value::String(s.clone()),\n            \
+                                 __FitzValue::List(items) => serde_json::Value::Array(items.iter().map(__ToFitzJson::__to_fitz_json).collect()),\n            \
+                                 __FitzValue::Map(pairs) => {\n                \
+                                     let mut obj = serde_json::Map::new();\n                \
+                                     for (k, v) in pairs.iter() {\n                    \
+                                         let key = match k {\n                        \
+                                             __FitzValue::Str(s) => s.clone(),\n                        \
+                                             other => format!(\"{}\", other),\n                    \
+                                         };\n                    \
+                                         obj.insert(key, v.__to_fitz_json());\n                \
+                                     }\n                \
+                                     serde_json::Value::Object(obj)\n            \
+                                 }\n        \
+                             }\n    \
+                         }\n\
+                     }\n\n\
+                     #[allow(dead_code)]\n\
+                     fn __fv_b64_encode(bytes: &[u8]) -> String {\n    \
+                         const T: &[u8; 64] = b\"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/\";\n    \
+                         let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);\n    \
+                         for c in bytes.chunks(3) {\n        \
+                             let b0 = c[0];\n        \
+                             let b1 = if c.len() > 1 { c[1] } else { 0 };\n        \
+                             let b2 = if c.len() > 2 { c[2] } else { 0 };\n        \
+                             let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);\n        \
+                             out.push(T[((triple >> 18) & 0x3f) as usize] as char);\n        \
+                             out.push(T[((triple >> 12) & 0x3f) as usize] as char);\n        \
+                             if c.len() > 1 { out.push(T[((triple >> 6) & 0x3f) as usize] as char); } else { out.push('='); }\n        \
+                             if c.len() > 2 { out.push(T[(triple & 0x3f) as usize] as char); } else { out.push('='); }\n    \
+                         }\n    \
+                         out\n\
+                     }\n\n",
+                );
+            }
         }
         // Mini-tanda Fmt-build — helpers para los format specs que
         // Rust no soporta nativamente: `,`/`_` grouping, `%` percent,
@@ -6877,6 +7029,79 @@ impl<'a> CodegenCtx<'a> {
             return Ok((code, Type::Result { ok: Box::new(Type::PyAny), err: Box::new(Type::Str) }));
         }
         match (&obj_ty, method) {
+            // ---- F13.D — methods universales sobre cualquier tipo
+            //       para type-check dinámico ----
+            //
+            // Sobre `Type::Any` (típico: items de heterogéneos), el
+            // receiver es `__FitzValue` y dispatcha por variant.
+            // Sobre tipos concretos (`Int`, `Str`, etc.), match
+            // estático y emit constante.
+            // F13.D — helper para emitir el match común "as_<tipo>"
+            // con mensaje alineado al intérprete. Ya que el match
+            // recorre las variantes de FitzValue, también extrae el
+            // type_name desde la variant.
+            (Type::Any, "as_int") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "(match &({}) {{ \
+                        __FitzValue::Int(__n) => Ok::<i64, String>(*__n), \
+                        __other => Err::<i64, String>(format!(\"as_int: el valor es {{}}, no Int\", __fv_type_name(__other))), \
+                    }})",
+                    obj_code
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }))
+            }
+            (Type::Any, "as_float") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "(match &({}) {{ \
+                        __FitzValue::Float(__x) => Ok::<f64, String>(*__x), \
+                        __FitzValue::Int(__n) => Ok::<f64, String>(*__n as f64), \
+                        __other => Err::<f64, String>(format!(\"as_float: el valor es {{}}, no Float\", __fv_type_name(__other))), \
+                    }})",
+                    obj_code
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Float), err: Box::new(Type::Str) }))
+            }
+            (Type::Any, "as_str") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "(match &({}) {{ \
+                        __FitzValue::Str(__s) => Ok::<String, String>(__s.clone()), \
+                        __other => Err::<String, String>(format!(\"as_str: el valor es {{}}, no Str\", __fv_type_name(__other))), \
+                    }})",
+                    obj_code
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Str), err: Box::new(Type::Str) }))
+            }
+            (Type::Any, "as_bool") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "(match &({}) {{ \
+                        __FitzValue::Bool(__b) => Ok::<bool, String>(*__b), \
+                        __other => Err::<bool, String>(format!(\"as_bool: el valor es {{}}, no Bool\", __fv_type_name(__other))), \
+                    }})",
+                    obj_code
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Bool), err: Box::new(Type::Str) }))
+            }
+            (Type::Any, "as_bytes") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!(
+                    "(match &({}) {{ \
+                        __FitzValue::Bytes(__bs) => Ok::<Vec<u8>, String>(__bs.clone()), \
+                        __other => Err::<Vec<u8>, String>(format!(\"as_bytes: el valor es {{}}, no Bytes\", __fv_type_name(__other))), \
+                    }})",
+                    obj_code
+                );
+                Ok((code, Type::Result { ok: Box::new(Type::Bytes), err: Box::new(Type::Str) }))
+            }
+            (Type::Any, "type_name") => {
+                check_method_arity(method, args, 0)?;
+                let code = format!("__fv_type_name(&({})).to_string()", obj_code);
+                Ok((code, Type::Str))
+            }
+
             // ---- Mini-tanda Bytes — métodos sobre `Type::Bytes` ----
             (Type::Bytes, "len") => {
                 check_method_arity(method, args, 0)?;
@@ -12531,19 +12756,19 @@ impl __ToFitzJson for ResponseData {
     }
 }
 
-/// Mini-tanda MP2 — `File` built-in para multipart bodies.
-/// Sub-paso futuro del codegen: hoy el dispatcher de Content-Type
-/// rechaza multipart con 415 + msg que cita `fitz run` como
-/// workaround, así que `FileData` solo es relevante si el usuario
-/// declara una signature con `Map<Str, File>` (compila pero no se
-/// poblará via multipart). Existe para que la anotación de tipo
-/// resuelva. Fields paralelos al intérprete.
+/// Mini-tanda MP2 + File.content Bytes — `File` built-in para
+/// multipart bodies. `content` ahora es `Vec<u8>` (Bytes en Fitz)
+/// para soportar files binarios. El path multipart en codegen
+/// HTTP también extrae bytes raw (`parse_multipart` del runtime
+/// emite array de Int al JSON intermedio que se deserializa a
+/// Vec<u8> via __FromFitzJson — refactor pendiente para usar
+/// formato más eficiente).
 #[derive(Clone, PartialEq)]
 #[allow(dead_code)]
 struct FileData {
     name: Option<String>,
     content_type: Option<String>,
-    content: String,
+    content: Vec<u8>,
 }
 #[allow(dead_code)]
 type File = std::sync::Arc<std::sync::Mutex<FileData>>;
@@ -12552,10 +12777,10 @@ impl std::fmt::Display for FileData {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         write!(
             f,
-            "File {{ name: {}, content_type: {}, content: \"{}\" }}",
+            "File {{ name: {}, content_type: {}, content: {} }}",
             self.name.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string()),
             self.content_type.as_ref().map(|s| format!("\"{}\"", s)).unwrap_or_else(|| "null".to_string()),
-            self.content,
+            __fitz_fmt_bytes(&self.content),
         )
     }
 }
@@ -12565,7 +12790,13 @@ impl __ToFitzJson for FileData {
         let mut obj = serde_json::Map::new();
         obj.insert("name".to_string(), self.name.__to_fitz_json());
         obj.insert("content_type".to_string(), self.content_type.__to_fitz_json());
-        obj.insert("content".to_string(), serde_json::Value::String(self.content.clone()));
+        // File.content Bytes — serialize as base64 string (RFC 4648),
+        // estándar de facto. Paralelo a `value_to_json(Value::Bytes)`
+        // del intérprete.
+        obj.insert(
+            "content".to_string(),
+            serde_json::Value::String(b64_encode_for_file(&self.content)),
+        );
         serde_json::Value::Object(obj)
     }
 }
@@ -12585,13 +12816,79 @@ impl __FromFitzJson for FileData {
             .map(|v| <Option<String> as __FromFitzJson>::__from_fitz_json(v))
             .transpose()?
             .unwrap_or(None);
-        let content = obj
-            .get("content")
-            .map(|v| <String as __FromFitzJson>::__from_fitz_json(v))
-            .transpose()?
-            .unwrap_or_default();
+        // File.content Bytes — decodificar desde base64 string (output
+        // de __ToFitzJson) o, como fallback, desde array de Int para
+        // round-trips legacy.
+        let content = match obj.get("content") {
+            Some(serde_json::Value::String(s)) => b64_decode_for_file(s)?,
+            Some(serde_json::Value::Array(arr)) => {
+                let mut bytes = Vec::with_capacity(arr.len());
+                for v in arr.iter() {
+                    let n = v.as_i64().ok_or_else(|| {
+                        format!("File.content array: se esperaba Int en cada item")
+                    })?;
+                    bytes.push(n as u8);
+                }
+                bytes
+            }
+            Some(_) => return Err("File.content: se esperaba String (base64) o Array<Int>".to_string()),
+            None => Vec::new(),
+        };
         Ok(FileData { name, content_type, content })
     }
+}
+
+/// File.content Bytes — base64 encoder/decoder inline para FileData
+/// (paralelo a los helpers en `http.rs` del intérprete).
+#[allow(dead_code)]
+fn b64_encode_for_file(bytes: &[u8]) -> String {
+    const T: &[u8; 64] =
+        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for c in bytes.chunks(3) {
+        let b0 = c[0];
+        let b1 = if c.len() > 1 { c[1] } else { 0 };
+        let b2 = if c.len() > 2 { c[2] } else { 0 };
+        let triple = ((b0 as u32) << 16) | ((b1 as u32) << 8) | (b2 as u32);
+        out.push(T[((triple >> 18) & 0x3f) as usize] as char);
+        out.push(T[((triple >> 12) & 0x3f) as usize] as char);
+        if c.len() > 1 { out.push(T[((triple >> 6) & 0x3f) as usize] as char); } else { out.push('='); }
+        if c.len() > 2 { out.push(T[(triple & 0x3f) as usize] as char); } else { out.push('='); }
+    }
+    out
+}
+
+#[allow(dead_code)]
+fn b64_decode_for_file(s: &str) -> Result<Vec<u8>, String> {
+    fn dec_char(c: u8) -> Option<u8> {
+        match c {
+            b'A'..=b'Z' => Some(c - b'A'),
+            b'a'..=b'z' => Some(c - b'a' + 26),
+            b'0'..=b'9' => Some(c - b'0' + 52),
+            b'+' => Some(62),
+            b'/' => Some(63),
+            _ => None,
+        }
+    }
+    let s = s.trim_end_matches('=');
+    let mut out = Vec::with_capacity((s.len() * 3) / 4);
+    let bytes = s.as_bytes();
+    let mut i = 0;
+    while i + 1 < bytes.len() {
+        let a = dec_char(bytes[i]).ok_or_else(|| format!("base64: char inválido '{}'", bytes[i] as char))?;
+        let b = dec_char(bytes[i + 1]).ok_or_else(|| format!("base64: char inválido '{}'", bytes[i + 1] as char))?;
+        out.push((a << 2) | (b >> 4));
+        if i + 2 < bytes.len() {
+            let c = dec_char(bytes[i + 2]).ok_or_else(|| format!("base64: char inválido '{}'", bytes[i + 2] as char))?;
+            out.push((b << 4) | (c >> 2));
+            if i + 3 < bytes.len() {
+                let d = dec_char(bytes[i + 3]).ok_or_else(|| format!("base64: char inválido '{}'", bytes[i + 3] as char))?;
+                out.push((c << 6) | d);
+            }
+        }
+        i += 4;
+    }
+    Ok(out)
 }
 
 /// MW.3 + Q.3: inyecta los headers CORS resueltos (si los hay) en una
@@ -13871,6 +14168,39 @@ fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
             "__FitzValue::Nominal(format!(\"{{}}\", &*({}).lock().unwrap()))",
             code
         ),
+        // F13.E — Listas anidadas adentro de heterogéneos. El
+        // `code` es `Arc<Mutex<Vec<T>>>`; lockeamos + cloneamos +
+        // wrapeamos cada item recursivamente. Bindeamos el `Arc`
+        // a una `let` antes del `.lock()` para extender la vida
+        // del temporal (paralelo al patrón del show_expr para List).
+        Type::List(inner) => {
+            let inner_wrap = wrap_as_fitz_value("__it", inner)?;
+            format!(
+                "__FitzValue::List({{ \
+                    let __list = {}; \
+                    let __l = __list.lock().unwrap(); \
+                    __l.iter().cloned().map(|__it| {}).collect::<Vec<__FitzValue>>() \
+                }})",
+                code, inner_wrap
+            )
+        }
+        // F13.E — Mapas anidados adentro de heterogéneos.
+        Type::Map(kt, vt) => {
+            let k_wrap = wrap_as_fitz_value("__k", kt)?;
+            let v_wrap = wrap_as_fitz_value("__v", vt)?;
+            format!(
+                "__FitzValue::Map({{ \
+                    let __map = {}; \
+                    let __m = __map.lock().unwrap(); \
+                    __m.iter().cloned().map(|(__k, __v)| ({}, {})).collect::<Vec<(__FitzValue, __FitzValue)>>() \
+                }})",
+                code, k_wrap, v_wrap
+            )
+        }
+        // F13.E — `Type::Any` adentro de heterogéneo significa
+        // que el item YA es un FitzValue (lista anidada de un mix
+        // que ya disparó FitzValue). Pasthrough sin re-wrap.
+        Type::Any => code.to_string(),
         _ => {
             return Err(FitzError::new(
                 ErrorKind::TypeError,
@@ -13878,9 +14208,9 @@ fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
                 0,
                 format!(
                     "F13: el tipo `{}` adentro de un literal heterogéneo \
-                     todavía no es soportado en `fitz build` — F13.A+B \
-                     cubren Int/Float/Str/Bool/Null/Bytes/Nominales. \
-                     List/Map/Function anidados en heterogéneos quedan \
+                     todavía no es soportado en `fitz build` — F13.A+B+E \
+                     cubren Int/Float/Str/Bool/Null/Bytes/Nominales/List/Map. \
+                     Functions/Tuples/Range/Future en heterogéneos siguen \
                      como follow-up. Workaround: usar `fitz run`.",
                     type_name(ty)
                 ),

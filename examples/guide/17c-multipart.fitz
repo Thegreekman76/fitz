@@ -8,15 +8,16 @@
 // `File` es un tipo built-in del runtime HTTP de Fitz (igual que
 // `Request` y `Response`). No hace falta declararlo ni importarlo.
 //
-// Limitación MVP: el `content` de los files es `Str`, así que solo se
-// admiten files cuyo contenido sea UTF-8 válido. Files binarios
-// (imágenes, PDFs) hacen el parse del request fallar con 400.
-// `Value::Bytes` queda como sub-paso futuro (mini-tanda dedicada).
+// File.content es ahora `Bytes` (mini-tanda File.content Bytes).
+// Habilita uploads binarios: imágenes, PDFs, zips, etc. Para
+// procesar texto UTF-8, usar `f.content.to_str() -> Result<Str>`.
+// Text fields (sin `filename=`) siguen exigiendo UTF-8 — para
+// bytes binarios usar `filename=` para que se clasifique como file.
 //
-// Paridad bit-a-bit `fitz run` ↔ `fitz build` (mini-tanda MP-Build):
-// el binario nativo también acepta multipart con los mismos helpers
-// emitidos en el preludio HTTP. El handler que ves abajo compila a
-// binario y corre idéntico al intérprete.
+// Paridad bit-a-bit `fitz run` ↔ `fitz build`: el binario nativo
+// también acepta multipart con los mismos helpers emitidos en el
+// preludio HTTP. `File.content` se serializa como base64 string
+// en JSON (estándar de facto).
 
 @server(3000)
 fn main() => 0

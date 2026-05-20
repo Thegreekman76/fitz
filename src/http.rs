@@ -2287,7 +2287,8 @@ fn extract_multipart_boundary(content_type: &str) -> Option<String> {
     None
 }
 
-/// Mini-tanda MP2 — parser de `multipart/form-data` (RFC 7578).
+/// Mini-tanda MP2 + File.content Bytes — parser de
+/// `multipart/form-data` (RFC 7578) sobre raw bytes.
 ///
 /// Cada part del body viene delimitado por `--<boundary>\r\n` con
 /// headers tipo `Content-Disposition: form-data; name="X"; filename="Y"`
@@ -2296,43 +2297,51 @@ fn extract_multipart_boundary(content_type: &str) -> Option<String> {
 /// `\r\n--<boundary>--`.
 ///
 /// Devuelve `Value::Map<Str, Value>` donde cada entry es:
-/// - Text field (sin `filename`) → `Value::Str(content)`.
+/// - Text field (sin `filename`) → `Value::Str(content)` (UTF-8;
+///   si el content no es UTF-8, error 400).
 /// - File field (con `filename`) → `Value::Instance` de `File` con
-///   `name`, `content_type`, `content`. Files binarios cuyo content
-///   no es UTF-8 válido → 400 con error claro (MVP intencional;
-///   `Value::Bytes` queda como sub-paso futuro).
+///   `name`, `content_type`, `content: Bytes`. Files binarios YA
+///   funcionan — el content se guarda como `Value::Bytes(Vec<u8>)`
+///   sin requerir UTF-8.
 ///
-/// Duplicados de `name`: last-wins (paralelo a la convención de
-/// `parse_urlencoded_body`).
+/// Refactor desde la versión MP2 inicial: ahora trabajamos byte por
+/// byte para preservar bytes binarios. Búsqueda de delimitadores
+/// usa `slice::windows` o un scan manual; headers se parsean como
+/// UTF-8 (ASCII per RFC 7578).
+///
+/// Duplicados de `name`: last-wins.
 fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
-    let delimiter = format!("--{}", boundary);
-    let s = std::str::from_utf8(bytes)
-        .map_err(|e| format!("multipart: body no es UTF-8 válido: {}", e))?;
-    let parts_raw: Vec<&str> = s.split(&delimiter).collect();
-    // El primer split antes del primer `--<boundary>` es preámbulo
-    // (suele estar vacío); ignoramos. La última part después de
-    // `--<boundary>--` también puede tener epílogo; idem.
+    let delimiter = format!("--{}", boundary).into_bytes();
+    // Split por la secuencia delimitador.
+    let parts_raw: Vec<&[u8]> = split_bytes_by(bytes, &delimiter);
     let mut entries: Vec<(Value, Value)> = Vec::new();
     for raw in parts_raw.iter().skip(1) {
         // Terminator final: `--<boundary>--` produce un raw que
         // empieza con `--` (justo después del delimiter).
-        if raw.starts_with("--") {
+        if raw.starts_with(b"--") {
             break;
         }
         // Cada part empieza con `\r\n` (separator entre delimiter y
         // headers). Si no lo tiene, malformado.
-        let body = raw.strip_prefix("\r\n").unwrap_or(raw);
+        let body = strip_prefix_bytes(raw, b"\r\n").unwrap_or(raw);
         // Cada part puede terminar con `\r\n` antes del próximo
         // delimiter. Trimmealo.
-        let body = body.strip_suffix("\r\n").unwrap_or(body);
+        let body = strip_suffix_bytes(body, b"\r\n").unwrap_or(body);
 
-        // Split headers vs content por la primera ocurrencia de `\r\n\r\n`.
-        let Some((headers_str, content)) = body.split_once("\r\n\r\n") else {
+        // Split headers vs content por la primera ocurrencia de
+        // `\r\n\r\n`. Los headers son ASCII; el content puede ser
+        // cualquier secuencia de bytes.
+        let Some(split_idx) = find_bytes(body, b"\r\n\r\n") else {
             return Err(
                 "multipart: part malformada — falta `\\r\\n\\r\\n` entre headers y body"
                     .to_string(),
             );
         };
+        let headers_bytes = &body[..split_idx];
+        let content_bytes = &body[split_idx + 4..];
+        let headers_str = std::str::from_utf8(headers_bytes).map_err(|e| {
+            format!("multipart: headers no son ASCII/UTF-8 válido: {}", e)
+        })?;
 
         // Parse de headers de la part. Solo nos interesa
         // `Content-Disposition` (extrae `name` y `filename`) y
@@ -2343,7 +2352,6 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         for line in headers_str.split("\r\n") {
             let lower = line.to_ascii_lowercase();
             if let Some(rest) = lower.strip_prefix("content-disposition:") {
-                // Preservar case del rest original.
                 let orig_offset = line.len() - rest.len();
                 let value = &line[orig_offset..];
                 let params: std::collections::HashMap<String, String> = parse_cd_params(value);
@@ -2363,9 +2371,19 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         };
 
         let value = match filename {
-            None => Value::Str(content.to_string()),
+            None => {
+                // Text field: content debe ser UTF-8 válido. Para
+                // bytes binarios sin filename, error.
+                let s = std::str::from_utf8(content_bytes).map_err(|e| {
+                    format!(
+                        "multipart: text field '{}' no es UTF-8 válido (use filename= para bytes binarios): {}",
+                        name, e
+                    )
+                })?;
+                Value::Str(s.to_string())
+            }
             Some(fname) => {
-                // Construir Value::Instance de `File`.
+                // File field: content como Bytes (raw). Binary OK.
                 let mut fields: Vec<(String, Value)> = Vec::new();
                 let name_val = if fname.is_empty() {
                     Value::Null
@@ -2379,12 +2397,14 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
                         .map(Value::Str)
                         .unwrap_or(Value::Null),
                 ));
-                fields.push(("content".to_string(), Value::Str(content.to_string())));
+                fields.push((
+                    "content".to_string(),
+                    Value::Bytes(content_bytes.to_vec()),
+                ));
                 Value::new_instance("File".to_string(), fields)
             }
         };
 
-        // last-wins sobre duplicados.
         let key = Value::Str(name);
         if let Some(idx) = entries.iter().position(|(k, _)| k == &key) {
             entries[idx].1 = value;
@@ -2394,6 +2414,54 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
     }
 
     Ok(Value::Map(shared(entries)))
+}
+
+/// File.content Bytes — helpers para split/find sobre `&[u8]`.
+fn split_bytes_by<'a>(haystack: &'a [u8], needle: &[u8]) -> Vec<&'a [u8]> {
+    let mut out = Vec::new();
+    let mut start = 0;
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            out.push(&haystack[start..i]);
+            i += needle.len();
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    out.push(&haystack[start..]);
+    out
+}
+
+fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    if needle.is_empty() || haystack.len() < needle.len() {
+        return None;
+    }
+    let mut i = 0;
+    while i + needle.len() <= haystack.len() {
+        if &haystack[i..i + needle.len()] == needle {
+            return Some(i);
+        }
+        i += 1;
+    }
+    None
+}
+
+fn strip_prefix_bytes<'a>(s: &'a [u8], prefix: &[u8]) -> Option<&'a [u8]> {
+    if s.starts_with(prefix) {
+        Some(&s[prefix.len()..])
+    } else {
+        None
+    }
+}
+
+fn strip_suffix_bytes<'a>(s: &'a [u8], suffix: &[u8]) -> Option<&'a [u8]> {
+    if s.len() >= suffix.len() && &s[s.len() - suffix.len()..] == suffix {
+        Some(&s[..s.len() - suffix.len()])
+    } else {
+        None
+    }
 }
 
 /// Helper para parsear params del header Content-Disposition:
@@ -5001,7 +5069,9 @@ mod tests {
                 assert_eq!(fld[1].0, "content_type");
                 assert_eq!(fld[1].1, Value::Str("text/plain".into()));
                 assert_eq!(fld[2].0, "content");
-                assert_eq!(fld[2].1, Value::Str("file contents here".into()));
+                // File.content Bytes — content ahora es Value::Bytes
+                // (Vec<u8>), no Value::Str. Habilita files binarios.
+                assert_eq!(fld[2].1, Value::Bytes(b"file contents here".to_vec()));
             }
             other => panic!("esperaba Value::Instance(File), fue: {:?}", other),
         }
@@ -5025,18 +5095,44 @@ mod tests {
     }
 
     #[test]
-    fn mp2_parse_multipart_binary_no_utf8_es_error() {
-        // Body con bytes no-UTF8 (0xFF) → 400 con msg claro. Alcance
-        // intencional del MVP — `Value::Bytes` queda como sub-paso futuro.
+    fn mp2_parse_multipart_binary_file_field_funciona() {
+        // File.content Bytes — bytes binarios no-UTF8 (0xFF) en un
+        // FILE field ya funcionan (antes era 400, ahora se guardan
+        // como `Value::Bytes` raw). Habilita uploads binarios.
         let boundary = "X";
         let mut body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n".to_vec();
         body.push(0xff);
         body.push(0xfe);
         body.extend_from_slice(b"\r\n--X--");
+        let result = parse_multipart_body(&body, boundary).expect("parse OK con binary");
+        let Value::Map(entries) = result else {
+            panic!("esperaba Value::Map");
+        };
+        let pairs = entries.lock();
+        assert_eq!(pairs.len(), 1);
+        match &pairs[0].1 {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "File");
+                let fld = fields.lock();
+                assert_eq!(fld[2].0, "content");
+                assert_eq!(fld[2].1, Value::Bytes(vec![0xff, 0xfe]));
+            }
+            other => panic!("esperaba Instance(File), fue: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn mp2_parse_multipart_text_field_sin_filename_sigue_exigiendo_utf8() {
+        // Text field (sin filename) sigue requiriendo UTF-8 — para
+        // bytes binarios, el usuario debe usar `filename=`.
+        let boundary = "X";
+        let mut body = b"--X\r\nContent-Disposition: form-data; name=\"raw\"\r\n\r\n".to_vec();
+        body.push(0xff);
+        body.extend_from_slice(b"\r\n--X--");
         let err = parse_multipart_body(&body, boundary).expect_err("esperaba error");
         assert!(
-            err.contains("UTF-8"),
-            "esperaba mención de UTF-8 en error, fue: {}",
+            err.contains("UTF-8") && err.contains("filename="),
+            "esperaba mención de UTF-8 + workaround filename=, fue: {}",
             err
         );
     }

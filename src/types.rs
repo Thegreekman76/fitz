@@ -499,6 +499,10 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
         "Null" => Some(Type::Null),
         "Bytes" => Some(Type::Bytes),
         "Range" => Some(Type::Range),
+        // F13.C — `Any` como anotación de tipo (gradual escape +
+        // heterogéneos). Habilita `body: List<Any>` / `body: Map<Str, Any>`
+        // en handlers HTTP.
+        "Any" => Some(Type::Any),
         _ => None,
     };
     if let Some(t) = prim {
@@ -625,17 +629,17 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
         .expect("Response es el segundo nominal — no puede colisionar");
     env.set_fields(resp_id, vec![]);
 
-    // Mini-tanda MP2 — `File`: nominal built-in para representar files
-    // de multipart/form-data bodies. El dispatcher lo construye al
-    // parsear `multipart/form-data` requests. Fields:
+    // Mini-tanda MP2 + File.content Bytes — `File`: nominal built-in
+    // para representar files de multipart/form-data bodies. El
+    // dispatcher lo construye al parsear `multipart/form-data`
+    // requests. Fields:
     //   - `name`: filename del Content-Disposition (`filename="..."`),
     //     `null` si la part no es file (form text field).
     //   - `content_type`: MIME del Content-Type de la part, `null` si
     //     no estaba presente.
-    //   - `content`: contenido UTF-8 de la part. Files binarios no
-    //     UTF-8 hacen el parse del request fallar con 400 — alcance
-    //     intencional del MVP (`Value::Bytes` queda como sub-paso
-    //     futuro).
+    //   - `content`: contenido binario crudo. Antes era `Str` (solo
+    //     UTF-8); ahora es `Bytes` (cualquier secuencia). Para texto
+    //     UTF-8, usar `f.content.to_str() -> Result<Str>`.
     let file_id = env
         .declare_nominal("File".to_string())
         .expect("File es el tercer nominal built-in — no puede colisionar");
@@ -650,7 +654,7 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
                 name: "content_type".into(),
                 type_: Type::Nullable(Box::new(Type::Str)),
             },
-            ResolvedField { name: "content".into(), type_: Type::Str },
+            ResolvedField { name: "content".into(), type_: Type::Bytes },
         ],
     );
 }
@@ -2447,6 +2451,53 @@ fn infer_method_call(
         Type::Str => Some(infer_str_method(ctx, method, args_ty, span)),
         // Mini-tanda Bytes — métodos sobre Bytes.
         Type::Bytes => Some(infer_bytes_method(ctx, method, args_ty, span)),
+        // F13.D — methods universales sobre `Type::Any` para type-check
+        // dinámico en heterogéneos. Devuelven `Result<T>` si match,
+        // `Result::Err(Str)` si no. `type_name()` devuelve `Str` directo.
+        Type::Any => match method {
+            "as_int" => {
+                check_method_arity(ctx, method, args_ty, 0, span);
+                Some(Type::Result {
+                    ok: Box::new(Type::Int),
+                    err: Box::new(Type::Str),
+                })
+            }
+            "as_float" => {
+                check_method_arity(ctx, method, args_ty, 0, span);
+                Some(Type::Result {
+                    ok: Box::new(Type::Float),
+                    err: Box::new(Type::Str),
+                })
+            }
+            "as_str" => {
+                check_method_arity(ctx, method, args_ty, 0, span);
+                Some(Type::Result {
+                    ok: Box::new(Type::Str),
+                    err: Box::new(Type::Str),
+                })
+            }
+            "as_bool" => {
+                check_method_arity(ctx, method, args_ty, 0, span);
+                Some(Type::Result {
+                    ok: Box::new(Type::Bool),
+                    err: Box::new(Type::Str),
+                })
+            }
+            "as_bytes" => {
+                check_method_arity(ctx, method, args_ty, 0, span);
+                Some(Type::Result {
+                    ok: Box::new(Type::Bytes),
+                    err: Box::new(Type::Str),
+                })
+            }
+            "type_name" => {
+                check_method_arity(ctx, method, args_ty, 0, span);
+                Some(Type::Str)
+            }
+            // Cualquier otro método sobre Any: gradual (cae al fallback
+            // genérico que asume Any).
+            _ => None,
+        },
         // R.3 — métodos custom sobre nominal. Buscamos en
         // `NominalInfo.methods`. Si existe: validamos aridad + tipos
         // de args, devolvemos el ret type (o `Future<T>` si async).
@@ -2501,8 +2552,6 @@ fn infer_method_call(
         // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
         Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
         Type::Float => Some(infer_float_method(ctx, method, args_ty, span)),
-        // Gradual: no chequeamos sobre Any (no sabemos nada).
-        Type::Any => None,
         other => {
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con

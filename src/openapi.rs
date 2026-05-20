@@ -152,7 +152,7 @@ pub fn collect_status_codes_with_consts(
 pub fn collect_top_level_int_consts(
     program: &crate::ast::Program,
 ) -> std::collections::HashMap<String, i64> {
-    use crate::ast::{Expr, Stmt, UnaryOpKind};
+    use crate::ast::Stmt;
     let mut out = std::collections::HashMap::new();
     for s in program {
         if let Stmt::Assign { target, value, .. } = s {
@@ -160,21 +160,11 @@ pub fn collect_top_level_int_consts(
             let crate::ast::AssignTarget::Ident(name) = target else {
                 continue;
             };
-            let resolved = match value {
-                Expr::Int(n, _) => Some(*n),
-                Expr::UnaryOp {
-                    op: UnaryOpKind::Neg,
-                    operand,
-                    ..
-                } => {
-                    if let Expr::Int(n, _) = operand.as_ref() {
-                        Some(-*n)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            };
+            // OAPI-Expr — usa `resolve_status_value` que ahora acepta
+            // Int literal, Ident a const previa, UnaryOp::Neg y BinOp
+            // simple (Add/Sub/Mul). Walk en orden de declaración para
+            // que `let Y = X + 4` resuelva X cuando llega Y.
+            let resolved = resolve_status_value(value, &out);
             if let Some(n) = resolved {
                 out.insert(name.clone(), n);
             }
@@ -215,20 +205,39 @@ fn collect_status_codes_stmt(
     }
 }
 
-/// Mini-tanda OAPI — resuelve un value de `status:` o
-/// `Stmt::ReturnStatus.status` a un Int. Acepta literales directos
-/// (`Expr::Int`) y referencias a constantes top-level
-/// (`Expr::Ident` con lookup en la tabla). Cualquier otra cosa
-/// (BinOp, llamadas, vars locales) devuelve None — el schema cae
-/// al 500 default.
+/// Mini-tanda OAPI + OAPI-Expr — resuelve un value de `status:` o
+/// `Stmt::ReturnStatus.status` a un Int. Acepta:
+/// - `Expr::Int(n)` literal directo.
+/// - `Expr::Ident(name)` con lookup en la tabla de consts top-level.
+/// - `Expr::UnaryOp::Neg` sobre cualquiera de los anteriores.
+/// - `Expr::BinOp` con Add/Sub/Mul aritmético simple sobre los
+///   anteriores (const-eval). Permite patrones como
+///   `status: BASE + 1` o `status: -CODE`.
+///
+/// Cualquier otra cosa (Div con 0, llamadas, vars locales, etc.)
+/// devuelve None — el schema cae al 500 default.
 fn resolve_status_value(
     e: &crate::ast::Expr,
     consts: &std::collections::HashMap<String, i64>,
 ) -> Option<i64> {
-    use crate::ast::Expr;
+    use crate::ast::{BinOpKind, Expr, UnaryOpKind};
     match e {
         Expr::Int(n, _) => Some(*n),
         Expr::Ident(name, _) => consts.get(name).copied(),
+        Expr::UnaryOp { op: UnaryOpKind::Neg, operand, .. } => {
+            resolve_status_value(operand, consts).map(|n| -n)
+        }
+        Expr::BinOp { op, left, right, .. } => {
+            let l = resolve_status_value(left, consts)?;
+            let r = resolve_status_value(right, consts)?;
+            match op {
+                BinOpKind::Add => l.checked_add(r),
+                BinOpKind::Sub => l.checked_sub(r),
+                BinOpKind::Mul => l.checked_mul(r),
+                // Div/Mod evitamos por simplicidad (división por 0).
+                _ => None,
+            }
+        }
         _ => None,
     }
 }
@@ -1068,14 +1077,17 @@ mod tests {
 
     #[test]
     fn oapi_collect_top_level_int_consts_recolecta_lets_int() {
-        // Mini-tanda OAPI — el pre-scan detecta `let X = <Int>` y
-        // `let Y = -<Int>` a nivel top-level del programa. Otras formas
-        // (RHS no literal, RHS no Int) se omiten.
+        // Mini-tanda OAPI + OAPI-Expr — el pre-scan detecta
+        // `let X = <Int>`, `let Y = -<Int>` y BinOps simples
+        // (`let SUM = 1 + 2` ahora SÍ resuelve a 3, refinamiento
+        // de OAPI-Expr). Walk en orden permite referencias a consts
+        // previas (`let Y = X + 4`). RHS no resoluble se omite.
         let src = "\
             let NOT_FOUND = 404\n\
             let CUSTOM = -42\n\
             let GREETING = \"hola\"\n\
             let SUM = 1 + 2\n\
+            let CHAINED = NOT_FOUND + 1\n\
             @get(\"/\")\n\
             fn h() -> Int => 0\n\
         ";
@@ -1084,7 +1096,8 @@ mod tests {
         assert_eq!(consts.get("NOT_FOUND").copied(), Some(404));
         assert_eq!(consts.get("CUSTOM").copied(), Some(-42));
         assert!(consts.get("GREETING").is_none());
-        assert!(consts.get("SUM").is_none()); // RHS BinOp no es literal
+        assert_eq!(consts.get("SUM").copied(), Some(3));
+        assert_eq!(consts.get("CHAINED").copied(), Some(405));
     }
 
     #[test]

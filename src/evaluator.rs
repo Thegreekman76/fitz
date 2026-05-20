@@ -3803,6 +3803,18 @@ async fn dispatch_method(
         (Value::Bytes(_), "len") => bytes_len(receiver, args, span),
         (Value::Bytes(_), "is_empty") => bytes_is_empty(receiver, args, span),
         (Value::Bytes(_), "to_str") => bytes_to_str(receiver, args, span),
+        // F13.D — methods universales sobre cualquier `Value` para
+        // type-check dinámico en `Any` / FitzValue post-F13. Útiles
+        // adentro de listas/mapas heterogéneos: `xs[0].as_int()` →
+        // `Result<Int>` con Ok(n) si es Int, Err(msg) si no. La
+        // simétrica `type_name()` devuelve el nombre del tipo del
+        // value como Str.
+        (_, "as_int") => fv_as_int(receiver, args, span),
+        (_, "as_float") => fv_as_float(receiver, args, span),
+        (_, "as_str") => fv_as_str(receiver, args, span),
+        (_, "as_bool") => fv_as_bool(receiver, args, span),
+        (_, "as_bytes") => fv_as_bytes(receiver, args, span),
+        (_, "type_name") => fv_type_name(receiver, args, span),
         // Str
         (Value::Str(_), "len") => str_len(receiver, args, span),
         (Value::Str(_), "upper") => str_upper(receiver, args, span),
@@ -6124,6 +6136,68 @@ fn str_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     };
     // Coincide con `len(s)` global: cuenta chars, no bytes.
     Ok(Value::Int(s.chars().count() as i64))
+}
+
+// ---- F13.D — methods universales sobre Value para type-check dinámico ----
+
+fn fv_as_int(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("as_int", &args, 0, span)?;
+    match receiver {
+        Value::Int(n) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(n))))),
+        other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("as_int: el valor es {}, no Int", other.type_name()),
+        ))))),
+    }
+}
+
+fn fv_as_float(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("as_float", &args, 0, span)?;
+    match receiver {
+        Value::Float(x) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Float(x))))),
+        // Int → Float coerce: es la convención del lenguaje (`1` y
+        // `1.0` se comparan iguales).
+        Value::Int(n) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Float(
+            n as f64,
+        ))))),
+        other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("as_float: el valor es {}, no Float", other.type_name()),
+        ))))),
+    }
+}
+
+fn fv_as_str(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("as_str", &args, 0, span)?;
+    match receiver {
+        Value::Str(s) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(s))))),
+        other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("as_str: el valor es {}, no Str", other.type_name()),
+        ))))),
+    }
+}
+
+fn fv_as_bool(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("as_bool", &args, 0, span)?;
+    match receiver {
+        Value::Bool(b) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bool(b))))),
+        other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("as_bool: el valor es {}, no Bool", other.type_name()),
+        ))))),
+    }
+}
+
+fn fv_as_bytes(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("as_bytes", &args, 0, span)?;
+    match receiver {
+        Value::Bytes(bs) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bytes(bs))))),
+        other => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("as_bytes: el valor es {}, no Bytes", other.type_name()),
+        ))))),
+    }
+}
+
+fn fv_type_name(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
+    expect_arity("type_name", &args, 0, span)?;
+    Ok(Value::Str(receiver.type_name().to_string()))
 }
 
 // ---- Mini-tanda Bytes — métodos sobre Value::Bytes ----

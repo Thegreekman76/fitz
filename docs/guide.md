@@ -7923,15 +7923,19 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
   del param (`fn double(n) { return n * 2 }`), el codegen falla.
   Workaround: anotar al menos el return type (`fn double(n) -> Int { ... }`),
   o anotar el param (`fn double(n: Int) { ... }`).
-- **Heterogéneos con tipos avanzados** — F13 SPIKE + F13.A + F13.B
-  cubren primitivos, Bytes y Nominales en listas/mapas
-  heterogéneos: `[1, "dos", true, b"raw", User { id: 1 }]` y
-  `{"name": "fitz", "count": 7, "on": true}` compilan a binario
-  nativo con paridad bit-a-bit `fitz run` ↔ `fitz build`. **Lo que
-  todavía no compila**: listas/mapas anidados con mix interno
-  (`[1, [2, 3]]`), Functions adentro de heterogéneos, Tuples
-  adentro de heterogéneos. Para esos, el mensaje del codegen cita
-  el subset cubierto + workaround `fitz run`.
+- **Heterogéneos con Functions/Tuples** — F13 SPIKE + F13.A + F13.B
+  + F13.C + F13.D + F13.E cubren primitivos, Bytes, Nominales,
+  listas/mapas anidados con mix interno, HTTP body heterogéneo
+  (`body: List<Any>`/`Map<Str, Any>`) y type-check dinámico via
+  `.as_int()`/`.as_str()`/`.type_name()`. Lo que aún NO compila
+  en heterogéneos: Functions y Tuples. Workaround: `fitz run` o
+  desestructurar antes de meter en heterogéneo.
+- **Wrap-style middleware** — `fn mw(req, next: Fn() -> Response)` con
+  invocación `next()` corre solo en `fitz run`. El codegen rechaza
+  con msg claro citando `fitz run`. La implementación en codegen
+  requiere emisión de cierre Rust con tipos async/Send/Sync
+  recursivos no triviales (~2-3h dedicados) — última deuda
+  residual real.
 
 > Lo que **sí anda** y antes era deuda: `let X = <expr>` no literal
 > a nivel top de un módulo (cerrado en F14 — la RHS puede ser una
@@ -7944,14 +7948,20 @@ Cosas que sí corren con `fitz run` pero todavía no compilan:
 > intérprete (mini-tanda DZ), **comparar valores de tipos
 > distintos** (`1 == "1"`, `true != 0`) compila y devuelve
 > `false`/`true` literal sin error E0308 (mini-tanda CT), y
-> **listas y mapas heterogéneos con primitivos, Bytes y Nominales**
-> compilan a binario nativo con un enum tagged `__FitzValue` emitido
-> en el preludio (mini-tandas F13 SPIKE + F13.A + F13.B). El caso
-> 90% del lenguaje compila bit-a-bit con `fitz run`. Listas anidadas
-> con mix interno, Functions y Tuples en heterogéneos siguen como
-> follow-up de F13. Ver `docs/design-fitzvalue.md` para el diseño y
-> el roadmap. **`Value::Bytes` en JSON** ahora se serializa como
-> base64 string (estándar de facto, antes era array de Int).
+> **heterogéneos completos en `fitz build`** — listas/mapas con
+> primitivos, Bytes, Nominales, listas/mapas anidados con mix
+> interno, HTTP body `List<Any>`/`Map<Str, Any>` deserializando
+> desde JSON, y type-check dinámico via `.as_int()`/`.as_str()`/
+> `.type_name()` sobre items de heterogéneos (mini-tandas
+> F13 SPIKE/A/B/C/D/E). El caso 95%+ del lenguaje compila bit-a-bit
+> con `fitz run`. **Solo falta**: Functions y Tuples en
+> heterogéneos. Ver `docs/design-fitzvalue.md` para el diseño.
+> **`Value::Bytes` en JSON** se serializa como base64 string
+> (estándar de facto, antes era array de Int). **`File.content`**
+> es ahora `Bytes` (antes `Str` UTF-8 only) — habilita uploads
+> binarios (imágenes, PDFs) end-to-end. **`status` codes con
+> expresiones simples** (`status: BASE + 4`) se resuelven al schema
+> OpenAPI vía const-eval (mini-tanda OAPI-Expr).
 
 Si te tropezás con algo de esta lista, el mensaje del codegen lo
 cita explícitamente. La salida tiene la forma:
