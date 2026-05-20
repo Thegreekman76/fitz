@@ -1,0 +1,83 @@
+// Mini-tanda Sp.2 — `return` (y `break`/`continue`) adentro de
+// match arms.
+//
+// Antes, el body de un match arm era una expresión pura: no se
+// podía cortar la fn desde adentro con `return`. Ahora el body es
+// un Vec<Stmt> (igual que `if`/`while`), así que `return`/`break`/
+// `continue` propagan al fn/loop contenedor como en cualquier otro
+// lugar.
+//
+// Sintaxis del body:
+//   - `pat => expr`               (forma clásica, un solo expr)
+//   - `pat => return X`           (return directo)
+//   - `pat => break`/`continue`   (break/continue directo)
+//   - `pat => { <stmts...> }`     (bloque con varios stmts)
+
+// --- Caso canónico: early return en match ---------------------------
+
+fn classify(n: Int) -> Str {
+    match n {
+        0 => return "cero"
+        1..10 => return "chico"
+        _ => return "grande"
+    }
+    return "unreachable"
+}
+
+print(classify(0))                         // cero
+print(classify(5))                         // chico
+print(classify(100))                       // grande
+
+// --- Mezcla `return` con expresiones simples -----------------------
+
+fn find_first_positive(xs: List<Int>) -> Result<Int> {
+    for x in xs {
+        match x > 0 {
+            true => return Ok(x)
+            false => 0
+        }
+    }
+    return Err("no hay positivos")
+}
+
+print(find_first_positive([-1, -2, 3, 4]))     // Ok(3)
+print(find_first_positive([-1, -2]))           // Err("no hay positivos")
+
+// --- Bloque con varios stmts en un arm -----------------------------
+
+fn compute(n: Int) -> Int {
+    return match n {
+        0 => {
+            let bonus: Int = 10
+            return bonus * 2
+        }
+        1..100 => 99
+        _ => -1
+    }
+}
+
+print(compute(0))                          // 20
+print(compute(50))                         // 99
+print(compute(1000))                       // -1
+
+// --- `break` adentro de match para cortar un loop ------------------
+
+fn find_index(xs: List<Int>, target: Int) -> Result<Int> {
+    let result: Int = -1
+    for (i, x) in xs.enumerate() {
+        match x == target {
+            true => {
+                result = i
+                break
+            }
+            false => 0
+        }
+    }
+    return match result {
+        -1 => Err("no encontrado")
+        _ => Ok(result)
+    }
+}
+
+print(find_index([10, 20, 30, 40], 30))    // Ok(2)
+print(find_index([10, 20], 99))            // Err("no encontrado")

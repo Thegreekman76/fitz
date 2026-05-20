@@ -349,7 +349,7 @@ fn program_uses_fmt_helpers(program: &Program) -> bool {
                     || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_fmt))
             }
             Expr::Match { value, arms, .. } => {
-                expr_uses_fmt(value) || arms.iter().any(|a| expr_uses_fmt(&a.body))
+                expr_uses_fmt(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_fmt))
             }
             Expr::Loop { body, .. } => body.iter().any(stmt_uses_fmt),
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_fmt(v)),
@@ -428,7 +428,7 @@ fn program_uses_async(program: &Program) -> bool {
                     || else_.as_ref().map(|b| b.iter().any(stmt_uses_async)).unwrap_or(false)
             }
             Expr::Match { value, arms, .. } => {
-                expr_uses_async(value) || arms.iter().any(|a| expr_uses_async(&a.body))
+                expr_uses_async(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_async))
             }
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_async(v)),
             Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_async),
@@ -644,7 +644,7 @@ fn contains_return_status_expr(expr: &Expr) -> bool {
             contains_return_status_stmts(then)
                 || else_.as_deref().is_some_and(contains_return_status_stmts)
         }
-        Expr::Match { arms, .. } => arms.iter().any(|a| contains_return_status_expr(&a.body)),
+        Expr::Match { arms, .. } => arms.iter().any(|a| contains_return_status_stmts(&a.body)),
         _ => false,
     }
 }
@@ -945,7 +945,9 @@ fn walk_expr_for_state_refs(
                 // Aproximación conservadora: no detallamos cada
                 // variante; los Ok(x)/Err(x) bindings no van a chocar
                 // con state vars en la práctica (nombres distintos).
-                walk_expr_for_state_refs(&arm.body, candidates, locals, refs);
+                for stmt in &arm.body {
+                    walk_stmt_for_state_refs(stmt, candidates, locals, refs);
+                }
             }
         }
         Expr::FnExpr { params, body, .. } => {
@@ -963,6 +965,12 @@ fn walk_expr_for_state_refs(
         }
         // Fase 9.0.1 (F15): walker estático no-op para Error nodes.
         Expr::Error(_) => {}
+        // Fp.3 — NamedArg solo aparece adentro de Call.args; el caller
+        // recurse hacia adentro del value. Tratamos el wrapper como
+        // passthrough.
+        Expr::NamedArg { value, .. } => {
+            walk_expr_for_state_refs(value, candidates, locals, refs);
+        }
     }
 }
 
@@ -1805,7 +1813,9 @@ fn collect_module_sigs(
                     None => Type::Null,
                 };
                 let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
-                fn_sigs.insert(name.clone(), FnSig { params: ps, ret, defaults });
+                let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
+                let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+                fn_sigs.insert(name.clone(), FnSig { params: ps, ret, defaults, has_varargs, param_names });
             }
             Stmt::Assign { target, type_, value, .. } => {
                 // Solo bindings simples a un Ident.
@@ -2611,6 +2621,14 @@ struct FnSig {
     /// garantiza que los defaults son consecutivos al final, así que
     /// los `None`s aparecen antes que los `Some`s.
     defaults: Vec<Option<Expr>>,
+    /// Fp.2 — si el último param es variádico (`...xs`). En el codegen
+    /// se emite como `Vec<T>` por valor — el call site lo arma con
+    /// `vec![]` macro a partir de los args extras.
+    has_varargs: bool,
+    /// Fp.3 — nombres de los params, en orden. Para el reorder de named
+    /// args en el call site del codegen. Vacío para vars de tipo
+    /// `Type::Function` (no llevan nombres).
+    param_names: Vec<String>,
 }
 
 /// Info de un tipo custom durante el codegen. Combina los datos
@@ -3835,9 +3853,11 @@ impl<'a> CodegenCtx<'a> {
                     inner_ret
                 };
                 let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
+                let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 self.fn_sigs.insert(
                     name.clone(),
-                    FnSig { params: params_tys, ret, defaults },
+                    FnSig { params: params_tys, ret, defaults, has_varargs, param_names },
                 );
             }
         }
@@ -4144,7 +4164,16 @@ impl<'a> CodegenCtx<'a> {
             self.emit("mut ");
             self.emit(&param.name);
             self.emit(": ");
-            self.emit(&rust_type_for(pty, self.env)?);
+            // Fp.2 — varargs: el tipo en `sig.params` es el elemento T
+            // (para que el call-site valide cada arg contra T), pero la
+            // fn recibe `List<T>` (`Arc<Mutex<Vec<T>>>`). Wrap en List
+            // al emitir el tipo Rust del param.
+            let rust_ty = if param.varargs {
+                rust_type_for(&Type::List(Box::new(pty.clone())), self.env)?
+            } else {
+                rust_type_for(pty, self.env)?
+            };
+            self.emit(&rust_ty);
         }
         self.emit(")");
         // En response mode el return type generado es `__FitzResponse`,
@@ -4185,7 +4214,13 @@ impl<'a> CodegenCtx<'a> {
         self.indent += 1;
         self.push_scope();
         for (param, pty) in params.iter().zip(sig.params.iter()) {
-            self.declare_var(param.name.clone(), pty.clone());
+            // Fp.2 — varargs param se ve como `List<T>` adentro del body.
+            let bind_ty = if param.varargs {
+                Type::List(Box::new(pty.clone()))
+            } else {
+                pty.clone()
+            };
+            self.declare_var(param.name.clone(), bind_ty);
         }
         // F11: si esta fn referencia algún state HTTP shared, lo
         // materializamos como var local al inicio del body. El `(*X).clone()`
@@ -5209,6 +5244,13 @@ impl<'a> CodegenCtx<'a> {
     /// Devuelve `(código Rust de la expresión, tipo Fitz)`.
     fn gen_expr(&mut self, e: &Expr) -> Result<(String, Type), FitzError> {
         match e {
+            // Fp.3 — NamedArg solo es válido adentro de Call.args; el
+            // dispatcher de calls lo procesa antes de llegar acá. Verlo
+            // en gen_expr indica AST mal formado (bug interno).
+            Expr::NamedArg { name, span, .. } => Err(self.err_at(*span, format!(
+                "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
+                name
+            ))),
             Expr::Int(n, _) => Ok((format!("{}i64", n), Type::Int)),
             Expr::Float(n, _) => {
                 // `1.0` ya es f64 literal en Rust; sufijo opcional
@@ -6136,7 +6178,7 @@ impl<'a> CodegenCtx<'a> {
             // Defaults solo aplican a callees por nombre resolubles en
             // `fn_sigs`. Estricta aridad acá.
             let arity = params.len();
-            let sig = FnSig { params, ret: *ret, defaults: vec![None; arity] };
+            let sig = FnSig { params, ret: *ret, defaults: vec![None; arity], has_varargs: false, param_names: Vec::new() };
             return self.gen_call_with_sig(name, &sig, args, call_span);
         }
 
@@ -6159,10 +6201,99 @@ impl<'a> CodegenCtx<'a> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
-        // Fp — aridad mínima = params SIN default; máxima = total.
-        let required = sig.defaults.iter().filter(|d| d.is_none()).count();
-        if args.len() < required || args.len() > sig.params.len() {
-            return Err(self.err_at(call_span, if required == sig.params.len() {
+        // Fp.3 — si hay named args, reordenar a posicionales primero.
+        // Requiere `sig.param_names` poblado; en su ausencia (FnSig
+        // sintetizada para Type::Function de var), error claro.
+        let has_named = args.iter().any(|a| matches!(a, Expr::NamedArg { .. }));
+        if has_named {
+            if sig.param_names.is_empty() {
+                return Err(self.err_at(call_span, format!(
+                    "`{}` no soporta argumentos nombrados (callee indirecto sin info de nombres)",
+                    callee_expr
+                )));
+            }
+            if sig.has_varargs {
+                return Err(self.err_at(call_span, format!(
+                    "`{}` tiene un parámetro variádico; los argumentos nombrados \
+                     no son compatibles con varargs en esta versión",
+                    callee_expr
+                )));
+            }
+            // Reordenar a posicional. Cada slot se rellena con un Expr
+            // (el value del NamedArg, el positional original, o el
+            // default expr).
+            let mut slots: Vec<Option<Expr>> = (0..sig.param_names.len()).map(|_| None).collect();
+            let mut next_pos = 0usize;
+            let mut after_named = false;
+            for arg in args {
+                if let Expr::NamedArg { name, value, .. } = arg {
+                    after_named = true;
+                    let idx = sig.param_names.iter().position(|p| p == name).ok_or_else(|| {
+                        self.err_at(call_span, format!(
+                            "`{}` no tiene un parámetro llamado `{}`",
+                            callee_expr, name
+                        ))
+                    })?;
+                    if slots[idx].is_some() {
+                        return Err(self.err_at(call_span, format!(
+                            "`{}`: el argumento `{}` está duplicado",
+                            callee_expr, name
+                        )));
+                    }
+                    slots[idx] = Some((**value).clone());
+                } else {
+                    if after_named {
+                        return Err(self.err_at(call_span, format!(
+                            "`{}`: no se puede pasar un argumento posicional después de uno nombrado",
+                            callee_expr
+                        )));
+                    }
+                    if next_pos >= sig.param_names.len() {
+                        return Err(self.err_at(call_span, format!(
+                            "`{}` espera {} argumento(s), recibió más",
+                            callee_expr, sig.param_names.len()
+                        )));
+                    }
+                    slots[next_pos] = Some(arg.clone());
+                    next_pos += 1;
+                }
+            }
+            // Rellenar None con default.
+            let mut reordered: Vec<Expr> = Vec::with_capacity(sig.param_names.len());
+            for (i, slot) in slots.into_iter().enumerate() {
+                match slot {
+                    Some(e) => reordered.push(e),
+                    None => {
+                        let de = sig.defaults[i].as_ref().ok_or_else(|| {
+                            self.err_at(call_span, format!(
+                                "`{}`: falta el argumento `{}` (no tiene default)",
+                                callee_expr, sig.param_names[i]
+                            ))
+                        })?;
+                        reordered.push(de.clone());
+                    }
+                }
+            }
+            // Recursar con args posicionales puros.
+            return self.gen_call_with_sig(callee_expr, sig, &reordered, call_span);
+        }
+        // Fp.2 — varargs: aridad mínima excluye el varargs (puede recibir
+        // 0 args); máxima = ilimitada. Sin varargs: aridad mínima =
+        // params SIN default; máxima = total.
+        let required_without_defaults = sig.defaults.iter().filter(|d| d.is_none()).count();
+        let required = if sig.has_varargs {
+            required_without_defaults.min(sig.params.len().saturating_sub(1))
+        } else {
+            required_without_defaults
+        };
+        let too_many = !sig.has_varargs && args.len() > sig.params.len();
+        if args.len() < required || too_many {
+            return Err(self.err_at(call_span, if sig.has_varargs {
+                format!(
+                    "`{}` espera al menos {} argumento(s), recibió {}",
+                    callee_expr, required, args.len(),
+                )
+            } else if required == sig.params.len() {
                 format!(
                     "`{}` espera {} argumento(s), recibió {}",
                     callee_expr, sig.params.len(), args.len(),
@@ -6174,23 +6305,47 @@ impl<'a> CodegenCtx<'a> {
                 )
             }));
         }
-        let mut arg_codes = Vec::with_capacity(sig.params.len());
-        // Args provistos.
-        for (a, expected) in args.iter().zip(sig.params.iter()) {
-            let (code, ty) = self.gen_expr(a)?;
-            arg_codes.push(coerce(&code, &ty, expected));
+        let varargs_idx = if sig.has_varargs { Some(sig.params.len() - 1) } else { None };
+        let mut arg_codes: Vec<String> = Vec::with_capacity(sig.params.len());
+
+        // Args posicionales hasta el varargs (si hay).
+        let positional_count = if let Some(i) = varargs_idx { i } else { sig.params.len() };
+        for (i, expected) in sig.params.iter().enumerate().take(positional_count) {
+            if i < args.len() {
+                let (code, ty) = self.gen_expr(&args[i])?;
+                arg_codes.push(coerce(&code, &ty, expected));
+            } else {
+                // Fill con default.
+                let default_expr = sig.defaults[i].as_ref().ok_or_else(|| {
+                    self.err_at(call_span, format!(
+                        "`{}`: el parámetro {} no tiene default y no fue provisto (bug interno)",
+                        callee_expr, i + 1,
+                    ))
+                })?;
+                let (code, ty) = self.gen_expr(default_expr)?;
+                arg_codes.push(coerce(&code, &ty, &sig.params[i]));
+            }
         }
-        // Fp — fill con defaults para los params faltantes (siempre trailing).
-        for i in args.len()..sig.params.len() {
-            let default_expr = sig.defaults[i].as_ref().ok_or_else(|| {
-                self.err_at(call_span, format!(
-                    "`{}`: el parámetro {} no tiene default y no fue provisto (bug interno)",
-                    callee_expr, i + 1,
-                ))
-            })?;
-            let (code, ty) = self.gen_expr(default_expr)?;
-            arg_codes.push(coerce(&code, &ty, &sig.params[i]));
+
+        // Fp.2 — args del varargs: se empaquetan en una `List<T>` Fitz
+        // (`Arc<Mutex<Vec<T>>>`). Construimos un `vec![item1, item2, ...]`
+        // y lo envolvemos. Si no hay args extra, queda como List vacío.
+        if let Some(varargs_idx) = varargs_idx {
+            let elem_ty = &sig.params[varargs_idx];
+            let mut extras: Vec<String> = Vec::new();
+            for arg in args.iter().skip(positional_count) {
+                let (code, ty) = self.gen_expr(arg)?;
+                extras.push(coerce(&code, &ty, elem_ty));
+            }
+            // `Arc::new(Mutex::new(vec![...]))` — paralelo al codegen
+            // estándar de literales de lista (`Expr::List`).
+            let list_code = format!(
+                "std::sync::Arc::new(std::sync::Mutex::new(vec![{}]))",
+                extras.join(", ")
+            );
+            arg_codes.push(list_code);
         }
+
         Ok((
             format!("{}({})", callee_expr, arg_codes.join(", ")),
             sig.ret.clone(),
@@ -9010,14 +9165,79 @@ impl<'a> CodegenCtx<'a> {
             } else {
                 None
             };
-            // `print(...)` adentro del arm no es una expresión Fitz (es
-            // statement). Lo emitimos como bloque `{ println!(...); }`
-            // que evalúa a `()`. Para el resto delegamos a `gen_expr`.
-            let (body_code, body_ty) = if is_print_call(&arm.body) {
-                let print_code = self.gen_print_to_string(&arm.body)?;
-                (format!("{{ {}; }}", print_code), Type::Null)
+            // Sp.2 — body es Vec<Stmt>. Emitimos como bloque Rust
+            // `{ <stmts> }`. El "valor" es el del último Stmt::Expr;
+            // los demás stmts (Return/Break/Continue/Assign) se emiten
+            // sin trailing semicolon en el último si es Expr (modo
+            // expr-block Rust). Si hay Return/Break/Continue, queda
+            // como `!` (never), Rust acepta.
+            // Sp.2 — body es Vec<Stmt>. Casos:
+            //   - 1 Stmt::Expr (print o regular) → emit como expression.
+            //   - 1 Stmt::Return/Break/Continue → emit como `{ return X }`
+            //     SIN `;` trailing para que Rust trate el block como
+            //     `!` (never type, coercible a cualquier T del match).
+            //   - >1 stmts → block con stmts y último expr-tail.
+            //
+            // Helper: strip trailing `;\n?` de un código de stmt cuando
+            // sabemos que es la cola de un block que debe tipar como `!`.
+            fn strip_trailing_semi(s: &str) -> String {
+                let trimmed = s.trim_end();
+                trimmed.strip_suffix(';').unwrap_or(trimmed).to_string()
+            }
+            let (body_code, body_ty) = if arm.body.len() == 1 {
+                match &arm.body[0] {
+                    Stmt::Expr(e, _) => {
+                        if is_print_call(e) {
+                            let print_code = self.gen_print_to_string(e)?;
+                            (format!("{{ {}; }}", print_code), Type::Null)
+                        } else {
+                            self.gen_expr(e)?
+                        }
+                    }
+                    other @ (Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..)) => {
+                        // `return X`/`break`/`continue` sin trailing `;`
+                        // — type `!` que coerce a cualquier T del match.
+                        let stmt_code = self.gen_stmt_to_string(other)?;
+                        let stripped = strip_trailing_semi(&stmt_code);
+                        (format!("{{ {} }}", stripped), Type::Null)
+                    }
+                    other => {
+                        // Otros stmts: emisión normal con `;`.
+                        let stmt_code = self.gen_stmt_to_string(other)?;
+                        (format!("{{ {} }}", stmt_code), Type::Null)
+                    }
+                }
             } else {
-                self.gen_expr(&arm.body)?
+                // Múltiples stmts → bloque Rust con todos los stmts y
+                // último como expr-tail si es Stmt::Expr o como `!` si
+                // es Return/Break/Continue (sin trailing `;`).
+                let mut block = String::from("{ ");
+                let mut tail_ty = Type::Null;
+                for (i, stmt) in arm.body.iter().enumerate() {
+                    let is_last = i + 1 == arm.body.len();
+                    if is_last {
+                        match stmt {
+                            Stmt::Expr(e, _) => {
+                                let (code, ty) = self.gen_expr(e)?;
+                                block.push_str(&code);
+                                tail_ty = ty;
+                                continue;
+                            }
+                            Stmt::Return(..) | Stmt::Break(..) | Stmt::Continue(..) => {
+                                let code = self.gen_stmt_to_string(stmt)?;
+                                block.push_str(&strip_trailing_semi(&code));
+                                tail_ty = Type::Null;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    let code = self.gen_stmt_to_string(stmt)?;
+                    block.push_str(&code);
+                    block.push(' ');
+                }
+                block.push_str(" }");
+                (block, tail_ty)
             };
             self.pop_scope();
 
@@ -12021,7 +12241,9 @@ fn collect_captures_expr(
         Expr::Match { value, arms, .. } => {
             collect_captures_expr(value, params, locals, ctx, seen, out);
             for arm in arms {
-                collect_captures_expr(&arm.body, params, locals, ctx, seen, out);
+                for stmt in &arm.body {
+                    collect_captures_stmt(stmt, params, locals, ctx, seen, out);
+                }
             }
         }
         Expr::StructLit { fields, .. } => {
@@ -12034,6 +12256,10 @@ fn collect_captures_expr(
         }
         // Fase 9.0.1 (F15): walker estático no-op.
         Expr::Error(_) => {}
+        // Fp.3 — NamedArg passthrough al value.
+        Expr::NamedArg { value, .. } => {
+            collect_captures_expr(value, params, locals, ctx, seen, out);
+        }
     }
 }
 

@@ -2395,6 +2395,18 @@ fn bind_tuple_pattern(pat: &Pattern, v: &Value, env: EnvRef) {
 async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
     let span = expr.span();
     match expr {
+        // Fp.3 — NamedArg solo es válido adentro de Call.args; el
+        // dispatcher de Call lo procesa antes de invocar el value.
+        // Verlo en eval_expr indica AST mal formado.
+        Expr::NamedArg { name, .. } => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line, span.column,
+            format!(
+                "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
+                name
+            ),
+        ))),
+
         // Literales — el valor está embebido en el AST.
         Expr::Int(n, _) => Ok(Value::Int(*n)),
         Expr::Float(x, _) => Ok(Value::Float(*x)),
@@ -2914,13 +2926,29 @@ async fn eval_expr(expr: &Expr, env: EnvRef) -> EvalResult<Value> {
                     }
                 }
 
-                // Mini-tanda T — para Tuple patterns el `arm_env`
-                // ya tiene los bindings aplicados; siempre evaluamos
-                // adentro.
-                if binding.is_some() || matches!(&arm.pattern, Pattern::Tuple(_)) {
-                    return eval_expr(&arm.body, arm_env).await;
+                // Sp.2 — body es Vec<Stmt>. Ejecutamos en orden; el
+                // valor del arm es el valor del último Stmt::Expr (si
+                // los hay), o Null en su defecto. Stmt::Return/Break/
+                // Continue propagan como EvalSignal — el match no los
+                // captura, suben al fn/loop contenedor.
+                let body_env = if binding.is_some() || matches!(&arm.pattern, Pattern::Tuple(_)) {
+                    arm_env
+                } else {
+                    env.clone()
+                };
+                let mut last_value = Value::Null;
+                for stmt in &arm.body {
+                    match stmt {
+                        Stmt::Expr(e, _) => {
+                            last_value = eval_expr(e, body_env.clone()).await?;
+                        }
+                        other => {
+                            eval_stmt(other, body_env.clone()).await?;
+                            last_value = Value::Null;
+                        }
+                    }
                 }
-                return eval_expr(&arm.body, env.clone()).await;
+                return Ok(last_value);
             }
 
             // Ningún arm matcheó. Con Ident/Wildcard presentes es imposible;
@@ -3059,21 +3087,106 @@ async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> Eva
     // Method call.
     if let Expr::Field { object, field, .. } = callee {
         let receiver = eval_expr(object, env.clone()).await?;
-        let mut arg_values = Vec::with_capacity(args.len());
+        // Fp.3 — extraer args con/sin nombre. El dispatch del método
+        // reordena por nombre al resolver el método target.
+        let mut named_args: Vec<(Option<String>, Value)> = Vec::with_capacity(args.len());
         for arg in args {
-            arg_values.push(eval_expr(arg, env.clone()).await?);
+            let (name, value_expr) = match arg {
+                Expr::NamedArg { name, value, .. } => (Some(name.clone()), value.as_ref()),
+                other => (None, other),
+            };
+            let v = eval_expr(value_expr, env.clone()).await?;
+            named_args.push((name, v));
         }
-        return dispatch_method(receiver, field, arg_values, env, span).await;
+        return dispatch_method_named(receiver, field, named_args, env, span).await;
     }
 
     // Llamada normal.
     let callee_value = eval_expr(callee, env.clone()).await?;
-    let mut arg_values = Vec::with_capacity(args.len());
+    // Fp.3 — args con/sin nombre. La resolución de nombres → posiciones
+    // ocurre en `invoke_value_named` después de evaluar args y conocer
+    // el target (Value::Function tiene los param names).
+    let mut named_args: Vec<(Option<String>, Value)> = Vec::with_capacity(args.len());
     for arg in args {
-        arg_values.push(eval_expr(arg, env.clone()).await?);
+        let (name, value_expr) = match arg {
+            Expr::NamedArg { name, value, .. } => (Some(name.clone()), value.as_ref()),
+            other => (None, other),
+        };
+        let v = eval_expr(value_expr, env.clone()).await?;
+        named_args.push((name, v));
     }
     let display_name = callee_display_name(callee);
-    invoke_value(callee_value, arg_values, &display_name, span).await
+    invoke_value_named(callee_value, named_args, &display_name, span).await
+}
+
+/// Fp.3 — reordena `named_args` (mezcla de positionals y named) a una
+/// Vec<Value> posicional respetando los nombres de `param_names`. La
+/// regla: positionals primero (sin nombre), después los named (cada uno
+/// al slot de su nombre). Slots no cubiertos quedan `None` para que el
+/// caller los llene con defaults.
+///
+/// Errores: nombre duplicado, nombre desconocido, named "sobreescribe"
+/// a un positional ya provisto.
+fn resolve_named_args(
+    named_args: Vec<(Option<String>, Value)>,
+    param_names: &[String],
+    display_name: &str,
+    span: Span,
+) -> EvalResult<Vec<Option<Value>>> {
+    let mut slots: Vec<Option<Value>> = (0..param_names.len()).map(|_| None).collect();
+    let mut next_positional = 0usize;
+    let mut after_named = false;
+    for (name_opt, value) in named_args {
+        if let Some(name) = name_opt {
+            after_named = true;
+            // Buscar el index del param por nombre.
+            let idx = param_names.iter().position(|p| p == &name).ok_or_else(|| {
+                EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line, span.column,
+                    format!(
+                        "`{}` no tiene un parámetro llamado `{}`",
+                        display_name, name
+                    ),
+                ))
+            })?;
+            // Si el slot ya está ocupado por un positional previo o
+            // por otro named con el mismo nombre, error claro.
+            if slots[idx].is_some() {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line, span.column,
+                    format!(
+                        "`{}`: el argumento `{}` está duplicado",
+                        display_name, name
+                    ),
+                )));
+            }
+            slots[idx] = Some(value);
+        } else {
+            if after_named {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line, span.column,
+                    format!(
+                        "`{}`: no se puede pasar un argumento posicional después de uno nombrado",
+                        display_name
+                    ),
+                )));
+            }
+            if next_positional >= param_names.len() {
+                // Más positionals que params — el invocador lo va a
+                // detectar después como exceso de args. Lo dejamos pasar
+                // acá y el chequeo de aridad final reporta.
+                slots.push(Some(value));
+                next_positional += 1;
+            } else {
+                slots[next_positional] = Some(value);
+                next_positional += 1;
+            }
+        }
+    }
+    Ok(slots)
 }
 
 /// Devuelve un nombre legible para usar en mensajes de error de una
@@ -3083,6 +3196,202 @@ fn callee_display_name(callee: &Expr) -> String {
     match callee {
         Expr::Ident(n, _) => n.clone(),
         _ => "<expr>".to_string(),
+    }
+}
+
+/// Fp.3 — versión de `invoke_value` que acepta args con/sin nombre.
+/// Para `Value::Function`, los nombres se mapean a posiciones según
+/// los `params` de la fn. Para builtins y PyObject (sin info de
+/// nombres), rechaza named args con error claro.
+async fn invoke_value_named(
+    value: Value,
+    named_args: Vec<(Option<String>, Value)>,
+    display_name: &str,
+    span: Span,
+) -> EvalResult<Value> {
+    let has_named = named_args.iter().any(|(n, _)| n.is_some());
+    // Caso rápido: si no hay nombres, delegar al path posicional clásico.
+    if !has_named {
+        let positional: Vec<Value> = named_args.into_iter().map(|(_, v)| v).collect();
+        return invoke_value(value, positional, display_name, span).await;
+    }
+    // Hay nombres — el callee debe ser una Fitz Function con params
+    // conocidos.
+    match value {
+        Value::Function { params, body, closure, is_async } => {
+            let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
+            let slots = resolve_named_args(named_args, &param_names, display_name, span)?;
+            // Reconstruir Vec<Value> rellenando defaults para los None.
+            let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
+            if has_varargs {
+                // Varargs + named args no compatibles en MVP.
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line, span.column,
+                    format!(
+                        "`{}` tiene un parámetro variádico; los argumentos nombrados \
+                         no son compatibles con varargs en esta versión",
+                        display_name
+                    ),
+                )));
+            }
+            let call_env = Environment::new_child(closure);
+            for (i, param) in params.iter().enumerate() {
+                let value = match &slots[i] {
+                    Some(v) => v.clone(),
+                    None => {
+                        // Rellenar con default.
+                        let de = param.default.as_ref().ok_or_else(|| {
+                            EvalSignal::Error(FitzError::new(
+                                ErrorKind::WrongArgCount {
+                                    expected: params.len(),
+                                    found: slots.iter().filter(|s| s.is_some()).count(),
+                                },
+                                span.line, span.column,
+                                format!(
+                                    "`{}`: falta el argumento `{}` (no tiene default)",
+                                    display_name, param.name
+                                ),
+                            ))
+                        })?;
+                        eval_expr(de, call_env.clone()).await?
+                    }
+                };
+                call_env.lock().define(param.name.clone(), value);
+            }
+            // Mismo path que invoke_value: ejecutar body sync o async.
+            if is_async {
+                let owned_body = body;
+                let display_owned = display_name.to_string();
+                let fut: crate::value::FitzFuture = Box::pin(async move {
+                    for stmt in &owned_body {
+                        match eval_stmt(stmt, call_env.clone()).await {
+                            Ok(_) => {}
+                            Err(EvalSignal::Return(v)) => return Ok(v),
+                            Err(signal) => return Err(signal_to_error(signal)),
+                        }
+                    }
+                    let _ = display_owned;
+                    Ok(Value::Null)
+                });
+                return Ok(Value::new_future(fut));
+            }
+            for stmt in &body {
+                match eval_stmt(stmt, call_env.clone()).await {
+                    Ok(_) => {}
+                    Err(EvalSignal::Return(v)) => return Ok(v),
+                    Err(other) => return Err(other),
+                }
+            }
+            Ok(Value::Null)
+        }
+        Value::Builtin { name, .. } => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line, span.column,
+            format!(
+                "el builtin `{}` no soporta argumentos nombrados",
+                name
+            ),
+        ))),
+        other => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line, span.column,
+            format!(
+                "`{}` no es invocable o no soporta argumentos nombrados (es {})",
+                display_name, other.type_name()
+            ),
+        ))),
+    }
+}
+
+/// Fp.3 — método con args nombrados. Solo soporta métodos custom (R.3)
+/// y estáticos — los métodos built-in de List/Map/Str no tienen nombres
+/// de params expuestos. Si todos los args son posicionales, delega al
+/// path clásico.
+#[async_recursion]
+async fn dispatch_method_named(
+    receiver: Value,
+    method: &str,
+    named_args: Vec<(Option<String>, Value)>,
+    env: EnvRef,
+    span: Span,
+) -> EvalResult<Value> {
+    let has_named = named_args.iter().any(|(n, _)| n.is_some());
+    if !has_named {
+        let positional: Vec<Value> = named_args.into_iter().map(|(_, v)| v).collect();
+        return dispatch_method(receiver, method, positional, env, span).await;
+    }
+    // Hay nombres — buscar método custom o estático con param names.
+    let method_def_opt: Option<crate::ast::MethodDef> = match &receiver {
+        Value::Instance { type_name, .. } => {
+            // Buscar el `Value::Type` por nombre canónico en el env.
+            let tname = type_name.clone();
+            let type_val = env.lock().get(&tname);
+            match type_val {
+                Some(Value::Type { methods, .. }) => {
+                    methods.iter().find(|m| m.name == method && !m.is_static).cloned()
+                }
+                _ => None,
+            }
+        }
+        Value::Type { methods, .. } => {
+            methods.iter().find(|m| m.name == method && m.is_static).cloned()
+        }
+        _ => None,
+    };
+    let method_def = method_def_opt.ok_or_else(|| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line, span.column,
+            format!(
+                "el método `.{}()` no acepta argumentos nombrados \
+                 (solo soportado en métodos custom sobre `type`)",
+                method
+            ),
+        ))
+    })?;
+    let param_names: Vec<String> = method_def.params.iter().map(|p| p.name.clone()).collect();
+    let display = format!(".{}()", method);
+    let slots = resolve_named_args(named_args, &param_names, &display, span)?;
+    let has_varargs = method_def.params.last().map(|p| p.varargs).unwrap_or(false);
+    if has_varargs {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line, span.column,
+            format!(
+                "el método `.{}()` tiene un parámetro variádico; \
+                 los argumentos nombrados no son compatibles con varargs",
+                method
+            ),
+        )));
+    }
+    // Construir args posicionales rellenando con defaults.
+    let mut positional: Vec<Value> = Vec::with_capacity(method_def.params.len());
+    // Necesitamos un env para evaluar defaults — usamos el del caller.
+    let temp_env = Environment::new_child(env.clone());
+    for (i, param) in method_def.params.iter().enumerate() {
+        let v = match &slots[i] {
+            Some(v) => v.clone(),
+            None => {
+                let de = param.default.as_ref().ok_or_else(|| {
+                    EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeError,
+                        span.line, span.column,
+                        format!(
+                            "el método `.{}()`: falta el argumento `{}` (no tiene default)",
+                            method, param.name
+                        ),
+                    ))
+                })?;
+                eval_expr(de, temp_env.clone()).await?
+            }
+        };
+        positional.push(v);
+    }
+    if method_def.is_static {
+        invoke_static_method(method_def, positional, env, span).await
+    } else {
+        invoke_custom_method(receiver, method_def, positional, env, span).await
     }
 }
 
@@ -3106,17 +3415,31 @@ async fn invoke_value(
 
         Value::Function { params, body, closure, is_async } => {
             // Fp — default params: si faltan args trailing y los params
-            // tienen `default`, se rellenan. Aridad mínima = cantidad
-            // de params SIN default; máxima = total de params.
-            let required = params.iter().filter(|p| p.default.is_none()).count();
-            if arg_values.len() < required || arg_values.len() > params.len() {
+            // tienen `default`, se rellenan.
+            // Fp.2 — varargs: el último param (si es variádico) absorbe
+            // 0+ args extra. Aridad mínima = required sin contar el
+            // varargs; máxima = total (o sin límite con varargs).
+            let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
+            let required_with_defaults = params.iter().filter(|p| p.default.is_none()).count();
+            let required = if has_varargs {
+                required_with_defaults.min(params.len().saturating_sub(1))
+            } else {
+                required_with_defaults
+            };
+            let too_many = !has_varargs && arg_values.len() > params.len();
+            if arg_values.len() < required || too_many {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::WrongArgCount {
                         expected: params.len(),
                         found: arg_values.len(),
                     },
                     span.line, span.column,
-                    if required == params.len() {
+                    if has_varargs {
+                        format!(
+                            "`{}` espera al menos {} argumento(s), recibió {}",
+                            display_name, required, arg_values.len(),
+                        )
+                    } else if required == params.len() {
                         format!(
                             "`{}` espera {} argumento(s), recibió {}",
                             display_name, params.len(), arg_values.len(),
@@ -3132,9 +3455,17 @@ async fn invoke_value(
 
             // Nuevo scope hijo del CLOSURE, no del caller. Lexical scoping.
             let call_env = Environment::new_child(closure);
+            let varargs_idx = if has_varargs { Some(params.len() - 1) } else { None };
             let provided = arg_values.len();
             let mut arg_iter = arg_values.into_iter();
             for (i, param) in params.iter().enumerate() {
+                if Some(i) == varargs_idx {
+                    // Recolectar los args restantes (incluso 0) en una List.
+                    let collected: Vec<Value> = arg_iter.by_ref().collect();
+                    let list = Value::new_list(collected);
+                    call_env.lock().define(param.name.clone(), list);
+                    break;
+                }
                 let value = if i < provided {
                     arg_iter.next().unwrap()
                 } else {
@@ -9054,6 +9385,7 @@ mod tests {
                 name: p.into(),
                 type_: None,
                 default: None,
+                varargs: false,
             }).collect(),
             return_type: None,
             body,
@@ -9400,7 +9732,7 @@ mod tests {
     use crate::ast::MatchArm;
 
     fn match_arm(pattern: Pattern, body: Expr) -> MatchArm {
-        MatchArm { pattern, guard: None, body }
+        MatchArm { pattern, guard: None, body: vec![Stmt::Expr(body, Span::ZERO)] }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11740,7 +12072,7 @@ let r = match n {
     async fn fn_expr_evalua_a_function() {
         // `fn(x) => x * 2` — evaluada sola, da un `Value::Function`.
         let fnexpr = Expr::FnExpr {
-            params: vec![crate::ast::Param { name: "x".into(), type_: None, default: None }],
+            params: vec![crate::ast::Param { name: "x".into(), type_: None, default: None, varargs: false }],
             body: vec![Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
@@ -17534,6 +17866,133 @@ let r = match n {
         res.unwrap();
         assert_eq!(env.lock().get("r1"), Some(Value::Int(15)));
         assert_eq!(env.lock().get("r2"), Some(Value::Int(7)));
+    }
+
+    // ---- Mini-tanda Fp.2 — varargs en runtime ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp2_varargs_sin_args_recibe_lista_vacia() {
+        let (env, res) = parse_eval_into_env(
+            "fn count(...xs: Int) -> Int { return xs.len() }\n\
+             let r: Int = count()",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(0)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp2_varargs_con_args_recibe_lista() {
+        let (env, res) = parse_eval_into_env(
+            "fn sum(...xs: Int) -> Int {\n\
+                let total: Int = 0\n\
+                for x in xs { total = total + x }\n\
+                return total\n\
+             }\n\
+             let a: Int = sum(1, 2, 3)\n\
+             let b: Int = sum(10, 20)\n\
+             let c: Int = sum()",
+        ).await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("a"), Some(Value::Int(6)));
+        assert_eq!(env.get("b"), Some(Value::Int(30)));
+        assert_eq!(env.get("c"), Some(Value::Int(0)));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp2_varargs_con_required_y_extras() {
+        let (env, res) = parse_eval_into_env(
+            "fn join(prefix: Str, ...xs: Str) -> Int { return xs.len() }\n\
+             let r: Int = join(\"x\", \"a\", \"b\", \"c\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(3)));
+    }
+
+    // ---- Mini-tanda Fp.3 — named args en runtime ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp3_call_solo_named_args() {
+        let (env, res) = parse_eval_into_env(
+            "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
+                return \"{greeting}, {name}\"\n\
+             }\n\
+             let r: Str = greet(name: \"Fitz\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("Hola, Fitz".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp3_call_mezcla_posicional_y_named() {
+        let (env, res) = parse_eval_into_env(
+            "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
+                return \"{greeting}, {name}\"\n\
+             }\n\
+             let r: Str = greet(\"Fitz\", greeting: \"Hi\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("Hi, Fitz".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp3_named_arg_orden_libre() {
+        let (env, res) = parse_eval_into_env(
+            "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
+                return \"{greeting}, {name}\"\n\
+             }\n\
+             let r: Str = greet(greeting: \"Hi\", name: \"Fitz\")",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Str("Hi, Fitz".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn fp3_named_arg_inexistente_es_error() {
+        let (_, res) = parse_eval_into_env(
+            "fn greet(name: Str) -> Str { return name }\n\
+             let r = greet(unknown: \"x\")",
+        ).await;
+        assert!(res.is_err(), "esperaba error por named arg inexistente");
+    }
+
+    // ---- Mini-tanda Sp.2 — return en match arm ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sp2_return_en_match_arm_corta_la_fn() {
+        let (env, res) = parse_eval_into_env(
+            "fn classify(n: Int) -> Str {\n\
+                match n {\n\
+                    0 => return \"cero\"\n\
+                    _ => \"otro\"\n\
+                }\n\
+                return \"end\"\n\
+             }\n\
+             let a: Str = classify(0)\n\
+             let b: Str = classify(5)",
+        ).await;
+        res.unwrap();
+        let env = env.lock();
+        assert_eq!(env.get("a"), Some(Value::Str("cero".into())));
+        assert_eq!(env.get("b"), Some(Value::Str("end".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn sp2_arm_con_bloque_de_varios_stmts() {
+        let (env, res) = parse_eval_into_env(
+            "fn f(n: Int) -> Int {\n\
+                match n {\n\
+                    0 => {\n\
+                        let x: Int = 10\n\
+                        return x * 2\n\
+                    }\n\
+                    _ => 99\n\
+                }\n\
+             }\n\
+             let r: Int = f(0)",
+        ).await;
+        res.unwrap();
+        assert_eq!(env.lock().get("r"), Some(Value::Int(20)));
     }
 
     #[tokio::test(flavor = "current_thread")]

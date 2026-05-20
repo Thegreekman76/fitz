@@ -3264,14 +3264,84 @@ print(make("z", 5))                       // z-5
 Ver [examples/guide/11b-default-params.fitz](../examples/guide/11b-default-params.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### Varargs (mini-tanda Fp.2)
+
+Un param prefijado con `...` es **variádico**: absorbe 0+ args extras
+del call site y los recolecta en una `List<T>` adentro del body. Solo
+el último param puede ser variádico; no se mezcla con default.
+
+```fitz
+fn sum(...xs: Int) -> Int {
+    let total: Int = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+print(sum())                      // 0
+print(sum(1, 2, 3))               // 6
+print(sum(10, 20, 30, 40))        // 100
+```
+
+Funciona con params previos required:
+
+```fitz
+fn join(sep: Str, ...parts: Str) -> Str { ... }
+print(join("-", "a", "b", "c"))   // a-b-c
+```
+
+Ver [examples/guide/11c-varargs.fitz](../examples/guide/11c-varargs.fitz)
+para el ejemplo completo.
+
+### Argumentos nombrados (mini-tanda Fp.3)
+
+En el call site, podés pasar args por nombre con la sintaxis `name:
+value`. El nombre matchea el param de la fn, no la posición:
+
+```fitz
+fn greet(name: Str = "amigo", greeting: Str = "Hola") -> Str {
+    return "{greeting}, {name}"
+}
+
+print(greet(name: "Fitz"))                       // Hola, Fitz
+print(greet(greeting: "Hi"))                     // Hi, amigo
+print(greet(greeting: "Hey", name: "Roy"))       // Hey, Roy
+```
+
+**Reglas**:
+
+- Los named args van **después** de los positionals (`greet("Fitz",
+  greeting: "Hi")` ✓; `greet(greeting: "Hi", "Fitz")` ✗).
+- El nombre debe corresponder a un param real de la fn.
+- Sin duplicados: un mismo param no puede aparecer dos veces.
+- No se combina con varargs (decisión MVP).
+
+Útil sobre todo para fns con varios params opcionales, donde solo
+querés especificar uno:
+
+```fitz
+fn config(host: Str = "127.0.0.1", port: Int = 3000, debug: Bool = false) -> Str {
+    return "{host}:{port}/{debug}"
+}
+
+print(config(port: 8080))                        // 127.0.0.1:8080/false
+print(config(debug: true))                       // 127.0.0.1:3000/true
+```
+
+Ver [examples/guide/11d-named-args.fitz](../examples/guide/11d-named-args.fitz)
+para el ejemplo completo.
+
 ### Lo que todavía no anda
 
-- **Varargs** (`fn sum(...xs)`).
-- **Argumentos nombrados al llamar** (`greet(name: "Fitz")`).
+- *(nada significativo — default params, varargs y named args están
+  cubiertos. Los siguientes salen del scope de "polish de funciones":
+  trait-like polymorphism, herencia entre `type`s y operator overloading
+  son decisiones grandes que requieren mini-fase dedicada.)*
 
-> Lo que **sí anda** y antes era deuda: **default params** (mini-tanda
-> Fp — ver sub-sección de arriba), **métodos custom sobre `type`**
-> (R.3) — ver [cap 13](#13-métodos-y-mutación) con su propia sub-sección.
+> Lo que **sí anda** y antes era deuda: **default params** (Fp.1),
+> **varargs** (Fp.2), **named args** (Fp.3), **métodos custom sobre `type`**
+> (R.3) — ver [cap 13](#13-métodos-y-mutación).
 
 ### Ejemplo completo
 
@@ -5126,13 +5196,51 @@ print((1.0).is_finite())                          // true
 Ver [examples/guide/13u-math-mb9-y-int-float.fitz](../examples/guide/13u-math-mb9-y-int-float.fitz)
 para el ejemplo completo (validado bit-a-bit `fitz run` ↔ `fitz build`).
 
+### `return`/`break`/`continue` en match arm (mini-tanda Sp.2)
+
+Cada arm de `match` ahora puede contener `return`/`break`/`continue`
+(o un bloque de stmts) además de la expresión clásica. Esto cierra
+la deuda histórica donde el match era pure-expression y no se
+podía cortar la fn desde adentro.
+
+```fitz
+fn classify(n: Int) -> Str {
+    match n {
+        0 => return "cero"             // early return desde un arm
+        1..10 => return "chico"
+        _ => return "grande"
+    }
+    return "unreachable"
+}
+```
+
+Tres formas de body por arm:
+
+- **Expresión simple**: `pat => expr` (forma clásica).
+- **Control flow directo**: `pat => return X`, `pat => break`, `pat => continue`.
+- **Bloque con varios stmts**: `pat => { let x = ...; return x * 2 }`.
+
+```fitz
+fn compute(n: Int) -> Int {
+    return match n {
+        0 => {
+            let bonus: Int = 10
+            return bonus * 2
+        }
+        1..100 => 99
+        _ => -1
+    }
+}
+
+print(compute(0))                          // 20
+print(compute(50))                         // 99
+```
+
+Ver [examples/guide/13v-return-en-match.fitz](../examples/guide/13v-return-en-match.fitz)
+para el ejemplo completo.
+
 ### Lo que todavía no anda
 
-- **`return` adentro de un brazo de `match`** — como cada brazo es
-  una expresión (no un bloque de stmts), no podés cortar la función
-  desde adentro con `return`/`break`/`continue`. Workaround: hacer
-  el `return` afuera del match. Sub-paso futuro dedicado — requiere
-  refactor de `MatchArm.body` o agregar `Expr::Block(Vec<Stmt>)`.
 - *(la API de métodos sobre `Str`/`List`/`Map`/`Range`/`Int`/`Float`
   cubre el 99% de los casos. Si te falta uno puntual, abrí un issue.)*
 

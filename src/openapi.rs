@@ -151,7 +151,9 @@ fn collect_status_codes_expr(expr: &crate::ast::Expr, out: &mut Vec<u16>) {
         }
         Expr::Match { arms, .. } => {
             for a in arms {
-                collect_status_codes_expr(&a.body, out);
+                for s in &a.body {
+                    collect_status_codes_stmt(s, out);
+                }
             }
         }
         // Los demás Expr no tienen bodies anidados con stmts (calls,

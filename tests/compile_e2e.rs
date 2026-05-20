@@ -1951,6 +1951,8 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "10b-match-tuple-subpatterns.fitz",
     "11-funciones.fitz",
     "11b-default-params.fitz",
+    "11c-varargs.fitz",
+    "11d-named-args.fitz",
     "12-type.fitz",
     "13-metodos.fitz",
     "13b-metodos-custom.fitz",
@@ -1973,6 +1975,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "13s-mb7-y-fmt-build.fitz",
     "13t-mb8-bits-y-fmt-g.fitz",
     "13u-math-mb9-y-int-float.fitz",
+    "13v-return-en-match.fitz",
     "14-result.fitz",
     // 14b: usa `Err(Int)` y `Err(Instance)` — el codegen pinea Err
     // como String, así que `fitz build` falla. Documentado en el
@@ -4632,6 +4635,104 @@ fn fp_mezcla_required_y_default_compila() {
     let (stdout, exit) = build_and_run("fp_mezcla", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "15\n7");
+}
+
+// ---- Mini-tanda Fp.2 — varargs ------------------
+
+#[test]
+fn fp2_varargs_basico_compila() {
+    let src = "fn sum(...xs: Int) -> Int {\n\
+                   let total: Int = 0\n\
+                   for x in xs { total = total + x }\n\
+                   return total\n\
+               }\n\
+               print(sum())\n\
+               print(sum(1, 2, 3))\n\
+               print(sum(10, 20))\n";
+    let (stdout, exit) = build_and_run("fp2_varargs_basico", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "0\n6\n30");
+}
+
+#[test]
+fn fp2_varargs_con_required_compila() {
+    let src = "fn join(prefix: Str, ...xs: Str) -> Int {\n\
+                   return xs.len()\n\
+               }\n\
+               print(join(\"_\"))\n\
+               print(join(\"_\", \"a\", \"b\"))\n\
+               print(join(\"_\", \"x\", \"y\", \"z\"))\n";
+    let (stdout, exit) = build_and_run("fp2_varargs_required", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "0\n2\n3");
+}
+
+// ---- Mini-tanda Fp.3 — named args ------------------
+
+#[test]
+fn fp3_named_args_basico_compila() {
+    let src = "fn greet(name: Str = \"amigo\", greeting: Str = \"Hola\") -> Str {\n\
+                   return \"{greeting}, {name}\"\n\
+               }\n\
+               print(greet())\n\
+               print(greet(name: \"Fitz\"))\n\
+               print(greet(greeting: \"Hi\"))\n\
+               print(greet(greeting: \"Hey\", name: \"Roy\"))\n";
+    let (stdout, exit) = build_and_run("fp3_named_basico", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "Hola, amigo\nHola, Fitz\nHi, amigo\nHey, Roy");
+}
+
+#[test]
+fn fp3_mezcla_posicional_y_named_compila() {
+    let src = "fn config(host: Str = \"127.0.0.1\", port: Int = 3000, debug: Bool = false) -> Str {\n\
+                   return \"{host}:{port}/{debug}\"\n\
+               }\n\
+               print(config())\n\
+               print(config(\"0.0.0.0\"))\n\
+               print(config(\"0.0.0.0\", port: 8080))\n\
+               print(config(port: 9000, debug: true))\n";
+    let (stdout, exit) = build_and_run("fp3_mezcla", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "127.0.0.1:3000/false\n0.0.0.0:3000/false\n0.0.0.0:8080/false\n127.0.0.1:9000/true");
+}
+
+// ---- Mini-tanda Sp.2 — return en match arm ------------------
+
+#[test]
+fn sp2_return_en_match_arm_compila() {
+    let src = "fn classify(n: Int) -> Str {\n\
+                   match n {\n\
+                       0 => return \"cero\"\n\
+                       1..10 => return \"chico\"\n\
+                       _ => return \"grande\"\n\
+                   }\n\
+                   return \"unreachable\"\n\
+               }\n\
+               print(classify(0))\n\
+               print(classify(5))\n\
+               print(classify(100))\n";
+    let (stdout, exit) = build_and_run("sp2_return_match", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "cero\nchico\ngrande");
+}
+
+#[test]
+fn sp2_match_arm_con_block_compila() {
+    let src = "fn f(n: Int) -> Int {\n\
+                   return match n {\n\
+                       0 => {\n\
+                           let x: Int = 10\n\
+                           return x * 2\n\
+                       }\n\
+                       _ => 99\n\
+                   }\n\
+               }\n\
+               print(f(0))\n\
+               print(f(1))\n";
+    let (stdout, exit) = build_and_run("sp2_match_block", src);
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "20\n99");
 }
 
 #[test]

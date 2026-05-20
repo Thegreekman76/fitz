@@ -455,7 +455,9 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         Expr::Match { value, arms, .. } => {
             let mut m = end_line_of_expr(value);
             for a in arms {
-                m = m.max(end_line_of_expr(&a.body));
+                for s in &a.body {
+                    m = m.max(end_line_of_stmt(s));
+                }
             }
             Some(m)
         }
@@ -465,6 +467,8 @@ fn end_line_of_expr(expr: &Expr) -> usize {
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             Some(end_line_of_expr(inner))
         }
+        // Fp.3 — NamedArg passthrough al value.
+        Expr::NamedArg { value, .. } => Some(end_line_of_expr(value)),
         Expr::StrInterp(parts, _) => parts
             .iter()
             .filter_map(|p| match p {
@@ -778,6 +782,14 @@ fn fmt_decorator(ctx: &mut FmtCtx, deco: &Decorator) {
 
 fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
     match expr {
+        // Fp.3 — NamedArg solo válido en Call.args. El fmt de Call ya
+        // maneja el caso `name: value` antes de llegar acá. Si aterriza
+        // un NamedArg suelto, emitimos la sintaxis como fallback.
+        Expr::NamedArg { name, value, .. } => {
+            ctx.write(name);
+            ctx.write(": ");
+            fmt_expr(ctx, value);
+        }
         Expr::Int(n, _) => ctx.write(&n.to_string()),
         Expr::Float(f, _) => ctx.write(&format_float_literal(*f)),
         Expr::Str(s, _) => ctx.write(&format_str_literal(s)),
@@ -1061,7 +1073,31 @@ fn fmt_match(ctx: &mut FmtCtx, value: &Expr, arms: &[MatchArm]) {
                 ctx.write(&inline);
             }
             ctx.write(" => ");
-            fmt_expr(ctx, &arm.body);
+            // Sp.2 — body es Vec<Stmt>. Caso típico: 1 Stmt::Expr —
+            // emitimos inline como expression. Caso bloque (>1 stmt o
+            // Stmt::Return/etc.): emitimos como `{ ... }` con stmts
+            // adentro indentados.
+            if arm.body.len() == 1 {
+                if let Stmt::Expr(e, _) = &arm.body[0] {
+                    fmt_expr(ctx, e);
+                } else {
+                    // Stmt::Return/Break/Continue → emitir como stmt
+                    // pelado (sin llaves) para preservar la forma.
+                    fmt_stmt(ctx, &arm.body[0]);
+                }
+            } else {
+                ctx.write("{");
+                ctx.newline();
+                ctx.with_indent(|ctx| {
+                    for s in &arm.body {
+                        ctx.write_indent();
+                        fmt_stmt(ctx, s);
+                        ctx.newline();
+                    }
+                });
+                ctx.write_indent();
+                ctx.write("}");
+            }
             ctx.write(",");
             ctx.newline();
         }

@@ -297,7 +297,9 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
         Expr::Match { value, arms, .. } => {
             collect_uses_in_expr(value, uses);
             for arm in arms {
-                collect_uses_in_expr(&arm.body, uses);
+                for s in &arm.body {
+                    collect_uses_in_stmt(s, uses);
+                }
             }
         }
         Expr::StructLit { fields, .. } => {
@@ -308,6 +310,10 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _)
         | Expr::Await(inner, _) => {
             collect_uses_in_expr(inner, uses);
+        }
+        // Fp.3 — NamedArg passthrough al value.
+        Expr::NamedArg { value, .. } => {
+            collect_uses_in_expr(value, uses);
         }
     }
 }
@@ -706,7 +712,23 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         Expr::Match { value, arms, .. } => {
             walk_expr(value, f);
             for arm in arms {
-                walk_expr(&arm.body, f);
+                // Sp.2 — body es Vec<Stmt>. Iteramos solo las Expr más
+                // comunes (Stmt::Expr / Return / ReturnStatus) sin
+                // recursión a través de walk_exprs_in_stmt (genera
+                // monomorphization recursion limit con closures
+                // anidados).
+                for s in &arm.body {
+                    match s {
+                        Stmt::Expr(e, _) | Stmt::Return(e, _) => walk_expr(e, f),
+                        Stmt::ReturnStatus { status, body, .. } => {
+                            walk_expr(status, f);
+                            if let Some(b) = body {
+                                walk_expr(b, f);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
         }
         Expr::StructLit { fields, .. } => {
@@ -716,6 +738,8 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         }
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _)
         | Expr::Await(inner, _) => walk_expr(inner, f),
+        // Fp.3 — NamedArg passthrough.
+        Expr::NamedArg { value, .. } => walk_expr(value, f),
     }
 }
 

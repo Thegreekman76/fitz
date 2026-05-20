@@ -1,0 +1,71 @@
+// Mini-tanda Fp.3 — named args en el call site.
+//
+// Sintaxis: `f(name: value)`. Mapea el arg al param por nombre en
+// lugar de por posición. Útil para fns con varios params opcionales
+// — el caller solo nombra los que necesita cambiar.
+//
+// Reglas:
+//   - Los named args van DESPUÉS de los positionals.
+//   - Cada nombre debe corresponder a un param real (sino error claro).
+//   - Sin duplicados (un mismo param no puede aparecer 2 veces).
+//   - No compatible con varargs (decisión MVP).
+
+// --- Caso canónico: configuración de servidor ----------------------
+
+fn config(
+    host: Str = "127.0.0.1",
+    port: Int = 3000,
+    debug: Bool = false,
+) -> Str {
+    return "{host}:{port}/{debug}"
+}
+
+print(config())                                              // 127.0.0.1:3000/false
+print(config(port: 8080))                                    // 127.0.0.1:8080/false
+print(config(debug: true))                                   // 127.0.0.1:3000/true
+print(config(host: "0.0.0.0", port: 9000))                   // 0.0.0.0:9000/false
+print(config(debug: true, port: 9000, host: "0.0.0.0"))      // 0.0.0.0:9000/true
+
+// --- Mezcla positional + named -------------------------------------
+
+fn greet(name: Str = "amigo", greeting: Str = "Hola") -> Str {
+    return "{greeting}, {name}"
+}
+
+print(greet("Fitz"))                       // Hola, Fitz (positional)
+print(greet("Fitz", greeting: "Hi"))       // Hi, Fitz   (positional + named)
+print(greet(greeting: "Hola"))             // Hola, amigo
+print(greet(greeting: "Hi", name: "Roy"))  // Hi, Roy (named en cualquier orden)
+
+// --- Útil para constructores estilo Python -------------------------
+
+type HttpClientReq {
+    method: Str,
+    path: Str,
+    timeout_ms: Int = 5000,
+    retries: Int = 3,
+    follow_redirects: Bool = true,
+}
+
+fn make_request(
+    method: Str = "GET",
+    path: Str = "/",
+    timeout_ms: Int = 5000,
+    retries: Int = 3,
+) -> HttpClientReq {
+    return HttpClientReq {
+        method: method,
+        path: path,
+        timeout_ms: timeout_ms,
+        retries: retries,
+    }
+}
+
+let r1 = make_request()
+print(r1.method)                           // GET
+print(r1.timeout_ms)                       // 5000
+
+let r2 = make_request(path: "/api/users", timeout_ms: 1000)
+print(r2.path)                             // /api/users
+print(r2.timeout_ms)                       // 1000
+print(r2.retries)                          // 3 (default)

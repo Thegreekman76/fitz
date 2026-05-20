@@ -1131,6 +1131,135 @@ GUIDE_EXAMPLES_COMPILE).
   reportes graves, validación de edades). Cap 13 tabla de
   métodos `List<T>` extendida con las 4 nuevas filas.
 
+### ~~Varargs + named args + return-en-match — cierre del cap 11 y cap 13~~ ✓ CERRADO 2026-05-19 (mini-tanda Fp.2 + Fp.3 + Sp.2)
+
+Bundle final de funciones polish + match expressivo antes de Fase
+9.w. Cierra las 3 deudas explícitamente prometidas en la mini-tanda
+anterior (Fp): varargs + named args + return-en-match-arm. Con esto,
+**cap 11 y cap 13 quedan SIN deudas visibles** — el lenguaje base
+está completo para arrancar 9.w (Stack web first-class).
+
+**Parte 1 — Fp.2: Varargs `fn sum(...xs: T)`**:
+
+- ~~**Sintaxis `...name: T`**~~ ✓ Prefijo de tres puntos antes del
+  último param. El parser detecta `Token::DotDot` + `Token::Dot`
+  (Fitz no tiene `Token::Ellipsis` aún; tres puntos consecutivos
+  se lexean naturalmente como `..` + `.`). Reglas: solo el ÚLTIMO
+  param puede ser varargs, no mutex con otros varargs ni params
+  posteriores, no compatible con `default`.
+- ~~**Binding como `List<T>` adentro del body**~~ ✓ El checker
+  binda el param variádico con tipo `List<T>` (T = anotación del
+  param, o `Any` sin anotación). Adentro del body, el usuario lo
+  ve como `List<T>` regular — usa `xs.len()`, `for x in xs`, etc.
+  Mismo binding semántico en evaluator y codegen.
+- ~~**Aridad mínima sin contar el varargs**~~ ✓ Una fn
+  `fn(a: Str, ...xs: Int)` acepta entre 1 y ∞ args. El call site
+  con `< 1` args es error claro. El runtime y codegen emiten el
+  mismo mensaje.
+- ~~**Codegen: emit como `Arc<Mutex<Vec<T>>>` (`List<T>` Rust)**~~ ✓
+  El call site empaca los args extras en `Arc::new(Mutex::new(vec![
+  a, b, c]))`. La fn DEFINIDA en Rust recibe el param como
+  `Arc<Mutex<Vec<T>>>`. Cero overhead respecto del path List<T>
+  regular del lenguaje.
+
+**Parte 2 — Fp.3: Named args `f(name: value)`**:
+
+- ~~**Sintaxis `name: value` en el call site**~~ ✓ Variant nuevo
+  `Expr::NamedArg { name, value }` que solo aparece adentro de
+  `Call.args`. El parser lo emite cuando ve `Ident` + `Colon` en
+  posición de arg (lookahead). Reusa el patrón de kwargs de
+  `Decorator` que ya existía desde Fase 7.
+- ~~**Reorder al despachar**~~ ✓ El evaluator (`invoke_value_named`,
+  `dispatch_method_named`), el checker (relaja per-arg type check
+  cuando hay nombres) y el codegen (`gen_call_with_sig` recursa
+  con args re-ordenados) hacen la resolución `name → posición` y
+  rellenan defaults para los slots no cubiertos. Helper compartido
+  `resolve_named_args` en evaluator extrae el patrón.
+- ~~**Reglas del MVP**~~ ✓ Positionals primero, named después. Sin
+  duplicados (mismo nombre dos veces → error claro). Sin nombres
+  desconocidos. NO compatible con varargs (decisión MVP — el
+  varargs absorbería los args nombrados ambiguamente). NO
+  compatible con higher-order callees (callbacks sin info de
+  nombres). NO compatible con builtins (sin nombres expuestos en
+  la signature de `Value::Builtin`).
+- ~~**Codegen: reorder en-place y emit posicional**~~ ✓ El call
+  site con named args se transforma a positional adentro del
+  codegen (slots por nombre + defaults). La firma Rust de la fn
+  emit posicional clásica. Cero overhead runtime.
+
+**Parte 3 — Sp.2: `return`/`break`/`continue` en match arm**:
+
+- ~~**`MatchArm.body: Vec<Stmt>` (en vez de `Expr`)**~~ ✓ Cambio
+  estructural del AST paralelo a `Expr::If.then`. El parser
+  acepta 3 formas de body:
+  - `pat => expr` → `vec![Stmt::Expr(expr)]` (forma clásica).
+  - `pat => { stmts }` → bloque parseado con `parse_block()`.
+  - `pat => return X` / `break` / `continue` → `vec![Stmt::...]`
+    directo (parseado con `parse_stmt()`, sin paréntesis).
+- ~~**Evaluator y codegen evalúan stmts en orden**~~ ✓ El "valor"
+  del arm es el valor del último `Stmt::Expr` (o `Null` si es
+  control flow). Stmt::Return/Break/Continue propagan al fn/loop
+  contenedor como cualquier otro statement. El codegen emite el
+  block Rust con la última expr como tail; si la última es
+  Return/Break/Continue, omite el trailing `;` para que el block
+  tipe como `!` y coerce al tipo expected del match.
+- ~~**Checker preserve el tipo del arm**~~ ✓ El último Stmt::Expr
+  determina el tipo; control-flow stmts tipan como `Any` (never-
+  coerce) — la unificación de arms ignora los arms que terminan
+  en return/break/continue.
+
+**Implementación cross-cutting**:
+
+- **AST** (`src/ast.rs`): `Param` suma `varargs: bool`. `Expr` suma
+  `NamedArg { name, value, span }`. `MatchArm.body` cambia de
+  `Expr` a `Vec<Stmt>`.
+- **Parser** (`src/parser.rs`): `parse_params` detecta `...` antes
+  del name. `parse_call_args` detecta `Ident + Colon` con lookahead.
+  `parse_match_expr` parsea body como `Vec<Stmt>` (3 formas).
+- **Checker** (`src/types.rs`): `VarBinding.has_varargs` flag.
+  `callee_has_varargs` helper. Reorder relax cuando hay named args.
+  MatchArm: tipo derivado del último Stmt::Expr; control flow → Any.
+- **Evaluator** (`src/evaluator.rs`): `invoke_value` extendido con
+  varargs collect. `invoke_value_named`/`dispatch_method_named`
+  para named args. `resolve_named_args` helper compartido.
+  MatchArm eval iterates stmts.
+- **Codegen** (`src/codegen.rs`): `FnSig` suma `has_varargs` y
+  `param_names`. `gen_call_with_sig` re-orderea con named args.
+  El emit del body de fn wrap-ea varargs en `List<T>` Rust.
+  MatchArm emit block con control flow sin trailing `;`.
+- **LSP** (`src/lsp.rs`): scope-level fn detail muestra varargs
+  con prefijo `...`.
+- **Walkers cross-cutting** (`fmt`, `lint`, `codegen`): updates
+  para `Expr::NamedArg` (passthrough/transparent) y `MatchArm.body`
+  (Vec<Stmt> iter).
+
+**27 unit tests nuevos** (9 parser + 8 evaluator + 1 LSP + 9
+otros distribuidos) + **6 compile_e2e nuevos** bit-a-bit. Ejemplos
+runnables `examples/guide/11c-varargs.fitz`,
+`examples/guide/11d-named-args.fitz`,
+`examples/guide/13v-return-en-match.fitz` sumados al smoke
+`GUIDE_EXAMPLES_COMPILE`.
+
+Cap 11 de la guía: sub-secciones nuevas "Varargs (mini-tanda Fp.2)"
+y "Argumentos nombrados (mini-tanda Fp.3)". Cap 13 sumó
+"`return`/`break`/`continue` en match arm". Sección "Lo que todavía
+no anda" del cap 11 ahora dice "nada significativo"; "Lo que todavía
+no anda" del cap 13 quitó el bullet del return-en-match.
+
+**Deuda residual (NO bloquea Fase 9.w)**:
+
+- **Named args + varargs combo**: decisión MVP es mutex. Si entra
+  demanda real (caso típico: middlewares HTTP con configuración),
+  refinable.
+- **Named args en builtins/methods built-in**: hoy solo soportado
+  sobre fns top-level e instance/static methods custom. Sumar a
+  `Value::Builtin` requiere capturar nombres de params al
+  registrar — refactor mediano (~3-4h).
+- **Match arm con stmts complejos sin trailing `;` ambiguity**:
+  el parser acepta `pat => return X` y `pat => { stmts }`. El caso
+  de `pat => { stmts }` donde el último stmt NO es Expr/Return ni
+  Break/Continue se trata como Null tail — bit-a-bit en run y build.
+
 ### ~~Default params + cleanup docs~~ ✓ CERRADO 2026-05-19 (mini-tanda Fp + Sp)
 
 Bundle de funciones + docs cleanup. Cierra la primera de las tres

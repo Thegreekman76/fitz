@@ -1,0 +1,75 @@
+// Mini-tanda Fp.2 — varargs (`...xs: T`).
+//
+// El prefijo `...` antes del último param de una fn indica que ese
+// param es VARIÁDICO: absorbe 0+ args extras del call site y los
+// recolecta en una `List<T>` accesible adentro del body.
+//
+// Reglas:
+//   - Solo el ÚLTIMO param puede ser varargs.
+//   - Un varargs NO puede tener default.
+//   - Otros params pueden ser required o tener default;
+//     los args extras siempre van al varargs.
+
+// --- Caso canónico: sum sobre varargs Int ---------------------------
+
+fn sum(...xs: Int) -> Int {
+    let total: Int = 0
+    for x in xs {
+        total = total + x
+    }
+    return total
+}
+
+print(sum())                               // 0
+print(sum(1, 2, 3))                        // 6
+print(sum(10, 20, 30, 40, 50))             // 150
+
+// --- Required + varargs --------------------------------------------
+
+fn join(sep: Str, ...parts: Str) -> Str {
+    let s = ""
+    let i: Int = 0
+    for p in parts {
+        if i > 0 {
+            s = "{s}{sep}{p}"
+        } else {
+            s = p
+        }
+        i = i + 1
+    }
+    return s
+}
+
+print(join("-"))                           // (vacío)
+print(join("-", "a"))                      // a
+print(join("-", "a", "b", "c"))            // a-b-c
+print(join(", ", "uno", "dos", "tres"))    // uno, dos, tres
+
+// --- Varargs con tipos custom --------------------------------------
+
+type User { id: Int, name: Str }
+
+fn list_users(...users: User) -> Int {
+    return users.len()
+}
+
+print(list_users())                                                  // 0
+print(list_users(User { id: 1, name: "Ada" }))                       // 1
+print(list_users(
+    User { id: 1, name: "Ada" },
+    User { id: 2, name: "Bob" },
+    User { id: 3, name: "Cam" },
+))                                                                   // 3
+
+// --- xs.len() / xs.first() / xs operations -------------------------
+
+fn first_or_default(default_val: Int, ...nums: Int) -> Int {
+    return match nums.first() {
+        Ok(n) => n
+        Err(_) => default_val
+    }
+}
+
+print(first_or_default(99))                // 99
+print(first_or_default(99, 7))             // 7
+print(first_or_default(99, 1, 2, 3))       // 1

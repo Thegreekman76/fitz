@@ -49,9 +49,24 @@ pub enum Expr {
     /// Llamada `callee(arg1, ...)`. `span` apunta al `(`.
     /// Method calls: `callee` es `Expr::Field`. `Ok(...)`/`Err(...)`
     /// los reemplaza el parser por `Expr::Ok`/`Expr::Err`.
+    ///
+    /// Mini-tanda Fp.3 — named args: los args nombrados (`name: value`)
+    /// aparecen como `Expr::NamedArg { name, value }` adentro de `args`.
+    /// Los positionals son cualquier otra variante. La regla canónica:
+    /// positionals primero, named después. El parser lo valida.
     Call {
         callee: Box<Expr>,
         args: Vec<Expr>,
+        span: Span,
+    },
+
+    /// Mini-tanda Fp.3 — argumento nombrado en una llamada
+    /// (`greet(name: "Fitz")`). Solo válido adentro de `Call.args`.
+    /// El checker/evaluator/codegen lo des-azucara mapeando `name` a la
+    /// posición del param correspondiente; los `value` se reordenan.
+    NamedArg {
+        name: String,
+        value: Box<Expr>,
         span: Span,
     },
 
@@ -271,6 +286,7 @@ impl Expr {
             Expr::BinOp { span, .. } => *span,
             Expr::UnaryOp { span, .. } => *span,
             Expr::Call { span, .. } => *span,
+            Expr::NamedArg { span, .. } => *span,
             Expr::FnExpr { span, .. } => *span,
             Expr::Field { span, .. } => *span,
             Expr::Index { span, .. } => *span,
@@ -741,11 +757,18 @@ pub enum UnaryOpKind {
 /// caller no provee este arg. Si un param tiene default, todos los
 /// posteriores también (regla Python). El parser y el checker lo
 /// validan.
+///
+/// `varargs` (mini-tanda Fp.2): si `true`, el param es variádico
+/// (`fn sum(...xs: Int)`). Recolecta todos los args extra del call
+/// en una `List<T>`. Solo el ÚLTIMO param puede ser varargs;
+/// mutex con `default` (un varargs no puede tener default). El parser
+/// lo valida.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Param {
     pub name: String,
     pub type_: Option<TypeExpr>,
     pub default: Option<Expr>,
+    pub varargs: bool,
 }
 
 /// Campo de un `type`. El tipo es obligatorio dentro de un struct.
@@ -893,7 +916,18 @@ pub struct MatchArm {
     /// Arms con guard NO cuentan para exhaustividad de Result
     /// (paralelo a Rust) — el checker exige catch-all explícito.
     pub guard: Option<Expr>,
-    pub body: Expr,
+    /// Cuerpo del arm. Sp.2 (post-Fp+Sp) — `Vec<Stmt>` en vez de `Expr`,
+    /// paralelo a `Expr::If.then`. El "valor" del arm es el último
+    /// `Stmt::Expr` (si lo hay) o `Null`. `return`/`break`/`continue`
+    /// adentro de un arm propagan al fn/loop contenedor como cualquier
+    /// otro statement.
+    ///
+    /// Sintaxis del parser:
+    ///   - `pat => expr` se desazucara a `vec![Stmt::Expr(expr)]` (1 elem).
+    ///   - `pat => { stmts }` se desazucara al stmt list del bloque.
+    ///   - `pat => return X` / `break` / `continue` se desazucara al
+    ///     `Stmt::Return(X)` / `Stmt::Break` / `Stmt::Continue` directo.
+    pub body: Vec<Stmt>,
 }
 
 /// Patrones para `match`.
@@ -1023,7 +1057,7 @@ mod tests {
             // fn double(n) => n * 2
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -1294,7 +1328,7 @@ mod tests {
     fn fn_expr_envuelve_params_y_body() {
         // `fn(x) => x * 2` — versión sin nombre.
         let fnexpr = Expr::FnExpr {
-            params: vec![Param { name: "x".into(), type_: None, default: None }],
+            params: vec![Param { name: "x".into(), type_: None, default: None, varargs: false }],
             body: vec![Stmt::Return(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),

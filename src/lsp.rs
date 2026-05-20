@@ -871,11 +871,13 @@ fn scope_level_completions(program: &Program, type_env: &TypeEnv) -> Vec<Complet
             }
             Stmt::FnDef { name, params, return_type, is_async, .. } => {
                 // Fp — firma de la fn con tipos + defaults (cuando los hay).
+                // Fp.2 — varargs prefijado con `...`.
                 let params_str = params
                     .iter()
                     .map(|p| {
                         let ty = p.type_.as_ref().map(|t| t.display_name()).unwrap_or_else(|| "Any".into());
-                        let base = format!("{}: {}", p.name, ty);
+                        let prefix = if p.varargs { "..." } else { "" };
+                        let base = format!("{}{}: {}", prefix, p.name, ty);
                         if let Some(default) = &p.default {
                             format!("{} = {}", base, render_default_expr(default))
                         } else {

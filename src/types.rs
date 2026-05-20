@@ -932,6 +932,9 @@ struct VarBinding {
     /// requerida es `params.len() - defaults_count`. Solo relevante para
     /// vars que tipan como `Type::Function`. 0 para todo lo demás.
     defaults_count: usize,
+    /// Fp.2 — `true` si el último param es variádico (`...xs`). En ese
+    /// caso, el call site acepta cualquier cantidad >= required de args.
+    has_varargs: bool,
 }
 
 /// Estado mutable durante la pasada de chequeo de expresiones.
@@ -1045,6 +1048,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         // `len(x) -> Int` — aridad 1 sobre List/Map/Str/Range. El
@@ -1061,6 +1065,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         // `cors(config: Map?) -> CorsConfig` — built-in MW.2.
@@ -1076,6 +1081,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         // `sleep(ms: Int) -> Future<Null>` — primer async primitive.
@@ -1095,6 +1101,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         // Fase 9.z.2.a — assertion builtins. `assert` queda como `Any`
@@ -1109,6 +1116,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         self.scopes[0].insert(
@@ -1121,6 +1129,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         self.scopes[0].insert(
@@ -1133,6 +1142,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         self.scopes[0].insert(
@@ -1148,6 +1158,7 @@ impl<'a> CheckCtx<'a> {
                 annotated: false,
                 def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
             },
         );
         // Mini-tanda Bits-extras — builtins globales sobre Int.
@@ -1164,6 +1175,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: false,
                     def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
                 },
             );
         }
@@ -1178,6 +1190,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: false,
                     def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
                 },
             );
         }
@@ -1196,6 +1209,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: false,
                     def_span: Span::ZERO,
                 defaults_count: 0,
+                has_varargs: false,
                 },
             );
         }
@@ -1223,6 +1237,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: false,
                     def_span,
                     defaults_count: 0,
+                has_varargs: false,
                 },
             );
         }
@@ -1240,14 +1255,24 @@ impl<'a> CheckCtx<'a> {
                     annotated: true,
                     def_span,
                     defaults_count: 0,
+                has_varargs: false,
                 },
             );
         }
     }
 
     /// Fp — declara una fn con info de defaults. La aridad mínima del
-    /// callee es `params.len() - defaults_count`.
-    fn declare_fn(&mut self, name: String, ty: Type, def_span: Span, defaults_count: usize) {
+    /// callee es `params.len() - defaults_count`. Fp.2 — `has_varargs`
+    /// indica si el último param es variádico (el call site acepta 0+
+    /// args extra).
+    fn declare_fn(
+        &mut self,
+        name: String,
+        ty: Type,
+        def_span: Span,
+        defaults_count: usize,
+        has_varargs: bool,
+    ) {
         if let Some(top) = self.scopes.last_mut() {
             top.insert(
                 name,
@@ -1256,6 +1281,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: true,
                     def_span,
                     defaults_count,
+                    has_varargs,
                 },
             );
         }
@@ -1333,6 +1359,16 @@ fn infer_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
 /// 5.3.5 FnExpr) los irán reemplazando.
 fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
     match e {
+        // Fp.3 — NamedArg solo es válido adentro de Call.args; el
+        // dispatcher de calls lo procesa. Verlo acá indica bug.
+        Expr::NamedArg { name, value, span } => {
+            ctx.error_at(*span, format!(
+                "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
+                name
+            ));
+            synthesize_expr(ctx, value)
+        }
+
         Expr::Int(_, _) => Type::Int,
         Expr::Float(_, _) => Type::Float,
         Expr::Str(_, _) => Type::Str,
@@ -1749,8 +1785,21 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // signatures paramétricas como `List<T>.map`.
             if let Expr::Field { object, field, .. } = callee.as_ref() {
                 let obj_ty = infer_expr(ctx, object);
-                let args_ty: Vec<Type> =
-                    args.iter().map(|a| infer_expr(ctx, a)).collect();
+                // Fp.3 — para method calls con named args, el chequeo
+                // exacto requiere conocer los param names del método
+                // (R.3 custom methods). Para built-ins no soportamos
+                // named args (sin nombres de params expuestos). Por
+                // ahora, NamedArg en method call con receiver Nominal
+                // pasa como gradual (Any); el runtime hace el chequeo
+                // real. Si el receiver es built-in (List/Map/Str), el
+                // checker tipa el value adentro del NamedArg y delega
+                // al dispatcher general — el runtime emite error claro.
+                let args_ty: Vec<Type> = args.iter().map(|a| {
+                    match a {
+                        Expr::NamedArg { value, .. } => infer_expr(ctx, value),
+                        other => infer_expr(ctx, other),
+                    }
+                }).collect();
                 // 8.4: receptor PyAny — el método se invoca cruzando
                 // a Python via dispatch_method (8.1.4). El runtime
                 // envuelve TODO call Python en `Result<T>` (8.3); el
@@ -1774,8 +1823,17 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // Sintetizamos siempre callee y args para que afloren
             // errores adentro. Después validamos aridad y tipos según
             // lo que sea el callee.
+            // Fp.3 — destruir NamedArg al sintetizar para tipar el value
+            // y no fallar con "fuera de una llamada". El reorder/chequeo
+            // real ocurre en `infer_call_with_named_args` cuando el
+            // callee es un Ident resoluble.
             let callee_ty = infer_expr(ctx, callee);
-            let args_ty: Vec<Type> = args.iter().map(|a| infer_expr(ctx, a)).collect();
+            let args_ty: Vec<Type> = args.iter().map(|a| {
+                match a {
+                    Expr::NamedArg { value, .. } => infer_expr(ctx, value),
+                    other => infer_expr(ctx, other),
+                }
+            }).collect();
             match callee_ty {
                 // Gradual: callee de tipo desconocido no se chequea.
                 Type::Any => Type::Any,
@@ -1789,12 +1847,38 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // Fp — la function-signature en `Type::Function` no
                     // lleva info de defaults (solo lista los tipos). Para
                     // el chequeo de aridad consultamos directo el
-                    // Stmt::FnDef o Expr::FnExpr cuando el callee es un
-                    // Ident resoluble; fallback a aridad estricta para
-                    // callees indirectos (callbacks, fns como var).
+                    // Stmt::FnDef cuando el callee es un Ident resoluble;
+                    // fallback a aridad estricta para callees indirectos
+                    // (callbacks, fns como var).
                     let required = required_arity_for_callee(ctx, callee, params.len());
-                    if args.len() < required || args.len() > params.len() {
-                        ctx.error_at(*span, if required == params.len() {
+                    let has_varargs = callee_has_varargs(ctx, callee);
+                    // Fp.2 — varargs: tail param tipa como `List<T>` en
+                    // el binding, pero adentro de Type::Function los
+                    // params siguen llevando el tipo de elemento T. El
+                    // call site valida cada arg contra T (no contra
+                    // List<T>); aridad mínima incluye al menos los
+                    // params previos al varargs.
+                    let max_arity = if has_varargs { usize::MAX } else { params.len() };
+                    let required = if has_varargs {
+                        // Varargs acepta 0+ args en el último slot, así
+                        // que la aridad mínima es total - 1 (el varargs
+                        // puede recibir 0 args).
+                        required.min(params.len().saturating_sub(1))
+                    } else {
+                        required
+                    };
+                    // Fp.3 — si hay named args, el reorder real ocurre
+                    // en runtime/codegen. El chequeo estricto de aridad
+                    // por posición no aplica (los nombres pueden saltar
+                    // posiciones). Validamos solo aridad mínima global.
+                    let has_named_args = args.iter().any(|a| matches!(a, Expr::NamedArg { .. }));
+                    if args.len() < required || args.len() > max_arity {
+                        ctx.error_at(*span, if has_varargs {
+                            format!(
+                                "{} espera al menos {} argumento(s), recibió {}",
+                                label, required, args.len(),
+                            )
+                        } else if required == params.len() {
                             format!(
                                 "{} espera {} argumento(s), recibió {}",
                                 label, params.len(), args.len(),
@@ -1805,13 +1889,21 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                                 label, required, params.len(), args.len(),
                             )
                         });
-                    } else {
-                        for (i, (actual, expected)) in
-                            args_ty.iter().zip(params.iter()).enumerate()
-                        {
+                    } else if !has_named_args {
+                        for (i, actual) in args_ty.iter().enumerate() {
+                            // Fp.2 — para el slot varargs (el último),
+                            // todos los args extras se chequean contra
+                            // el tipo de ELEMENTO del varargs (no contra
+                            // List<T>). Si i < params.len()-1, va al
+                            // param posicional; si i >= last_idx y hay
+                            // varargs, va contra params[last_idx].
+                            let expected_idx = if has_varargs && i >= params.len() {
+                                params.len() - 1
+                            } else {
+                                i
+                            };
+                            let expected = &params[expected_idx];
                             if !is_compatible(actual, expected) {
-                                // Apuntamos al argumento concreto —
-                                // mejor pista que el `(` del Call.
                                 ctx.error_at(args[i].span(), format!(
                                     "{}: el argumento {} espera `{}`, recibió `{}`",
                                     label,
@@ -1860,11 +1952,18 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 .map(|p| ann_to_type(p.type_.as_ref(), ctx.types))
                 .collect();
             for (p, t) in params.iter().zip(param_types.iter()) {
+                // Fp.2 — varargs: adentro del body, el binding tipa
+                // como `List<T>`.
+                let bind_ty = if p.varargs {
+                    Type::List(Box::new(t.clone()))
+                } else {
+                    t.clone()
+                };
                 // Sin span propio en `Param` (deuda S1), aproximamos
                 // con el span del FnExpr contenedor: hover/go-to-def
                 // sobre un uso del param salta al `fn(...)` que lo
                 // declara.
-                ctx.declare_var(p.name.clone(), t.clone(), *span);
+                ctx.declare_var(p.name.clone(), bind_ty, *span);
             }
             check_block(ctx, body);
             ctx.loop_depth = saved_loop_depth;
@@ -1978,7 +2077,9 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // `def_span` del binding — el más cercano del arm en
                 // el AST actual. go-to-def sobre el uso del binding
                 // salta al body del arm.
-                bind_pattern(ctx, &arm.pattern, &scrutinee, arm.body.span());
+                // Sp.2 — body es Vec<Stmt>; el span es el del primer stmt.
+                let body_span = arm.body.first().map(|s| s.span()).unwrap_or(Span::ZERO);
+                bind_pattern(ctx, &arm.pattern, &scrutinee, body_span);
                 // R.2.2 — el guard tipa adentro del scope del binding.
                 // Debe sintetizar Bool; otro tipo es error.
                 if let Some(guard_expr) = &arm.guard {
@@ -1990,7 +2091,47 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                         ));
                     }
                 }
-                let t = infer_expr(ctx, &arm.body);
+                // Sp.2 — chequear el body (Vec<Stmt>) y derivar el tipo
+                // del arm. Casos:
+                //   - Stmt::Expr: t = tipo del expr.
+                //   - Stmt::Return/Break/Continue: tipo `!` (never).
+                //     Como no hay un Type::Never explícito, usamos
+                //     Type::Any (matchea cualquier expected).
+                //   - Otros stmts: solo se chequean, no contribuyen
+                //     al tipo del arm. Si son el ÚLTIMO stmt, t queda
+                //     en Null (decisión consistente con if/else).
+                let mut t = Type::Null;
+                let arm_len = arm.body.len();
+                for (i, stmt) in arm.body.iter().enumerate() {
+                    let is_last = i + 1 == arm_len;
+                    match stmt {
+                        Stmt::Expr(e, _) => {
+                            t = infer_expr(ctx, e);
+                        }
+                        Stmt::Return(e, _) => {
+                            // Chequear el value del return contra
+                            // return_stack. El "tipo del arm" es Any
+                            // (never coerce).
+                            check_stmt(ctx, stmt);
+                            let _ = e;
+                            if is_last {
+                                t = Type::Any;
+                            }
+                        }
+                        Stmt::Break(..) | Stmt::Continue(..) => {
+                            check_stmt(ctx, stmt);
+                            if is_last {
+                                t = Type::Any;
+                            }
+                        }
+                        _ => {
+                            check_stmt(ctx, stmt);
+                            if is_last {
+                                t = Type::Null;
+                            }
+                        }
+                    }
+                }
                 ctx.pop_scope();
                 if first.is_none() {
                     first = Some(t);
@@ -4482,7 +4623,15 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             let saved_loop_depth = ctx.loop_depth;
             ctx.loop_depth = 0;
             for p in params {
-                let pty = ann_to_type(p.type_.as_ref(), ctx.types);
+                let elem_ty = ann_to_type(p.type_.as_ref(), ctx.types);
+                // Fp.2 — varargs: adentro del body, el binding tipa
+                // como `List<T>` (T = tipo anotado o Any). El call site
+                // colecciona 0+ args extra en una List.
+                let pty = if p.varargs {
+                    Type::List(Box::new(elem_ty))
+                } else {
+                    elem_ty
+                };
                 // Sin span propio en `Param` (deuda S1), aproximamos
                 // con el span del FnDef. go-to-def sobre el uso del
                 // param salta a la línea de la fn.
@@ -4668,6 +4817,8 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
             // `params.len() - defaults_count`. El parser garantiza que
             // todos los defaults son consecutivos al final.
             let defaults_count = params.iter().filter(|p| p.default.is_some()).count();
+            // Fp.2 — has_varargs si el último param es variádico.
+            let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
             // go-to-def sobre el uso de la fn salta al span del FnDef
             // (que apunta al `fn` keyword). Aproximación; precisión
             // por nombre requiere span propio del identificador.
@@ -4679,6 +4830,7 @@ fn preregister_fn_signatures(ctx: &mut CheckCtx, program: &Program) {
                 },
                 *span,
                 defaults_count,
+                has_varargs,
             );
         }
     }
@@ -4695,6 +4847,18 @@ fn required_arity_for_callee(ctx: &CheckCtx, callee: &Expr, total: usize) -> usi
         }
     }
     total
+}
+
+/// Fp.2 — `true` si el callee es una fn con varargs (último param es
+/// variádico). Cuando es varargs, el call site acepta cualquier cantidad
+/// `>= required` de args (en lugar de máximo = `total`).
+fn callee_has_varargs(ctx: &CheckCtx, callee: &Expr) -> bool {
+    if let Expr::Ident(name, _) = callee {
+        if let Some(b) = ctx.lookup_binding(name) {
+            return b.has_varargs;
+        }
+    }
+    false
 }
 
 /// Entrada pública del checker estático completo: corre resolución
@@ -5745,6 +5909,7 @@ mod tests {
                     name: "p".into(),
                     type_: Some(TE::named("X")),
                     default: None,
+                    varargs: false,
                 }],
                 return_type: None,
                 body: vec![],

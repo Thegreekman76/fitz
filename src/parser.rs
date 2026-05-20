@@ -1649,16 +1649,21 @@ impl Parser {
     }
 
     /// Lista de parámetros, ya con '(' consumido. Termina consumiendo
-    /// el ')'. Cada parámetro es `name`, `name: Type`, `name = default`
-    /// o `name: Type = default` (mini-tanda Fp — default params).
-    /// Acepta trailing comma y newlines dentro de los paréntesis.
+    /// el ')'. Cada parámetro es `name`, `name: Type`, `name = default`,
+    /// `name: Type = default` (mini-tanda Fp — default params), o
+    /// `...name: Type` (mini-tanda Fp.2 — varargs). Acepta trailing
+    /// comma y newlines dentro de los paréntesis.
     ///
-    /// **Regla Python**: una vez que un param tiene default, todos los
-    /// siguientes también deben tener default. Validado acá con error
-    /// claro citando el param ofensor.
+    /// **Regla Python para defaults**: una vez que un param tiene default,
+    /// todos los siguientes también deben tener default.
+    ///
+    /// **Regla varargs (Fp.2)**: solo el ÚLTIMO param puede ser varargs.
+    /// Un varargs NO puede tener default. El binding adentro del body
+    /// tipa como `List<T>` (o `List<Any>` si no se anotó).
     fn parse_params(&mut self) -> FitzResult<Vec<Param>> {
         let mut params = Vec::new();
         let mut saw_default = false;
+        let mut saw_varargs = false;
         self.skip_newlines();
         if matches!(self.peek(), Token::RParen) {
             self.advance();
@@ -1666,16 +1671,55 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
+            // Fp.2 — `...name` indica varargs. Detectamos `..` + `.`
+            // (Token::DotDot seguido de Token::Dot). Fitz tiene `..` para
+            // Range y `..=` para Range inclusivo; tres `.` consecutivos
+            // no colisionan con nada (el lexer empareja greedy).
+            let varargs = if matches!(self.peek(), Token::DotDot)
+                && matches!(self.peek_at(1), Token::Dot)
+            {
+                if saw_varargs {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        "solo puede haber un parámetro variádico, y debe ser el último",
+                    ));
+                }
+                self.advance(); // consume `..`
+                self.advance(); // consume `.`
+                saw_varargs = true;
+                true
+            } else {
+                if saw_varargs {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        "después de un parámetro variádico no puede haber más parámetros",
+                    ));
+                }
+                false
+            };
             let name = self.expect_ident("se esperaba nombre de parámetro")?;
             let type_ = self.parse_optional_type_annotation()?;
-            // Fp — default value `= <expr>` después del tipo (o del name).
+            // Fp — default value `= <expr>`. Varargs no admite default.
             let default = if matches!(self.peek(), Token::Eq) {
+                if varargs {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        format!(
+                            "el parámetro variádico `{}` no puede tener default",
+                            name
+                        ),
+                    ));
+                }
                 self.advance(); // consume `=`
                 let expr = self.expression()?;
                 saw_default = true;
                 Some(expr)
             } else {
-                if saw_default {
+                // Default + varargs son mutex: un varargs absorbe 0+ args,
+                // así que NO triggerea la regla de "todos los siguientes
+                // necesitan default" (no hay siguientes y absorbe el rol
+                // de "args opcionales adicionales").
+                if saw_default && !varargs {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
                         format!(
@@ -1687,7 +1731,7 @@ impl Parser {
                 }
                 None
             };
-            params.push(Param { name, type_, default });
+            params.push(Param { name, type_, default, varargs });
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -1909,7 +1953,24 @@ impl Parser {
                 &Token::FatArrow,
                 "se esperaba '=>' después del patrón",
             )?;
-            let body = self.expression()?;
+            // Sp.2 — el cuerpo del arm puede ser:
+            //   1. `return <expr>` / `break <expr>` / `continue` → Stmt directo.
+            //   2. `{ <stmts> }` → bloque de stmts (parse_block).
+            //   3. `<expr>` → un Stmt::Expr de una sola entrada (legacy).
+            let body: Vec<Stmt> = match self.peek() {
+                Token::Return | Token::Break | Token::Continue => {
+                    let stmt = self.parse_stmt()?;
+                    vec![stmt]
+                }
+                Token::LBrace => {
+                    self.parse_block()?
+                }
+                _ => {
+                    let (line, col) = self.current_pos();
+                    let expr = self.expression()?;
+                    vec![Stmt::Expr(expr, Span::new(line, col))]
+                }
+            };
             arms.push(MatchArm { pattern, guard, body });
             // Separador entre brazos: coma o newline. RBrace y EOF se
             // dejan pasar — el siguiente iter del loop los maneja:
@@ -2437,6 +2498,7 @@ impl Parser {
     /// y newlines entre elementos (útil para llamadas multilínea).
     fn parse_call_args(&mut self) -> FitzResult<Vec<Expr>> {
         let mut args = Vec::new();
+        let mut saw_named = false;
         self.skip_newlines();
         // Caso vacío: f()
         if matches!(self.peek(), Token::RParen) {
@@ -2445,7 +2507,35 @@ impl Parser {
         }
         loop {
             self.skip_newlines();
-            args.push(self.expression()?);
+            // Fp.3 — `name: value` con lookahead Ident + Colon. Mismo
+            // patrón que kwargs de decoradores (eval ya lo hace para
+            // `@server(port=3000)`). El parser no chequea aquí si el
+            // name corresponde a un param real — eso lo hace el checker
+            // y el evaluator/codegen al despachar la call.
+            let (start_line, start_col) = self.current_pos();
+            let is_named = matches!(self.peek(), Token::Ident(_))
+                && matches!(self.peek_at(1), Token::Colon);
+            let arg = if is_named {
+                let name = self.expect_ident("se esperaba nombre de argumento").unwrap();
+                self.advance(); // consume `:`
+                let value = self.expression()?;
+                saw_named = true;
+                Expr::NamedArg {
+                    name,
+                    value: Box::new(value),
+                    span: Span::new(start_line, start_col),
+                }
+            } else {
+                if saw_named {
+                    return Err(self.error(
+                        ErrorKind::UnexpectedToken,
+                        "no se pueden mezclar args posicionales después de args nombrados — \
+                         los nombrados van al final",
+                    ));
+                }
+                self.expression()?
+            };
+            args.push(arg);
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -4629,7 +4719,7 @@ mod tests {
             parse_one_stmt("fn double(n) => n * 2"),
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -4653,6 +4743,7 @@ mod tests {
                     name: "n".into(),
                     type_: Some(TypeExpr::named("Int")),
                     default: None,
+                    varargs: false,
                 }],
                 return_type: Some(TypeExpr::named("Int")),
                 body: vec![Stmt::Return(Expr::BinOp {
@@ -4673,7 +4764,7 @@ mod tests {
             parse_one_stmt("fn greet(name) { print(name) }"),
             Stmt::FnDef {
                 name: "greet".into(),
-                params: vec![Param { name: "name".into(), type_: None, default: None }],
+                params: vec![Param { name: "name".into(), type_: None, default: None, varargs: false }],
                 return_type: None,
                 body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("name".into(), Span::ZERO)], span: Span::ZERO,
                 }, Span::ZERO)],
@@ -4690,7 +4781,7 @@ mod tests {
             parse_one_stmt(src),
             Stmt::FnDef {
                 name: "calc".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
                 return_type: None,
                 body: vec![
                     Stmt::Assign { target: AssignTarget::Ident("x".into()),
@@ -5511,7 +5602,7 @@ mod tests {
             program[3],
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None }],
+                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
                 return_type: None,
                 body: vec![Stmt::Return(Expr::BinOp {
                     op: BinOpKind::Mul,
@@ -7730,6 +7821,124 @@ mod tests {
                 assert!(params[0].default.is_some());
             }
             other => panic!("esperaba FnDef, dio {:?}", other),
+        }
+    }
+
+    // ---- Mini-tanda Fp.2 — varargs ----
+
+    #[test]
+    fn fp2_param_varargs_se_parsea() {
+        let stmt = parse_one_stmt("fn sum(...xs: Int) -> Int { return 0 }");
+        match stmt {
+            Stmt::FnDef { params, .. } => {
+                assert_eq!(params.len(), 1);
+                assert!(params[0].varargs, "esperaba varargs=true");
+                assert_eq!(params[0].name, "xs");
+            }
+            other => panic!("esperaba FnDef, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fp2_varargs_solo_ultimo_es_error() {
+        let result = parse_program_str(
+            "fn f(...xs: Int, ...ys: Int) -> Int { return 0 }",
+        );
+        assert!(result.is_err(), "esperaba error por varargs duplicado");
+    }
+
+    #[test]
+    fn fp2_param_despues_de_varargs_es_error() {
+        let result = parse_program_str(
+            "fn f(...xs: Int, y: Int) -> Int { return 0 }",
+        );
+        assert!(result.is_err(), "esperaba error por param después de varargs");
+    }
+
+    #[test]
+    fn fp2_varargs_con_default_es_error() {
+        let result = parse_program_str(
+            "fn f(...xs: Int = 5) -> Int { return 0 }",
+        );
+        assert!(result.is_err(), "esperaba error por varargs con default");
+    }
+
+    #[test]
+    fn fp2_mezcla_required_y_varargs_se_parsea() {
+        let stmt = parse_one_stmt("fn f(a: Str, ...xs: Int) -> Int { return 0 }");
+        match stmt {
+            Stmt::FnDef { params, .. } => {
+                assert_eq!(params.len(), 2);
+                assert!(!params[0].varargs);
+                assert!(params[1].varargs);
+            }
+            other => panic!("esperaba FnDef, dio {:?}", other),
+        }
+    }
+
+    // ---- Mini-tanda Fp.3 — named args ----
+
+    #[test]
+    fn fp3_call_con_named_arg_emite_named_arg() {
+        let src = "let r = f(name: 1)";
+        let program = parse_program_str(src).expect("parse OK");
+        match &program[0] {
+            Stmt::Assign { value, .. } => {
+                if let Expr::Call { args, .. } = value {
+                    assert_eq!(args.len(), 1);
+                    if let Expr::NamedArg { name, .. } = &args[0] {
+                        assert_eq!(name, "name");
+                    } else {
+                        panic!("esperaba NamedArg, dio {:?}", args[0]);
+                    }
+                } else {
+                    panic!("esperaba Call, dio {:?}", value);
+                }
+            }
+            other => panic!("esperaba Assign, dio {:?}", other),
+        }
+    }
+
+    #[test]
+    fn fp3_positional_despues_de_named_es_error() {
+        let result = parse_program_str("let r = f(name: 1, 2)");
+        assert!(result.is_err(), "esperaba error positional-tras-named");
+    }
+
+    // ---- Mini-tanda Sp.2 — return en match arm ----
+
+    #[test]
+    fn sp2_match_arm_con_return_se_parsea_como_stmt_return() {
+        let src = "fn f(n: Int) -> Str {\n  match n {\n    0 => return \"zero\"\n    _ => \"other\"\n  }\n  return \"end\"\n}";
+        let stmt = parse_one_stmt(src);
+        if let Stmt::FnDef { body, .. } = stmt {
+            // Buscar el Expr::Match adentro.
+            if let Stmt::Expr(Expr::Match { arms, .. }, _) = &body[0] {
+                // Arm 0: pattern Int(0) → Stmt::Return.
+                assert_eq!(arms[0].body.len(), 1);
+                assert!(matches!(arms[0].body[0], Stmt::Return(..)));
+                // Arm 1: pattern Wildcard → Stmt::Expr("other").
+                assert!(matches!(arms[1].body[0], Stmt::Expr(..)));
+            } else {
+                panic!("esperaba Stmt::Expr(Match), dio {:?}", body[0]);
+            }
+        } else {
+            panic!("esperaba FnDef");
+        }
+    }
+
+    #[test]
+    fn sp2_match_arm_body_es_vec_stmt_de_1_para_expr_simple() {
+        // El caso common: arm body de 1 stmt expr.
+        let src = "let r = match 1 { 0 => \"a\"\n_ => \"b\" }";
+        let program = parse_program_str(src).expect("parse OK");
+        if let Stmt::Assign { value: Expr::Match { arms, .. }, .. } = &program[0] {
+            for arm in arms {
+                assert_eq!(arm.body.len(), 1);
+                assert!(matches!(arm.body[0], Stmt::Expr(..)));
+            }
+        } else {
+            panic!("esperaba Match");
         }
     }
 }
