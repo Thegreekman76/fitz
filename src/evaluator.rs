@@ -336,6 +336,7 @@ fn process_decorator(
     headers: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
+    auth_spec: crate::http::AuthSpec,
     handler: &Value,
     env: &EnvRef,
     fn_def_span: Span,
@@ -351,6 +352,7 @@ fn process_decorator(
             headers,
             middlewares,
             cors_config,
+            auth_spec,
             handler,
             env,
         );
@@ -377,6 +379,16 @@ fn process_decorator(
         return register_test(deco, fn_name, params, handler, fn_def_span);
     }
 
+    // Fase 9.w.1.c — `@auth_provider`: registra la fn como provider de
+    // auth en el HttpRegistry activo. Solo aplica en contexto HTTP
+    // (debe haber un registry — caso típico `fitz run` del archivo);
+    // en otros contextos error explícito. El checker (9.w.1.a) ya
+    // validó signature (`fn(Map<Str,Str>) -> Result<User>`) y unicidad
+    // estáticamente; replicamos defensivamente acá.
+    if deco.name == "auth_provider" {
+        return register_auth_provider(deco, fn_name, handler, fn_def_span);
+    }
+
     // Decorador desconocido. Mensaje listo para guiar al usuario.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -384,10 +396,109 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin.",
             deco.name, fn_name,
         ),
     )))
+}
+
+/// Fase 9.w.1.c — Procesa el decorator `@auth_provider` sobre una
+/// `Stmt::FnDef`. Valida que:
+/// - El decorator no tiene args ni kwargs (paralelo a `@test`).
+/// - El handler es un `Value::Function` (siempre cierto desde
+///   `Stmt::FnDef`).
+/// - Hay un `HttpRegistry` activo (mismo gate que los handlers HTTP).
+/// - No hay otro `@auth_provider` ya registrado (singleton — el
+///   checker valida estáticamente; replicamos defensivamente).
+///
+/// Si todo OK, suma el `AuthProviderHandle` al registry. La fn que
+/// decora también se define en el env como cualquier otra (lo hace el
+/// caller, no este helper).
+fn register_auth_provider(
+    deco: &Decorator,
+    fn_name: &str,
+    handler: &Value,
+    fn_def_span: Span,
+) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            fn_def_span.line,
+            fn_def_span.column,
+            msg,
+        ))
+    };
+    if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+        return Err(err(format!(
+            "@auth_provider sobre fn '{}': no admite args ni kwargs. \
+             Sintaxis: `@auth_provider\\nfn nombre(headers: Map<Str, Str>) -> Result<User> {{ ... }}`.",
+            fn_name,
+        )));
+    }
+    if !has_active_registry() {
+        return Err(err(format!(
+            "@auth_provider sobre fn '{}': no hay servidor HTTP activo en este \
+             contexto. Solo aplica ejecutando con `fitz run` un archivo con \
+             handlers HTTP.",
+            fn_name,
+        )));
+    }
+    let is_async = matches!(handler, Value::Function { is_async: true, .. });
+    let handle = crate::http::AuthProviderHandle {
+        name: fn_name.to_string(),
+        handler: handler.clone(),
+        is_async,
+    };
+    if let Err(existing) = crate::http::set_auth_provider(handle) {
+        return Err(err(format!(
+            "@auth_provider duplicado: ya estaba registrado '{}' como provider; \
+             '{}' es un segundo provider. Solo se admite uno por programa.",
+            existing.name, fn_name,
+        )));
+    }
+    Ok(())
+}
+
+/// Fase 9.w.1.c — Recolecta la política de auth de un FnDef inspeccionando
+/// sus decorators. `@admin` gana sobre `@authenticated` (admin implica
+/// authenticated). Sin decorators de auth → `None` (handler público).
+///
+/// Valida que `@authenticated`/`@admin` no traigan args/kwargs (paralelo
+/// al checker — defensivo en runtime).
+fn collect_route_auth(
+    decorators: &[Decorator],
+    fn_name: &str,
+) -> Result<crate::http::AuthSpec, EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
+    };
+    let mut spec = crate::http::AuthSpec::None;
+    for deco in decorators {
+        match deco.name.as_str() {
+            "authenticated" => {
+                if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+                    return Err(err(format!(
+                        "@authenticated sobre fn '{}': no admite args ni kwargs.",
+                        fn_name,
+                    )));
+                }
+                if spec == crate::http::AuthSpec::None {
+                    spec = crate::http::AuthSpec::Authenticated;
+                }
+            }
+            "admin" => {
+                if !deco.args.is_empty() || !deco.kwargs.is_empty() {
+                    return Err(err(format!(
+                        "@admin sobre fn '{}': no admite args ni kwargs.",
+                        fn_name,
+                    )));
+                }
+                spec = crate::http::AuthSpec::Admin;
+            }
+            _ => {}
+        }
+    }
+    Ok(spec)
 }
 
 /// Procesa `@test` sobre una `Stmt::FnDef` (Fase 9.z.2.a). Valida la
@@ -916,6 +1027,7 @@ fn register_http_route(
     headers: &[HeaderSpec],
     middlewares: &[MiddlewareSpec],
     cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
+    auth_spec: crate::http::AuthSpec,
     handler: &Value,
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
@@ -995,9 +1107,57 @@ fn register_http_route(
         }
     }
 
+    // Fase 9.w.1.c — identificar el param donde inyectar el `user`
+    // tras autenticación exitosa. Si `auth_spec != None`, validamos
+    // que el `@auth_provider` esté ya registrado (orden de declaración
+    // requerido: provider antes que cualquier handler que lo use).
+    // El checker (9.w.1.a) ya validó signatures estáticamente; acá
+    // identificamos el slot del user usando la regla del "leftover":
+    // el primer param que no sea path/query/header. El body se excluye
+    // abajo (el user gana sobre body para evitar la ambigüedad).
+    let auth_user_param_name: Option<String> = if auth_spec != crate::http::AuthSpec::None {
+        if !crate::http::has_auth_provider() {
+            return Err(err(format!(
+                "@{} sobre fn '{}': el `@auth_provider` debe estar declarado antes \
+                 que cualquier handler con `@authenticated`/`@admin` en el archivo. \
+                 Movelo arriba de los handlers que lo usan.",
+                deco.name, fn_name,
+            )));
+        }
+        let candidates: Vec<&Param> = params
+            .iter()
+            .filter(|p| {
+                !template.params.contains(&p.name)
+                    && !template.query_params.contains(&p.name)
+                    && !headers.iter().any(|h| h.param_name == p.name)
+            })
+            .collect();
+        if candidates.is_empty() {
+            // No debería pasar — el checker valida que haya un param User.
+            return Err(err(format!(
+                "@{} sobre fn '{}': falta param del tipo `User` (inyectado tras autenticación exitosa).",
+                deco.name, fn_name,
+            )));
+        }
+        if candidates.len() > 1 {
+            return Err(err(format!(
+                "@{} sobre fn '{}': hay {} params que no son path/query/header. \
+                 En el MVP de auth nativa, un handler protegido admite solo un param \
+                 inyectado por auth y NO acepta body separado. Considerá usar headers \
+                 (`@header(name=\"...\")`) para los datos extra, o split en \
+                 múltiples handlers.",
+                deco.name, fn_name, candidates.len(),
+            )));
+        }
+        Some(candidates[0].name.clone())
+    } else {
+        None
+    };
+
     // Identificar el body param: cualquier parámetro que NO esté ni en
     // template.params (path), ni en template.query_params (query), ni
-    // sea un header declarado. Máximo uno por handler.
+    // sea un header declarado, ni sea el param de auth (9.w.1.c).
+    // Máximo uno por handler.
     let mut body_param: Option<BodyParam> = None;
     for p in params {
         if template.params.contains(&p.name) {
@@ -1008,6 +1168,9 @@ fn register_http_route(
         }
         if headers.iter().any(|h| h.param_name == p.name) {
             continue; // es header (Fase 7.6)
+        }
+        if auth_user_param_name.as_deref() == Some(p.name.as_str()) {
+            continue; // es el user inyectado por auth (9.w.1.c)
         }
         if body_param.is_some() {
             return Err(err(format!(
@@ -1080,6 +1243,8 @@ fn register_http_route(
         return_type_expr: return_type.clone(),
         middlewares: middlewares.to_vec(),
         cors: cors_config.clone(),
+        auth: auth_spec,
+        auth_user_param_name,
     });
 
     Ok(())
@@ -1786,8 +1951,33 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     ),
                 )));
             }
+            // Fase 9.w.1.c — recolectar `@authenticated`/`@admin` en un
+            // único `AuthSpec`. Solo aplica sobre handlers HTTP de ruta;
+            // si aparecen sin un `@get`/`@post`/`@put`/`@delete`, error
+            // claro (paralelo a `@header`/`@middleware`).
+            let auth_spec = collect_route_auth(decorators, name)?;
+            if auth_spec != crate::http::AuthSpec::None
+                && !decorators
+                    .iter()
+                    .any(|d| HttpMethod::from_decorator_name(&d.name).is_some())
+            {
+                return Err(EvalSignal::Error(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!(
+                        "@authenticated/@admin sobre fn '{}': solo aplica sobre \
+                         handlers HTTP (apilar junto a `@get`/`@post`/`@put`/`@delete`).",
+                        name,
+                    ),
+                )));
+            }
             for deco in decorators {
-                if deco.name == "header" || deco.name == "middleware" {
+                if deco.name == "header"
+                    || deco.name == "middleware"
+                    || deco.name == "authenticated"
+                    || deco.name == "admin"
+                {
                     continue; // ya procesado por sus `collect_*`
                 }
                 process_decorator(
@@ -1798,6 +1988,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     &collected_headers,
                     &collected_middlewares,
                     &collected_cors,
+                    auth_spec,
                     &func,
                     &env,
                     *span,

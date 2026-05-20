@@ -144,6 +144,17 @@ pub struct RouteSpec {
     /// el config por request y para cruzar threads (preflight corre en
     /// el thread tokio).
     pub cors: Option<std::sync::Arc<CorsConfig>>,
+    /// Fase 9.w.1.c — Política de auth determinada por la presencia
+    /// de `@authenticated`/`@admin` sobre el handler. `None` (default)
+    /// es ruta pública.
+    pub auth: AuthSpec,
+    /// Fase 9.w.1.c — Nombre del param del handler donde inyectar el
+    /// `user` retornado por el `@auth_provider`. `Some(name)` cuando
+    /// `auth != None` y el handler declaró un param de tipo `User`
+    /// (validado por el checker). `None` cuando `auth == None`. El
+    /// wrapper de runtime usa este nombre para insertar el `user` en
+    /// la posición correcta del Vec de args.
+    pub auth_user_param_name: Option<String>,
 }
 
 /// Una entrada del stack de middlewares de una ruta (mini-fase MW.1).
@@ -381,6 +392,50 @@ impl ServerConfig {
     }
 }
 
+/// Fase 9.w.1.c — Política de auth para un handler HTTP. Determinada
+/// al registro de la ruta por la presencia de `@authenticated` y/o
+/// `@admin` decorators. Sin esos decorators → `None` (handler público,
+/// sin auth check).
+///
+/// El checker (9.w.1.a) ya validó estáticamente que cualquier handler
+/// con `Authenticated`/`Admin` tiene un param compatible con el
+/// `User` que retorna el `@auth_provider`, y que `Admin` exige campo
+/// `role: Str` en `User`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthSpec {
+    /// Sin requisito de auth (default — handler público).
+    None,
+    /// `@authenticated`: requiere que el `@auth_provider` retorne
+    /// `Result::Ok(user)`. Cualquier `user` retornado vale.
+    Authenticated,
+    /// `@admin`: además de `@authenticated`, exige que el `user`
+    /// retornado tenga campo `role: Str` con valor `"admin"`.
+    Admin,
+}
+
+/// Fase 9.w.1.c — Handle al `@auth_provider` registrado en el
+/// programa. Singleton: máximo uno por programa (validado tanto por
+/// el checker 9.w.1.a como por `set_auth_provider` defensivamente).
+///
+/// El runtime invoca `handler` con un único arg de tipo `Map<Str, Str>`
+/// (los headers HTTP del request entrante) y espera `Result<User>` de
+/// vuelta. `Ok` → continúa al handler con el `user` inyectado; `Err` →
+/// 401 con `{"error": <msg>}`.
+#[derive(Debug, Clone)]
+pub struct AuthProviderHandle {
+    /// Nombre de la fn marcada con `@auth_provider`. Solo para
+    /// mensajes de error y logging.
+    pub name: String,
+    /// Value::Function (el handler resuelto del env de definición).
+    /// El call site lo invoca exactamente igual que cualquier
+    /// `Value::Function` Fitz.
+    pub handler: Value,
+    /// `true` si la fn provider es `async`. El call site debe
+    /// await-ear el `Value::Future` resultante; sync → llamar y usar
+    /// el `Value` retornado directo.
+    pub is_async: bool,
+}
+
 /// Acumulador de rutas registradas durante `eval`. Construido por
 /// `main.rs` antes de evaluar; consultado después para decidir si
 /// arrancar el server.
@@ -391,6 +446,10 @@ pub struct HttpRegistry {
     /// si el programa no la declaró — el caller (main.rs) aplica
     /// `ServerConfig::default_addr()`.
     pub server_config: Option<ServerConfig>,
+    /// Fase 9.w.1.c — Provider de auth declarado con `@auth_provider`.
+    /// `None` si el programa no lo declaró (en ese caso no puede haber
+    /// handlers con `@authenticated`/`@admin` — el checker lo bloquea).
+    pub auth_provider: Option<AuthProviderHandle>,
 }
 
 impl HttpRegistry {
@@ -398,6 +457,7 @@ impl HttpRegistry {
         Self {
             routes: Vec::new(),
             server_config: None,
+            auth_provider: None,
         }
     }
 
@@ -497,6 +557,19 @@ pub fn has_active_registry() -> bool {
     HTTP_REGISTRY.with(|cell| cell.borrow().is_some())
 }
 
+/// Fase 9.w.1.c — `true` si el registry activo tiene un `@auth_provider`
+/// registrado. `register_http_route` lo consulta al ver un handler con
+/// `@authenticated`/`@admin` para validar orden de declaración (el
+/// provider debe estar antes que cualquier handler que lo use).
+pub fn has_auth_provider() -> bool {
+    HTTP_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|reg| reg.auth_provider.is_some())
+            .unwrap_or(false)
+    })
+}
+
 /// Empuja una ruta al registry activo. Pánico si no hay uno — el
 /// llamador debe haber chequeado con `has_active_registry()` o estar
 /// adentro de `with_active_registry`.
@@ -523,6 +596,31 @@ pub fn set_server_config(config: ServerConfig) -> Result<(), ServerConfig> {
             return Err(existing.clone());
         }
         reg.server_config = Some(config);
+        Ok(())
+    })
+}
+
+/// Fase 9.w.1.c — Setea el `@auth_provider` del registry activo.
+/// Falla con `Err(Box<existing>)` si ya había uno registrado
+/// (singleton). El checker (9.w.1.a) hace el mismo chequeo
+/// estáticamente, pero el runtime lo replica defensivamente para que
+/// código generado o evaluación incremental no rompa la invariante.
+///
+/// `Err` boxed para que `Result` no quede gigante (clippy
+/// `result_large_err`): `AuthProviderHandle` arrastra un `Value` que
+/// puede ser pesado por sus variantes (Arc<Mutex<>> de List/Map/etc.).
+pub fn set_auth_provider(
+    handle: AuthProviderHandle,
+) -> Result<(), Box<AuthProviderHandle>> {
+    HTTP_REGISTRY.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        let reg = borrow
+            .as_mut()
+            .expect("set_auth_provider llamado sin registry activo");
+        if let Some(existing) = &reg.auth_provider {
+            return Err(Box::new(existing.clone()));
+        }
+        reg.auth_provider = Some(handle);
         Ok(())
     })
 }
@@ -1970,6 +2068,135 @@ async fn handle_task(
         }
     }
 
+    // Fase 9.w.1.c — auth check. Después de middlewares (que pueden
+    // short-circuitear sin tocar auth — CORS preflight, etc.) y antes
+    // de parsear el body o armar args. Si la ruta exige
+    // `@authenticated`/`@admin`, invocamos el `@auth_provider` con un
+    // `Map<Str, Str>` de los headers y esperamos `Result<User>`:
+    //
+    //   - `Ok(user)` → continúa al handler, `user` se inyecta como arg.
+    //     Para `@admin`, validamos `user.role == "admin"` adicional;
+    //     si no matchea → 403.
+    //   - `Err(msg)` → 401 con `{"error": msg}`.
+    //   - Provider falló con FitzError o devolvió shape distinto a
+    //     `Result<User>` → 500 con mensaje (no debería pasar — el
+    //     checker 9.w.1.a valida estáticamente; defensivo).
+    let auth_user: Option<Value> = if route.auth != AuthSpec::None {
+        let provider = match registry.auth_provider.as_ref() {
+            Some(h) => h.clone(),
+            None => {
+                return HandlerOutcome::internal_error(format!(
+                    "ruta '{}' exige auth pero no hay `@auth_provider` en el registry — bug interno",
+                    route.handler_name,
+                ));
+            }
+        };
+        // Construir `Map<Str, Str>` con los headers HTTP recibidos para
+        // pasárselo al provider. Mismo shape que `Request.headers`.
+        let headers_pairs: Vec<(Value, Value)> = raw_headers
+            .iter()
+            .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
+            .collect();
+        let headers_arg = Value::Map(crate::value::shared(headers_pairs));
+        let invoked = call_handler(
+            provider.handler.clone(),
+            vec![headers_arg],
+            &provider.name,
+        )
+        .await;
+        let raw_result = match invoked {
+            Ok(v) => v,
+            Err(e) => {
+                return HandlerOutcome::internal_error(format!(
+                    "`@auth_provider` '{}' falló: {}",
+                    provider.name, e.message,
+                ));
+            }
+        };
+        // Si el provider es async, lo invocado es `Value::Future` y hay
+        // que await-earlo (paralelo a `run_test_handler` de 9.z.2.b).
+        let resolved = if provider.is_async {
+            match raw_result {
+                Value::Future(cell) => {
+                    let fut = cell.0.lock().take();
+                    match fut {
+                        Some(f) => match f.await {
+                            Ok(v) => v,
+                            Err(e) => {
+                                return HandlerOutcome::internal_error(format!(
+                                    "`@auth_provider` '{}' falló al await-ear: {}",
+                                    provider.name, e.message,
+                                ));
+                            }
+                        },
+                        None => {
+                            return HandlerOutcome::internal_error(format!(
+                                "`@auth_provider` '{}': Future ya consumido (bug del dispatcher)",
+                                provider.name,
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    return HandlerOutcome::internal_error(format!(
+                        "`@auth_provider` '{}' async no devolvió Future, devolvió: {}",
+                        provider.name,
+                        other.type_name(),
+                    ));
+                }
+            }
+        } else {
+            raw_result
+        };
+        // `resolved` debe ser `Result<User>`.
+        match resolved {
+            Value::Result(crate::value::ResultVariant::Ok(user_box)) => {
+                // Para `@admin`, validar `user.role == "admin"`. El
+                // checker valida que el tipo `User` tenga el campo;
+                // acá miramos el valor en runtime.
+                if route.auth == AuthSpec::Admin {
+                    let role_ok = match user_box.as_ref() {
+                        Value::Instance { fields, .. } => {
+                            let guard = fields.lock();
+                            guard.iter().any(|(k, v)| {
+                                k == "role" && matches!(v, Value::Str(s) if s == "admin")
+                            })
+                        }
+                        _ => false,
+                    };
+                    if !role_ok {
+                        return HandlerOutcome::json(
+                            403,
+                            serde_json::json!({
+                                "error": "acceso prohibido — se requiere rol admin",
+                            }),
+                        );
+                    }
+                }
+                Some(*user_box)
+            }
+            Value::Result(crate::value::ResultVariant::Err(msg_box)) => {
+                let msg = match *msg_box {
+                    Value::Str(s) => s,
+                    other => format!("{}", other),
+                };
+                return HandlerOutcome::json(
+                    401,
+                    serde_json::json!({ "error": msg }),
+                );
+            }
+            other => {
+                return HandlerOutcome::internal_error(format!(
+                    "`@auth_provider` '{}' debe devolver `Result<User>`, devolvió `{}`",
+                    provider.name,
+                    other.type_name(),
+                ));
+            }
+        }
+    } else {
+        None
+    };
+
     // Si el handler espera body, parsearlo y prepararlo. Lo hacemos
     // antes de armar args para fallar temprano si el JSON está roto.
     //
@@ -2141,9 +2368,17 @@ async fn handle_task(
                     );
                 }
             }
+        } else if route.auth_user_param_name.as_deref() == Some(name.as_str()) {
+            // Fase 9.w.1.c — param inyectado por `@authenticated`/`@admin`.
+            // El `auth_user` fue resuelto arriba ANTES de armar args. Si
+            // por alguna razón `auth_user` es None (no debería pasar: si
+            // `auth_user_param_name` es Some, el bloque de auth arriba
+            // garantiza que `auth_user` también lo sea), default a Null
+            // como defensa.
+            args.push(auth_user.clone().unwrap_or(Value::Null));
         } else {
             return HandlerOutcome::internal_error(format!(
-                "parámetro '{}' del handler '{}' no es ni path param ni query param ni body ni header — \
+                "parámetro '{}' del handler '{}' no es ni path param ni query param ni body ni header ni user de auth — \
                  esto es un bug interno del registro",
                 name, route.handler_name,
             ));
@@ -4620,6 +4855,8 @@ mod tests {
                 return_type_expr: None,
                 middlewares: vec![],
                 cors: None,
+                auth: AuthSpec::None,
+                auth_user_param_name: None,
             });
         });
         assert_eq!(reg.routes.len(), 1);
@@ -4709,6 +4946,8 @@ mod tests {
             return_type_expr: None,
             middlewares: vec![],
             cors: None,
+            auth: AuthSpec::None,
+            auth_user_param_name: None,
         });
         std::sync::Arc::new(reg)
     }
@@ -5251,6 +5490,218 @@ mod tests {
         assert_eq!(
             crate::evaluator::classify_2_arg_middleware(&p),
             MiddlewareKind::Wrap,
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Fase 9.w.1.c — Tests E2E del wrapper de auth nativa.
+    //
+    // Validan el flujo end-to-end por el path real de axum vía
+    // `Router::oneshot`: registry desde source Fitz, `@auth_provider`
+    // ejecutado antes del handler, `user` inyectado en los args, y
+    // codes 401/403 cuando el provider rechaza o el rol no matchea.
+    //
+    // Fuente compartida para los tests: provider que matchea headers
+    // contra dos tokens hard-codeados (admin y user normal) y emite
+    // `Err` para cualquier otra cosa. Usa `match` sobre el `Result`
+    // de `headers.get("authorization")` para distinguir
+    // "falta Authorization" de "token inválido".
+    // -----------------------------------------------------------------
+
+    const AUTH_E2E_SOURCE: &str = "\
+type User { id: Int, name: Str, role: Str }\n\
+@auth_provider\n\
+fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+    match headers.get(\"authorization\") {\n\
+        Ok(token) => {\n\
+            if (token == \"Bearer admin-token\") {\n\
+                return Ok(User { id: 1, name: \"Admin\", role: \"admin\" })\n\
+            }\n\
+            if (token == \"Bearer user-token\") {\n\
+                return Ok(User { id: 2, name: \"Alice\", role: \"user\" })\n\
+            }\n\
+            return Err(\"token inválido\")\n\
+        }\n\
+        Err(_) => return Err(\"falta Authorization\")\n\
+    }\n\
+}\n\
+@get(\"/public\")\n\
+fn public_route() -> Str => \"sin auth\"\n\
+@authenticated\n\
+@get(\"/me\")\n\
+fn me(user: User) -> Str => user.name\n\
+@admin\n\
+@get(\"/admin\")\n\
+fn admin_route(user: User) -> Str => \"hola admin\"\n\
+";
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_ruta_publica_sin_auth_devuelve_200() {
+        // Ruta sin `@authenticated`/`@admin` no toca el provider.
+        // Smoke: no debería romperse aunque el programa tenga
+        // `@auth_provider` declarado.
+        let (status, body) = run_oneshot(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/public",
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"sin auth\"");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_authenticated_sin_header_devuelve_401() {
+        // Sin header `Authorization` → provider emite `Err("falta...")`
+        // → wrapper convierte a 401 con `{"error": "falta..."}`.
+        let (status, body) = run_oneshot(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/me",
+        )
+        .await;
+        assert_eq!(status, 401);
+        assert!(
+            body.contains("falta Authorization"),
+            "esperaba mención de Authorization en body, fue: {}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_authenticated_token_invalido_devuelve_401() {
+        // Header presente pero token desconocido → Err("token inválido")
+        // → 401.
+        let (status, body) = run_oneshot_with_headers(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/me",
+            &[("authorization", "Bearer wrong-token")],
+        )
+        .await;
+        assert_eq!(status, 401);
+        assert!(
+            body.contains("token inválido"),
+            "esperaba 'token inválido' en body, fue: {}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_authenticated_token_valido_devuelve_200_con_user_inyectado() {
+        // Token user válido → provider devuelve Ok(User{name:"Alice"})
+        // → wrapper inyecta `user` como arg del handler → el handler
+        // accede a `user.name` y devuelve "Alice".
+        let (status, body) = run_oneshot_with_headers(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/me",
+            &[("authorization", "Bearer user-token")],
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"Alice\"");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_admin_con_rol_no_admin_devuelve_403() {
+        // Token válido, pero `user.role == "user"` (no "admin") →
+        // wrapper emite 403 con mensaje "se requiere rol admin".
+        let (status, body) = run_oneshot_with_headers(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/admin",
+            &[("authorization", "Bearer user-token")],
+        )
+        .await;
+        assert_eq!(status, 403);
+        assert!(
+            body.contains("admin"),
+            "esperaba mención de admin en body, fue: {}",
+            body
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_admin_con_rol_admin_devuelve_200() {
+        // Token admin → user.role == "admin" → handler ejecuta.
+        let (status, body) = run_oneshot_with_headers(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/admin",
+            &[("authorization", "Bearer admin-token")],
+        )
+        .await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"hola admin\"");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_admin_sin_header_devuelve_401_no_403() {
+        // Sin header, el provider falla con Err ANTES de evaluar role.
+        // Resultado: 401 (no autenticado), no 403 (no autorizado).
+        let (status, _body) = run_oneshot(
+            AUTH_E2E_SOURCE,
+            axum::http::Method::GET,
+            "/admin",
+        )
+        .await;
+        assert_eq!(status, 401);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_provider_duplicado_es_error_en_runtime() {
+        // Defensa runtime de la unicidad: dos `@auth_provider`
+        // deberían emitir error al evaluar el programa (el checker
+        // también lo bloquea, pero replicamos en runtime por defensa).
+        let src = "\
+type User { id: Int, role: Str }\n\
+@auth_provider\n\
+fn check_a(headers: Map<Str, Str>) -> Result<User> { return Err(\"x\") }\n\
+@auth_provider\n\
+fn check_b(headers: Map<Str, Str>) -> Result<User> { return Err(\"y\") }\n\
+@authenticated\n\
+@get(\"/x\")\n\
+fn h(user: User) -> Str => user.role\n\
+";
+        let (res, _reg) = with_active_registry_async(|| async {
+            let tokens = crate::lexer::tokenize(src).unwrap();
+            let program = crate::parser::parse(tokens).unwrap();
+            crate::evaluator::eval(program).await
+        })
+        .await;
+        let err = res.expect_err("esperaba error por @auth_provider duplicado");
+        assert!(
+            err.message.contains("@auth_provider duplicado"),
+            "esperaba mención de provider duplicado, fue: {}",
+            err.message
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn auth_handler_sin_provider_es_error_en_runtime() {
+        // Defensa runtime: handler con @authenticated pero sin un
+        // @auth_provider declarado. El checker también lo bloquea
+        // estáticamente; replicamos en runtime para mantener la
+        // invariante del registry.
+        let src = "\
+type User { id: Int }\n\
+@authenticated\n\
+@get(\"/me\")\n\
+fn me(user: User) -> Str => \"x\"\n\
+";
+        let (res, _reg) = with_active_registry_async(|| async {
+            let tokens = crate::lexer::tokenize(src).unwrap();
+            let program = crate::parser::parse(tokens).unwrap();
+            crate::evaluator::eval(program).await
+        })
+        .await;
+        let err = res.expect_err("esperaba error por @authenticated sin @auth_provider");
+        assert!(
+            err.message.contains("@auth_provider")
+                && err.message.contains("antes"),
+            "esperaba mención de @auth_provider y orden, fue: {}",
+            err.message
         );
     }
 }
