@@ -59,6 +59,15 @@ pub struct OpenApiRouteInfo {
     /// determinista. Status no literales (variable, expr) se omiten —
     /// no son inferibles estáticamente.
     pub custom_status_codes: Vec<u16>,
+    /// Fase 9.w.1.e — política de auth de la ruta.
+    ///
+    /// `AuthSpec::None` (default) — handler público, sin `security` en
+    /// el operation. `Authenticated`/`Admin` — emite el security
+    /// requirement con bearerAuth y suma 401 (`Admin` también suma 403)
+    /// a las `responses`. El scheme top-level
+    /// `components.securitySchemes.bearerAuth` se emite cuando al menos
+    /// un route tiene `auth != None`.
+    pub auth: crate::http::AuthSpec,
 }
 
 /// Adapter: del registry runtime a vistas livianas.
@@ -104,6 +113,8 @@ fn route_info_from_spec(
             }
             _ => Vec::new(),
         },
+        // Fase 9.w.1.e — propagar la política de auth de la ruta.
+        auth: s.auth,
     }
 }
 
@@ -403,15 +414,34 @@ pub fn pseudo_routes_from_ast(
             // lógica acá; si la fn pasa el evaluator, esta vista es
             // consistente.
             let header_params = headers_from_decorators(decorators, params);
-            let body_param_name = params.iter().find_map(|p| {
-                if !template.params.contains(&p.name)
-                    && !template.query_params.contains(&p.name)
-                    && !header_params.iter().any(|(_, fitz, _)| fitz == &p.name)
-                {
-                    Some(p.name.clone())
-                } else {
-                    None
+            // Fase 9.w.1.e — recolectar política de auth del set de
+            // decorators. `@admin` gana sobre `@authenticated`.
+            let mut auth = crate::http::AuthSpec::None;
+            for d2 in decorators {
+                match d2.name.as_str() {
+                    "authenticated" if auth == crate::http::AuthSpec::None => {
+                        auth = crate::http::AuthSpec::Authenticated;
+                    }
+                    "admin" => auth = crate::http::AuthSpec::Admin,
+                    _ => {}
                 }
+            }
+            // El body_param ahora excluye el user param de auth (espejo
+            // del codegen 9.w.1.d: "leftover" → auth user en lugar de body).
+            let body_param_name = params.iter().find_map(|p| {
+                let is_path = template.params.contains(&p.name);
+                let is_query = template.query_params.contains(&p.name);
+                let is_header =
+                    header_params.iter().any(|(_, fitz, _)| fitz == &p.name);
+                if is_path || is_query || is_header {
+                    return None;
+                }
+                // Si la ruta tiene auth, el primer leftover es el user
+                // (NO body). Esta heurística matchea la regla del codegen.
+                if auth != crate::http::AuthSpec::None {
+                    return None;
+                }
+                Some(p.name.clone())
             });
             let param_type_exprs = params
                 .iter()
@@ -430,6 +460,7 @@ pub fn pseudo_routes_from_ast(
                 // Q.4: escanear el body del FnDef por ReturnStatus.
                 // OAPI: resolver Idents que apunten a consts top-level.
                 custom_status_codes: collect_status_codes_with_consts(body, &consts),
+                auth,
             });
         }
     }
@@ -475,6 +506,28 @@ pub fn generate_openapi_with_version(
     program: &Program,
     version: Option<&str>,
 ) -> Value {
+    let mut components = Map::new();
+    components.insert("schemas".into(), build_components_schemas(program));
+    // Fase 9.w.1.e — security scheme. Si al menos un route tiene
+    // `auth != None`, declarar `bearerAuth` en components así los
+    // tooling clients (Scalar UI, Swagger UI, generadores de SDK)
+    // saben emitir el lock icon + el campo de token. Bearer tokens
+    // JWT son el patrón canónico que `@auth_provider` espera (header
+    // `Authorization: Bearer <token>`).
+    let has_auth = routes.iter().any(|r| r.auth != crate::http::AuthSpec::None);
+    if has_auth {
+        components.insert(
+            "securitySchemes".into(),
+            json!({
+                "bearerAuth": {
+                    "type": "http",
+                    "scheme": "bearer",
+                    "bearerFormat": "JWT",
+                    "description": "Token JWT emitido por el `@auth_provider` del programa. Pasar como `Authorization: Bearer <token>`."
+                }
+            }),
+        );
+    }
     json!({
         "openapi": "3.1.0",
         "info": {
@@ -482,9 +535,7 @@ pub fn generate_openapi_with_version(
             "version": version.unwrap_or("0.1.0"),
         },
         "paths": build_paths(routes),
-        "components": {
-            "schemas": build_components_schemas(program),
-        },
+        "components": Value::Object(components),
     })
 }
 
@@ -529,9 +580,25 @@ fn build_operation(route: &OpenApiRouteInfo) -> Value {
         op.insert("requestBody".into(), build_request_body(body_type));
     }
 
+    // Fase 9.w.1.e — `security` por operation. Para handlers
+    // `@authenticated`/`@admin` declara el requerimiento del bearer
+    // token (referencia al scheme global `bearerAuth`). Para handlers
+    // públicos NO emitimos `security` (el default OpenAPI es "ninguno"
+    // — no necesitamos `security: []` explícito).
+    if route.auth != crate::http::AuthSpec::None {
+        op.insert(
+            "security".into(),
+            json!([{ "bearerAuth": [] }]),
+        );
+    }
+
     op.insert(
         "responses".into(),
-        build_responses(&route.return_type_expr, &route.custom_status_codes),
+        build_responses_with_auth(
+            &route.return_type_expr,
+            &route.custom_status_codes,
+            route.auth,
+        ),
     );
     Value::Object(op)
 }
@@ -595,7 +662,25 @@ fn build_request_body(t: Option<&TypeExpr>) -> Value {
     })
 }
 
+#[cfg(test)]
 fn build_responses(return_type: &Option<TypeExpr>, custom_status_codes: &[u16]) -> Value {
+    build_responses_with_auth(
+        return_type,
+        custom_status_codes,
+        crate::http::AuthSpec::None,
+    )
+}
+
+/// Fase 9.w.1.e — variante de `build_responses` que también incluye
+/// `401` (handlers `@authenticated`/`@admin`) y `403` (handlers
+/// `@admin`) cuando aplica. Documenta al consumidor del schema que
+/// el endpoint emite esos status codes — el wrapper auth los
+/// produce automáticamente, no son del handler user.
+fn build_responses_with_auth(
+    return_type: &Option<TypeExpr>,
+    custom_status_codes: &[u16],
+    auth: crate::http::AuthSpec,
+) -> Value {
     let mut resp: Map<String, Value> = Map::new();
     match return_type {
         Some(TypeExpr::Generic { name, args }) if name == "Result" && args.len() == 1 => {
@@ -608,6 +693,18 @@ fn build_responses(return_type: &Option<TypeExpr>, custom_status_codes: &[u16]) 
         None => {
             resp.insert("200".into(), success_response(None));
         }
+    }
+    // Fase 9.w.1.e — sumar 401 (auth) y 403 (admin). El body es
+    // siempre `{"error": "<msg>"}` (formato del wrapper auth, paralelo
+    // a errores de validación de path params/body). Si el handler
+    // también declara `@admin`, 403 sale aparte. NO sobreescribir
+    // entries existentes (caso raro: handler que retorna 401 manualmente
+    // via `return 401 { ... }`).
+    if auth != crate::http::AuthSpec::None && !resp.contains_key("401") {
+        resp.insert("401".into(), auth_error_response("Autenticación requerida"));
+    }
+    if auth == crate::http::AuthSpec::Admin && !resp.contains_key("403") {
+        resp.insert("403".into(), auth_error_response("Permiso denegado (admin)"));
     }
     // Q.4: sumar entries por cada status code custom detectado en el
     // body. El body de un ReturnStatus es polimórfico (un handler
@@ -624,6 +721,26 @@ fn build_responses(return_type: &Option<TypeExpr>, custom_status_codes: &[u16]) 
         resp.insert(key, custom_status_response(*code));
     }
     Value::Object(resp)
+}
+
+/// Fase 9.w.1.e — shape de las responses de 401/403 emitidas por el
+/// wrapper auth. Body siempre `{"error": "<msg>"}` — espejo del
+/// `serde_json::json!({"error": ...})` del runtime + codegen.
+fn auth_error_response(description: &str) -> Value {
+    json!({
+        "description": description,
+        "content": {
+            "application/json": {
+                "schema": {
+                    "type": "object",
+                    "properties": {
+                        "error": { "type": "string" }
+                    },
+                    "required": ["error"]
+                }
+            }
+        }
+    })
 }
 
 fn custom_status_response(code: u16) -> Value {
@@ -1479,5 +1596,105 @@ mod tests {
             .unwrap();
         assert!(responses.contains_key("400"));
         assert!(responses.contains_key("404"));
+    }
+
+    // ---- Fase 9.w.1.e — security scheme del OpenAPI ----
+
+    /// Programa base reusado por los tests de auth del schema: un
+    /// `@auth_provider` + 3 handlers (público, `@authenticated`, `@admin`).
+    const AUTH_SCHEMA_SRC: &str = "\
+type User { id: Int, name: Str, role: Str }\n\
+@auth_provider\n\
+fn check(headers: Map<Str, Str>) -> Result<User> {\n\
+    return Err(\"sin auth\")\n\
+}\n\
+@get(\"/public\")\n\
+fn public_route() -> Str => \"sin auth\"\n\
+@authenticated\n\
+@get(\"/me\")\n\
+fn me(user: User) -> Str => user.name\n\
+@admin\n\
+@get(\"/admin\")\n\
+fn admin_route(user: User) -> Str => \"hola admin\"\n\
+";
+
+    #[test]
+    fn auth_schema_emite_security_schemes_bearer_auth() {
+        let schema = schema_for(AUTH_SCHEMA_SRC);
+        let security_schemes = schema["components"]["securitySchemes"].as_object();
+        assert!(
+            security_schemes.is_some(),
+            "components.securitySchemes ausente — esperaba bearerAuth",
+        );
+        let bearer = &schema["components"]["securitySchemes"]["bearerAuth"];
+        assert_eq!(bearer["type"], json!("http"));
+        assert_eq!(bearer["scheme"], json!("bearer"));
+        assert_eq!(bearer["bearerFormat"], json!("JWT"));
+    }
+
+    #[test]
+    fn auth_schema_handler_publico_no_tiene_security() {
+        let schema = schema_for(AUTH_SCHEMA_SRC);
+        let op = &schema["paths"]["/public"]["get"];
+        assert!(
+            op.get("security").is_none(),
+            "handler público debería NO tener `security`, fue: {:?}",
+            op,
+        );
+        // Tampoco emite 401/403 (no es un caso del wrapper auth).
+        let resp = op["responses"].as_object().unwrap();
+        assert!(!resp.contains_key("401"));
+        assert!(!resp.contains_key("403"));
+    }
+
+    #[test]
+    fn auth_schema_authenticated_handler_requiere_bearer() {
+        let schema = schema_for(AUTH_SCHEMA_SRC);
+        let op = &schema["paths"]["/me"]["get"];
+        // security: [{ bearerAuth: [] }]
+        let sec = op["security"].as_array().expect("security debe ser array");
+        assert_eq!(sec.len(), 1);
+        assert!(
+            sec[0].get("bearerAuth").is_some(),
+            "primer requirement debería ser bearerAuth, fue: {:?}",
+            sec[0],
+        );
+        // responses incluye 401 (auth) pero NO 403 (no es admin).
+        let resp = op["responses"].as_object().unwrap();
+        assert!(resp.contains_key("401"), "@authenticated emite 401");
+        assert!(!resp.contains_key("403"), "@authenticated NO emite 403");
+        // 200 del happy path debe seguir.
+        assert!(resp.contains_key("200"));
+    }
+
+    #[test]
+    fn auth_schema_admin_handler_emite_401_y_403() {
+        let schema = schema_for(AUTH_SCHEMA_SRC);
+        let op = &schema["paths"]["/admin"]["get"];
+        let sec = op["security"].as_array().expect("security debe ser array");
+        assert_eq!(sec.len(), 1);
+        assert!(sec[0].get("bearerAuth").is_some());
+        let resp = op["responses"].as_object().unwrap();
+        assert!(resp.contains_key("401"), "@admin emite 401");
+        assert!(resp.contains_key("403"), "@admin emite 403");
+        // 401 y 403 son objetos con shape `{"error": <string>}`.
+        let r401_schema = &resp["401"]["content"]["application/json"]["schema"];
+        assert_eq!(r401_schema["type"], json!("object"));
+        assert!(r401_schema["properties"]["error"].is_object());
+    }
+
+    #[test]
+    fn auth_schema_programa_sin_auth_no_emite_security_schemes() {
+        // Sin handlers de auth, components.securitySchemes debe ser
+        // omitido (no emitir un objeto vacío — menos ruido en el schema).
+        let src = "\
+@get(\"/x\")\n\
+fn x() -> Str => \"ok\"\n\
+";
+        let schema = schema_for(src);
+        assert!(
+            schema["components"].get("securitySchemes").is_none(),
+            "programas sin auth NO deberían emitir securitySchemes",
+        );
     }
 }
