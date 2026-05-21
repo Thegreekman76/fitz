@@ -815,13 +815,16 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
   - Total al cierre del refresh: **1381 unit + 76 cli_e2e + 79
     compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
   - Próximo norte: Fase 9.w (Stack web first-class).
-- **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
-  (auth nativo JWT-based, **9.w.1 CERRADA**), `@ws` (WebSockets
-  tipados con `WsConn<T>` + AsyncAPI 3.0 + heartbeat built-in +
-  auth integrada, **9.w.2 CERRADA**), `@cron` + `@background` +
-  `spawn` (jobs sin Celery, sin broker externo, **9.w.3
-  CERRADA**). ORM nativo + migraciones autogeneradas escala a
-  Fase 10.
+- **9.w — Stack web first-class 🌐** — **MVP CERRADO ENTERO
+  (2026-05-21)**. `@authenticated`/`@admin` (auth nativo
+  JWT-based, **9.w.1**), `@ws` (WebSockets tipados con
+  `WsConn<T>` + AsyncAPI 3.0 + heartbeat built-in + auth
+  integrada, **9.w.2**), `@cron` + `@background` + `spawn`
+  (jobs sin Celery, sin broker externo, **9.w.3**). ORM nativo
+  + migraciones (9.w.4) diferido a Fase 10 por scope (driver
+  Postgres puro es comparable a todo Fase 5-9 combinado).
+  Próximo norte: boilerplates Dockerizados showcase del stack
+  cerrado.
 
 **Visión post-Fase 9 (Fase 10+)** — especulativo, norte
 direccional: Fase 10 stack DB nativo + ORM declarativo, Fase 11

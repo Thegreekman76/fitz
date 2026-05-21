@@ -54,9 +54,92 @@ Total al cierre del bloque: **2045 unit sin feature, 2135 con
 [`docs/deudas_lenguaje.md`](docs/deudas_lenguaje.md) y
 [`docs/design-fitzvalue.md`](docs/design-fitzvalue.md) (F13).
 
-Próximo norte: **9.w** — Fase 9.w.1 (Auth nativa), 9.w.2
-(WebSockets tipados) y 9.w.3 (Jobs sin Celery) CERRADAS. Sigue
-ORM nativo + migraciones (escala a Fase 10).
+Próximo norte: **boilerplates Dockerizados** (memoria
+`project_boilerplates`) — 4 boilerplates showcase del stack
+cerrado en 9.w (api-simple, api-postgres-python con SQLAlchemy
+via interop, api-middleware-cors, cli-tool). Luego repo público
++ sitio docs MkDocs Material. ORM nativo + migraciones
+(9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
+
+## [v0.9.24] — 2026-05-21 — Cierre formal Fase 9.w MVP entera (Stack web first-class)
+
+**Cierre formal del bloque entero "Stack web first-class"** —
+9.w.1 + 9.w.2 + 9.w.3 cerradas entre 2026-05-20 y 2026-05-21.
+9.w.4 (ORM nativo + migraciones) diferida a **Fase 10** por
+scope técnico justificado.
+
+**Diferenciales validados del bloque** (con caps + ejemplos
+runnable end-to-end):
+
+1. **Auth como decoradores del lenguaje** (`@auth_provider` +
+   `@authenticated` + `@admin`) con built-ins `jwt`/`hash`
+   (HS256/HS384/HS512 + Argon2id) — checker estático en
+   compile-time + OpenAPI auto-documentado con `securitySchemes.
+   bearerAuth` + paridad bit-a-bit `fitz run` ↔ `fitz build` +
+   cero `pip install jsonwebtoken passlib`. Cap 28 +
+   `examples/guide/28-auth.fitz` (<100 LoC: login + /me +
+   /admin con JWT real).
+2. **WebSockets tipados** (`@ws("/path")` + `WsConn<T>`) con
+   **marshaling JSON automático** + **AsyncAPI 3.0
+   auto-generado** en `/asyncapi.json` + **heartbeat built-in**
+   con `@server(ws_heartbeat_secs=N)` + **auth integrada** en
+   el handshake (`@authenticated`/`@admin` apilados ANTES del
+   HTTP upgrade) + paridad bit-a-bit. Cap 29 +
+   `examples/guide/29-ws.fitz` (<100 LoC: chat broadcast con
+   login + JWT + heartbeat).
+3. **Jobs sin Celery** (`@cron("expr")` + `@background` +
+   `spawn(fn_call)`) sin broker externo (Redis/RabbitMQ no son
+   requisito) + checker estático del callsite `spawn(...)` que
+   refina el ret type a `Future<T>` con T concreto +
+   cron-only mode systemd-friendly (`signal::ctrl_c` automático
+   sin `@server`) + paridad bit-a-bit. Cap 30 +
+   `examples/guide/30-cron-background.fitz` (<100 LoC: URL
+   shortener con HTTP + cron stats + spawn tracking async).
+
+**Ningún otro lenguaje combina** auth + JWT/Argon2 +
+WebSockets tipados + AsyncAPI auto + cron + spawn tipado en el
+core del compilador, sin broker externo, con paridad bit-a-bit
+intérprete↔binario nativo, cero deps externas para features
+intrínsecas.
+
+**Decisión de scope de 9.w.4 (ORM nativo)**: difetida a
+**Fase 10**. El driver Postgres puro en Fitz es un proyecto
+del tamaño de todo Fase 5-9 combinado. Implementar el
+protocolo binario desde cero (handshake + SCRAM-SHA-256 +
+prepared statements + ~40 tipos OID + cursors + transacciones
++ COPY + LISTEN/NOTIFY + pool + retry) sin via libpq es
+comparable a `tokio-postgres`/`sqlx` que llevaron años de
+desarrollo. Más ORM declarativo + migraciones autogeneradas +
+decisiones de diseño abiertas (Postgres-first vs multi-DB,
+async-first vs sync-first). **Gap cubierto por interop
+Python**: cap 21 documenta SQLAlchemy desde Fitz con `fitz
+py-types` y CRUD runnable. Fase 10 arranca cuando aparezca
+proyecto real en Fitz que choque con las limitaciones de
+interop Python.
+
+**Acumulado al cierre del bloque 9.w MVP**:
+
+- **2156 unit tests** sin feature (~80 unit tests nuevos del
+  bloque: 33 de 9.w.1 + N de 9.w.2 + 32 de 9.w.3).
+- **90 LSP unit tests** con `--features lsp` (incluye
+  completion de `jwt`/`hash`/`WsConn`/`spawn`).
+- **76 cli_e2e + 3 openapi**.
+- **255 compile_e2e** con smoke ejemplos guía (incluye
+  `28-auth.fitz`, `29-ws.fitz`, `30-cron-background.fitz`).
+- Clippy `-D warnings` limpio en ambos modos (con y sin
+  features).
+- **3 caps nuevos** en `docs/guide.md` (28, 29, 30) + 3
+  ejemplos runnable end-to-end.
+- **Deps nuevas** del binario: `jsonwebtoken = "9"` +
+  `argon2 = "0.5"` + `rand_core = "0.6"` (9.w.1); axum
+  feature `ws` + `futures-util` + dev-dep
+  `tokio-tungstenite` (9.w.2); `cron = "0.12"` +
+  `chrono = "0.4"` (9.w.3).
+
+**Próximo norte**: boilerplates Dockerizados (memoria
+`project_boilerplates`) — showcase del stack cerrado en 4
+boilerplates listos para `git clone` + `fitz run`. Después
+repo público + sitio docs MkDocs Material.
 
 ## [v0.9.23] — 2026-05-21 — Fase 9.w.3 CERRADA — Jobs sin Celery (`@cron` + `@background` + `spawn`)
 

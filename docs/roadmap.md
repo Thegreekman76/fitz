@@ -6682,8 +6682,13 @@ el stack web.
 
 ## Fase 9.w — Stack web first-class: auth, websockets, jobs, ORM 🌐
 
-**Estado: PENDIENTE (siguiente bloque post-DX)** — tercer trabajo
-del resto de Fase 9.
+**Estado: MVP CERRADO (2026-05-21)** — 9.w.1 (Auth nativa) +
+9.w.2 (WebSockets tipados) + 9.w.3 (Jobs sin Celery) cerradas
+entre 2026-05-20 y 2026-05-21. 9.w.4 (ORM nativo + migraciones)
+diferida a **Fase 10** por scope (driver Postgres puro en Fitz
+es comparable en tamaño a todo Fase 5-9 combinado). El gap de
+DB nativa queda cubierto por interop Python con SQLAlchemy (cap
+21 de la guía).
 
 **Objetivo**: extender la filosofía "HTTP es parte del lenguaje"
 al resto del stack web típico. Auth, WebSockets, cron jobs,
@@ -7154,8 +7159,88 @@ items para iteración 2 post-Fase 10):
   agregación manual con vectores de futures).
 - Cron timezone configurable (hoy `chrono::Utc::now()`).
 
-**Próximo norte**: resto de Fase 9.w — ORM nativo + migraciones
-(escala a Fase 10), o cierre formal de Fase 9.w entera.
+**Próximo norte**: cierre formal de Fase 9.w MVP entera (ver
+sección de abajo).
+
+### Cierre formal de Fase 9.w MVP entera (2026-05-21)
+
+**Las 3 sub-fases del MVP de Stack web first-class están
+cerradas** (9.w.1 Auth + 9.w.2 WebSockets + 9.w.3 Jobs).
+9.w.4 (ORM nativo + migraciones) queda diferida a **Fase 10**
+con justificación técnica concreta.
+
+**Total acumulado al cierre de 9.w MVP**:
+- **2156 unit tests** sin feature (+33 de 9.w.1 + 14 de 9.w.2.a
+  + N de 9.w.2.b-e + 17 de 9.w.3.a + 8 de 9.w.3.b + 7 de 9.w.3.c
+  = ~80 unit tests nuevos en el bloque).
+- **90 LSP unit tests** con `--features lsp` (incluye completion
+  de `jwt`/`hash`/`WsConn`/`spawn`).
+- **76 cli_e2e + 3 openapi**.
+- **255 compile_e2e** con smoke ejemplos guía (incluye
+  `28-auth.fitz`, `29-ws.fitz`, `30-cron-background.fitz`).
+- Clippy `-D warnings` limpio.
+- 3 caps nuevos en `docs/guide.md` (28 Auth + 29 WS + 30 Jobs)
+  + 3 ejemplos runnable end-to-end.
+
+**Diferenciales del bloque** (validados con caps y ejemplos
+runnable):
+1. **Auth como decoradores del lenguaje** (`@auth_provider` +
+   `@authenticated` + `@admin`) con `jwt`/`hash` built-ins —
+   vs FastAPI (5 deps + reflection), Spring `@PreAuthorize`
+   (reflection runtime), ASP.NET `[Authorize]` (framework +
+   reflection).
+2. **WebSockets tipados** (`@ws("/path")` + `WsConn<T>`) con
+   marshaling JSON automático + AsyncAPI 3.0 auto-generado +
+   heartbeat built-in + auth integrada en el handshake — vs
+   Socket.IO (sin schema), Phoenix Channels (solo Elixir),
+   SignalR (solo C#), FastAPI WebSocket (Pydantic + schema
+   manual).
+3. **Jobs sin Celery** (`@cron` + `@background` + `spawn`)
+   sin broker externo (jobs en memoria del proceso), checker
+   estático del callsite `spawn(...)`, cron-only mode
+   systemd-friendly — vs Celery+Redis (Python con broker
+   externo), Bull/BullMQ (Node con Redis), Spring
+   `@Scheduled` (reflection).
+
+**Ningún otro lenguaje hoy junta** auth + JWT/Argon2 +
+WebSockets tipados + AsyncAPI auto + cron + spawn tipado en
+el core del compilador, sin broker externo, con paridad
+bit-a-bit intérprete↔binario nativo, cero deps externas para
+features intrínsecas.
+
+**Por qué 9.w.4 (ORM nativo) escala a Fase 10**:
+
+El driver Postgres puro en Fitz es un proyecto del tamaño de
+todo Fase 5-9 combinado. Implementar el protocolo binario de
+Postgres desde cero (handshake + autenticación SCRAM-SHA-256
++ prepared statements + tipos OID ~40 + cursors + transacciones
++ COPY + LISTEN/NOTIFY + connection pooling + retry/reconnect)
+sin via libpq es comparable a `tokio-postgres` o `sqlx` que
+llevaron años de desarrollo. Encima va combinado con ORM
+declarativo (`@table`/`@primary`/`@unique`/relaciones lazy vs
+eager + query builder tipado) + migraciones autogeneradas
+(`fitz db diff`/`migrate`) + decisiones de diseño abiertas
+(Postgres-first vs multi-DB, async-first vs sync-first, pool
+config, migraciones reversibles).
+
+**Gap cubierto por interop Python**: cap 21 de la guía
+documenta el uso de SQLAlchemy desde Fitz (`fitz py-types`
+auto-mapea modelos SQLA a `type` Fitz, ejemplo CRUD
+runnable). Hoy podés correr un proyecto real con DB en Fitz
+sin esperar a Fase 10.
+
+**Decisión**: Fase 10 arranca cuando aparezca un proyecto real
+en Fitz que choque con las limitaciones de interop Python con
+SQLAlchemy (típicamente performance, missing features de
+queries complejas, o ergonomía del round-trip Map/Instance).
+Entonces tenemos caso de uso concreto que guía las decisiones
+de diseño.
+
+**Sub-paso transversal pendiente post-9.w**: cierre formal de
+Fase 9 entera (cuando Fase 9.w.4 también cierre — diferido
+junto con Fase 10) — esto se hará al cerrar Fase 10 con un
+commit de "Fase 9 entera CERRADA" que cubra el balance final
+de Fase 9 (LSP + PM + DX + Stack web).
 
 #### 9.w.4 — ORM nativo + migraciones autogeneradas (LINK A FASE 10)
 
