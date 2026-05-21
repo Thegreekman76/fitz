@@ -160,7 +160,7 @@ Cada ejemplo de la guía vive como archivo en `examples/guide/` y se
 ejecuta así:
 
 ```bash
-cargo run -- run examples/guide/02-hola.fitz
+fitz run examples/guide/02-hola.fitz
 ```
 
 Si copiás y pegás a un archivo propio, también funciona — los ejemplos
@@ -186,89 +186,77 @@ escribimos y corremos el primer programa.
 
 Antes de escribir código, asegurate de poder ejecutarlo.
 
-### Requisitos
+### Instalar Fitz
 
-Fitz hoy es un intérprete escrito en Rust. Para correrlo necesitás:
+Tenés dos caminos. Elegí el que te quede más cómodo.
 
-- **Rust toolchain** (cargo + rustc). Si todavía no la tenés,
-  instalá con [rustup](https://rustup.rs). El repo pinea la versión
-  exacta de Rust en `rust-toolchain.toml`, así que rustup la baja sola
-  la primera vez que corras `cargo` adentro del proyecto — no hace
-  falta que coincida con la versión global de tu sistema.
-- **Git**, para clonar el repo.
+**Opción A — Binario pre-compilado (recomendado).** Cada release
+publica binarios listos para Linux x64/ARM, macOS ARM y Windows x64
+en la página de releases del repo:
 
-No hace falta nada más. No hay package manager de Fitz todavía (eso es
-Fase 9), así que el "intérprete" es directamente el ejecutable del
-proyecto.
+```
+https://github.com/Thegreekman76/fitz/releases/latest
+```
 
-### Bajar Fitz
+Bajá el `.tar.gz` (o `.zip` para Windows) de tu plataforma, descomprimí,
+y dejá el ejecutable `fitz` (o `fitz.exe`) en cualquier carpeta de tu
+`PATH`. A partir de ahí, `fitz` está disponible desde cualquier
+directorio del sistema.
+
+**Opción B — Compilar desde fuente.** Si querés la última versión
+de `main` o tu plataforma no tiene binario pre-compilado, necesitás
+el toolchain de Rust ([rustup](https://rustup.rs) si todavía no lo
+tenés). El repo pinea la versión exacta en `rust-toolchain.toml`, así
+que rustup la baja sola la primera vez:
 
 ```bash
 git clone https://github.com/Thegreekman76/fitz.git
 cd fitz
+cargo build --release
 ```
+
+El binario queda en `target/release/fitz` (o `fitz.exe` en Windows).
+Copialo a algún directorio del `PATH` o usá la ruta completa.
+
+### Verificar la instalación
+
+```bash
+fitz --version
+fitz --help
+```
+
+Si `fitz --help` lista los subcomandos (`run`, `build`, `check`,
+`new`, `test`, `fmt`, `dev`, `repl`, `lint`, `openapi`, `add`,
+`remove`, `update`), estás listo.
 
 ### Correr un programa
 
-La forma más simple es dejar que `cargo` compile y ejecute en un solo
-paso:
+Fitz tiene un intérprete (`fitz run`) que ejecuta tu archivo
+directamente, y un compilador (`fitz build`) que produce un binario
+nativo standalone. Empezamos con el intérprete:
 
 ```bash
-cargo run -- run examples/hello.fitz
+fitz run examples/hello.fitz
 ```
 
-Ese `--` separa los argumentos de cargo de los argumentos de Fitz. Lo
-que viene después (`run examples/hello.fitz`) se lo come el binario
-de Fitz: `run` es el subcomando para ejecutar un archivo, y después va
-la ruta al `.fitz`.
+(Si compilaste desde fuente, las rutas relativas son al directorio
+desde donde corrés `fitz`. Si bajaste el binario pre-compilado y
+querés correr los ejemplos del repo, podés clonarlo igual: `git clone
+https://github.com/Thegreekman76/fitz.git`.)
 
-Si querés un binario suelto que no dependa de cargo cada vez, podés
-compilarlo en modo release:
-
-```bash
-cargo build --release
-./target/release/fitz run examples/hello.fitz   # Linux/macOS
-.\target\release\fitz.exe run examples\hello.fitz  # Windows
-```
-
-### La salida actual
-
-Cuando ejecutás un programa hoy, vas a ver bastante más que la salida
-del propio programa. Fitz está en Fase 2, así que el binario imprime
-los pasos intermedios (los tokens del lexer y el árbol de sintaxis)
-antes de la ejecución real:
+La salida es solo la de tu programa, sin ruido:
 
 ```
-🏔️  Fitz v0.1.0
-   Ejecutando: examples/hello.fitz
-   (intérprete en construcción — Fase 2)
-
---- Tokens ---
-   1:1    Ident("print")
-   1:6    LParen
-   ...
-
---- AST ---
-  [0] Expr(...)
-  ...
-
---- Ejecución ---
 Hola desde Fitz 🏔️
-Hola, Patagonia!
 ```
-
-Lo que escribió tu programa aparece debajo de `--- Ejecución ---`.
-Todo lo de arriba es ruido útil para debuggear el intérprete, no para
-vos. Más adelante en el roadmap esa salida se va a esconder detrás de
-un flag `--debug`; por ahora convivimos con ella.
 
 ### Tu primer archivo
 
-Vamos a escribir un programa propio. Creá [examples/guide/02-hola.fitz](../examples/guide/02-hola.fitz)
-con este contenido (o copialo del repo):
+Vamos a escribir un programa propio. Creá un archivo `hola.fitz` en
+cualquier carpeta:
 
 ```fitz
-// 01-hola.fitz — El primer programa de la guía.
+// hola.fitz — El primer programa de la guía.
 // Muestra: print, asignación sin tipo, interpolación de strings.
 
 print("Hola desde Fitz 🏔️")
@@ -277,23 +265,43 @@ name = "Patagonia"
 print("Hola, {name}!")
 ```
 
-Lo corrés igual que cualquier otro:
+Y lo corrés:
 
 ```bash
-cargo run -- run examples/guide/02-hola.fitz
+fitz run hola.fitz
 ```
 
-Y vas a ver, al final:
+Salida:
 
 ```
 Hola desde Fitz 🏔️
 Hola, Patagonia!
 ```
 
+Este mismo ejemplo vive en [examples/guide/02-hola.fitz](../examples/guide/02-hola.fitz)
+si querés copiarlo del repo.
+
+### `fitz new` — arrancar un proyecto
+
+Para programas más serios (con tests, deps, varios módulos), Fitz
+trae su propio package manager (Fase 9.y). Un proyecto se crea con:
+
+```bash
+fitz new mi_app
+cd mi_app
+fitz run
+```
+
+`fitz new` arma la estructura mínima (`fitz.toml`, `src/main.fitz`,
+`.gitignore`, `git init` automático) y `fitz run` sin argumentos
+encuentra el `[bin].main` del manifest. El capítulo 16b cubre el
+package manager en detalle. Para los ejemplos de esta guía, archivos
+sueltos alcanzan.
+
 ### Anatomía línea por línea
 
 ```fitz
-// 01-hola.fitz — El primer programa de la guía.
+// hola.fitz — El primer programa de la guía.
 ```
 
 Comentarios de una línea con `//`. Para bloques largos también podés
@@ -331,11 +339,11 @@ capítulo de strings.
 Si el comando no encuentra el archivo:
 
 ```
-Error leyendo examples/guide/02-hola.fitz: ...
+Error leyendo hola.fitz: ...
 ```
 
-Revisá la ruta. Cargo corre con la raíz del proyecto como working
-directory, así que las rutas son relativas a la carpeta `fitz/`.
+Revisá la ruta. `fitz run` usa el directorio donde corriste el comando
+como working directory, así que las rutas son relativas a ahí.
 
 Si el archivo está pero hay un error de sintaxis, el intérprete corta
 con línea y columna del problema. Vamos a aprender a leer esos
@@ -7100,13 +7108,13 @@ más estricto (deuda 5b.1).
 Levantalo con `fitz run` (sin compilar):
 
 ```bash
-cargo run -- run examples/guide/17-http.fitz
+fitz run examples/guide/17-http.fitz
 ```
 
 O compilalo a binario nativo:
 
 ```bash
-cargo run -- build examples/guide/17-http.fitz
+fitz build examples/guide/17-http.fitz
 ./examples/guide/17-http
 ```
 
@@ -8101,18 +8109,29 @@ ya tenés en tu stack.
 
 ### 21.1 Setup
 
-La interop con Python es **opt-in**: el binario `fitz` default NO
-linkea libpython. Para activarla, compilá `fitz` con la feature
-`python`:
+La interop con Python es **opt-in**: el binario `fitz` pre-compilado
+de los releases NO linkea libpython (cero costo si no necesitás la
+interop). Para activarla tenés que compilar `fitz` desde fuente con
+la feature `python`:
 
 ```bash
-cargo build --features python
+git clone https://github.com/Thegreekman76/fitz.git
+cd fitz
+cargo build --release --features python
+# El binario queda en target/release/fitz (copialo a tu PATH si querés)
 ```
 
-Eso le pide a PyO3 que linkee CPython 3.10+ al binario `fitz`.
-Los programas Fitz que **no** usan `from python import` siguen
-produciendo binarios libres como en Fase 5b (cero costo si no
-necesitás la interop).
+O, si preferís no instalarlo global, podés usar `cargo run` directo
+contra el repo durante desarrollo:
+
+```bash
+cargo run --release --features python -- run mi_app.fitz
+```
+
+PyO3 linkea CPython 3.10+ al binario. Los programas Fitz que **no**
+usan `from python import` siguen produciendo binarios libres como en
+Fase 5b. Los ejemplos del resto del capítulo asumen que tenés un
+`fitz` con la feature `python` activa en el `PATH`.
 
 **Política de venvs**: el patrón estándar Python — activá tu venv
 con `source venv/bin/activate` (o equivalente Windows) antes de
@@ -8348,7 +8367,7 @@ y asume Python instalado en la máquina destino (igual que el
 binario `fitz` mismo necesita CPython al boot).
 
 ```bash
-cargo run --features python -- build mi_app.fitz
+fitz build mi_app.fitz
 ./mi_app  # requiere Python 3.10+ en el PATH
 ```
 
@@ -8397,11 +8416,11 @@ Python encuentre `db.py` y `models.py`):
 ```bash
 # Linux/macOS:
 PYTHONPATH=examples/guide/21-python-crud \
-  cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+  fitz run examples/guide/21-python-crud/app.fitz
 
 # Windows PowerShell:
 $env:PYTHONPATH = "examples\guide\21-python-crud"
-cargo run --features python -- run examples/guide/21-python-crud/app.fitz
+fitz run examples/guide/21-python-crud/app.fitz
 ```
 
 El server arranca en `127.0.0.1:3000`. Probalo con curl:
