@@ -14738,9 +14738,14 @@ fn field_eq_expr(
         // son el mismo objeto" es lo que ya hace `PartialEq` del
         // newtype (por puntero). Dentro de un field eq derivado, dos
         // PyObjects distintos siempre dan `false`.
-        Type::Function { .. } | Type::Future(_) | Type::Any | Type::PyAny => {
-            Ok("false".to_string())
-        }
+        // Fase 9.w.2: `WsConn<T>` tampoco es comparable — el conn lleva
+        // handles a streams Mutex<>'eados, dos conns distintos jamás
+        // son "iguales" estructuralmente.
+        Type::Function { .. }
+        | Type::Future(_)
+        | Type::WsConn(_)
+        | Type::Any
+        | Type::PyAny => Ok("false".to_string()),
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
         // implementa PartialEq para tuples si cada slot lo hace,
         // así que `lhs == rhs` funciona directamente para tipos
@@ -15050,6 +15055,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Map(_, _) => "Map<...>",
         Type::Result { .. } => "Result<...>",
         Type::Future(_) => "Future<...>",
+        Type::WsConn(_) => "WsConn<...>",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
@@ -15075,6 +15081,7 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
         Type::Result { ok: inner, err: _ } => format!("Result<{}>", display_type(inner, env)),
         Type::Future(inner) => format!("Future<{}>", display_type(inner, env)),
+        Type::WsConn(inner) => format!("WsConn<{}>", display_type(inner, env)),
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
         Type::Function { params, ret } => {

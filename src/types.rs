@@ -74,6 +74,17 @@ pub enum Type {
     /// Nullable). Introducido en Fase 6.2.
     Future(Box<Type>),
 
+    /// Fase 9.w.2 — `WsConn<T>` conexión WebSocket tipada. `T` es el
+    /// tipo de mensaje (cualquier tipo que serialice a JSON: primitivo,
+    /// `type` custom, List/Map, etc.). Aridad fija 1, built-in genérico
+    /// (paralelo a Future/Result/List). Sólo aparece como param de
+    /// handlers `@ws("/path")` — el runtime construye el `Value::WsConn`
+    /// tras el upgrade HTTP→WS y lo inyecta. Métodos paramétricos:
+    /// `recv: () -> Result<T>`, `send: (T) -> Result<Null>`,
+    /// `broadcast: (T) -> Result<Null>` (a todos los conn del endpoint,
+    /// incluyendo el sender), `close: () -> Null`.
+    WsConn(Box<Type>),
+
     /// Tipo declarado por el usuario (`type User { ... }`) o
     /// importado. La identidad va por `TypeId`.
     Nominal(TypeId),
@@ -159,6 +170,7 @@ impl Type {
                 _ => format!("Result<{}, {}>", t.display(env), e.display(env)),
             },
             Type::Future(t) => format!("Future<{}>", t.display(env)),
+            Type::WsConn(t) => format!("WsConn<{}>", t.display(env)),
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
             Type::Function { params, ret } => {
@@ -552,6 +564,12 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             expect_arity(name, 1, args)?;
             let inner = resolve_type_expr(&args[0], env)?;
             Ok(Type::Future(Box::new(inner)))
+        }
+        "WsConn" => {
+            // Fase 9.w.2 — `WsConn<T>` con aridad fija 1.
+            expect_arity(name, 1, args)?;
+            let inner = resolve_type_expr(&args[0], env)?;
+            Ok(Type::WsConn(Box::new(inner)))
         }
         _ => {
             // Nominal declarado por el usuario.
@@ -2598,6 +2616,16 @@ fn infer_method_call(
         // de iteradores que tiene sentido (enumerate/zip/chain) + `len`.
         // El evaluator materializa el Range a List<Int> y delega.
         Type::Range => Some(infer_range_method(ctx, method, args_ty, span)),
+        // Fase 9.w.2 — `WsConn<T>`. Métodos paramétricos:
+        // `recv() -> Result<T>` (Err si conn cerrada),
+        // `send(msg: T) -> Result<Null>` (Err si send falló),
+        // `broadcast(msg: T) -> Result<Null>` (a todos los conn del
+        // endpoint, incluyendo el sender),
+        // `close() -> Null` (cierra la conn).
+        Type::WsConn(t) => {
+            let t = (**t).clone();
+            Some(infer_wsconn_method(ctx, &t, method, args_ty, span))
+        }
         // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
         Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
         Type::Float => Some(infer_float_method(ctx, method, args_ty, span)),
@@ -3792,6 +3820,88 @@ fn check_binary_callback(
     }
 }
 
+/// Fase 9.w.2 — métodos sobre `WsConn<T>`. Paramétricos sobre `T`:
+/// el tipo de mensaje del WebSocket. `T` se serializa a JSON
+/// automático en el wire.
+///
+/// Métodos:
+///   - `recv() -> Result<T>` — bloquea (async) hasta que llegue un
+///     frame. `Err(Str)` si la conn se cerró o el frame no parsea
+///     contra `T`.
+///   - `send(msg: T) -> Result<Null>` — envía un frame text con
+///     `T` serializado. `Err` si la conn está cerrada.
+///   - `broadcast(msg: T) -> Result<Null>` — envía a TODOS los
+///     conns vivos del endpoint, **incluyendo** el sender
+///     (convención Socket.IO/Phoenix). `Err` si serialización
+///     falla; conns individuales caídos se ignoran silenciosamente.
+///   - `close() -> Null` — cierra la conn explícitamente.
+///
+/// Todos retornan `Result<...>` excepto `close` (sin recovery
+/// path significativo: si ya está cerrada, no pasa nada).
+fn infer_wsconn_method(
+    ctx: &mut CheckCtx,
+    t: &Type,
+    method: &str,
+    args_ty: &[Type],
+    span: Span,
+) -> Type {
+    match method {
+        "recv" => {
+            check_method_arity(ctx, "recv", args_ty, 0, span);
+            Type::Result {
+                ok: Box::new(t.clone()),
+                err: Box::new(Type::Str),
+            }
+        }
+        "send" => {
+            check_method_arity(ctx, "send", args_ty, 1, span);
+            if let Some(arg) = args_ty.first() {
+                if !is_compatible(arg, t) {
+                    ctx.error_at(span, format!(
+                        "el método `WsConn<{}>.send(msg)` espera un argumento de tipo `{}`, recibió `{}`",
+                        t.display(ctx.types),
+                        t.display(ctx.types),
+                        arg.display(ctx.types),
+                    ));
+                }
+            }
+            Type::Result {
+                ok: Box::new(Type::Null),
+                err: Box::new(Type::Str),
+            }
+        }
+        "broadcast" => {
+            check_method_arity(ctx, "broadcast", args_ty, 1, span);
+            if let Some(arg) = args_ty.first() {
+                if !is_compatible(arg, t) {
+                    ctx.error_at(span, format!(
+                        "el método `WsConn<{}>.broadcast(msg)` espera un argumento de tipo `{}`, recibió `{}`",
+                        t.display(ctx.types),
+                        t.display(ctx.types),
+                        arg.display(ctx.types),
+                    ));
+                }
+            }
+            Type::Result {
+                ok: Box::new(Type::Null),
+                err: Box::new(Type::Str),
+            }
+        }
+        "close" => {
+            check_method_arity(ctx, "close", args_ty, 0, span);
+            Type::Null
+        }
+        _ => {
+            ctx.error_at(span, format!(
+                "el tipo `WsConn<{}>` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
+                t.display(ctx.types),
+                method,
+            ));
+            Type::Any
+        }
+    }
+}
+
 /// Mini-tanda Bytes — métodos del primitivo `Bytes`.
 fn infer_bytes_method(
     ctx: &mut CheckCtx,
@@ -4790,16 +4900,25 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 None => Type::Any,
             };
             // "Contexto HTTP" para el chequeo de `Stmt::ReturnStatus`:
-            // handlers HTTP (`@get`/`@post`/`@put`/`@delete`) y fns
-            // referenciadas por `@middleware(name)` en otro FnDef.
+            // handlers HTTP (`@get`/`@post`/`@put`/`@delete`/`@ws`) y
+            // fns referenciadas por `@middleware(name)` en otro FnDef.
             // El pre-scan llena `ctx.middleware_fn_names` antes del walk.
+            // Fase 9.w.2: `@ws("/path")` también cuenta como HTTP-like —
+            // permite `return <status> { ... }` antes del upgrade.
             let is_http_handler = decorators.iter().any(|d| {
-                matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
+                matches!(
+                    d.name.as_str(),
+                    "get" | "post" | "put" | "delete" | "ws"
+                )
             }) || ctx.middleware_fn_names.contains(fn_name);
             // Fase 9.w.1 — validar `@authenticated`/`@admin` contra el
             // `@auth_provider` recolectado pre-walk. Errores van a
             // `ctx.errors`; no interrumpe el chequeo del body.
             check_auth_decorators(ctx, fn_name, params, decorators, *fn_span);
+            // Fase 9.w.2 — validar `@ws(...)` handlers: async fn que
+            // recibe exactamente un `WsConn<T>` + (opcional) un `user:
+            // User` si tiene `@authenticated`/`@admin`.
+            check_ws_handler(ctx, fn_name, params, *is_async, decorators, *fn_span);
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
@@ -5380,9 +5499,13 @@ fn check_auth_decorators(
             ));
             continue;
         }
-        // 2) Solo sobre handlers HTTP.
+        // 2) Solo sobre handlers HTTP (incluye `@ws` desde Fase 9.w.2 —
+        // el wrapper de auth corre antes del upgrade HTTP→WS).
         let is_handler = decorators.iter().any(|d| {
-            matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
+            matches!(
+                d.name.as_str(),
+                "get" | "post" | "put" | "delete" | "ws"
+            )
         });
         if !is_handler {
             ctx.errors.push(FitzError::new(
@@ -5390,7 +5513,7 @@ fn check_auth_decorators(
                 fn_span.line,
                 fn_span.column,
                 format!(
-                    "@{} sobre fn '{}': solo se aplica a handlers HTTP (`@get`/`@post`/`@put`/`@delete`).",
+                    "@{} sobre fn '{}': solo se aplica a handlers HTTP (`@get`/`@post`/`@put`/`@delete`/`@ws`).",
                     kind, fn_name
                 ),
             ));
@@ -5469,6 +5592,129 @@ fn collect_middleware_fn_names(ctx: &mut CheckCtx, program: &Program) {
                 }
             }
         }
+    }
+}
+
+/// Fase 9.w.2 — Valida el shape de un handler `@ws("/path")`:
+/// - Decorator con exactamente 1 arg `Str` (el path); sin kwargs.
+/// - El handler debe ser `async fn` (los WS naturalmente son async
+///   — `recv().await`/`send().await`).
+/// - Debe declarar exactamente 1 param de tipo `WsConn<T>` (T
+///   concreto, no `Any`), opcionalmente más 1 param de tipo del
+///   `@auth_provider` si hay `@authenticated`/`@admin` apilado.
+/// - Path no requiere validación de query/path-params (a diferencia
+///   de los handlers HTTP), pero sí debe parsear como Str literal.
+///
+/// Errores van a `ctx.errors`. No interrumpe el chequeo del body.
+fn check_ws_handler(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    is_async: bool,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let ws_deco = match decorators.iter().find(|d| d.name == "ws") {
+        Some(d) => d,
+        None => return,
+    };
+    // 1) `@ws` debe tener exactamente 1 arg Str (el path) y sin
+    //    kwargs en el MVP. Sintaxis: `@ws("/chat")`.
+    if ws_deco.args.len() != 1 || !ws_deco.kwargs.is_empty() {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@ws sobre fn '{}': espera exactamente 1 argumento (path: Str). Sintaxis: `@ws(\"/chat\")`.",
+                fn_name
+            ),
+        ));
+        return;
+    }
+    match &ws_deco.args[0] {
+        Expr::Str(_, _) => {}
+        _ => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@ws sobre fn '{}': el argumento debe ser un Str literal (path).",
+                    fn_name
+                ),
+            ));
+            return;
+        }
+    }
+    // 2) async fn obligatorio — `recv()`/`send()` son async por
+    //    naturaleza.
+    if !is_async {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@ws sobre fn '{}': debe declararse `async fn` — los métodos del `WsConn` (`recv`/`send`/`broadcast`) son async.",
+                fn_name
+            ),
+        ));
+    }
+    // 3) Exactamente 1 param `WsConn<T>` con T concreto + opcional
+    //    1 param User si hay `@authenticated`/`@admin`.
+    let has_auth = decorators
+        .iter()
+        .any(|d| matches!(d.name.as_str(), "authenticated" | "admin"));
+    let expected_params = if has_auth { 2 } else { 1 };
+    if params.len() != expected_params {
+        let extra = if has_auth {
+            " (1 `WsConn<T>` + 1 param User del `@auth_provider`)"
+        } else {
+            " (1 `WsConn<T>`)"
+        };
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@ws sobre fn '{}': espera {} param(s){}, recibió {}.",
+                fn_name,
+                expected_params,
+                extra,
+                params.len(),
+            ),
+        ));
+        return;
+    }
+    // Identificar el param WsConn y validar shape.
+    let mut wsconn_params = 0;
+    for p in params {
+        let pty = ann_to_type(p.type_.as_ref(), ctx.types);
+        if let Type::WsConn(inner) = &pty {
+            wsconn_params += 1;
+            if matches!(inner.as_ref(), Type::Any) {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    fn_span.line,
+                    fn_span.column,
+                    format!(
+                        "@ws sobre fn '{}': el `WsConn<T>` exige `T` concreto (no `Any`). Anotá el tipo de mensaje: `WsConn<Str>`, `WsConn<ChatMsg>`, etc.",
+                        fn_name
+                    ),
+                ));
+            }
+        }
+    }
+    if wsconn_params != 1 {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@ws sobre fn '{}': debe declarar exactamente 1 param de tipo `WsConn<T>` (tiene {}). Ej: `fn {}(conn: WsConn<ChatMsg>) {{ ... }}`.",
+                fn_name, wsconn_params, fn_name,
+            ),
+        ));
     }
 }
 
@@ -10601,5 +10847,145 @@ print(total)
                    @get(\"/x\")\n\
                    fn h(user: User) -> Str { return \"ok\" }";
         assert_auth_err(src, "campo `role: Str`");
+    }
+
+    // ----------------------------------------------------------------
+    // Fase 9.w.2.a — WebSockets tipados: tipo `WsConn<T>` + checker
+    // ----------------------------------------------------------------
+
+    #[test]
+    fn wsconn_se_resuelve_como_generico_built_in() {
+        // `WsConn<Str>` reusa `TypeExpr::Generic`. Aridad fija 1.
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic {
+            name: "WsConn".into(),
+            args: vec![TypeExpr::Named("Str".into())],
+        };
+        let ty = resolve_type_expr(&te, &env).expect("WsConn<Str>");
+        assert_eq!(ty, Type::WsConn(Box::new(Type::Str)));
+    }
+
+    #[test]
+    fn wsconn_sin_argumento_es_error_de_aridad() {
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic { name: "WsConn".into(), args: vec![] };
+        let err = resolve_type_expr(&te, &env).expect_err("aridad 0");
+        assert!(matches!(err.kind, ErrorKind::TypeError));
+    }
+
+    #[test]
+    fn wsconn_display_muestra_inner() {
+        let env = TypeEnv::new();
+        let ty = Type::WsConn(Box::new(Type::Int));
+        assert_eq!(ty.display(&env), "WsConn<Int>");
+    }
+
+    #[test]
+    fn ws_handler_minimal_pasa_checker() {
+        // Handler mínimo: `async fn` + `@ws("/chat")` + WsConn<Str>.
+        let src = "@ws(\"/chat\")\n\
+                   async fn echo(conn: WsConn<Str>) -> Null {\n\
+                       match conn.recv() {\n\
+                           Ok(msg) => match conn.send(msg) {\n\
+                               Ok(_) => return null,\n\
+                               Err(_) => return null,\n\
+                           },\n\
+                           Err(_) => return null,\n\
+                       }\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_handler_sin_async_es_error() {
+        let src = "@ws(\"/chat\")\n\
+                   fn echo(conn: WsConn<Str>) -> Null { return null }";
+        assert_auth_err(src, "async fn");
+    }
+
+    #[test]
+    fn ws_handler_sin_param_wsconn_es_error() {
+        let src = "@ws(\"/chat\")\n\
+                   async fn echo() -> Null { return null }";
+        assert_auth_err(src, "1 param");
+    }
+
+    #[test]
+    fn ws_handler_wsconn_con_t_concreto_compila() {
+        // `WsConn<ChatMsg>` con tipo custom. El checker debe aceptarlo.
+        let src = "type ChatMsg { user: Str, text: Str }\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<ChatMsg>) -> Null { return null }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_decorator_sin_arg_path_es_error() {
+        let src = "@ws()\n\
+                   async fn echo(conn: WsConn<Str>) -> Null { return null }";
+        assert_auth_err(src, "1 argumento");
+    }
+
+    #[test]
+    fn ws_method_recv_devuelve_result_t() {
+        // `conn.recv()` debe tipar como `Result<T>` donde T es el
+        // parámetro del WsConn.
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>) -> Null {\n\
+                       let r: Result<Str> = conn.recv()\n\
+                       return null\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_method_send_con_tipo_distinto_es_error() {
+        // `conn.send(msg: T)` debe rechazar args de tipo distinto a T.
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>) -> Null {\n\
+                       let _r = conn.send(42)\n\
+                       return null\n\
+                   }";
+        assert_auth_err(src, "WsConn<Str>.send");
+    }
+
+    #[test]
+    fn ws_method_broadcast_devuelve_result_null() {
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>) -> Null {\n\
+                       let r: Result<Null> = conn.broadcast(\"hola\")\n\
+                       return null\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_method_desconocido_es_error() {
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Str>) -> Null {\n\
+                       let _ = conn.zzz()\n\
+                       return null\n\
+                   }";
+        assert_auth_err(src, "no tiene el método `zzz`");
+    }
+
+    #[test]
+    fn ws_handler_con_authenticated_acepta_2_params() {
+        // `@authenticated @ws("/me-chat")` con (WsConn<Str>, user: User).
+        let src = "type User { id: Int, name: Str }\n\
+                   @auth_provider\n\
+                   fn check(h: Map<Str, Str>) -> Result<User> { return Err(\"x\") }\n\
+                   @authenticated\n\
+                   @ws(\"/me-chat\")\n\
+                   async fn h(conn: WsConn<Str>, user: User) -> Null { return null }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_handler_wsconn_any_es_error() {
+        // `WsConn<Any>` no se acepta — T debe ser concreto.
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Any>) -> Null { return null }";
+        assert_auth_err(src, "T` concreto");
     }
 }

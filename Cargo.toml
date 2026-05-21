@@ -45,8 +45,18 @@ serde_json = { version = "1", features = ["preserve_order"] }
 # `mpsc::UnboundedSender` + `oneshot` por request, evitando bloquear
 # el reactor. El intérprete vive en un thread std propio porque
 # `Value` usa `Rc<RefCell<>>` (no es `Send`).
-axum = "0.8"
+# Fase 9.w.2 — activamos feature `ws` para WebSockets nativos
+# (`@ws("/path")` + tipo `WsConn<T>`). axum 0.8 trae el extractor
+# `WebSocketUpgrade` + `WebSocket` con split en (sink, stream)
+# arriba de tokio-tungstenite. Sin la feature, axum default es
+# stateless HTTP only.
+axum = { version = "0.8", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
+# Fase 9.w.2 — combinadores para split del WebSocket en sink+stream
+# y dispatch de Ping/Pong/Close. `futures-util` ya viene como
+# transitiva de axum, pero lo declaramos explícito para acceder a
+# `StreamExt::next` y `SinkExt::send` desde el handler runtime.
+futures-util = { version = "0.3", default-features = false, features = ["std"] }
 
 # Fase 6.4 — `#[async_recursion]` macro para que las async fns recursivas
 # del evaluator (eval_expr/eval_stmt/eval_call/eval_block) compilen sin
