@@ -94,7 +94,13 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          key: release-${{ matrix.vsce-target }}
+          # Cache key incluye `matrix.os` para invalidar la cache
+          # cuando cambia el runner (e.g. ubuntu-latest → ubuntu-22.04
+          # con GLIBC distinta). Sin esto, binarios cached como `cross`
+          # del runner anterior fallan con "GLIBC_2.39 not found" en el
+          # nuevo runner. Sufijo `v2` permite invalidación manual futura
+          # incrementando el número.
+          key: release-${{ matrix.vsce-target }}-${{ matrix.os }}-v2
 
       # Linux ARM64 cross-compile (matrix.cross == true)
       - name: Install cross (Linux ARM64)

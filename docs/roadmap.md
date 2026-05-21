@@ -2310,7 +2310,7 @@ nativo punto".
 > nueva: 6.1 AST/parser, 6.2 checker, 6.3 builtin `sleep`, 6.4 evaluator
 > async, 6.5 bridge HTTP eliminado, 6.6 codegen, 6.7 guía. Los párrafos
 > siguientes mantienen los IDs originales del documento; los estados
-> reales por sub-paso están en CLAUDE.md y los mensajes de commit.
+> reales por sub-paso están en los mensajes de commit.
 
 #### 6.1 — Sintaxis: `await` postfix + `Future<T>` en AST/parser
 **CERRADO** — base sintáctica.
@@ -2655,8 +2655,6 @@ as b` funcionan en `fitz run` y `fitz build` bit-a-bit.
   `docs/deudas-post-5b.md` (M1/M2 + F4 + F10 + nuevo F18 para
   aliasing).
 - Entrada `v0.8.1 — Mini-tanda PreF8` sumada a `CHANGELOG.md`.
-- `CLAUDE.md` actualizado con el cierre (entrada paralela al
-  cierre de F17, sub-sección "Mini-tanda PreF8").
 - Smoke completo verde: 1172 unit + 79 compile_e2e + 3 openapi_e2e.
   Clippy `-D warnings` limpio. Working tree limpio post-commits.
 - Bit-a-bit `fitz run` ↔ `fitz build` validado sobre los ejemplos
@@ -3146,7 +3144,7 @@ con el roadmap original):
   (`fn round_trip(xs) -> Result<List<Int>> { dumps?; loads? }`).
   Validado bit-a-bit. CHANGELOG v0.8.4, roadmap marca 8.3 a
   CERRADA, deudas-post-5b nota de cierre paralela a las de
-  8.1/8.2/F17, README + CLAUDE refresh.
+  8.1/8.2/F17, README refresh.
 
 **Criterio de éxito** (del roadmap, cumplido bit-a-bit):
 ```fitz
@@ -3294,8 +3292,8 @@ con el roadmap):
   + comentario explícito sobre el caso "field requerido
   faltante" que aborta por diseño. Validado bit-a-bit. CHANGELOG
   v0.8.5, roadmap.md actualiza Fase 8.4 a CERRADA con sub-pasos
-  detallados, deudas-post-5b.md nota de cierre paralela, CLAUDE
-  + README refresh.
+  detallados, deudas-post-5b.md nota de cierre paralela, README
+  refresh.
 
 **Criterio de éxito** (del roadmap, cumplido bit-a-bit):
 
@@ -3436,7 +3434,7 @@ User, Order`.
   JSON malformado propagado como `Result::Err`. Validado bit-a-bit
   con `cargo run --features python -- run examples/py-types/usage.fitz`.
   Cierre formal (CHANGELOG v0.8.6, roadmap a CERRADA, deudas
-  nota de cierre, CLAUDE + README refresh).
+  nota de cierre, README refresh).
 
 **Criterio de éxito** (del roadmap, cumplido bit-a-bit):
 
@@ -3587,7 +3585,7 @@ Fitz nativos.
   asyncio (heredado de 8.3), trade-off baseline blocking y por
   qué no hay caso runnable de excepción asyncio (requiere
   helper Python externo). Validado bit-a-bit. Cierre formal
-  (CHANGELOG v0.8.7, roadmap, deudas, CLAUDE, README).
+  (CHANGELOG v0.8.7, roadmap, deudas, README).
 
 **Criterio de éxito** (del roadmap, cumplido bit-a-bit con
 adaptación pragmática — el caso textual del roadmap usa
@@ -3751,8 +3749,7 @@ clippy `-D warnings` limpio en ambos modos; paridad bit-a-bit
     Instance, bridge async con patrón canónico). Validado
     bit-a-bit `fitz run` ↔ `fitz build` + binario standalone.
   - CHANGELOG.md v0.8.8, roadmap actualizado, deudas-post-5b
-    marca **F19 como CERRADO** con nota detallada, README +
-    CLAUDE refresh.
+    marca **F19 como CERRADO** con nota detallada, README refresh.
 
 **Decisiones técnicas tomadas al arrancar**:
 - **Alcance acotado (codegen sí, bundling no)**: F19 era la
@@ -3880,8 +3877,8 @@ clippy `-D warnings` limpio en ambos modos; paridad bit-a-bit
 
 - **8.8.3 — Cierre formal**: CHANGELOG v0.8.9, este roadmap
   marca Fase 8.8 CERRADA + sección de cierre de Fase 8 entera,
-  deudas-post-5b refresh con nota final, README + CLAUDE
-  refresh para reflejar Fase 8 completa.
+  deudas-post-5b refresh con nota final, README refresh para
+  reflejar Fase 8 completa.
 
 **Limitaciones documentadas** (honesta) en el ejemplo + cap:
 - Iterar `List<Any>` opaca de Python con coerción por item a
@@ -4137,8 +4134,8 @@ OpenAPI 3.1 + UI embebida.
 ### Decisiones de diseño tomadas
 
 1. **Built-in en el runtime HTTP, no librería externa**. Coherente
-   con "HTTP es parte del lenguaje" (decisión de diseño 1 de
-   CLAUDE.md). Sin imports, sin configuración — viene gratis.
+   con "HTTP es parte del lenguaje" (decisión de diseño 1 del
+   proyecto). Sin imports, sin configuración — viene gratis.
 2. **Scalar > Redoc > Swagger UI**. Scalar es la opción más
    moderna (mantenida activamente, mejor look default, más
    liviana). Redoc es alternativa razonable; Swagger UI queda
@@ -4582,7 +4579,7 @@ API recovering es para tooling externo.
 - **Smoke `GUIDE_EXAMPLES_COMPILE`**: 13 ejemplos compilables de
   la guía siguen verdes.
 - **Docs**: CHANGELOG v0.9.0, este roadmap, `deudas-post-5b.md`
-  con F15 marcado CERRADO, README + CLAUDE refresh.
+  con F15 marcado CERRADO, README refresh.
 
 #### Decisiones técnicas tomadas
 
@@ -4705,7 +4702,7 @@ expresión?" sin re-correr el checker por cada request.
 - **Docs**: CHANGELOG v0.9.1, este roadmap (Fase 9.0 — F16
   documentada paso a paso, Fase 9.0 marcada CERRADA entera),
   `docs/deudas-post-5b.md` con F16 marcado CERRADO + nota
-  paralela a F15, README + CLAUDE refresh.
+  paralela a F15, README refresh.
 
 #### Decisiones técnicas tomadas
 
@@ -6385,8 +6382,8 @@ Test runner integrado al lenguaje. Tres sub-pasos cerrados:
   `delete`/`server`.
 - CHANGELOG v0.9.16, este archivo (este bloque), `docs/deudas-
   post-5b.md` (bloque "Fase 9.z.2 entera CERRADA"), README,
-  CLAUDE, `docs/syntax-spec.md` (sección "Testing" pasa de
-  "futuro" a "implementado").
+  `docs/syntax-spec.md` (sección "Testing" pasa de "futuro" a
+  "implementado").
 
 **Decisiones tomadas durante 9.z.2**:
 - `panic(msg)` (mencionado en el ejemplo del syntax-spec) NO entra
@@ -6802,8 +6799,7 @@ abajo (no bloquea uso real).
   ~100 líneas + suma a `GUIDE_EXAMPLES_COMPILE` smoke + README
   emphasis del diferencial (tabla feature + footnote ♦ + bullet
   en "Estado del proyecto" + bullet en "Qué funciona hoy") +
-  cierre formal (CHANGELOG v0.9.21, esta entrada, deudas,
-  CLAUDE).
+  cierre formal (CHANGELOG v0.9.21, esta entrada, deudas).
 
 **Decisiones técnicas del MVP** (más allá del lean original):
 
@@ -7539,8 +7535,8 @@ sub-pasos:
   handler `sleep(1000).await`; validado a mano con curl + xargs:
   5 requests concurrentes en **1.2s** vs 5 en serie en **5.3s**
   (pre-F17 ambos eran ~5s). Smoke `GUIDE_EXAMPLES_COMPILE`
-  incluye el ejemplo. CLAUDE.md + roadmap + deudas-post-5b
-  actualizados con el cierre. README.md ajustado para reflejar
+  incluye el ejemplo. Roadmap + deudas-post-5b actualizados con el
+  cierre. README.md ajustado para reflejar
   paralelismo HTTP real.
 
 **Total al cierre**: 1153 unit + 74 E2E verdes, clippy
