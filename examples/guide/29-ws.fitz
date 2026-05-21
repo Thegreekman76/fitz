@@ -1,0 +1,149 @@
+// Cap 29 — WebSockets tipados.
+//
+// Un servidor de chat completo: login HTTP que emite JWT, canal
+// WebSocket protegido por `@authenticated` que broadcastea mensajes
+// tipados a TODOS los clientes conectados. AsyncAPI 3.0 + heartbeat
+// automático + paridad bit-a-bit `fitz run` ↔ `fitz build` — todo
+// sin un solo `cargo add` ni `pip install`.
+//
+// Probar:
+//
+//   1. fitz run examples/guide/29-ws.fitz     # o fitz build
+//
+//   2. # Obtener JWT (Ada admin / Alan user):
+//      curl -X POST localhost:43929/login \
+//           -H 'Content-Type: application/json' \
+//           -d '{"email":"ada@example.com","password":"secret-ada-123"}'
+//      # → {"token":"eyJ..."}
+//
+//   3. # Conectar 2 clientes WS distintos (en dos terminales o
+//      # con websocat/wscat), reemplazando <TOKEN>:
+//      wscat -c "ws://localhost:43929/chat" \
+//            -H "Authorization: Bearer <TOKEN>"
+//      # Cualquier mensaje JSON enviado se broadcastea a TODOS los
+//      # clientes: {"user":"Ada","text":"hola"}
+//
+//   4. # Mirar AsyncAPI 3.0 autogenerado:
+//      curl localhost:43929/asyncapi.json
+//      # → channels: /chat con messages tipados (ChatMsg) +
+//      #   operations receive/send + securitySchemes bearerAuth.
+
+@server(43929, ws_heartbeat_secs=30)
+fn main() => 0
+
+// Tipos del dominio. `ChatMsg` viaja por el WS — el marshaling JSON
+// automático lo serializa/deserializa en cada frame text sin que el
+// usuario escriba nada.
+type User { id: Int, email: Str, name: Str, role: Str }
+type ChatMsg { user: Str, text: Str }
+type Credentials { email: Str, password: Str }
+type LoginResponse { token: Str }
+
+// JWT secret (en producción: env var / secret store).
+let SECRET = "demo-secret-cambiame-en-prod-aaaaaaaa"
+
+// "Base de datos" mínima — hashes generados al boot.
+let ADA_HASH = hash.password("secret-ada-123")
+let ALAN_HASH = hash.password("secret-alan-456")
+
+fn find_user(email: Str) -> Result<User> {
+    if (email == "ada@example.com") {
+        return Ok(User { id: 1, email: email, name: "Ada", role: "admin" })
+    }
+    if (email == "alan@example.com") {
+        return Ok(User { id: 2, email: email, name: "Alan", role: "user" })
+    }
+    return Err("usuario no encontrado")
+}
+
+fn stored_hash(email: Str) -> Result<Str> {
+    if (email == "ada@example.com") { return Ok(ADA_HASH) }
+    if (email == "alan@example.com") { return Ok(ALAN_HASH) }
+    return Err("usuario no encontrado")
+}
+
+// Provider de auth — singleton. Corre antes de CADA request
+// `@authenticated` (HTTP o WS): el handshake WS pasa por acá, y
+// si el token está mal, el cliente recibe 401 ANTES del upgrade.
+@auth_provider
+fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth: Str = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta header Authorization"),
+    }
+    let parts = auth.split(" ")
+    if (parts.len() != 2) { return Err("Authorization debe ser 'Bearer <token>'") }
+    if (parts[0] != "Bearer") { return Err("scheme debe ser Bearer") }
+    let claims = jwt.decode(parts[1], SECRET)?
+    return find_user(claims["email"])
+}
+
+// Login HTTP — único endpoint público. Verifica password con
+// `hash.verify` (Argon2id), emite JWT firmado con HS256.
+@post("/login")
+fn login(creds: Credentials) -> LoginResponse {
+    let user: User = match find_user(creds.email) {
+        Ok(u) => u,
+        Err(_) => return 401 { "error": "credenciales inválidas" },
+    }
+    let hashed: Str = match stored_hash(creds.email) {
+        Ok(h) => h,
+        Err(_) => return 401 { "error": "credenciales inválidas" },
+    }
+    if (not hash.verify(creds.password, hashed)) {
+        return 401 { "error": "credenciales inválidas" }
+    }
+    let claims = { "email": user.email, "role": user.role }
+    let token = jwt.encode(claims, SECRET)
+    return LoginResponse { token: token }
+}
+
+// Canal de chat — `@authenticated @ws("/chat")` apilados. El runtime:
+//   1. Ejecuta `check_token` con los headers del handshake.
+//   2. Si pasa, hace upgrade HTTP→WS y llama a `chat(conn, user)`.
+//   3. Cada frame text se deserializa a `ChatMsg` automático.
+//   4. `conn.broadcast(msg)` envía a TODOS los conn vivos del
+//      endpoint, incluido el sender (convención Socket.IO/Phoenix).
+//   5. El heartbeat ping cada 30s (default) mantiene viva la conn
+//      a través de proxies/CDNs idle-killers.
+@authenticated
+@ws("/chat")
+async fn chat(conn: WsConn<ChatMsg>, user: User) -> Null {
+    // Mensaje de bienvenida solo al sender (no broadcast).
+    let welcome = ChatMsg { user: "system", text: "bienvenido {user.name}" }
+    let _ = conn.send(welcome)
+
+    // Loop principal: recv → broadcast con el username del sender.
+    loop {
+        match conn.recv() {
+            Ok(msg) => {
+                // Forzamos el user.name del JWT en el broadcast
+                // (no confiamos en lo que mande el cliente).
+                let stamped = ChatMsg { user: user.name, text: msg.text }
+                let _ = conn.broadcast(stamped)
+            }
+            Err(_) => {
+                // Conn cerrada o frame inválido → salida limpia.
+                return null
+            }
+        }
+    }
+    return null
+}
+
+// Cómo funciona end-to-end (qué hace falta para producción real):
+//
+//   - **OpenAPI** auto-generado en `/openapi.json` documenta el
+//     endpoint `POST /login` (Scalar UI en `/docs`).
+//   - **AsyncAPI 3.0** auto-generado en `/asyncapi.json` documenta
+//     el canal `/chat` con el schema de `ChatMsg` y el requirement
+//     de bearer token. Consumible con tooling AsyncAPI Studio
+//     (asyncapi.com/studio) o generadores de clientes.
+//   - **Heartbeat** ping/pong cada 30s mantiene la conn viva
+//     atravesando Nginx (default 60s idle), CloudFlare (~100s),
+//     AWS ALB (60s). Override con `@server(ws_heartbeat_secs=N)`.
+//   - **JWT + Argon2id** son built-ins del lenguaje — el binario
+//     producido con `fitz build` no necesita `jsonwebtoken` ni
+//     `argon2` instalados. Deploy = un binario.
+//   - **`fitz build` y `fitz run`** sirven idéntico: el JSON
+//     marshaling, el broadcast, la auth, todo es paridad bit-a-bit.

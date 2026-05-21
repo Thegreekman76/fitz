@@ -6841,38 +6841,175 @@ items para 9.w iteración 2 post-Fase 10):
 `security` por handler + 401/403 en responses — todo
 auto-generado, sin escribir specs OpenAPI a mano.
 
-#### 9.w.2 — `@ws("/chat")` — WebSockets tipados
+#### 9.w.2 — `@ws("/chat")` — WebSockets tipados (CERRADA 2026-05-21)
 
-- **Decorator paralelo a `@get`** para handlers WebSocket:
-  ```fitz
-  type ChatMsg { user: Str, text: Str }
+**Segundo sub-paso de Fase 9.w (stack web first-class).**
+`@ws("/path")` sobre `async fn` + `WsConn<T>` con métodos
+`recv`/`send`/`broadcast`/`close` montan un servidor de
+WebSockets tipado end-to-end. **Cinco diferenciales** que
+vuelven a Fitz único en este espacio: marshaling JSON
+automático, AsyncAPI 3.0 auto-generado, heartbeat built-in,
+auth integrada en el handshake, codegen con paridad bit-a-bit.
 
-  @ws("/chat")
-  async fn chat_handler(conn: WsConn<ChatMsg>) {
-      loop {
-          match conn.recv().await {
-              Ok(msg) => conn.broadcast(msg).await,
-              Err(_) => break,
-          }
-      }
-  }
-  ```
-- **Tipo `WsConn<T>`** built-in con métodos `recv()`,
-  `send(msg)`, `broadcast(msg)`, `close()`. `T` es el tipo de
-  mensaje (serializado JSON automático).
-- **Decisiones**:
-  - ¿Broadcast a todas las conns de un endpoint built-in o
-    pattern manual? Lean: **built-in `broadcast`** con scope por
-    endpoint.
-  - ¿Reconexión automática del lado del client? Cliente WS no es
-    scope de Fitz (es del browser).
-  - ¿Heartbeat/keepalive configurable o automático? Lean:
-    **automático** con setting via `@server`.
-  - ¿Auth en WS (combinar `@authenticated` + `@ws`)? Sí, mismo
-    decorator stack.
-- **Trade-offs**: WS es estado, conflicto natural con el modelo
-  stateless del HTTP. Implementación requiere broadcaster
-  compartido (`Arc<Mutex<HashMap<EndpointId, Vec<Tx>>>>`).
+**Sub-pasos (6 commits)**:
+
+- **9.w.2.a** — Checker estático. `Type::WsConn(Box<Type>)`
+  variant, `resolve_type_expr` para `WsConn<T>` aridad 1,
+  `infer_wsconn_method` con signatures paramétricas:
+  `recv() -> Result<T>` (T del receptor),
+  `send(T) -> Result<Null>`,
+  `broadcast(T) -> Result<Null>`,
+  `close() -> Result<Null>`.
+  `check_ws_handler` valida shape del handler en compile-time:
+  async fn, primer param `WsConn<T>` resoluble, return `Null`,
+  compatibilidad con `@authenticated`/`@admin` (segundo param
+  `User`). 14 unit tests.
+- **9.w.2.b** — Value runtime + evaluator. `WsConnHandle`,
+  `WsBroadcasterTrait`, `WsReadStreamTrait`, `WsOutMessage`
+  (Text/Close), `Value::WsConn(Arc<WsConnHandle>)` con
+  manual Debug impl. `register_ws_route` en evaluator paralelo
+  a `register_http_route`; `process_decorator` branch para
+  `@ws`; `dispatch_method` arms para `(Value::WsConn, _)` con
+  `ws_conn_recv/send/broadcast/close`. `ws_conn_recv` usa
+  `coerce_to_annotation` (heredado de 8.4.3) para Map →
+  Instance cuando T es nominal — el frame JSON deserializa al
+  `type` declarado.
+- **9.w.2.c** — Runtime HTTP. `WsBroadcaster` con
+  `parking_lot::Mutex<HashMap<endpoint, Vec<(conn_id,
+  outbox_tx)>>>` + `AtomicU64` next_id (pool de conexiones por
+  endpoint). `WsReadStreamImpl` envuelve `SplitStream<WebSocket>`
+  filtrando ping/pong/binary (deuda: binary). `RouteSpec` suma
+  `is_ws/ws_conn_param_name/ws_msg_type`.
+  `HttpRegistry.ws_broadcaster: Arc<WsBroadcaster>`.
+  `build_ws_method_router` emite axum GET handler con
+  `WebSocketUpgrade` extractor + **auth pre-upgrade** (devuelve
+  401/403 vía HTTP Response ANTES de `ws.on_upgrade` — menos
+  attack surface). `build_ws_conn` signature
+  `(socket, endpoint, broadcaster, msg_type, env,
+  heartbeat_secs) -> (Value, u64, JoinHandle)`: spawnea writer
+  task (mpsc::UnboundedReceiver → sink, separa contención de
+  send/broadcast operations) + opcional heartbeat task. axum
+  0.8 con feature `ws` + `futures-util` (default-features =
+  false, features ["std"]) + dev-dep `tokio-tungstenite = "0.29"`
+  para E2E. **Decisión: outbox por conn unbounded** (deuda:
+  backpressure).
+- **9.w.2.d** — AsyncAPI 3.0 schema (`src/asyncapi.rs` nuevo,
+  ~350 LoC). Spec hermana de OpenAPI 3.1 para event-driven APIs.
+  `AsyncApiChannelInfo` struct + `channels_from_registry`
+  (runtime) + `pseudo_channels_from_ast` (codegen).
+  `generate_asyncapi_with_version` emite: channels (uno por
+  endpoint `@ws`), operations receive/send por channel
+  (`receive_<endpoint>` + `send_<endpoint>`),
+  `components.securitySchemes.bearerAuth` cuando hay auth.
+  `BTreeMap` para orden determinístico (paralelo a
+  `serde_json::preserve_order` de OpenAPI). `build_router_with_asyncapi`
+  registra `/asyncapi.json`. En codegen, `auto_asyncapi` gate
+  emite `__FITZ_ASYNCAPI_SCHEMA` const + handler
+  `__serve_asyncapi_json` + route. 8 unit tests. Consumible por
+  AsyncAPI Studio (asyncapi.com/studio) + generadores de
+  clientes JS/TS/Python/Java estándar.
+- **9.w.2.e** — Heartbeat ping/pong automático.
+  `WsOutMessage::Ping` agregado al enum (paralelo a Text/Close)
+  + `ServerConfig.ws_heartbeat_secs: u64` (default 30s, el más
+  bajo de los proxies comunes: Nginx 60s, Cloudflare ~100s, AWS
+  ALB 60s). Parsing de `@server(ws_heartbeat_secs=N)` con
+  validación (`Int` literal, no negativo; 0 desactiva
+  heartbeat). Si N > 0, `build_ws_conn` spawnea
+  `tokio::time::interval(N segundos)` que envía Ping frames
+  por el outbox; si el cliente no responde Pong, el sink falla
+  en el próximo write y el writer task termina limpio (no
+  requiere tracking explícito de Pong — tokio-tungstenite del
+  cliente auto-responde, si está muerto el write falla).
+  `CodegenCtx.ws_heartbeat_secs` capturado ANTES de emitir WS
+  wrappers (timing crítico: gen_ws_handler_wrapper corre antes
+  de gen_http_main). 6 unit tests.
+- **9.w.2.f** — Cap 29 nuevo "WebSockets tipados" en
+  `docs/guide.md` (renumeración 29→30 "Qué sigue") + ejemplo
+  runnable `examples/guide/29-ws.fitz` (servidor de chat
+  completo con login HTTP + JWT + `@authenticated @ws("/chat")`
+  + broadcast multi-client + `@server(43929,
+  ws_heartbeat_secs=30)`, <100 líneas) + README emphasis con
+  los 5 diferenciales en la tabla feature comparison + footnote
+  dedicado + bullets en "Estado del proyecto" y "Qué funciona
+  hoy". Suma a `GUIDE_EXAMPLES_COMPILE` (smoke compile_e2e).
+  Validado bit-a-bit `fitz run` ↔ `fitz build` con curl +
+  wscat (2 clientes concurrentes haciendo broadcast del JSON
+  tipado `{"user":"Ada","text":"hola"}` + heartbeat
+  funcionando).
+
+**Decisiones técnicas tomadas durante 9.w.2**:
+
+- **`Arc<HttpRegistry>` compartido** vs registry global por hilo:
+  `Arc` simple (mismo modelo que F17 cerrada). El broadcaster
+  vive adentro del registry; las conns lo clonan vía `Arc::clone`.
+- **`tokio::sync::Mutex` en `WsConnHandle.rx`** (no
+  `parking_lot::Mutex`): solo `tokio::sync::MutexGuard` es Send
+  across `.await`. Recv() necesita esto porque bloquea hasta el
+  próximo frame.
+- **`parking_lot::Mutex` en `WsBroadcaster.conns`**: no
+  cruza await points, performance > tokio::sync (no parking, no
+  poisoning).
+- **Manual Clone impl para `__FitzWsConn<T>`** en codegen: sin
+  `T: Clone` bound porque los fields del struct son Arcs/
+  atomics/strings/PhantomData; el derive default falla.
+- **Broadcast incluye al sender** (convención
+  Socket.IO/Phoenix): broadcast() es a TODOS los conns vivos
+  del endpoint, incluido el que envió. Filtrar al sender es
+  trivial del lado del cliente con un message_id; del lado del
+  server consume estado por conn.
+- **Auth pre-upgrade vs post-upgrade**: PRE. El handshake
+  HTTP/1.1 Upgrade pasa por el auth wrapper igual que un
+  `@get`; si devuelve Err, respondemos 401/403 sin llamar
+  `ws.on_upgrade`. Menos attack surface (no se abre el socket
+  para tokens inválidos), menos recursos consumidos.
+- **`@server(ws_heartbeat_secs=0)`** desactiva heartbeat sin
+  romper la decoración (vs error). Útil para deploys sin
+  proxies idle-killers.
+
+**Por qué importa**:
+
+- **Marshaling JSON automático**: declarás `WsConn<ChatMsg>` y
+  cada frame text se serializa/deserializa al `type` sin
+  `json.loads` + Pydantic / `JSON.parse` + Zod manual. El mismo
+  trait (`__ToFitzJson`/`__FromFitzJson`) que sirve HTTP cubre
+  WS — coherencia interna del stack.
+- **AsyncAPI auto-generado**: el schema sale del código fuente
+  (vs Socket.IO/Phoenix/SignalR/FastAPI WebSocket donde vive
+  manual en un README). Tooling estándar consume directo.
+- **Heartbeat built-in**: 1 kwarg y listo. No hay que escribir
+  `setInterval` + `ws.ping()` manual.
+- **Auth integrada**: `@authenticated`/`@admin` apilados sobre
+  `@ws` validan bearer ANTES del HTTP upgrade — 401/403 sin
+  abrir el socket.
+- **Codegen con paridad**: el flow WS funciona idéntico en
+  intérprete y binario nativo. Cero `cargo add
+  tokio-tungstenite` o `pip install websockets`.
+- **Ningún otro lenguaje hoy combina** WS tipados con AsyncAPI
+  auto-generado del código fuente, heartbeat built-in y auth
+  integrada en el handshake.
+
+**Deuda residual derivada de 9.w.2** (no bloquea uso real):
+
+- **Binary frames** (`Vec<u8>` como payload). Hoy solo text
+  frames. Requiere tipo `Bytes` en Fitz (ya cerrado en bundle
+  post-8) integrado con `WsConn<Bytes>`. Deuda residual.
+- **AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).
+  Hoy se sirve solo el JSON; consumirlo es por AsyncAPI Studio
+  externo. Bundle de UI integrada es deuda menor.
+- **Tipado bidireccional separado** (`WsConn<In, Out>`). Hoy
+  `T` único para recv y send.
+- **Reconnect con state replay** del lado del server. Hoy si el
+  cliente se reconecta, no replicamos los frames perdidos.
+  Requiere persistencia (Fase 10).
+- **Rooms / channels dentro de un endpoint**. Hoy `broadcast()`
+  manda a TODOS los clientes del endpoint. Sub-canales (rooms
+  Socket.IO, topics Phoenix) son deuda visible.
+- **Backpressure explícito**. Hoy el outbox por conn es
+  unbounded. Bounded channels + drop policy es deuda residual.
+
+**Próximo norte**: resto de Fase 9.w — 9.w.3 (`@cron` +
+`@background` — jobs sin Celery) y 9.w.4 (ORM nativo +
+migraciones, escala a Fase 10).
 
 #### 9.w.3 — `@cron` + `@background` — jobs sin Celery
 

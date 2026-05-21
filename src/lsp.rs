@@ -1088,6 +1088,14 @@ fn after_dot_completions(
             ("as_bytes", "fn() -> Result<Bytes>".into()),
             ("type_name", "fn() -> Str".into()),
         ]),
+        // 9.w.2 — WebSockets tipados. `WsConn<T>` expone 4 métodos:
+        // recv/send/broadcast (parametrizados sobre T) + close.
+        Type::WsConn(t) => method_items(&[
+            ("recv", format!("fn() -> Result<{}>", t.display(type_env))),
+            ("send", format!("fn(msg: {}) -> Result<Null>", t.display(type_env))),
+            ("broadcast", format!("fn(msg: {}) -> Result<Null>  // a TODOS los clientes del endpoint", t.display(type_env))),
+            ("close", "fn() -> Result<Null>".into()),
+        ]),
         // PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }

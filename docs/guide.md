@@ -9700,14 +9700,267 @@ endurecimiento para servicios críticos".
 
 ---
 
-## 29. Qué sigue
+## 29. WebSockets tipados
+
+En Socket.IO/Phoenix Channels/ASP.NET SignalR/FastAPI WebSocket los
+WS arrancan con un grado de tipado parcial y se completan a mano:
+en FastAPI el handler recibe `WebSocket` opaco y vos parseás el
+JSON con `json.loads` + Pydantic; en Socket.IO los eventos son
+strings sin schema; SignalR genera proxies tipados solo en C#; el
+schema de los mensajes (qué frames van, qué frames vienen) vive
+en un README al lado del código o en una doc que se atrasa.
+Encima el heartbeat para pasar proxies idle-killers (Nginx 60s,
+Cloudflare ~100s, ALB 60s) lo configurás vos en cada proyecto, y
+la auth pre-upgrade del handshake es código manual.
+
+En Fitz los WebSockets son **parte del lenguaje** con tipado
+end-to-end: declarás un `type ChatMsg { ... }`, declarás el
+handler como `fn chat(conn: WsConn<ChatMsg>, ...)`, y cada frame
+text se serializa/deserializa al `type` automáticamente. El
+**heartbeat** se configura con un kwarg
+(`@server(ws_heartbeat_secs=30)`) y los Ping frames se mandan
+solos. El **AsyncAPI 3.0** del canal — la spec equivalente a
+OpenAPI pero para event-driven — se genera del código fuente en
+`/asyncapi.json`. Los decoradores **`@authenticated` / `@admin`**
+apilados sobre `@ws` validan el bearer token ANTES del HTTP
+upgrade, devolviendo 401/403 sin abrir el socket. Y todo eso
+vale igual en `fitz run` y en el binario nativo de `fitz build` —
+paridad bit-a-bit, cero `cargo add tokio-tungstenite` o
+`pip install websockets`.
+
+### Las piezas
+
+**`@ws("/path")`** — declara un handler WebSocket. El handler es
+una `async fn` que recibe un `WsConn<T>` como primer param, y
+opcionalmente un `user: User` si está protegido por
+`@authenticated`/`@admin`. `T` es el tipo de cada frame text;
+puede ser un `type` custom (`ChatMsg`) o cualquier tipo
+serializable a JSON.
+
+```fitz
+type ChatMsg { user: Str, text: Str }
+
+@ws("/chat")
+async fn chat(conn: WsConn<ChatMsg>) -> Null {
+    loop {
+        match conn.recv() {
+            Ok(msg) => { let _ = conn.broadcast(msg) }
+            Err(_) => return null
+        }
+    }
+    return null
+}
+```
+
+El checker valida estáticamente:
+
+- Que el handler sea `async fn` (los WS son intrínsecamente async).
+- Que el primer param sea `WsConn<T>` con `T` resoluble.
+- Que retorne `Null` (el ciclo de vida del WS lo maneja el runtime).
+- Si está bajo `@authenticated`/`@admin`, que reciba el `User` del
+  `@auth_provider` registrado (igual que con `@get`/`@post`).
+
+**`WsConn<T>`** — conexión activa. Cuatro métodos:
+
+- **`conn.recv() -> Result<T>`** — bloquea hasta el próximo frame
+  text. Devuelve `Ok(<T>)` con el mensaje deserializado, o `Err(e)`
+  si la conexión se cierra o el frame no parsea contra `T`.
+- **`conn.send(msg: T) -> Result<Null>`** — manda un frame text
+  al cliente actual (solo al sender, no a otros).
+- **`conn.broadcast(msg: T) -> Result<Null>`** — manda el mismo
+  frame text a TODOS los clientes conectados al mismo endpoint —
+  incluido el sender, convención Socket.IO/Phoenix.
+- **`conn.close() -> Result<Null>`** — cierra la conexión
+  explícitamente. Opcional: salir del handler también cierra.
+
+**`@server(ws_heartbeat_secs=N)`** — configura el intervalo de
+ping. Default 30s (el más bajo de los proxies comunes). Cada N
+segundos el runtime manda un Ping frame por cada conexión viva;
+si el cliente no responde Pong, el sink falla en el próximo
+write y el writer task termina limpio. `N=0` desactiva el
+heartbeat (no recomendado en deploys con proxies).
+
+### Ejemplo completo: chat broadcast con auth
+
+`examples/guide/29-ws.fitz` arma un servidor de chat completo en
+~100 líneas que combina **todo el stack** de Fitz:
+
+- `POST /login` (HTTP plano) verifica password con
+  `hash.verify(...)` (Argon2id) y devuelve un JWT firmado con
+  `jwt.encode(...)` (HS256).
+- `@auth_provider fn check_token(headers)` corre antes de CADA
+  request `@authenticated` — HTTP **y** WS. Para el WS, corre en
+  el handshake antes del upgrade.
+- `@authenticated @ws("/chat")` decora el handler con
+  `WsConn<ChatMsg>`. Cada frame text se deserializa a `ChatMsg`
+  automático; `conn.broadcast(msg)` envía a todos los clientes
+  conectados.
+- `@server(43929, ws_heartbeat_secs=30)` configura puerto y
+  heartbeat.
+
+Una sesión típica:
+
+```bash
+# 1. Login para obtener un token.
+$ curl -X POST localhost:43929/login \
+       -H 'Content-Type: application/json' \
+       -d '{"email":"ada@example.com","password":"secret-ada-123"}'
+{"token":"eyJ0eXAi..."}
+
+# 2. Conectar dos clientes WS distintos (en dos terminales), cada
+#    uno con SU bearer token. Cualquier mensaje JSON enviado se
+#    broadcastea a TODOS los clientes — incluido el sender.
+$ wscat -c "ws://localhost:43929/chat" \
+        -H "Authorization: Bearer eyJ0eXAi..."
+> {"user":"Ada","text":"hola"}
+< {"user":"system","text":"bienvenido Ada"}
+< {"user":"Ada","text":"hola"}  # del broadcast, con user.name forzado del JWT
+
+# 3. Auth pre-upgrade — token inválido → 401 SIN abrir el socket.
+$ wscat -c "ws://localhost:43929/chat" \
+        -H "Authorization: Bearer fake"
+error: Unexpected server response: 401
+```
+
+El ejemplo entero compila a binario nativo con `fitz build` y
+producía output bit-a-bit idéntico al intérprete.
+
+### Integración con AsyncAPI
+
+OpenAPI 3.1 documenta endpoints HTTP request/response. **AsyncAPI
+3.0** documenta canales event-driven — la spec hermana para WS,
+MQTT, Kafka, etc. Cuando el programa declara `@ws(...)`, el
+runtime genera automáticamente el schema en `/asyncapi.json`:
+
+```json
+{
+  "asyncapi": "3.0.0",
+  "info": { "title": "Fitz API", "version": "0.1.0" },
+  "channels": {
+    "/chat": {
+      "messages": {
+        "ChatMsg": {
+          "name": "ChatMsg",
+          "payload": {
+            "type": "object",
+            "properties": {
+              "user": { "type": "string" },
+              "text": { "type": "string" }
+            },
+            "required": ["user", "text"]
+          }
+        }
+      }
+    }
+  },
+  "operations": {
+    "receive_/chat": {
+      "action": "receive",
+      "channel": { "$ref": "#/channels/~1chat" }
+    },
+    "send_/chat": {
+      "action": "send",
+      "channel": { "$ref": "#/channels/~1chat" }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  }
+}
+```
+
+Tooling AsyncAPI (AsyncAPI Studio en `asyncapi.com/studio`,
+generadores de clientes para JS/TS/Python/Java) consume este
+schema directo — escribís `type ChatMsg { ... }` una vez y los
+clientes en otros lenguajes se generan solos.
+
+### Por qué Fitz hace esto distinto
+
+Cinco diferenciales que vuelven a Fitz único en el espacio de
+WebSockets tipados:
+
+- **Marshaling JSON automático** — declarás `WsConn<ChatMsg>` y
+  cada frame text se serializa/deserializa a `ChatMsg` sin un
+  `json.loads` + Pydantic / `JSON.parse` + Zod / `serde_json`
+  manual. El mismo trait que sirve los handlers HTTP
+  (`__ToFitzJson`/`__FromFitzJson`) cubre WS, primitivos, types
+  custom, listas, mapas, Result. Si el frame no parsea contra `T`,
+  `recv()` devuelve `Err` — error de runtime esperable, no panic.
+- **AsyncAPI auto-generado** — el schema en `/asyncapi.json` sale
+  del código fuente. No hay que mantener un YAML AsyncAPI a mano
+  (vs Socket.IO/Phoenix/SignalR/FastAPI WebSocket, donde el
+  schema vive en un README al lado del código o en una doc que
+  atrasa). Tooling AsyncAPI estándar (Studio, generadores de
+  clientes) consume el schema directo.
+- **Heartbeat built-in** — `@server(ws_heartbeat_secs=N)` y listo.
+  El runtime manda los Ping frames cada N segundos por cada
+  conexión viva, sin código del usuario. Pasa de largo Nginx
+  (60s default idle), Cloudflare (~100s), AWS ALB (60s).
+- **Auth integrada** — `@authenticated`/`@admin` apilados sobre
+  `@ws` validan el bearer token ANTES del HTTP upgrade. El
+  cliente recibe 401/403 sin que se abra el socket — menos
+  attack surface, menos recursos consumidos. El checker valida
+  en compile-time que el handler reciba el `User` correcto del
+  `@auth_provider` registrado.
+- **Codegen con paridad** — el flow WS funciona idéntico en
+  `fitz run` (intérprete, feedback rápido durante dev) y en
+  `fitz build` (binario nativo standalone, deploy a prod). Cero
+  "anda en local pero no en server". Cero `cargo add
+  tokio-tungstenite` o `pip install websockets`.
+
+**Ningún otro lenguaje hoy combina WS tipados con AsyncAPI
+auto-generado del código fuente, heartbeat built-in y auth
+integrada en el handshake**. FastAPI WebSocket te da Pydantic y
+schema manual; Socket.IO te da eventos sin schema; Phoenix
+Channels te da pattern matching tipado pero solo en Elixir;
+SignalR te da proxies tipados solo en C# y solo en `.NET`. Fitz
+los junta en un lenguaje nuevo, con un binario standalone, con
+auth nativa.
+
+### Qué no está en el MVP
+
+Estos items están comprometidos como deuda explícita:
+
+- **Binary frames** (`Vec<u8>` como payload). Hoy solo text
+  frames. Audio/video streaming, protocolos binarios custom
+  requieren un tipo `Bytes` en Fitz; deuda residual.
+- **AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).
+  Hoy se sirve solo el JSON; consumirlo es por AsyncAPI Studio
+  externo. Bundle de UI integrada es deuda menor.
+- **Tipado bidireccional separado** — hoy `WsConn<T>` usa el
+  mismo `T` para recv y send. Para canales con tipos distintos
+  en cada dirección (`WsConn<In, Out>`) hace falta una
+  generalización del tipo; deuda residual.
+- **Reconnect con state replay** — si el cliente se reconecta,
+  el server hoy no replica los frames perdidos. Pattern típico
+  de chat con history; requiere persistencia (Fase 10).
+- **Rooms / channels dentro de un endpoint**. Hoy `broadcast()`
+  manda a TODOS los clientes del endpoint. Sub-canales (rooms
+  de Socket.IO, topics de Phoenix) son deuda visible — modelo
+  típico para presence, grupos, salas privadas.
+- **Backpressure explícito**. Hoy el outbox por conn es
+  unbounded — un cliente lento puede acumular memoria. Bounded
+  channels + drop policy es deuda residual.
+
+Detalle completo en `docs/roadmap.md` → "Fase 9.w iteración 2 —
+endurecimiento para servicios críticos".
+
+---
+
+## 30. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 28 podés:
+Con los capítulos 1 a 29 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -9806,6 +10059,16 @@ Con los capítulos 1 a 28 podés:
   403 en responses. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
   Cero `cargo add`/`pip install`. Ver
   [cap 28](#28-auth-nativa).
+- **WebSockets tipados** (Fase 9.w.2): `@ws("/path")` sobre
+  `async fn` + `WsConn<T>` con `recv`/`send`/`broadcast`/`close`.
+  **Marshaling JSON automático** de cada frame text al `type`
+  declarado, **AsyncAPI 3.0 auto-generado** en `/asyncapi.json`,
+  **heartbeat built-in** con `@server(ws_heartbeat_secs=N)`,
+  **auth integrada** en el handshake (`@authenticated`/`@admin`
+  apilados ANTES del upgrade), **codegen con paridad** bit-a-bit
+  `fitz run` ↔ `fitz build`. Ningún otro lenguaje hoy combina WS
+  tipados con AsyncAPI auto-generado del código fuente. Ver
+  [cap 29](#29-websockets-tipados).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se

@@ -53,6 +53,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 | Async nativo           | ⚠️   | ✅         | ✅ | ✅ ‡ |
 | Docs HTTP automáticas | ⚠️   | ❌         | ❌ | ✅ ◊ |
 | **Auth nativa**        | ❌     | ❌         | ❌ | ✅ ♦ |
+| **WebSockets tipados** | ⚠️   | ⚠️       | ⚠️ | ✅ ♣ |
 | Interop Python         | ✅     | ❌         | ❌ | ✅ § |
 
 \* **Tipado gradual con chequeo estático** — Fase 5a completada.
@@ -105,6 +106,37 @@ Ver [cap 28 de la guía](docs/guide.md#28-auth-nativa) y el
 ejemplo completo
 [`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz)
 (login + /me + /admin con JWT real, < 100 líneas).
+
+♣ **WebSockets tipados** — Fase 9.w.2 completada. `@ws("/path")`
+sobre `async fn` + `WsConn<T>` con métodos
+`recv`/`send`/`broadcast`/`close`. Cinco diferenciales que
+vuelven a Fitz único en este espacio: **(1) marshaling JSON
+automático** — declarás `WsConn<ChatMsg>` y cada frame text se
+serializa/deserializa al `type` declarado sin un `json.loads` +
+Pydantic / `JSON.parse` + Zod manual; **(2) AsyncAPI 3.0
+auto-generado** en `/asyncapi.json` del código fuente (la spec
+hermana de OpenAPI 3.1 para event-driven APIs), consumible por
+tooling estándar (AsyncAPI Studio, generadores de clientes para
+JS/TS/Python/Java); **(3) heartbeat built-in** con
+`@server(ws_heartbeat_secs=N)` — Ping frames automáticos que
+pasan de largo Nginx (60s default idle), Cloudflare (~100s) y
+AWS ALB (60s); **(4) auth integrada** en el handshake
+(`@authenticated`/`@admin` apilados sobre `@ws` validan el
+bearer token ANTES del HTTP upgrade, devolviendo 401/403 sin
+abrir el socket); **(5) codegen con paridad** — el flow WS
+funciona idéntico en `fitz run` y en el binario nativo de
+`fitz build`. **Ningún otro lenguaje hoy combina WS tipados con
+AsyncAPI auto-generado del código fuente, heartbeat built-in y
+auth integrada en el handshake**. FastAPI WebSocket te da
+Pydantic y schema manual; Socket.IO te da eventos sin schema;
+Phoenix Channels te da pattern matching tipado pero solo en
+Elixir; SignalR te da proxies tipados solo en C# y solo en .NET.
+Cero `cargo add tokio-tungstenite` o `pip install websockets`.
+Ver [cap 29 de la guía](docs/guide.md#29-websockets-tipados) y
+el ejemplo completo
+[`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
+(servidor de chat con login HTTP + JWT + broadcast multi-client
++ heartbeat configurado, < 100 líneas).
 
 § **Interop Python via PyO3** — Fase 8 cerrada al 100% del roadmap
 original. Embedding básico de CPython (8.1), marshaling bidireccional
@@ -279,6 +311,37 @@ arma `POST /login` + `GET /me` (`@authenticated`) + `GET
 /admin/users` (`@admin`) en menos de 100 líneas, validado
 end-to-end con curl contra el binario nativo. Ver
 [cap 28 de la guía](docs/guide.md#28-auth-nativa).
+
+**Fase 9.w.2 (WebSockets tipados) CERRADA** — el segundo
+sub-paso del stack web first-class. `@ws("/path")` sobre
+`async fn` + `WsConn<T>` con métodos
+`recv`/`send`/`broadcast`/`close`. Cinco diferenciales que
+vuelven a Fitz único en este espacio: **marshaling JSON
+automático** (cada frame text se serializa/deserializa al
+`type` declarado, sin `json.loads` + Pydantic / `JSON.parse` +
+Zod manual), **AsyncAPI 3.0 auto-generado** en
+`/asyncapi.json` (la spec hermana de OpenAPI 3.1 para
+event-driven APIs, consumible por AsyncAPI Studio +
+generadores de clientes), **heartbeat built-in** con
+`@server(ws_heartbeat_secs=N)` (Ping frames automáticos que
+pasan de largo Nginx 60s default idle / Cloudflare ~100s /
+AWS ALB 60s), **auth integrada** en el handshake
+(`@authenticated`/`@admin` apilados sobre `@ws` validan el
+bearer token ANTES del HTTP upgrade, devolviendo 401/403 sin
+abrir el socket) y **codegen con paridad** bit-a-bit `fitz
+run` ↔ `fitz build`. **Ningún otro lenguaje hoy combina WS
+tipados con AsyncAPI auto-generado del código fuente,
+heartbeat built-in y auth integrada en el handshake** —
+FastAPI WebSocket te da Pydantic y schema manual; Socket.IO te
+da eventos sin schema; Phoenix Channels te da pattern matching
+tipado pero solo en Elixir; SignalR te da proxies tipados solo
+en C# y solo en .NET. Cero `cargo add tokio-tungstenite` o
+`pip install websockets`. El ejemplo completo
+[`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
+arma un servidor de chat con login HTTP + JWT + broadcast
+multi-client + heartbeat configurado, en menos de 100 líneas,
+validado end-to-end (incluido el binario nativo de `fitz
+build`). Ver [cap 29 de la guía](docs/guide.md#29-websockets-tipados).
 
 **Plan LSP entero (Fase 9.x.1 → 9.x.5) CERRADO — 2026-05-15/16** —
 las cinco sub-fases del LSP MVP. Habilitan la experiencia
@@ -698,9 +761,11 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     compile_e2e + 3 openapi**. Clippy `-D warnings` limpio.
   - Próximo norte: Fase 9.w (Stack web first-class).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
-  (auth nativo JWT-based), `@ws` (WebSockets tipados con
-  `WsConn<T>`), `@cron` + `@background` (jobs sin Celery). ORM
-  nativo + migraciones autogeneradas escala a Fase 10.
+  (auth nativo JWT-based, **9.w.1 CERRADA**), `@ws` (WebSockets
+  tipados con `WsConn<T>` + AsyncAPI 3.0 + heartbeat built-in + auth
+  integrada, **9.w.2 CERRADA**), `@cron` + `@background` (jobs sin
+  Celery, pendiente). ORM nativo + migraciones autogeneradas escala
+  a Fase 10.
 
 **Visión post-Fase 9 (Fase 10+)** — especulativo, norte
 direccional: Fase 10 stack DB nativo + ORM declarativo, Fase 11
@@ -768,6 +833,20 @@ async), marshaling Future↔Coroutine.
   bit-a-bit `fitz run` ↔ `fitz build`. Cero deps externas. Ver
   [cap 28 de la guía](docs/guide.md#28-auth-nativa) y el ejemplo
   [`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz).
+- **WebSockets tipados** (Fase 9.w.2): `@ws("/path")` sobre
+  `async fn` + `WsConn<T>` con métodos
+  `recv`/`send`/`broadcast`/`close`. **Marshaling JSON automático**
+  de cada frame text al `type` declarado, **AsyncAPI 3.0
+  auto-generado** en `/asyncapi.json`, **heartbeat built-in** con
+  `@server(ws_heartbeat_secs=N)`, **auth integrada** en el
+  handshake (`@authenticated`/`@admin` apilados ANTES del HTTP
+  upgrade), **codegen con paridad** bit-a-bit `fitz run` ↔ `fitz
+  build`. **Ningún otro lenguaje hoy combina WS tipados con
+  AsyncAPI auto-generado del código fuente, heartbeat built-in y
+  auth integrada en el handshake**. Ver
+  [cap 29 de la guía](docs/guide.md#29-websockets-tipados) y el
+  ejemplo [`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
+  (servidor de chat con login HTTP + JWT + broadcast multi-client).
 
 ### CLI
 

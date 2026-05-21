@@ -54,8 +54,120 @@ Total al cierre del bloque: **2045 unit sin feature, 2135 con
 [`docs/deudas_lenguaje.md`](docs/deudas_lenguaje.md) y
 [`docs/design-fitzvalue.md`](docs/design-fitzvalue.md) (F13).
 
-Próximo norte: **9.w** (Stack web first-class — `@authenticated`,
-`@ws`, `@cron`, `@background`).
+Próximo norte: **9.w** — Fase 9.w.1 (Auth nativa) y 9.w.2
+(WebSockets tipados) CERRADAS. Siguen `@cron` + `@background`
+(jobs sin Celery) y ORM nativo (escala a Fase 10).
+
+## [v0.9.22] — 2026-05-21 — Fase 9.w.2 CERRADA — WebSockets tipados (`@ws` + `WsConn<T>` + AsyncAPI 3.0 + heartbeat + auth integrada)
+
+**Cierre del segundo sub-paso de Fase 9.w (stack web first-class).**
+`@ws("/path")` sobre `async fn` + `WsConn<T>` con métodos
+`recv`/`send`/`broadcast`/`close` montan un servidor de WebSockets
+tipado end-to-end. Cinco diferenciales que vuelven a Fitz único
+en este espacio: **marshaling JSON automático** del frame al
+`type` declarado, **AsyncAPI 3.0 auto-generado** en
+`/asyncapi.json`, **heartbeat built-in** con
+`@server(ws_heartbeat_secs=N)`, **auth integrada**
+(`@authenticated`/`@admin` apilados sobre `@ws` validan bearer
+ANTES del HTTP upgrade) y **codegen con paridad** bit-a-bit
+`fitz run` ↔ `fitz build`.
+
+**Sub-pasos (6 commits)**:
+
+- **9.w.2.a** — Checker: `Type::WsConn(Box<Type>)` variant,
+  `resolve_type_expr` para `WsConn<T>` aridad 1,
+  `infer_wsconn_method` con signatures paramétricas
+  (`recv() -> Result<T>`, `send(T) -> Result<Null>`,
+  `broadcast(T) -> Result<Null>`, `close() -> Result<Null>`),
+  `check_ws_handler` validando shape del handler (async fn, primer
+  param `WsConn<T>`, return `Null`, compatibilidad con auth). 14
+  unit tests.
+- **9.w.2.b** — Value runtime: `WsConnHandle`,
+  `WsBroadcasterTrait`, `WsReadStreamTrait`, `WsOutMessage`
+  (Text/Close), `Value::WsConn(Arc<WsConnHandle>)`. Manual Debug.
+  `register_ws_route` en evaluator paralelo a
+  `register_http_route`; `process_decorator` branch para `@ws`;
+  `dispatch_method` arms para `(Value::WsConn, recv/send/broadcast/
+  close)`; `ws_conn_recv` usa `coerce_to_annotation` (8.4.3) para
+  Map → Instance cuando T es nominal.
+- **9.w.2.c** — Runtime HTTP: `WsBroadcaster` con
+  `parking_lot::Mutex<HashMap<endpoint, Vec<(conn_id, outbox_tx)>>>` +
+  `AtomicU64` next_id. `WsReadStreamImpl` wrapping `SplitStream`
+  con filtrado de ping/pong/binary. `RouteSpec.is_ws/
+  ws_conn_param_name/ws_msg_type`. `HttpRegistry.ws_broadcaster:
+  Arc<WsBroadcaster>`. `build_ws_method_router` emite axum GET
+  handler con `WebSocketUpgrade` extractor + auth pre-upgrade
+  (devuelve 401/403 vía HTTP Response ANTES de `ws.on_upgrade`).
+  `build_ws_conn` spawnea writer task (mpsc::UnboundedReceiver →
+  sink) + opcional heartbeat task. axum 0.8 con feature `ws` +
+  `futures-util` + dev-dep `tokio-tungstenite`.
+- **9.w.2.d** — AsyncAPI 3.0 schema (`src/asyncapi.rs` nuevo,
+  ~350 LoC). `AsyncApiChannelInfo`,
+  `channels_from_registry` (runtime),
+  `pseudo_channels_from_ast` (codegen). `generate_asyncapi_with_version`
+  emite channels (uno por endpoint `@ws`), operations
+  receive/send por channel, `components.securitySchemes.bearerAuth`
+  cuando hay auth. `BTreeMap` para orden determinístico.
+  `build_router_with_asyncapi` registra `/asyncapi.json`. En
+  codegen, `auto_asyncapi` gate emite `__FITZ_ASYNCAPI_SCHEMA` +
+  handler `__serve_asyncapi_json` + route. 8 unit tests.
+- **9.w.2.e** — Heartbeat ping/pong automático.
+  `WsOutMessage::Ping` + `ServerConfig.ws_heartbeat_secs: u64`
+  (default 30). Parsing de `@server(ws_heartbeat_secs=N)` con
+  validación (`Int` literal, no negativo). Si N > 0,
+  `build_ws_conn` spawnea `tokio::time::interval(N segundos)` que
+  envía Ping frames por el outbox; si el cliente no responde
+  Pong, el sink falla en el próximo write y el writer task
+  termina limpio (no requiere tracking explícito de Pong).
+  `CodegenCtx.ws_heartbeat_secs` capturado ANTES de emitir WS
+  wrappers (gen_ws_handler_wrapper corre antes de gen_http_main).
+  6 unit tests.
+- **9.w.2.f** — Cap 29 "WebSockets tipados" en `docs/guide.md`
+  (renumeración 29→30) + ejemplo runnable
+  `examples/guide/29-ws.fitz` (servidor de chat con login HTTP
+  + JWT + `@authenticated @ws("/chat")` + broadcast multi-client
+  + `@server(43929, ws_heartbeat_secs=30)`, <100 líneas) +
+  README emphasis con los 5 diferenciales en la tabla feature
+  comparison + footnote dedicado + bullets en "Estado del
+  proyecto" y "Qué funciona hoy". Smoke en
+  `GUIDE_EXAMPLES_COMPILE`.
+
+**Por qué importa**:
+
+- **Marshaling JSON automático**: declarás `WsConn<ChatMsg>` y
+  cada frame text se serializa/deserializa al `type` sin
+  `json.loads` + Pydantic / `JSON.parse` + Zod manual. El
+  mismo trait que sirve HTTP (`__ToFitzJson`/`__FromFitzJson`)
+  cubre WS.
+- **AsyncAPI auto-generado**: el schema sale del código fuente
+  (vs Socket.IO/Phoenix/SignalR/FastAPI WebSocket donde vive en
+  un README que se atrasa). Tooling estándar (AsyncAPI Studio,
+  generadores de clientes JS/TS/Python/Java) lo consume directo.
+- **Heartbeat built-in**: `@server(ws_heartbeat_secs=N)` y
+  listo. Pasa de largo Nginx (60s idle), Cloudflare (~100s) y
+  AWS ALB (60s) sin código del usuario.
+- **Auth integrada**: `@authenticated`/`@admin` apilados sobre
+  `@ws` validan el bearer token ANTES del HTTP upgrade. El
+  cliente recibe 401/403 sin abrir el socket — menos attack
+  surface, menos recursos consumidos.
+- **Codegen con paridad**: el flow WS funciona idéntico en
+  `fitz run` y en el binario nativo de `fitz build`.
+- **Ningún otro lenguaje hoy combina** WS tipados con AsyncAPI
+  auto-generado del código fuente, heartbeat built-in y auth
+  integrada en el handshake.
+
+**Deuda residual derivada de 9.w.2** (no bloquea uso real):
+binary frames (`Vec<u8>` payload — hoy solo text), AsyncAPI UI
+equivalente al `/docs` de OpenAPI (hoy solo el JSON), tipado
+bidireccional separado (`WsConn<In, Out>` — hoy `T` único),
+reconnect con state replay (requiere persistencia, Fase 10),
+rooms/channels dentro de un endpoint (broadcast es a TODOS los
+clientes del endpoint), backpressure explícito (outbox unbounded
+hoy).
+
+**Próximo norte**: resto de Fase 9.w — `@cron` + `@background`
+(jobs sin Celery), y ORM nativo + migraciones (escalado a Fase
+10).
 
 ## [v0.9.21] — 2026-05-20 — Fase 9.w.1 CERRADA — Auth nativa (`@auth_provider`/`@authenticated`/`@admin` + `jwt`/`hash`)
 

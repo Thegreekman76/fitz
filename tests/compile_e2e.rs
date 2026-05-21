@@ -2702,6 +2702,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "23-fmt-ejemplo.fitz",
     "24-tests.fitz",
     "28-auth.fitz",
+    "29-ws.fitz",
 ];
 
 #[test]

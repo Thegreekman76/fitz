@@ -883,6 +883,83 @@
 > (jobs sin Celery), y ORM nativo + migraciones (escalado a
 > Fase 10).
 
+> **Nota (2026-05-21) — Fase 9.w.2 (WebSockets tipados) CERRADA**:
+> el segundo sub-paso del stack web first-class está
+> implementado entero. `@ws("/path")` sobre `async fn` +
+> `WsConn<T>` con métodos `recv`/`send`/`broadcast`/`close`
+> montan un servidor de WebSockets tipado end-to-end. **Cinco
+> diferenciales** que vuelven a Fitz único en este espacio:
+> marshaling JSON automático (cada frame text se serializa/
+> deserializa al `type` declarado, sin glue manual); AsyncAPI
+> 3.0 auto-generado en `/asyncapi.json` (la spec hermana de
+> OpenAPI 3.1 para event-driven APIs, consumible por tooling
+> estándar); heartbeat built-in con
+> `@server(ws_heartbeat_secs=N)` (Ping frames automáticos que
+> pasan de largo proxies idle-killers); auth integrada
+> (`@authenticated`/`@admin` apilados sobre `@ws` validan
+> bearer ANTES del HTTP upgrade); codegen con paridad bit-a-bit
+> `fitz run` ↔ `fitz build`. **Ningún otro lenguaje hoy combina
+> WS tipados con AsyncAPI auto-generado del código fuente,
+> heartbeat built-in y auth integrada en el handshake**.
+> Sub-pasos cerrados:
+>
+> - **9.w.2.a** — Checker estático: `Type::WsConn(Box<Type>)`,
+>   `infer_wsconn_method` con signatures paramétricas,
+>   `check_ws_handler` validando shape (14 unit tests).
+> - **9.w.2.b** — Value runtime + evaluator: `WsConnHandle`,
+>   `WsOutMessage` (Text/Close), `Value::WsConn`,
+>   `register_ws_route`, `dispatch_method` arms,
+>   `ws_conn_recv` con `coerce_to_annotation` (heredado 8.4.3)
+>   para Map → Instance cuando T es nominal.
+> - **9.w.2.c** — Runtime HTTP: `WsBroadcaster` con
+>   `parking_lot::Mutex<HashMap<endpoint, Vec<(conn_id,
+>   outbox_tx)>>>`, `WsReadStreamImpl`, `build_ws_method_router`
+>   con auth pre-upgrade (401/403 ANTES de `ws.on_upgrade`),
+>   `build_ws_conn` con writer task + outbox separado. axum 0.8
+>   feature `ws` + `futures-util` + dev-dep `tokio-tungstenite`.
+> - **9.w.2.d** — AsyncAPI 3.0 (`src/asyncapi.rs` ~350 LoC):
+>   channels + operations receive/send + securitySchemes,
+>   `BTreeMap` para orden determinístico, `/asyncapi.json`
+>   route en runtime y codegen (8 unit tests).
+> - **9.w.2.e** — Heartbeat ping/pong automático:
+>   `WsOutMessage::Ping`, `ServerConfig.ws_heartbeat_secs`
+>   default 30s, `@server(ws_heartbeat_secs=N)` kwarg,
+>   `tokio::time::interval` spawneado en `build_ws_conn` cuando
+>   N > 0 (6 unit tests).
+> - **9.w.2.f** — Cap 29 nuevo en `docs/guide.md` (renumeración
+>   29→30) + ejemplo runnable `examples/guide/29-ws.fitz`
+>   (servidor de chat con login HTTP + JWT +
+>   `@authenticated @ws("/chat")` + broadcast multi-client +
+>   `@server(43929, ws_heartbeat_secs=30)`, <100 LoC) + README
+>   emphasis (5 diferenciales en tabla + footnote dedicado +
+>   bullets en "Estado del proyecto" y "Qué funciona hoy") +
+>   smoke `GUIDE_EXAMPLES_COMPILE`.
+>
+> **Decisiones técnicas del MVP** (no en roadmap original):
+> `Arc<HttpRegistry>` compartido (mismo modelo F17);
+> `tokio::sync::Mutex` en `WsConnHandle.rx` (necesita Send
+> across .await); `parking_lot::Mutex` en
+> `WsBroadcaster.conns` (no cruza await); manual Clone impl
+> para `__FitzWsConn<T>` en codegen sin `T: Clone` bound;
+> broadcast incluye al sender (convención Socket.IO/Phoenix);
+> auth pre-upgrade (menos attack surface);
+> `ws_heartbeat_secs=0` desactiva sin error.
+>
+> **Deuda residual derivada de 9.w.2** (NO bloquea uso real;
+> queda comprometida en `docs/roadmap.md` → "Fase 9.w iteración
+> 2"): binary frames (`Vec<u8>` payload — hoy solo text;
+> integración con tipo `Bytes` ya cerrado); AsyncAPI UI
+> equivalente al `/docs` de OpenAPI (hoy solo JSON); tipado
+> bidireccional separado (`WsConn<In, Out>` — hoy `T` único);
+> reconnect con state replay (requiere persistencia, Fase 10);
+> rooms/channels dentro de un endpoint (broadcast a TODOS los
+> clientes del endpoint); backpressure explícito (outbox
+> unbounded hoy).
+>
+> **Próximo norte**: resto de Fase 9.w — 9.w.3 (`@cron` +
+> `@background` — jobs sin Celery) y 9.w.4 (ORM nativo +
+> migraciones, escala a Fase 10).
+
 ## Resumen ejecutivo
 
 Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.
