@@ -155,6 +155,11 @@ pub fn generate_project(
     // `ws` de axum + `futures-util` + `tokio-tungstenite` (transitivo
     // de la feature ws) al Cargo.toml generado.
     let uses_ws = program_uses_ws(program);
+    // Fase 9.w.3.c — detección de jobs (`@cron`/`@background`/`spawn`).
+    // Suma el crate `cron` + `chrono` al Cargo.toml, emite el helper
+    // `__fitz_run_cron_scheduler` en el preludio, y dispara el modo
+    // "cron-only main" cuando no hay HTTP pero sí cron jobs.
+    let uses_jobs = program_uses_jobs(program);
 
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
@@ -166,7 +171,7 @@ pub fn generate_project(
         bin_name: stem.clone(),
         output_basename: raw_stem,
         cargo_toml: cargo_toml_for(
-            &stem, has_http, uses_async, uses_python, uses_auth, uses_ws,
+            &stem, has_http, uses_async, uses_python, uses_auth, uses_ws, uses_jobs,
         ),
         main_rs,
         mod_files: loader.into_mod_files(),
@@ -314,6 +319,111 @@ fn program_uses_ws(program: &Program) -> bool {
             Stmt::FnDef { decorators, .. }
                 if decorators.iter().any(|d| d.name == "ws")
         )
+    })
+}
+
+/// Fase 9.w.3 — detecta si el programa usa jobs (`@cron`/`@background`
+/// o llamadas a `spawn(...)`). Si hay cualquiera, sumamos el crate
+/// `cron` y los helpers de scheduling al binario. Sin features de
+/// jobs, el binario default queda sin deps extra.
+///
+/// Detección:
+/// - Cualquier FnDef con decorator `@cron` o `@background`.
+/// - Cualquier llamada a `spawn(...)` adentro de cualquier expr/stmt
+///   (walk recursivo paralelo a `program_uses_auth`). El walk pierde
+///   shadowing de `spawn` user-defined — el codegen del callsite
+///   chequea eso al emitir.
+fn program_uses_jobs(program: &Program) -> bool {
+    use crate::ast::StrPart;
+    fn expr_uses_spawn(e: &Expr) -> bool {
+        match e {
+            Expr::Call { callee, args, .. } => {
+                if let Expr::Ident(name, _) = callee.as_ref() {
+                    if name == "spawn" {
+                        return true;
+                    }
+                }
+                expr_uses_spawn(callee) || args.iter().any(expr_uses_spawn)
+            }
+            Expr::BinOp { left, right, .. } => expr_uses_spawn(left) || expr_uses_spawn(right),
+            Expr::UnaryOp { operand, .. } => expr_uses_spawn(operand),
+            Expr::Field { object, .. } => expr_uses_spawn(object),
+            Expr::Index { object, index, .. } => expr_uses_spawn(object) || expr_uses_spawn(index),
+            Expr::Slice { object, start, end, .. } => {
+                expr_uses_spawn(object)
+                    || start.as_ref().is_some_and(|s| expr_uses_spawn(s))
+                    || end.as_ref().is_some_and(|x| expr_uses_spawn(x))
+            }
+            Expr::Range { start, end, .. } => expr_uses_spawn(start) || expr_uses_spawn(end),
+            Expr::List(items, _) => items.iter().any(expr_uses_spawn),
+            Expr::Tuple(items, _) => items.iter().any(expr_uses_spawn),
+            Expr::TupleField { tuple, .. } => expr_uses_spawn(tuple),
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_spawn(k) || expr_uses_spawn(v)),
+            Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
+                StrPart::Expr(inner, _) => expr_uses_spawn(inner),
+                StrPart::Lit(_) => false,
+            }),
+            Expr::If { condition, then, else_, .. } => {
+                expr_uses_spawn(condition)
+                    || then.iter().any(stmt_uses_spawn)
+                    || else_.as_ref().is_some_and(|e| e.iter().any(stmt_uses_spawn))
+            }
+            Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_spawn),
+            Expr::Match { value, arms, .. } => {
+                expr_uses_spawn(value)
+                    || arms.iter().any(|a| a.body.iter().any(stmt_uses_spawn))
+            }
+            Expr::Await(inner, _) | Expr::Try(inner, _) => expr_uses_spawn(inner),
+            Expr::Loop { body, .. } => body.iter().any(stmt_uses_spawn),
+            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+                expr_uses_spawn(expr)
+                    || expr_uses_spawn(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_spawn(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_spawn(f))
+            }
+            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+                expr_uses_spawn(key)
+                    || expr_uses_spawn(value)
+                    || expr_uses_spawn(iter)
+                    || extra_clauses.iter().any(|(_, it)| expr_uses_spawn(it))
+                    || filter.as_ref().is_some_and(|f| expr_uses_spawn(f))
+            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_spawn(v)),
+            Expr::NamedArg { value, .. } => expr_uses_spawn(value),
+            _ => false,
+        }
+    }
+    fn stmt_uses_spawn(s: &Stmt) -> bool {
+        match s {
+            Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_spawn(e),
+            Stmt::Assign { value, .. } => expr_uses_spawn(value),
+            Stmt::While { condition, body, .. } => {
+                expr_uses_spawn(condition) || body.iter().any(stmt_uses_spawn)
+            }
+            Stmt::Loop { body, .. } => body.iter().any(stmt_uses_spawn),
+            Stmt::For { iter, body, .. } => {
+                expr_uses_spawn(iter) || body.iter().any(stmt_uses_spawn)
+            }
+            Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_spawn),
+            Stmt::ReturnStatus { status, body, .. } => {
+                expr_uses_spawn(status)
+                    || body.as_ref().is_some_and(expr_uses_spawn)
+            }
+            _ => false,
+        }
+    }
+    program.iter().any(|s| {
+        if let Stmt::FnDef { decorators, .. } = s {
+            if decorators
+                .iter()
+                .any(|d| matches!(d.name.as_str(), "cron" | "background"))
+            {
+                return true;
+            }
+        }
+        stmt_uses_spawn(s)
     })
 }
 
@@ -1351,6 +1461,7 @@ fn cargo_toml_for(
     uses_python: bool,
     uses_auth: bool,
     uses_ws: bool,
+    uses_jobs: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -1366,11 +1477,24 @@ fn cargo_toml_for(
     // programa usa async (`sleep`/`.await`/`async fn`). HTTP ya pide
     // tokio con macros+rt-multi-thread; combinar las features para no
     // emitir dos entries.
-    let tokio_features: &[&str] = match (has_http, uses_async) {
-        (true, true) => &["macros", "rt-multi-thread", "time"],
-        (true, false) => &["macros", "rt-multi-thread"],
-        (false, true) => &["macros", "rt-multi-thread", "time"],
-        (false, false) => &[],
+    // Fase 9.w.3.c — jobs (cron/spawn) también necesitan tokio con
+    // `time` (sleep_until) y `signal` (ctrl_c en cron-only mode).
+    let needs_tokio = has_http || uses_async || uses_jobs;
+    let needs_time = uses_async || uses_jobs;
+    let needs_signal = uses_jobs && !has_http; // cron-only mode
+    let tokio_features: Vec<&str> = {
+        let mut feats: Vec<&str> = Vec::new();
+        if needs_tokio {
+            feats.push("macros");
+            feats.push("rt-multi-thread");
+        }
+        if needs_time {
+            feats.push("time");
+        }
+        if needs_signal {
+            feats.push("signal");
+        }
+        feats
     };
     // Fase 8.7.1: pyo3 con `abi3-py310` (un binario corre contra
     // cualquier CPython 3.10+) + `auto-initialize` (boot lazy de
@@ -1396,11 +1520,11 @@ fn cargo_toml_for(
     } else {
         ""
     };
-    let needs_deps_section = has_http || uses_async || uses_python || uses_auth;
+    let needs_deps_section = has_http || uses_async || uses_python || uses_auth || uses_jobs;
     if !needs_deps_section {
         return header;
     }
-    let tokio_line = if has_http || uses_async {
+    let tokio_line = if needs_tokio {
         format!(
             "tokio = {{ version = \"1\", features = [{}] }}\n",
             tokio_features
@@ -1411,6 +1535,15 @@ fn cargo_toml_for(
         )
     } else {
         String::new()
+    };
+    // Fase 9.w.3.c — `cron = "0.12"` para parsear cron expressions y
+    // `chrono = "0.4"` (feature clock) para `Utc::now()` que usa el
+    // scheduler. Ambas no-opcionales cuando `uses_jobs = true`.
+    let jobs_lines = if uses_jobs {
+        "cron = \"0.12\"\n\
+         chrono = { version = \"0.4\", default-features = false, features = [\"clock\"] }\n"
+    } else {
+        ""
     };
     // `serde_json` ya está en http_lines cuando hay HTTP; si solo hay
     // auth (sin HTTP), `auth_lines` lo trae. Evitar duplicación: si
@@ -1447,8 +1580,8 @@ fn cargo_toml_for(
         ""
     };
     format!(
-        "{}\n[dependencies]\n{}{}{}{}",
-        header, http_lines, tokio_line, pyo3_line, auth_lines_final
+        "{}\n[dependencies]\n{}{}{}{}{}",
+        header, http_lines, tokio_line, pyo3_line, auth_lines_final, jobs_lines
     )
 }
 
@@ -2367,6 +2500,7 @@ fn generate_main_rs(
     let uses_fitz_value = program_uses_fitz_value(program);
     let uses_auth = program_uses_auth(program);
     let uses_ws = program_uses_ws(program);
+    let uses_jobs = program_uses_jobs(program);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -2376,6 +2510,7 @@ fn generate_main_rs(
     ctx.has_http = has_http;
     ctx.uses_auth = uses_auth;
     ctx.uses_ws = uses_ws;
+    ctx.uses_jobs = uses_jobs;
     // Fase 9.w.1.d — pre-scan del `@auth_provider`. Singleton; el checker
     // (9.w.1.a) ya validó. Lo guardamos por nombre + is_async para que
     // cada handler con `@authenticated`/`@admin` emita la invocación
@@ -2412,6 +2547,12 @@ struct PartitionedProgram<'a> {
     /// `WebSocketUpgrade` + `on_upgrade` closure en lugar del HTTP
     /// dispatcher).
     ws_fns: Vec<&'a Stmt>,
+    /// Fase 9.w.3.c — handlers `@cron("expr")`. La fn también aparece
+    /// en `top_fns` (se emite como `pub fn`/`pub async fn` invocable);
+    /// `cron_fns` separa la lista para que el codegen del main pueda
+    /// emitir el registro del job (parsing del schedule + `tokio::spawn`
+    /// del loop).
+    cron_fns: Vec<&'a Stmt>,
     top_fns: Vec<&'a Stmt>,
     main_stmts: Vec<&'a Stmt>,
     server_config: Option<ServerConfigArgs>,
@@ -2432,6 +2573,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
     let mut type_defs: Vec<&Stmt> = Vec::new();
     let mut http_fns: Vec<&Stmt> = Vec::new();
     let mut ws_fns: Vec<&Stmt> = Vec::new();
+    let mut cron_fns: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut main_stmts: Vec<&Stmt> = Vec::new();
     let mut server_config: Option<ServerConfigArgs> = None;
@@ -2459,6 +2601,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                     // Separar `@server` de los `@get`/`@post`/etc.
                     let mut http_decos = false;
                     let mut ws_decos = false;
+                    let mut cron_decos = false;
                     for d in decorators {
                         // 7.5: `@server` acepta kwargs (delegado a
                         // `parse_server_decorator`).
@@ -2523,6 +2666,13 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // dispatcher normal. Sin kwargs (validado
                             // por el branch general arriba).
                             "ws" => ws_decos = true,
+                            // Fase 9.w.3.c — `@cron("expr")` y `@background`.
+                            // `@cron` dispara `cron_decos` para rutear a
+                            // `cron_fns`; `@background` queda como top_fn
+                            // (es solo marcador del checker). El checker
+                            // (9.w.3.a) ya validó shape + conflictos.
+                            "cron" => cron_decos = true,
+                            "background" => {}
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
@@ -2560,6 +2710,15 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                         // estuvieran apilados (no es un caso válido, pero
                         // defensivo). El wrapper WS no consulta http_decos.
                         ws_fns.push(s);
+                    } else if cron_decos {
+                        // Fase 9.w.3.c — `@cron("expr")`. Va a `cron_fns`
+                        // para que el codegen del main registre el job en
+                        // el scheduler. La fn se emite también como
+                        // top_fn (handler invocable). Pushear a AMBAS
+                        // listas: `top_fns` para la emisión de la fn,
+                        // `cron_fns` para el registro del job.
+                        cron_fns.push(s);
+                        top_fns.push(s);
                     } else if http_decos {
                         http_fns.push(s);
                     } else if name != "main" {
@@ -2578,6 +2737,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
         type_defs,
         http_fns,
         ws_fns,
+        cron_fns,
         top_fns,
         main_stmts,
         server_config,
@@ -2671,6 +2831,12 @@ fn emit_main_rs_body(
     // mod/use decls para que las fns top-level del usuario lo
     // referencien sin necesidad de `use` extra.
     ctx.emit_auth_prelude();
+    // Fase 9.w.3.c: preludio de jobs — helpers para parsear cron
+    // expressions (`__fitz_parse_cron`) y para ejecutar el loop de
+    // cada job (`__fitz_run_cron_job`). Solo se emiten si el programa
+    // usa cron jobs o spawn. Va después del preludio base y antes de
+    // los mod/use decls.
+    ctx.emit_jobs_prelude();
     // Fase 8.7.2: bindings Python globales (static + getter) emitidos
     // al top-level del crate para que cualquier fn los pueda referenciar.
     let py_imports = std::mem::take(&mut ctx.python_imports_ordered);
@@ -2716,6 +2882,22 @@ fn emit_main_rs_body(
         ctx.gen_top_fn(stmt)?;
     }
 
+    // Fase 9.w.3.c — pre-poblar `cron_jobs_info` desde `p.cron_fns` para
+    // que `gen_main`/`gen_http_main` puedan emitir el registro de jobs.
+    for stmt in &p.cron_fns {
+        if let Stmt::FnDef { name, decorators, is_async, .. } = stmt {
+            if let Some(deco) = decorators.iter().find(|d| d.name == "cron") {
+                if let Some(Expr::Str(expr, _)) = deco.args.first() {
+                    ctx.cron_jobs_info.push(CronJobInfo {
+                        fn_name: name.clone(),
+                        expr: expr.clone(),
+                        is_async: *is_async,
+                    });
+                }
+            }
+        }
+    }
+
     if has_http {
         // Emitir un wrapper `async fn __handler_<name>` por cada handler.
         for stmt in &p.http_fns {
@@ -2748,6 +2930,21 @@ fn emit_main_rs_body(
         ctx.gen_main(&p.main_stmts)?;
     }
     Ok(())
+}
+
+/// Fase 9.w.3.c — info de un cron job recolectada durante el walk de
+/// `partition_program_stmts`. Cada FnDef con `@cron("expr")` produce
+/// una entry. El codegen del main lo consume al final para emitir
+/// `tokio::spawn(__fitz_run_cron_job(...))`.
+#[derive(Debug, Clone)]
+struct CronJobInfo {
+    /// Nombre Rust de la fn target (= nombre Fitz, sin transformación).
+    fn_name: String,
+    /// Cron expression como el usuario la escribió. El runtime aplica
+    /// `__fitz_normalize_cron` antes de pasarla al crate `cron`.
+    expr: String,
+    /// `true` si la fn es async (cambia el dispatch del invoke).
+    is_async: bool,
 }
 
 /// Valores parseados de `@server(port?, host?)`. Defaults aplicados
@@ -3135,6 +3332,16 @@ struct CodegenCtx<'a> {
     /// handler. Cuando es `false`, programas HTTP regulares no pagan
     /// el costo del bloque WS adicional en el binario.
     uses_ws: bool,
+    /// Fase 9.w.3.c: `true` si el programa tiene jobs (`@cron`/
+    /// `@background`) o usa `spawn(...)`. Habilita emisión del helper
+    /// `__fitz_run_cron_scheduler`, registro de jobs en main, y el
+    /// modo "cron-only main" cuando no hay HTTP.
+    uses_jobs: bool,
+    /// Fase 9.w.3.c: info de cada cron job pre-recolectada. Cada entry
+    /// tiene el nombre Rust de la fn target, el cron expression Str,
+    /// y un flag `is_async`. `gen_main`/`gen_http_main` lo usan para
+    /// emitir el `tokio::spawn(__fitz_run_cron_job(...))` por job.
+    cron_jobs_info: Vec<CronJobInfo>,
     /// Fase 9.w.2.e: intervalo de heartbeat ping para WebSockets en
     /// segundos. Default 30; `@server(ws_heartbeat_secs=N)` lo
     /// sobrescribe. Setado por `emit_main_rs_body` ANTES de invocar
@@ -3305,6 +3512,8 @@ impl<'a> CodegenCtx<'a> {
             auth_provider_name: None,
             auth_provider_is_async: false,
             uses_ws: false,
+            uses_jobs: false,
+            cron_jobs_info: Vec::new(),
             ws_heartbeat_secs: 30,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
@@ -4133,6 +4342,115 @@ impl<'a> CodegenCtx<'a> {
     /// `__fitz_py_bind_math()`. El boot del módulo Python es lazy: la
     /// primera invocación inicializa el OnceLock (toma el GIL, importa);
     /// las siguientes son lecturas atómicas baratas.
+    /// Fase 9.w.3.c — preludio de jobs. Helpers para correr cron jobs
+    /// y para wrappear `tokio::spawn` returns en `Future<T>`. Solo se
+    /// emite cuando `self.uses_jobs == true`.
+    ///
+    /// El helper `__fitz_run_cron_job` corre el loop de un job:
+    /// `loop { sleep_until(next_tick); invoke; }`. Cada job se spawnea
+    /// con `tokio::spawn` desde el main generado. Errores del handler
+    /// (panic, Err) se loguean a stderr; el loop sigue.
+    ///
+    /// El helper `__fitz_normalize_cron` convierte "5 fields" Unix
+    /// clásico a "6 fields" (con seconds) que el crate `cron` espera.
+    /// Paralelo a `cron_jobs::normalize_cron_expression` del intérprete.
+    /// Fase 9.w.3.c — emite el código que registra y spawnea cada
+    /// cron job. Se llama desde `gen_main` (CLI cron-only) y desde
+    /// `gen_http_main` (HTTP + cron). Cada job arma su propio
+    /// `tokio::spawn(__fitz_run_cron_job(...))` con una closure async
+    /// que invoca la fn target.
+    ///
+    /// El parse del cron expression es runtime (no compile-time del
+    /// codegen): se usa el crate `cron` con `__fitz_normalize_cron`
+    /// para soportar 5/6/7 fields. Una expression inválida hace
+    /// panic al boot — paralelo al fail-fast del runtime intérprete
+    /// (`register_cron_job` devuelve Err que el evaluator propaga).
+    fn emit_cron_job_spawns(&mut self) -> Result<(), FitzError> {
+        if self.cron_jobs_info.is_empty() {
+            return Ok(());
+        }
+        // Banner inicial de logs (paralelo a `spawn_cron_scheduler` del
+        // intérprete). Útil para que el operador vea qué jobs se
+        // registraron al boot.
+        self.emit(&format!(
+            "    eprintln!(\"\\u{{1F550}} Fitz scheduler arrancado con {} job(s) cron\");\n",
+            self.cron_jobs_info.len()
+        ));
+        // Clone to release borrow on self
+        let jobs = self.cron_jobs_info.clone();
+        for job in &jobs {
+            let escaped_expr = rust_str_literal(&job.expr);
+            let escaped_name = rust_str_literal(&job.fn_name);
+            self.emit(&format!(
+                "    eprintln!(\"   @cron  {} ({})\");\n",
+                job.fn_name, job.expr
+            ));
+            self.emit(&format!(
+                "    {{\n        \
+                     use std::str::FromStr;\n        \
+                     let __normalized = __fitz_normalize_cron({expr});\n        \
+                     let __schedule = cron::Schedule::from_str(&__normalized)\n            \
+                         .unwrap_or_else(|e| panic!(\"@cron sobre fn '{{}}': expresión inválida `{{}}`: {{}}\", {name}, {expr}, e));\n        \
+                     let __job_name = {name}.to_string();\n        \
+                     tokio::spawn(__fitz_run_cron_job(__job_name, __schedule, || async {{\n            \
+                         {invoke};\n        \
+                     }}));\n    \
+                     }}\n",
+                expr = escaped_expr,
+                name = escaped_name,
+                invoke = if job.is_async {
+                    format!("{}().await", job.fn_name)
+                } else {
+                    format!("let _ = {}()", job.fn_name)
+                },
+            ));
+        }
+        Ok(())
+    }
+
+    fn emit_jobs_prelude(&mut self) {
+        if !self.uses_jobs {
+            return;
+        }
+        self.emit(
+            "\
+// --- 9.w.3.c: runtime de jobs (@cron / @background / spawn) ---
+
+/// Normaliza una cron expression de 5 fields (Unix clásico) a 6 fields
+/// (con seconds al inicio = 0). El crate `cron` exige 6 o 7 fields.
+fn __fitz_normalize_cron(expr: &str) -> String {
+    let trimmed = expr.trim();
+    if trimmed.split_whitespace().count() == 5 {
+        format!(\"0 {}\", trimmed)
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// Loop principal de un cron job: calcula el próximo tick, duerme,
+/// invoca el handler, repite. El handler es una closure async que
+/// invoca la fn target del usuario; el wrapper se construye en main.
+async fn __fitz_run_cron_job<F, Fut>(name: String, schedule: cron::Schedule, mut handler: F)
+where
+    F: FnMut() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send,
+{
+    loop {
+        let now = chrono::Utc::now();
+        let Some(next) = schedule.upcoming(chrono::Utc).next() else {
+            eprintln!(\"\\u{1F550} cron job '{}' agotó su schedule, terminando.\", name);
+            return;
+        };
+        let delay = (next - now).to_std().unwrap_or_else(|_| std::time::Duration::from_millis(0));
+        tokio::time::sleep(delay).await;
+        handler().await;
+    }
+}
+
+",
+        );
+    }
+
     fn emit_python_bindings_top_level(&mut self, imports: &[PythonImport]) {
         if imports.is_empty() {
             return;
@@ -4489,14 +4807,26 @@ impl<'a> CodegenCtx<'a> {
         // "current_thread")] async fn main()`. Eso destraba `.await`
         // top-level y llamadas a `async fn` Fitz que llegan acá vía
         // statements del CLI.
-        if self.uses_async {
-            self.emit("#[tokio::main(flavor = \"current_thread\")]\n");
+        //
+        // Fase 9.w.3.c — programas con jobs (`@cron` o `spawn(...)`)
+        // también necesitan tokio. Multi_thread cuando hay jobs
+        // (scheduler corre en workers separados sin bloquear el main),
+        // current_thread cuando es solo async sin jobs.
+        if self.uses_async || self.uses_jobs {
+            let flavor = if self.uses_jobs { "multi_thread" } else { "current_thread" };
+            self.emit(&format!("#[tokio::main(flavor = \"{}\")]\n", flavor));
             self.emit("async fn main() {\n");
         } else {
             self.emit("fn main() {\n");
         }
         self.indent += 1;
         self.push_scope();
+        // Fase 9.w.3.c — registrar cron jobs ANTES de los stmts del
+        // usuario. Los jobs corren en `tokio::spawn` independientes;
+        // el main puede seguir con sus stmts. Si hay cron-only mode
+        // (sin HTTP), el bloqueo con `ctrl_c` va al final.
+        let has_cron = !self.cron_jobs_info.is_empty();
+        self.emit_cron_job_spawns()?;
         // Fase 8.7.2: los bindings Python son **globales** (static +
         // getter emitido al top-level del crate por
         // `emit_python_bindings_top_level`). El main body no necesita
@@ -4517,6 +4847,16 @@ impl<'a> CodegenCtx<'a> {
                 }
             }
             self.gen_stmt(stmt)?;
+        }
+        // Fase 9.w.3.c — si hay cron jobs en modo CLI (sin HTTP),
+        // bloqueamos sobre `signal::ctrl_c()` para que el proceso
+        // quede vivo mientras los jobs corren. Decisión confirmada
+        // con el autor: modo systemd-friendly. Sin esta línea el
+        // main retornaría tras los stmts y los tasks tokio se
+        // cancelarían inmediatamente.
+        if has_cron {
+            self.emit("    let _ = tokio::signal::ctrl_c().await;\n");
+            self.emit("    eprintln!(\"\\n\\u{1F550} Fitz scheduler recibió Ctrl+C, terminando.\");\n");
         }
         self.pop_scope();
         self.indent -= 1;
@@ -6995,6 +7335,18 @@ impl<'a> CodegenCtx<'a> {
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
             ));
         }
+        // Fase 9.w.3.c — `spawn(fn_call)` builtin dispatch. El target
+        // del inner call debe ser una fn `@background` registrada (el
+        // checker 9.w.3.a lo validó). Acá emitimos
+        // `tokio::spawn(async move { fn_target(args...).await })` con
+        // unwrap del JoinHandle a Future<T>.
+        //
+        // Solo dispara cuando `spawn` NO fue shadowed por una fn
+        // user-defined (chequeamos `fn_sigs.contains_key("spawn")` —
+        // si está, el usuario lo overrideó).
+        if name == "spawn" && !self.fn_sigs.contains_key("spawn") {
+            return self.gen_spawn_call(args, call_span);
+        }
         // Mini-tanda Bits-extras — builtins globales sobre Int. Si
         // el usuario define una fn con el mismo nombre, `fn_sigs` la
         // toma antes (paralelo a `sleep`/`len`). Emite el método Rust
@@ -7291,6 +7643,115 @@ impl<'a> CodegenCtx<'a> {
     /// con coerciones por parámetro. El `callee_expr` puede ser un
     /// identificador (`greet`) o un path Rust (`foo::greet`); ambos
     /// son válidos como prefijo de `(...)`.
+    /// Fase 9.w.3.c — codegen de `spawn(fn_call)`. El checker (9.w.3.a)
+    /// validó que el arg es `Expr::Call` literal a fn `@background`
+    /// y refinó el tipo a `Future<T>` con T = ret del target.
+    ///
+    /// El codegen emite:
+    /// ```rust
+    /// {
+    ///     let __jh = tokio::spawn(async move { fn_target(args...).await });
+    ///     Box::pin(async move { __jh.await.unwrap() })
+    /// }
+    /// ```
+    /// donde `__jh` es el JoinHandle. Si la fn target ya es async,
+    /// el `.await` en el async block desempaca el Future inner. Si
+    /// es sync, el wrapper `async move {}` cubre el caso.
+    ///
+    /// Para sync fns que retornan `T` puro, el JoinHandle es
+    /// `Future<Output = Result<T, JoinError>>`; envolvemos en
+    /// `Box::pin(async move { jh.await.unwrap() })` para mapear a
+    /// `Pin<Box<dyn Future<Output = T>>>` (el tipo que el codegen
+    /// usa para `Future<T>` Fitz).
+    fn gen_spawn_call(
+        &mut self,
+        args: &[Expr],
+        call_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
+        if args.len() != 1 {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "spawn: espera exactamente 1 argumento (un call a fn `@background`), recibió {}.",
+                    args.len()
+                ),
+            ));
+        }
+        let Expr::Call { callee: inner_callee, args: inner_args, .. } = &args[0] else {
+            return Err(self.err_at(
+                call_span,
+                "spawn: el argumento debe ser un call literal a una fn `@background`.".to_string(),
+            ));
+        };
+        let Expr::Ident(target_name, _) = inner_callee.as_ref() else {
+            return Err(self.err_at(
+                call_span,
+                "spawn: el callee del inner call debe ser una fn top-level con `@background`."
+                    .to_string(),
+            ));
+        };
+        // Lookup signature de la fn target para conocer su ret type
+        // (Future<T> vs T puro) + tipos de params para coercionar args.
+        let sig = self.fn_sigs.get(target_name).cloned().ok_or_else(|| {
+            self.err_at(
+                call_span,
+                format!("spawn: la fn `{}` no está definida en este scope.", target_name),
+            )
+        })?;
+        // Generar el código de los args, coercionando al tipo del param.
+        if inner_args.len() != sig.params.len() {
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "spawn: la fn `{}` espera {} args, recibió {}.",
+                    target_name,
+                    sig.params.len(),
+                    inner_args.len()
+                ),
+            ));
+        }
+        let mut args_code: Vec<String> = Vec::with_capacity(inner_args.len());
+        for (i, arg) in inner_args.iter().enumerate() {
+            let (code, ty) = self.gen_expr(arg)?;
+            let coerced = coerce(&code, &ty, &sig.params[i]);
+            args_code.push(coerced);
+        }
+        // El ret type del spawn es `Future<T>` con T = ret_type de la
+        // fn target. Si la fn ya era async, sig.ret_type es `Future<X>`;
+        // hacemos passthrough (no doble wrap). Si era sync, envolvemos
+        // en Future<T>.
+        let target_ret = sig.ret.clone();
+        let final_ret_type = match &target_ret {
+            Type::Future(_) => target_ret.clone(),
+            other => Type::Future(Box::new(other.clone())),
+        };
+        // Si el target es async fn, el call retorna `Future<...>` Rust
+        // (un `Pin<Box<dyn Future>>` por la convención del codegen).
+        // Lo `.await`-amos adentro del async block para que el
+        // `tokio::spawn` ejecute la corutina.
+        //
+        // Si el target es sync, el call ejecuta directo y retorna T.
+        // No hace falta `.await`.
+        let inner_call = if matches!(target_ret, Type::Future(_)) {
+            format!("{}({}).await", target_name, args_code.join(", "))
+        } else {
+            format!("{}({})", target_name, args_code.join(", "))
+        };
+        // El JoinHandle resuelve a `Result<T, JoinError>`. `.unwrap()`
+        // panic si la task panicó — paralelo a `tokio::spawn` semántico.
+        // El `Box::pin(...)` envuelve para que case con el tipo
+        // `Pin<Box<dyn Future<Output = T> + Send>>` que el codegen usa
+        // para `Future<T>` Fitz.
+        let code = format!(
+            "{{ \
+                let __jh = tokio::spawn(async move {{ {inner} }}); \
+                Box::pin(async move {{ __jh.await.unwrap() }}) as std::pin::Pin<Box<dyn std::future::Future<Output = _> + Send>> \
+            }}",
+            inner = inner_call,
+        );
+        Ok((code, final_ret_type))
+    }
+
     fn gen_call_with_sig(
         &mut self,
         callee_expr: &str,
@@ -13468,6 +13929,11 @@ impl<'a> CodegenCtx<'a> {
         .unwrap();
         self.emit_indent();
         self.emit("let __listener = tokio::net::TcpListener::bind(__addr).await.expect(\"bind\");\n");
+        // Fase 9.w.3.c — spawnea cron jobs ANTES de `axum::serve`. Los
+        // tasks corren en el runtime tokio multi_thread del HTTP; cuando
+        // el server termina (Ctrl+C), los tasks se cancelan al dropear
+        // el runtime.
+        self.emit_cron_job_spawns()?;
         self.emit_indent();
         self.emit("axum::serve(__listener, __app).await.expect(\"axum::serve\");\n");
 
@@ -16551,7 +17017,7 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", false, true, false, false, false);
+        let toml = cargo_toml_for("foo", false, true, false, false, false, false);
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -16559,7 +17025,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", true, true, false, false, false);
+        let toml = cargo_toml_for("foo", true, true, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -16567,7 +17033,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
-        let toml = cargo_toml_for("foo", false, false, false, false, false);
+        let toml = cargo_toml_for("foo", false, false, false, false, false, false);
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
     }
@@ -16580,7 +17046,7 @@ mod tests {
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
-        let toml = cargo_toml_for("foo", false, false, true, false, false);
+        let toml = cargo_toml_for("foo", false, false, true, false, false, false);
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
         assert!(toml.contains("\"abi3-py310\""), "esperaba feature abi3-py310");
@@ -16594,7 +17060,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
-        let toml = cargo_toml_for("foo", true, false, true, false, false);
+        let toml = cargo_toml_for("foo", true, false, true, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
         assert!(toml.contains("tokio"));
@@ -16602,7 +17068,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
-        let toml = cargo_toml_for("foo", true, false, false, false, false);
+        let toml = cargo_toml_for("foo", true, false, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
     }
@@ -21246,6 +21712,104 @@ mod tests {
             code.contains("const LIMIT : i64") || code.contains("const LIMIT: i64"),
             "esperaba `const LIMIT: i64` hoisteado, got:\n{}",
             code
+        );
+    }
+
+    // ---- Fase 9.w.3.c — codegen @cron + @background + spawn ----
+
+    #[test]
+    fn cargo_toml_con_jobs_incluye_cron_y_chrono() {
+        let toml = cargo_toml_for("app", false, false, false, false, false, true);
+        assert!(toml.contains("cron = \"0.12\""));
+        assert!(toml.contains("chrono = "));
+        // Sin HTTP/async, tokio se incluye por uses_jobs con multi_thread.
+        assert!(toml.contains("tokio"));
+        assert!(toml.contains("rt-multi-thread"));
+    }
+
+    #[test]
+    fn cargo_toml_jobs_sin_http_incluye_signal_feature() {
+        // Cron-only mode necesita `signal` para ctrl_c.
+        let toml = cargo_toml_for("app", false, false, false, false, false, true);
+        assert!(
+            toml.contains("\"signal\""),
+            "esperaba tokio feature `signal` para cron-only mode, got:\n{}",
+            toml
+        );
+    }
+
+    #[test]
+    fn cargo_toml_jobs_con_http_no_incluye_signal_feature() {
+        // HTTP + cron: ctrl_c lo maneja `serve()` con su propio
+        // shutdown signal; el main generado no usa signal directo.
+        let toml = cargo_toml_for("app", true, false, false, false, false, true);
+        assert!(toml.contains("cron"));
+        assert!(!toml.contains("\"signal\""));
+    }
+
+    #[test]
+    fn cron_decorator_emite_spawn_y_schedule_parsing() {
+        let src = "@cron(\"0 0 * * *\")\n\
+                   fn cleanup() -> Null { return null }\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // Helper del preludio debe estar.
+        assert!(
+            code.contains("__fitz_run_cron_job"),
+            "esperaba helper `__fitz_run_cron_job` en el preludio"
+        );
+        // Main genera el spawn del job.
+        assert!(
+            code.contains("cron::Schedule::from_str"),
+            "esperaba parseo del cron expression en main"
+        );
+        assert!(
+            code.contains("tokio::spawn(__fitz_run_cron_job"),
+            "esperaba `tokio::spawn(__fitz_run_cron_job(...))` en main"
+        );
+    }
+
+    #[test]
+    fn cron_only_main_bloquea_con_ctrl_c() {
+        // Programa con `@cron` pero sin `@server` — el main CLI
+        // debe bloquear con ctrl_c() para no salir antes de los ticks.
+        let src = "@cron(\"*/1 * * * * *\")\nfn tick() -> Null { return null }\n";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("tokio::signal::ctrl_c().await"),
+            "esperaba bloqueo con ctrl_c en cron-only main"
+        );
+    }
+
+    #[test]
+    fn spawn_call_emite_tokio_spawn_y_box_pin() {
+        let src = "@background\nfn job() -> Int { return 42 }\n\
+                   async fn caller() -> Int {\n\
+                       let f = spawn(job())\n\
+                       return f.await\n\
+                   }\n\
+                   print(\"hi\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("tokio::spawn"),
+            "esperaba `tokio::spawn` en el codegen de spawn(...), got:\n{}",
+            code
+        );
+        assert!(
+            code.contains("Box::pin"),
+            "esperaba `Box::pin` que envuelve el JoinHandle en Future<T>"
+        );
+    }
+
+    #[test]
+    fn background_decorator_no_emite_codigo_extra() {
+        // `@background` es marcador del checker; en codegen la fn se
+        // emite como `pub fn` normal sin diferencia visible.
+        let src = "@background\nfn send(addr: Str) -> Null { return null }\n\
+                   print(\"hi\")";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("fn send"),
+            "esperaba la fn definida igual que sin decorator"
         );
     }
 }
