@@ -1340,6 +1340,11 @@ fn scope_level_completions(
         ("print", "fn(args...)"),
         ("len", "fn(x) -> Int"),
         ("sleep", "fn(Int) -> Future<Null>"),
+        // Fase 9.w.3 — `spawn(fn_call)` fire-and-forget. El target del
+        // call debe estar marcado con `@background`. Devuelve un
+        // `Future<T>` awaitable; ignorar el Future deja la task
+        // ejecutándose detached.
+        ("spawn", "fn(fn_call) -> Future<T>  // requiere @background"),
         ("cors", "fn(config: Map?) -> CorsConfig"),
         ("bytes", "fn(s: Str) -> Bytes"),
         ("assert", "fn(cond: Bool, msg: Str?) -> Null"),

@@ -1038,6 +1038,13 @@ struct CheckCtx<'a> {
     /// y que el `User` tenga campo `role: Str` cuando hay `@admin` en el
     /// programa.
     auth_provider: Option<AuthProviderInfo>,
+    /// Fase 9.w.3 — set de nombres de fns top-level con decorator
+    /// `@background`. Recolectado por `collect_background_fns` antes
+    /// del walk. Lo consulta el chequeo de `spawn(call)` para validar
+    /// que el target del spawn esté declarado como ejecutable en
+    /// background — evita usos accidentales de spawn sobre fns
+    /// regulares cuyo retorno el caller espera consumir.
+    background_fns: std::collections::HashSet<String>,
     /// Mini-tanda L — stack paralelo a los `Expr::Loop` actualmente
     /// siendo chequeados. Cada frame recolecta los tipos de los
     /// valores de `break <v>` adentro. `Expr::Loop` consume el
@@ -1086,6 +1093,7 @@ impl<'a> CheckCtx<'a> {
             await_stack: Vec::new(),
             middleware_fn_names: std::collections::HashSet::new(),
             auth_provider: None,
+            background_fns: std::collections::HashSet::new(),
             loop_depth: 0,
             break_value_stack: Vec::new(),
             errors: Vec::new(),
@@ -1157,6 +1165,28 @@ impl<'a> CheckCtx<'a> {
         // El evaluator hace la validación completa en runtime.
         self.scopes[0].insert(
             "cors".into(),
+            VarBinding {
+                ty: Type::Any,
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // Fase 9.w.3 — `spawn(fn_call) -> Future<T>` fire-and-forget.
+        // Tipado como `Any` porque T depende del fn target; el dispatch
+        // especial en `synthesize_expr` para `Expr::Call` cuando el
+        // callee es Ident "spawn" refina al tipo concreto. Validaciones
+        // del checker:
+        //   - exactamente 1 arg, que debe ser un `Expr::Call` literal,
+        //   - el callee del inner call debe ser una fn top-level
+        //     declarada con `@background`,
+        //   - el ret del spawn es `Future<T>` con T = ret de la fn
+        //     target (await-able igual que `sleep(...)`).
+        // El runtime hace `tokio::spawn` y devuelve un Future que
+        // resuelve cuando la task termina.
+        self.scopes[0].insert(
+            "spawn".into(),
             VarBinding {
                 ty: Type::Any,
                 annotated: false,
@@ -1941,6 +1971,30 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // modo gradual sin chequear nada de la llamada.
                     None => Type::Any,
                 };
+            }
+            // Fase 9.w.3 — dispatch especial para `spawn(fn_call)`.
+            // El built-in se tipa como `Any` (5.3.4); acá refinamos al
+            // tipo concreto `Future<T>` donde T es el ret type de la
+            // fn target. Validaciones:
+            //   - exactamente 1 arg, que debe ser un `Expr::Call`
+            //     literal (no var, no expression compuesta).
+            //   - el callee del inner call debe ser una fn top-level
+            //     declarada con `@background` (opt-in del autor).
+            //
+            // El dispatch solo aplica si el binding de `spawn` no fue
+            // shadowed por una fn user-defined: comparamos el `ty` del
+            // binding contra `Type::Any` (el del builtin). Si el
+            // usuario hace `fn spawn(x) -> Int`, el lookup tipa como
+            // `Function{...}` y caemos a la ruta normal.
+            if let Expr::Ident(name, _) = callee.as_ref() {
+                if name == "spawn"
+                    && matches!(
+                        ctx.lookup_binding("spawn").map(|b| &b.ty),
+                        Some(Type::Any)
+                    )
+                {
+                    return check_spawn_call(ctx, args, *span);
+                }
             }
             // Sintetizamos siempre callee y args para que afloren
             // errores adentro. Después validamos aridad y tipos según
@@ -4919,6 +4973,12 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // recibe exactamente un `WsConn<T>` + (opcional) un `user:
             // User` si tiene `@authenticated`/`@admin`.
             check_ws_handler(ctx, fn_name, params, *is_async, decorators, *fn_span);
+            // Fase 9.w.3 — validar `@cron("expr")` (jobs periódicos) y
+            // `@background` (fns ejecutables vía spawn). Cada uno tiene
+            // reglas propias; conflictos `@cron + @background` o
+            // `@cron + @get/@post/...` se rechazan.
+            check_cron_decorator(ctx, fn_name, params, &ret, *is_async, decorators, *fn_span);
+            check_background_decorator(ctx, fn_name, decorators, *fn_span);
             ctx.push_scope();
             ctx.return_stack.push(ret);
             ctx.inferred_returns.push(Vec::new());
@@ -5194,6 +5254,11 @@ pub fn check_program(
         // su info en `ctx.auth_provider`. El walk posterior chequea
         // `@authenticated`/`@admin` contra esta info.
         collect_auth_provider(&mut ctx, program);
+        // Fase 9.w.3 — recolectar nombres de fns con `@background`. El
+        // chequeo de `spawn(call)` exige que el target sea una fn
+        // declarada con `@background` (opt-in para evitar usos
+        // accidentales sobre fns regulares).
+        collect_background_fns(&mut ctx, program);
         check_block(&mut ctx, program);
         // R.3 — chequear bodies de los métodos custom de cada
         // `type`. Esto sucede DESPUÉS del check_block normal para
@@ -5715,6 +5780,316 @@ fn check_ws_handler(
                 fn_name, wsconn_params, fn_name,
             ),
         ));
+    }
+}
+
+/// Fase 9.w.3 — checker para `spawn(fn_call)`. El callsite `spawn(...)`
+/// devuelve `Future<T>` donde T es el ret type de la fn target. El
+/// dispatch dispara solo cuando el binding de `spawn` es el builtin
+/// (no override del user).
+///
+/// Validaciones:
+///   1. Exactamente 1 arg, que debe ser un `Expr::Call` literal. No
+///      aceptamos `spawn(x)` donde `x` es var (el target debe ser
+///      claro estáticamente para validar `@background`).
+///   2. El callee del inner call debe ser un Ident resoluble. No
+///      aceptamos `spawn(obj.method())` (los métodos custom no llevan
+///      `@background`).
+///   3. La fn target debe estar en `ctx.background_fns`. Sin
+///      `@background`, el checker rechaza con mensaje claro.
+///
+/// El ret type del spawn se sintetiza siguiendo el ret type de la fn
+/// target: si la fn ya devuelve `Future<T>` (async fn), spawn devuelve
+/// `Future<T>` (no doble wrap). Si la fn sync devuelve `T` puro,
+/// spawn devuelve `Future<T>`. Paridad con `tokio::spawn` que envuelve
+/// el output en JoinHandle pero la API expone solo el `T` final via
+/// `.await`.
+fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
+    if args.len() != 1 {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            format!(
+                "spawn: espera exactamente 1 argumento (un call a fn `@background`), recibió {}. Sintaxis: `spawn(mi_fn(args))`.",
+                args.len()
+            ),
+        ));
+        return Type::Future(Box::new(Type::Any));
+    }
+    let inner_call = match &args[0] {
+        Expr::Call { callee, args: inner_args, .. } => (callee, inner_args),
+        Expr::NamedArg { value, .. } => match value.as_ref() {
+            Expr::Call { callee, args: inner_args, .. } => (callee, inner_args),
+            _ => {
+                ctx.errors.push(FitzError::new(
+                    ErrorKind::TypeError,
+                    span.line,
+                    span.column,
+                    "spawn: el argumento debe ser un call literal a una fn `@background`, no un valor compuesto. Sintaxis: `spawn(send_email(addr, body))`.".to_string(),
+                ));
+                return Type::Future(Box::new(Type::Any));
+            }
+        }
+        _ => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                span.line,
+                span.column,
+                "spawn: el argumento debe ser un call literal a una fn `@background`, no una variable o expresión. Sintaxis: `spawn(send_email(addr, body))`.".to_string(),
+            ));
+            return Type::Future(Box::new(Type::Any));
+        }
+    };
+    let (callee, inner_args) = inner_call;
+    let target_name = match callee.as_ref() {
+        Expr::Ident(name, _) => name.clone(),
+        _ => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                span.line,
+                span.column,
+                "spawn: el callee del inner call debe ser una fn top-level con `@background`, no un method call ni una expression compuesta.".to_string(),
+            ));
+            // Tipamos los args para que afloren errores adentro y
+            // devolvemos Future<Any> sin parar el chequeo.
+            for a in inner_args {
+                infer_expr(ctx, a);
+            }
+            return Type::Future(Box::new(Type::Any));
+        }
+    };
+    if !ctx.background_fns.contains(&target_name) {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            format!(
+                "spawn: la fn `{}` no está declarada con `@background`. Marcá la fn con `@background\\nfn {}(...) {{ ... }}` para autorizar su ejecución fire-and-forget vía spawn.",
+                target_name, target_name
+            ),
+        ));
+        // Tipamos los args + devolvemos Future<Any> para no romper
+        // el chequeo del caller.
+        for a in inner_args {
+            infer_expr(ctx, a);
+        }
+        return Type::Future(Box::new(Type::Any));
+    }
+    // OK: target es una fn `@background` declarada. Tipamos el inner
+    // call delegando al synthesize estándar (valida aridad + arg
+    // types contra la firma real de la fn target). El ret type del
+    // inner call es lo que envolvemos en `Future` — excepto si ya
+    // viene como Future (async fn), en cuyo caso pasthrough sin
+    // doble wrap.
+    let inner_ret = infer_expr(ctx, &args[0]);
+    match inner_ret {
+        Type::Future(_) => inner_ret,
+        Type::Any => Type::Future(Box::new(Type::Any)),
+        other => Type::Future(Box::new(other)),
+    }
+}
+
+/// Fase 9.w.3 — pre-scan de las fns top-level con `@background`. El
+/// chequeo de `spawn(call)` (en `synthesize_expr` para `Expr::Call`
+/// cuyo callee es Ident `"spawn"`) consulta este set para validar
+/// que el target del spawn esté declarado como background.
+///
+/// Política: `@background` no admite args/kwargs. `@background` y
+/// `@cron` son mutuamente excluyentes (lo valida `check_cron_decorator`
+/// y `check_background_decorator`). El walk del checker emite errores
+/// si el shape del decorator es inválido; acá solo recolectamos
+/// nombres para tener el set listo antes del walk.
+fn collect_background_fns(ctx: &mut CheckCtx, program: &Program) {
+    for stmt in program {
+        let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+        if decorators.iter().any(|d| d.name == "background") {
+            ctx.background_fns.insert(name.clone());
+        }
+    }
+}
+
+/// Fase 9.w.3 — valida `@cron("cron-expr")` sobre `fn` top-level.
+/// Reglas:
+///   1. Args: exactamente 1 Str literal con cron expression.
+///      Aceptamos 5 fields (Unix clásico) o 6/7 fields (con seconds
+///      y/o year) — el parser del runtime usa el crate `cron`.
+///   2. Sin kwargs.
+///   3. La fn no admite params (los jobs no reciben input).
+///   4. Return type: `Null`, `Result<Null>`, `Result<T>` con T cualquiera,
+///      o `Future<X>` cuando es async (paralelo a otros handlers async).
+///      Aceptamos también `Any` (gradual / sin anotar).
+///   5. No combinable con `@get`/`@post`/`@put`/`@delete`/`@ws` (un job
+///      cron no es un endpoint HTTP) ni con `@background` (semánticas
+///      distintas: cron es periódico programado, background es
+///      fire-and-forget desde un handler).
+///
+/// Validación sintáctica del cron expression: se hace en runtime/codegen
+/// (no en el checker) porque importar `cron` acá implica una dep en el
+/// path del checker. El checker valida shape; el runtime valida sintaxis.
+fn check_cron_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    params: &[Param],
+    ret: &Type,
+    is_async: bool,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let cron_deco = match decorators.iter().find(|d| d.name == "cron") {
+        Some(d) => d,
+        None => return,
+    };
+    // 1) Args: exactamente 1 Str literal, sin kwargs.
+    if cron_deco.args.len() != 1 || !cron_deco.kwargs.is_empty() {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@cron sobre fn '{}': espera exactamente 1 argumento (cron expression Str). Sintaxis: `@cron(\"0 0 * * *\")`.",
+                fn_name
+            ),
+        ));
+        return;
+    }
+    match &cron_deco.args[0] {
+        Expr::Str(_, _) => {}
+        _ => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@cron sobre fn '{}': el argumento debe ser un Str literal con la cron expression (e.g. `\"0 0 * * *\"` para cada medianoche).",
+                    fn_name
+                ),
+            ));
+            return;
+        }
+    }
+    // 2) Conflictos con otros decoradores HTTP / WS / background.
+    let conflicting = ["get", "post", "put", "delete", "ws", "background", "auth_provider", "test"];
+    for other in decorators {
+        if conflicting.contains(&other.name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@cron sobre fn '{}' no es combinable con `@{}`: los jobs cron son programados periódicos, no requests HTTP ni fire-and-forget desde un handler.",
+                    fn_name, other.name
+                ),
+            ));
+            return;
+        }
+    }
+    // 3) Sin params.
+    if !params.is_empty() {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@cron sobre fn '{}': el handler no admite params (los jobs cron no reciben input). Tiene {}.",
+                fn_name,
+                params.len()
+            ),
+        ));
+        return;
+    }
+    // 4) Return type: aceptamos Null/Result/Future (async)/Any.
+    //    Otros tipos concretos (Int/Float/Str/...) → error claro (un
+    //    job no produce un valor consumible).
+    //
+    //    Para async fns, el `ret` que llega ya está post-async
+    //    transparente (el body produce `T`, el caller ve `Future<T>`).
+    //    Aceptamos Null o Result<...> también acá.
+    let _ = is_async; // is_async ya está implícito en la forma de `ret`.
+    match ret {
+        Type::Null | Type::Any => {}
+        Type::Result { .. } => {}
+        Type::Future(inner) => {
+            // Para async fns, ret es Future<T>. El T interno debe ser
+            // Null o Result o Any.
+            match inner.as_ref() {
+                Type::Null | Type::Any => {}
+                Type::Result { .. } => {}
+                other => {
+                    ctx.errors.push(FitzError::new(
+                        ErrorKind::TypeError,
+                        fn_span.line,
+                        fn_span.column,
+                        format!(
+                            "@cron sobre fn '{}': el return type async debe ser `Future<Null>` o `Future<Result<...>>`, es `Future<{}>`. El runtime descarta el valor — usá `Result` si querés loguear fallas.",
+                            fn_name,
+                            other.display(ctx.types),
+                        ),
+                    ));
+                }
+            }
+        }
+        other => {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@cron sobre fn '{}': el return type debe ser `Null`, `Result<...>`, o el equivalente async (`Future<...>`). Es `{}`. El runtime descarta el valor del job.",
+                    fn_name,
+                    other.display(ctx.types),
+                ),
+            ));
+        }
+    }
+}
+
+/// Fase 9.w.3 — valida `@background` sobre `fn` top-level. Reglas:
+///   1. Sin args ni kwargs.
+///   2. No combinable con `@get`/`@post`/`@put`/`@delete`/`@ws`/`@cron`/
+///      `@auth_provider` (semánticas distintas: background es opt-in
+///      del lado del autor para marcar que la fn puede ejecutarse vía
+///      `spawn(...)`; HTTP handlers consumen request/response;
+///      cron/auth_provider tienen sus propios runtimes).
+///
+/// La política de `@background` es solo marcador: no cambia el shape
+/// de la fn ni su return type. El chequeo del callsite (`spawn(call)`)
+/// es lo que consulta `ctx.background_fns` para autorizar el spawn.
+fn check_background_decorator(
+    ctx: &mut CheckCtx,
+    fn_name: &str,
+    decorators: &[Decorator],
+    fn_span: Span,
+) {
+    let bg_deco = match decorators.iter().find(|d| d.name == "background") {
+        Some(d) => d,
+        None => return,
+    };
+    if !bg_deco.args.is_empty() || !bg_deco.kwargs.is_empty() {
+        ctx.errors.push(FitzError::new(
+            ErrorKind::TypeError,
+            fn_span.line,
+            fn_span.column,
+            format!(
+                "@background sobre fn '{}': no admite args ni kwargs. Sintaxis: `@background\\nfn {}(...) {{ ... }}`.",
+                fn_name, fn_name
+            ),
+        ));
+    }
+    let conflicting = ["get", "post", "put", "delete", "ws", "cron", "auth_provider", "test"];
+    for other in decorators {
+        if conflicting.contains(&other.name.as_str()) {
+            ctx.errors.push(FitzError::new(
+                ErrorKind::TypeError,
+                fn_span.line,
+                fn_span.column,
+                format!(
+                    "@background sobre fn '{}' no es combinable con `@{}`: background es solo un marcador para autorizar `spawn(...)`; los handlers HTTP/WS/cron tienen sus propios runtimes.",
+                    fn_name, other.name
+                ),
+            ));
+            return;
+        }
     }
 }
 
@@ -10987,5 +11362,232 @@ print(total)
         let src = "@ws(\"/c\")\n\
                    async fn h(conn: WsConn<Any>) -> Null { return null }";
         assert_auth_err(src, "T` concreto");
+    }
+
+    // ---- Fase 9.w.3 — checker @cron + @background + spawn ----
+
+    #[test]
+    fn cron_simple_sin_params_async_pasa_checker() {
+        // `@cron("0 0 * * *")` sobre async fn sin params + return Null:
+        // shape válido del MVP. El checker no valida sintaxis del cron
+        // (eso se hace en runtime/codegen).
+        let src = "@cron(\"0 0 * * *\")\n\
+                   async fn cleanup() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors.is_empty(),
+            "esperaba 0 errores, fueron {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_sync_fn_pasa_checker() {
+        // El MVP acepta `@cron` sobre sync y async (decisión confirmada
+        // por el autor al arrancar 9.w.3). Sync se ejecuta directo, async
+        // con `.await` adentro del scheduler.
+        let src = "@cron(\"*/5 * * * *\")\n\
+                   fn tick() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores, fueron {:?}", errors);
+    }
+
+    #[test]
+    fn cron_sin_args_es_error() {
+        let src = "@cron\nfn tick() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("@cron") && e.message.contains("1 argumento")),
+            "esperaba msg sobre args: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_arg_no_str_es_error() {
+        let src = "@cron(60)\nfn tick() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("Str literal")),
+            "esperaba msg sobre Str literal: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_con_params_es_error() {
+        let src = "@cron(\"0 0 * * *\")\nfn tick(x: Int) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("no admite params")),
+            "esperaba msg sobre params: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_combinado_con_get_es_error() {
+        let src = "@cron(\"0 0 * * *\")\n@get(\"/x\")\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("no es combinable") && e.message.contains("get")),
+            "esperaba msg sobre combinación con @get: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_combinado_con_background_es_error() {
+        let src = "@cron(\"0 0 * * *\")\n@background\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("no es combinable") && e.message.contains("background")),
+            "esperaba msg sobre combinación con @background: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_return_int_es_error() {
+        let src = "@cron(\"0 0 * * *\")\nfn h() -> Int { return 1 }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("@cron") && e.message.contains("Null")),
+            "esperaba msg sobre return Null/Result: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn cron_return_result_es_ok() {
+        // `Result<Null>` es válido — sirve para loguear fallas del job
+        // sin abortar el scheduler.
+        let src = "@cron(\"0 0 * * *\")\nfn h() -> Result<Null> { return Ok(null) }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn background_simple_pasa_checker() {
+        let src = "@background\nfn send_email(to: Str) -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn background_con_args_es_error() {
+        let src = "@background(\"x\")\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("@background") && e.message.contains("no admite")),
+            "esperaba msg sobre args: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn background_combinado_con_get_es_error() {
+        let src = "@background\n@get(\"/x\")\nfn h() -> Null { return null }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("no es combinable")),
+            "esperaba msg sobre combinación: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn spawn_sobre_background_devuelve_future() {
+        // `spawn(fn_background())` tipa como `Future<T>`. Validamos
+        // via shape de programa: el `let f = spawn(...)` debería
+        // permitir `.await` adentro de async fn.
+        let src = "@background\nasync fn job() -> Int { return 42 }\n\
+                   async fn caller() -> Int {\n\
+                       let f = spawn(job())\n\
+                       return f.await\n\
+                   }\n";
+        let errors = errors_of(src);
+        // El return type Int es válido porque `spawn(job())` →
+        // `Future<Int>`, y `.await` desempaca a `Int`.
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
+    }
+
+    #[test]
+    fn spawn_sin_args_es_error() {
+        let src = "async fn caller() -> Null {\n\
+                       let _ = spawn()\n\
+                       return null\n\
+                   }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("spawn") && e.message.contains("1 argumento")),
+            "esperaba msg sobre args de spawn: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn spawn_con_var_es_error() {
+        // `spawn(x)` donde x es var no se acepta — el target debe ser
+        // un call literal a fn `@background`.
+        let src = "async fn caller() -> Null {\n\
+                       let x = 1\n\
+                       let _ = spawn(x)\n\
+                       return null\n\
+                   }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("call literal")),
+            "esperaba msg sobre call literal: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn spawn_sobre_fn_sin_background_es_error() {
+        let src = "fn no_marker() -> Int { return 1 }\n\
+                   async fn caller() -> Null {\n\
+                       let _ = spawn(no_marker())\n\
+                       return null\n\
+                   }";
+        let errors = errors_of(src);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.message.contains("@background")),
+            "esperaba msg sobre @background: {:?}",
+            errors
+        );
+    }
+
+    #[test]
+    fn spawn_userdefined_override_no_dispara_dispatch_especial() {
+        // Si el usuario define su propia `spawn`, el dispatch especial
+        // NO aplica (el lookup retorna `Function{...}` distinto de
+        // `Any`). El call se valida por la ruta general.
+        let src = "fn spawn(x: Int) -> Int { return x }\n\
+                   fn main() -> Int { return spawn(42) }";
+        let errors = errors_of(src);
+        assert!(errors.is_empty(), "esperaba 0 errores: {:?}", errors);
     }
 }
