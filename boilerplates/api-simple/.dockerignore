@@ -1,0 +1,17 @@
+# Excluir del contexto Docker — acelera el build y previene leak.
+
+target/
+*.exe
+*.pdb
+
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+.git/
+.gitignore
+
+Dockerfile
+.dockerignore
+README.md

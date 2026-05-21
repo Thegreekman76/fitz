@@ -4730,6 +4730,128 @@ no está aplicado.
 
 ---
 
+## R.bug-result-status — Handler con return type `Result<T>` + `return <status> { ... }` mezclados (descubierto 2026-05-21)
+
+**Prioridad: MEDIA** — produce serialización incorrecta del
+response body (wrap `Ok`/`Err` en JSON), no es deadlock ni crash.
+Detectado al validar `boilerplates/api-simple/`.
+
+### Descripción
+
+Cuando un handler HTTP declara return type `Result<T>` Y tiene un
+`return <status> { ... }` (ReturnStatus) adentro del body, el
+codegen override el return type Rust a `__FitzResponse` (para
+acomodar el status code custom). Pero **NO desempaca el `Ok(v)`**
+en los `return Ok(v)` explícitos — emite el Result wrapper
+serializado completo.
+
+**Repro mínimo**:
+
+```fitz
+type Item { id: Int, name: Str }
+let ITEMS: List<Item> = [Item { id: 1, name: "a" }, Item { id: 2, name: "b" }]
+
+@server(3000)
+fn main() => 0
+
+@get("/items/{id}")
+fn get_item(id: Int) -> Result<Item> {
+    let found: Item = match ITEMS.find(fn(it: Item) => it.id == id) {
+        Ok(it) => it,
+        Err(_) => return 404 { "error": "no encontrado" },
+    }
+    return Ok(found)   // ← serializa como {"Ok":{"id":1,...}} en lugar de {"id":1,...}
+}
+```
+
+Output observado en `fitz build`:
+- `GET /items/1` → `{"Ok":{"id":1,"name":"a"}}` (mal, debería ser
+  `{"id":1,"name":"a"}`).
+- `GET /items/99` → `{"error":"no encontrado"}` status 404 (OK,
+  ese path va por el `return 404 { ... }`).
+
+El `fitz run` (intérprete) sí desempaca el Result correctamente
+— solo el codegen tiene el bug.
+
+### Código generado problemático
+
+```rust
+fn get_item(id: i64) -> __FitzResponse {
+    // ... match ITEMS.find(...) ...
+    return __FitzResponse {
+        status: 200,
+        body: <Result<Item, String> as __ToFitzJson>::__to_fitz_json(
+            &(Ok(found.clone()))
+        )  // ← serializa Result<T> con wrapper
+    };
+}
+```
+
+Lo correcto sería:
+```rust
+return __FitzResponse {
+    status: 200,
+    body: found.__to_fitz_json()  // ← desempaca: serializa solo el T interno
+};
+```
+
+### Workaround del usuario
+
+**Opción A** (cleaner): cambiar el return type del handler a `T`
+directo (no `Result<T>`) cuando se usa `return <status> { ... }`:
+
+```fitz
+@get("/items/{id}")
+fn get_item(id: Int) -> Item {
+    match ITEMS.find(fn(it: Item) => it.id == id) {
+        Ok(it) => return it,
+        Err(_) => return 404 { "error": "no encontrado" },
+    }
+}
+```
+
+**Opción B**: NO usar `return <status> { ... }`, solo `Result<T>`
+con `Err(...)` (status 500 implícito) o `Err({ status: 404, ... })`
+con field `status` (status code dinámico via mini-tanda HTTP-Err).
+
+El boilerplate `api-simple` usa Opción A.
+
+### Fix proposed en el codegen
+
+En `emit_handler_dispatch_and_response` (o donde se decide el
+return type override por ReturnStatus): cuando el handler tiene
+return type Fitz `Result<T>` Y `return <status> { ... }` adentro,
+el codegen debe:
+
+1. Cambiar el return type Rust a `__FitzResponse` (ya hace eso).
+2. En `gen_return` para `Stmt::Return(Ok(expr))`: emitir
+   `return __FitzResponse { status: 200, body: <expr>.__to_fitz_json() }`
+   (desempaca el Ok).
+3. En `gen_return` para `Stmt::Return(Err(expr))`: emitir
+   `return __FitzResponse { status: 500, body: json!({"error": expr}) }`
+   (desempaca el Err con la convención HTTP-Err).
+4. Cualquier otro `return v` que no sea `Ok(v)`/`Err(e)`: error
+   claro pidiendo que el user use el patrón explícito.
+
+### Tests de regresión cuando se cierre
+
+- Repro mínimo arriba: `GET /items/1` debe devolver
+  `{"id":1,"name":"a"}` status 200 (no `{"Ok":{...}}`).
+- Test E2E nuevo en `compile_e2e.rs` con un handler `-> Result<T>`
+  + `return <status>` mezclados.
+- Smoke `GUIDE_EXAMPLES_COMPILE` debe seguir verde.
+
+### Descubrimiento
+
+Encontrado al validar `boilerplates/api-simple/` (2do boilerplate
+Dockerizado). El handler `get_item(id: Int) -> Result<Item>` con
+`return 404 { "error": "..." }` para el caso no-encontrado
+devolvía `{"Ok":{"id":2,...}}` para `GET /items/2` (existente)
+en lugar del Item directo. Workaround inline aplicado en
+api-simple.
+
+---
+
 ## Cómo se actualiza este doc
 
 - Cada vez que cerramos un item de R, **marcamos con ~~strikethrough~~

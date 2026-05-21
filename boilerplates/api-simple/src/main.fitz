@@ -1,0 +1,67 @@
+// api-simple boilerplate — REST API mínima con HTTP nativo, types
+// tipados, JSON marshaling automático y OpenAPI 3.1 + UI Scalar
+// auto-generados. Sin auth, sin DB (in-memory state).
+//
+// Demuestra:
+//   - `@server(port, host)` para configurar el listener.
+//   - `@get`/`@post` con path templates (`{id}`).
+//   - Tipos custom (`Item`) usados como body de POST + return de GET.
+//   - State compartido HTTP via `let ITEMS = [...]` top-level (post-F17).
+//   - `Result<T>` + `?` para manejo de errores → status code auto.
+//   - `return <status> { ... }` para status codes custom (404).
+//   - OpenAPI 3.1 schema autogenerado en `/openapi.json`.
+//   - UI Scalar en `/docs` para probar la API en browser.
+//
+// Endpoints:
+//   - GET  /              — health check
+//   - GET  /items         — lista todos los items
+//   - POST /items         — crea un item (body: Item)
+//   - GET  /items/{id}    — un item por id (404 si no existe)
+//   - GET  /openapi.json  — schema OpenAPI 3.1 auto
+//   - GET  /docs          — UI Scalar interactiva auto
+
+// `@server(port, host)` — bindea a 0.0.0.0 (todas las interfaces)
+// para que el container acepte requests desde el host vía
+// `-p 3000:3000`. Para dev local fuera de Docker, podés cambiar
+// a 127.0.0.1 (solo loopback) y exponer solo en tu máquina.
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+type Item {
+    id: Int,
+    name: Str,
+    quantity: Int = 0,
+}
+
+// In-memory storage. Post-F17 esto compila a `LazyLock<Arc<Mutex<...>>>`
+// en el binario Rust generado, accesible safe desde cualquier handler.
+let ITEMS: List<Item> = [
+    Item { id: 1, name: "widget", quantity: 100 },
+    Item { id: 2, name: "gadget", quantity: 50 },
+]
+
+@get("/")
+fn root() -> Str => "fitz-api-simple — ver /docs para la UI interactiva"
+
+@get("/items")
+fn list_items() -> List<Item> => ITEMS
+
+@post("/items")
+fn create_item(input: Item) -> Item {
+    ITEMS.push(input)
+    return input
+}
+
+// El handler retorna `Item` directo (no `Result<Item>`) + un
+// `return 404 { ... }` para el caso de error. Deuda del codegen
+// (R.bug-result-status): mezclar return type `Result<T>` con
+// `return <status> { ... }` genera código que serializa el Result
+// con su wrapper Ok/Err en lugar de desempacar — workaround
+// documentado en `docs/deudas_lenguaje.md`.
+@get("/items/{id}")
+fn get_item(id: Int) -> Item {
+    match ITEMS.find(fn(it: Item) => it.id == id) {
+        Ok(it) => return it,
+        Err(_) => return 404 { "error": "item con id={id} no encontrado" },
+    }
+}

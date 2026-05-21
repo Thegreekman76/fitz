@@ -1,0 +1,13 @@
+# Build outputs de Fitz
+target/
+
+# Binarios adyacentes al .fitz
+*.exe
+*.pdb
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+Thumbs.db

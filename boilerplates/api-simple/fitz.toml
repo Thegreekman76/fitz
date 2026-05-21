@@ -1,0 +1,13 @@
+# Manifest del package manager Fitz (Fase 9.y).
+#
+# `fitz build` (sin args) lee este archivo si está en el cwd o algún
+# ancestor (lookup Cargo-style) y usa `[bin].main` como entry point.
+
+[package]
+name = "fitz-api-simple"
+version = "0.1.0"
+edition = "2026"
+description = "HTTP API boilerplate — REST mínimo con OpenAPI 3.1 + UI Scalar gratis"
+
+[bin]
+main = "src/main.fitz"
