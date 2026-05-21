@@ -61,6 +61,47 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.25] — 2026-05-21 — Patch: fix codegen deadlock en string interp con re-locks
+
+**Bug fix crítico** descubierto al validar el primer boilerplate
+Dockerizado (`boilerplates/cli-tool`).
+
+**Bug**: `gen_str_interp` emitía `format!(fmt, arg1, arg2, ...)` donde
+los temporales (MutexGuards de `.lock().unwrap()`) vivían hasta el
+final de la statement. Si dos args lockeaban el mismo `Arc<Mutex<>>`
+(caso típico: `print("{xs.len()} - {total(xs)}")`), el segundo
+`.lock()` desde el mismo thread quedaba esperando que el primero
+libere → **deadlock silencioso del binario** (std::sync::Mutex no es
+re-entrant). El programa terminaba sin panic ni error visible — solo
+output truncado.
+
+**Fix** en `src/codegen.rs::gen_str_interp`: cuando hay ≥2 args, emitir
+cada arg como `let __aN = <code>;` adentro de un bloque ANTES del
+`format!`. Cada `let` cierra una statement → dropea el MutexGuard
+inmediatamente. El siguiente arg evalúa sin guards vivos del anterior.
+0 args mantiene `String::from`, 1 arg mantiene `format!` directo.
+
+**Regression test**: `tests/compile_e2e.rs::r_bug_deadlock_str_interp_re_lock_mismo_arc_no_cuelga`.
+Si el deadlock vuelve, el test falla por timeout/exit code.
+
+**Boilerplate cli-tool** (`boilerplates/cli-tool/`) incluido en este
+release como showcase del fix funcionando end-to-end: Dockerfile +
+README exhaustivo + .gitignore + .dockerignore + fitz.toml con
+`edition = "2026"` + main.fitz con report generator usando el
+patrón problemático que el fix arregla.
+
+**Validado**: 2156 unit + 256 compile_e2e (255 + 1 nuevo) +
+smoke con 78 ejemplos guide verde. Sin breaking changes — solo
+bug fix.
+
+**Por qué importa este release**: la imagen Docker `ghcr.io/<owner>/
+fitz:v0.9.24` tenía el binario con el bug. Boilerplates posteriores
+van a usar `FROM ghcr.io/<owner>/fitz:latest` que ahora apunta a
+v0.9.25 con el fix. Sin este release, los boilerplates con patterns
+típicos de print interp se cuelgan.
+
+Deuda **R.bug-deadlock** cerrada el mismo día del descubrimiento.
+
 ## [v0.9.24] — 2026-05-21 — Cierre formal Fase 9.w MVP entera (Stack web first-class)
 
 **Cierre formal del bloque entero "Stack web first-class"** —
