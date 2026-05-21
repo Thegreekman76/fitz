@@ -850,10 +850,29 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
                     )));
                 }
             },
+            // Fase 9.w.2.e — heartbeat ping/pong intervalo en segundos
+            // para conexiones WebSocket. `0` desactiva. Default 30.
+            "ws_heartbeat_secs" => match value_expr {
+                Expr::Int(n, _) if *n >= 0 => {
+                    config.ws_heartbeat_secs = *n as u64;
+                }
+                Expr::Int(n, _) => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'ws_heartbeat_secs' debe ser Int >= 0, recibió {}",
+                        fn_name, n,
+                    )));
+                }
+                other => {
+                    return Err(err(format!(
+                        "@server sobre fn '{}': el kwarg 'ws_heartbeat_secs' debe ser Int literal, recibió {:?}",
+                        fn_name, other,
+                    )));
+                }
+            },
             other => {
                 return Err(err(format!(
                     "@server sobre fn '{}': kwarg '{}' no reconocido. \
-                     Soportados: docs, api_version.",
+                     Soportados: docs, api_version, ws_heartbeat_secs.",
                     fn_name, other,
                 )));
             }
@@ -16670,6 +16689,92 @@ let r = match n {
         );
     }
 
+    // ---- Fase 9.w.2.e: @server(ws_heartbeat_secs=N) ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_ws_heartbeat_secs_kwarg_carga_en_registry() {
+        let src = "\
+            @server(3000, ws_heartbeat_secs=15)\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => 0\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.expect("server_config presente");
+        assert_eq!(cfg.ws_heartbeat_secs, 15);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_ws_heartbeat_secs_default_es_30() {
+        let src = "\
+            @server(3000)\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => 0\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.expect("server_config presente");
+        assert_eq!(cfg.ws_heartbeat_secs, 30);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_ws_heartbeat_secs_cero_desactiva() {
+        let src = "\
+            @server(3000, ws_heartbeat_secs=0)\n\
+            fn main() => 0\n\
+            @get(\"/\")\n\
+            fn root() => 0\n\
+        ";
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        res.unwrap();
+        let cfg = reg.server_config.expect("server_config presente");
+        assert_eq!(cfg.ws_heartbeat_secs, 0);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_ws_heartbeat_secs_negativo_es_error() {
+        // `-1` se parsea como `UnaryOp::Neg(Int(1))`, no como
+        // `Int(-1)`. El evaluator rechaza por "no es Int literal"
+        // (el chequeo "n >= 0" cubre el caso pero rara vez se
+        // dispara — el parser ya construye UnaryOp). Mensaje
+        // resultante: "ws_heartbeat_secs debe ser Int literal".
+        let src = "\
+            @server(ws_heartbeat_secs=-1)\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("ws_heartbeat_secs")
+                && err.message.contains("Int literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn server_ws_heartbeat_secs_no_int_es_error() {
+        let src = "\
+            @server(ws_heartbeat_secs=\"30\")\n\
+            fn main() => 0\n\
+        ";
+        let (res, _) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("ws_heartbeat_secs")
+                && err.message.contains("Int literal"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn server_api_version_no_str_es_error() {
         let src = "\
@@ -16698,7 +16803,8 @@ let r = match n {
         assert!(
             err.message.contains("foo")
                 && err.message.contains("docs")
-                && err.message.contains("api_version"),
+                && err.message.contains("api_version")
+                && err.message.contains("ws_heartbeat_secs"),
             "mensaje inesperado: {}",
             err.message,
         );

@@ -2712,6 +2712,13 @@ fn emit_main_rs_body(
         for stmt in &p.http_fns {
             ctx.gen_http_handler_wrapper(stmt)?;
         }
+        // Fase 9.w.2.e — antes de emitir wrappers WS, capturamos el
+        // `ws_heartbeat_secs` del server config (si lo hay) en el
+        // ctx. Cada `gen_ws_handler_wrapper` emite el valor literal
+        // en el call a `__fitz_ws_setup`.
+        if let Some(cfg) = &p.server_config {
+            ctx.ws_heartbeat_secs = cfg.ws_heartbeat_secs;
+        }
         // Fase 9.w.2.c — wrappers WS análogos (extractor
         // `WebSocketUpgrade`, auth pre-upgrade, on_upgrade closure).
         for stmt in &p.ws_fns {
@@ -2749,6 +2756,10 @@ struct ServerConfigArgs {
     /// generado en build-time. None → "0.1.0". Seteado con
     /// `@server(api_version="X.Y.Z")`.
     api_version: Option<String>,
+    /// Fase 9.w.2.e: intervalo de heartbeat ping para WebSockets en
+    /// segundos. `0` desactiva (no recomendado para proxies/CDNs).
+    /// Default 30. Seteado con `@server(ws_heartbeat_secs=N)`.
+    ws_heartbeat_secs: u64,
 }
 
 impl Default for ServerConfigArgs {
@@ -2758,6 +2769,7 @@ impl Default for ServerConfigArgs {
             host: "127.0.0.1".to_string(),
             enable_docs: true,
             api_version: None,
+            ws_heartbeat_secs: 30,
         }
     }
 }
@@ -2859,13 +2871,40 @@ fn parse_server_decorator(
                     ));
                 }
             },
+            "ws_heartbeat_secs" => match value_expr {
+                Expr::Int(n, _) if *n >= 0 => {
+                    cfg.ws_heartbeat_secs = *n as u64;
+                }
+                Expr::Int(n, _) => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'ws_heartbeat_secs' debe ser Int >= 0, recibió {}",
+                            n
+                        ),
+                    ));
+                }
+                _ => {
+                    return Err(FitzError::new(
+                        ErrorKind::TypeError,
+                        0,
+                        0,
+                        format!(
+                            "@server: el kwarg 'ws_heartbeat_secs' debe ser Int literal, recibió {:?}",
+                            value_expr
+                        ),
+                    ));
+                }
+            },
             other => {
                 return Err(FitzError::new(
                     ErrorKind::TypeError,
                     0,
                     0,
                     format!(
-                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version.",
+                        "@server: kwarg '{}' no reconocido. Soportados: docs, api_version, ws_heartbeat_secs.",
                         other
                     ),
                 ));
@@ -3087,6 +3126,12 @@ struct CodegenCtx<'a> {
     /// handler. Cuando es `false`, programas HTTP regulares no pagan
     /// el costo del bloque WS adicional en el binario.
     uses_ws: bool,
+    /// Fase 9.w.2.e: intervalo de heartbeat ping para WebSockets en
+    /// segundos. Default 30; `@server(ws_heartbeat_secs=N)` lo
+    /// sobrescribe. Setado por `emit_main_rs_body` ANTES de invocar
+    /// `gen_ws_handler_wrapper` para que el wrapper emita el valor
+    /// literal en el call a `__fitz_ws_setup`.
+    ws_heartbeat_secs: u64,
     /// Fase 9.w.1.d: nombre Rust de la fn marcada con `@auth_provider`
     /// (singleton). `None` si el programa no la tiene. El wrapper de
     /// cada handler con `@authenticated`/`@admin` la invoca antes del
@@ -3251,6 +3296,7 @@ impl<'a> CodegenCtx<'a> {
             auth_provider_name: None,
             auth_provider_is_async: false,
             uses_ws: false,
+            ws_heartbeat_secs: 30,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
             pattern_slot_counter: 0,
@@ -12139,8 +12185,9 @@ impl<'a> CodegenCtx<'a> {
         };
         writeln!(
             &mut self.output,
-            "        let (__conn, __writer) = __fitz_ws_setup::<{}>(__socket, __endpoint.clone());",
+            "        let (__conn, __writer) = __fitz_ws_setup::<{}>(__socket, __endpoint.clone(), {}u64);",
             t_rs,
+            self.ws_heartbeat_secs,
         )
         .unwrap();
         self.emit("        let __conn_id = __conn.conn_id;\n");
@@ -14381,6 +14428,11 @@ use std::sync::atomic::{AtomicU64, AtomicBool, Ordering as __FitzOrdering};
 enum __FitzWsOutMsg {
     Text(String),
     Close,
+    /// Fase 9.w.2.e — heartbeat. El writer task lo traduce a un
+    /// frame `axum::extract::ws::Message::Ping(vec![])`. Si el sink
+    /// está caído, sink.send() falla → writer task termina → closed
+    /// se setea → el heartbeat task detecta y termina solo.
+    Ping,
 }
 
 /// Tipo del map interno del broadcaster. Por endpoint, una lista de
@@ -14554,11 +14606,12 @@ impl<T: __FitzWsMessage> __FitzWsConn<T> {
 }
 
 /// Construye un `__FitzWsConn<T>` a partir del axum WebSocket + el
-/// endpoint, y lanza el writer task. El handler recibe el conn como
-/// `&__FitzWsConn<T>` (por ref para evitar moves).
+/// endpoint, y lanza el writer task + heartbeat task (este último
+/// gated por `heartbeat_secs > 0`).
 fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
     socket: axum::extract::ws::WebSocket,
     endpoint: String,
+    heartbeat_secs: u64,
 ) -> (__FitzWsConn<T>, tokio::task::JoinHandle<()>) {
     use futures_util::{SinkExt, StreamExt};
     let (mut sink, stream) = socket.split();
@@ -14578,6 +14631,15 @@ fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
                         break;
                     }
                 }
+                __FitzWsOutMsg::Ping => {
+                    if sink
+                        .send(axum::extract::ws::Message::Ping(Vec::new().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 __FitzWsOutMsg::Close => {
                     let _ = sink.close().await;
                     break;
@@ -14586,6 +14648,28 @@ fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
         }
         closed_w.store(true, __FitzOrdering::Relaxed);
     });
+    // Fase 9.w.2.e — heartbeat task. Si `heartbeat_secs > 0`, spawn
+    // un task que envía Ping al outbox cada N segundos. Termina cuando
+    // `closed` se setea (writer task falló) o cuando el outbox_tx
+    // está cerrado.
+    if heartbeat_secs > 0 {
+        let hb_tx = outbox_tx.clone();
+        let hb_closed = closed.clone();
+        let interval = std::time::Duration::from_secs(heartbeat_secs);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await; // descartar el primer tick (fire-immediate)
+            loop {
+                ticker.tick().await;
+                if hb_closed.load(__FitzOrdering::Relaxed) {
+                    return;
+                }
+                if hb_tx.send(__FitzWsOutMsg::Ping).is_err() {
+                    return;
+                }
+            }
+        });
+    }
     let conn = __FitzWsConn {
         endpoint,
         conn_id,

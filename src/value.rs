@@ -200,6 +200,11 @@ pub enum WsOutMessage {
     Text(String),
     /// Pedido de cierre. El writer task lo procesa y termina.
     Close,
+    /// Fase 9.w.2.e — heartbeat ping. El writer task lo traduce a
+    /// `axum::extract::ws::Message::Ping(...)`. Si el sink.send() falla,
+    /// el writer task termina y `closed` se setea (lo cual el heartbeat
+    /// task también detecta en su próxima iteración).
+    Ping,
 }
 
 /// Trait del broadcaster — abstracción que `WsConnHandle.broadcaster`
