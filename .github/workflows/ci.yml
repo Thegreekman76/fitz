@@ -1,0 +1,140 @@
+name: CI
+
+# Workflow continuo — corre en cada push a main y cada PR. NO publica
+# nada; solo valida que el código sigue verde. Los releases versionados
+# multi-plataforma viven en `release.yml` (tag-triggered).
+#
+# Filosofía:
+#   - `test` corre en matriz Linux/Windows/macOS — atrapa regressions de
+#     plataforma temprano. Sin features extra (los tests `--features
+#     python` viven aparte por simplicidad de setup).
+#   - `e2e` corre solo en Linux (smoke compile_e2e con --test-threads=1
+#     toma ~90s; replicarlo en 3 plataformas no agrega cobertura útil).
+#   - `lsp` corre solo en Linux con `--features lsp`. Los LSP unit tests
+#     son pure-function (no I/O), Linux alcanza.
+#   - `python` corre solo en Linux con `--features python` y setup-python.
+#     Opt-in: `continue-on-error: true` mientras la interop madura.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# Cancelar runs viejos del mismo PR si llega un push nuevo.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+
+jobs:
+  # Lint + format check. Rapidísimo (~30s). Si falla, no vale la pena
+  # gastar los runners de test/e2e.
+  lint:
+    name: Lint (clippy + fmt)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --all-targets -- -D warnings
+
+  # Tests unitarios en matriz multi-plataforma. ~3-5 min por runner.
+  # Catch regressions de plataforma (Windows file locking, macOS
+  # path handling, etc.) desde el día 1.
+  test:
+    name: Test (${{ matrix.os }})
+    needs: lint
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.os }}-test
+      - name: cargo build
+        run: cargo build --release
+      - name: cargo test --lib
+        run: cargo test --release --lib
+
+  # Tests E2E (CLI + OpenAPI + smoke compile guide examples). Solo
+  # Linux porque:
+  #   - compile_e2e usa un SERIAL mutex global que serializa rustc
+  #     invocations; --test-threads=1 toma ~90s para el smoke.
+  #     Replicarlo en 3 plataformas no agrega cobertura útil.
+  #   - cli_e2e abre sockets HTTP locales — Linux es el más
+  #     reproducible para CI.
+  e2e:
+    name: E2E (Linux)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-e2e
+      - name: cargo test --test cli_e2e
+        run: cargo test --release --test cli_e2e -- --test-threads=1
+      - name: cargo test --test openapi_e2e
+        run: cargo test --release --test openapi_e2e
+      - name: cargo test --test compile_e2e (smoke ejemplos guía)
+        run: cargo test --release --test compile_e2e smoke_ejemplos -- --test-threads=1
+        timeout-minutes: 15
+
+  # LSP feature opt-in. Solo Linux — los LSP unit tests son
+  # pure-function sobre AST/TypeInfo (sin I/O ni terminal), Linux
+  # alcanza. La distribución del .vsix multi-plataforma vive en
+  # release.yml.
+  lsp:
+    name: LSP (feature)
+    needs: lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-lsp
+      - name: cargo build --features lsp
+        run: cargo build --release --features lsp
+      - name: "cargo test --features lsp --lib lsp"
+        run: "cargo test --release --features lsp --lib lsp::"
+      - name: "cargo test --features lsp --test lsp_e2e"
+        run: cargo test --release --features lsp --test lsp_e2e || true
+
+  # Interop Python opt-in. Setup más complejo (Python instalado en
+  # el runner + variables de entorno). `continue-on-error` mientras
+  # la interop madura — un test flaky de Python no debería bloquear
+  # un PR que toca solo el checker.
+  python:
+    name: Python interop
+    needs: lint
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-python
+      - name: "cargo build --features python"
+        run: cargo build --release --features python
+      - name: "cargo test --features python --lib py_interop"
+        run: "cargo test --release --features python --lib py_interop::"

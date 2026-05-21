@@ -1,0 +1,15 @@
+# Dependencies para buildear el sitio MkDocs Material localmente.
+#
+# Local dev:
+#   pip install -r requirements-docs.txt
+#   mkdocs serve  # → http://localhost:8000
+#
+# El workflow `docs.yml` instala exactamente estas versiones para
+# que el build de CI sea reproducible bit-a-bit contra el dev local.
+
+mkdocs-material>=9.5,<10
+pymdown-extensions>=10.7,<11
+
+# `mike` queda como deuda post-MVP del sitio (multi-version docs).
+# Cuando Fitz tenga releases versionados estables (post 1.0), sumar:
+# mike>=2.0,<3

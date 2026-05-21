@@ -1,0 +1,133 @@
+# MkDocs Material — sitio de docs de Fitz.
+#
+# Lee los `.md` directo de `docs/` sin moverlos. La guía sigue siendo
+# legible 1:1 en GitHub desde `docs/guide.md` antes y después de
+# publicar el sitio — el sitio es solo capa de UI.
+#
+# Build + deploy en cada push a `main` via `.github/workflows/docs.yml`.
+# Local: `pip install -r requirements-docs.txt && mkdocs serve`.
+
+site_name: Fitz
+site_description: Lenguaje compilado con HTTP/async como ciudadanos de primera clase
+site_author: TheGreekMan
+site_url: https://fitz-lang.github.io/fitz/
+
+repo_name: Thegreekman76/fitz
+repo_url: https://github.com/Thegreekman76/fitz
+edit_uri: edit/main/docs/
+
+docs_dir: docs
+
+theme:
+  name: material
+  language: es
+  logo: ../assets/logo.png
+  favicon: ../assets/logo.png
+  palette:
+    # Toggle dark/light
+    - media: '(prefers-color-scheme: light)'
+      scheme: default
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/brightness-7
+        name: Cambiar a modo oscuro
+    - media: '(prefers-color-scheme: dark)'
+      scheme: slate
+      primary: deep orange
+      accent: deep orange
+      toggle:
+        icon: material/brightness-4
+        name: Cambiar a modo claro
+  features:
+    - navigation.instant     # SPA-style page swaps (no full reload).
+    - navigation.tracking    # URL refleja el anchor activo al scrollear.
+    - navigation.tabs        # Tabs en el header para top-level nav.
+    - navigation.sections    # Categorías expandidas como secciones.
+    - navigation.expand      # Auto-expandir el sidebar.
+    - navigation.indexes     # `section/index.md` agrupa la sección.
+    - navigation.top         # Botón "back to top".
+    - search.suggest         # Suggest mientras escribís.
+    - search.highlight       # Highlight de matches al hacer click.
+    - search.share           # Permalink a búsqueda específica.
+    - content.code.copy      # Botón copy en cada code block.
+    - content.code.annotate  # Annotations clickeables en code blocks.
+    - content.action.edit    # Link "Edit this page" → GitHub.
+    - content.action.view    # Link "View source" → GitHub.
+  icon:
+    repo: fontawesome/brands/github
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/Thegreekman76/fitz
+  generator: false  # Quitar "Made with Material for MkDocs" del footer.
+
+markdown_extensions:
+  # Sintaxis estándar
+  - abbr
+  - admonition
+  - attr_list
+  - def_list
+  - footnotes
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      permalink_title: Anchor a esta sección
+  # PyMdown Extensions — features ricas (admonitions, tabs, mermaid, etc.)
+  - pymdownx.betterem
+  - pymdownx.caret
+  - pymdownx.details
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.keys
+  - pymdownx.mark
+  - pymdownx.smartsymbols
+  - pymdownx.snippets:
+      base_path:
+        - docs
+        - .
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.tasklist:
+      custom_checkbox: true
+  - pymdownx.tilde
+
+plugins:
+  - search:
+      lang:
+        - es
+        - en
+  # `mike` para multi-version queda como deuda post-MVP del sitio.
+
+# Estructura de navegación. La guía es el corazón del sitio; el
+# resto vive en tabs separados accesibles desde el header.
+nav:
+  - Inicio: index.md
+  - Guía:
+      - guide.md
+  - Roadmap:
+      - roadmap.md
+      - 'Visión': vision.md
+      - 'Decisiones de diseño': design-decisions.md
+  - Arquitectura:
+      - architecture.md
+      - 'Sintaxis completa': syntax-spec.md
+      - 'fmt-style': fmt-style.md
+  - 'Referencias': references.md
+  - 'Notas internas':
+      - 'Deuda post-5b': deudas-post-5b.md
+      - 'Deuda del lenguaje': deudas_lenguaje.md
+      - 'Design FitzValue': design-fitzvalue.md

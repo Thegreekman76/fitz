@@ -23,3 +23,7 @@ __pycache__/
 
 # SQLite DB local del ejemplo CRUD (Fase 8.8) — se recrea al correr.
 examples/guide/21-python-crud/crud.db
+
+# MkDocs Material — sitio generado por `mkdocs build`. Lo construye
+# el workflow `docs.yml` y se publica a GitHub Pages; no se versiona.
+/site/

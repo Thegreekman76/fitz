@@ -1,0 +1,79 @@
+name: Docs site
+
+# Build + deploy del sitio MkDocs Material a GitHub Pages. Trigger
+# paths-filter sobre `docs/` y `mkdocs.yml` — el sitio cambia en
+# cada cierre de sub-paso (cap nuevo en la guía, nota en el roadmap,
+# decisión en design-decisions), NO con cada PR de código.
+#
+# ~30s sobre 1 runner Linux. NO acoplado al `release.yml` que es
+# por tag con matriz multi-plataforma.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+      - '.github/workflows/docs.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'docs/**'
+      - 'mkdocs.yml'
+      - 'requirements-docs.txt'
+  workflow_dispatch:
+
+concurrency:
+  group: docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # mkdocs-material puede mostrar "last update" por archivo
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+          cache-dependency-path: requirements-docs.txt
+
+      - name: Install MkDocs deps
+        run: pip install -r requirements-docs.txt
+
+      - name: Build site
+        run: mkdocs build
+        # Sin `--strict` por ahora: la guía tiene links relativos a
+        # archivos fuera de `docs/` (a `src/`, `examples/guide/`,
+        # etc.) que MkDocs reporta como broken pero en GitHub
+        # funcionan. Refinable cuando reescribamos todos esos links
+        # con URLs absolutas a github.com.
+
+      - name: Upload artifact
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site/
+
+  deploy:
+    name: Deploy to Pages
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4

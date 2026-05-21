@@ -1,0 +1,79 @@
+name: Extension smoke
+
+# Smoke test continuo de la extensión VSCode + bin `fitz-lsp`. Trigger
+# por paths-filter: solo corre cuando cambia algo de la extensión o de
+# los archivos del LSP server. Atrapa breakage temprano entre releases
+# sin pagar la matriz multi-plataforma de `release.yml`.
+#
+# Filosofía: 1 sola plataforma (Linux), ~3 min total. La validación
+# multi-plataforma del `.vsix` vive en `release.yml` (por tag).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'editors/vscode/**'
+      - 'src/lsp.rs'
+      - 'src/bin/fitz-lsp.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/extension-smoke.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'editors/vscode/**'
+      - 'src/lsp.rs'
+      - 'src/bin/fitz-lsp.rs'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+concurrency:
+  group: ext-smoke-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  smoke:
+    name: Build LSP + extension
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: linux-ext-smoke
+
+      - name: Build fitz-lsp
+        run: cargo build --release --features lsp --bin fitz-lsp
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Install extension deps
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: TypeScript compile (sin matriz, smoke local)
+        working-directory: editors/vscode
+        run: npx tsc --noEmit
+
+      - name: Lint del package.json + manifest
+        working-directory: editors/vscode
+        run: |
+          # Smoke: el package.json debe tener nombre/version/publisher
+          # válidos para que `vsce package` no se rompa cuando se
+          # ejecute en release.yml.
+          test -n "$(jq -r '.name' package.json)"
+          test -n "$(jq -r '.version' package.json)"
+          test -n "$(jq -r '.publisher' package.json)"
+          test -n "$(jq -r '.contributes.languages[0]' package.json)"

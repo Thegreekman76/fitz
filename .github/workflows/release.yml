@@ -1,0 +1,391 @@
+name: Release
+
+# Workflow de release versionado. Se dispara por tags `v*` (semver) o
+# manualmente desde la UI. Compila en matriz multi-plataforma los tres
+# artefactos que vienen juntos por versión:
+#   1. `fitz` — binario standalone del compilador/intérprete.
+#   2. `fitz-lsp` — binario del language server (feature `lsp`).
+#   3. `.vsix` per-plataforma de la extensión VSCode con `fitz-lsp`
+#      bundleado adentro.
+#
+# Filosofía:
+#   - Versiones acopladas por construcción: `fitz` v0.9.X y el
+#     `fitz-lsp` del `.vsix` v0.9.X salen del MISMO build. Imposible
+#     que diverjan.
+#   - Default sin `--features python` (Fase 5b promete binario
+#     standalone). Variante `fitz-python` queda como deuda futura.
+#   - Imagen Docker `ghcr.io/<owner>/fitz:vX.Y.Z` + `:latest` con el
+#     binario standalone — base para los boilerplates Dockerizados.
+#
+# Tagging: `git tag v0.9.24 && git push --tags` dispara el workflow.
+# El workflow del release infiere la versión del tag (`v0.9.24` →
+# `0.9.24`) y la propaga a los assets.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Versión a releaser (sin la v, ej "0.9.24")'
+        required: true
+        type: string
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # --- Job 1: compilar `fitz` + `fitz-lsp` por plataforma ----------
+  #
+  # Matriz multi-plataforma. Cada runner produce:
+  #   - target/release/fitz[.exe]            (standalone)
+  #   - target/release/fitz-lsp[.exe]        (con feature lsp)
+  # Sube ambos como artifact con nombre `fitz-<vsce-target>`.
+  build:
+    name: Build (${{ matrix.vsce-target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            rust-target: x86_64-unknown-linux-gnu
+            vsce-target: linux-x64
+            archive-ext: tar.gz
+          - os: ubuntu-latest
+            rust-target: aarch64-unknown-linux-gnu
+            vsce-target: linux-arm64
+            archive-ext: tar.gz
+            cross: true
+          - os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            vsce-target: win32-x64
+            archive-ext: zip
+          - os: macos-latest
+            rust-target: x86_64-apple-darwin
+            vsce-target: darwin-x64
+            archive-ext: tar.gz
+          - os: macos-latest
+            rust-target: aarch64-apple-darwin
+            vsce-target: darwin-arm64
+            archive-ext: tar.gz
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release-${{ matrix.vsce-target }}
+
+      # Linux ARM64 cross-compile (matrix.cross == true)
+      - name: Install cross (Linux ARM64)
+        if: matrix.cross
+        run: cargo install cross --locked
+
+      - name: Build fitz (standalone)
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.rust-target }} --bin fitz
+          else
+            cargo build --release --target ${{ matrix.rust-target }} --bin fitz
+          fi
+
+      - name: Build fitz-lsp (feature lsp)
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --features lsp --target ${{ matrix.rust-target }} --bin fitz-lsp
+          else
+            cargo build --release --features lsp --target ${{ matrix.rust-target }} --bin fitz-lsp
+          fi
+
+      - name: Upload binaries as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.vsce-target }}
+          path: |
+            target/${{ matrix.rust-target }}/release/fitz${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+            target/${{ matrix.rust-target }}/release/fitz-lsp${{ matrix.os == 'windows-latest' && '.exe' || '' }}
+          retention-days: 7
+
+  # --- Job 2: empaquetar .vsix de la extensión por plataforma ------
+  #
+  # Usa el `fitz-lsp` del job `build` (por plataforma). El script
+  # `editors/vscode/scripts/build-vsix.mjs` lo copia a `server/` y
+  # `vsce package --target <vsce-target>` empaqueta todo.
+  package-vsix:
+    name: Package .vsix (${{ matrix.vsce-target }})
+    needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - vsce-target: linux-x64
+            ext-bin: fitz-lsp
+          - vsce-target: linux-arm64
+            ext-bin: fitz-lsp
+          - vsce-target: win32-x64
+            ext-bin: fitz-lsp.exe
+          - vsce-target: darwin-x64
+            ext-bin: fitz-lsp
+          - vsce-target: darwin-arm64
+            ext-bin: fitz-lsp
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: editors/vscode/package-lock.json
+
+      - name: Download fitz-lsp binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-${{ matrix.vsce-target }}
+          path: ./prebuilt
+
+      - name: Stage fitz-lsp para la extensión
+        run: |
+          mkdir -p editors/vscode/server
+          # El download-artifact mantiene el path completo del upload;
+          # el script `build-vsix.mjs` espera el binario en
+          # `editors/vscode/server/<ext-bin>`. Buscamos el binario en
+          # cualquier subdirectorio y lo copiamos.
+          BIN_PATH=$(find ./prebuilt -name "${{ matrix.ext-bin }}" -type f | head -n 1)
+          if [ -z "$BIN_PATH" ]; then
+            echo "::error::no se encontró ${{ matrix.ext-bin }} en el artifact"
+            exit 1
+          fi
+          cp "$BIN_PATH" "editors/vscode/server/${{ matrix.ext-bin }}"
+          chmod +x "editors/vscode/server/${{ matrix.ext-bin }}" || true
+
+      - name: Install extension deps
+        working-directory: editors/vscode
+        run: npm ci
+
+      - name: TypeScript compile
+        working-directory: editors/vscode
+        run: npx tsc
+
+      - name: vsce package (--target ${{ matrix.vsce-target }})
+        working-directory: editors/vscode
+        run: |
+          # vsce viene en devDependencies (declared en package.json)
+          npx vsce package --target ${{ matrix.vsce-target }} --out fitz-lang-${{ matrix.vsce-target }}.vsix
+
+      - name: Upload .vsix as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: vsix-${{ matrix.vsce-target }}
+          path: editors/vscode/fitz-lang-${{ matrix.vsce-target }}.vsix
+          retention-days: 7
+
+  # --- Job 3: imagen Docker base con `fitz` standalone -------------
+  #
+  # Imagen `ghcr.io/<owner>/fitz:<version>` + `:latest`. Solo Linux
+  # x64 por simplicidad (la mayoría de los Dockerfiles de los users
+  # van a usar esta base). Multi-arch via `docker buildx` queda como
+  # mejora posterior si aparece demanda real.
+  docker-image:
+    name: Docker image (ghcr.io)
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux x64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-linux-x64
+          path: ./prebuilt
+
+      - name: Stage binary para Docker
+        run: |
+          BIN_PATH=$(find ./prebuilt -name "fitz" -type f | head -n 1)
+          mkdir -p docker-stage
+          cp "$BIN_PATH" docker-stage/fitz
+          chmod +x docker-stage/fitz
+
+      - name: Derive version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            # Tag `v0.9.24` → `0.9.24`.
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Write Dockerfile
+        run: |
+          cat > docker-stage/Dockerfile <<'EOF'
+          # Imagen base con `fitz` standalone — usada por boilerplates
+          # Dockerizados como builder stage.
+          #
+          # Uso típico desde un boilerplate:
+          #   FROM ghcr.io/<owner>/fitz:latest AS builder
+          #   COPY src/ /app/src/
+          #   WORKDIR /app
+          #   RUN fitz build src/main.fitz
+          #
+          #   FROM gcr.io/distroless/cc-debian12
+          #   COPY --from=builder /app/target/release/<bin> /usr/local/bin/app
+          #   CMD ["/usr/local/bin/app"]
+          FROM debian:bookworm-slim
+          RUN apt-get update && \
+              apt-get install -y --no-install-recommends \
+                ca-certificates curl build-essential pkg-config libssl-dev && \
+              rm -rf /var/lib/apt/lists/*
+          # Rust toolchain — los `fitz build` que el user haga adentro
+          # del container invocan cargo internamente.
+          RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain stable --profile minimal && \
+              ln -s /root/.cargo/bin/cargo /usr/local/bin/cargo && \
+              ln -s /root/.cargo/bin/rustc /usr/local/bin/rustc
+          ENV PATH="/root/.cargo/bin:${PATH}"
+          # Binario fitz pre-compilado del job `build`.
+          COPY fitz /usr/local/bin/fitz
+          RUN chmod +x /usr/local/bin/fitz
+          WORKDIR /app
+          EOF
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase image owner
+        id: image
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-stage
+          push: true
+          tags: |
+            ghcr.io/${{ steps.image.outputs.owner }}/fitz:v${{ steps.version.outputs.version }}
+            ghcr.io/${{ steps.image.outputs.owner }}/fitz:latest
+
+  # --- Job 4: release final con todos los assets -------------------
+  #
+  # Junta los artifacts de `build` y `package-vsix`, los empaqueta
+  # por plataforma como `.tar.gz`/`.zip`, y crea una entrada de
+  # GitHub Release con todos los assets juntos. Genera changelog
+  # automático desde los commits desde el tag anterior.
+  release:
+    name: GitHub Release
+    needs: [build, package-vsix, docker-image]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # full history para changelog
+
+      - name: Download all binaries
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+
+      - name: Derive version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+            echo "tag=v${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+            echo "tag=${GITHUB_REF_NAME}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Package binaries por plataforma
+        run: |
+          mkdir -p release-assets
+          cd artifacts
+          for dir in binaries-*; do
+            target="${dir#binaries-}"
+            cd "$dir"
+            # Encontrar los binarios (puede estar en subpaths del cross-target)
+            FITZ=$(find . -name "fitz" -o -name "fitz.exe" | grep -v fitz-lsp | head -n 1)
+            FITZ_LSP=$(find . -name "fitz-lsp" -o -name "fitz-lsp.exe" | head -n 1)
+            STAGE="../../release-assets/fitz-${{ steps.version.outputs.version }}-$target"
+            mkdir -p "$STAGE"
+            cp "$FITZ" "$STAGE/"
+            cp "$FITZ_LSP" "$STAGE/"
+            cp ../../README.md "$STAGE/"
+            cp ../../CHANGELOG.md "$STAGE/"
+            cp ../../LICENSE "$STAGE/" 2>/dev/null || true
+            cd ../../release-assets
+            if [[ "$target" == win32* ]]; then
+              zip -r "fitz-${{ steps.version.outputs.version }}-$target.zip" "fitz-${{ steps.version.outputs.version }}-$target"
+            else
+              tar -czf "fitz-${{ steps.version.outputs.version }}-$target.tar.gz" "fitz-${{ steps.version.outputs.version }}-$target"
+            fi
+            rm -rf "fitz-${{ steps.version.outputs.version }}-$target"
+            cd ../artifacts
+          done
+          # Mover .vsix files
+          cd ..
+          find artifacts -name "*.vsix" -exec cp {} release-assets/ \;
+          ls -la release-assets/
+
+      - name: Generate changelog
+        id: changelog
+        run: |
+          # Buscar el tag anterior (descartando el actual).
+          PREV_TAG=$(git tag --sort=-version:refname | grep -v "^${{ steps.version.outputs.tag }}$" | head -n 1)
+          if [ -n "$PREV_TAG" ]; then
+            echo "Comparando desde $PREV_TAG"
+            CHANGES=$(git log "${PREV_TAG}..HEAD" --pretty=format:'- %s (%h)')
+          else
+            echo "Primer release, sin tag previo"
+            CHANGES=$(git log --pretty=format:'- %s (%h)' | head -n 50)
+          fi
+          # GitHub Actions multiline output requiere delimiter.
+          {
+            echo 'body<<RELEASE_BODY_EOF'
+            echo "## Cambios desde ${PREV_TAG:-inicio}"
+            echo ""
+            echo "$CHANGES"
+            echo ""
+            echo "## Assets"
+            echo ""
+            echo "Por cada plataforma se publica un \`.tar.gz\` / \`.zip\` con:"
+            echo "- \`fitz\` — binario del compilador/intérprete."
+            echo "- \`fitz-lsp\` — language server."
+            echo "- \`README.md\` y \`CHANGELOG.md\`."
+            echo ""
+            echo "Más \`.vsix\` per-plataforma para instalar la extensión VSCode."
+            echo ""
+            echo "Detalle completo en [\`CHANGELOG.md\`](CHANGELOG.md)."
+            echo 'RELEASE_BODY_EOF'
+          } >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: 'Fitz ${{ steps.version.outputs.tag }}'
+          body: ${{ steps.changelog.outputs.body }}
+          draft: false
+          prerelease: false
+          files: |
+            release-assets/*
