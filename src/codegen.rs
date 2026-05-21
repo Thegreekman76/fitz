@@ -454,15 +454,24 @@ fn program_uses_auth(program: &Program) -> bool {
 fn program_uses_fitz_value(program: &Program) -> bool {
     use crate::ast::StrPart;
     fn item_class(e: &Expr) -> Option<u8> {
-        // Clasifica un literal AST en buckets primitivos. None si no
-        // es un literal directo (el tipo viene del checker — se asume
-        // que `lub` lo resuelve).
+        // Clasifica un literal AST en buckets primitivos + compuestos.
+        // F13.E follow-up — incluimos List/Map/StructLit/Bytes para
+        // que la mezcla "primitivo + compuesto" (`[1, [2, 3]]`,
+        // `[42, {"a": 1}]`, etc.) dispare el preludio FitzValue
+        // antes del walk. Sin esto, `gen_list_lit` detecta la
+        // heterogeneidad en runtime y setea `uses_fitz_value` pero
+        // el preludio ya se decidió no emitir → cargo build falla.
+        // None si el tipo se resuelve solo en el checker.
         match e {
             Expr::Int(_, _) => Some(0),
             Expr::Float(_, _) => Some(1),
             Expr::Str(_, _) | Expr::StrInterp(_, _) => Some(2),
             Expr::Bool(_, _) => Some(3),
             Expr::Null(_) => Some(4),
+            Expr::Bytes(_, _) => Some(5),
+            Expr::List(_, _) => Some(6),
+            Expr::Map(_, _) => Some(7),
+            Expr::StructLit { .. } => Some(8),
             _ => None,
         }
     }
@@ -14178,9 +14187,22 @@ fn __parse_multipart(bytes: &[u8], boundary: &str) -> Result<serde_json::Value, 
                         .map(serde_json::Value::String)
                         .unwrap_or(serde_json::Value::Null),
                 );
+                // File.content Bytes — emitir como Array<Int> para que
+                // `__FromFitzJson for FileData` use el path legacy de
+                // Array<Int> → Vec<u8> directo (no base64). Paralelo a
+                // `Value::Bytes(content_bytes.to_vec())` del intérprete
+                // (`parse_multipart_body` en http.rs). Antes emitía
+                // String, lo que disparaba `b64_decode_for_file(s)` y
+                // fallaba con cualquier char fuera del alfabeto base64
+                // (e.g. espacio en "file contents").
+                let bytes_arr: Vec<serde_json::Value> = content
+                    .as_bytes()
+                    .iter()
+                    .map(|b| serde_json::Value::from(*b as i64))
+                    .collect();
                 obj.insert(
                     "content".to_string(),
-                    serde_json::Value::String(content.to_string()),
+                    serde_json::Value::Array(bytes_arr),
                 );
                 serde_json::Value::Object(obj)
             }

@@ -569,15 +569,16 @@ print(xs)
 
 #[test]
 fn lista_heterogenea_aborta_build() {
-    let stderr = build_expect_fail(
-        "unsupported-heterogeneous-list",
-        "let xs = [1, \"dos\"]\nprint(xs)\n",
-    );
-    assert!(
-        stderr.contains("homogénea") || stderr.contains("incompatibles"),
-        "esperaba mensaje sobre lista homogénea, fue: {}",
-        stderr
-    );
+    // F13 cerrado (heterogéneos `Int/Float/Str/Bool/Null/Bytes/
+    // Nominal` cubiertos con `__FitzValue` tagged runtime) — la
+    // lista `[1, "dos"]` SÍ compila ahora y produce output
+    // bit-a-bit con `fitz run`. El test mantiene el nombre
+    // histórico (era pre-F13: heterogéneo abortaba); ahora valida
+    // que la paridad se preserva.
+    let src = "let xs = [1, \"dos\"]\nprint(xs)\n";
+    let (stdout, exit) = build_and_run("heterogeneous-list-f13", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["[1, \"dos\"]"]);
 }
 
 #[test]
@@ -2355,33 +2356,22 @@ fn f13_a_map_heterogeneo_paridad_run_vs_build() {
 
 #[test]
 fn f13_lista_con_tipo_complejo_aborta_con_msg_claro() {
-    // F13 SPIKE + F13.A + F13.B — el subset cubierto en heterogéneos
-    // es Int/Float/Str/Bool/Null/Bytes/Nominal. Tipos complejos
-    // (List anidada, Function, etc.) siguen abortando con msg
-    // claro citando el follow-up. Probamos con List anidada en
-    // heterogéneo.
-    let dir = std::env::temp_dir().join("fitz-e2e-f13-no-soportado");
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::create_dir_all(&dir).expect("tempdir");
-    let src_path = dir.join("prog.fitz");
+    // F13.E follow-up cerrado (post-9.w.2) — el caso `[1, [2, 3]]`
+    // (List anidada como item de heterogéneo) ahora SÍ compila con
+    // `fitz build` y produce output bit-a-bit con `fitz run`. La
+    // fix fue extender la heurística sintáctica
+    // `program_uses_fitz_value` para detectar mezcla
+    // primitivo+compuesto (List/Map/StructLit/Bytes) — sin eso, el
+    // walk detectaba la heterogeneidad pero el preludio FitzValue
+    // ya se había decidido no emitir.
+    //
+    // El test mantiene el nombre histórico para que git log siga
+    // siendo navegable, pero ahora valida la paridad en lugar del
+    // abort.
     let src = "let xs = [1, [2, 3]]\nprint(xs)\n";
-    std::fs::write(&src_path, src).expect("write");
-
-    let out = Command::new(fitz_bin())
-        .args(["build"])
-        .arg(&src_path)
-        .output()
-        .expect("fitz build");
-    assert!(
-        !out.status.success(),
-        "esperaba que `fitz build` rechace List anidada en heterogéneo"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("F13") && stderr.contains("fitz run"),
-        "esperaba msg con F13 + workaround `fitz run`, fue: {}",
-        stderr
-    );
+    let (stdout, exit) = build_and_run("f13-list-anidada-en-heterogeneo", src);
+    assert_eq!(exit, 0);
+    assert_lines(&stdout, &["[1, [2, 3]]"]);
 }
 
 #[test]
