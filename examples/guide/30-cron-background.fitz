@@ -1,0 +1,136 @@
+// Cap 30 — Jobs sin Celery.
+//
+// Un servicio completo de "URL shortener" con:
+//   - Endpoint HTTP para crear/leer enlaces tipados.
+//   - Tarea `@background` que registra clics async sin bloquear
+//     la respuesta (fire-and-forget con `spawn`).
+//   - Job `@cron` que imprime estadísticas cada 5 segundos.
+//
+// Tres decoradores que vuelven a Fitz único en este espacio:
+//   - `@cron("expr")`  — job periódico, sintaxis cron Unix.
+//   - `@background`   — marca fn como spawneable (opt-in).
+//   - `spawn(call)`   — fire-and-forget, devuelve `Future<T>`.
+//
+// Todo paralelo en un solo binario, sin Celery, sin Redis, sin
+// systemd timers, sin `pip install`/`cargo add`. Paridad bit-a-bit
+// `fitz run` ↔ `fitz build`.
+//
+// Probar:
+//
+//   1. fitz run examples/guide/30-cron-background.fitz   # o fitz build
+//
+//   2. # Crear enlaces:
+//      curl -X POST localhost:43930/links \
+//           -H 'Content-Type: application/json' \
+//           -d '{"slug":"fitz","url":"https://github.com/Thegreekman76/fitz"}'
+//      # → 201 Created con el link tipado
+//
+//   3. # Redirigir (registra el clic en background):
+//      curl localhost:43930/go/fitz
+//      # → 200 con el target URL — el clic se registra async sin
+//      #   bloquear la response.
+//
+//   4. # Esperá 5 segundos y mirá stdout — el `@cron` imprime stats.
+
+@server(43930)
+fn main() => 0
+
+// Dominio del programa.
+type Link {
+    slug: Str,
+    url: Str,
+    clicks: Int = 0,
+}
+
+// "Base de datos" en memoria (Fase 9.w.3 MVP — persistencia llega
+// con Fase 10 + ORM nativo).
+let LINKS: Map<Str, Link> = {}
+
+// `@background` marca la fn como autorizada para `spawn(...)`. Solo
+// es un marcador del checker — el callsite `spawn(track_click(slug))`
+// es lo que efectivamente dispara la tarea fire-and-forget. Sin el
+// decorator, el checker rechaza el `spawn(...)` antes de runtime.
+@background
+async fn track_click(slug: Str) -> Null {
+    // Simulamos I/O lento (típico: insert en analytics DB / Kafka /
+    // bus de eventos). El handler HTTP no espera esto — la response
+    // sale inmediato.
+    let _ = sleep(100).await
+    let link: Link = match LINKS.get(slug) {
+        Ok(l) => l,
+        Err(_) => {
+            print("[bg] click ignorado: slug `{slug}` no existe")
+            return null
+        }
+    }
+    link.clicks = link.clicks + 1
+    print("[bg] click registrado: /{slug} → {link.clicks} total")
+    return null
+}
+
+// `@cron("expr")` corre periódicamente. Sintaxis aceptada:
+//   - 5 fields Unix clásico: "min hora día mes día-semana"
+//     (`"0 0 * * *"` = medianoche cada día).
+//   - 6 fields con seconds al inicio (`"*/5 * * * * *"` = cada 5 seg).
+//   - 7 fields con año al final (`"0 0 0 1 1 * 2027"`).
+//
+// El job corre en su propio task tokio. Errores del handler se
+// loguean a stderr; el scheduler no se aborta.
+@cron("*/5 * * * * *")
+fn stats() -> Null {
+    print("[cron] stats — {LINKS.len()} link(s) registrados")
+    for (slug, link) in LINKS {
+        print("[cron]   /{slug} → {link.clicks} clicks")
+    }
+    return null
+}
+
+// Crear un enlace (sync handler, response inmediata). El body
+// se deserializa contra `type Link`; el field `clicks` toma el
+// default (0) si el cliente no lo manda.
+@post("/links")
+fn create_link(input: Link) -> Link {
+    LINKS[input.slug] = input
+    return input
+}
+
+// Listar todos los enlaces.
+@get("/links")
+fn list_links() -> List<Link> {
+    return LINKS.values()
+}
+
+// Redirigir + registrar el clic en background. El handler retorna
+// inmediato sin esperar al `track_click`; la response y el job
+// corren en paralelo en el runtime tokio.
+@get("/go/{slug}")
+fn redirect(slug: Str) -> Str {
+    let target: Str = match LINKS.get(slug) {
+        Ok(link) => link.url,
+        Err(_) => return 404 { "error": "slug `{slug}` no encontrado" },
+    }
+    // Fire-and-forget. `spawn(...)` devuelve un Future que
+    // podríamos `.await`-ear si quisiéramos esperar al job; acá
+    // lo descartamos con `let _ = ...` y el task queda detached
+    // ejecutándose hasta completar.
+    let _ = spawn(track_click(slug))
+    return "→ {target}"
+}
+
+// Cómo funciona end-to-end (qué hace falta para producción real):
+//
+//   - **`@cron`** corre en `tokio::spawn` independiente. Si el job
+//     es lento, NO bloquea a los demás (cada job tiene su propia
+//     task). Errores del handler se loguean — el scheduler sigue
+//     vivo. Persistencia entre restarts llega con Fase 10 + DB
+//     nativa.
+//   - **`@background` + `spawn`** son fire-and-forget. El task
+//     queda detached al descartar el Future devuelto. Si querés
+//     esperar (caso raro), `.await`-ealo: `let result =
+//     spawn(track_click(slug)).await`.
+//   - **`fitz build`** linkea `cron = "0.12"` + `chrono = "0.4"`
+//     en el Cargo.toml generado. Sin features de jobs, el
+//     binario sigue siendo standalone sin deps extra.
+//   - **Sin `@server`**, un programa con solo `@cron` queda vivo
+//     bloqueante (modo systemd-friendly): el main hace
+//     `signal::ctrl_c().await` automático al final.

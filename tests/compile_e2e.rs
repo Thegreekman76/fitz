@@ -2693,6 +2693,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "24-tests.fitz",
     "28-auth.fitz",
     "29-ws.fitz",
+    "30-cron-background.fitz",
 ];
 
 #[test]

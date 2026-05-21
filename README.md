@@ -54,6 +54,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 | Docs HTTP automáticas | ⚠️   | ❌         | ❌ | ✅ ◊ |
 | **Auth nativa**        | ❌     | ❌         | ❌ | ✅ ♦ |
 | **WebSockets tipados** | ⚠️   | ⚠️       | ⚠️ | ✅ ♣ |
+| **Jobs sin Celery**    | ⚠️   | ⚠️       | ⚠️ | ✅ ♠ |
 | Interop Python         | ✅     | ❌         | ❌ | ✅ § |
 
 \* **Tipado gradual con chequeo estático** — Fase 5a completada.
@@ -137,6 +138,35 @@ el ejemplo completo
 [`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
 (servidor de chat con login HTTP + JWT + broadcast multi-client
 + heartbeat configurado, < 100 líneas).
+
+♠ **Jobs sin Celery** — Fase 9.w.3 completada. Tres piezas
+nativas del lenguaje: **`@cron("expr")`** para tareas periódicas
+(5/6/7 fields, cron Unix clásico + seconds + year), **`@background`**
+como marcador opt-in para autorizar el callsite, y
+**`spawn(fn_call)`** fire-and-forget que devuelve `Future<T>`
+tipado. **Sin broker externo** (Redis/RabbitMQ no son requisito);
+los jobs viven en memoria del proceso, suficiente para 90% de
+servicios reales (tareas de mantenimiento, scripts periódicos,
+fire-and-forget de notificaciones). El **checker estático** valida
+en compile-time que `spawn(...)` apunte a una fn `@background` y
+refina el ret type a `Future<T>` con T concreto (vs `tokio::spawn`
+sin marcador, `asyncio.create_task` sin tipos, Celery con string-
+based task names). **Cron-only mode** (programas sin `@server` ni
+handlers HTTP) quedan vivos bloqueantes con `signal::ctrl_c`
+automático — modo systemd-friendly drop-in. **Paridad bit-a-bit
+`fitz run` ↔ `fitz build`** con `cron = "0.12"` + `chrono = "0.4"`
+linkeados condicionalmente en el binario. **Cero `pip install
+celery` / `cargo add tokio-cron-scheduler` / docker-compose con
+Redis**. Vs Celery+Redis (Python con broker externo, lib opcional),
+Bull/BullMQ (Node con Redis), Spring `@Scheduled` (reflection en
+runtime), Fitz es el único lenguaje donde **cron + background
+workers + spawn tipado** son ciudadanos de primera clase del
+compilador, sin broker externo, con paridad intérprete↔binario.
+Ver [cap 30 de la guía](docs/guide.md#30-jobs-sin-celery) y el
+ejemplo completo
+[`examples/guide/30-cron-background.fitz`](examples/guide/30-cron-background.fitz)
+(URL shortener con HTTP + cron stats + spawn fire-and-forget de
+tracking de clicks, < 100 líneas).
 
 § **Interop Python via PyO3** — Fase 8 cerrada al 100% del roadmap
 original. Embedding básico de CPython (8.1), marshaling bidireccional
@@ -342,6 +372,31 @@ arma un servidor de chat con login HTTP + JWT + broadcast
 multi-client + heartbeat configurado, en menos de 100 líneas,
 validado end-to-end (incluido el binario nativo de `fitz
 build`). Ver [cap 29 de la guía](docs/guide.md#29-websockets-tipados).
+
+**Fase 9.w.3 (Jobs sin Celery) CERRADA** — el tercer sub-paso del
+stack web first-class. Tres piezas nativas del lenguaje:
+**`@cron("expr")`** (5/6/7 fields, cron Unix clásico),
+**`@background`** como marcador opt-in para spawn, y
+**`spawn(fn_call)`** fire-and-forget tipado. **Sin broker externo**
+— los jobs viven en memoria del proceso, suficiente para tareas
+de mantenimiento + scripts periódicos + fire-and-forget de
+notificaciones (90% de servicios reales). El **checker estático**
+valida en compile-time que `spawn(...)` apunte a una fn
+`@background` y refina el ret type a `Future<T>` con T concreto
+(vs `tokio::spawn` sin marcador, `asyncio.create_task` sin tipos,
+Celery con string-based task names). **Cron-only mode**
+(programas sin `@server`) quedan vivos bloqueantes con
+`signal::ctrl_c` automático — modo systemd-friendly drop-in.
+**Paridad bit-a-bit `fitz run` ↔ `fitz build`** con `cron`/
+`chrono` linkeados condicionalmente en el binario. El ejemplo
+completo
+[`examples/guide/30-cron-background.fitz`](examples/guide/30-cron-background.fitz)
+arma un URL shortener con HTTP + cron stats + spawn fire-and-
+forget de tracking de clicks en menos de 100 líneas, validado
+end-to-end (incluido el binario nativo). **Ningún otro lenguaje
+combina cron + background workers + spawn tipado en el core sin
+broker externo y con paridad intérprete↔binario**. Ver
+[cap 30 de la guía](docs/guide.md#30-jobs-sin-celery).
 
 **Plan LSP entero (Fase 9.x.1 → 9.x.5) CERRADO — 2026-05-15/16** —
 las cinco sub-fases del LSP MVP. Habilitan la experiencia
@@ -762,10 +817,11 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
   - Próximo norte: Fase 9.w (Stack web first-class).
 - **9.w — Stack web first-class 🌐** — `@authenticated`/`@admin`
   (auth nativo JWT-based, **9.w.1 CERRADA**), `@ws` (WebSockets
-  tipados con `WsConn<T>` + AsyncAPI 3.0 + heartbeat built-in + auth
-  integrada, **9.w.2 CERRADA**), `@cron` + `@background` (jobs sin
-  Celery, pendiente). ORM nativo + migraciones autogeneradas escala
-  a Fase 10.
+  tipados con `WsConn<T>` + AsyncAPI 3.0 + heartbeat built-in +
+  auth integrada, **9.w.2 CERRADA**), `@cron` + `@background` +
+  `spawn` (jobs sin Celery, sin broker externo, **9.w.3
+  CERRADA**). ORM nativo + migraciones autogeneradas escala a
+  Fase 10.
 
 **Visión post-Fase 9 (Fase 10+)** — especulativo, norte
 direccional: Fase 10 stack DB nativo + ORM declarativo, Fase 11
@@ -847,6 +903,23 @@ async), marshaling Future↔Coroutine.
   [cap 29 de la guía](docs/guide.md#29-websockets-tipados) y el
   ejemplo [`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
   (servidor de chat con login HTTP + JWT + broadcast multi-client).
+- **Jobs sin Celery** (Fase 9.w.3): tres piezas — **`@cron("expr")`**
+  para tareas periódicas (5/6/7 fields, cron Unix clásico),
+  **`@background`** como marcador opt-in para autorizar
+  `spawn(...)`, y **`spawn(fn_call)`** fire-and-forget tipado.
+  **Sin broker externo** (Redis/RabbitMQ no son requisito), los
+  jobs viven en memoria del proceso. El checker valida en
+  compile-time que `spawn(...)` apunte a una fn `@background` y
+  refina el ret type a `Future<T>` con T concreto.
+  **Cron-only mode** (sin `@server`) queda vivo bloqueante con
+  `signal::ctrl_c` automático (systemd-friendly). Paridad
+  bit-a-bit `fitz run` ↔ `fitz build`. **Ningún otro lenguaje
+  combina cron + background workers + spawn tipado en el core sin
+  broker externo**. Ver
+  [cap 30 de la guía](docs/guide.md#30-jobs-sin-celery) y el
+  ejemplo
+  [`examples/guide/30-cron-background.fitz`](examples/guide/30-cron-background.fitz)
+  (URL shortener con HTTP + cron stats + spawn de tracking).
 
 ### CLI
 

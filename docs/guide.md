@@ -9953,14 +9953,240 @@ endurecimiento para servicios críticos".
 
 ---
 
-## 30. Qué sigue
+## 30. Jobs sin Celery
+
+En Python lo típico es Celery + Redis (o RabbitMQ): un broker
+externo + un worker pool + decoradores `@task` + `apply_async`. En
+Node es Bull/BullMQ con la misma forma. En Go hay `cron` y
+`goroutines` pero el cron no está en el lenguaje (es lib). En
+Rust hay `tokio-cron-scheduler`. Todos comparten el problema: una
+dependencia externa por cada modo (cron, jobs en background,
+queue), configuración separada, y a veces un proceso aparte.
+
+En Fitz los jobs son **parte del lenguaje** con tres piezas:
+**`@cron("expr")`** para tareas periódicas, **`@background`** para
+marcar fns spawneables, y **`spawn(fn_call)`** para fire-and-forget
+desde un handler HTTP. Sin Celery, sin Redis, sin systemd timers.
+Todo corre en el mismo binario con paridad bit-a-bit `fitz run` ↔
+`fitz build`.
+
+### Las piezas
+
+**`@cron("expr")`** — corre la fn periódicamente según una cron
+expression. La fn no admite params (los jobs no reciben input) y
+retorna `Null` o `Result<Null>` (el runtime descarta el valor; usa
+`Result` si querés loguear fallas):
+
+```fitz
+@cron("0 0 * * *")  // cada medianoche (5 fields Unix clásico)
+fn cleanup_old_sessions() -> Null {
+    print("[cron] limpieza diaria")
+    return null
+}
+
+@cron("*/5 * * * * *")  // cada 5 segundos (6 fields con seconds)
+async fn heartbeat() -> Null {
+    return null
+}
+```
+
+Sintaxis aceptada por el parser:
+
+- **5 fields Unix clásico**: `"min hora día mes día-semana"`. El
+  runtime prependa `"0 "` (segundo 0) automáticamente para
+  compatibilidad con el cron tradicional.
+- **6 fields con seconds al inicio**: `"sec min hora día mes
+  día-semana"`. Útil para sub-minuto.
+- **7 fields con año al final**: `"sec min hora día mes día-semana
+  año"`.
+
+El checker (Fase 9.w.3.a) valida shape (1 arg Str, sin params,
+return Null/Result/Future, no combinable con `@get`/`@post`/`@ws`/
+`@background`). La sintaxis del cron expression se valida en
+runtime/codegen al registrar el job — typos disparan error claro
+con un ejemplo correcto.
+
+**`@background`** — marca una fn como autorizada para `spawn(...)`.
+Sin el decorator, el checker rechaza el callsite estáticamente:
+
+```fitz
+@background
+async fn send_email(to: Str, body: Str) -> Null { ... }
+
+// En cualquier handler:
+let _ = spawn(send_email("ada@example.com", "welcome"))
+```
+
+Es opt-in del autor para evitar usos accidentales sobre fns
+regulares cuyo retorno el caller espera consumir.
+
+**`spawn(fn_call)`** — fire-and-forget. Devuelve `Future<T>` con
+`T` el tipo de retorno de la fn target. Si descartás el Future
+(`let _ = spawn(...)`), la task queda **detached** ejecutándose en
+background. Si lo guardás y `.await`-eás, esperás al resultado:
+
+```fitz
+// Fire-and-forget — la task corre sola.
+let _ = spawn(send_email("ada", "hi"))
+
+// O esperás al resultado (útil para coordinar múltiples jobs).
+let result: Null = spawn(send_email("ada", "hi")).await
+```
+
+El target del `spawn(...)` debe ser un call literal a una fn
+`@background`. El checker rechaza `spawn(x)` con `x` variable o
+`spawn(obj.method())` — el target debe ser claro estáticamente.
+
+### Ejemplo completo: URL shortener con cron + spawn
+
+`examples/guide/30-cron-background.fitz` arma un servicio mínimo
+en menos de 100 líneas que combina **todo el stack** de jobs:
+
+- `type Link { slug, url, clicks }` — dominio.
+- `let LINKS: Map<Str, Link> = {}` — DB en memoria (Fase 9.w.3
+  MVP; persistencia llega con Fase 10 + ORM nativo).
+- `@background async fn track_click(slug)` — simula I/O lento
+  con `sleep(100).await` (típico: insert en analytics DB).
+- `@cron("*/5 * * * * *") fn stats()` — imprime estadísticas
+  cada 5 segundos.
+- `@get("/go/{slug}") fn redirect(slug)` — devuelve el target
+  URL **inmediato** y dispara `spawn(track_click(slug))` para
+  registrar el clic en background sin bloquear la response.
+
+Una sesión típica:
+
+```bash
+$ fitz run examples/guide/30-cron-background.fitz
+🏔️  Fitz HTTP escuchando en http://127.0.0.1:43930
+   POST /links
+   GET /links
+   GET /go/{slug}
+🕐 Fitz scheduler arrancado con 1 job(s) cron
+   @cron  stats (*/5 * * * * *)
+
+# Crear un link.
+$ curl -X POST localhost:43930/links \
+       -H 'Content-Type: application/json' \
+       -d '{"slug":"fitz","url":"https://github.com/.../fitz"}'
+{"slug":"fitz","url":"https://github.com/.../fitz","clicks":0}
+
+# Redirigir — la response sale inmediato; el clic se registra
+# async en background.
+$ curl localhost:43930/go/fitz
+"→ https://github.com/.../fitz"
+[bg] click registrado: /fitz → 1 total       # log del background
+
+# Tras 5 segundos el cron dispara stats.
+[cron] stats — 1 link(s) registrados
+[cron]   /fitz → 1 clicks
+```
+
+El ejemplo entero compila a binario nativo con `fitz build` y
+produce output bit-a-bit idéntico al intérprete.
+
+### Cron-only mode (sin server HTTP)
+
+Un programa con solo `@cron` (sin `@server` ni handlers HTTP)
+también funciona — el main queda vivo bloqueante hasta SIGINT/
+Ctrl+C (modo systemd-friendly):
+
+```fitz
+// cleanup.fitz — script periódico standalone.
+
+@cron("0 3 * * *")  // todos los días a las 3 AM
+fn cleanup() -> Null {
+    print("[cron] cleanup nocturno")
+    return null
+}
+
+print("Daemon arrancado. Ctrl+C para salir.")
+```
+
+```bash
+$ fitz build cleanup.fitz
+$ ./cleanup
+Daemon arrancado. Ctrl+C para salir.
+🕐 Fitz scheduler arrancado con 1 job(s) cron
+   @cron  cleanup (0 3 * * *)
+# ... espera hasta 3 AM o Ctrl+C ...
+^C
+🕐 Fitz scheduler recibió Ctrl+C, terminando.
+```
+
+Es exactamente lo que necesitás para un service `systemd`:
+`ExecStart=/usr/local/bin/cleanup`, sin scripts extra ni
+intérpretes embebidos.
+
+### Por qué Fitz hace esto distinto
+
+Cinco diferenciales que vuelven a Fitz único en este espacio:
+
+- **Decoradores nativos del lenguaje**: `@cron`/`@background` son
+  parte del compilador, no una lib opcional. El checker valida
+  shape en compile-time (typos en cron expression, params
+  prohibidos, conflictos con `@get`/`@ws`/`@auth_provider`); no
+  esperás a runtime para descubrir que el job está roto. Vs
+  Celery (lib externa con `@task` reflection), Bull (decorators
+  TypeScript con tipos opcionales), Spring `@Scheduled`
+  (reflection en runtime con AOP).
+- **Sin broker externo**: Redis/RabbitMQ NO son requisito. Los
+  jobs viven en memoria del proceso. Para 90% de los servicios
+  reales (tareas de mantenimiento, scripts periódicos, fire-and-
+  forget de notificaciones) eso es **suficiente**. Persistencia
+  llega con Fase 10 + DB nativa — sin cambiar la sintaxis.
+- **`spawn` con tipado**: el checker valida en compile-time que
+  el target tenga `@background` Y refina el ret type a
+  `Future<T>` con T concreto. Vs `tokio::spawn` Rust (sin
+  marcador, cualquier closure pasa), vs `asyncio.create_task`
+  Python (sin tipos), vs Celery `apply_async` (string-based
+  task name, lookup en runtime).
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build`**: el flow de
+  jobs corre idéntico en intérprete (rapid dev) y binario nativo
+  (deploy a prod). Cero "anda en local pero no en server".
+- **Cero `cargo add tokio-cron-scheduler` / `pip install celery`**:
+  el crate `cron` + helpers van en el binario `fitz`. Deploy es
+  un binario.
+
+**Ningún otro lenguaje hoy combina cron + background workers + spawn
+tipado en el core del lenguaje, sin broker externo y con paridad
+intérprete↔binario**.
+
+### Qué no está en el MVP
+
+Estos items están comprometidos como deuda explícita:
+
+- **Persistencia de jobs entre restarts**. Hoy los jobs viven en
+  memoria del proceso; un crash o deploy pierde los runs en
+  vuelo. Para servicios críticos hace falta una DB nativa (Fase
+  10) o backend de queue (Redis, post-MVP).
+- **Visibility de jobs** (panel admin que liste runs pasados,
+  estadísticas, retries). Hoy solo logs a stderr.
+- **Retry con backoff** cuando un job falla. Hoy errores van a
+  stderr y el job intenta de nuevo al próximo tick. Backoff
+  exponencial + max retries es deuda post-MVP.
+- **Coordinación entre múltiples instancias** (locks distribuidos
+  para que un cron solo corra en un nodo). Hoy cada instancia
+  corre todos sus jobs.
+- **`spawn` con coordinación múltiple**: `spawn(...).await` solo
+  awaitea un task; para `Promise.all([...])` style hace falta
+  agregación manual con vectores de futures.
+- **Cron timezone configurable**. Hoy todos los jobs corren con
+  `chrono::Utc::now()`. Servicios multi-timezone requieren
+  conversión manual en el handler.
+
+Detalle completo en `docs/roadmap.md` → "Fase 9.w iteración 2 —
+endurecimiento para servicios críticos".
+
+---
+
+## 31. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 29 podés:
+Con los capítulos 1 a 30 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -10069,6 +10295,17 @@ Con los capítulos 1 a 29 podés:
   `fitz run` ↔ `fitz build`. Ningún otro lenguaje hoy combina WS
   tipados con AsyncAPI auto-generado del código fuente. Ver
   [cap 29](#29-websockets-tipados).
+- **Jobs sin Celery** (Fase 9.w.3): tres piezas — **`@cron("expr")`**
+  para tareas periódicas (5/6/7 fields), **`@background`** como
+  marcador opt-in para autorizar `spawn(...)`, y **`spawn(fn_call)`**
+  fire-and-forget que devuelve `Future<T>` tipado. Sin Celery, sin
+  Redis, sin systemd timers — todo en el mismo binario. El checker
+  valida en compile-time que `spawn(...)` apunte a una fn
+  `@background` y refina el ret type. Cron-only mode (sin
+  `@server`) queda vivo bloqueante con `signal::ctrl_c` (modo
+  systemd-friendly). Paridad bit-a-bit `fitz run` ↔ `fitz build`
+  con `cron = "0.12"` linkeado en el binario. Ver
+  [cap 30](#30-jobs-sin-celery).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se

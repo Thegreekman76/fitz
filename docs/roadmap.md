@@ -7011,43 +7011,151 @@ auth integrada en el handshake, codegen con paridad bit-a-bit.
 `@background` — jobs sin Celery) y 9.w.4 (ORM nativo +
 migraciones, escala a Fase 10).
 
-#### 9.w.3 — `@cron` + `@background` — jobs sin Celery
+#### 9.w.3 — `@cron` + `@background` + `spawn` — jobs sin Celery (CERRADA 2026-05-21)
 
-- **`@cron("0 * * * *")`** sobre fn sin args — ejecuta según
-  cron expression:
-  ```fitz
-  @cron("0 0 * * *")  // cada medianoche
-  async fn cleanup_old_sessions() {
-      // ...
-  }
-  ```
-- **`@background`** marca fn como ejecutable en background con
-  `spawn`:
-  ```fitz
-  @background
-  async fn send_email(to: Str, body: Str) { ... }
+**Tercer sub-paso de Fase 9.w (stack web first-class).** Tres
+piezas nativas del lenguaje montan jobs sin broker externo:
+**`@cron("expr")`** para tareas periódicas, **`@background`** como
+marcador opt-in para autorizar el callsite, y **`spawn(fn_call)`**
+fire-and-forget que devuelve `Future<T>` tipado. Sin Celery, sin
+Redis, sin systemd timers — todo en el mismo binario con paridad
+bit-a-bit `fitz run` ↔ `fitz build`.
 
-  @post("/users")
-  async fn create_user(input: UserInput) -> User {
-      let user = save(input)
-      spawn send_email(user.email, "welcome")  // fire-and-forget
-      return user
-  }
+**Sub-pasos (4 commits)**:
+
+- **9.w.3.a** — Checker estático. `CheckCtx.background_fns:
+  HashSet<String>` poblado por `collect_background_fns` antes del
+  walk (paralelo a `collect_auth_provider`). `check_cron_decorator`
+  valida shape (arg Str, sin params, return Null/Result/Future,
+  conflictos). `check_background_decorator` valida sin args/
+  kwargs + conflictos. `synthesize_expr` para `Expr::Call`
+  intercepta cuando callee es Ident "spawn" y binding no fue
+  shadowed; refina ret type a `Future<T>` con T del target. LSP
+  completion list `spawn` con detail `fn(fn_call) -> Future<T>
+  // requiere @background`. 17 unit tests.
+
+- **9.w.3.b** — Runtime intérprete. Nuevo módulo
+  `src/cron_jobs.rs` con `CronJob` (handler + Schedule parseado)
+  + `CronRegistry` (paralelo a `HttpRegistry`; vive adentro como
+  `cron_registry: Arc<CronRegistry>` para reusar lifecycle entre
+  HTTP server y cron-only) + `spawn_cron_scheduler` (un
+  `tokio::spawn` por job con loop `sleep_until → invoke`)
+  + `run_scheduler_only` (cron-only mode con multi_thread
+  runtime + ctrl_c). `process_decorator` branches para `@cron`
+  (parsea expression via crate `cron`, registra job) y
+  `@background` (no-op runtime — solo marcador del checker).
+  `eval_call` intercepta `spawn(fn_call)` ANTES de evaluar args
+  para capturar el AST del inner call. `eval_spawn_call`
+  resuelve el handler en el env, evalúa args, hace
+  `tokio::spawn(invoke)` con await del Future si target es
+  async, envuelve el JoinHandle en `Value::Future`. Cron-only
+  mode en `main.rs`: cuando NO hay rutas HTTP pero SÍ jobs
+  `@cron`, llama `cron_jobs::run_scheduler_only` que bloquea
+  hasta Ctrl+C. **Fix bug preexistente**: handlers `async fn`
+  HTTP en intérprete retornaban "Future pendiente no es
+  serializable" porque `handle_task` nunca awaiteaba el Future
+  — solo afectaba `fitz run` (codegen lo hacía bien). Helper
+  `await_if_future` en `http.rs` para extraer el Value final.
+  Normalización 5→6 fields del cron expression: si el usuario
+  provee Unix clásico (5 fields), el runtime prependa `"0 "`
+  (segundo 0). Deps nuevas: `cron = "0.12"` y `chrono = "0.4"`
+  no-opcionales. 8 unit tests.
+
+- **9.w.3.c** — Codegen `fitz build`. Cargo.toml condicional
+  suma `cron`/`chrono` cuando `uses_jobs = true`. Tokio con
+  feature `signal` adicional en cron-only mode (para
+  `signal::ctrl_c()` que mantiene el proceso vivo). Multi_thread
+  flavor por default cuando hay jobs. Preludio
+  `__fitz_run_cron_job(name, schedule, handler)` análogo al
+  intérprete + helper `__fitz_normalize_cron`.
+  `PartitionedProgram.cron_fns` paralelo a `http_fns`/`ws_fns`
+  — una fn con `@cron` aparece en BOTH `cron_fns` (para emitir
+  el spawn) y `top_fns` (para emitir la fn invocable). `gen_main`
+  (CLI) y `gen_http_main` ambos invocan `emit_cron_job_spawns()`
+  que itera `ctx.cron_jobs_info` y emite por job:
   ```
-- **Built-in `spawn(fn_call)`** — devuelve `JoinHandle<T>` que se
-  puede `await`.
-- **Scheduler interno**: thread tokio dedicado para cron jobs,
-  registry de jobs vivo en memoria.
-- **Decisiones**:
-  - ¿Persistencia de jobs (retry tras crash)? Lean: **NO en
-    MVP** — jobs in-memory, perdidos al restart. Persistencia
-    post-MVP (requiere storage).
-  - ¿Backend de queue (Redis, etc.) o solo in-process? Lean:
-    **in-process MVP**, pluggable post-MVP.
-  - ¿Visibility de jobs (panel admin que liste runs)? Post-MVP.
-- **Trade-offs**: in-memory queue pierde jobs en crash — para
-  servicios críticos no alcanza. Para scripts de mantenimiento
-  (lo que usás en realidad), sobra. Documentar la limitación.
+  tokio::spawn(__fitz_run_cron_job(
+      "name".to_string(),
+      cron::Schedule::from_str(&__fitz_normalize_cron("expr"))?,
+      || async { name().await; },
+  ));
+  ```
+  CLI cron-only mode añade `signal::ctrl_c().await` al final
+  del main. HTTP + cron arranca el scheduler ANTES de
+  `axum::serve`. `spawn(fn_call)` dispatch en `gen_call` solo
+  dispara cuando `spawn` no fue shadowed; emite
+  `tokio::spawn(async move { target(args...).await })` con
+  `.await` solo si target es async; envuelve el JoinHandle en
+  `Box::pin(async move { jh.await.unwrap() })` para case con
+  `Pin<Box<dyn Future>>` del codegen. 7 unit tests.
+
+- **9.w.3.d** — Cap 30 nuevo "Jobs sin Celery" en
+  `docs/guide.md` (renumeración 30→31 "Qué sigue") + ejemplo
+  runnable `examples/guide/30-cron-background.fitz` (URL
+  shortener con `type Link`, HTTP + cron stats cada 5 seg +
+  `spawn(track_click)` de tracking async sin bloquear la
+  response, <100 LoC) + README emphasis con los 5 diferenciales
+  en tabla feature comparison + footnote dedicado ♠ + bullets en
+  "Estado del proyecto" y "Qué funciona hoy". Suma a
+  `GUIDE_EXAMPLES_COMPILE` (smoke compile_e2e).
+
+**Decisiones técnicas del MVP** (no en roadmap original):
+
+- **Cron-only mode vivo bloqueante** (vs run-once o flag opt-in):
+  modo systemd-friendly drop-in. Confirmado con el autor.
+- **`@cron` acepta sync y async** (vs solo async): ergonomía
+  consistente con el resto del lenguaje. Confirmado con el autor.
+- **`@background` como marcador opt-in** (vs cualquier fn
+  spawneable): evita usos accidentales sobre fns regulares cuyo
+  retorno el caller espera consumir.
+- **`spawn(...)` exige call literal a fn `@background`** (vs var
+  o expression compuesta): permite refinamiento estático del ret
+  type y validación clara en compile-time.
+- **Crate `cron = "0.12"`** (vs parser propio o `tokio-cron-
+  scheduler`): liviano, audit history limpio, soporta 5/6/7
+  fields. `tokio-cron-scheduler` arrastraba más deps + concept
+  de "job ID" que no necesitamos en MVP.
+- **Normalización 5→6 fields automática**: el crate `cron` exige
+  6+ fields; nosotros prependeamos `"0 "` para preservar la UX
+  familiar del Unix cron sin reescribir la sintaxis.
+- **JoinHandle envuelto en `Value::Future`/`Pin<Box<dyn Future>>`**:
+  unifica la API con `Future<T>` Fitz existente — descartar el
+  Future deja la task detached (fire-and-forget natural).
+
+**Por qué importa** (resumen del cap 30 de la guía):
+
+- **Sin broker externo**: para 90% de servicios reales (tareas
+  de mantenimiento, scripts periódicos, fire-and-forget de
+  notificaciones), los jobs en memoria del proceso son
+  suficientes. Persistencia entre restarts llega con Fase 10 +
+  DB nativa, sin cambiar la sintaxis.
+- **Checker estático**: validación en compile-time del callsite
+  `spawn(...)` (target con `@background` Y refinamiento del ret
+  type) vs `tokio::spawn` sin marcador, `asyncio.create_task`
+  sin tipos, Celery con string-based task names.
+- **Paridad bit-a-bit**: el flow corre idéntico en intérprete
+  (rapid dev) y binario nativo (deploy a prod).
+- **Cero deps externas**: `cron` + `chrono` van en el binario
+  `fitz`. No hay `pip install celery`, `npm install bull`,
+  `cargo add tokio-cron-scheduler`.
+- **Ningún otro lenguaje** combina cron + background workers +
+  spawn tipado en el core sin broker externo y con paridad
+  intérprete↔binario.
+
+**Deuda residual derivada de 9.w.3** (NO bloquea uso real; abre
+items para iteración 2 post-Fase 10):
+
+- Persistencia de jobs entre restarts (requiere DB nativa).
+- Visibility de jobs (panel admin con runs, stats, retries).
+- Retry con backoff exponencial cuando un job falla.
+- Coordinación entre múltiples instancias (locks distribuidos
+  para que un cron solo corra en un nodo).
+- `spawn` con coordinación múltiple (Promise.all style requiere
+  agregación manual con vectores de futures).
+- Cron timezone configurable (hoy `chrono::Utc::now()`).
+
+**Próximo norte**: resto de Fase 9.w — ORM nativo + migraciones
+(escala a Fase 10), o cierre formal de Fase 9.w entera.
 
 #### 9.w.4 — ORM nativo + migraciones autogeneradas (LINK A FASE 10)
 

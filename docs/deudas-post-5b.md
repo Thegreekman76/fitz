@@ -960,6 +960,80 @@
 > `@background` — jobs sin Celery) y 9.w.4 (ORM nativo +
 > migraciones, escala a Fase 10).
 
+> **Nota (2026-05-21) — Fase 9.w.3 (Jobs sin Celery) CERRADA**: el
+> tercer sub-paso del stack web first-class está implementado
+> entero. Tres piezas nativas del lenguaje montan jobs sin broker
+> externo: **`@cron("expr")`** para tareas periódicas (5/6/7
+> fields cron Unix), **`@background`** como marcador opt-in para
+> autorizar el callsite, y **`spawn(fn_call)`** fire-and-forget
+> que devuelve `Future<T>` tipado. Sin Celery, sin Redis, sin
+> systemd timers — todo en el mismo binario con paridad bit-a-bit
+> `fitz run` ↔ `fitz build`. **Cinco diferenciales** que vuelven
+> a Fitz único en este espacio: decoradores nativos del lenguaje
+> (parte del compilador, no lib opcional), sin broker externo
+> (jobs viven en memoria del proceso, suficiente para 90% de
+> servicios reales), `spawn` con tipado (refinamiento estático
+> a `Future<T>` con T concreto), paridad `fitz run` ↔ `fitz
+> build`, y cero `pip install celery` / `cargo add
+> tokio-cron-scheduler`. **Ningún otro lenguaje combina cron +
+> background workers + spawn tipado en el core sin broker externo
+> y con paridad intérprete↔binario**. Sub-pasos cerrados:
+>
+> - **9.w.3.a** — Checker estático: `CheckCtx.background_fns`
+>   poblado por `collect_background_fns` antes del walk;
+>   `check_cron_decorator` + `check_background_decorator` +
+>   dispatch especial de `spawn(...)` en `synthesize_expr` que
+>   refina ret type a `Future<T>` (17 unit tests).
+> - **9.w.3.b** — Runtime intérprete: nuevo módulo
+>   `src/cron_jobs.rs` con `CronJob` + `CronRegistry` (paralelo
+>   a HttpRegistry) + `spawn_cron_scheduler` + `run_scheduler_only`
+>   (cron-only mode con multi_thread + ctrl_c). `process_decorator`
+>   branches para `@cron`/`@background`. `eval_call` intercepta
+>   `spawn(fn_call)` ANTES de evaluar args. Cron-only mode en
+>   `main.rs`. **Fix bug preexistente**: handlers `async fn`
+>   HTTP en intérprete retornaban "Future pendiente no es
+>   serializable" porque `handle_task` nunca awaiteaba el Future.
+>   Helper `await_if_future`. Normalización 5→6 fields automática.
+>   Deps `cron = "0.12"` + `chrono = "0.4"` (8 unit tests).
+> - **9.w.3.c** — Codegen `fitz build`: Cargo.toml condicional
+>   suma `cron`/`chrono` + feature `signal` (cron-only mode);
+>   multi_thread flavor con jobs; preludio `__fitz_run_cron_job`
+>   + helper `__fitz_normalize_cron`; `PartitionedProgram.cron_fns`;
+>   `emit_cron_job_spawns()` invocado desde `gen_main` y
+>   `gen_http_main`; `spawn(fn_call)` dispatch que emite
+>   `tokio::spawn(async move {...})` + `Box::pin` para case con
+>   `Pin<Box<dyn Future>>` (7 unit tests).
+> - **9.w.3.d** — Cap 30 nuevo en `docs/guide.md` (renumeración
+>   30→31) + ejemplo runnable
+>   `examples/guide/30-cron-background.fitz` (URL shortener con
+>   HTTP + cron stats + spawn tracking, <100 LoC) + README
+>   emphasis con tabla + footnote ♠ + bullets en "Estado del
+>   proyecto" y "Qué funciona hoy" + smoke
+>   `GUIDE_EXAMPLES_COMPILE`.
+>
+> **Decisiones técnicas del MVP** (no en roadmap original):
+> cron-only mode vivo bloqueante (modo systemd-friendly,
+> confirmado con el autor); `@cron` acepta sync y async
+> (confirmado); `@background` opt-in (evita usos accidentales);
+> `spawn(...)` exige call literal a fn `@background` (permite
+> refinamiento estático); crate `cron = "0.12"` (vs propio o
+> `tokio-cron-scheduler`); normalización 5→6 fields automática
+> (preserva UX familiar); JoinHandle envuelto en `Value::Future`/
+> `Pin<Box<dyn Future>>` (unifica con `Future<T>` existente).
+>
+> **Deuda residual derivada de 9.w.3** (NO bloquea uso real;
+> queda comprometida en `docs/roadmap.md` → "Fase 9.w iteración
+> 2"): persistencia de jobs entre restarts (requiere DB nativa,
+> Fase 10); visibility de jobs (panel admin con runs, stats,
+> retries); retry con backoff exponencial; coordinación entre
+> múltiples instancias (locks distribuidos); `spawn` con
+> coordinación múltiple (Promise.all style); cron timezone
+> configurable (hoy `chrono::Utc::now()`).
+>
+> **Próximo norte**: resto de Fase 9.w — ORM nativo +
+> migraciones (escala a Fase 10), o cierre formal de Fase 9.w
+> entera.
+
 ## Resumen ejecutivo
 
 Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.
