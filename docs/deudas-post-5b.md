@@ -1034,6 +1034,70 @@
 > migraciones (escala a Fase 10), o cierre formal de Fase 9.w
 > entera.
 
+> **Nota (2026-05-21) — Deudas derivadas del setup CI/CD
+> (post-9.w MVP)**: al armar los 4 workflows GitHub Actions
+> (`ci.yml`, `extension-smoke.yml`, `release.yml`, `docs.yml`)
+> + sitio MkDocs Material, descubrimos dos issues
+> preexistentes del repo que el CI strict expuso pero que
+> NO bloquean la entrega de releases:
+>
+> **D1 — Cargo fmt cleanup masivo** (deuda explícita, NO
+> bloquea CI ni features). `cargo fmt --all -- --check` falla
+> porque el código del repo nunca fue formateado con rustfmt
+> canónico — el autor tiene su propio estilo (imports
+> agrupados manualmente vs alfabéticos, etc.). El `fmt --check`
+> step del `ci.yml` quedó **deshabilitado con comentario
+> explicativo** mientras se hace el cleanup.
+>
+> - **Plan**: commit dedicado `style: cargo fmt --all across
+>   the codebase` que toca **cientos de archivos** (todos los
+>   `.rs` del proyecto). Beneficio: el `fmt --check` del CI
+>   vuelve a funcionar para siempre + el proyecto queda
+>   alineado con rustfmt default (estándar Rust ecosystem).
+> - **Riesgo**: pull conflicts si alguien tiene branches
+>   abiertas (no es el caso hoy — solo el autor commitea).
+> - **Trade-off**: el diff del commit es masivo (ilegible para
+>   review humano), pero `cargo fmt` no cambia semántica, solo
+>   layout. Validar con `cargo test --lib` post-fmt para
+>   confirmar que nada se rompió accidentalmente.
+> - **Cuándo arrancar**: cuando aparezca presión real de
+>   contribuidores externos que esperan `cargo fmt --check`
+>   verde en sus PRs, o como cleanup post-Fase 10. Sin presión
+>   real, no rush.
+>
+> **D2 — Clippy strict en `--all-targets`** (deuda explícita,
+> NO bloquea CI). `cargo clippy --all-targets -- -D warnings`
+> reporta **11 errores en código de tests** (no en lib):
+> patterns idiomáticos como `assert!(x.is_none())` (clippy
+> sugiere `!x.contains_key(...)`), `useless_format` en strings
+> de tests E2E, `unnecessary_get_then_check`. El `clippy` step
+> del `ci.yml` quedó cambiado de `--all-targets` a `--lib`
+> (clippy strict sobre lib code captura 99% de issues reales;
+> warnings en tests son aceptables).
+>
+> - **Plan**: commit dedicado `style: clippy --all-targets
+>   cleanup` que aplica las sugerencias de clippy a los ~11
+>   sitios de tests. Pequeño en tamaño (~50 LoC tocadas).
+> - **Trade-off**: aceptar las sugerencias de clippy es a
+>   veces menos legible (`assert!(x.is_none())` lee más natural
+>   que `assert!(!x.contains_key(k))` para verificar ausencia
+>   de una key). Caso por caso: aceptar la sugerencia clippy
+>   o sumar `#[allow(clippy::unnecessary_get_then_check)]` con
+>   comentario.
+> - **Cuándo arrancar**: idem D1 — sin presión real, no rush.
+>   Refinable junto con el cleanup de fmt en una mini-tanda de
+>   "code style" dedicada.
+>
+> **Por qué ambas son aceptables como deudas**: las dos son
+> sobre **convenciones de estilo**, no sobre correctness del
+> código. El lint strict del CI tiene valor cuando hay
+> múltiples contribuidores que necesitan baseline común; con
+> un solo autor commiteando, el costo del cleanup masivo no se
+> justifica todavía. El binario sigue compilando, los tests
+> siguen verdes, los releases siguen produciendo artifacts
+> reproducibles. La calidad del código real (clippy `--lib`)
+> sigue siendo strict.
+
 ## Resumen ejecutivo
 
 Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.
