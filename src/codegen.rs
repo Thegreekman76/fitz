@@ -7015,10 +7015,42 @@ where
                 }
             }
         }
-        let call = if args.is_empty() {
-            format!("String::from(\"{}\")", fmt)
-        } else {
-            format!("format!(\"{}\", {})", fmt, args.join(", "))
+        // R.bug-deadlock — Fix del deadlock en interpolaciones con
+        // re-locks. Si `format!(...)` recibe >1 arg, Rust mantiene los
+        // temporales (MutexGuards de `.lock().unwrap()`) vivos hasta el
+        // final de la statement entera — incluyendo mientras se evaluan
+        // args posteriores. Si arg N lockea un Arc<Mutex<>> Y arg N+1
+        // llama una fn que lockea el MISMO Arc, el segundo `.lock()`
+        // se bloquea esperando que el primero libere → deadlock
+        // silencioso del binario (std::sync::Mutex no es re-entrant).
+        //
+        // Fix: emitir cada arg como `let __a<N> = <code>;` dentro de
+        // un bloque ANTES del `format!`. Cada `let` cierra una
+        // statement, lo que dropea el MutexGuard temporal al final de
+        // la RHS. El `format!` final recibe los valores ya extraídos,
+        // sin guards vivos.
+        //
+        // Para 0 args usamos `String::from`; para 1 arg el `format!`
+        // sigue siendo equivalente al patrón anterior (no hay 2do
+        // arg con potencial de re-lock).
+        let call = match args.len() {
+            0 => format!("String::from(\"{}\")", fmt),
+            1 => format!("format!(\"{}\", {})", fmt, args[0]),
+            _ => {
+                let mut block = String::from("{ ");
+                let mut bind_names: Vec<String> = Vec::with_capacity(args.len());
+                for (i, arg_code) in args.iter().enumerate() {
+                    let name = format!("__a{}", i);
+                    block.push_str(&format!("let {} = {}; ", name, arg_code));
+                    bind_names.push(name);
+                }
+                block.push_str(&format!(
+                    "format!(\"{}\", {}) }}",
+                    fmt,
+                    bind_names.join(", ")
+                ));
+                block
+            }
         };
         Ok((call, Type::Str))
     }

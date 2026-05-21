@@ -4581,6 +4581,155 @@ encaje en mini-tanda futura tipo "Sp" sin compromiso):
 
 ---
 
+## ~~R.bug-deadlock — Deadlock en string interp con re-locks del mismo Mutex~~ ✓ CERRADO 2026-05-21
+
+> **CERRADO el mismo día del descubrimiento (2026-05-21)** — el fix
+> aterrizó en `gen_str_interp` (codegen). El test de regresión vive
+> en `tests/compile_e2e.rs::r_bug_deadlock_str_interp_re_lock_mismo_arc_no_cuelga`
+> y valida tanto el exit code (no timeout) como el output esperado.
+>
+> El cli-tool boilerplate compiló y corrió bit-a-bit como esperado
+> con el código original limpio (sin workaround inline). Smoke
+> `GUIDE_EXAMPLES_COMPILE` con los 78 ejemplos guide sigue verde
+> (~123s), incluyendo `30-cron-background.fitz` que tiene el
+> patrón típico de print con dos calls dentro.
+
+**Prioridad: ALTA** — produce hang silencioso del binario sin
+panic ni error visible. Difícil de diagnosticar porque el `fitz
+check` y el `cargo build` pasan limpio.
+
+### Descripción
+
+`fitz build` emite código que puede causar **deadlock** cuando
+una interpolación de string contiene **dos accesos al mismo
+`Arc<Mutex<T>>`** vía `.lock()` adentro del mismo `format!(...)`.
+
+**Repro mínimo**:
+
+```fitz
+type Sale { product: Str, amount: Float, region: Str }
+
+let SALES: List<Sale> = [
+    Sale { product: "a", amount: 1.0, region: "AR" },
+    Sale { product: "b", amount: 2.0, region: "AR" },
+]
+
+fn total(sales: List<Sale>) -> Float {
+    return sales.reduce(0.0, fn(acc: Float, s: Sale) => acc + s.amount)
+}
+
+fn by_region(sales: List<Sale>, region: Str) -> List<Sale> {
+    return sales.filter(fn(s: Sale) => s.region == region)
+}
+
+let subset: List<Sale> = by_region(SALES, "AR")
+// HANG: subset.len() lockea subset.0, total(subset) re-lockea adentro.
+print("{subset.len()} - {total(subset)}")
+```
+
+El `fitz run` ejecuta esto OK (intérprete usa `parking_lot::Mutex`
+que recursiva o detecta y panic). El `fitz build` emite código
+con `std::sync::Mutex` que es **NO re-entrant** — el segundo
+`.lock()` desde el mismo thread hace **deadlock** (espera para
+siempre).
+
+### Código generado problemático
+
+Para `print("{subset.len()} - {total(subset)}")` el codegen emite:
+
+```rust
+println!("{}", format!("{} - {}",
+    ((subset.clone()).lock().unwrap().len() as i64),   // ARG 1: lockea subset.0
+                                                        //        MutexGuard vive hasta
+                                                        //        el final de la statement
+    total(subset.clone())                               // ARG 2: total() lockea subset.0
+                                                        //        de nuevo → DEADLOCK
+));
+```
+
+Rust mantiene los temporales (MutexGuard de ARG 1) vivos hasta
+el final de la **statement** que los contiene. Mientras evalua
+ARG 2, ese guard sigue vivo. La llamada a `total()` adentro
+intenta `.lock()` sobre el mismo Arc y queda bloqueada esperando
+que ARG 1 libere — pero ARG 1 no libera hasta que la statement
+entera termine.
+
+### Por qué solo afecta codegen, no intérprete
+
+| Runtime | Mutex type | Re-entrancy |
+|---|---|---|
+| Intérprete (`fitz run`) | `parking_lot::Mutex` | NO re-entrant, pero `try_lock` retorna `WouldBlock` (no deadlock); F17 lo evita con "lock scope mínimo + clone-out" en el evaluator |
+| Codegen (`fitz build`) | `std::sync::Mutex` | NO re-entrant, segundo `.lock()` **deadlock** silencioso |
+
+El intérprete está diseñado para soltar el lock entre operaciones
+(política de F17). El codegen NO hace eso explícitamente — confía
+en el scope de Rust para dropear los guards, pero el scope de
+temporales en `format!(...)` extiende los guards más allá de lo
+necesario.
+
+### Workaround del usuario
+
+Romper la interpolación con bindings intermedios:
+
+```fitz
+// En lugar de:
+print("{subset.len()} - {total(subset)}")
+
+// Hacer:
+let count: Int = subset.len()
+let amount: Float = total(subset)
+print("{count} - {amount}")
+```
+
+Cada `let` cierra una statement → el MutexGuard se dropea ANTES
+del siguiente lock. Sin deadlock.
+
+### Fix proposed en el codegen
+
+Dos opciones:
+
+**Opción A — Bindings intermedios automáticos en `gen_str_interp`**.
+Cuando un fragment requiere `.lock()` (field access sobre Nominal,
+`.len()` sobre List/Map, etc.) Y el `format!` tiene >1 fragment,
+emitir cada fragment como `let __arg_N = <expr>;` ANTES del
+`format!`. Eso fuerza scope-end de cada MutexGuard entre args.
+
+```rust
+let __arg1 = ((subset.clone()).lock().unwrap().len() as i64);  // guard dies aquí
+let __arg2 = total(subset.clone());                             // sin conflict
+println!("{}", format!("{} - {}", __arg1, __arg2));
+```
+
+**Opción B — Migrar el codegen a `parking_lot::Mutex`**. Pesa
+una dep nueva en los binarios producidos pero acaba con el
+problema de raíz. Mantiene la dep ya usada en el intérprete.
+Trade-off: tamaño del binario (~50 KB) por simplicidad del fix.
+
+Lean: **Opción A** porque es local al codegen sin nueva dep en
+los binarios.
+
+### Tests de regresión cuando se cierre
+
+- Repro mínimo (de arriba) debe correr sin colgar.
+- `examples/guide/13-metodos.fitz` con `print("{xs.len()} - {xs.first()}")`-style.
+- Test E2E nuevo en `compile_e2e.rs`: timeout 5s, fail si el
+  binario tarda más.
+- Smoke `GUIDE_EXAMPLES_COMPILE` debe seguir verde.
+
+### Descubrimiento
+
+Encontrado al validar el primer boilerplate Dockerizado
+(`boilerplates/cli-tool/`). El programa generaba un report de
+ventas con `print("  {region}: {subset.len()} ventas, ${total(subset):.2f}")`
+adentro de un `for region in distinct_regions(SALES)`. El binario
+imprimía "Por región:" y se cortaba sin error. Diagnosticado
+aislando con tests minimales (`/tmp/test_iter3.fitz` ... `/tmp/test_iter7.fitz`).
+
+El boilerplate cli-tool tiene workaround inline mientras el fix
+no está aplicado.
+
+---
+
 ## Cómo se actualiza este doc
 
 - Cada vez que cerramos un item de R, **marcamos con ~~strikethrough~~

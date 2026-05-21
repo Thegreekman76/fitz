@@ -5912,3 +5912,46 @@ fn ws_codegen_tipo_custom_marshaling_json() {
     assert_eq!(v["text"], serde_json::json!("re:hi"));
 }
 
+
+// ---------------------------------------------------------------------------
+// R.bug-deadlock — regression test (2026-05-21)
+// ---------------------------------------------------------------------------
+
+/// El codegen pre-fix emitía un `format!(fmt, arg1, arg2, ...)` donde
+/// los temporales (MutexGuards de `.lock().unwrap()`) vivían hasta el
+/// final de la statement. Si dos args lockeaban el mismo Arc<Mutex<>>
+/// (caso típico: `print("{xs.len()} - {total(xs)}")`), el segundo
+/// `.lock()` desde el mismo thread quedaba bloqueado esperando que el
+/// primero libere → deadlock silencioso del binario.
+///
+/// Fix: `gen_str_interp` ahora emite cada arg como `let __aN = <code>;`
+/// en un bloque ANTES del `format!`. Cada `let` cierra una statement,
+/// dropea el MutexGuard temporal antes de evaluar el siguiente arg.
+///
+/// Este test corre el binario con timeout — si el deadlock vuelve, el
+/// test falla por exit code (timeout). El stdout valida que ambas
+/// líneas se imprimen.
+#[test]
+fn r_bug_deadlock_str_interp_re_lock_mismo_arc_no_cuelga() {
+    let src = "type Sale { product: Str, amount: Float }\n\
+               let xs: List<Sale> = [\n\
+                   Sale { product: \"a\", amount: 1.0 },\n\
+                   Sale { product: \"b\", amount: 2.0 },\n\
+               ]\n\
+               fn total(sales: List<Sale>) -> Float {\n\
+                   return sales.reduce(0.0, fn(acc: Float, s: Sale) => acc + s.amount)\n\
+               }\n\
+               print(\"len={xs.len()} total={total(xs)}\")\n";
+    let (stdout, exit) = build_and_run("r-bug-deadlock-str-interp", src);
+    assert_eq!(exit, 0, "binario debió terminar limpio (timeout = deadlock)");
+    assert!(
+        stdout.contains("len=2"),
+        "esperaba `len=2` en stdout, fue: {}",
+        stdout
+    );
+    assert!(
+        stdout.contains("total=3"),
+        "esperaba `total=3` en stdout, fue: {}",
+        stdout
+    );
+}
