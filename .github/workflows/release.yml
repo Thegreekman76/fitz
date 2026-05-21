@@ -310,10 +310,24 @@ jobs:
         with:
           fetch-depth: 0  # full history para changelog
 
-      - name: Download all binaries
+      # `actions/download-artifact@v4` sin `name:` ni `pattern:`
+      # tiene un issue conocido cuando hay muchos artifacts del run
+      # (8 en nuestro caso: 4 binaries-* + 4 vsix-*) — falla con
+      # "Artifact download failed after 5 retries". Fix: descargar
+      # binaries y .vsix en steps separados con `pattern:`, cada uno
+      # se reintenta independiente. `merge-multiple: false` (default)
+      # mantiene cada artifact en su propio subdir.
+      - name: Download binaries artifacts
         uses: actions/download-artifact@v4
         with:
           path: ./artifacts
+          pattern: 'binaries-*'
+
+      - name: Download .vsix artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ./artifacts
+          pattern: 'vsix-*'
 
       - name: Derive version
         id: version
