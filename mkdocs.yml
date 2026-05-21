@@ -68,6 +68,11 @@ extra:
       link: https://github.com/Thegreekman76/fitz
   generator: false  # Quitar "Made with Material for MkDocs" del footer.
 
+# Custom CSS para agrandar el logo del header y armar el hero del
+# landing (docs/index.md).
+extra_css:
+  - stylesheets/extra.css
+
 markdown_extensions:
   # Sintaxis estándar
   - abbr

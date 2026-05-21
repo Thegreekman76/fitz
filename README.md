@@ -33,6 +33,8 @@ async, [`examples/guide/19-async.fitz`](examples/guide/19-async.fitz).
 Para **docs autogeneradas** (OpenAPI 3.1 + UI Scalar en `/docs`),
 [`examples/guide/18-docs.fitz`](examples/guide/18-docs.fitz).
 
+ve la documentación aqui: [`https://thegreekman76.github.io/fitz/`](https://thegreekman76.github.io/fitz/).
+
 ## Por qué Fitz
 
 Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
@@ -44,18 +46,18 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 **Fitz toma lo mejor de cada uno:**
 
-| Feature                | Python | TypeScript | Go | Fitz  |
-| ---------------------- | ------ | ---------- | -- | ----- |
-| Sintaxis limpia        | ✅     | ⚠️       | ❌ | ✅    |
-| Tipado gradual         | ❌     | ✅         | ❌ | ✅ *  |
-| Compilado nativo       | ❌     | ❌         | ✅ | ✅ † |
-| HTTP en el core        | ❌     | ❌         | ❌ | ✅    |
-| Async nativo           | ⚠️   | ✅         | ✅ | ✅ ‡ |
-| Docs HTTP automáticas | ⚠️   | ❌         | ❌ | ✅ ◊ |
-| **Auth nativa**        | ❌     | ❌         | ❌ | ✅ ♦ |
-| **WebSockets tipados** | ⚠️   | ⚠️       | ⚠️ | ✅ ♣ |
-| **Jobs sin Celery**    | ⚠️   | ⚠️       | ⚠️ | ✅ ♠ |
-| Interop Python         | ✅     | ❌         | ❌ | ✅ § |
+| Feature                | Python | TypeScript | Go  | Fitz  |
+| ---------------------- | ------ | ---------- | --- | ----- |
+| Sintaxis limpia        | ✅     | ⚠️         | ❌  | ✅    |
+| Tipado gradual         | ❌     | ✅         | ❌  | ✅ \* |
+| Compilado nativo       | ❌     | ❌         | ✅  | ✅ †  |
+| HTTP en el core        | ❌     | ❌         | ❌  | ✅    |
+| Async nativo           | ⚠️     | ✅         | ✅  | ✅ ‡  |
+| Docs HTTP automáticas  | ⚠️     | ❌         | ❌  | ✅ ◊  |
+| **Auth nativa**        | ❌     | ❌         | ❌  | ✅ ♦  |
+| **WebSockets tipados** | ⚠️     | ⚠️         | ⚠️  | ✅ ♣  |
+| **Jobs sin Celery**    | ⚠️     | ⚠️         | ⚠️  | ✅ ♠  |
+| Interop Python         | ✅     | ❌         | ❌  | ✅ §  |
 
 \* **Tipado gradual con chequeo estático** — Fase 5a completada.
 `fitz check` y `fitz run` validan anotaciones en compile time;
@@ -137,7 +139,8 @@ Ver [cap 29 de la guía](docs/guide.md#29-websockets-tipados) y
 el ejemplo completo
 [`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
 (servidor de chat con login HTTP + JWT + broadcast multi-client
-+ heartbeat configurado, < 100 líneas).
+
+- heartbeat configurado, < 100 líneas).
 
 ♠ **Jobs sin Celery** — Fase 9.w.3 completada. Tres piezas
 nativas del lenguaje: **`@cron("expr")`** para tareas periódicas
@@ -155,8 +158,7 @@ based task names). **Cron-only mode** (programas sin `@server` ni
 handlers HTTP) quedan vivos bloqueantes con `signal::ctrl_c`
 automático — modo systemd-friendly drop-in. **Paridad bit-a-bit
 `fitz run` ↔ `fitz build`** con `cron = "0.12"` + `chrono = "0.4"`
-linkeados condicionalmente en el binario. **Cero `pip install
-celery` / `cargo add tokio-cron-scheduler` / docker-compose con
+linkeados condicionalmente en el binario. **Cero `pip install celery` / `cargo add tokio-cron-scheduler` / docker-compose con
 Redis**. Vs Celery+Redis (Python con broker externo, lib opcional),
 Bull/BullMQ (Node con Redis), Spring `@Scheduled` (reflection en
 runtime), Fitz es el único lenguaje donde **cron + background
@@ -176,14 +178,12 @@ original. Embedding básico de CPython (8.1), marshaling bidireccional
 tokio ↔ asyncio (8.6), codegen interop en `fitz build` (8.7), guía +
 ejemplo CRUD (8.8). Opt-in con la feature `python` al build del
 binario `fitz`. **Deuda residual derivada** (no bloquea uso real
-end-to-end, sí refinamientos): coerción `PyAny → List<T>/Map<K,V>/
-Instance` en `fitz build` (helpers emitidos en el preludio; falta
+end-to-end, sí refinamientos): coerción `PyAny → List<T>/Map<K,V>/ Instance` en `fitz build` (helpers emitidos en el preludio; falta
 wiring en `coerce` — anotaciones nominales sobre dicts ya andan en
 intérprete vía 8.4, sólo el path codegen tiene este gap); `.await`
 con binding intermedio split (`let f = py_call()?; f.await` — hoy
 sólo el patrón canónico `<py_call>?.await`); stubs `.pyi` parseados
-(pospuesto post-9); bundling CPython embebido (`fitz build
---bundle-python` para no requerir Python instalado en el destino —
+(pospuesto post-9); bundling CPython embebido (`fitz build --bundle-python` para no requerir Python instalado en el destino —
 sub-paso futuro separado, decisión python-build-standalone vs
 PyOxidizer pendiente). Ver
 [cap 21 de la guía](docs/guide.md#21-interop-python) y detalle
@@ -337,8 +337,7 @@ ASP.NET). El **schema OpenAPI 3.1** auto-agrega
 en responses — sin tocar el spec a mano. Paridad bit-a-bit
 `fitz run` ↔ `fitz build`. El ejemplo completo
 [`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz)
-arma `POST /login` + `GET /me` (`@authenticated`) + `GET
-/admin/users` (`@admin`) en menos de 100 líneas, validado
+arma `POST /login` + `GET /me` (`@authenticated`) + `GET /admin/users` (`@admin`) en menos de 100 líneas, validado
 end-to-end con curl contra el binario nativo. Ver
 [cap 28 de la guía](docs/guide.md#28-auth-nativa).
 
@@ -358,8 +357,7 @@ pasan de largo Nginx 60s default idle / Cloudflare ~100s /
 AWS ALB 60s), **auth integrada** en el handshake
 (`@authenticated`/`@admin` apilados sobre `@ws` validan el
 bearer token ANTES del HTTP upgrade, devolviendo 401/403 sin
-abrir el socket) y **codegen con paridad** bit-a-bit `fitz
-run` ↔ `fitz build`. **Ningún otro lenguaje hoy combina WS
+abrir el socket) y **codegen con paridad** bit-a-bit `fitz run` ↔ `fitz build`. **Ningún otro lenguaje hoy combina WS
 tipados con AsyncAPI auto-generado del código fuente,
 heartbeat built-in y auth integrada en el handshake** —
 FastAPI WebSocket te da Pydantic y schema manual; Socket.IO te
@@ -370,8 +368,7 @@ en C# y solo en .NET. Cero `cargo add tokio-tungstenite` o
 [`examples/guide/29-ws.fitz`](examples/guide/29-ws.fitz)
 arma un servidor de chat con login HTTP + JWT + broadcast
 multi-client + heartbeat configurado, en menos de 100 líneas,
-validado end-to-end (incluido el binario nativo de `fitz
-build`). Ver [cap 29 de la guía](docs/guide.md#29-websockets-tipados).
+validado end-to-end (incluido el binario nativo de `fitz build`). Ver [cap 29 de la guía](docs/guide.md#29-websockets-tipados).
 
 **Fase 9.w.3 (Jobs sin Celery) CERRADA** — el tercer sub-paso del
 stack web first-class. Tres piezas nativas del lenguaje:
@@ -482,10 +479,10 @@ Las fases cerradas:
   parser, PreF8.3 audit de defaults de tipos importados (fix de
   eager-at-import), PreF8.4 import aliasing (`as`).
 - **Fase 8.1 — Embedding básico de CPython**: `from python import X` desde el intérprete (`fitz run --features python`). PyO3 0.28
-  + ABI3-py310. Acceso a atributos, llamadas con args primitivos,
+  - ABI3-py310. Acceso a atributos, llamadas con args primitivos,
     return primitivo coercionado a `Value` Fitz. Sub-pasos: 8.1.1
     dep PyO3 opcional + `Value::PyObject` feature-gated, 8.1.2 loader
-  + `from python import X`, 8.1.3 `Expr::Field` + auto-coerción
+  - `from python import X`, 8.1.3 `Expr::Field` + auto-coerción
     primitiva, 8.1.4 `Expr::Call` con args primitivos (cumple el
     criterio del roadmap end-to-end), 8.1.5 guard de codegen
     (`fitz build` aborta con mensaje claro — deuda F19 comprometida
@@ -592,7 +589,7 @@ Las fases cerradas:
   (renumeración cap 21→22). Ejemplo
   `examples/guide/21-python-crud/` (SQLAlchemy + SQLite + handlers
   HTTP) validado end-to-end con curl. Sub-pasos: 8.8.1 cap 21
-  + renumeración; 8.8.2 ejemplo CRUD; 8.8.3 cierre formal
+  - renumeración; 8.8.2 ejemplo CRUD; 8.8.3 cierre formal
     (CHANGELOG, roadmap, deudas, README, CLAUDE). Decisiones de
     scope: cap 21 (una renumeración), SQLite (sin Docker), solo
     `fitz run` con nota explícita sobre deuda residual de 8.7.
@@ -646,8 +643,9 @@ middleware con `next` callable en `fitz build`) — `fitz run` ya lo
 cubre end-to-end; el codegen rechaza con msg claro citando
 `fitz run` como workaround. Implementarlo en codegen requiere
 emitir cierres Rust con tipos `Arc<dyn Fn() -> Pin<Box<dyn Future
-+ Send>>>` con captura recursiva (~2-3h dedicados). Sin presión
-real hoy.
+
+- Send>>>` con captura recursiva (~2-3h dedicados). Sin presión
+  real hoy.
 
 **Fase 9 (Ecosistema) — pre-reqs LSP (F15 + F16) y LSP MVP entero
 CERRADOS (2026-05-15/16)**: error recovery del parser, side-table
@@ -688,8 +686,7 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     finalmente usables desde código.**
   - **9.y.3.c** — **git deps + cache local**. Habilita
     `[dependencies] foo = { git = "https://...", tag = "v1.0.0" }`
-    en `fitz.toml`. El primer acceso clona a `<cache>/git/
-    <sanitized-url>@<ref>/` (default `~/.fitz/cache/`, override
+    en `fitz.toml`. El primer acceso clona a `<cache>/git/ <sanitized-url>@<ref>/` (default `~/.fitz/cache/`, override
     con `FITZ_CACHE_DIR`) y reusa el dir en accesos siguientes.
     El lockfile registra el commit hash exacto Cargo-style:
     `source = "git+<url>#<commit>"`. `tag` XOR `rev`; `branch` NO
@@ -700,10 +697,7 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     declarar, resolver, bloquear y CONSUMIR deps tanto locales
     como de repos git remotos, sin registry todavía.
   - **9.y.4** — **`fitz add` / `fitz remove` / `fitz update`**.
-    Automatiza la edición del manifest + lockfile. `fitz add
-    <name> --path <p>` agrega path dep; `fitz add <name> --git
-    <url> --tag <t>` (o `--rev`) agrega git dep; `fitz remove
-    <name>` quita entry + sync lockfile; `fitz update [name]`
+    Automatiza la edición del manifest + lockfile. `fitz add <name> --path <p>` agrega path dep; `fitz add <name> --git <url> --tag <t>` (o `--rev`) agrega git dep; `fitz remove <name>` quita entry + sync lockfile; `fitz update [name]`
     invalida cache de git deps y fuerza re-clone. Sobreescribe
     si la dep ya existía. `toml_edit` preserva comentarios y
     formatting del usuario al modificar `fitz.toml`. Smoke
@@ -727,7 +721,7 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
     [`docs/fmt-style.md`](docs/fmt-style.md) para la referencia
     completa de convenciones.
   - Total al cierre 9.z.1: 1333 unit + 55 cli_e2e + 79 compile_e2e
-    + 3 openapi. Clippy `-D warnings` limpio.
+    - 3 openapi. Clippy `-D warnings` limpio.
   - **9.z.2 entera CERRADA (2026-05-17)** — test runner built-in.
     Decorator `@test` sobre fns sin args + 4 assertion builtins
     (`assert`, `assert_eq`, `assert_ne`, `assert_throws`) +
@@ -821,10 +815,10 @@ el `.vsix` por plataforma. 36 unit + 5 E2E nuevos con
   `WsConn<T>` + AsyncAPI 3.0 + heartbeat built-in + auth
   integrada, **9.w.2**), `@cron` + `@background` + `spawn`
   (jobs sin Celery, sin broker externo, **9.w.3**). ORM nativo
-  + migraciones (9.w.4) diferido a Fase 10 por scope (driver
-  Postgres puro es comparable a todo Fase 5-9 combinado).
-  Próximo norte: boilerplates Dockerizados showcase del stack
-  cerrado.
+  - migraciones (9.w.4) diferido a Fase 10 por scope (driver
+    Postgres puro es comparable a todo Fase 5-9 combinado).
+    Próximo norte: boilerplates Dockerizados showcase del stack
+    cerrado.
 
 **Visión post-Fase 9 (Fase 10+)** — especulativo, norte
 direccional: Fase 10 stack DB nativo + ORM declarativo, Fase 11
@@ -884,14 +878,14 @@ async), marshaling Future↔Coroutine.
   métodos del tipo. Ver
   [cap 22 de la guía](docs/guide.md#22-soporte-para-editores).
 - **Auth nativa** (Fase 9.w.1): `@auth_provider` + `@authenticated`
-  + `@admin` como decoradores del lenguaje, con built-ins `jwt`
-  (HS256/384/512) y `hash` (Argon2id). El checker valida
-  estáticamente que cada handler protegido reciba un `User` del
-  tipo correcto. OpenAPI auto-agrega `securitySchemes.bearerAuth`
-  + `security` por handler + 401/403 en responses. Paridad
-  bit-a-bit `fitz run` ↔ `fitz build`. Cero deps externas. Ver
-  [cap 28 de la guía](docs/guide.md#28-auth-nativa) y el ejemplo
-  [`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz).
+  - `@admin` como decoradores del lenguaje, con built-ins `jwt`
+    (HS256/384/512) y `hash` (Argon2id). El checker valida
+    estáticamente que cada handler protegido reciba un `User` del
+    tipo correcto. OpenAPI auto-agrega `securitySchemes.bearerAuth`
+  - `security` por handler + 401/403 en responses. Paridad
+    bit-a-bit `fitz run` ↔ `fitz build`. Cero deps externas. Ver
+    [cap 28 de la guía](docs/guide.md#28-auth-nativa) y el ejemplo
+    [`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz).
 - **WebSockets tipados** (Fase 9.w.2): `@ws("/path")` sobre
   `async fn` + `WsConn<T>` con métodos
   `recv`/`send`/`broadcast`/`close`. **Marshaling JSON automático**
@@ -899,8 +893,7 @@ async), marshaling Future↔Coroutine.
   auto-generado** en `/asyncapi.json`, **heartbeat built-in** con
   `@server(ws_heartbeat_secs=N)`, **auth integrada** en el
   handshake (`@authenticated`/`@admin` apilados ANTES del HTTP
-  upgrade), **codegen con paridad** bit-a-bit `fitz run` ↔ `fitz
-  build`. **Ningún otro lenguaje hoy combina WS tipados con
+  upgrade), **codegen con paridad** bit-a-bit `fitz run` ↔ `fitz build`. **Ningún otro lenguaje hoy combina WS tipados con
   AsyncAPI auto-generado del código fuente, heartbeat built-in y
   auth integrada en el handshake**. Ver
   [cap 29 de la guía](docs/guide.md#29-websockets-tipados) y el

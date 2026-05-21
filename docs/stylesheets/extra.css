@@ -1,0 +1,56 @@
+/* Custom styles para el sitio MkDocs Material de Fitz. */
+
+/* ---- Logo del header más grande ------------------------------------ */
+
+/* Default de Material: logo ~24px de alto. Lo agrandamos a ~48px para que
+ * el engranaje + silueta del Fitz Roy se vean con detalle. */
+.md-header__button.md-logo img,
+.md-header__button.md-logo svg {
+    height: 48px;
+    width: 48px;
+}
+
+/* El header crece para acomodar el logo + título. Quitar padding extra
+ * para que no se vea desbalanceado. */
+.md-header__title {
+    margin-left: 0.5rem;
+}
+
+/* ---- Hero del index.md --------------------------------------------- */
+
+/* `class="fitz-hero"` lo aplicamos a un div al inicio del index.md. */
+.fitz-hero {
+    text-align: center;
+    margin: 2rem 0 3rem 0;
+}
+
+.fitz-hero img {
+    max-width: 280px;
+    width: 60%;
+    height: auto;
+    margin: 0 auto;
+}
+
+.fitz-hero h1 {
+    font-size: 3.5rem;
+    margin: 1rem 0 0.5rem 0;
+    font-weight: 700;
+}
+
+.fitz-hero .fitz-tagline {
+    font-size: 1.25rem;
+    color: var(--md-default-fg-color--light);
+    max-width: 640px;
+    margin: 0 auto;
+    line-height: 1.5;
+}
+
+/* Responsive: en mobile el logo se achica un poco. */
+@media screen and (max-width: 600px) {
+    .fitz-hero img {
+        max-width: 180px;
+    }
+    .fitz-hero h1 {
+        font-size: 2.5rem;
+    }
+}

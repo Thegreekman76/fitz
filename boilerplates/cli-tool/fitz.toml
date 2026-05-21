@@ -1,0 +1,13 @@
+# Manifest del package manager Fitz (Fase 9.y).
+#
+# `fitz build` (sin args) lee este archivo si está en el cwd o algún
+# ancestor (lookup Cargo-style) y usa `[bin].main` como entry point.
+# El binario producido va a `<dir>/target/release/<package.name>`.
+
+[package]
+name = "fitz-report-generator"
+version = "0.1.0"
+description = "CLI tool boilerplate — generador de report a binario nativo standalone"
+
+[bin]
+main = "src/main.fitz"

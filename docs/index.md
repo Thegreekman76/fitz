@@ -4,11 +4,14 @@ hide:
   - toc
 ---
 
-# Fitz
-
-**Un lenguaje de programación compilado con HTTP, async, auth,
-WebSockets, jobs e interop Python como ciudadanos de primera clase
-del core del lenguaje.**
+<div class="fitz-hero" markdown="0">
+  <img src="assets/logo.png" alt="Fitz logo — engranaje de Rust con la silueta del Fitz Roy adentro" />
+  <h1>Fitz</h1>
+  <p class="fitz-tagline">
+    Un lenguaje de programación compilado con HTTP, async, auth, WebSockets,
+    jobs e interop Python como ciudadanos de primera clase del core del lenguaje.
+  </p>
+</div>
 
 Sintaxis inspirada en Python/TypeScript, compilado a binario nativo
 standalone (sin runtime en el destino), tipado gradual con checker

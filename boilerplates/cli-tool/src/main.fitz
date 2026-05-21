@@ -1,0 +1,80 @@
+// cli-tool boilerplate — generador de report de ventas.
+//
+// Demuestra el subset CLI core del lenguaje compilado a binario
+// nativo standalone:
+//   - Tipos custom (`Sale`) con campos tipados.
+//   - Listas + métodos higher-order (`filter`, `map`, `reduce`).
+//   - Maps + lookup por clave (`get`).
+//   - Interpolación de strings con format specs (`:.2f` para Float).
+//   - Recursión vía métodos de colecciones.
+//
+// El binario `fitz build` produce ~5 MB standalone (Linux estático
+// con musl + `FROM scratch` en Docker). Sin runtime Fitz en el
+// destino, sin libc, nada.
+//
+// Roadmap del lenguaje (cuando arranque Fase 9 extras):
+//   - `args()` builtin para CLI args.
+//   - `stdin()` / `read_line()` para input interactivo.
+//   - `exit(code)` para exit codes custom.
+//   - `read_file(path)` / `write_file(path, contents)` para I/O.
+//
+// Mientras tanto, el input va hardcoded como `let SALES = [...]`.
+// Reemplazá ese array con tu data real.
+
+type Sale {
+    product: Str,
+    amount: Float,
+    region: Str,
+}
+
+// Datos de prueba — en un tool real esto vendría de un archivo,
+// argv, o stdin.
+let SALES: List<Sale> = [
+    Sale { product: "widget", amount: 99.50, region: "AR" },
+    Sale { product: "widget", amount: 149.00, region: "BR" },
+    Sale { product: "gadget", amount: 250.00, region: "AR" },
+    Sale { product: "gadget", amount: 320.00, region: "US" },
+    Sale { product: "thingamajig", amount: 12.50, region: "AR" },
+    Sale { product: "thingamajig", amount: 18.75, region: "BR" },
+    Sale { product: "widget", amount: 110.00, region: "US" },
+]
+
+fn total(sales: List<Sale>) -> Float {
+    return sales.reduce(0.0, fn(acc: Float, s: Sale) => acc + s.amount)
+}
+
+fn by_region(sales: List<Sale>, region: Str) -> List<Sale> {
+    return sales.filter(fn(s: Sale) => s.region == region)
+}
+
+fn distinct_regions(sales: List<Sale>) -> List<Str> {
+    let names = sales.map(fn(s: Sale) => s.region)
+    return names.unique()
+}
+
+// Encuentra la venta de mayor monto. Helper top-level porque el
+// callback de `reduce` necesita ret type concreto y el parser no
+// acepta `if` como expresión inline en el body de un FnExpr.
+fn pick_top(acc: Sale, s: Sale) -> Sale {
+    if (s.amount > acc.amount) { return s }
+    return acc
+}
+
+print("📊 Sales Report")
+print("===============")
+print("")
+print("Total ventas: {SALES.len()}")
+print("Revenue total: ${total(SALES):.2f}")
+print("")
+print("Por región:")
+for region in distinct_regions(SALES) {
+    let subset: List<Sale> = by_region(SALES, region)
+    print("  {region}: {subset.len()} ventas, ${total(subset):.2f}")
+}
+print("")
+print("Top venta única:")
+if (SALES.len() == 0) {
+    print("  (lista vacía)")
+}
+let top: Sale = SALES.reduce(SALES[0], pick_top)
+print("  {top.product} (${top.amount:.2f}) en {top.region}")

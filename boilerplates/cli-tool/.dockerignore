@@ -1,0 +1,26 @@
+# Excluir del contexto Docker — acelera el build y previene leak de
+# secrets/binarios al builder.
+
+# Directorios de build
+target/
+*.exe
+*.pdb
+
+# Editores
+.vscode/
+.idea/
+*.swp
+.DS_Store
+
+# Git
+.git/
+.gitignore
+
+# Docker mismo (no necesita verse a sí mismo)
+Dockerfile
+.dockerignore
+
+# README — se incluye si querés que aparezca dentro del container,
+# pero por default lo excluimos: la documentación vive en el repo
+# afuera del binary. Quitá la línea si querés mantenerlo adentro.
+README.md
