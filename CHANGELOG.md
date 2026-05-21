@@ -57,6 +57,91 @@ Total al cierre del bloque: **2045 unit sin feature, 2135 con
 Próximo norte: **9.w** (Stack web first-class — `@authenticated`,
 `@ws`, `@cron`, `@background`).
 
+## [v0.9.21] — 2026-05-20 — Fase 9.w.1 CERRADA — Auth nativa (`@auth_provider`/`@authenticated`/`@admin` + `jwt`/`hash`)
+
+**Cierre del primer sub-paso de Fase 9.w (stack web first-class).**
+Tres decoradores nuevos del lenguaje + dos módulos built-in
+montan un flujo de auth + JWT + password hashing entero sin
+deps externas. El checker valida estáticamente; OpenAPI 3.1
+auto-documenta los requirements y los 401/403; paridad bit-a-bit
+`fitz run` ↔ `fitz build`.
+
+**Sub-pasos (6 commits)**:
+
+- **9.w.1.a** — Checker: `collect_auth_provider` pre-scan
+  (singleton; signature `fn(Map<Str,Str>) -> Result<T-nominal>`)
+  + `check_auth_decorators` por handler (exige provider + handler
+  HTTP + param compatible con `User`; `@admin` exige campo
+  `role: Str`). 16 unit tests.
+- **9.w.1.b** — Built-ins `jwt` y `hash` como `Value::Module`
+  pre-registrados. `jwt.encode/decode` (HS256/384/512 con
+  `jsonwebtoken = "9"`), `hash.password/verify` (Argon2id con
+  `argon2 = "0.5"` + `rand_core` para `OsRng`). Sin kwargs en
+  builtins; `alg` como positional opcional al final.
+  `decode` siempre devuelve `Result<Map>`; `verify` siempre
+  devuelve `Bool` (hash malformado → `false` por seguridad).
+  Checker tipa como `Any` (deuda de `Type::Function` sin
+  opcionales); LSP completions agregan `jwt`/`hash` como
+  `MODULE` kind con after-dot shortcut. 16 unit tests.
+- **9.w.1.c** — Runtime auth en `fitz run`. Wrapper en
+  `handle_task` después de middlewares y antes de body parsing:
+  construye `Map<Str,Str>` de headers, invoca al provider (con
+  `.await` si es async), match `Result<User>` → 401/200 o 403
+  (admin). `AuthSpec`/`AuthProviderHandle` en `http.rs`;
+  `register_auth_provider` + `collect_route_auth` en evaluator.
+  Provider singleton con order requirement (provider antes que
+  handlers que lo usan). 9 unit E2E.
+- **9.w.1.d** — Codegen `fitz build`. Helpers `__fitz_jwt_*`/
+  `__fitz_hash_*` en preludio gated por `uses_auth`; Cargo.toml
+  condicional suma `jsonwebtoken`/`argon2`/`rand_core` cuando
+  aplica. Dispatch en `gen_call` para `jwt.encode/decode/hash.
+  password/verify`. `HandlerSig` suma
+  `auth + auth_user_param_name`; `emit_auth_check` (paralelo al
+  wrapper del intérprete); `emit_axum_extractors` agarra
+  `HeaderMap` cuando hay auth. 2 tests compile_e2e (CLI puros +
+  HTTP end-to-end).
+- **9.w.1.e** — OpenAPI security scheme.
+  `OpenApiRouteInfo.auth` + propagación;
+  `components.securitySchemes.bearerAuth` (type=http,
+  scheme=bearer, bearerFormat=JWT) cuando hay auth; `security:
+  [{bearerAuth: []}]` por handler protegido; 401 (auth) y 403
+  (admin) auto en responses con shape `{"error": Str}`. 5 unit
+  tests del schema.
+- **9.w.1.f** — Cap 28 "Auth nativa" en `docs/guide.md`
+  (renumeración 28→29) + ejemplo runnable
+  `examples/guide/28-auth.fitz` (login + /me + /admin con
+  JWT real, <100 líneas) + README emphasis del diferencial vs
+  FastAPI/Spring/ASP.NET (cero deps, checker estático, OpenAPI
+  auto, paridad run↔build). Suma a `GUIDE_EXAMPLES_COMPILE`.
+  Refresh oportunista del marcador de Interop Python en la
+  tabla feature comparison del README (de 🚧 a ✅ con footnote
+  honesta sobre deuda residual derivada).
+
+**Por qué importa**:
+
+- **Estático, no reflection**: el checker valida en compile-time
+  que cada `@authenticated`/`@admin` tenga provider registrado
+  y reciba el `User` correcto. Spring AOP / ASP.NET
+  `[Authorize]` resuelven en runtime con reflection; cuando
+  rompe, rompe en prod.
+- **Zero dependencies**: JWT signing + Argon2id password hashing
+  vienen en el binario `fitz`. No hay `requirements.txt` /
+  `package.json` / `Cargo.toml` extra que mantener. Deploy es
+  un binario.
+- **OpenAPI auto-documentado**: `bearerAuth` + `security` por
+  operation + 401/403 — sin escribir specs OpenAPI a mano.
+- **Paridad bit-a-bit**: el flow funciona idéntico en
+  intérprete y binario nativo.
+
+**Deuda residual derivada de 9.w.1** (no bloquea uso real):
+sessions cookie-based + RBAC multi-rol + token refresh/revocación
+(requieren DB nativa, Fase 10); asimétricos JWT (RS256/ES256 con
+PEM); provider request-aware más allá de headers (body, método).
+
+**Próximo norte**: resto de Fase 9.w — `@ws("/chat")` (WebSockets
+tipados con `WsConn<T>`), `@cron` + `@background` (jobs sin
+Celery), y ORM nativo + migraciones (escalado a Fase 10).
+
 ## [v0.9.20] — 2026-05-17 — Refresh masivo de docs + cap 16b Package manager + fix bug fmt
 
 Sub-paso dedicado de refresh general de docs acumulado durante

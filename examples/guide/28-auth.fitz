@@ -1,0 +1,159 @@
+// Cap 28 — Auth nativa.
+//
+// Toda la pila de auth (provider + decorators + JWT + password hashing)
+// vive dentro del lenguaje Fitz, sin cargo add, pip install ni
+// dependencias externas. Este ejemplo arma una API mini-realista con:
+//
+//   POST /login          — público; recibe creds, devuelve JWT.
+//   GET  /me             — @authenticated; devuelve el user del token.
+//   GET  /admin/users    — @admin; lista todos los users.
+//
+// El checker valida estáticamente que cada @authenticated/@admin tenga
+// un @auth_provider declarado y que el handler reciba un param del tipo
+// `User`. El generador de OpenAPI agrega `securitySchemes.bearerAuth`
+// y un requirement por handler protegido (mirar `/docs` mientras
+// corre). El binario nativo de `fitz build` mantiene paridad bit-a-bit.
+
+@server(43928)
+fn main() => 0
+
+// Tipos del dominio. `LoginResponse` carry sólo el token; el SDK
+// cliente decodea para leer claims o llama /me.
+type User { id: Int, email: Str, name: Str, role: Str }
+type Credentials { email: Str, password: Str }
+type LoginResponse { token: Str }
+
+// Secret del HMAC del JWT. En producción esto vendría de una env var
+// o de un secret store; acá hardcoded para que el ejemplo arranque.
+let SECRET = "demo-secret-cambiame-en-prod-aaaaaaaa"
+
+// "Base de datos" — en producción sería una tabla SQL. Los hashes se
+// generan al boot del programa con `hash.password(...)` (Argon2id con
+// salt aleatorio). Cada arranque produce hashes distintos del mismo
+// password — es lo esperado: el salt es por hash, no por password.
+let ADA_HASH = hash.password("secret-ada-123")
+let ALAN_HASH = hash.password("secret-alan-456")
+
+// Helper: lookup user por email. Devuelve `Result<User>` para que el
+// caller use `?` o `match`. En producción esto sería una query SQL.
+fn find_user(email: Str) -> Result<User> {
+    if (email == "ada@example.com") {
+        return Ok(User { id: 1, email: email, name: "Ada", role: "admin" })
+    }
+    if (email == "alan@example.com") {
+        return Ok(User { id: 2, email: email, name: "Alan", role: "user" })
+    }
+    return Err("usuario no encontrado")
+}
+
+// Helper: lookup del hash almacenado por email.
+fn stored_hash(email: Str) -> Result<Str> {
+    if (email == "ada@example.com") { return Ok(ADA_HASH) }
+    if (email == "alan@example.com") { return Ok(ALAN_HASH) }
+    return Err("usuario no encontrado")
+}
+
+// El `@auth_provider` (singleton del programa) corre antes de cada
+// handler @authenticated/@admin. Recibe los headers HTTP del request
+// y devuelve el `User` autenticado (o un Err con el mensaje para el
+// cliente). El runtime inyecta el user en el handler. `Err` se mapea
+// a 401 automáticamente con `{"error": <msg>}`.
+@auth_provider
+fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    // Sustituimos el `?` por un `match` explícito para devolver un
+    // mensaje cliente-friendly en lugar de "clave no encontrada: ...".
+    let auth: Str = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta header Authorization"),
+    }
+    let parts = auth.split(" ")
+    if (parts.len() != 2) { return Err("Authorization debe ser 'Bearer <token>'") }
+    let scheme = parts[0]
+    let token = parts[1]
+    if (scheme != "Bearer") { return Err("scheme debe ser Bearer, fue: {scheme}") }
+    let claims = jwt.decode(token, SECRET)?
+    let email = claims["email"]
+    return find_user(email)
+}
+
+// POST /login es el único endpoint público (sin @authenticated/@admin).
+// Toma credenciales, busca al user, verifica el password contra el
+// hash Argon2id almacenado, y devuelve un JWT firmado con HS256.
+//
+// El handler usa `return <status> { ... }` para errores explícitos
+// (401 en credenciales inválidas, en lugar del 500 default de un
+// `Err`). El happy path es un return normal de `LoginResponse` que
+// el runtime serializa como 200.
+@post("/login")
+fn login(creds: Credentials) -> LoginResponse {
+    let user: User = match find_user(creds.email) {
+        Ok(u) => u,
+        Err(_) => return 401 { "error": "credenciales inválidas" },
+    }
+    let hashed: Str = match stored_hash(creds.email) {
+        Ok(h) => h,
+        Err(_) => return 401 { "error": "credenciales inválidas" },
+    }
+    if (not hash.verify(creds.password, hashed)) {
+        return 401 { "error": "credenciales inválidas" }
+    }
+    // El JWT lleva email + role; el provider lo decodea por request y
+    // resuelve el User completo (espejo del flujo en producción donde
+    // los claims son la "fuente de la verdad" del token).
+    let claims = { "email": user.email, "role": user.role }
+    let token = jwt.encode(claims, SECRET)
+    return LoginResponse { token: token }
+}
+
+// GET /me requiere auth. El runtime inyecta `user: User` después de
+// validar el token. Cualquier client que no manda Authorization válido
+// → 401 con `{"error": "..."}`; el handler no se ejecuta.
+@authenticated
+@get("/me")
+fn me(user: User) -> User => user
+
+// GET /admin/users requiere `@admin` — además de @authenticated, exige
+// que `user.role == "admin"`. Si el token es de Alan (role "user") →
+// 403 con mensaje claro; si es de Ada (role "admin") → 200 con la
+// lista. El checker valida estáticamente que el tipo `User` tenga
+// campo `role: Str` (sin esto, error al compilar).
+@admin
+@get("/admin/users")
+fn admin_list(user: User) -> List<User> {
+    return [
+        User { id: 1, email: "ada@example.com", name: "Ada", role: "admin" },
+        User { id: 2, email: "alan@example.com", name: "Alan", role: "user" },
+    ]
+}
+
+// Cómo probarlo (con el server corriendo en :43928):
+//
+//   # 1. Login para obtener un token.
+//   curl -X POST localhost:43928/login \
+//        -H 'Content-Type: application/json' \
+//        -d '{"email":"ada@example.com","password":"secret-ada-123"}'
+//   # → {"token":"eyJ0eXAiOi..."}
+//
+//   # 2. Llamar /me con el token (sustituí <TOKEN>).
+//   curl localhost:43928/me -H 'Authorization: Bearer <TOKEN>'
+//   # → {"id":1,"email":"ada@example.com","name":"Ada","role":"admin"}
+//
+//   # 3. Llamar /admin/users con un token de Ada (admin) → 200 + lista.
+//   curl localhost:43928/admin/users -H 'Authorization: Bearer <TOKEN_ADA>'
+//
+//   # 4. Llamar /admin/users con un token de Alan (user) → 403.
+//   curl localhost:43928/admin/users -H 'Authorization: Bearer <TOKEN_ALAN>'
+//   # → 403 + {"error":"acceso prohibido — se requiere rol admin"}
+//
+//   # 5. Llamar /me sin token → 401.
+//   curl localhost:43928/me
+//   # → 401 + {"error":"clave no encontrada: \"authorization\""}
+//
+//   # 6. Mirar el OpenAPI generado con securitySchemes + security:
+//   curl localhost:43928/openapi.json | jq '.components.securitySchemes'
+//   # → { "bearerAuth": { "type": "http", "scheme": "bearer", ... } }
+//   curl localhost:43928/openapi.json | jq '.paths["/me"].get.security'
+//   # → [{ "bearerAuth": [] }]
+//
+//   # 7. UI Scalar con el lock icon listo para probar:
+//   #    http://localhost:43928/docs

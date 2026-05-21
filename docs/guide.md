@@ -9464,14 +9464,250 @@ romper). El resto siempre exige cero issues.
 
 ---
 
-## 28. Qué sigue
+## 28. Auth nativa
+
+En FastAPI/Spring/ASP.NET/Express la auth se resuelve con librerías
+opcionales: `fastapi-users` + `python-jose` + `passlib` en Python;
+`@PreAuthorize` de Spring AOP + reflection en Java; `passport.js` +
+`bcrypt` + `jsonwebtoken` en Node. Cinco dependencias mínimo,
+configuración manual, y validación que sucede en runtime —
+descubrís que tu handler protegido no recibe el `user` cuando ya
+está corriendo en prod.
+
+En Fitz auth es **parte del lenguaje**: tres decoradores
+(`@auth_provider`, `@authenticated`, `@admin`), dos módulos
+built-in (`jwt`, `hash`), y el type checker valida en compile-time
+que cada handler protegido reciba un `user` del tipo correcto. Cero
+`fitz add jsonwebtoken` / `argon2` / nada. El esquema OpenAPI 3.1
+generado documenta automáticamente el requirement de bearer token
+y los códigos 401/403. Y todo eso vale igual en `fitz run` y en el
+binario nativo de `fitz build` — paridad bit-a-bit, deploy
+standalone sin instalar runtime.
+
+### Las piezas
+
+**`@auth_provider`** — singleton del programa. Una fn que toma los
+headers HTTP del request, decide si el usuario está autenticado, y
+devuelve el `User` correspondiente:
+
+```fitz
+type User { id: Int, email: Str, name: Str, role: Str }
+
+@auth_provider
+fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth = headers.get("authorization")?
+    let claims = jwt.decode(auth, "secret")?
+    let email = claims["email"]
+    // ... lookup en DB / hardcoded ... devuelve `Ok(User { ... })`
+    return Err("auth inválida")
+}
+```
+
+El checker valida estáticamente:
+
+- Que el provider tenga exactamente un param `Map<Str, Str>`.
+- Que retorne `Result<T>` donde `T` es un type custom (nominal).
+- Que sea único por programa (un solo provider; otro = error).
+
+**`@authenticated`** — sobre un handler HTTP. El runtime corre el
+provider antes del handler; si devuelve `Err`, responde **401** con
+`{"error": <msg>}` y el handler no ejecuta. Si devuelve `Ok(user)`,
+el `user` se inyecta como argumento del handler:
+
+```fitz
+@authenticated
+@get("/me")
+fn me(user: User) -> User => user
+```
+
+**`@admin`** — shorthand de `@authenticated` + check `user.role
+== "admin"`. Si el provider autentica pero el rol no es `"admin"`,
+el runtime responde **403**. El checker exige que el tipo `User`
+(retornado por el provider) tenga campo `role: Str`:
+
+```fitz
+@admin
+@get("/admin/dashboard")
+fn dashboard(user: User) -> Str => "hola {user.name}"
+```
+
+**`jwt`** — módulo built-in. Siempre disponible, sin import.
+
+```fitz
+let token = jwt.encode({"sub": "u42", "role": "admin"}, "mi-secret")
+let claims = jwt.decode(token, "mi-secret")?  // Result<Map<Str, Str>>
+```
+
+HS256 default; opcional pasar `"HS384"`/`"HS512"` como tercer arg.
+`encode` devuelve el JWT firmado como `Str`; `decode` siempre
+devuelve `Result<Map<Str, Str>>` — token malformado, signature
+inválida, expirado son runtime events que el caller maneja con
+`match` o `?`.
+
+**`hash`** — módulo built-in. Argon2id (recomendación OWASP), salt
+aleatorio por hash, output en formato PHC string listo para
+guardar en DB:
+
+```fitz
+let hashed = hash.password("supersecret")
+// → "$argon2id$v=19$m=19456,t=2,p=1$<salt>$<hash>"
+let ok = hash.verify("supersecret", hashed)  // Bool
+```
+
+`verify` siempre devuelve `Bool` (no `Result`): hash malformado o
+mismatch → `false` por seguridad, no se filtra info al attacker.
+
+### Ejemplo completo: login + /me + /admin
+
+`examples/guide/28-auth.fitz` arma una API mini-realista con los
+tres roles que cubren la mayoría de casos reales:
+
+- `POST /login` — público; recibe credenciales, verifica el
+  password contra el hash almacenado con `hash.verify(...)`, y
+  devuelve un JWT firmado con `jwt.encode(...)`.
+- `GET /me` — requiere `@authenticated`; devuelve el `user`
+  inyectado.
+- `GET /admin/users` — requiere `@admin`; devuelve la lista de
+  todos los usuarios. Si el token es de un user con rol distinto a
+  `"admin"`, 403.
+
+El ejemplo entero compila a binario nativo con `fitz build`. Una
+sesión típica:
+
+```bash
+# 1. Login para obtener un token.
+$ curl -X POST localhost:43928/login \
+       -H 'Content-Type: application/json' \
+       -d '{"email":"ada@example.com","password":"secret-ada-123"}'
+{"token":"eyJ0eXAiOi..."}
+
+# 2. /me con el token.
+$ curl localhost:43928/me -H 'Authorization: Bearer eyJ0eXAiOi...'
+{"id":1,"email":"ada@example.com","name":"Ada","role":"admin"}
+
+# 3. /admin/users con token de admin → 200.
+$ curl localhost:43928/admin/users -H 'Authorization: Bearer eyJ0eXAiOi...'
+[{"id":1,"email":"ada@example.com",...},{"id":2,...}]
+
+# 4. /admin/users con token de user-rol → 403.
+$ curl localhost:43928/admin/users -H 'Authorization: Bearer <alan-token>'
+{"error":"acceso prohibido — se requiere rol admin"}
+
+# 5. /me sin token → 401.
+$ curl localhost:43928/me
+{"error":"falta header Authorization"}
+```
+
+El ejemplo combina **todo el stack** en menos de 100 líneas: tipos
+Fitz (`type User { ... }`), decoradores apilados (`@auth_provider`
++ `@authenticated`/`@admin` + `@get`/`@post`), body HTTP
+deserializado a tipos custom (`Credentials`), `Result<T>` con `?`,
+`return <status> { ... }` para emitir status codes explícitos,
+JWT firmado y verificado con HS256, password hashing con Argon2id.
+Cero `pip install`, cero `cargo add`, cero `npm install`.
+
+### Integración con OpenAPI
+
+Cuando el programa declara `@authenticated`/`@admin`, el schema
+OpenAPI generado en `/openapi.json` agrega automáticamente:
+
+```json
+{
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "JWT"
+      }
+    }
+  },
+  "paths": {
+    "/me": {
+      "get": {
+        "security": [{"bearerAuth": []}],
+        "responses": {
+          "200": { "...": "..." },
+          "401": { "...": "..." }
+        }
+      }
+    },
+    "/admin/users": {
+      "get": {
+        "security": [{"bearerAuth": []}],
+        "responses": {
+          "200": { "...": "..." },
+          "401": { "...": "..." },
+          "403": { "...": "..." }
+        }
+      }
+    }
+  }
+}
+```
+
+La UI de Scalar en `/docs` muestra el lock icon en cada handler
+protegido y un campo para pegar el bearer token — listo para
+probar la API sin escribir un solo cliente.
+
+### Por qué Fitz hace esto distinto
+
+- **Estático, no reflection**: el checker valida en compile-time
+  que `@authenticated`/`@admin` tengan un `@auth_provider`
+  registrado y que el `user: User` del handler matchee el `User`
+  del provider. Spring AOP / ASP.NET `[Authorize]` resuelven esto
+  en runtime con reflection; cuando rompe, rompe en prod.
+- **Zero dependencies**: `jwt`, `hash`, JWT signing, password
+  hashing — todo viene en el binario `fitz` y se incluye en el
+  binario nativo de `fitz build`. No hay `requirements.txt`,
+  `package.json`, `Cargo.toml` que mantener. Deploy = un binario.
+- **Paridad bit-a-bit `fitz run` ↔ `fitz build`**: el flow de auth
+  funciona idéntico en el intérprete (rapid feedback durante dev)
+  y en el binario nativo (deploy a prod). Cero "anda en local
+  pero no en server".
+- **OpenAPI auto-documentado**: el security scheme + los códigos
+  401/403 + el bearer requirement por handler se generan del
+  código fuente. No hay que escribir specs OpenAPI a mano (vs
+  Express+`swagger-ui-express`+manual specs).
+- **Integrado con el resto del lenguaje**: tipos custom + `Result<T>`
+  + decoradores apilables + middleware/CORS + body deserialization
+  + `return <status> { ... }` — todas las features previas siguen
+  funcionando dentro de un handler protegido. No es una "isla" de
+  auth con sus propias reglas.
+
+### Qué no está en el MVP
+
+Estos items están comprometidos como deuda explícita:
+
+- **Sessions cookie-based** como alternativa a JWT. JWT primero
+  (stateless, simple). Sessions persistentes requieren DB nativa
+  (Fase 10).
+- **RBAC con múltiples roles**. Hoy hay solo `@authenticated` y
+  `@admin`. Custom decorators de auth con su propia lógica de
+  permisos llegan post-Fase 10.
+- **Provider request-aware** más allá de los headers (e.g. acceso
+  al body o al método HTTP). Hoy el provider recibe solo
+  `Map<Str, Str>` de headers.
+- **Token refresh / revocación**. JWT del MVP es stateless puro;
+  para revocar antes del `exp` hace falta una blacklist server-side
+  (Fase 10 con DB).
+- **Asimétricos (RS256/ES256)**. Hoy HS256/384/512 (HMAC con
+  secret compartido). Asimétricos requieren parsear PEM y rotación
+  de llaves — post-MVP.
+
+Detalle completo en `docs/roadmap.md` → "Fase 9.w iteración 2 —
+endurecimiento para servicios críticos".
+
+---
+
+## 29. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.
 
 ### Lo que ya sabés
 
-Con los capítulos 1 a 27 podés:
+Con los capítulos 1 a 28 podés:
 
 - Escribir y correr programas que combinan **variables, aritmética y
   strings** con interpolación.
@@ -9557,6 +9793,19 @@ Con los capítulos 1 a 27 podés:
   `// @allow(<lint>)` en la línea anterior. Output estilo
   cargo-clippy con colores ANSI auto. Ver
   [cap 27](#27-fitz-lint--linter-de-patrones).
+- **Auth nativa** (Fase 9.w.1): tres decoradores —
+  `@auth_provider` (singleton del programa que recibe headers y
+  devuelve `Result<User>`), `@authenticated` (handler protegido
+  por bearer JWT; 401 automático), `@admin` (shorthand de auth
+  + `user.role == "admin"`; 403 automático) — más dos módulos
+  built-in `jwt` (encode/decode HS256/384/512) y `hash`
+  (Argon2id password hashing). El checker valida en compile-time
+  que cada handler protegido tenga el provider registrado y
+  reciba el `User` correcto. El schema OpenAPI 3.1 auto-agrega
+  `securitySchemes.bearerAuth` + `security` por handler + 401/
+  403 en responses. Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+  Cero `cargo add`/`pip install`. Ver
+  [cap 28](#28-auth-nativa).
 
 Es decir: todo lo que el intérprete de Fitz hoy ejecuta end-to-end,
 con un chequeo estático que atrapa errores antes de que se

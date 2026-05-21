@@ -6721,49 +6721,125 @@ link a Fase 10 (ver Visión post-Fase 9 abajo).
 
 ### Sub-pasos
 
-#### 9.w.1 — `@authenticated` / `@admin` — auth nativo
+#### 9.w.1 — `@authenticated` / `@admin` — auth nativo (CERRADA 2026-05-20)
 
-- **Decorators apilables** sobre handlers:
-  ```fitz
-  @authenticated
-  @get("/me")
-  fn me(user: User) -> User { return user }
+**Estado: CERRADA**. El MVP entero de auth nativa está implementado
+en intérprete y codegen, con paridad bit-a-bit, OpenAPI auto-
+documentado, ejemplo runnable end-to-end y cap dedicado en la guía.
+Roadmap original 100% cubierto; deuda residual derivada documentada
+abajo (no bloquea uso real).
 
-  @admin
-  @delete("/users/{id}")
-  fn delete_user(id: Int) -> Str { ... }
-  ```
-- **Modelo de autenticación**: JWT-based (default), con opción a
-  sessions cookie-based (futuro).
-- **`fn authenticate(headers: Map<Str, Str>) -> Result<User>`** —
-  fn que el usuario implementa, registrada via decorator del
-  lenguaje:
-  ```fitz
-  @auth_provider
-  fn check_token(headers: Map<Str, Str>) -> Result<User> {
-      let token = headers.get("authorization")?
-      // ... validación, lookup en DB
-      return Ok(user)
-  }
-  ```
-- **Param `user`** inyectado por el runtime después de auth
-  exitosa.
-- **`@admin`** es shorthand de
-  `@authenticated + check(user.role == "admin")` o decorator
-  separado con su propio provider.
-- **Decisiones**:
-  - ¿JWT en el core o solo el patrón (delegando librería)? Lean:
-    **patrón + helper `jwt.encode`/`jwt.decode`** como built-in
-    del lenguaje.
-  - ¿Sessions cookie-based como tier-1 o post-MVP? Lean:
-    **post-MVP**. JWT primero (stateless, simple).
-  - ¿Bcrypt/Argon2 built-in para password hashing? Sí — sin
-    esto, cada app reescribe lo mismo.
-  - ¿Modelo de roles (RBAC) o solo "authenticated/admin"? Lean:
-    **solo dos roles en MVP**, sistema de roles via custom
-    decorator.
-- **Sintaxis OpenAPI**: el schema generado debe documentar el
-  requisito de auth (security scheme bearer).
+**Decisiones tomadas al arrancar** (lean original confirmado):
+
+- JWT en el core via built-ins `jwt.encode`/`jwt.decode` (HS256
+  default, HS384/HS512 opcional). Asimétricos (RS256/ES256) post-MVP.
+- Argon2id para password hashing (recomendación OWASP).
+- `@auth_provider` único global; múltiples scoped post-MVP.
+- `@admin` shorthand de `@authenticated` + check `user.role ==
+  "admin"`; el checker exige `role: Str` en el `User` retornado.
+
+**Sub-pasos cerrados (6 commits, 2026-05-20)**:
+
+- **9.w.1.a** — Checker valida los 3 decorators estáticamente.
+  Pre-scan `collect_auth_provider` (signature `fn(Map<Str,Str>)
+  -> Result<T-nominal>`, singleton); `check_auth_decorators` por
+  `Stmt::FnDef` (provider registrado + handler HTTP +
+  `User` param compatible; `@admin` exige `role: Str` no
+  nullable). 16 unit tests en `types::tests::auth_*`/`admin_*`.
+- **9.w.1.b** — Built-ins `jwt`/`hash` como `Value::Module`
+  pre-registrados en `register_builtins`. `jwt.encode(payload:
+  Map<Str,Str>, secret: Str, alg: Str?) -> Str`,
+  `jwt.decode(token, secret, alg?) -> Result<Map<Str,Str>>`,
+  `hash.password(plain: Str) -> Str` (Argon2id PHC string),
+  `hash.verify(plain: Str, hashed: Str) -> Bool`. Deps
+  `jsonwebtoken = "9"` + `argon2 = "0.5"` (feature `std`) +
+  `rand_core = "0.6"` (feature `getrandom` para `OsRng`).
+  Checker tipa `jwt`/`hash` como `Any` (deuda de `Type::Function`
+  sin opcionales). LSP `scope_level_completions` lista como
+  `MODULE` + `after_dot_completions` shortcut por nombre. 16
+  unit tests.
+- **9.w.1.c** — Runtime auth en `fitz run`. `AuthSpec`
+  enum + `AuthProviderHandle` + `RouteSpec.auth` +
+  `HttpRegistry.auth_provider` en `src/http.rs`. Wrapper en
+  `handle_task` después de middlewares y antes de body parsing:
+  construye `Map<Str,Str>` de headers, invoca al provider (con
+  `.await` si async), match `Result<User>` → 401/200 o 403
+  (admin). `register_auth_provider` + `collect_route_auth` +
+  branch `@auth_provider` en `process_decorator`. Orden
+  requerido: provider antes que handlers que lo usan (runtime
+  error con sugerencia). 9 unit E2E vía `Router::oneshot`.
+- **9.w.1.d** — Codegen `fitz build`. `program_uses_auth`
+  detector + `cargo_toml_for` suma deps cuando aplica.
+  `emit_auth_prelude` con helpers `__fitz_jwt_encode/decode`/
+  `__fitz_hash_password/verify`. Dispatch en `gen_call` para
+  `jwt.encode/decode/hash.password/verify` (validación de aridad
+  y tipos; payload restringido a `Map<Str, Str>` strict en MVP
+  — heterogéneos requieren `__FitzValue` integration post-MVP).
+  `HandlerSig` suma `auth + auth_user_param_name`;
+  `emit_auth_check` entre middleware chain y param coercions
+  (espejo del intérprete); `emit_axum_extractors` agarra
+  `HeaderMap` cuando hay auth; param coercions skipea el user
+  (ya bindeado por emit_auth_check). 2 tests compile_e2e (CLI
+  puro con jwt+hash + flujo HTTP end-to-end con login/me/admin).
+- **9.w.1.e** — OpenAPI security scheme.
+  `OpenApiRouteInfo.auth: AuthSpec`; propagado en
+  `route_info_from_spec` (runtime) y `pseudo_routes_from_ast`
+  (codegen — body_param excluye el user param).
+  `components.securitySchemes.bearerAuth` (type=http,
+  scheme=bearer, bearerFormat=JWT, description) sólo cuando hay
+  routes con auth. `security: [{bearerAuth: []}]` por handler
+  protegido (handlers públicos sin `security`).
+  `build_responses_with_auth` suma 401 (auth) y 403 (admin) con
+  shape `{"error": Str}`. 5 unit tests del schema.
+- **9.w.1.f** — Cap 28 nuevo "Auth nativa" en `docs/guide.md`
+  (renumeración 28→29 "Qué sigue") + ejemplo runnable
+  `examples/guide/28-auth.fitz` con login/me/admin completos en
+  ~100 líneas + suma a `GUIDE_EXAMPLES_COMPILE` smoke + README
+  emphasis del diferencial (tabla feature + footnote ♦ + bullet
+  en "Estado del proyecto" + bullet en "Qué funciona hoy") +
+  cierre formal (CHANGELOG v0.9.21, esta entrada, deudas,
+  CLAUDE).
+
+**Decisiones técnicas del MVP** (más allá del lean original):
+
+- `Map<Str, Str>` strict para el payload de `jwt.encode` y
+  return de `jwt.decode`. Heterogéneos (numbers/bools/nested)
+  requieren `__FitzValue` en codegen — deuda post-MVP.
+- `hash.verify` devuelve `Bool` (no `Result<Bool>`); hash
+  malformado → `false` por seguridad.
+- `jwt.decode` siempre devuelve `Result<Map>` — token
+  malformado/signature inválida/expirado son runtime events
+  esperables.
+- Provider order required: `@auth_provider` antes que cualquier
+  handler `@authenticated`/`@admin` (limitación del pass-único
+  del codegen registrando types/fns top-down).
+- Handler protegido en MVP NO admite body separado del user —
+  el param "leftover" debe ser exactamente uno. Workaround
+  documentado (headers o split handlers).
+- Provider validador del user param via regla "leftover" (el
+  param que no es path/query/header): NO requiere magic name
+  como `user`, el handler nombra como quiera.
+
+**Deuda residual derivada de 9.w.1** (no bloquea uso real; abre
+items para 9.w iteración 2 post-Fase 10):
+
+- **Sessions cookie-based** como alternativa a JWT (requiere
+  session store server-side, DB nativa).
+- **RBAC con múltiples roles personalizados** (más allá de
+  `@authenticated`/`@admin`; modelo de permisos pluggable).
+- **Token refresh / revocación** server-side (blacklist con DB
+  nativa).
+- **Asimétricos JWT** (RS256/ES256 con par de llaves PEM; rotación).
+- **Provider request-aware** más allá de los headers (body,
+  método HTTP).
+- **Heterogéneos en `jwt.encode/decode`** (claims con tipos
+  mixtos; requiere `__FitzValue` integration en codegen).
+- **OpenAPI 401/403 ya emitidos** pero descripciones genéricas;
+  refinable con doc-strings sobre el provider/handlers.
+
+**Sintaxis OpenAPI cumplida**: `securitySchemes.bearerAuth` +
+`security` por handler + 401/403 en responses — todo
+auto-generado, sin escribir specs OpenAPI a mano.
 
 #### 9.w.2 — `@ws("/chat")` — WebSockets tipados
 

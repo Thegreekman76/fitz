@@ -52,7 +52,8 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 | HTTP en el core        | ❌     | ❌         | ❌ | ✅    |
 | Async nativo           | ⚠️   | ✅         | ✅ | ✅ ‡ |
 | Docs HTTP automáticas | ⚠️   | ❌         | ❌ | ✅ ◊ |
-| Interop Python         | ✅     | ❌         | ❌ | 🚧 § |
+| **Auth nativa**        | ❌     | ❌         | ❌ | ✅ ♦ |
+| Interop Python         | ✅     | ❌         | ❌ | ✅ § |
 
 \* **Tipado gradual con chequeo estático** — Fase 5a completada.
 `fitz check` y `fitz run` validan anotaciones en compile time;
@@ -83,8 +84,48 @@ y `Result<T>` en return), UI Scalar embebida en `/docs`,
 `@server(docs=false)`. Schema bit-a-bit idéntico entre `fitz run`, `fitz openapi archivo.fitz` y `fitz build`. Ver
 [cap 18 de la guía](docs/guide.md#18-docs-automáticas).
 
-§ **Interop Python via PyO3** — planificado para Fase 8,
-todavía no implementado.
+♦ **Auth nativa** — Fase 9.w.1 completada. Tres decoradores —
+`@auth_provider` (singleton que valida headers y devuelve un
+`User`), `@authenticated` (handler protegido por bearer JWT con
+401 automático), `@admin` (shorthand de auth + check
+`user.role == "admin"` con 403 automático) — más dos módulos
+built-in **`jwt`** (encode/decode HS256/384/512) y **`hash`**
+(Argon2id password hashing, recomendación OWASP). El checker
+valida en compile-time que cada handler protegido tenga el
+provider registrado y reciba el `User` correcto. El esquema
+OpenAPI 3.1 auto-agrega `securitySchemes.bearerAuth` +
+`security` por handler + 401/403 en responses. Paridad
+bit-a-bit `fitz run` ↔ `fitz build`. **Cero `cargo add` /
+`pip install` / `npm install`** — todo viene en el binario
+`fitz`. Vs FastAPI (5 deps + middleware manual), Spring AOP
+(reflection en runtime), ASP.NET `[Authorize]` (framework +
+reflection), Fitz es el único lenguaje donde auth + JWT +
+password hashing son ciudadanos de primera clase del compilador.
+Ver [cap 28 de la guía](docs/guide.md#28-auth-nativa) y el
+ejemplo completo
+[`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz)
+(login + /me + /admin con JWT real, < 100 líneas).
+
+§ **Interop Python via PyO3** — Fase 8 cerrada al 100% del roadmap
+original. Embedding básico de CPython (8.1), marshaling bidireccional
+`List`/`Map`/`Instance` ↔ `list`/`dict` (8.2), excepciones Python →
+`Result<T>` (8.3), tipos del checker + coerción runtime (8.4),
+`fitz py-types` auto-mapeo SQLAlchemy → `type` Fitz (8.5), bridge
+tokio ↔ asyncio (8.6), codegen interop en `fitz build` (8.7), guía +
+ejemplo CRUD (8.8). Opt-in con la feature `python` al build del
+binario `fitz`. **Deuda residual derivada** (no bloquea uso real
+end-to-end, sí refinamientos): coerción `PyAny → List<T>/Map<K,V>/
+Instance` en `fitz build` (helpers emitidos en el preludio; falta
+wiring en `coerce` — anotaciones nominales sobre dicts ya andan en
+intérprete vía 8.4, sólo el path codegen tiene este gap); `.await`
+con binding intermedio split (`let f = py_call()?; f.await` — hoy
+sólo el patrón canónico `<py_call>?.await`); stubs `.pyi` parseados
+(pospuesto post-9); bundling CPython embebido (`fitz build
+--bundle-python` para no requerir Python instalado en el destino —
+sub-paso futuro separado, decisión python-build-standalone vs
+PyOxidizer pendiente). Ver
+[cap 21 de la guía](docs/guide.md#21-interop-python) y detalle
+en "Estado del proyecto" abajo.
 
 ## Ejemplo aspiracional
 
@@ -220,6 +261,24 @@ siguen usando `parse()` strict y descartando el side-table. Próximo
 norte: las sub-fases visibles del LSP (9.x.1 diagnostics → 9.x.5
 distribución VSCode Marketplace). Ver el
 [roadmap](docs/roadmap.md) para el plan completo.
+
+**Fase 9.w.1 (Auth nativa) CERRADA** — el MVP del stack web
+first-class arrancó por auth. **Tres decoradores nuevos del
+lenguaje** (`@auth_provider` singleton, `@authenticated`,
+`@admin`) + **dos módulos built-in** (`jwt` con HS256/384/512,
+`hash` con Argon2id) construyen un flujo de login + JWT + password
+hashing entero sin dependencias externas. El **checker estático**
+valida que cada handler protegido reciba un `User` del tipo
+correcto en compile-time (no reflection en runtime como Spring/
+ASP.NET). El **schema OpenAPI 3.1** auto-agrega
+`securitySchemes.bearerAuth` + `security` por handler + 401/403
+en responses — sin tocar el spec a mano. Paridad bit-a-bit
+`fitz run` ↔ `fitz build`. El ejemplo completo
+[`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz)
+arma `POST /login` + `GET /me` (`@authenticated`) + `GET
+/admin/users` (`@admin`) en menos de 100 líneas, validado
+end-to-end con curl contra el binario nativo. Ver
+[cap 28 de la guía](docs/guide.md#28-auth-nativa).
 
 **Plan LSP entero (Fase 9.x.1 → 9.x.5) CERRADO — 2026-05-15/16** —
 las cinco sub-fases del LSP MVP. Habilitan la experiencia
@@ -700,6 +759,15 @@ async), marshaling Future↔Coroutine.
   su tipo; F12 te lleva a su declaración; tras `.` aparecen los
   métodos del tipo. Ver
   [cap 22 de la guía](docs/guide.md#22-soporte-para-editores).
+- **Auth nativa** (Fase 9.w.1): `@auth_provider` + `@authenticated`
+  + `@admin` como decoradores del lenguaje, con built-ins `jwt`
+  (HS256/384/512) y `hash` (Argon2id). El checker valida
+  estáticamente que cada handler protegido reciba un `User` del
+  tipo correcto. OpenAPI auto-agrega `securitySchemes.bearerAuth`
+  + `security` por handler + 401/403 en responses. Paridad
+  bit-a-bit `fitz run` ↔ `fitz build`. Cero deps externas. Ver
+  [cap 28 de la guía](docs/guide.md#28-auth-nativa) y el ejemplo
+  [`examples/guide/28-auth.fitz`](examples/guide/28-auth.fitz).
 
 ### CLI
 

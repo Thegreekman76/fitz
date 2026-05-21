@@ -833,6 +833,56 @@
 > `@background`) o el sub-paso dedicado de refresh masivo de
 > docs.
 
+> **Nota (2026-05-20) — Fase 9.w.1 (Auth nativa) CERRADA**: el
+> primer sub-paso del stack web first-class está implementado
+> entero. Tres decoradores nuevos del lenguaje (`@auth_provider`
+> singleton, `@authenticated`, `@admin`) + dos módulos built-in
+> (`jwt` con HS256/384/512, `hash` con Argon2id) cubren el flujo
+> de login + JWT + password hashing entero **sin deps externas**.
+> El checker valida estáticamente que cada handler protegido
+> tenga el provider registrado y reciba el `User` correcto. El
+> schema OpenAPI auto-agrega `securitySchemes.bearerAuth` +
+> `security` por handler + 401/403 en responses. Paridad bit-a-bit
+> `fitz run` ↔ `fitz build`. Sub-pasos cerrados:
+>
+> - **9.w.1.a** — Checker valida los 3 decorators (16 unit
+>   tests).
+> - **9.w.1.b** — Built-ins `jwt`/`hash` como `Value::Module`
+>   pre-registrados con `jsonwebtoken = "9"` + `argon2 = "0.5"`
+>   + `rand_core = "0.6"` deps no-opcionales (16 unit tests).
+> - **9.w.1.c** — Runtime auth en `fitz run`: `AuthSpec` enum +
+>   `AuthProviderHandle` + wrapper en `handle_task` (9 unit E2E).
+> - **9.w.1.d** — Codegen `fitz build`: helpers en preludio +
+>   dispatch en `gen_call` + `emit_auth_check` espejo del
+>   intérprete (2 tests compile_e2e).
+> - **9.w.1.e** — OpenAPI security scheme: `bearerAuth` +
+>   `security` por handler + 401/403 auto (5 unit tests del
+>   schema).
+> - **9.w.1.f** — Cap 28 nuevo en `docs/guide.md` + ejemplo
+>   runnable `examples/guide/28-auth.fitz` (login + /me + /admin,
+>   <100 LoC) + README emphasis del diferencial + smoke
+>   `GUIDE_EXAMPLES_COMPILE`.
+>
+> **Decisiones técnicas del MVP** (no en el roadmap original):
+> `Map<Str, Str>` strict para payload de `jwt.encode` y return
+> de `jwt.decode` (heterogéneos requieren `__FitzValue` post-MVP);
+> `hash.verify` devuelve `Bool` (no Result) por seguridad; provider
+> order required (provider antes que handlers); handler protegido
+> NO admite body separado del user en MVP.
+>
+> **Deuda residual derivada de 9.w.1** (NO bloquea uso real;
+> queda comprometida en `docs/roadmap.md` → "Fase 9.w iteración
+> 2"): sessions cookie-based + RBAC multi-rol + token refresh/
+> revocación (requieren DB nativa, Fase 10); asimétricos JWT
+> (RS256/ES256 con PEM); provider request-aware más allá de
+> headers; heterogéneos en `jwt.encode/decode` (requiere
+> `__FitzValue` en codegen).
+>
+> **Próximo norte**: resto de Fase 9.w — `@ws("/chat")`
+> (WebSockets tipados con `WsConn<T>`), `@cron` + `@background`
+> (jobs sin Celery), y ORM nativo + migraciones (escalado a
+> Fase 10).
+
 ## Resumen ejecutivo
 
 Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.
