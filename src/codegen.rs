@@ -13249,6 +13249,39 @@ impl<'a> CodegenCtx<'a> {
                 self.emit("}\n\n");
             }
         }
+        // Fase 9.w.2.d — schema AsyncAPI 3.0 embebido cuando hay
+        // handlers @ws. Mismo patrón que OpenAPI: pre-compute desde
+        // AST, embebe como `static &str`, serve handler `__serve_asyncapi_json`.
+        let auto_asyncapi = cfg.enable_docs
+            && !user_paths.contains("/asyncapi.json")
+            && !ws_fns.is_empty();
+        if auto_asyncapi {
+            let channels = crate::asyncapi::pseudo_channels_from_ast(program)?;
+            let schema = crate::asyncapi::generate_asyncapi_with_version(
+                &channels,
+                program,
+                cfg.api_version.as_deref(),
+            );
+            let schema_str = serde_json::to_string(&schema).map_err(|e| {
+                FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    format!("error serializando schema AsyncAPI: {}", e),
+                )
+            })?;
+            self.emit("/// Schema AsyncAPI 3.0 generado por `fitz build` (Fase 9.w.2.d).\n");
+            self.emit("static __FITZ_ASYNCAPI_SCHEMA: &str = r###\"");
+            self.emit(&schema_str);
+            self.emit("\"###;\n\n");
+            self.emit("async fn __serve_asyncapi_json() -> axum::response::Response {\n");
+            self.emit("    use axum::response::IntoResponse;\n");
+            self.emit("    (\n");
+            self.emit("        [(axum::http::header::CONTENT_TYPE, \"application/json\")],\n");
+            self.emit("        __FITZ_ASYNCAPI_SCHEMA,\n");
+            self.emit("    ).into_response()\n");
+            self.emit("}\n\n");
+        }
 
         // F17.4b: tokio default (multi-thread). N workers según cores,
         // paralelismo HTTP real entre requests sobre los handlers.
@@ -13345,10 +13378,15 @@ impl<'a> CodegenCtx<'a> {
             }
         }
         // Fase 7.5: rutas auto-registradas. Mismo orden que el runtime
-        // (7.2/7.3): /openapi.json primero, /docs después.
+        // (7.2/7.3): /openapi.json primero, /asyncapi.json (9.w.2.d)
+        // si hay WS, /docs último.
         if auto_openapi {
             self.emit_indent();
             self.emit("    .route(\"/openapi.json\", axum::routing::get(__serve_openapi_json))\n");
+        }
+        if auto_asyncapi {
+            self.emit_indent();
+            self.emit("    .route(\"/asyncapi.json\", axum::routing::get(__serve_asyncapi_json))\n");
         }
         if auto_docs {
             self.emit_indent();

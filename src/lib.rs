@@ -22,6 +22,7 @@ pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
 pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base
 pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
 pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
+pub mod asyncapi; // Fase 9.w.2.d — generador AsyncAPI 3.0 (WebSockets)
 pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
 pub mod git_dep; // Fase 9.y.3.c — git deps + cache local

@@ -1523,6 +1523,21 @@ pub fn build_router(
     registry: std::sync::Arc<HttpRegistry>,
     openapi_schema: Option<serde_json::Value>,
 ) -> Router {
+    build_router_with_asyncapi(metas, registry, openapi_schema, None)
+}
+
+/// Fase 9.w.2.d — variante de `build_router` que también acepta un
+/// schema AsyncAPI 3.0 pre-computado. Si `Some`, registra
+/// `/asyncapi.json` (y suma una nota a `/docs` listando los WS
+/// endpoints — el bundle Scalar no soporta AsyncAPI nativamente,
+/// pero el endpoint queda servido para tooling externo). `None` para
+/// programas sin handlers `@ws` (zero overhead).
+pub fn build_router_with_asyncapi(
+    metas: &[RouteMeta],
+    registry: std::sync::Arc<HttpRegistry>,
+    openapi_schema: Option<serde_json::Value>,
+    asyncapi_schema: Option<serde_json::Value>,
+) -> Router {
     let mut router = Router::new();
     // Agrupar rutas por path para sumar el `OPTIONS` de preflight al
     // mismo MethodRouter en caso de que varios verbos del mismo path
@@ -1588,6 +1603,21 @@ pub fn build_router(
                 "/docs",
                 axum::routing::get(|| async {
                     axum::response::Html(crate::openapi::SCALAR_HTML)
+                }),
+            );
+        }
+    }
+    // Fase 9.w.2.d — auto-register de /asyncapi.json cuando hay
+    // handlers @ws. Mismo patrón que /openapi.json: si el user declaró
+    // un handler con el mismo path, su handler gana.
+    if let Some(schema) = asyncapi_schema {
+        if !metas.iter().any(|m| m.path == "/asyncapi.json") {
+            let schema = std::sync::Arc::new(schema);
+            router = router.route(
+                "/asyncapi.json",
+                axum::routing::get(move || {
+                    let schema = schema.clone();
+                    async move { axum::Json((*schema).clone()) }
                 }),
             );
         }
@@ -3169,6 +3199,24 @@ pub fn serve(
     } else {
         None
     };
+    // Fase 9.w.2.d — AsyncAPI 3.0 schema cuando hay handlers `@ws`.
+    // Gated por `enable_docs` igual que OpenAPI: si el usuario apagó
+    // docs con `@server(docs=false)`, tampoco emitimos AsyncAPI.
+    let asyncapi_schema = if enable_docs {
+        let channels = crate::asyncapi::channels_from_registry(&registry);
+        if channels.is_empty() {
+            None
+        } else {
+            Some(crate::asyncapi::generate_asyncapi_with_version(
+                &channels,
+                &program,
+                api_version.as_deref(),
+            ))
+        }
+    } else {
+        None
+    };
+    let has_asyncapi = asyncapi_schema.is_some();
 
     let registry = std::sync::Arc::new(registry);
 
@@ -3176,14 +3224,23 @@ pub fn serve(
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let router = build_router(&metas, registry, openapi_schema);
+        let router = build_router_with_asyncapi(
+            &metas,
+            registry,
+            openapi_schema,
+            asyncapi_schema,
+        );
         let listener = tokio::net::TcpListener::bind(addr).await?;
         eprintln!("🏔️  Fitz HTTP escuchando en http://{}", addr);
         for meta in &metas {
-            eprintln!("   {} {}", meta.method.as_str(), meta.path);
+            let arrow = if meta.is_ws { "WS " } else { meta.method.as_str() };
+            eprintln!("   {} {}", arrow, meta.path);
         }
         if enable_docs {
             eprintln!("   GET /openapi.json  (schema autogenerado)");
+            if has_asyncapi {
+                eprintln!("   GET /asyncapi.json (canales WebSocket)");
+            }
             eprintln!("   GET /docs          (UI Scalar)");
         } else {
             eprintln!("   (docs apagadas por @server(docs=false))");
