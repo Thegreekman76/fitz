@@ -7,6 +7,7 @@
 [package]
 name = "fitz-report-generator"
 version = "0.1.0"
+edition = "2026"
 description = "CLI tool boilerplate — generador de report a binario nativo standalone"
 
 [bin]
