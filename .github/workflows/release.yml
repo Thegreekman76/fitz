@@ -137,8 +137,10 @@ jobs:
             ext-bin: fitz-lsp
           - vsce-target: win32-x64
             ext-bin: fitz-lsp.exe
-          - vsce-target: darwin-x64
-            ext-bin: fitz-lsp
+          # darwin-x64 omitido — Apple Intel macs son base declining
+          # y `macos-13` runners en escasez crónica. Aligned con la
+          # matrix del job `build`. Universal binary via `lipo` queda
+          # como deuda futura.
           - vsce-target: darwin-arm64
             ext-bin: fitz-lsp
     runs-on: ubuntu-latest
@@ -184,8 +186,11 @@ jobs:
       - name: vsce package (--target ${{ matrix.vsce-target }})
         working-directory: editors/vscode
         run: |
-          # vsce viene en devDependencies (declared en package.json)
-          npx vsce package --target ${{ matrix.vsce-target }} --out fitz-lang-${{ matrix.vsce-target }}.vsix
+          # `@vscode/vsce` declarado en devDependencies; `npm ci`
+          # arriba lo instala. El paquete npm es `@vscode/vsce`
+          # (no `vsce` standalone — eso es un package distinto y
+          # obsoleto). Usar siempre el path con namespace.
+          npx @vscode/vsce package --target ${{ matrix.vsce-target }} --out fitz-lang-${{ matrix.vsce-target }}.vsix
 
       - name: Upload .vsix as artifact
         uses: actions/upload-artifact@v4

@@ -21,8 +21,13 @@ docs_dir: docs
 theme:
   name: material
   language: es
-  logo: ../assets/logo.png
-  favicon: ../assets/logo.png
+  # `logo` y `favicon` se resuelven relativos a `docs_dir` (docs/).
+  # El asset vive en `docs/assets/logo.png` — duplicado del original
+  # en `assets/logo.png` (raíz del repo, usado por README + extensión
+  # VSCode). MkDocs no incluye archivos fuera de `docs_dir` en el
+  # sitio buildeado, por eso la copia.
+  logo: assets/logo.png
+  favicon: assets/logo.png
   palette:
     # Toggle dark/light
     - media: '(prefers-color-scheme: light)'
