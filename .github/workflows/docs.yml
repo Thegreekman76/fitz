@@ -48,6 +48,15 @@ jobs:
           cache: 'pip'
           cache-dependency-path: requirements-docs.txt
 
+      # Setup explícito del environment Pages — crea el environment
+      # si no existe y configura los outputs (base URL, etc.) que
+      # `actions/deploy-pages` consume. Sin este step el primer
+      # deploy falla con "Failed to create deployment (status: 404)
+      # Ensure GitHub Pages has been enabled", aunque el Source en
+      # Settings → Pages ya esté en "GitHub Actions".
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
       - name: Install MkDocs deps
         run: pip install -r requirements-docs.txt
 
