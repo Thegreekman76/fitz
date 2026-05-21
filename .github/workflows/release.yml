@@ -61,7 +61,12 @@ jobs:
             rust-target: x86_64-pc-windows-msvc
             vsce-target: win32-x64
             archive-ext: zip
-          - os: macos-latest
+          # `macos-latest` hoy es ARM64 (M-series). Para evitar
+          # cross-compile a x86_64 (linker issues frecuentes en CI),
+          # usamos runners separados: `macos-13` (último Intel x64
+          # GA en GitHub Actions) para darwin-x64, `macos-latest`
+          # (ARM64) para darwin-arm64. Ambos builds nativos.
+          - os: macos-13
             rust-target: x86_64-apple-darwin
             vsce-target: darwin-x64
             archive-ext: tar.gz
