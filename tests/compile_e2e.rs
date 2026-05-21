@@ -5764,3 +5764,159 @@ print(\"verify-bad: {bad}\")\n\
     assert!(stdout.contains("verify-bad: false"), "stdout: {}", stdout);
 }
 
+// ---------------------------------------------------------------------------
+// Fase 9.w.2.c — Tests E2E del codegen WebSocket.
+//
+// Compilan un programa con `@ws("/path")` a binario nativo con `fitz
+// build`, spawnean el binario, conectan un cliente WS via
+// tokio-tungstenite (dev-dep), envían/reciben frames, y verifican que
+// el flujo matchea bit-a-bit el comportamiento del intérprete (9.w.2.b).
+// ---------------------------------------------------------------------------
+
+/// Spawn del binario WS + cliente que envía/recibe un mensaje texto.
+/// Devuelve la respuesta del server.
+async fn ws_build_send_recv(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    path: &str,
+    payload: &str,
+) -> String {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build WS falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server WS no abrió el puerto {} en 3s", port);
+    }
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let url = format!("ws://{}{}", addr, path);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect");
+    ws.send(Message::text(payload.to_string()))
+        .await
+        .expect("send");
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+        .await
+        .expect("timeout")
+        .expect("frame")
+        .expect("ok");
+    let txt = match frame {
+        Message::Text(t) => t.to_string(),
+        other => panic!("esperaba text, fue {:?}", other),
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    txt
+}
+
+#[test]
+fn ws_codegen_echo_simple_compila_y_responde() {
+    // Programa mínimo `@ws` con WsConn<Str>. Verifica que el codegen
+    // emite el preludio + wrapper + dispatch de los métodos, y que el
+    // binario nativo responde idéntico al intérprete.
+    let src = "@server(43971)\n\
+               fn main() => 0\n\
+               @ws(\"/echo\")\n\
+               async fn echo(conn: WsConn<Str>) -> Null {\n\
+                   match conn.recv() {\n\
+                       Ok(msg) => {\n\
+                           let _ = conn.send(\"eco-{msg}\")\n\
+                           return null\n\
+                       }\n\
+                       Err(_) => return null\n\
+                   }\n\
+               }";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let resp = rt.block_on(async {
+        ws_build_send_recv("ws_codegen_echo", src, 43971, "/echo", "\"hola\"").await
+    });
+    assert_eq!(resp, "\"eco-hola\"");
+}
+
+#[test]
+fn ws_codegen_tipo_custom_marshaling_json() {
+    // `WsConn<ChatMsg>` con tipo custom. El codegen debe emitir el
+    // marshaling JSON via __ToFitzJson/__FromFitzJson del tipo,
+    // espejo del runtime (9.w.2.b).
+    let src = "@server(43972)\n\
+               fn main() => 0\n\
+               type ChatMsg { user: Str, text: Str }\n\
+               @ws(\"/chat\")\n\
+               async fn chat(conn: WsConn<ChatMsg>) -> Null {\n\
+                   match conn.recv() {\n\
+                       Ok(msg) => {\n\
+                           let reply = ChatMsg { user: msg.user, text: \"re:{msg.text}\" }\n\
+                           let _ = conn.send(reply)\n\
+                           return null\n\
+                       }\n\
+                       Err(_) => return null\n\
+                   }\n\
+               }";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let resp = rt.block_on(async {
+        ws_build_send_recv(
+            "ws_codegen_custom",
+            src,
+            43972,
+            "/chat",
+            "{\"user\":\"ada\",\"text\":\"hi\"}",
+        )
+        .await
+    });
+    // serde_json preserve_order: el orden de los fields del struct se
+    // mantiene en la serialización.
+    let v: serde_json::Value = serde_json::from_str(&resp).expect("JSON válido");
+    assert_eq!(v["user"], serde_json::json!("ada"));
+    assert_eq!(v["text"], serde_json::json!("re:hi"));
+}
+

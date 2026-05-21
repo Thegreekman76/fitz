@@ -150,6 +150,11 @@ pub fn generate_project(
     // built-in `jwt`/`hash` o cualquier decorator de auth
     // (`@auth_provider`/`@authenticated`/`@admin`).
     let uses_auth = program_uses_auth(program);
+    // Fase 9.w.2.c — detección de uso de WebSockets. Habilita el
+    // preludio `__FitzWsConn<T>` + broadcaster global, suma la feature
+    // `ws` de axum + `futures-util` + `tokio-tungstenite` (transitivo
+    // de la feature ws) al Cargo.toml generado.
+    let uses_ws = program_uses_ws(program);
 
     // PASS 2 — Generar el main.rs. El loader expone los bindings de
     // módulos (`import foo` / `from foo import X`) para que el codegen
@@ -160,7 +165,9 @@ pub fn generate_project(
     Ok(ProjectArtifacts {
         bin_name: stem.clone(),
         output_basename: raw_stem,
-        cargo_toml: cargo_toml_for(&stem, has_http, uses_async, uses_python, uses_auth),
+        cargo_toml: cargo_toml_for(
+            &stem, has_http, uses_async, uses_python, uses_auth, uses_ws,
+        ),
         main_rs,
         mod_files: loader.into_mod_files(),
     })
@@ -274,7 +281,12 @@ fn has_http_routes(program: &Program) -> bool {
             Stmt::FnDef { decorators, .. }
                 if decorators.iter().any(|d| matches!(
                     d.name.as_str(),
-                    "get" | "post" | "put" | "delete" | "server"
+                    // Fase 9.w.2.c — `@ws` cuenta como HTTP también:
+                    // el handshake es HTTP, y los wrappers WS necesitan
+                    // toda la infraestructura HTTP (axum + tokio +
+                    // serde + __ToFitzJson/__FromFitzJson para el
+                    // marshaling JSON del T).
+                    "get" | "post" | "put" | "delete" | "server" | "ws"
                 ))
         )
     })
@@ -289,6 +301,22 @@ fn has_http_routes(program: &Program) -> bool {
 /// `argon2` + `rand_core` al Cargo.toml y si emitir el preludio de
 /// helpers `__fitz_jwt_*` / `__fitz_hash_*`. Programas sin auth no
 /// pagan el costo de bajar/compilar esas crates.
+/// Fase 9.w.2.c — `true` si el programa tiene al menos un handler
+/// con `@ws("/path")`. Habilita el preludio WS (`__FitzWsConn<T>` +
+/// broadcaster global), suma la feature `ws` de axum + `futures-util`
+/// al Cargo.toml generado, y emite los wrappers axum WS específicos
+/// en lugar del HTTP dispatcher normal. Programas sin `@ws` no
+/// pagan el costo.
+fn program_uses_ws(program: &Program) -> bool {
+    program.iter().any(|s| {
+        matches!(
+            s,
+            Stmt::FnDef { decorators, .. }
+                if decorators.iter().any(|d| d.name == "ws")
+        )
+    })
+}
+
 fn program_uses_auth(program: &Program) -> bool {
     use crate::ast::StrPart;
     fn expr_uses_auth(e: &Expr) -> bool {
@@ -1313,6 +1341,7 @@ fn cargo_toml_for(
     uses_async: bool,
     uses_python: bool,
     uses_auth: bool,
+    uses_ws: bool,
 ) -> String {
     let header = format!(
         "[package]\n\
@@ -1389,10 +1418,22 @@ fn cargo_toml_for(
     } else {
         auth_lines
     };
+    // Fase 9.w.2.c — `axum` con feature `ws` cuando hay `@ws` handlers.
+    // La feature `ws` agrega `dep:tokio-tungstenite` + `dep:sha1` +
+    // `dep:base64` transitivamente — el codegen no las menciona por
+    // separado, axum las arrastra. `futures-util` para los
+    // combinadores Sink/Stream que usa el wrapper WS generado.
     let http_lines = if has_http {
-        "axum = \"0.8\"\n\
-         serde = { version = \"1\", features = [\"derive\"] }\n\
-         serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
+        if uses_ws {
+            "axum = { version = \"0.8\", features = [\"ws\"] }\n\
+             futures-util = { version = \"0.3\", default-features = false, features = [\"std\"] }\n\
+             serde = { version = \"1\", features = [\"derive\"] }\n\
+             serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
+        } else {
+            "axum = \"0.8\"\n\
+             serde = { version = \"1\", features = [\"derive\"] }\n\
+             serde_json = { version = \"1\", features = [\"preserve_order\"] }\n"
+        }
     } else {
         ""
     };
@@ -2316,6 +2357,7 @@ fn generate_main_rs(
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
     let uses_fitz_value = program_uses_fitz_value(program);
     let uses_auth = program_uses_auth(program);
+    let uses_ws = program_uses_ws(program);
 
     let mut ctx = CodegenCtx::new(env, type_info);
     ctx.uses_async = uses_async;
@@ -2324,6 +2366,7 @@ fn generate_main_rs(
     ctx.uses_fitz_value = uses_fitz_value;
     ctx.has_http = has_http;
     ctx.uses_auth = uses_auth;
+    ctx.uses_ws = uses_ws;
     // Fase 9.w.1.d — pre-scan del `@auth_provider`. Singleton; el checker
     // (9.w.1.a) ya validó. Lo guardamos por nombre + is_async para que
     // cada handler con `@authenticated`/`@admin` emita la invocación
@@ -2355,6 +2398,11 @@ fn generate_main_rs(
 struct PartitionedProgram<'a> {
     type_defs: Vec<&'a Stmt>,
     http_fns: Vec<&'a Stmt>,
+    /// Fase 9.w.2.c — handlers `@ws("/path")`. Separados de
+    /// `http_fns` porque el codegen del wrapper es distinto (axum
+    /// `WebSocketUpgrade` + `on_upgrade` closure en lugar del HTTP
+    /// dispatcher).
+    ws_fns: Vec<&'a Stmt>,
     top_fns: Vec<&'a Stmt>,
     main_stmts: Vec<&'a Stmt>,
     server_config: Option<ServerConfigArgs>,
@@ -2374,6 +2422,7 @@ struct PartitionedProgram<'a> {
 fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, FitzError> {
     let mut type_defs: Vec<&Stmt> = Vec::new();
     let mut http_fns: Vec<&Stmt> = Vec::new();
+    let mut ws_fns: Vec<&Stmt> = Vec::new();
     let mut top_fns: Vec<&Stmt> = Vec::new();
     let mut main_stmts: Vec<&Stmt> = Vec::new();
     let mut server_config: Option<ServerConfigArgs> = None;
@@ -2400,6 +2449,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                     }
                     // Separar `@server` de los `@get`/`@post`/etc.
                     let mut http_decos = false;
+                    let mut ws_decos = false;
                     for d in decorators {
                         // 7.5: `@server` acepta kwargs (delegado a
                         // `parse_server_decorator`).
@@ -2456,13 +2506,21 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                             // `@put`/`@delete` apilado (validado por el
                             // checker 9.w.1.a y por el evaluator MVP).
                             "authenticated" | "admin" => {}
+                            // Fase 9.w.2.c — `@ws("/path")` marca un
+                            // handler WebSocket. Va a `ws_fns` (no a
+                            // `http_fns`) porque el wrapper generado
+                            // es distinto: `WebSocketUpgrade` extractor
+                            // + `on_upgrade` closure en lugar del HTTP
+                            // dispatcher normal. Sin kwargs (validado
+                            // por el branch general arriba).
+                            "ws" => ws_decos = true,
                             other => {
                                 return Err(FitzError::new(
                                     ErrorKind::TypeError,
                                     0,
                                     0,
                                     format!(
-                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@server/@header/@middleware/@auth_provider/@authenticated/@admin)",
+                                        "decorator `@{}` sobre fn `{}` no soportado en codegen (hoy: @get/@post/@put/@delete/@ws/@server/@header/@middleware/@auth_provider/@authenticated/@admin)",
                                         other, name
                                     ),
                                 ));
@@ -2488,7 +2546,12 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
                                 .to_string(),
                         ));
                     }
-                    if http_decos {
+                    if ws_decos {
+                        // `@ws` wins over `@get/...` si por alguna razón
+                        // estuvieran apilados (no es un caso válido, pero
+                        // defensivo). El wrapper WS no consulta http_decos.
+                        ws_fns.push(s);
+                    } else if http_decos {
                         http_fns.push(s);
                     } else if name != "main" {
                         // fn con solo `@server` y nombre distinto a main:
@@ -2505,6 +2568,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
     Ok(PartitionedProgram {
         type_defs,
         http_fns,
+        ws_fns,
         top_fns,
         main_stmts,
         server_config,
@@ -2633,6 +2697,12 @@ fn emit_main_rs_body(
     for stmt in &p.http_fns {
         ctx.gen_top_fn(stmt)?;
     }
+    // Fase 9.w.2.c — emitir handlers `@ws` como pub fn normales (con
+    // signature `async fn h(conn: __FitzWsConn<T>, ...) -> ...`). El
+    // wrapper axum los invoca tras el upgrade.
+    for stmt in &p.ws_fns {
+        ctx.gen_top_fn(stmt)?;
+    }
     for stmt in &p.top_fns {
         ctx.gen_top_fn(stmt)?;
     }
@@ -2642,10 +2712,21 @@ fn emit_main_rs_body(
         for stmt in &p.http_fns {
             ctx.gen_http_handler_wrapper(stmt)?;
         }
+        // Fase 9.w.2.c — wrappers WS análogos (extractor
+        // `WebSocketUpgrade`, auth pre-upgrade, on_upgrade closure).
+        for stmt in &p.ws_fns {
+            ctx.gen_ws_handler_wrapper(stmt)?;
+        }
         // `#[tokio::main] async fn main` con Router + serve.
         // Fase 7.5: pasamos `program` para que adentro pueda
         // pre-computar el schema OpenAPI desde el AST.
-        ctx.gen_http_main(&p.http_fns, &p.server_config, &p.main_stmts, program)?;
+        ctx.gen_http_main(
+            &p.http_fns,
+            &p.ws_fns,
+            &p.server_config,
+            &p.main_stmts,
+            program,
+        )?;
     } else {
         // Modo CLI: cuerpo de `fn main()` con el resto de stmts.
         ctx.gen_main(&p.main_stmts)?;
@@ -2999,6 +3080,13 @@ struct CodegenCtx<'a> {
     /// preludio y el wiring del wrapper auth alrededor de cada handler
     /// HTTP con `@authenticated`/`@admin`.
     uses_auth: bool,
+    /// Fase 9.w.2.c: `true` si el programa tiene al menos un handler
+    /// con `@ws("/path")`. Habilita la emisión de `WS_RUNTIME_PRELUDE`
+    /// (struct `__FitzWsConn<T>` + broadcaster global + trait
+    /// `__FitzWsMessage`) y el wiring del wrapper WS para cada `@ws`
+    /// handler. Cuando es `false`, programas HTTP regulares no pagan
+    /// el costo del bloque WS adicional en el binario.
+    uses_ws: bool,
     /// Fase 9.w.1.d: nombre Rust de la fn marcada con `@auth_provider`
     /// (singleton). `None` si el programa no la tiene. El wrapper de
     /// cada handler con `@authenticated`/`@admin` la invoca antes del
@@ -3162,6 +3250,7 @@ impl<'a> CodegenCtx<'a> {
             uses_auth: false,
             auth_provider_name: None,
             auth_provider_is_async: false,
+            uses_ws: false,
             python_bindings: HashMap::new(),
             python_imports_ordered: Vec::new(),
             pattern_slot_counter: 0,
@@ -7445,6 +7534,67 @@ impl<'a> CodegenCtx<'a> {
         args: &[Expr],
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
+        // Fase 9.w.2.c — Métodos sobre `WsConn<T>`. Detectamos por tipo
+        // sintetizado del receiver. `recv`/`send`/`broadcast` son async
+        // — emitimos `.await` automático para que el call site Fitz
+        // (`let r = conn.recv()`) se traduzca a Rust válido. `close`
+        // es sync. El checker (9.w.2.a) ya validó aridad y tipos de
+        // args; acá nos limitamos a emitir el Rust.
+        if let Ok((obj_code, Type::WsConn(inner_t_box))) = self.gen_expr(object) {
+            let inner_t: &Type = &inner_t_box;
+            {
+                match method {
+                    "recv" => {
+                        if !args.is_empty() {
+                            return Err(self.err_at(call_span,
+                                format!("`WsConn.recv()` no acepta args, recibió {}", args.len()),
+                            ));
+                        }
+                        return Ok((
+                            format!("({}).recv().await", obj_code),
+                            Type::Result {
+                                ok: Box::new(inner_t.clone()),
+                                err: Box::new(Type::Str),
+                            },
+                        ));
+                    }
+                    "send" | "broadcast" => {
+                        if args.len() != 1 {
+                            return Err(self.err_at(call_span, format!(
+                                "`WsConn.{}(msg)` espera 1 arg, recibió {}",
+                                method, args.len()
+                            )));
+                        }
+                        let (msg_code, msg_ty) = self.gen_expr(&args[0])?;
+                        let coerced = coerce(&msg_code, &msg_ty, inner_t);
+                        return Ok((
+                            format!("({}).{}({}).await", obj_code, method, coerced),
+                            Type::Result {
+                                ok: Box::new(Type::Null),
+                                err: Box::new(Type::Str),
+                            },
+                        ));
+                    }
+                    "close" => {
+                        if !args.is_empty() {
+                            return Err(self.err_at(call_span,
+                                format!("`WsConn.close()` no acepta args, recibió {}", args.len()),
+                            ));
+                        }
+                        return Ok((
+                            format!("({{ ({}).close(); () }})", obj_code),
+                            Type::Null,
+                        ));
+                    }
+                    _ => {
+                        return Err(self.err_at(call_span, format!(
+                            "`WsConn<T>` no tiene método `{}` (soportados: recv, send, broadcast, close)",
+                            method,
+                        )));
+                    }
+                }
+            }
+        }
         // Mini-tanda St — static method dispatch: `Type.method(args)`.
         // El object es `Expr::Ident("Type")` que NO es un valor sino un
         // tipo. Lo detectamos antes que `gen_expr(object)` falle y
@@ -11553,6 +11703,13 @@ impl<'a> CodegenCtx<'a> {
     /// emiten junto al struct (en `gen_type_http_impls`).
     fn emit_http_runtime_prelude(&mut self) {
         self.emit(HTTP_RUNTIME_PRELUDE);
+        // Fase 9.w.2.c — preludio adicional cuando hay handlers @ws.
+        // Vive separado de HTTP_RUNTIME_PRELUDE para que programas
+        // HTTP sin WS no paguen el costo del bloque extra (~150 LoC
+        // generados).
+        if self.uses_ws {
+            self.emit(WS_RUNTIME_PRELUDE);
+        }
     }
 
     /// Emite los `impl __ToFitzJson` y `impl __FromFitzJson` para un
@@ -11805,6 +11962,211 @@ impl<'a> CodegenCtx<'a> {
         self.emit_param_coercions(&sig)?;
         self.emit_handler_dispatch_and_response(&sig);
         self.emit_cors_helpers(&sig);
+        Ok(())
+    }
+
+    /// Fase 9.w.2.c — Wrapper async para handlers `@ws("/path")`.
+    /// Paralelo a `gen_http_handler_wrapper` pero con dispatch axum
+    /// distinto: `WebSocketUpgrade` extractor + `on_upgrade` closure.
+    ///
+    /// Estructura del Rust emitido:
+    ///
+    /// ```rust
+    /// async fn __ws_handler_<name>(
+    ///     ws: axum::extract::ws::WebSocketUpgrade,
+    ///     __hmap: axum::http::HeaderMap,
+    /// ) -> axum::response::Response {
+    ///     // [auth check si aplica — return 401/403 pre-upgrade]
+    ///     ws.on_upgrade(move |socket| async move {
+    ///         let endpoint = "/<path>".to_string();
+    ///         let (__conn, __writer) = __fitz_ws_setup::<T>(socket, endpoint.clone());
+    ///         let __conn_id = __conn.conn_id;
+    ///         let _ = <user_handler>(__conn, ...optional user...).await;
+    ///         __fitz_ws_unregister(&endpoint, __conn_id);
+    ///         let _ = __writer.await;
+    ///     }).into_response()
+    /// }
+    /// ```
+    fn gen_ws_handler_wrapper(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
+        let Stmt::FnDef {
+            name,
+            params,
+            decorators,
+            ..
+        } = stmt
+        else {
+            return Err(self.err("gen_ws_handler_wrapper: esperaba Stmt::FnDef"));
+        };
+        // Path del decorator @ws.
+        let ws_deco = decorators
+            .iter()
+            .find(|d| d.name == "ws")
+            .ok_or_else(|| self.err(format!("fn `{}`: sin decorator @ws", name)))?;
+        let path_arg = ws_deco
+            .args
+            .first()
+            .ok_or_else(|| self.err(format!("@ws sobre `{}`: falta path arg", name)))?;
+        let path = match path_arg {
+            Expr::Str(s, _) => s.clone(),
+            _ => {
+                return Err(self.err(format!(
+                    "@ws sobre `{}`: el path debe ser Str literal",
+                    name
+                )));
+            }
+        };
+
+        // Resolver auth desde decorators (paralelo a HandlerSig).
+        let mut auth = crate::http::AuthSpec::None;
+        for d in decorators {
+            match d.name.as_str() {
+                "authenticated" if auth == crate::http::AuthSpec::None => {
+                    auth = crate::http::AuthSpec::Authenticated;
+                }
+                "admin" => auth = crate::http::AuthSpec::Admin,
+                _ => {}
+            }
+        }
+
+        // Identificar el param `WsConn<T>` y (si hay auth) el param
+        // `user: T_user`. Resolver tipos para la signature Rust del
+        // user handler.
+        let mut ws_conn_param: Option<(String, Type)> = None;
+        let mut user_param: Option<(String, Type)> = None;
+        for p in params {
+            let te = p.type_.as_ref().ok_or_else(|| {
+                self.err_at(
+                    stmt.span(),
+                    format!("@ws fn `{}`: param `{}` necesita anotación de tipo", name, p.name),
+                )
+            })?;
+            let ty = resolve_type_expr(te, self.env).map_err(|e| {
+                self.err_at(
+                    stmt.span(),
+                    format!("@ws fn `{}`: param `{}`: {}", name, p.name, e.message),
+                )
+            })?;
+            if matches!(ty, Type::WsConn(_)) {
+                ws_conn_param = Some((p.name.clone(), ty));
+            } else if auth != crate::http::AuthSpec::None && user_param.is_none() {
+                user_param = Some((p.name.clone(), ty));
+            }
+        }
+        let (conn_name, conn_ty) = ws_conn_param.ok_or_else(|| {
+            self.err_at(
+                stmt.span(),
+                format!(
+                    "@ws fn `{}`: falta param `WsConn<T>` (validado por checker, defensivo en codegen)",
+                    name
+                ),
+            )
+        })?;
+        let conn_ty_rs = rust_type_for(&conn_ty, self.env)?;
+
+        // Emitir signature del wrapper.
+        writeln!(&mut self.output, "async fn __ws_handler_{}(", name).unwrap();
+        self.emit("    ws: axum::extract::ws::WebSocketUpgrade,\n");
+        self.emit("    __hmap: axum::http::HeaderMap,\n");
+        self.emit(") -> axum::response::Response {\n");
+        self.emit("    use axum::response::IntoResponse;\n");
+
+        // Auth pre-upgrade. Paralelo a `emit_auth_check` pero adaptado
+        // para el contexto WS (return Response directo si falla).
+        if auth != crate::http::AuthSpec::None {
+            let provider = self.auth_provider_name.clone().ok_or_else(|| {
+                self.err_at(stmt.span(), format!(
+                    "@ws fn `{}` con `@authenticated`/`@admin`: falta `@auth_provider` (validado por checker, defensivo)",
+                    name,
+                ))
+            })?;
+            let provider_await = if self.auth_provider_is_async {
+                ".await"
+            } else {
+                ""
+            };
+            self.emit("    let __auth_headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = {\n");
+            self.emit("        let mut __pairs: Vec<(String, String)> = Vec::with_capacity(__hmap.len());\n");
+            self.emit("        for (k, v) in __hmap.iter() {\n");
+            self.emit("            if let Ok(vs) = v.to_str() {\n");
+            self.emit("                __pairs.push((k.as_str().to_string(), vs.to_string()));\n");
+            self.emit("            }\n");
+            self.emit("        }\n");
+            self.emit("        std::sync::Arc::new(std::sync::Mutex::new(__pairs))\n");
+            self.emit("    };\n");
+            writeln!(
+                &mut self.output,
+                "    let __auth_result = {}(__auth_headers){};",
+                provider, provider_await,
+            )
+            .unwrap();
+            self.emit("    let __user = match __auth_result {\n");
+            self.emit("        Ok(u) => u,\n");
+            self.emit("        Err(__msg) => return (\n");
+            self.emit("            axum::http::StatusCode::UNAUTHORIZED,\n");
+            self.emit("            axum::Json(serde_json::json!({\"error\": __msg})),\n");
+            self.emit("        ).into_response(),\n");
+            self.emit("    };\n");
+            if auth == crate::http::AuthSpec::Admin {
+                self.emit("    {\n        let __guard = __user.lock().unwrap();\n        if __guard.role != \"admin\" {\n");
+                self.emit("            drop(__guard);\n");
+                self.emit("            return (\n");
+                self.emit("                axum::http::StatusCode::FORBIDDEN,\n");
+                self.emit("                axum::Json(serde_json::json!({\"error\": \"acceso prohibido — se requiere rol admin\"})),\n");
+                self.emit("            ).into_response();\n");
+                self.emit("        }\n    }\n");
+            }
+        }
+
+        // Upgrade closure.
+        // El `move` captura `__user` si aplica.
+        if auth != crate::http::AuthSpec::None {
+            self.emit("    ws.on_upgrade(move |__socket| async move {\n");
+        } else {
+            self.emit("    ws.on_upgrade(|__socket| async move {\n");
+        }
+        writeln!(
+            &mut self.output,
+            "        let __endpoint = \"{}\".to_string();",
+            path,
+        )
+        .unwrap();
+        // `T` para el setup viene del WsConn<T> del param: rust_type_for
+        // ya devuelve `__FitzWsConn<T_rust>`. Necesitamos extraer T para
+        // pasarlo al setup. Lo extraemos del TypeExpr resuelto.
+        let t_rs = match &conn_ty {
+            Type::WsConn(inner) => rust_type_for(inner, self.env)?,
+            _ => unreachable!("conn_ty siempre es WsConn por construcción"),
+        };
+        writeln!(
+            &mut self.output,
+            "        let (__conn, __writer) = __fitz_ws_setup::<{}>(__socket, __endpoint.clone());",
+            t_rs,
+        )
+        .unwrap();
+        self.emit("        let __conn_id = __conn.conn_id;\n");
+        // Llamar al handler. Si hay user, pasarlo además del conn.
+        let _ = conn_name;
+        if let Some((user_name, _user_ty)) = &user_param {
+            let _ = user_name;
+            writeln!(
+                &mut self.output,
+                "        let _ = {}(__conn, __user).await;",
+                name,
+            )
+            .unwrap();
+        } else {
+            writeln!(&mut self.output, "        let _ = {}(__conn).await;", name)
+                .unwrap();
+        }
+        // Cleanup.
+        self.emit("        __fitz_ws_unregister(&__endpoint, __conn_id);\n");
+        self.emit("        let _ = __writer.await;\n");
+        self.emit("    }).into_response()\n");
+        self.emit("}\n\n");
+
+        // El user handler `<name>` ya se emitió con `gen_top_fn` —
+        // tiene la signature `async fn <name>(conn: __FitzWsConn<T>, ...)`.
+        let _ = conn_ty_rs;
         Ok(())
     }
 
@@ -12777,9 +13139,11 @@ impl<'a> CodegenCtx<'a> {
     /// top-level usados como state) se emiten dentro del `fn main()`
     /// antes del Router — útil para `print(...)` de inicio o setup
     /// auxiliar.
+    #[allow(clippy::too_many_arguments)]
     fn gen_http_main(
         &mut self,
         http_fns: &[&Stmt],
+        ws_fns: &[&Stmt],
         server_config: &Option<ServerConfigArgs>,
         main_stmts: &[&Stmt],
         program: &Program,
@@ -12955,6 +13319,29 @@ impl<'a> CodegenCtx<'a> {
                     )
                     .unwrap();
                 }
+            }
+        }
+        // Fase 9.w.2.c — registrar rutas WS. Cada `@ws("/path")` se
+        // monta como axum GET (el handshake HTTP es GET) que internamente
+        // hace el upgrade.
+        for stmt in ws_fns {
+            let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            for d in decorators {
+                if d.name != "ws" {
+                    continue;
+                }
+                let path_arg = match d.args.first() {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let (path, _q) = parse_http_path(path_arg)?;
+                self.emit_indent();
+                writeln!(
+                    &mut self.output,
+                    "    .route(\"{}\", axum::routing::get(__ws_handler_{}))",
+                    path, name,
+                )
+                .unwrap();
             }
         }
         // Fase 7.5: rutas auto-registradas. Mismo orden que el runtime
@@ -13920,6 +14307,256 @@ fn __json_shape(json: &serde_json::Value) -> &'static str {
         serde_json::Value::Array(_) => "Array",
         serde_json::Value::Object(_) => "Object",
     }
+}
+
+"#;
+
+/// Fase 9.w.2.c — Preludio adicional para WebSockets.
+///
+/// Define:
+///   - Enum `__FitzWsOutMsg` (Text|Close) que viaja por el outbox.
+///   - Global `__FITZ_WS_BROADCASTER` (LazyLock<Arc<Mutex<HashMap>>>)
+///     que mantiene endpoint → list de outbox txs. Paralelo al
+///     `WsBroadcaster` del intérprete (http.rs).
+///   - Global `__FITZ_WS_NEXT_ID` (AtomicU64) para asignar conn_ids.
+///   - Struct `__FitzWsConn<T>` con `recv/send/broadcast/close` async.
+///     `T: __FitzWsMessage` permite que cualquier tipo
+///     serializable a JSON pueda usarse.
+///   - Trait `__FitzWsMessage` + blanket impl sobre cualquier `T:
+///     __ToFitzJson + __FromFitzJson` (lo cual cubre primitivos y
+///     todos los `type` Fitz custom porque ya emitimos esos impls
+///     en `gen_type_http_impls`).
+///   - Helpers `__fitz_ws_register/unregister/broadcast` que el
+///     wrapper de cada `@ws` handler invoca.
+///
+/// Solo se emite cuando `ctx.uses_ws == true`. Sin uses_ws, programas
+/// HTTP regulares no pagan los ~150 LoC extra ni el costo de runtime
+/// del global broadcaster.
+const WS_RUNTIME_PRELUDE: &str = r#"// --- 9.w.2.c: runtime WebSocket (broadcaster + struct + trait) ---
+
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, AtomicBool, Ordering as __FitzOrdering};
+
+/// Outbox message. Lo emiten `send`/`broadcast` desde el handler; lo
+/// drena el writer task del conn y lo empuja al sink WebSocket.
+#[derive(Clone, Debug)]
+enum __FitzWsOutMsg {
+    Text(String),
+    Close,
+}
+
+/// Tipo del map interno del broadcaster. Por endpoint, una lista de
+/// `(conn_id, outbox_tx)`. Cleanup lazy: retain elimina txs cerrados
+/// al broadcast.
+type __FitzWsConnList = Vec<(u64, tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>)>;
+
+static __FITZ_WS_BROADCASTER: OnceLock<
+    std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, __FitzWsConnList>>>,
+> = OnceLock::new();
+
+fn __fitz_ws_broadcaster() -> &'static std::sync::Arc<
+    std::sync::Mutex<std::collections::HashMap<String, __FitzWsConnList>>,
+> {
+    __FITZ_WS_BROADCASTER.get_or_init(|| {
+        std::sync::Arc::new(std::sync::Mutex::new(std::collections::HashMap::new()))
+    })
+}
+
+static __FITZ_WS_NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+fn __fitz_ws_register(
+    endpoint: String,
+    tx: tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>,
+) -> u64 {
+    let conn_id = __FITZ_WS_NEXT_ID.fetch_add(1, __FitzOrdering::Relaxed);
+    let b = __fitz_ws_broadcaster();
+    let mut conns = b.lock().unwrap();
+    conns.entry(endpoint).or_default().push((conn_id, tx));
+    conn_id
+}
+
+fn __fitz_ws_unregister(endpoint: &str, conn_id: u64) {
+    let b = __fitz_ws_broadcaster();
+    let mut conns = b.lock().unwrap();
+    if let Some(list) = conns.get_mut(endpoint) {
+        list.retain(|(id, _)| *id != conn_id);
+        if list.is_empty() {
+            conns.remove(endpoint);
+        }
+    }
+}
+
+fn __fitz_ws_broadcast_payload(endpoint: &str, payload: String) {
+    let b = __fitz_ws_broadcaster();
+    let mut conns = b.lock().unwrap();
+    if let Some(list) = conns.get_mut(endpoint) {
+        list.retain(|(_, tx)| tx.send(__FitzWsOutMsg::Text(payload.clone())).is_ok());
+        if list.is_empty() {
+            conns.remove(endpoint);
+        }
+    }
+}
+
+/// Trait que cualquier `T` debe satisfacer para viajar por un
+/// `WsConn<T>`. Blanket impl sobre `__ToFitzJson + __FromFitzJson`
+/// (que ya emitimos para todos los `type` Fitz custom + primitivos)
+/// asegura que el usuario no tiene que escribir impls manuales.
+trait __FitzWsMessage: Sized {
+    fn __ws_to_payload(&self) -> Result<String, String>;
+    fn __ws_from_payload(payload: &str) -> Result<Self, String>;
+}
+
+impl<T> __FitzWsMessage for T
+where
+    T: __ToFitzJson + __FromFitzJson,
+{
+    fn __ws_to_payload(&self) -> Result<String, String> {
+        serde_json::to_string(&self.__to_fitz_json()).map_err(|e| e.to_string())
+    }
+    fn __ws_from_payload(payload: &str) -> Result<Self, String> {
+        let v: serde_json::Value =
+            serde_json::from_str(payload).map_err(|e| e.to_string())?;
+        Self::__from_fitz_json(&v)
+    }
+}
+
+/// WebSocket conn tipado. El runtime construye uno por upgrade y lo
+/// pasa al handler como argumento `conn: WsConn<T>`. Métodos espejo
+/// del intérprete (9.w.2.b): `recv/send/broadcast/close`.
+struct __FitzWsConn<T: __FitzWsMessage> {
+    endpoint: String,
+    conn_id: u64,
+    rx: std::sync::Arc<
+        tokio::sync::Mutex<
+            futures_util::stream::SplitStream<axum::extract::ws::WebSocket>,
+        >,
+    >,
+    outbox_tx: tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>,
+    closed: std::sync::Arc<AtomicBool>,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+// Clone manual sin bound `T: Clone`: el conn solo carga Arcs/atomics/
+// strings/ids, todos clone-ables independientemente de T. PhantomData<T>
+// clona libremente sin tocar T. Esto permite que el codegen Fitz haga
+// `let x = conn.clone()` natural cuando el handler usa `conn` varias
+// veces (cada uso necesita un clone porque needs_clone() devuelve true
+// para tipos opacos).
+impl<T: __FitzWsMessage> Clone for __FitzWsConn<T> {
+    fn clone(&self) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+            conn_id: self.conn_id,
+            rx: std::sync::Arc::clone(&self.rx),
+            outbox_tx: self.outbox_tx.clone(),
+            closed: std::sync::Arc::clone(&self.closed),
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: __FitzWsMessage> __FitzWsConn<T> {
+    /// Lee el próximo frame text y lo deserializa a T. `Err` para
+    /// conn cerrada, frame binario, o JSON inválido.
+    async fn recv(&self) -> Result<T, String> {
+        use futures_util::StreamExt;
+        if self.closed.load(__FitzOrdering::Relaxed) {
+            return Err("WsConn cerrada".to_string());
+        }
+        loop {
+            let next = {
+                let mut g = self.rx.lock().await;
+                g.next().await
+            };
+            match next {
+                Some(Ok(axum::extract::ws::Message::Text(t))) => {
+                    return T::__ws_from_payload(t.as_str())
+                        .map_err(|e| format!("WsConn.recv(): {}", e));
+                }
+                Some(Ok(axum::extract::ws::Message::Binary(_))) => {
+                    return Err("WsConn.recv(): frame binario no soportado en MVP".to_string());
+                }
+                Some(Ok(axum::extract::ws::Message::Ping(_)))
+                | Some(Ok(axum::extract::ws::Message::Pong(_))) => continue,
+                Some(Ok(axum::extract::ws::Message::Close(_))) | None => {
+                    self.closed.store(true, __FitzOrdering::Relaxed);
+                    return Err("WsConn cerrada por el peer".to_string());
+                }
+                Some(Err(e)) => return Err(format!("WsConn.recv(): {}", e)),
+            }
+        }
+    }
+
+    async fn send(&self, msg: T) -> Result<(), String> {
+        if self.closed.load(__FitzOrdering::Relaxed) {
+            return Err("WsConn cerrada".to_string());
+        }
+        let payload = msg.__ws_to_payload()?;
+        self.outbox_tx
+            .send(__FitzWsOutMsg::Text(payload))
+            .map_err(|_| {
+                self.closed.store(true, __FitzOrdering::Relaxed);
+                "WsConn.send(): outbox cerrado (conn caída)".to_string()
+            })
+    }
+
+    async fn broadcast(&self, msg: T) -> Result<(), String> {
+        let payload = msg.__ws_to_payload()?;
+        __fitz_ws_broadcast_payload(&self.endpoint, payload);
+        Ok(())
+    }
+
+    fn close(&self) {
+        if self.closed.load(__FitzOrdering::Relaxed) {
+            return;
+        }
+        let _ = self.outbox_tx.send(__FitzWsOutMsg::Close);
+        self.closed.store(true, __FitzOrdering::Relaxed);
+    }
+}
+
+/// Construye un `__FitzWsConn<T>` a partir del axum WebSocket + el
+/// endpoint, y lanza el writer task. El handler recibe el conn como
+/// `&__FitzWsConn<T>` (por ref para evitar moves).
+fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
+    socket: axum::extract::ws::WebSocket,
+    endpoint: String,
+) -> (__FitzWsConn<T>, tokio::task::JoinHandle<()>) {
+    use futures_util::{SinkExt, StreamExt};
+    let (mut sink, stream) = socket.split();
+    let (outbox_tx, mut outbox_rx) = tokio::sync::mpsc::unbounded_channel();
+    let conn_id = __fitz_ws_register(endpoint.clone(), outbox_tx.clone());
+    let closed = std::sync::Arc::new(AtomicBool::new(false));
+    let closed_w = closed.clone();
+    let writer = tokio::spawn(async move {
+        while let Some(m) = outbox_rx.recv().await {
+            match m {
+                __FitzWsOutMsg::Text(t) => {
+                    if sink
+                        .send(axum::extract::ws::Message::Text(t.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                __FitzWsOutMsg::Close => {
+                    let _ = sink.close().await;
+                    break;
+                }
+            }
+        }
+        closed_w.store(true, __FitzOrdering::Relaxed);
+    });
+    let conn = __FitzWsConn {
+        endpoint,
+        conn_id,
+        rx: std::sync::Arc::new(tokio::sync::Mutex::new(stream)),
+        outbox_tx,
+        closed,
+        _phantom: std::marker::PhantomData,
+    };
+    (conn, writer)
 }
 
 "#;
@@ -15012,6 +15649,15 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
                 inner_rs
             ))
         }
+        // Fase 9.w.2.c — `WsConn<T>` Fitz → `__FitzWsConn<T>` Rust.
+        // El struct se emite en `WS_RUNTIME_PRELUDE` cuando
+        // `uses_ws = true`. El handler recibe `__FitzWsConn<T>` por
+        // valor (move), pero como solo aparece como param de un
+        // handler `@ws`, nunca cruza el sitio donde haría falta clone.
+        Type::WsConn(inner) => {
+            let inner_rs = rust_type_for(inner, env)?;
+            Ok(format!("__FitzWsConn<{}>", inner_rs))
+        }
         // Tuples (mini-tanda T) → Rust tuple type nativo.
         // `()` (vacía) → `()` (unit). `(T,)` (un slot) → `(T,)`.
         Type::Tuple(items) => {
@@ -15761,7 +16407,7 @@ mod tests {
     fn cargo_toml_async_sin_http_incluye_tokio_time() {
         // Programa CLI con async → Cargo.toml mínimo + tokio con
         // feature `time` (sin axum).
-        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/true, /*uses_python=*/false, /*uses_auth=*/false);
+        let toml = cargo_toml_for("foo", false, true, false, false, false);
         assert!(toml.contains("tokio"), "esperaba tokio en deps");
         assert!(toml.contains("\"time\""), "esperaba feature `time`");
         assert!(!toml.contains("axum"), "no debería incluir axum");
@@ -15769,7 +16415,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_async_con_http_incluye_tokio_time_y_axum() {
-        let toml = cargo_toml_for("foo", /*has_http=*/true, /*uses_async=*/true, /*uses_python=*/false, /*uses_auth=*/false);
+        let toml = cargo_toml_for("foo", true, true, false, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("\"time\""));
         assert!(toml.contains("\"macros\""));
@@ -15777,7 +16423,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_async_sin_http_es_minimal() {
-        let toml = cargo_toml_for("foo", false, false, /*uses_python=*/false, /*uses_auth=*/false);
+        let toml = cargo_toml_for("foo", false, false, false, false, false);
         assert!(!toml.contains("[dependencies]"));
         assert!(!toml.contains("tokio"));
     }
@@ -15790,7 +16436,7 @@ mod tests {
     fn cargo_toml_con_python_incluye_pyo3() {
         // Programa CLI con `from python import` → Cargo.toml suma pyo3
         // con `abi3-py310` + `auto-initialize`.
-        let toml = cargo_toml_for("foo", /*has_http=*/false, /*uses_async=*/false, /*uses_python=*/true, /*uses_auth=*/false);
+        let toml = cargo_toml_for("foo", false, false, true, false, false);
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
         assert!(toml.contains("\"abi3-py310\""), "esperaba feature abi3-py310");
@@ -15804,7 +16450,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_python_y_http_incluyen_ambos() {
-        let toml = cargo_toml_for("foo", true, false, true, false);
+        let toml = cargo_toml_for("foo", true, false, true, false, false);
         assert!(toml.contains("axum"));
         assert!(toml.contains("pyo3"));
         assert!(toml.contains("tokio"));
@@ -15812,7 +16458,7 @@ mod tests {
 
     #[test]
     fn cargo_toml_sin_python_no_incluye_pyo3() {
-        let toml = cargo_toml_for("foo", true, false, false, false);
+        let toml = cargo_toml_for("foo", true, false, false, false, false);
         assert!(toml.contains("axum"));
         assert!(!toml.contains("pyo3"));
     }
