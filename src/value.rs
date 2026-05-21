@@ -83,6 +83,141 @@ impl std::fmt::Debug for NativeAsyncFn {
 /// (F17.4).
 pub struct FutureCell(pub Arc<Mutex<Option<FitzFuture>>>);
 
+/// Fase 9.w.2 — Handle opaco a una conexión WebSocket abierta. Lo
+/// construye el runtime HTTP tras el upgrade HTTP→WS y se inyecta al
+/// handler `@ws("/path")` como `Value::WsConn(Arc<WsConnHandle>)`.
+///
+/// Diseño:
+///   - `rx`: read half del WebSocket (axum SplitStream). `recv()` lo
+///     locka, awaitea el próximo frame, parsea contra T.
+///   - `outbox_tx`: un mpsc channel del conn que un "writer task"
+///     drena → empuja al sink del socket. `send(msg)` y
+///     `broadcast(msg)` empujan al outbox sin contender por el sink.
+///   - `broadcaster`: shared handle al registry per-endpoint. Permite
+///     que `broadcast(msg)` itere los outboxes de TODOS los conns
+///     vivos del endpoint (incluyendo el sender — convención
+///     Socket.IO/Phoenix).
+///   - `endpoint`: path del decorator `@ws("/x")`. Scope del broadcast.
+///   - `conn_id`: id único del conn dentro del broadcaster, para
+///     unregister al cerrar.
+///   - `closed`: flag atomic que `close()` setea. Métodos chequean
+///     antes de cualquier operación para fail-fast con `Err` claro.
+///
+/// El tipo concreto vive en `http.rs` para evitar leak de tipos
+/// axum/tokio-tungstenite a `value.rs`. Acá lo declaramos como `dyn`
+/// opaco con los métodos mínimos que el evaluator/codegen necesitan
+/// dispatcheable.
+///
+/// Solo existe en runtime — Display imprime `<ws-conn>`, type_name
+/// `WsConn`, JSON serialization rechaza (la conn no es marshalleable
+/// a JSON; el `T` que ella transporta sí lo es individualmente).
+pub struct WsConnHandle {
+    /// Path del endpoint (e.g. `"/chat"`).
+    pub endpoint: String,
+    /// Id único del conn dentro del broadcaster. Único hasta restart
+    /// del server. AtomicU64 garantiza no-colisión bajo concurrencia.
+    pub conn_id: u64,
+    /// Read half del WebSocket. `recv()` lo locka mientras espera el
+    /// próximo frame; durante ese tiempo `send`/`broadcast` siguen
+    /// libres (locks separados).
+    ///
+    /// Usamos `tokio::sync::Mutex` (no `parking_lot::Mutex`) porque
+    /// `recv()` necesita sostener el lock a través de un `.await`
+    /// — solo `tokio::sync::Mutex` garantiza `MutexGuard: Send` para
+    /// uso en futures `Send`. El resto del codebase usa parking_lot
+    /// para locks sync, pero acá el patrón es async-aware.
+    pub rx: Arc<tokio::sync::Mutex<WsReadStream>>,
+    /// Outbox del conn. `send(msg)` y los `broadcast(msg)` de OTROS
+    /// conns escriben acá; un writer task drena → empuja al sink del
+    /// socket. Unbounded para no bloquear el handler.
+    pub outbox_tx: tokio::sync::mpsc::UnboundedSender<WsOutMessage>,
+    /// Flag atomic — `true` cuando el conn se cerró (handler retornó,
+    /// `close()` invocado, o el writer task detectó el sink cerrado).
+    /// Los métodos del conn lo chequean al entrar para fail-fast.
+    pub closed: Arc<std::sync::atomic::AtomicBool>,
+    /// Handle al broadcaster compartido (per `HttpRegistry`). Permite
+    /// que `broadcast(msg)` busque los outboxes del endpoint sin
+    /// pasar por `HttpRegistry`.
+    pub broadcaster: Arc<dyn WsBroadcasterTrait + Send + Sync>,
+    /// Fase 9.w.2 — TypeExpr del T en `WsConn<T>`. `recv()` lo usa
+    /// para coercer `Map` recibidos a `Instance` cuando T es nominal
+    /// (paralelo a la coerción 8.4.3 sobre `Stmt::Assign`). `None`
+    /// para conns construidos en tests sin contexto de tipo.
+    pub msg_type: Option<crate::ast::TypeExpr>,
+    /// Fase 9.w.2 — EnvRef del scope donde se declaró el handler.
+    /// Necesario para resolver `msg_type` cuando `T` es nominal (el
+    /// `Value::Type` del nominal vive en el env). `Arc<Mutex<>>`
+    /// — clon barato.
+    pub env: EnvRef,
+}
+
+impl std::fmt::Debug for WsConnHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        f.debug_struct("WsConnHandle")
+            .field("endpoint", &self.endpoint)
+            .field("conn_id", &self.conn_id)
+            .field(
+                "closed",
+                &self.closed.load(std::sync::atomic::Ordering::Relaxed),
+            )
+            .finish()
+    }
+}
+
+/// Alias para el read half — typedef interno para no leakear el tipo
+/// concreto `axum::extract::ws::WebSocket`'s SplitStream a value.rs.
+/// El struct concreto vive en `http.rs` y se castea a `Box<dyn>` o
+/// se almacena como tipo concreto vía generics en el handler.
+///
+/// Decisión MVP: usamos un trait object para abstraerlo. El read
+/// half concreto se castea al impl `WsReadStreamImpl` definido en
+/// http.rs. Esto evita que `value.rs` dependa de `axum` directo.
+pub type WsReadStream = Box<dyn WsReadStreamTrait + Send + Unpin>;
+
+/// Trait del read half — abstracción para no leakear axum tipos.
+/// Define solo lo que necesita `recv()`: leer un frame text o
+/// detectar close.
+pub trait WsReadStreamTrait {
+    /// Lee el próximo frame. Devuelve:
+    ///   - `Ok(Some(text))` — text frame válido.
+    ///   - `Ok(None)` — close frame; el conn cerró ordenadamente.
+    ///   - `Err(msg)` — error de transporte o frame inesperado.
+    ///
+    /// Frames binarios / ping / pong: el impl los maneja internamente
+    /// (ping → pong automático; binary → error; close → Ok(None)).
+    fn next_text_frame<'a>(
+        &'a mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + 'a>,
+    >;
+}
+
+/// Mensaje "outbox" — texto a enviar o señal de cierre. El writer
+/// task del conn lo consume.
+#[derive(Debug, Clone)]
+pub enum WsOutMessage {
+    /// Frame text con `payload` (JSON serialization del T).
+    Text(String),
+    /// Pedido de cierre. El writer task lo procesa y termina.
+    Close,
+}
+
+/// Trait del broadcaster — abstracción que `WsConnHandle.broadcaster`
+/// implementa. Para evitar que `value.rs` dependa de `http.rs` (que
+/// es donde vive el broadcaster concreto), exponemos solo el método
+/// `broadcast(endpoint, msg)`.
+///
+/// El runtime construye un broadcaster compartido por `HttpRegistry`
+/// (`Arc<WsBroadcaster>`), lo registra en cada `WsConnHandle`, y
+/// `broadcast(msg)` del lado del usuario delega acá.
+pub trait WsBroadcasterTrait {
+    /// Envía `payload` (text frame) al outbox de TODOS los conns
+    /// vivos en `endpoint`, incluyendo el conn que invocó (convención
+    /// Socket.IO/Phoenix). Conns con outbox cerrado se ignoran
+    /// silenciosamente (cleanup lazy).
+    fn broadcast(&self, endpoint: &str, payload: String);
+}
+
 impl Clone for FutureCell {
     fn clone(&self) -> Self {
         FutureCell(Arc::clone(&self.0))
@@ -380,6 +515,18 @@ pub enum Value {
     #[cfg(feature = "python")]
     #[allow(dead_code)]
     PyObject(PyObjectHandle),
+
+    /// Fase 9.w.2 — Conexión WebSocket abierta. El runtime HTTP la
+    /// construye tras el upgrade HTTP→WS y la inyecta como argumento
+    /// del handler `@ws("/path")`. Opaco para el usuario: solo se
+    /// accede vía los 4 métodos paramétricos del checker (`recv`/
+    /// `send`/`broadcast`/`close`).
+    ///
+    /// Igualdad por identidad del `Arc` — dos referencias al mismo
+    /// conn comparten state; conns distintos son siempre distintos.
+    /// No serializable a JSON (ver `value_to_json` en `http.rs` —
+    /// rechaza con mensaje claro). Display: `<ws-conn>`.
+    WsConn(Arc<WsConnHandle>),
 }
 
 /// Variante de `Value::Result`. Usa `Box<Value>` para evitar enum
@@ -446,6 +593,7 @@ impl Value {
             Value::Module { .. } => "Module",
             Value::CorsConfig(_) => "CorsConfig",
             Value::Future(_) => "Future",
+            Value::WsConn(_) => "WsConn",
             #[cfg(feature = "python")]
             Value::PyObject(_) => "PyObject",
         }
@@ -577,6 +725,7 @@ impl std::fmt::Display for Value {
             },
             Value::CorsConfig(_) => write!(f, "<cors-config>"),
             Value::Future(_) => write!(f, "<future>"),
+            Value::WsConn(_) => write!(f, "<ws-conn>"),
             Value::NativeFn(_) => write!(f, "<native function>"),
             #[cfg(feature = "python")]
             Value::PyObject(_) => write!(f, "<python object>"),
@@ -667,6 +816,11 @@ impl PartialEq for Value {
             (Value::PyObject(a), Value::PyObject(b)) => {
                 a.0.as_ptr() == b.0.as_ptr()
             }
+            // WsConn — igualdad por identidad del Arc. Dos handles al
+            // mismo conn comparten state; conns distintos jamás son
+            // iguales estructuralmente (sockets distintos, broadcaster
+            // entries distintas).
+            (Value::WsConn(a), Value::WsConn(b)) => Arc::ptr_eq(a, b),
             // Funciones no se comparan por valor — siempre desiguales.
             _ => false,
         }

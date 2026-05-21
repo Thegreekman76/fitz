@@ -358,6 +358,25 @@ fn process_decorator(
         );
     }
 
+    // Fase 9.w.2 — `@ws("/path")`: registra una ruta WebSocket. El
+    // handshake inicial es GET HTTP estándar, pero el dispatch en
+    // `build_router` se bifurca por `is_ws` y termina con
+    // `WebSocketUpgrade::on_upgrade` en lugar del HTTP dispatcher.
+    if deco.name == "ws" {
+        return register_ws_route(
+            deco,
+            fn_name,
+            params,
+            return_type,
+            headers,
+            middlewares,
+            cors_config,
+            auth_spec,
+            handler,
+            env,
+        );
+    }
+
     // `@server(port?, host?)`: configura el server. La fn que decora
     // queda en el env como cualquier otra (el patrón típico es
     // ponerlo arriba de `fn main()`).
@@ -1245,6 +1264,184 @@ fn register_http_route(
         cors: cors_config.clone(),
         auth: auth_spec,
         auth_user_param_name,
+        is_ws: false,
+        ws_conn_param_name: None,
+        ws_msg_type: None,
+    });
+
+    Ok(())
+}
+
+/// Fase 9.w.2 — Registra un handler `@ws("/path")` como WebSocket
+/// route en el `HttpRegistry`. Paralelo a `register_http_route` pero
+/// con menos validaciones del path (no hay path params dinámicos en
+/// WS — el path es exact match), y con detección del param
+/// `WsConn<T>` para inyectarlo en runtime.
+///
+/// El checker (9.w.2.a `check_ws_handler`) ya validó:
+///   - Decorator con 1 arg Str sin kwargs.
+///   - Handler `async fn`.
+///   - Exactamente 1 param `WsConn<T>` con T concreto.
+///   - +1 param User si hay `@authenticated`/`@admin`.
+///
+/// Acá replicamos chequeos básicos defensivamente (el evaluator
+/// puede correr sin checker si el usuario forzó `--no-typecheck`).
+#[allow(clippy::too_many_arguments)]
+fn register_ws_route(
+    deco: &Decorator,
+    fn_name: &str,
+    params: &[Param],
+    return_type: &Option<TypeExpr>,
+    headers: &[HeaderSpec],
+    middlewares: &[MiddlewareSpec],
+    cors_config: &Option<std::sync::Arc<crate::http::CorsConfig>>,
+    auth_spec: crate::http::AuthSpec,
+    handler: &Value,
+    _env: &EnvRef,
+) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
+    };
+
+    // El decorator `@ws` no admite kwargs.
+    if let Some((key, _)) = deco.kwargs.first() {
+        return Err(err(format!(
+            "@ws sobre fn '{}': los argumentos por nombre (recibió '{}=...') \
+             no están soportados.",
+            fn_name, key,
+        )));
+    }
+    // Espera 1 arg: el path.
+    if deco.args.len() != 1 {
+        return Err(err(format!(
+            "@ws(...) sobre fn '{}' espera un único argumento (la ruta), \
+             recibió {}",
+            fn_name,
+            deco.args.len(),
+        )));
+    }
+    let path_str = match &deco.args[0] {
+        Expr::Str(s, _) => s.clone(),
+        _ => {
+            return Err(err(format!(
+                "@ws sobre fn '{}': el argumento debe ser un Str literal (path)",
+                fn_name,
+            )));
+        }
+    };
+
+    if !has_active_registry() {
+        return Err(err(format!(
+            "@ws sobre fn '{}': no hay servidor HTTP activo en este contexto. \
+             Los decoradores HTTP solo funcionan ejecutando el archivo con \
+             `fitz run`.",
+            fn_name,
+        )));
+    }
+
+    // Auth: si declara @authenticated/@admin, el provider debe estar
+    // registrado (mismo gate que HTTP routes).
+    if auth_spec != crate::http::AuthSpec::None && !crate::http::has_auth_provider() {
+        return Err(err(format!(
+            "@ws sobre fn '{}': la ruta declara `@authenticated`/`@admin` pero \
+             no hay `@auth_provider` registrado antes en el archivo. Movelo \
+             arriba.",
+            fn_name,
+        )));
+    }
+
+    // Identificar el param `WsConn<T>` por shape del TypeExpr. El
+    // checker (9.w.2.a) ya validó que exista exactamente uno; acá
+    // lo localizamos por nombre para guardarlo en `RouteSpec`.
+    let mut ws_conn_param_name: Option<String> = None;
+    let mut ws_msg_type: Option<TypeExpr> = None;
+    for p in params {
+        if let Some(TypeExpr::Generic { name, args }) = &p.type_ {
+            if name == "WsConn" && args.len() == 1 {
+                if ws_conn_param_name.is_some() {
+                    return Err(err(format!(
+                        "@ws sobre fn '{}': el handler tiene más de un param `WsConn<T>` (debe ser exactamente uno)",
+                        fn_name,
+                    )));
+                }
+                ws_conn_param_name = Some(p.name.clone());
+                ws_msg_type = Some(args[0].clone());
+            }
+        }
+    }
+    if ws_conn_param_name.is_none() {
+        return Err(err(format!(
+            "@ws sobre fn '{}': el handler debe declarar un param `conn: WsConn<T>` (con T concreto). Sintaxis: `async fn {}(conn: WsConn<ChatMsg>) {{ ... }}`.",
+            fn_name, fn_name,
+        )));
+    }
+
+    // Si hay auth, identificar el user param por regla "leftover"
+    // (paralelo a register_http_route). En WS NO hay path/query/body
+    // params, solo headers + WsConn + (optional) user. Así que el
+    // user es el "leftover" entre los params no-WsConn-no-header.
+    let auth_user_param_name: Option<String> = if auth_spec
+        != crate::http::AuthSpec::None
+    {
+        let candidates: Vec<&Param> = params
+            .iter()
+            .filter(|p| {
+                Some(&p.name) != ws_conn_param_name.as_ref()
+                    && !headers.iter().any(|h| h.param_name == p.name)
+            })
+            .collect();
+        if candidates.is_empty() {
+            return Err(err(format!(
+                "@ws + @authenticated sobre fn '{}': falta param del tipo `User` (inyectado tras autenticación exitosa).",
+                fn_name,
+            )));
+        }
+        if candidates.len() > 1 {
+            return Err(err(format!(
+                "@ws + @authenticated sobre fn '{}': hay {} params extra (sólo se admite 1 user param).",
+                fn_name,
+                candidates.len(),
+            )));
+        }
+        Some(candidates[0].name.clone())
+    } else {
+        None
+    };
+
+    let param_types: Vec<(String, Option<String>, bool)> = params
+        .iter()
+        .map(|p| {
+            (
+                p.name.clone(),
+                p.type_.as_ref().map(|t| t.head_name().to_string()),
+                p.type_.as_ref().map(|t| t.is_nullable()).unwrap_or(false),
+            )
+        })
+        .collect();
+    let param_type_exprs: Vec<(String, Option<TypeExpr>)> = params
+        .iter()
+        .map(|p| (p.name.clone(), p.type_.clone()))
+        .collect();
+
+    push_route(RouteSpec {
+        method: HttpMethod::Get, // upgrade handshake es GET HTTP
+        path: path_str,
+        path_params: vec![],
+        query_params: vec![],
+        handler: handler.clone(),
+        handler_name: fn_name.to_string(),
+        param_types,
+        body_param: None,
+        headers: headers.to_vec(),
+        param_type_exprs,
+        return_type_expr: return_type.clone(),
+        middlewares: middlewares.to_vec(),
+        cors: cors_config.clone(),
+        auth: auth_spec,
+        auth_user_param_name,
+        is_ws: true,
+        ws_conn_param_name,
+        ws_msg_type,
     });
 
     Ok(())
@@ -1956,10 +2153,14 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
             // si aparecen sin un `@get`/`@post`/`@put`/`@delete`, error
             // claro (paralelo a `@header`/`@middleware`).
             let auth_spec = collect_route_auth(decorators, name)?;
+            // Fase 9.w.2 — `@ws` también cuenta como handler HTTP para
+            // el chequeo de `@authenticated`/`@admin` apilados (auth
+            // pre-upgrade es analógo al HTTP wrapper).
             if auth_spec != crate::http::AuthSpec::None
-                && !decorators
-                    .iter()
-                    .any(|d| HttpMethod::from_decorator_name(&d.name).is_some())
+                && !decorators.iter().any(|d| {
+                    HttpMethod::from_decorator_name(&d.name).is_some()
+                        || d.name == "ws"
+                })
             {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
@@ -1967,7 +2168,7 @@ async fn eval_stmt(stmt: &Stmt, env: EnvRef) -> EvalResult<Value> {
                     0,
                     format!(
                         "@authenticated/@admin sobre fn '{}': solo aplica sobre \
-                         handlers HTTP (apilar junto a `@get`/`@post`/`@put`/`@delete`).",
+                         handlers HTTP (apilar junto a `@get`/`@post`/`@put`/`@delete`/`@ws`).",
                         name,
                     ),
                 )));
@@ -4152,6 +4353,25 @@ async fn dispatch_method(
                 })?;
             invoke_value(attr, args, method, span).await
         }
+        // Fase 9.w.2 — WsConn<T> métodos. Los 4 paramétricos:
+        //   `recv() -> Result<T>` — bloquea hasta próximo frame.
+        //   `send(msg: T) -> Result<Null>` — envía al outbox del conn.
+        //   `broadcast(msg: T) -> Result<Null>` — al outbox de todos
+        //     los conns del endpoint (incluyendo el caller).
+        //   `close() -> Null` — cierra la conn (idempotente).
+        (Value::WsConn(_), "recv") => ws_conn_recv(receiver, args, span).await,
+        (Value::WsConn(_), "send") => ws_conn_send(receiver, args, span).await,
+        (Value::WsConn(_), "broadcast") => ws_conn_broadcast(receiver, args, span).await,
+        (Value::WsConn(_), "close") => ws_conn_close(receiver, args, span),
+        (Value::WsConn(_), other) => Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            span.line,
+            span.column,
+            format!(
+                "`WsConn` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
+                other,
+            ),
+        ))),
         _ => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             span.line, span.column,
@@ -4162,6 +4382,232 @@ async fn dispatch_method(
             ),
         ))),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Fase 9.w.2 — WsConn<T> métodos del runtime
+// ---------------------------------------------------------------------------
+//
+// Los 4 métodos paramétricos del checker (9.w.2.a) dispatcheados sobre
+// `Value::WsConn(Arc<WsConnHandle>)`. Marshaling JSON automático del
+// T: `recv()` parsea el frame text como JSON y lo convierte a `Value`;
+// `send`/`broadcast` serializan el `Value` a JSON y mandan text frame.
+// El error de transporte va por el `Result::Err` de Fitz.
+
+async fn ws_conn_recv(
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<Value> {
+    if !args.is_empty() {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 0, found: args.len() },
+            span.line, span.column,
+            format!("`WsConn.recv()` no acepta argumentos, recibió {}", args.len()),
+        )));
+    }
+    let handle = match receiver {
+        Value::WsConn(h) => h,
+        _ => unreachable!("dispatch_method ya verificó WsConn"),
+    };
+    if handle.closed.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "WsConn cerrada".to_string(),
+        )))));
+    }
+    // Loop locking: cada iteración locka el rx, awaita el próximo
+    // frame, suelta el lock al volver. Diseñado para que send/broadcast
+    // concurrentes no se bloqueen (sink half tiene su propio Mutex
+    // adentro del writer task).
+    let rx = handle.rx.clone();
+    // tokio::sync::Mutex `.lock().await` y `guard: Send` — el
+    // lock se sostiene a través del frame .await siguiente sin
+    // perder Send-ness del future contenedor. Solo este task tiene
+    // acceso legítimo al rx (el handler Fitz es secuencial sobre
+    // recv()).
+    let next_frame = {
+        let mut guard = rx.lock().await;
+        guard.next_text_frame().await
+    };
+    match next_frame {
+        Ok(Some(text)) => {
+            // Parsear como JSON y convertir a Value. Para tipos T
+            // nominales, aplicamos la coerción `Map → Instance`
+            // paralela a 8.4.3 (anotaciones runtime). Esto hace que
+            // `WsConn<ChatMsg>` reciba un `Instance` directo en
+            // `Ok(msg)`, permitiendo `msg.user` etc.
+            match serde_json::from_str::<serde_json::Value>(&text) {
+                Ok(j) => {
+                    let raw = crate::http::json_to_value(&j);
+                    let coerced = match &handle.msg_type {
+                        Some(annot) => {
+                            match coerce_to_annotation(
+                                annot,
+                                raw,
+                                handle.env.clone(),
+                            )
+                            .await
+                            {
+                                Ok(v) => v,
+                                Err(EvalSignal::Error(e)) => {
+                                    return Ok(Value::Result(
+                                        ResultVariant::Err(Box::new(
+                                            Value::Str(format!(
+                                                "WsConn.recv(): coerción al tipo `{}` falló: {}",
+                                                annot.display_name(),
+                                                e.message,
+                                            )),
+                                        )),
+                                    ));
+                                }
+                                Err(other) => return Err(other),
+                            }
+                        }
+                        None => raw,
+                    };
+                    Ok(Value::Result(ResultVariant::Ok(Box::new(coerced))))
+                }
+                Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(
+                    Value::Str(format!(
+                        "WsConn.recv(): frame JSON inválido: {}",
+                        e
+                    )),
+                )))),
+            }
+        }
+        Ok(None) => {
+            handle
+                .closed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                "WsConn cerrada por el peer".to_string(),
+            )))))
+        }
+        Err(msg) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("WsConn.recv(): {}", msg),
+        ))))),
+    }
+}
+
+async fn ws_conn_send(
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<Value> {
+    if args.len() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            span.line, span.column,
+            format!("`WsConn.send(msg)` espera 1 argumento, recibió {}", args.len()),
+        )));
+    }
+    let handle = match receiver {
+        Value::WsConn(h) => h,
+        _ => unreachable!(),
+    };
+    if handle.closed.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            "WsConn cerrada".to_string(),
+        )))));
+    }
+    let payload = match crate::http::value_to_json(&args[0]) {
+        Ok(j) => match serde_json::to_string(&j) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(Value::Result(ResultVariant::Err(Box::new(
+                    Value::Str(format!(
+                        "WsConn.send(): no serializable: {}",
+                        e
+                    )),
+                ))));
+            }
+        },
+        Err(msg) => {
+            return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                format!("WsConn.send(): {}", msg),
+            )))));
+        }
+    };
+    match handle.outbox_tx.send(crate::value::WsOutMessage::Text(payload)) {
+        Ok(()) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null)))),
+        Err(_) => {
+            handle
+                .closed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+            Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                "WsConn.send(): outbox cerrado (conn caída)".to_string(),
+            )))))
+        }
+    }
+}
+
+async fn ws_conn_broadcast(
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<Value> {
+    if args.len() != 1 {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
+            span.line, span.column,
+            format!("`WsConn.broadcast(msg)` espera 1 argumento, recibió {}", args.len()),
+        )));
+    }
+    let handle = match receiver {
+        Value::WsConn(h) => h,
+        _ => unreachable!(),
+    };
+    // broadcast NO requiere que el sender esté vivo — el otro lado
+    // puede haberlo cerrado pero los demás conns del endpoint siguen
+    // recibiendo. Si el sender está cerrado, igual se intenta el
+    // broadcast (decisión: useful para "despedida" antes de cerrar).
+    let payload = match crate::http::value_to_json(&args[0]) {
+        Ok(j) => match serde_json::to_string(&j) {
+            Ok(s) => s,
+            Err(e) => {
+                return Ok(Value::Result(ResultVariant::Err(Box::new(
+                    Value::Str(format!(
+                        "WsConn.broadcast(): no serializable: {}",
+                        e
+                    )),
+                ))));
+            }
+        },
+        Err(msg) => {
+            return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                format!("WsConn.broadcast(): {}", msg),
+            )))));
+        }
+    };
+    handle.broadcaster.broadcast(&handle.endpoint, payload);
+    Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null))))
+}
+
+fn ws_conn_close(
+    receiver: Value,
+    args: Vec<Value>,
+    span: Span,
+) -> EvalResult<Value> {
+    if !args.is_empty() {
+        return Err(EvalSignal::Error(FitzError::new(
+            ErrorKind::WrongArgCount { expected: 0, found: args.len() },
+            span.line, span.column,
+            format!("`WsConn.close()` no acepta argumentos, recibió {}", args.len()),
+        )));
+    }
+    let handle = match receiver {
+        Value::WsConn(h) => h,
+        _ => unreachable!(),
+    };
+    // Idempotente: si ya estaba cerrada, no-op.
+    if handle.closed.load(std::sync::atomic::Ordering::Relaxed) {
+        return Ok(Value::Null);
+    }
+    let _ = handle.outbox_tx.send(crate::value::WsOutMessage::Close);
+    handle
+        .closed
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    Ok(Value::Null)
 }
 
 // ---------------------------------------------------------------------------

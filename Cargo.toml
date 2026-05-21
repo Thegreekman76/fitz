@@ -188,6 +188,12 @@ lsp = ["dep:tower-lsp"]
 # permite armar fixtures en disco y limpiarlos automáticamente.
 tempfile = "3"
 
+# Fase 9.w.2 — cliente WebSocket para tests E2E del runtime WS.
+# axum trae tokio-tungstenite como dep server-side cuando `feature ws`
+# está activo; acá lo declaramos como dev-dep para usarlo client-side
+# (handshake + send/recv) en los tests integration.
+tokio-tungstenite = "0.29"
+
 # AST-inspection del Rust generado por el codegen (T1 post-5b):
 # parsear el output de `generate_rust` con `syn::parse_file` permite
 # tests estructurales en lugar de string-matching frágil sobre el
