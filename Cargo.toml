@@ -166,6 +166,18 @@ argon2 = { version = "0.5", features = ["std"] }
 # `password_hash::rand_core`).
 rand_core = { version = "0.6", features = ["getrandom"] }
 
+# Fase 9.w.3 — parser de cron expressions para `@cron("expr")`. La crate
+# `cron = "0.12"` soporta 5/6/7 fields (Unix clásico + segundos + año
+# opcionales) y `Schedule::upcoming(Utc)` da un iterator de los próximos
+# disparos. No-opcional: forma parte del core "stack web first-class"
+# del lenguaje. El parsing en compile-time falla con mensaje claro si la
+# expression es inválida — el checker valida solo shape (es Str literal),
+# la sintaxis cron se valida en runtime/codegen al registrar el job.
+# `chrono` viene como dep transitiva — usamos `Utc::now()` para calcular
+# el próximo tick.
+cron = "0.12"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+
 [features]
 # Activa la interop con Python (Fase 8.1+). Opt-in: el binario
 # `fitz` default no lincado a libpython, sin requerir Python en el

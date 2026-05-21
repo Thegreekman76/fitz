@@ -5,8 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    codegen, evaluator, fmt, http, lexer, lint, lockfile, manifest, openapi, parser, testing,
-    types,
+    codegen, cron_jobs, evaluator, fmt, http, lexer, lint, lockfile, manifest, openapi, parser,
+    testing, types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -940,6 +940,17 @@ fn run_file(path: &PathBuf, no_typecheck: bool, dep_registry: manifest::DepRegis
         };
         if let Err(e) = http::serve(registry, program_for_server, addr) {
             eprintln!("Error del servidor HTTP: {}", e);
+            std::process::exit(1);
+        }
+    } else if registry.cron_registry.has_jobs() {
+        // Fase 9.w.3 — cron-only mode: el programa NO tiene rutas
+        // HTTP pero SÍ tiene jobs `@cron`. Arrancamos el scheduler
+        // standalone y bloqueamos hasta SIGINT/Ctrl+C (decisión
+        // confirmada con el autor: vivo bloqueante, modo
+        // systemd-friendly).
+        let cron_registry = registry.cron_registry.clone();
+        if let Err(e) = cron_jobs::run_scheduler_only(cron_registry) {
+            eprintln!("Error del cron scheduler: {}", e);
             std::process::exit(1);
         }
     }

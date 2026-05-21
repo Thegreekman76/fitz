@@ -408,6 +408,25 @@ fn process_decorator(
         return register_auth_provider(deco, fn_name, handler, fn_def_span);
     }
 
+    // Fase 9.w.3 — `@cron("expr")`: registra la fn como cron job en el
+    // CronRegistry adentro del HttpRegistry. El scheduler arranca
+    // cuando levanta `serve()` (junto con axum) o cuando el cron-only
+    // mode toma el control (`run_scheduler_only`). El checker ya validó
+    // shape (arg Str, sin params, return Null/Result, conflictos);
+    // acá validamos sintaxis del cron expression vía la crate `cron`.
+    if deco.name == "cron" {
+        return register_cron_job(deco, fn_name, handler, env, fn_def_span);
+    }
+
+    // Fase 9.w.3 — `@background`: marca la fn como autorizada para
+    // `spawn(...)`. NO requiere registro adicional en runtime — el
+    // checker (9.w.3.a) ya validó. La fn queda definida en el env
+    // como cualquier otra; el callsite `spawn(call)` la invoca via
+    // `tokio::spawn`. Decorator no-op en runtime.
+    if deco.name == "background" {
+        return Ok(());
+    }
+
     // Decorador desconocido. Mensaje listo para guiar al usuario.
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::InvalidSyntax,
@@ -415,7 +434,7 @@ fn process_decorator(
         0,
         format!(
             "decorator '@{}' no implementado (sobre fn '{}'). \
-             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin.",
+             Decorators soportados hoy: @get, @post, @put, @delete, @server, @header, @middleware, @test, @auth_provider, @authenticated, @admin, @ws, @cron, @background.",
             deco.name, fn_name,
         ),
     )))
@@ -476,6 +495,60 @@ fn register_auth_provider(
         )));
     }
     Ok(())
+}
+
+/// Fase 9.w.3 — Procesa el decorator `@cron("expr")` sobre una
+/// `Stmt::FnDef`. El checker (9.w.3.a) ya validó shape (arg Str, sin
+/// params, return Null/Result, conflictos con otros decorators). Acá
+/// validamos la sintaxis del cron expression vía la crate `cron` y
+/// registramos el job en el CronRegistry del registry activo.
+///
+/// Sin registry activo (caso `fitz run` de un script sin contexto
+/// HTTP) → error claro. El caller (`eval_with_base_and_deps`)
+/// instala el registry para CUALQUIER programa con handlers HTTP
+/// o cron jobs; si el programa no tiene ninguno, el registry no se
+/// instala y los decorators de runtime fallan.
+fn register_cron_job(
+    deco: &Decorator,
+    fn_name: &str,
+    handler: &Value,
+    env: &EnvRef,
+    fn_def_span: Span,
+) -> Result<(), EvalSignal> {
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::InvalidSyntax,
+            fn_def_span.line,
+            fn_def_span.column,
+            msg,
+        ))
+    };
+    // Extraer el cron expression — el checker validó que es 1 arg
+    // Str literal. Acá replicamos defensivamente.
+    if deco.args.len() != 1 || !deco.kwargs.is_empty() {
+        return Err(err(format!(
+            "@cron sobre fn '{}': espera exactamente 1 argumento (cron expression Str).",
+            fn_name,
+        )));
+    }
+    let cron_expr = match &deco.args[0] {
+        Expr::Str(s, _) => s.clone(),
+        _ => {
+            return Err(err(format!(
+                "@cron sobre fn '{}': el argumento debe ser un Str literal.",
+                fn_name,
+            )));
+        }
+    };
+    let is_async = matches!(handler, Value::Function { is_async: true, .. });
+    crate::http::register_cron_job(
+        fn_name.to_string(),
+        &cron_expr,
+        handler.clone(),
+        is_async,
+        env.clone(),
+    )
+    .map_err(err)
 }
 
 /// Fase 9.w.1.c — Recolecta la política de auth de un FnDef inspeccionando
@@ -3569,6 +3642,28 @@ async fn eval_call(callee: &Expr, args: &[Expr], env: EnvRef, span: Span) -> Eva
         return dispatch_method_named(receiver, field, named_args, env, span).await;
     }
 
+    // Fase 9.w.3 — dispatch especial para `spawn(fn_call)`. El checker
+    // (9.w.3.a) validó: 1 arg que es `Expr::Call` literal a fn
+    // `@background`. Acá lo que hacemos es:
+    //   1. Resolver el callee del inner call al `Value::Function` real
+    //      en el env (lookup por nombre).
+    //   2. Evaluar los args del inner call.
+    //   3. `tokio::spawn` un task que invoca el handler con esos args.
+    //      Si la fn es async, el invoke devuelve `Value::Future` que
+    //      awaiteamos adentro del task. Si es sync, el invoke devuelve
+    //      el value directo y el task termina inmediatamente.
+    //   4. Wrappear el `JoinHandle` en un `Value::Future` para que el
+    //      caller pueda `.await`-earlo o ignorarlo (fire-and-forget).
+    //
+    // El dispatch dispara solo cuando `spawn` no fue shadowed por una
+    // fn user-defined: chequeamos via `env.lookup` que la binding sea
+    // un Builtin (no Function user-defined).
+    if let Expr::Ident(name, _) = callee {
+        if name == "spawn" && is_spawn_builtin(&env) {
+            return eval_spawn_call(args, env, span).await;
+        }
+    }
+
     // Llamada normal.
     let callee_value = eval_expr(callee, env.clone()).await?;
     // Fp.3 — args con/sin nombre. La resolución de nombres → posiciones
@@ -3863,10 +3958,165 @@ async fn dispatch_method_named(
     }
 }
 
+/// Fase 9.w.3 — stub del builtin `spawn`. Nunca debería ejecutarse:
+/// el dispatch real intercepta en `eval_call` ANTES de invocar el
+/// builtin (necesita capturar el inner call AST sin eager-evaluation).
+/// Si llega acá, hubo un bug en el dispatch o el usuario hizo
+/// algo como `let s = spawn; s(...)` (que no soportamos en MVP).
+fn builtin_spawn_stub(_args: &[Value]) -> FitzResult<Value> {
+    Err(FitzError::new(
+        ErrorKind::InvalidSyntax,
+        0,
+        0,
+        "spawn: solo se puede usar como `spawn(fn_call)` directo, \
+         no como valor first-class (let s = spawn) en este MVP. \
+         El target debe ser una fn declarada con `@background`."
+            .to_string(),
+    ))
+}
+
+/// Fase 9.w.3 — `true` si la binding "spawn" en el env actual es el
+/// Builtin (no fue shadowed por una fn user-defined). El callsite
+/// `spawn(...)` solo activa el dispatch especial cuando este check
+/// retorna `true`.
+fn is_spawn_builtin(env: &EnvRef) -> bool {
+    matches!(
+        env.lock().get("spawn"),
+        Some(Value::Builtin { name: "spawn", .. })
+    )
+}
+
+/// Fase 9.w.3 — implementación del dispatch especial de `spawn(call)`.
+/// Asume que el caller ya validó (vía `is_spawn_builtin`) que `spawn`
+/// no fue shadowed. El checker (9.w.3.a) ya validó que `args[0]` es
+/// `Expr::Call` literal con callee Ident → fn `@background`; replicamos
+/// defensivamente en runtime para mensajes claros si alguien evita el
+/// checker (`fitz run --no-typecheck`).
+///
+/// El task spawneado por `tokio::spawn` ejecuta el invoke real. Si la
+/// fn target es async, el invoke retorna `Value::Future` y el task
+/// awaitea adentro. El JoinHandle se envuelve en un `Value::Future`
+/// para que el caller pueda `.await`-earlo o descartarlo. Descartar
+/// el Future deja la task ejecutándose detached (fire-and-forget) —
+/// idéntico a `tokio::spawn(...)` en Rust sin guardar el JoinHandle.
+async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<Value> {
+    use crate::value::{FutureCell, FitzFuture};
+    use std::sync::Arc;
+    use parking_lot::Mutex;
+
+    let err = |msg: String| {
+        EvalSignal::Error(FitzError::new(
+            ErrorKind::TypeError,
+            span.line,
+            span.column,
+            msg,
+        ))
+    };
+    if args.len() != 1 {
+        return Err(err(format!(
+            "spawn: espera exactamente 1 argumento (un call a fn `@background`), recibió {}.",
+            args.len()
+        )));
+    }
+    // El arg debe ser `Expr::Call` literal — el checker garantiza eso.
+    // NamedArg unwrap por uniformidad con el resto del eval_call path.
+    let (inner_callee, inner_args) = match &args[0] {
+        Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+        Expr::NamedArg { value, .. } => match value.as_ref() {
+            Expr::Call { callee, args, .. } => (callee.as_ref(), args.as_slice()),
+            _ => {
+                return Err(err(
+                    "spawn: el argumento debe ser un call literal a una fn `@background`."
+                        .to_string(),
+                ));
+            }
+        },
+        _ => {
+            return Err(err(
+                "spawn: el argumento debe ser un call literal a una fn `@background`."
+                    .to_string(),
+            ));
+        }
+    };
+    let fn_name = match inner_callee {
+        Expr::Ident(name, _) => name.clone(),
+        _ => {
+            return Err(err(
+                "spawn: el callee del inner call debe ser una fn top-level con `@background`."
+                    .to_string(),
+            ));
+        }
+    };
+    // Resolvemos el `Value::Function` real en el env. Si la fn no
+    // existe → error claro (puede pasar con `fitz run --no-typecheck`).
+    let handler = env.lock().get(&fn_name).ok_or_else(|| {
+        err(format!(
+            "spawn: la fn `{}` no existe en este scope.",
+            fn_name
+        ))
+    })?;
+    // Evaluamos los args del inner call.
+    let mut arg_values: Vec<Value> = Vec::with_capacity(inner_args.len());
+    for a in inner_args {
+        let v = match a {
+            Expr::NamedArg { value, .. } => eval_expr(value, env.clone()).await?,
+            other => eval_expr(other, env.clone()).await?,
+        };
+        arg_values.push(v);
+    }
+    // Spawneamos el invoke en un task tokio. El JoinHandle se envuelve
+    // en `Value::Future` para que el caller pueda awaitearlo.
+    let handler_clone = handler;
+    let fn_name_clone = fn_name.clone();
+    let join_handle = tokio::spawn(async move {
+        match invoke_value(handler_clone, arg_values, &fn_name_clone, Span::ZERO).await {
+            Ok(value) => {
+                // Si la fn target era async, el value es un Future —
+                // lo awaiteamos adentro del task para que la corutina
+                // efectivamente corra.
+                if let Value::Future(cell) = value {
+                    let inner = cell.0.lock().take();
+                    if let Some(future) = inner {
+                        future.await
+                    } else {
+                        Ok(Value::Null)
+                    }
+                } else {
+                    Ok(value)
+                }
+            }
+            Err(signal) => match signal {
+                EvalSignal::Error(e) => Err(e),
+                _ => Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    "spawn: el task spawneado emitió un signal no-Error inesperado".to_string(),
+                )),
+            },
+        }
+    });
+    // Wrappear el JoinHandle en un `Value::Future`. El Future Fitz
+    // resuelve cuando la task termina; si el caller no `.await`-ea,
+    // la task sigue corriendo detached (fire-and-forget).
+    let fut: FitzFuture = Box::pin(async move {
+        match join_handle.await {
+            Ok(result) => result,
+            Err(join_err) => Err(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0,
+                0,
+                format!("spawn: la task spawneada falló: {}", join_err),
+            )),
+        }
+    });
+    Ok(Value::Future(FutureCell(Arc::new(Mutex::new(Some(fut))))))
+}
+
 /// Invoca un valor que ya sabemos que tiene que ser una función. Maneja
 /// builtins, user-defined functions y errores de "no es invocable".
 #[async_recursion]
-async fn invoke_value(
+pub async fn invoke_value(
     value: Value, arg_values: Vec<Value>, display_name: &str, span: Span,
 ) -> EvalResult<Value> {
     match value {
@@ -8262,6 +8512,19 @@ fn register_builtins(env: &EnvRef) {
         Value::Builtin {
             name: "sleep",
             func: builtin_sleep,
+        },
+    );
+    // Fase 9.w.3 — `spawn(fn_call)` sentinel. El dispatch real vive en
+    // `eval_call` (eval_spawn_call) que intercepta antes de evaluar
+    // args (necesita capturar el inner call sin eager-evaluation).
+    // Este Builtin solo sirve como marker para que `is_spawn_builtin`
+    // detecte que no fue shadowed por una fn user-defined. Si llegara
+    // a ejecutarse el `func`, hubo un bug en el dispatch.
+    env.lock().define(
+        "spawn",
+        Value::Builtin {
+            name: "spawn",
+            func: builtin_spawn_stub,
         },
     );
     // Fase 9.z.2.a — assertion builtins. Siempre disponibles (igual
@@ -19771,5 +20034,155 @@ let r = match n {
         }
         assert_eq!(env.get("ok"), Some(Value::Bool(true)));
         assert_eq!(env.get("bad"), Some(Value::Bool(false)));
+    }
+
+    // ---- Fase 9.w.3 — runtime cron + background + spawn ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_decorator_sin_registry_activo_es_error() {
+        // `@cron("...")` sin contexto HTTP/registry → error claro.
+        // Replica defensiva del checker (que no chequea contexto).
+        let (_, res) = parse_eval_into_env(
+            "@cron(\"0 0 * * *\")\nfn h() -> Null { return null }",
+        )
+        .await;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("@cron"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_decorator_con_registry_registra_job() {
+        // Con un HttpRegistry activo, `@cron("...")` empuja un CronJob
+        // al cron_registry. La fn también queda en el env.
+        let (env, registry) = crate::http::with_active_registry_async(|| async {
+            let (env, res) = parse_eval_into_env(
+                "@cron(\"*/5 * * * *\")\nfn tick() -> Null { return null }",
+            )
+            .await;
+            res.expect("evaluación OK");
+            env
+        })
+        .await;
+        assert!(registry.cron_registry.has_jobs(), "esperaba job registrado");
+        let jobs = registry.cron_registry.jobs_snapshot();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].name, "tick");
+        assert!(!jobs[0].is_async);
+        // La fn también queda en el env.
+        assert!(matches!(env.lock().get("tick"), Some(Value::Function { .. })));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_async_fn_registra_is_async_true() {
+        let (_env, registry) = crate::http::with_active_registry_async(|| async {
+            let (env, res) = parse_eval_into_env(
+                "@cron(\"*/1 * * * * *\")\nasync fn tick() -> Null { return null }",
+            )
+            .await;
+            res.expect("evaluación OK");
+            env
+        })
+        .await;
+        let jobs = registry.cron_registry.jobs_snapshot();
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].is_async, "esperaba is_async=true");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn cron_expression_invalida_es_error_claro() {
+        // El checker no valida sintaxis del cron expression; el
+        // runtime lo hace al registrar via `cron::Schedule::from_str`.
+        let result = crate::http::with_active_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(
+                "@cron(\"no es un cron válido\")\nfn h() -> Null { return null }",
+            )
+            .await;
+            res
+        })
+        .await;
+        let res = result.0;
+        let err = res.unwrap_err();
+        assert!(
+            err.message.contains("inválida")
+                || err.message.contains("invalid")
+                || err.message.contains("cron"),
+            "mensaje inesperado: {}",
+            err.message,
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_decorator_no_registra_en_runtime() {
+        // `@background` es solo marcador del checker; en runtime es
+        // no-op. La fn queda definida en el env normalmente.
+        let (env, res) = parse_eval_into_env(
+            "@background\nfn send(addr: Str) -> Null { return null }",
+        )
+        .await;
+        res.expect("evaluación OK");
+        assert!(matches!(
+            env.lock().get("send"),
+            Some(Value::Function { .. })
+        ));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_sobre_background_fn_retorna_future() {
+        // `spawn(send_email(...))` retorna `Value::Future` que el
+        // caller puede `.await`-ear o descartar. El target debe ser
+        // una fn con `@background` (validación del runtime defensiva
+        // si el caller evita el checker).
+        let (env, res) = parse_eval_into_env(
+            "@background\n\
+             fn job() -> Int { return 42 }\n\
+             let f = spawn(job())",
+        )
+        .await;
+        res.expect("evaluación OK");
+        let f = env.lock().get("f").expect("f bindeado");
+        assert!(matches!(f, Value::Future(_)), "esperaba Future, fue {:?}", f);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_y_await_devuelve_valor_target() {
+        // `spawn(fn_call).await` resuelve al valor que la fn target
+        // hubiera devuelto si la llamáramos directo.
+        let (env, res) = parse_eval_into_env(
+            "@background\n\
+             fn job() -> Int { return 42 }\n\
+             async fn caller() -> Int {\n\
+                 let f = spawn(job())\n\
+                 return f.await\n\
+             }\n\
+             let result = caller()",
+        )
+        .await;
+        res.expect("evaluación OK");
+        // `caller()` retorna un Future porque es async. Para chequear
+        // el valor interior, lo awaiteamos en el test.
+        let caller_fut = env.lock().get("result").expect("result bindeado");
+        let final_value = crate::http::await_if_future(caller_fut)
+            .await
+            .expect("await OK");
+        assert_eq!(final_value, Value::Int(42));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn spawn_userdefined_override_no_dispara_dispatch_especial() {
+        // Si el usuario define `fn spawn(...)`, el lookup retorna
+        // Value::Function y `is_spawn_builtin` devuelve false → el
+        // dispatch normal corre. Validamos que el call resuelve al
+        // user-defined spawn (no al builtin que requiere @background).
+        let (env, res) = parse_eval_into_env(
+            "fn spawn(x: Int) -> Int { return x + 1 }\n\
+             let result = spawn(41)",
+        )
+        .await;
+        res.expect("evaluación OK");
+        assert_eq!(env.lock().get("result"), Some(Value::Int(42)));
     }
 }

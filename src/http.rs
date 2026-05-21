@@ -492,6 +492,12 @@ pub struct HttpRegistry {
     /// tiene `@ws` endpoints, el broadcaster vive vacío y no cuesta
     /// nada.
     pub ws_broadcaster: std::sync::Arc<WsBroadcaster>,
+    /// Fase 9.w.3 — Registry de jobs `@cron`. Se llena durante el
+    /// evaluation; el scheduler arranca cuando `serve()` levanta el
+    /// runtime tokio o cuando el cron-only mode toma el control
+    /// (`run_scheduler_only`). `Arc` para compartirlo con los workers
+    /// tokio que ejecutan los jobs.
+    pub cron_registry: std::sync::Arc<crate::cron_jobs::CronRegistry>,
 }
 
 impl HttpRegistry {
@@ -501,6 +507,7 @@ impl HttpRegistry {
             server_config: None,
             auth_provider: None,
             ws_broadcaster: std::sync::Arc::new(WsBroadcaster::new()),
+            cron_registry: std::sync::Arc::new(crate::cron_jobs::CronRegistry::new()),
         }
     }
 
@@ -665,6 +672,49 @@ pub fn set_auth_provider(
         }
         reg.auth_provider = Some(handle);
         Ok(())
+    })
+}
+
+/// Fase 9.w.3 — registra un cron job en el `CronRegistry` del registry
+/// activo. Si la cron expression es inválida, devuelve `Err(msg)` para
+/// que el caller (evaluator) emita un FitzError. Sin registry activo
+/// → `Err` ("no hay registry") — el contexto típico es `fitz run` del
+/// archivo, igual que `set_auth_provider`.
+pub fn register_cron_job(
+    fn_name: String,
+    cron_expr: &str,
+    handler: crate::value::Value,
+    is_async: bool,
+    env: crate::env::EnvRef,
+) -> Result<(), String> {
+    HTTP_REGISTRY.with(|cell| {
+        let borrow = cell.borrow();
+        let reg = borrow.as_ref().ok_or_else(|| {
+            "@cron sin contexto activo: solo aplica ejecutando con `fitz run` un archivo del programa.".to_string()
+        })?;
+        reg.cron_registry
+            .register(fn_name, cron_expr, handler, is_async, env)
+    })
+}
+
+/// Fase 9.w.3 — `true` si el registry activo tiene al menos un cron
+/// job. Lo usa `eval_with_base_and_deps` para decidir si arrancar el
+/// scheduler standalone cuando no hay handlers HTTP (cron-only mode).
+pub fn registry_has_cron_jobs() -> bool {
+    HTTP_REGISTRY.with(|cell| {
+        cell.borrow()
+            .as_ref()
+            .map(|reg| reg.cron_registry.has_jobs())
+            .unwrap_or(false)
+    })
+}
+
+/// Fase 9.w.3 — devuelve un clone del `Arc<CronRegistry>` del registry
+/// activo, o `None` si no hay registry. El caller (cron-only mode lo
+/// usa para `run_scheduler_only`).
+pub fn current_cron_registry() -> Option<std::sync::Arc<crate::cron_jobs::CronRegistry>> {
+    HTTP_REGISTRY.with(|cell| {
+        cell.borrow().as_ref().map(|reg| reg.cron_registry.clone())
     })
 }
 
@@ -959,6 +1009,23 @@ impl HandlerOutcome {
 ///     no usan `Result` y devuelven `Str`, `Int`, `Instance`, etc.
 ///   - Tipos no serializables (Function, Builtin, Type, Module, Range)
 ///     → status 500, `{"error": "valor no serializable: <tipo>"}`.
+/// Fase 6.4 / 9.w.3.b — si el value es `Value::Future`, lo awaiteamos
+/// para extraer el valor final. Sino, pasthrough. Helper para los
+/// dispatchers del HTTP runtime (handlers async retornan
+/// `Value::Future` que hay que extraer antes de serializar). Paralelo
+/// al patrón en `build_ws_method_router` y `register_auth_provider`.
+pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
+    if let Value::Future(cell) = value {
+        let fut = cell.0.lock().take();
+        match fut {
+            Some(f) => f.await,
+            None => Ok(Value::Null),
+        }
+    } else {
+        Ok(value)
+    }
+}
+
 pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
     // Status code custom (spec): el handler hizo `return 401 { ... }`
     // y el evaluator emitió `Value::HttpResponse`. Mapeo directo: el
@@ -2795,8 +2862,21 @@ async fn handle_task(
         .await
     } else {
         // Flujo clásico: invocar handler + post mws.
+        // Fase 6.4 — si el handler es async, el invoke devuelve
+        // `Value::Future`; lo awaiteamos antes de pasarlo al
+        // serializer (paralelo al patrón en build_ws_method_router
+        // y register_auth_provider). Sin este await, async handlers
+        // HTTP devolvían "Future pendiente no es serializable" —
+        // bug preexistente expuesto al cerrar 9.w.3.b (que necesita
+        // async handlers que llamen `spawn(...)`).
         let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await {
-            Ok(value) => value_to_outcome(&value),
+            Ok(value) => {
+                let resolved = await_if_future(value).await;
+                match resolved {
+                    Ok(v) => value_to_outcome(&v),
+                    Err(e) => HandlerOutcome::internal_error(e.message),
+                }
+            }
             Err(err) => HandlerOutcome::internal_error(err.message),
         };
 
@@ -3239,6 +3319,10 @@ pub fn serve(
     let has_asyncapi = asyncapi_schema.is_some();
 
     let registry = std::sync::Arc::new(registry);
+    // Fase 9.w.3 — clonamos el cron_registry ANTES de mover el
+    // `Arc<HttpRegistry>` al router. Spawn del scheduler adentro del
+    // runtime, paralelo a axum.
+    let cron_registry_for_scheduler = registry.cron_registry.clone();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -3265,6 +3349,11 @@ pub fn serve(
         } else {
             eprintln!("   (docs apagadas por @server(docs=false))");
         }
+        // Fase 9.w.3 — arranca el cron scheduler antes de axum::serve.
+        // Los tasks corren detached en el mismo runtime tokio. Cuando
+        // el `with_graceful_shutdown(ctrl_c)` dispare y dropeemos el
+        // runtime, los tasks cron también se cancelan.
+        crate::cron_jobs::spawn_cron_scheduler(cron_registry_for_scheduler);
         axum::serve(listener, router)
             .with_graceful_shutdown(shutdown_signal())
             .await
