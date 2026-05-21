@@ -995,6 +995,26 @@ impl HandlerOutcome {
     }
 }
 
+// Fase 6.4 / 9.w.3.b — helper `await_if_future` para los dispatchers
+// del HTTP runtime: si un handler `async fn` retorna `Value::Future`,
+// hay que awaitearlo antes de pasar el value al serializer. Paralelo
+// al patrón en `build_ws_method_router` y `register_auth_provider`.
+//
+// Sin este helper, los handlers `async fn` HTTP en intérprete fallaban
+// con "Future pendiente no es serializable" — bug preexistente
+// detectado al validar 9.w.3.b.
+pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
+    if let Value::Future(cell) = value {
+        let fut = cell.0.lock().take();
+        match fut {
+            Some(f) => f.await,
+            None => Ok(Value::Null),
+        }
+    } else {
+        Ok(value)
+    }
+}
+
 /// Convierte el resultado de un handler Fitz a un `HandlerOutcome`.
 ///
 /// Reglas:
@@ -1009,23 +1029,6 @@ impl HandlerOutcome {
 ///     no usan `Result` y devuelven `Str`, `Int`, `Instance`, etc.
 ///   - Tipos no serializables (Function, Builtin, Type, Module, Range)
 ///     → status 500, `{"error": "valor no serializable: <tipo>"}`.
-/// Fase 6.4 / 9.w.3.b — si el value es `Value::Future`, lo awaiteamos
-/// para extraer el valor final. Sino, pasthrough. Helper para los
-/// dispatchers del HTTP runtime (handlers async retornan
-/// `Value::Future` que hay que extraer antes de serializar). Paralelo
-/// al patrón en `build_ws_method_router` y `register_auth_provider`.
-pub async fn await_if_future(value: Value) -> crate::error::FitzResult<Value> {
-    if let Value::Future(cell) = value {
-        let fut = cell.0.lock().take();
-        match fut {
-            Some(f) => f.await,
-            None => Ok(Value::Null),
-        }
-    } else {
-        Ok(value)
-    }
-}
-
 pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
     // Status code custom (spec): el handler hizo `return 401 { ... }`
     // y el evaluator emitió `Value::HttpResponse`. Mapeo directo: el
