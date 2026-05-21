@@ -61,15 +61,15 @@ jobs:
             rust-target: x86_64-pc-windows-msvc
             vsce-target: win32-x64
             archive-ext: zip
-          # `macos-latest` hoy es ARM64 (M-series). Para evitar
-          # cross-compile a x86_64 (linker issues frecuentes en CI),
-          # usamos runners separados: `macos-13` (último Intel x64
-          # GA en GitHub Actions) para darwin-x64, `macos-latest`
-          # (ARM64) para darwin-arm64. Ambos builds nativos.
-          - os: macos-13
-            rust-target: x86_64-apple-darwin
-            vsce-target: darwin-x64
-            archive-ext: tar.gz
+          # macOS: solo arm64 (M-series). Los `macos-13` runners
+          # (Intel x64) están en escasez crónica en GitHub Actions
+          # free tier — queues de 30-60+ min son comunes. Apple
+          # marcó macOS 13 como legacy y los va a remover; deprecar
+          # x86_64 ahora evita deuda futura. Users con Intel macs
+          # (clearly declining base) pueden compilar from source con
+          # `cargo install --git https://github.com/Thegreekman76/fitz`.
+          # Universal binary via `lipo` queda como mejora futura si
+          # aparece presión real de Intel users.
           - os: macos-latest
             rust-target: aarch64-apple-darwin
             vsce-target: darwin-arm64
