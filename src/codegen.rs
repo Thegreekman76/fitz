@@ -2180,7 +2180,6 @@ fn generate_module_rs_with_bindings(
     // armar las firmas locales de fns/types/consts.
     for m in loaded_modules {
         ctx.loaded_modules.push(LoadedModuleSigs {
-            mod_name: m.mod_name.clone(),
             mod_qualifier: mod_qualifier_of(&m.rel_path),
             type_sigs: m.type_sigs.clone(),
             fn_sigs: m.fn_sigs.clone(),
@@ -3175,12 +3174,12 @@ enum GenMode {
 /// `install_loader_bindings` y vive adentro del CodegenCtx.
 #[derive(Debug, Clone)]
 struct LoadedModuleSigs {
-    mod_name: String,
     /// Mini-fase loader-absoluto (Paso 4) — path Rust completo
-    /// "types::user" para módulos nested (vs `mod_name = "user"` que
-    /// es solo el último segmento). Usar este field cuando se emite
-    /// código Rust que necesita el path completo (use, dispatch
-    /// cross-module). Para módulos flat coincide con `mod_name`.
+    /// "types::user" para módulos nested (vs solo el último
+    /// segmento "user", que era el `mod_name` previo). Usar este
+    /// field para emitir código Rust que necesite el path completo
+    /// (`use crate::types::user::User`, dispatch cross-module).
+    /// Para módulos flat coincide con el `mod_name` del LoadedModule.
     mod_qualifier: String,
     type_sigs: HashMap<String, TypeSig>,
     fn_sigs: HashMap<String, FnSig>,
@@ -3617,7 +3616,6 @@ impl<'a> CodegenCtx<'a> {
     fn install_loader_bindings(&mut self, loader: &ModuleLoader) {
         for m in &loader.modules {
             self.loaded_modules.push(LoadedModuleSigs {
-                mod_name: m.mod_name.clone(),
                 mod_qualifier: mod_qualifier_of(&m.rel_path),
                 type_sigs: m.type_sigs.clone(),
                 fn_sigs: m.fn_sigs.clone(),
@@ -6622,7 +6620,55 @@ where
         }
         if self.response_mode {
             // En response mode, todos los returns se envuelven en
-            // `__FitzResponse { status: 200, body: <value>.__to_fitz_json() }`.
+            // `__FitzResponse { status: ..., body: ... }`.
+            //
+            // Mini-tanda Cleanup-Residual (2026-05-22) — fix de
+            // R.bug-result-status: cuando el expr es `Ok(v)` o `Err(e)`,
+            // DESEMPACAMOS el inner para serializar solo el valor.
+            // Antes serializaba el Result entero con wrapper
+            // `{"Ok":{...}}` o `{"Err":"..."}`, que es incorrecto
+            // (el cliente HTTP típicamente espera el T directo en 2xx
+            // y `{"error": e}` en 4xx/5xx).
+            //
+            // Semántica del unwrap (paralelo a la regla canónica del
+            // intérprete `handle_task::value_to_outcome`):
+            //   - `return Ok(v)`  → 200 + body = v.__to_fitz_json()
+            //   - `return Err(e)` → 500 + body = {"error": e.__to_fitz_json()}
+            //   - `return <otra cosa>` → 200 + body como antes
+            //     (caso gradual; el checker permite cualquier subtipo
+            //     de Result<T> en return).
+            if let Expr::Ok(inner, _) = e {
+                let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                let body_code = if matches!(inner_ty, Type::Null) {
+                    "serde_json::Value::Null".to_string()
+                } else {
+                    format!(
+                        "<{rt} as __ToFitzJson>::__to_fitz_json(&({code}))",
+                        rt = rust_type_for(&inner_ty, self.env)?,
+                        code = inner_code
+                    )
+                };
+                self.emit("return __FitzResponse { status: 200, body: ");
+                self.emit(&body_code);
+                self.emit(" };\n");
+                return Ok(());
+            }
+            if let Expr::Err(inner, _) = e {
+                let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                let body_code = if matches!(inner_ty, Type::Null) {
+                    "serde_json::json!({\"error\": serde_json::Value::Null})".to_string()
+                } else {
+                    format!(
+                        "serde_json::json!({{\"error\": <{rt} as __ToFitzJson>::__to_fitz_json(&({code}))}})",
+                        rt = rust_type_for(&inner_ty, self.env)?,
+                        code = inner_code
+                    )
+                };
+                self.emit("return __FitzResponse { status: 500, body: ");
+                self.emit(&body_code);
+                self.emit(" };\n");
+                return Ok(());
+            }
             // El status default para el path "no error" es 200; el
             // usuario puede pisarlo con `return 401 { ... }` que el
             // codegen de `Stmt::ReturnStatus` maneja aparte.

@@ -1,0 +1,16 @@
+# Configuración Cargo del proyecto fitz.
+#
+# Mini-tanda Cleanup-Residual (2026-05-22) — fix de
+# R.bug-13i-stack-overflow-debug: el binario `fitz` en debug-mode
+# desborda el stack default de Windows (1 MB) al compilar
+# ejemplos como `13i-campos-privados.fitz` con métodos custom
+# anidados. El codegen recursa profundo en `gen_expr`/
+# `gen_method_call`/`gen_struct_lit` con frames grandes en debug
+# (sin inlining, debug info pesado).
+#
+# Fix: aumentar el stack del main thread del binario `fitz`
+# emitido a 8 MB (paridad con Linux/Mac default). Solo afecta el
+# linker MSVC en Windows; otros targets no se tocan.
+
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "link-arg=/STACK:8388608"]

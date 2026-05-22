@@ -61,6 +61,83 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.31] — 2026-05-22 — Patch: mini-tanda Cleanup-Residual — 2 deudas FUNCIONALES cerradas
+
+Cierre de 2 deudas medias documentadas en
+`docs/deudas_lenguaje.md` después del cierre del plan
+post-boilerplates. Una tercera (R.bug-pyo3-abi3-autoinit) quedó
+diferida con plan claro porque su validación necesita Docker
+multi-Python que no tengo en local — el workaround del
+boilerplate funciona correctamente y no urge.
+
+**R.bug-13i-stack-overflow-debug** — CERRADO
+
+`13i-campos-privados.fitz` desbordaba el stack al compilar con
+`fitz build` debug-mode en Windows (1 MB stack default). Fix:
+`.cargo/config.toml` con linker flag `/STACK:8388608` bajo
+`[target.x86_64-pc-windows-msvc]`. El main thread del binario
+`fitz` ahora tiene 8 MB de stack en Windows (paridad con Unix
+default). Smoke `GUIDE_EXAMPLES_COMPILE` verde con 13i incluido.
+Clippy `-D warnings` verde.
+
+**R.bug-result-status** — CERRADO
+
+Handler HTTP con return type `Result<T>` + `return <status> { ... }`
+adentro serializaba con wrapper `{"Ok":{...}}` en lugar de
+desempacar el inner. Fix en `src/codegen.rs::gen_return`:
+
+```rust
+// Antes (en response_mode):
+return __FitzResponse {
+    status: 200,
+    body: <Result<Item, String> as __ToFitzJson>::__to_fitz_json(&(Ok(found.clone()))),
+    // ↑ serializa con wrapper {"Ok":{...}}
+};
+
+// Ahora (response_mode con Expr::Ok detectado):
+return __FitzResponse {
+    status: 200,
+    body: <ItemData as __ToFitzJson>::__to_fitz_json(&(found.clone())),
+    // ↑ desempaca el inner, serializa Item directo
+};
+```
+
+Semántica paralela al runtime:
+- `return Ok(v)` → 200 + body = v serializado.
+- `return Err(e)` → 500 + body = `{"error": e}` serializado.
+- `return <status> { ... }` sin cambios.
+
+2 E2E verdes en `compile_e2e::r_bug_result_status_handler_*`
+(unwrap Ok + path 404). Boilerplate `api-simple::get_item`
+simplificado a `Result<Item>` con `return Ok(it)` semánticamente
+prolijo (era workaround a `Item` directo).
+
+**R.bug-pyo3-abi3-autoinit** — DIFERIDO con plan claro
+
+Cargo.toml de Fitz tiene `pyo3 = { features = ["abi3-py310",
+"auto-initialize"] }`, incompatibles entre sí: auto-initialize
+gana y el binario linkea contra libpython específica del builder,
+perdiendo la promesa "binario portable" de abi3. Workaround actual:
+match builder/runtime Python en los Dockerfiles de boilerplates
+5/6, funciona OK pero agrega ~30s al build (apt-get build-essential
++ rustup en lugar de `rust:slim`).
+
+Fix planificado (no ejecutado en esta mini-tanda):
+1. Quitar `auto-initialize` del Cargo.toml.
+2. Emitir `pyo3::prepare_freethreaded_python()` en el preludio
+   del codegen y al boot del intérprete cuando `uses_python = true`.
+3. Validar cross-Python en Docker (build 3.13 + run 3.10/3.11/
+   3.12/3.14). El paso 3 requiere Docker runner con múltiples
+   Pythons que no tengo en local — bloqueante.
+
+Próxima acción: cuando aterrice un sub-paso "CI multi-Python"
+con GitHub Actions matrix, cerrar este fix ahí.
+
+Total al cierre: **2178 unit + 277 compile_e2e + 3 openapi**.
+Smoke `GUIDE_EXAMPLES_COMPILE` verde. Clippy `-D warnings` verde.
+
+---
+
 ## [v0.9.30] — 2026-05-22 — Feature: mini-fase loader-absoluto — imports nested cross-folder
 
 Cuarto y último paso del plan post-boilerplates. Cierra deuda

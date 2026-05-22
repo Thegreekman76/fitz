@@ -6283,6 +6283,87 @@ fn load_env_builtin_carga_archivo_y_lee_vars() {
 }
 
 // ----------------------------------------------------------------------
+// Mini-tanda Cleanup-Residual (2026-05-22) — R.bug-result-status:
+// handler con return type Result<T> + return <status> mezclados.
+// Pre-fix el codegen serializaba el Result wrapper como
+// `{"Ok":{...}}` en lugar de desempacar el inner. Caso del
+// boilerplate api-simple que tenía workaround inline.
+// ----------------------------------------------------------------------
+
+#[test]
+fn r_bug_result_status_handler_unwrap_ok_serializa_t_directo() {
+    let src = "\
+@server(43777)
+fn main() => 0
+
+type Item { id: Int, name: Str }
+
+@get(\"/items/{id}\")
+fn get_item(id: Int) -> Result<Item> {
+    if (id == 1) {
+        return Ok(Item { id: 1, name: \"alpha\" })
+    }
+    return 404 { \"error\": \"no encontrado\" }
+}
+";
+    // GET /items/1 — return Ok(Item) debe serializar Item directo,
+    // no `{"Ok":{...}}`.
+    let (status, body) = build_spawn_request(
+        "r-bug-result-status-ok",
+        src,
+        43777,
+        "GET",
+        "/items/1",
+        None,
+    );
+    assert_eq!(status, 200, "body: {}", body);
+    let lower = body.to_lowercase();
+    assert!(
+        !lower.contains("\"ok\":") && !lower.contains("\"err\":"),
+        "el body NO debe tener wrapper Ok/Err: {}",
+        body
+    );
+    assert!(
+        body.contains("\"id\":1") && body.contains("\"name\":\"alpha\""),
+        "el body debe ser el Item directo: {}",
+        body
+    );
+}
+
+#[test]
+fn r_bug_result_status_handler_path_404_funciona() {
+    let src = "\
+@server(43778)
+fn main() => 0
+
+type Item { id: Int, name: Str }
+
+@get(\"/items/{id}\")
+fn get_item(id: Int) -> Result<Item> {
+    if (id == 1) {
+        return Ok(Item { id: 1, name: \"alpha\" })
+    }
+    return 404 { \"error\": \"no encontrado\" }
+}
+";
+    // GET /items/99 — return <status> path sigue funcionando OK.
+    let (status, body) = build_spawn_request(
+        "r-bug-result-status-404",
+        src,
+        43778,
+        "GET",
+        "/items/99",
+        None,
+    );
+    assert_eq!(status, 404, "body: {}", body);
+    assert!(
+        body.contains("\"error\":\"no encontrado\""),
+        "404 debe traer mensaje: {}",
+        body
+    );
+}
+
+// ----------------------------------------------------------------------
 // Mini-fase loader-absoluto (2026-05-22, Paso 4 post-boilerplates) —
 // `from sub.foo` desde un módulo en subcarpeta debe resolver al
 // import_root (parent del entry file) cuando la resolución relativa

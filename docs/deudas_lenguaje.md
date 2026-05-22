@@ -5289,7 +5289,14 @@ relativos al importer (cap 16 de la guía).
 
 ---
 
-## R.bug-13i-stack-overflow-debug — `13i-campos-privados.fitz` desborda stack en `fitz build` debug en Windows (descubierto 2026-05-22)
+## ~~R.bug-13i-stack-overflow-debug — `13i-campos-privados.fitz` desborda stack en `fitz build` debug en Windows~~ ✓ CERRADO 2026-05-22
+
+> **CERRADO 2026-05-22** — mini-tanda Cleanup-Residual. Fix
+> aplicado: `.cargo/config.toml` con `rustflags = ["-C",
+> "link-arg=/STACK:8388608"]` bajo `[target.x86_64-pc-windows-msvc]`.
+> El main thread del binario `fitz` ahora tiene 8 MB de stack en
+> Windows (default Unix). Smoke `GUIDE_EXAMPLES_COMPILE` verde con
+> 13i incluido. Clippy `-D warnings` verde.
 
 **Prioridad: BAJA** — el binario `fitz` en release mode compila el
 ejemplo correctamente. Solo afecta el debug build (1 MB stack por
@@ -5371,6 +5378,24 @@ specific a `[target.x86_64-pc-windows-msvc]`. Sin tocar código.
 ---
 
 ## R.bug-pyo3-abi3-autoinit — `abi3-py310` + `auto-initialize` incompatibles en Cargo.toml (descubierto 2026-05-22)
+
+> **Diferido 2026-05-22** post mini-tanda Cleanup-Residual: el fix
+> requiere (a) modificar `Cargo.toml` quitando `auto-initialize`,
+> (b) emitir `pyo3::prepare_freethreaded_python()` en el preludio
+> del codegen cuando `uses_python = true`, (c) llamarlo también
+> al boot del intérprete, (d) validar cross-Python en Docker (build
+> con Python 3.13, run en 3.10/3.11/3.12/3.14). El paso (d) requiere
+> Docker runner con múltiples Pythons que no tengo en local —
+> bloqueante para verificar el fix real.
+>
+> Mientras tanto, el workaround "builder = runtime Python" en los
+> Dockerfiles de boilerplates 5/6 funciona correctamente. No
+> bloquea uso real, solo agrega ~30s al build inicial (apt-get
+> install build-essential + rustup en lugar de `rust:slim`).
+>
+> **Próxima acción**: cuando aterrice un sub-paso de "Validación
+> CI multi-Python" (probablemente con GitHub Actions matrix
+> Python 3.10/3.11/3.12/3.13/3.14), cerrar este fix ahí.
 
 **Prioridad: MEDIA** — produce binarios `--features python`
 acoplados a versión específica de libpython del builder, en lugar
@@ -5469,10 +5494,29 @@ contra cualquier Python 3.10+" que el feature publicita.
 
 ---
 
-## R.bug-result-status — Handler con return type `Result<T>` + `return <status> { ... }` mezclados (descubierto 2026-05-21)
+## ~~R.bug-result-status — Handler con return type `Result<T>` + `return <status> { ... }` mezclados~~ ✓ CERRADO 2026-05-22
 
-**Prioridad: MEDIA** — produce serialización incorrecta del
-response body (wrap `Ok`/`Err` en JSON), no es deadlock ni crash.
+> **CERRADO 2026-05-22** — mini-tanda Cleanup-Residual. Fix en
+> `src/codegen.rs::gen_return`: cuando `response_mode = true`
+> (handler con `return <status>`), si el expr del `return` es
+> `Expr::Ok(inner)`, se emite `__FitzResponse { status: 200, body:
+> inner.__to_fitz_json() }` (desempaca el Ok). Si es
+> `Expr::Err(inner)`, se emite `__FitzResponse { status: 500, body:
+> json!({"error": inner.__to_fitz_json()}) }` (status 500 + wrap
+> `{"error": ...}` paralelo al runtime).
+>
+> 2 E2E verdes en
+> `compile_e2e::r_bug_result_status_handler_*`: el path `Ok(...)`
+> devuelve el `T` directo sin wrapper; el path `return 404 { ... }`
+> sigue funcionando como antes.
+>
+> Boilerplate `api-simple` simplificado: el handler `get_item`
+> ahora retorna `Result<Item>` con `return Ok(it)` (semánticamente
+> más prolijo) en lugar del workaround `Item` directo. Type-check
+> verde.
+
+**Prioridad: MEDIA** — producía serialización incorrecta del
+response body (wrap `Ok`/`Err` en JSON), no era deadlock ni crash.
 Detectado al validar `boilerplates/api-simple/`.
 
 ### Descripción

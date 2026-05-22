@@ -52,16 +52,15 @@ fn create_item(input: Item) -> Item {
     return input
 }
 
-// El handler retorna `Item` directo (no `Result<Item>`) + un
-// `return 404 { ... }` para el caso de error. Deuda del codegen
-// (R.bug-result-status): mezclar return type `Result<T>` con
-// `return <status> { ... }` genera código que serializa el Result
-// con su wrapper Ok/Err en lugar de desempacar — workaround
-// documentado en `docs/deudas_lenguaje.md`.
+// El handler retorna `Result<Item>` (semánticamente más prolijo)
+// + un `return 404 { ... }` para el caso de error con status code
+// custom. La mini-tanda Cleanup-Residual (2026-05-22) cerró el
+// bug R.bug-result-status: el codegen ahora desempaca el inner del
+// Ok/Err al serializar la response (no más wrapper `{"Ok":{...}}`).
 @get("/items/{id}")
-fn get_item(id: Int) -> Item {
+fn get_item(id: Int) -> Result<Item> {
     match ITEMS.find(fn(it: Item) => it.id == id) {
-        Ok(it) => return it,
+        Ok(it) => return Ok(it),
         Err(_) => return 404 { "error": "item con id={id} no encontrado" },
     }
 }
