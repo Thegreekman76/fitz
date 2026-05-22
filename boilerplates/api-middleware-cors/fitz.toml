@@ -1,0 +1,8 @@
+[package]
+name = "fitz-api-middleware-cors"
+version = "0.1.0"
+edition = "2026"
+description = "HTTP API boilerplate — @authenticated (JWT) + @middleware + cors() + frontend separado"
+
+[bin]
+main = "src/main.fitz"

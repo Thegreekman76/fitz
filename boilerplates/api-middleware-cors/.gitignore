@@ -1,0 +1,11 @@
+target/
+*.exe
+*.pdb
+.DS_Store
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+
+# Secrets nunca al repo
+.env

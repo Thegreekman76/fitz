@@ -1,0 +1,41 @@
+# docker-compose para el boilerplate api-middleware-cors.
+#
+# Dos servicios:
+#   - `api`: la API Fitz buildeada desde el Dockerfile local. Bindea
+#     a :3000 (host) → :3000 (container).
+#   - `frontend`: nginx alpine sirviendo `frontend/index.html` como
+#     static. Bindea a :8080 (host) → :80 (container).
+#
+# Por qué dos containers en origins distintos: para demostrar CORS
+# REAL. El frontend en localhost:8080 hace fetch a localhost:3000 →
+# el browser dispara preflight OPTIONS antes de POST/GET con
+# Authorization. La API responde con headers
+# Access-Control-Allow-* declarados en `@middleware(cors({...}))`.
+#
+# Uso:
+#   docker compose up --build
+#
+# Después: abrí http://localhost:8080 en el browser y probá los
+# botones de la página.
+
+services:
+  api:
+    build: .
+    container_name: fitz-api-middleware-cors
+    ports:
+      - "3000:3000"
+    # Sin volumes — la API es stateless (sin DB). El JWT secret está
+    # hardcoded en main.fitz (cambiá antes de deploy real, ver README).
+
+  frontend:
+    image: nginx:alpine
+    container_name: fitz-frontend-demo
+    ports:
+      - "8080:80"
+    volumes:
+      # Servir el index.html del frontend/ como única página.
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      # Config minimal de nginx (no-CORS — eso lo hace la API).
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api

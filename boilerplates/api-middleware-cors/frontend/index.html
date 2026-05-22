@@ -1,0 +1,174 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <title>Fitz API — Frontend demo (CORS)</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 720px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            background: #1a1a1a;
+            color: #e6e6e6;
+            line-height: 1.5;
+        }
+        h1 { color: #ff6b35; }
+        h2 { color: #ff6b35; margin-top: 2rem; border-bottom: 1px solid #444; padding-bottom: 0.3rem; }
+        .note {
+            background: #2a2a2a;
+            border-left: 3px solid #ff6b35;
+            padding: 0.75rem 1rem;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        label { display: block; margin-top: 0.5rem; font-size: 0.9rem; }
+        input {
+            width: 100%;
+            padding: 0.5rem;
+            box-sizing: border-box;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: #e6e6e6;
+            border-radius: 4px;
+        }
+        button {
+            background: #ff6b35;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            border-radius: 4px;
+            margin-top: 0.75rem;
+            font-weight: 600;
+        }
+        button:hover { background: #e55a25; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        pre {
+            background: #0d0d0d;
+            border: 1px solid #333;
+            padding: 0.75rem;
+            border-radius: 4px;
+            overflow-x: auto;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .ok { color: #6fdc8c; }
+        .err { color: #fa4d56; }
+        .token-display { font-size: 0.75rem; color: #888; word-break: break-all; }
+    </style>
+</head>
+<body>
+
+<h1>🏔️ Fitz API — frontend demo (CORS)</h1>
+
+<div class="note">
+    <strong>Cross-origin setup</strong>: este HTML corre en
+    <code>http://localhost:8080</code> (nginx alpine). La API Fitz
+    corre en <code>http://localhost:3000</code>. Origins distintos →
+    el browser hace preflight OPTIONS antes de cada POST/GET con
+    headers custom. La API responde con
+    <code>Access-Control-Allow-Origin: http://localhost:8080</code>
+    declarado en cada handler con <code>@middleware(cors({...}))</code>.
+</div>
+
+<h2>1. Endpoint público: GET /items</h2>
+<p>Sin auth — el frontend puede pedirlo siempre. CORS habilitado.</p>
+<button id="btn-items">Llamar GET /items</button>
+<pre id="out-items">(click el botón)</pre>
+
+<h2>2. Login: POST /login</h2>
+<p>Devuelve un JWT bearer token. Credenciales hardcoded del boilerplate:</p>
+<ul style="font-size: 0.9rem;">
+    <li>email: <code>ada@example.com</code></li>
+    <li>password: <code>secret-ada-123</code></li>
+</ul>
+<label>Email:</label>
+<input id="inp-email" value="ada@example.com" />
+<label>Password:</label>
+<input id="inp-password" type="password" value="secret-ada-123" />
+<button id="btn-login">Login (POST /login)</button>
+<pre id="out-login">(click el botón)</pre>
+<div class="token-display" id="token-display"></div>
+
+<h2>3. Endpoint protegido: GET /me</h2>
+<p>Requiere <code>Authorization: Bearer &lt;token&gt;</code>. El token
+del login va a localStorage; el botón lo lee de ahí.</p>
+<button id="btn-me">Llamar GET /me</button>
+<button id="btn-me-notoken">Llamar GET /me SIN token (debería 401)</button>
+<pre id="out-me">(click el botón)</pre>
+
+<script>
+const API = "http://localhost:3000";
+
+function show(elId, ok, data) {
+    const el = document.getElementById(elId);
+    el.innerHTML = `<span class="${ok ? 'ok' : 'err'}">${ok ? 'OK' : 'ERROR'}</span> — ${JSON.stringify(data, null, 2)}`;
+}
+
+// 1. GET /items
+document.getElementById("btn-items").addEventListener("click", async () => {
+    try {
+        const resp = await fetch(`${API}/items`);
+        const data = await resp.json();
+        show("out-items", resp.ok, data);
+    } catch (e) {
+        show("out-items", false, e.message);
+    }
+});
+
+// 2. POST /login
+document.getElementById("btn-login").addEventListener("click", async () => {
+    const email = document.getElementById("inp-email").value;
+    const password = document.getElementById("inp-password").value;
+    try {
+        const resp = await fetch(`${API}/login`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ email, password }),
+        });
+        const data = await resp.json();
+        show("out-login", resp.ok, data);
+        if (resp.ok && data.token) {
+            localStorage.setItem("fitz_token", data.token);
+            document.getElementById("token-display").textContent =
+                "Token guardado en localStorage (primeros 40 chars): " + data.token.slice(0, 40) + "...";
+        }
+    } catch (e) {
+        show("out-login", false, e.message);
+    }
+});
+
+// 3. GET /me con token
+document.getElementById("btn-me").addEventListener("click", async () => {
+    const token = localStorage.getItem("fitz_token");
+    if (!token) {
+        show("out-me", false, "No hay token en localStorage — hacé login primero");
+        return;
+    }
+    try {
+        const resp = await fetch(`${API}/me`, {
+            headers: { "Authorization": `Bearer ${token}` },
+        });
+        const data = await resp.json();
+        show("out-me", resp.ok, data);
+    } catch (e) {
+        show("out-me", false, e.message);
+    }
+});
+
+// 3b. GET /me sin token (debe dar 401)
+document.getElementById("btn-me-notoken").addEventListener("click", async () => {
+    try {
+        const resp = await fetch(`${API}/me`);
+        const data = await resp.json();
+        show("out-me", resp.ok, data);
+    } catch (e) {
+        show("out-me", false, e.message);
+    }
+});
+</script>
+
+</body>
+</html>
