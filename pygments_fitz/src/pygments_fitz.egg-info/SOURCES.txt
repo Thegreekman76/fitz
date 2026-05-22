@@ -1,0 +1,11 @@
+README.md
+pyproject.toml
+src/pygments_fitz/__init__.py
+src/pygments_fitz/lexer.py
+src/pygments_fitz.egg-info/PKG-INFO
+src/pygments_fitz.egg-info/SOURCES.txt
+src/pygments_fitz.egg-info/dependency_links.txt
+src/pygments_fitz.egg-info/entry_points.txt
+src/pygments_fitz.egg-info/requires.txt
+src/pygments_fitz.egg-info/top_level.txt
+tests/test_lexer.py

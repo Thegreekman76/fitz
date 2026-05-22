@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pygments-fitz"
+version = "0.1.0"
+description = "Pygments lexer for the Fitz programming language"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [
+  { name = "TheGreekMan (Palopoli Martín)" },
+]
+requires-python = ">=3.10"
+dependencies = [
+  "Pygments>=2.0",
+]
+
+# El entry point es la clave: cualquier consumidor de Pygments
+# (MkDocs Material, Sphinx, GitHub no, pero Jupyter sí, etc.) que
+# llame `pygments.lexers.get_lexer_by_name('fitz')` después de
+# `pip install pygments-fitz` recibe nuestro FitzLexer.
+[project.entry-points."pygments.lexers"]
+fitz = "pygments_fitz.lexer:FitzLexer"
+
+[project.urls]
+Homepage = "https://github.com/Thegreekman76/fitz"
+Documentation = "https://thegreekman76.github.io/fitz/"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["pygments_fitz*"]

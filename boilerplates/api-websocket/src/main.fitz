@@ -64,5 +64,12 @@ async fn chat(conn: WsConn<ChatMsg>) -> Null {
 // Endpoint HTTP público para que el frontend sepa que el server
 // está vivo. El frontend tiene un health check antes de intentar
 // el WS handshake.
+//
+// CORS habilitado: el frontend en `:8080` hace `fetch()` a este
+// endpoint (cross-origin), entonces el browser dispara preflight
+// OPTIONS y exige el header `Access-Control-Allow-Origin`. Sin
+// `@middleware(cors({...}))` el browser bloquea el fetch
+// silenciosamente y el frontend muestra "server no responde".
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["GET", "OPTIONS"]}))
 @get("/health")
 fn health() -> Str => "ok"

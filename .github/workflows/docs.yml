@@ -16,6 +16,7 @@ on:
       - 'examples/guide/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
+      - 'pygments_fitz/**'
       - '.github/workflows/docs.yml'
   pull_request:
     branches: [main]
@@ -24,6 +25,7 @@ on:
       - 'examples/guide/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
+      - 'pygments_fitz/**'
   workflow_dispatch:
 
 concurrency:
@@ -60,7 +62,18 @@ jobs:
         uses: actions/configure-pages@v5
 
       - name: Install MkDocs deps
+        # Esto también instala `./pygments_fitz` (el lexer Pygments
+        # propio del lenguaje, declarado en requirements-docs.txt).
+        # MkDocs Material lo descubre por entry point `pygments.lexers`
+        # al renderizar bloques ```fitz.
         run: pip install -r requirements-docs.txt
+
+      - name: Test FitzLexer (Pygments)
+        # Smoke + cobertura básica del lexer. Si la regex se rompe o
+        # alguien borra una keyword del lenguaje sin actualizar acá,
+        # falla antes de buildear el sitio y antes de quedar todo
+        # blanco-y-negro en producción.
+        run: python -m unittest discover pygments_fitz/tests
 
       # MkDocs solo expone archivos adentro de `docs_dir` (`docs/`).
       # La guía linkea ~100 veces a `../examples/guide/X.fitz` (links

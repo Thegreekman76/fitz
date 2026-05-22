@@ -10,6 +10,13 @@
 mkdocs-material>=9.5,<10
 pymdown-extensions>=10.7,<11
 
+# Lexer Pygments propio del lenguaje Fitz. Habilita syntax
+# highlighting de bloques ```fitz en la guía. El paquete vive en
+# `pygments_fitz/` (mismo repo) y registra el lexer via entry point
+# `pygments.lexers`. Cuando Pygments resuelve `get_lexer_by_name("fitz")`
+# (lo que MkDocs Material hace por debajo), recibe el FitzLexer.
+./pygments_fitz
+
 # `mike` queda como deuda post-MVP del sitio (multi-version docs).
 # Cuando Fitz tenga releases versionados estables (post 1.0), sumar:
 # mike>=2.0,<3

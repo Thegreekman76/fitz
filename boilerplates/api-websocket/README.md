@@ -261,8 +261,29 @@ docker compose logs api
 ### El frontend muestra "El server no responde"
 
 El frontend hace health check a `GET /health` antes del WS. Si
-falla, el server probablemente está caído o en otro puerto.
-Revisá el `docker-compose.yml` (puerto 43929).
+falla:
+
+1. **Server caído / wrong port**: revisá `docker compose ps` y
+   los logs. El server debe escuchar en `:43929`.
+2. **CORS error en la consola del browser**: el `/health` está
+   en `:43929` y el frontend en `:8080` (cross-origin). El
+   handler `/health` necesita `@middleware(cors({...}))` con
+   `allow_origin: "http://localhost:8080"`. Si removiste el
+   middleware del boilerplate, el browser bloquea el fetch
+   silenciosamente con:
+   ```
+   Access to fetch at 'http://localhost:43929/health' from origin
+   'http://localhost:8080' has been blocked by CORS policy: No
+   'Access-Control-Allow-Origin' header is present
+   ```
+   Solución: dejar el `@middleware(cors({...}))` arriba del
+   `@get("/health")` (viene así por default en el boilerplate).
+
+**Nota sobre el WS y CORS**: el `new WebSocket()` del browser NO
+aplica CORS al WS protocol (es un protocolo distinto). Lo que SÍ
+aplica CORS es el `fetch('/health')` que el frontend hace ANTES
+del WS handshake — por eso el `/health` necesita los headers,
+pero el `@ws("/chat")` no.
 
 ### Los mensajes no aparecen en otros tabs
 

@@ -1,0 +1,40 @@
+# pygments-fitz
+
+Pygments lexer para el lenguaje [Fitz](https://github.com/Thegreekman76/fitz).
+
+Habilita syntax highlighting de bloques `​```fitz`​ en cualquier renderer que use Pygments por debajo (MkDocs, Sphinx, Jupyter, mdBook, etc.).
+
+## Instalación
+
+```bash
+pip install -e ./pygments_fitz
+```
+
+Una vez instalado, Pygments lo detecta vía entry point `pygments.lexers`:
+
+```python
+from pygments.lexers import get_lexer_by_name
+lexer = get_lexer_by_name("fitz")  # → FitzLexer instance
+```
+
+## Qué reconoce
+
+- **Keywords**: `fn`, `let`, `if`/`else`, `while`, `for`/`in`, `loop`, `match`, `return`, `break`, `continue`, `async`/`await`, `type`, `import`/`from`/`as`.
+- **Constantes**: `null`, `true`, `false`.
+- **Decoradores**: `@get`/`@post`/`@put`/`@delete`/`@server`/`@middleware`/`@authenticated`/`@admin`/`@auth_provider`/`@ws`/`@cron`/`@background`/`@test`/`@header`/`@allow` (resaltado por shape `@\w+`, no por lista hardcodeada).
+- **Tipos built-in**: `Int`, `Float`, `Str`, `Bool`, `Null`, `List`, `Map`, `Result`, `Future`, `Range`, `Bytes`, `Any`, `PyAny`, `WsConn`, `Request`, `Response`.
+- **Builtins**: `print`, `len`, `sleep`, `cors`, `spawn`, `Ok`, `Err`, `jwt`, `hash`, `assert`, `assert_eq`, `assert_ne`, `assert_throws`.
+- **Strings**: literales `"..."` con interpolación `{expr}` resaltada distinto, bytes literals `b"..."`, escapes `\n`/`\t`/`\xHH`/`\u{HHHH}`.
+- **Comentarios**: `//` y `/* ... */` (anidables).
+- **Números**: decimales, hex `0x`, bin `0b`, oct `0o`, con separador `_`, floats con `e`/`E`.
+- **Operadores**: `==`, `!=`, `<=`, `>=`, `&&`, `||`, `?`, `=>`, `->`, `..`, `<<`, `>>`, asignación compuesta.
+
+## Tests
+
+```bash
+python -m unittest discover pygments_fitz/tests
+```
+
+## Licencia
+
+MIT. Parte del repo [Fitz](https://github.com/Thegreekman76/fitz).
