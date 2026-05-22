@@ -53,6 +53,7 @@ $ ./server
 | Sintaxis limpia | ✅ | ⚠️ | ❌ | ✅ |
 | Tipado gradual | ❌ | ✅ | ❌ | ✅ |
 | Compilado nativo | ❌ | ❌ | ✅ | ✅ |
+| **Multiplataforma** | ⚠️ | ⚠️ | ✅ | ✅ |
 | HTTP en el core | ❌ | ❌ | ❌ | ✅ |
 | Async nativo | ⚠️ | ✅ | ✅ | ✅ |
 | Docs HTTP auto | ⚠️ | ❌ | ❌ | ✅ |
@@ -60,6 +61,13 @@ $ ./server
 | **WS tipados + AsyncAPI auto** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | **Jobs sin Celery** | ⚠️ | ⚠️ | ⚠️ | ✅ |
 | Interop Python | ✅ | ❌ | ❌ | ✅ |
+
+**Multiplataforma**: cada [release](https://github.com/Thegreekman76/fitz/releases/latest)
+publica binarios + extensión VSCode + imagen Docker
+(`ghcr.io/thegreekman76/fitz:latest`) para **4 plataformas**:
+Windows x64, Linux x64, Linux ARM64 y macOS Apple Silicon. El mismo
+programa Fitz corre en cualquiera; cross-compile gratis vía rustc
+targets.
 
 ---
 
@@ -87,10 +95,12 @@ containers. Cada uno con README exhaustivo. Ver el
 La extensión con LSP (highlighting + diagnostics + hover +
 go-to-def + autocomplete) viene en `.vsix` per-plataforma como
 asset de cada [release](https://github.com/Thegreekman76/fitz/releases/latest).
-Bajá el de tu OS/arquitectura (`fitz-language-<plataforma>-X.Y.Z.vsix`)
-e instalá desde VSCode: `Ctrl+Shift+P` → "Extensions: Install from
-VSIX...". El binario `fitz-lsp` viene bundleado adentro — no
-necesitás compilar nada local.
+Bajá el de tu OS/arquitectura (`fitz-lang-win32-x64.vsix`,
+`fitz-lang-linux-x64.vsix`, `fitz-lang-linux-arm64.vsix` o
+`fitz-lang-darwin-arm64.vsix`) e instalá desde VSCode:
+`Ctrl+Shift+P` → "Extensions: Install from VSIX...". El binario
+`fitz-lsp` viene bundleado adentro — no necesitás compilar nada
+local.
 
 Cuando la cuenta de publisher en el VSCode Marketplace esté lista,
 la extensión va a estar instalable en un clic desde la UI de

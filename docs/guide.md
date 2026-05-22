@@ -95,6 +95,11 @@ bagaje histórico del segundo. Algunas ideas centrales:
   si tu programa registra rutas. Lo vas a ver en el [capítulo 17](#17-http-nativo).
 - **Sin excepciones**: los errores se manejan con `Result` y `match`,
   estilo Rust.
+- **Multiplataforma desde el día uno** — cada release publica binarios
+  + extensión VSCode + imagen Docker (`ghcr.io/thegreekman76/fitz:latest`)
+  para **4 plataformas**: Windows x64, Linux x64, Linux ARM64 y macOS
+  Apple Silicon. El mismo programa Fitz corre en cualquiera; cross-compile
+  gratis vía rustc targets desde cualquier plataforma a las otras.
 - **Objetivo final: binario nativo**. Hoy Fitz es un intérprete escrito
   en Rust, y eso es lo que cubre esta guía.
 
@@ -8582,13 +8587,12 @@ del release en GitHub. Sin compilar nada local.
 1. Andá a [releases](https://github.com/Thegreekman76/fitz/releases/latest)
    y bajá el `.vsix` correspondiente a tu sistema:
 
-   | Plataforma                        | Archivo                                      |
-   |-----------------------------------|----------------------------------------------|
-   | Windows x64                       | `fitz-language-win32-x64-X.Y.Z.vsix`         |
-   | Windows ARM64                     | `fitz-language-win32-arm64-X.Y.Z.vsix`       |
-   | Linux x64                         | `fitz-language-linux-x64-X.Y.Z.vsix`         |
-   | Linux ARM64                       | `fitz-language-linux-arm64-X.Y.Z.vsix`       |
-   | macOS Apple Silicon (M1/M2/M3)    | `fitz-language-darwin-arm64-X.Y.Z.vsix`      |
+   | Plataforma                        | Archivo                            |
+   |-----------------------------------|------------------------------------|
+   | Windows x64                       | `fitz-lang-win32-x64.vsix`         |
+   | Linux x64                         | `fitz-lang-linux-x64.vsix`         |
+   | Linux ARM64                       | `fitz-lang-linux-arm64.vsix`       |
+   | macOS Apple Silicon (M1/M2/M3)    | `fitz-lang-darwin-arm64.vsix`      |
 
    Cada `.vsix` trae el `fitz-lsp` ya compilado adentro
    (`server/fitz-lsp[.exe]`). No necesitás Rust ni Node.
@@ -8601,15 +8605,18 @@ del release en GitHub. Sin compilar nada local.
 
    **Desde la terminal**:
    ```bash
-   code --install-extension fitz-language-<plataforma>-X.Y.Z.vsix --force
+   code --install-extension fitz-lang-<plataforma>.vsix --force
    ```
 
 3. Abrí cualquier `.fitz` y vas a ver highlighting + diagnostics +
    hover + go-to-def + autocomplete funcionando. Cero settings extra.
 
-> **macOS Intel (`darwin-x64`)** no está en la matriz de release
-> por escasez crónica de runners macos-13 en GitHub Actions. Si lo
-> necesitás, build local (sección B) funciona idéntico.
+> Las plataformas en la matriz de release son las 4 listadas arriba.
+> **macOS Intel (`darwin-x64`)** y **Windows ARM64 (`win32-arm64`)**
+> no están: el primero por escasez crónica de runners macos-13 en
+> GitHub Actions, el segundo porque axum aún no compila estable en
+> ese target. Si necesitás alguna de esas, build local (sección B)
+> funciona idéntico.
 >
 > **¿Por qué no desde el VSCode Marketplace?** Publicar al
 > Marketplace requiere cuenta de publisher de Microsoft (vía Azure

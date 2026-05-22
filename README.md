@@ -50,6 +50,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 | Sintaxis limpia        | ✅     | ⚠️         | ❌  | ✅    |
 | Tipado gradual         | ❌     | ✅         | ❌  | ✅ \* |
 | Compilado nativo       | ❌     | ❌         | ✅  | ✅ †  |
+| **Multiplataforma**    | ⚠️     | ⚠️         | ✅  | ✅ ✱  |
 | HTTP en el core        | ❌     | ❌         | ❌  | ✅    |
 | Async nativo           | ⚠️     | ✅         | ✅  | ✅ ‡  |
 | Docs HTTP automáticas  | ⚠️     | ❌         | ❌  | ✅ ◊  |
@@ -61,6 +62,8 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 \* **Tipado gradual con chequeo estático**. `fitz check` valida anotaciones en compile time; sin anotación se infiere o se trata como `Any`. → [cap 15 de la guía](https://thegreekman76.github.io/fitz/guide/#15-errores-y-mensajes).
 
 † **Compilado nativo via transpile-a-Rust + Cargo**. Binario standalone ~5 MB, sin runtime de Fitz en el destino. Cross-compile gratis vía targets de rustc. → [cap 20](https://thegreekman76.github.io/fitz/guide/#20-fitz-build--compilar-a-binario-nativo).
+
+✱ **Multiplataforma de verdad**. Cada release publica binarios + extensión VSCode + imagen Docker para **4 plataformas** (Windows x64, Linux x64, Linux ARM64, macOS Apple Silicon). El mismo programa Fitz corre en cualquiera de las cuatro — y compilás desde una a las otras sin instalar toolchains extras (cross-compile gratis vía rustc targets). Imagen Docker `ghcr.io/thegreekman76/fitz:latest` lista para `FROM` en boilerplates Dockerizados.
 
 ‡ **Async nativo + paralelismo HTTP real**. `async fn` y `.await` postfix, `Future<T>` built-in, evaluator async sobre tokio multi-thread. 5 requests concurrentes en ~1.2s en vez de ~5s en serie. → [cap 19](https://thegreekman76.github.io/fitz/guide/#19-async-y-concurrencia).
 
@@ -182,15 +185,14 @@ Highlighting + LSP (diagnostics, hover, go-to-definition, autocomplete contextua
 **Instalar desde releases (recomendado)**:
 
 1. Bajá el `.vsix` correspondiente a tu OS/arquitectura de [releases](https://github.com/Thegreekman76/fitz/releases/latest):
-   - **Windows x64**: `fitz-language-win32-x64-X.Y.Z.vsix`
-   - **Windows ARM64**: `fitz-language-win32-arm64-X.Y.Z.vsix`
-   - **Linux x64**: `fitz-language-linux-x64-X.Y.Z.vsix`
-   - **Linux ARM64**: `fitz-language-linux-arm64-X.Y.Z.vsix`
-   - **macOS Apple Silicon (M1/M2/M3)**: `fitz-language-darwin-arm64-X.Y.Z.vsix`
+   - **Windows x64**: `fitz-lang-win32-x64.vsix`
+   - **Linux x64**: `fitz-lang-linux-x64.vsix`
+   - **Linux ARM64**: `fitz-lang-linux-arm64.vsix`
+   - **macOS Apple Silicon (M1/M2/M3)**: `fitz-lang-darwin-arm64.vsix`
 2. En VSCode: `Ctrl+Shift+P` → "Extensions: Install from VSIX..." → seleccioná el archivo bajado.
 3. Listo — abrí cualquier `.fitz` y vas a tener errores subrayados al tipear, hover con tipos, F12 para go-to-definition, y autocomplete contextual.
 
-> Nota: macOS Intel (`darwin-x64`) no está en la matriz de release por escasez crónica de runners macos-13 en GitHub Actions. Si lo necesitás, build local (próxima sección) funciona idéntico.
+> Nota: las plataformas en la matriz de release son las 4 listadas arriba. macOS Intel (`darwin-x64`) y Windows ARM64 (`win32-arm64`) no están — el primero por escasez crónica de runners macos-13 en GitHub Actions, el segundo porque axum aún no compila estable en ese target. Si necesitás alguna de esas, build local (próxima sección) funciona idéntico.
 >
 > Cuando se cree la cuenta de publisher en el VSCode Marketplace, la extensión va a estar instalable en un clic desde la UI de Extensions buscando `fitz`. Por ahora releases en GitHub es el camino canónico.
 
