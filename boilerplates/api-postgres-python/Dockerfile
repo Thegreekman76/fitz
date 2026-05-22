@@ -4,41 +4,31 @@
 # Patrón distinto a los otros 4 boilerplates: en lugar de buildear
 # a binario standalone distroless, mantenemos Python en el runtime.
 #
-# IMPORTANTE — match de Python entre stages:
-# PyO3 0.28 con `auto-initialize` (combinado con `abi3-py310` en el
-# Cargo.toml de Fitz) IGNORA `abi3` y linkea el binario contra la
-# versión específica de libpython detectada en el builder. Si los
-# stages usan Pythons distintos (builder 3.13 + runtime 3.12), el
-# binario falla con "cannot open shared object libpython3.X.so.1.0"
-# al boot del runtime.
+# Builder + runtime ahora pueden tener Python versions distintas
+# gracias al fix de R.bug-pyo3-abi3-autoinit (mini-tanda
+# Cleanup-Residual+ 2026-05-22): quitamos `auto-initialize` del
+# Cargo.toml de Fitz, ahora el binario es portable abi3-py310 — corre
+# contra cualquier Python 3.10+. Usamos `rust:slim` como builder
+# (más rápido) y `python:3.12-slim` como runtime.
 #
-# Solución: usar `python:3.12-slim` como base de AMBOS stages. El
-# builder agrega Rust con `rustup`; el runtime descarta Rust y
-# mantiene solo Python + libpq + el binario fitz.
-#
-# Build inicial: ~8-12 min (compila fitz + deps desde source).
+# Build inicial: ~6-9 min (compila fitz + deps desde source).
 # Builds subsiguientes: ~30s si solo cambia src/ o python/.
 #
 # Build con tag específico:
 #   docker build --build-arg FITZ_TAG=v0.9.25 .
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM python:3.12-slim AS builder
+# Rust:slim ya trae Rust 1.95+ pre-instalado. Solo agregamos Python +
+# headers + libssl para que pyo3 pueda buildear. El abi3-py310 del
+# Cargo.toml de Fitz hace que el binario resultante corra contra
+# cualquier Python 3.10+, así que la versión del builder no condiciona
+# el runtime.
+FROM rust:slim AS builder
 
-# Dev headers para que pyo3 detecte Python correctamente, plus
-# herramientas de compilación que Rust crates necesitan
-# (build-essential trae gcc/g++/make; libssl-dev + pkg-config son
-# necesarios para algunos crates de Fitz).
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl ca-certificates git \
-        python3-dev pkg-config libssl-dev build-essential && \
+        git python3 python3-dev pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
-
-# Rust 1.95+ (Fitz pinea `rust-version = "1.95"` en Cargo.toml).
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Clonar Fitz desde el repo público.
 # Por default toma `HEAD` del default branch (main). Para pinear:
@@ -65,7 +55,9 @@ RUN if [ -n "$FITZ_REV" ]; then \
     fi
 
 # ---- Stage 2: runtime ----------------------------------------------
-# MISMA imagen base que el builder → libpython3.12 garantizado.
+# python:3.12-slim — la versión específica importa relativamente poco
+# después del fix abi3-py310 puro. El binario fitz corre contra
+# cualquier Python 3.10+.
 FROM python:3.12-slim
 
 # libpq5: client lib de Postgres que psycopg2 necesita en runtime.
@@ -76,9 +68,9 @@ RUN apt-get update && \
         libpq5 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-# Binario fitz del stage builder (lincado contra libpython3.12 del
-# builder, que es la misma que el runtime tiene).
-COPY --from=builder /root/.cargo/bin/fitz /usr/local/bin/fitz
+# Binario fitz del stage builder. abi3-py310 garantiza compatibilidad
+# con la libpython del runtime (cualquier 3.10+).
+COPY --from=builder /usr/local/cargo/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /app
 

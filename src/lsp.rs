@@ -29,8 +29,7 @@ use tower_lsp::lsp_types::{
 /// `check_program` (consumidores que solo necesitan diagnostics). Para
 /// hover / go-to-definition / completion, usar `check_source_with_types`.
 pub fn check_source(source: &str) -> Vec<FitzError> {
-    let (_program, _env, _type_info, _def_info, errors) =
-        check_source_with_types(source);
+    let (_program, _env, _type_info, _def_info, errors) = check_source_with_types(source);
     errors
 }
 
@@ -70,7 +69,10 @@ pub fn check_source_with_types(
 /// reglas de mapeo (1-based Fitz → 0-based LSP, sin posición → range
 /// degenerado, hint → concatenado al message).
 pub fn fitz_errors_to_diagnostics(errors: &[FitzError]) -> Vec<Diagnostic> {
-    errors.iter().map(|e| error_to_diagnostic(e, None)).collect()
+    errors
+        .iter()
+        .map(|e| error_to_diagnostic(e, None))
+        .collect()
 }
 
 /// Mini-tanda LSPy — variante con source text que computa Range exacto
@@ -109,8 +111,9 @@ fn error_to_diagnostic(err: &FitzError, source: Option<&str>) -> Diagnostic {
             end: Position::new(line, col + 1),
         };
         match source {
-            Some(text) => ident_range_at_position(text, line as usize, col as usize)
-                .unwrap_or(fallback),
+            Some(text) => {
+                ident_range_at_position(text, line as usize, col as usize).unwrap_or(fallback)
+            }
             None => fallback,
         }
     };
@@ -156,11 +159,7 @@ fn error_to_diagnostic(err: &FitzError, source: Option<&str>) -> Diagnostic {
 /// guarda solo el último escrito — heredado de F16. En la práctica
 /// el tipo del Expr más "grande" suele ser lo que el usuario quiere
 /// ver al hover.
-pub fn hover_for_position(
-    type_info: &TypeInfo,
-    line: u32,
-    character: u32,
-) -> Option<&Type> {
+pub fn hover_for_position(type_info: &TypeInfo, line: u32, character: u32) -> Option<&Type> {
     // LSP 0-based → Fitz 1-based.
     let target_line = (line as usize) + 1;
     let target_col = (character as usize) + 1;
@@ -266,11 +265,10 @@ pub fn make_definition_location_with_source(
     let line0 = (def_span.line.saturating_sub(1)) as u32;
     let col0 = (def_span.column.saturating_sub(1)) as u32;
     let range = match source {
-        Some(text) => ident_range_from_def(text, def_span)
-            .unwrap_or_else(|| Range {
-                start: Position::new(line0, col0),
-                end: Position::new(line0, col0 + 1),
-            }),
+        Some(text) => ident_range_from_def(text, def_span).unwrap_or_else(|| Range {
+            start: Position::new(line0, col0),
+            end: Position::new(line0, col0 + 1),
+        }),
         None => Range {
             start: Position::new(line0, col0),
             end: Position::new(line0, col0 + 1),
@@ -396,7 +394,9 @@ pub fn resolve_cross_module_definition(
                     }
                     break;
                 }
-                Stmt::FromImport { path, names, span, .. } if *span == target_span => {
+                Stmt::FromImport {
+                    path, names, span, ..
+                } if *span == target_span => {
                     let item = names.iter().find_map(|(n, alias)| {
                         if alias.as_deref() == Some(target_name) || n == target_name {
                             Some(n.clone())
@@ -455,7 +455,11 @@ fn find_top_level_decl(program: &Program, name: &str) -> Option<Span> {
         match stmt {
             Stmt::FnDef { name: n, span, .. } if n == name => return Some(*span),
             Stmt::TypeDef { name: n, span, .. } if n == name => return Some(*span),
-            Stmt::Assign { target: AssignTarget::Ident(n), span, .. } if n == name => {
+            Stmt::Assign {
+                target: AssignTarget::Ident(n),
+                span,
+                ..
+            } if n == name => {
                 return Some(*span);
             }
             _ => {}
@@ -529,7 +533,9 @@ pub fn completion_at_position(
             recv_name,
             recv_line,
             recv_col,
-        } => after_dot_completions(program, type_info, type_env, &recv_name, recv_line, recv_col),
+        } => after_dot_completions(
+            program, type_info, type_env, &recv_name, recv_line, recv_col,
+        ),
         CompletionContext::ScopeLevel => {
             // Mini-tanda LSPy.4 — pasar la línea del cursor (1-based)
             // para incluir vars locales/params del scope contenedor.
@@ -543,11 +549,7 @@ pub fn completion_at_position(
 /// `<ident>.<partial_prefix?>` devuelve `AfterDot` con la posición del
 /// inicio del receiver. Si no, `ScopeLevel`. Devuelve `None` si la
 /// posición no es válida (más allá del fin del texto).
-fn detect_completion_context(
-    text: &str,
-    line: u32,
-    character: u32,
-) -> Option<CompletionContext> {
+fn detect_completion_context(text: &str, line: u32, character: u32) -> Option<CompletionContext> {
     let offset = position_to_offset(text, line, character)?;
     let bytes = text.as_bytes();
     // Saltar el prefix que el usuario ya tipeó (chars de identificador
@@ -673,8 +675,14 @@ fn after_dot_completions(
     match recv_name {
         "jwt" => {
             return method_items(&[
-                ("encode", "fn(payload: Map, secret: Str, alg: Str?) -> Str".into()),
-                ("decode", "fn(token: Str, secret: Str, alg: Str?) -> Result<Map>".into()),
+                (
+                    "encode",
+                    "fn(payload: Map, secret: Str, alg: Str?) -> Str".into(),
+                ),
+                (
+                    "decode",
+                    "fn(token: Str, secret: Str, alg: Str?) -> Result<Map>".into(),
+                ),
             ]);
         }
         "hash" => {
@@ -753,7 +761,9 @@ fn after_dot_completions(
             // Mini-tanda Vm — métodos privados (`_method`) tampoco
             // aparecen en `instance.`: solo accesibles desde adentro
             // del type body. Paralelo al filter de fields (Vp).
-            for m in info.methods.iter()
+            for m in info
+                .methods
+                .iter()
                 .filter(|m| !m.is_static && !m.name.starts_with('_'))
             {
                 // Combinar param_names con params para formar
@@ -789,7 +799,10 @@ fn after_dot_completions(
         Type::Int => method_items(&[
             ("abs", "fn() -> Int".into()),
             ("to_str", "fn() -> Str".into()),
-            ("to_str_base", "fn(base: Int) -> Str  // base ∈ {2, 8, 10, 16}".into()),
+            (
+                "to_str_base",
+                "fn(base: Int) -> Str  // base ∈ {2, 8, 10, 16}".into(),
+            ),
         ]),
         Type::Float => method_items(&[
             ("abs", "fn() -> Float".into()),
@@ -797,187 +810,347 @@ fn after_dot_completions(
             ("is_nan", "fn() -> Bool".into()),
             ("is_finite", "fn() -> Bool".into()),
         ]),
-        Type::List(t) => method_items(
-            &[
-                ("push", format!("fn({}) -> Null", t.display(type_env))),
-                ("pop", format!("fn() -> Result<{}>", t.display(type_env))),
-                ("map", format!("fn(fn({}) -> U) -> List<U>", t.display(type_env))),
-                ("filter", format!(
+        Type::List(t) => method_items(&[
+            ("push", format!("fn({}) -> Null", t.display(type_env))),
+            ("pop", format!("fn() -> Result<{}>", t.display(type_env))),
+            (
+                "map",
+                format!("fn(fn({}) -> U) -> List<U>", t.display(type_env)),
+            ),
+            (
+                "filter",
+                format!(
                     "fn(fn({}) -> Bool) -> List<{}>",
                     t.display(type_env),
                     t.display(type_env)
-                )),
-                ("find", format!(
+                ),
+            ),
+            (
+                "find",
+                format!(
                     "fn(fn({}) -> Bool) -> Result<{}>",
                     t.display(type_env),
                     t.display(type_env)
-                )),
-                ("len", "fn() -> Int".into()),
-                // Mini-tanda S.3: `sort` y `reverse` mutan in-place y
-                // devuelven Null. `contains(v)` toma un T y devuelve Bool.
-                ("sort", "fn() -> Null".into()),
-                ("reverse", "fn() -> Null".into()),
-                ("contains", format!("fn({}) -> Bool", t.display(type_env))),
-                // Mini-tanda It — iteradores estilo Python.
-                ("enumerate", format!("fn() -> List<(Int, {})>", t.display(type_env))),
-                ("zip", format!("fn(List<U>) -> List<({}, U)>", t.display(type_env))),
-                ("chain", format!(
+                ),
+            ),
+            ("len", "fn() -> Int".into()),
+            // Mini-tanda S.3: `sort` y `reverse` mutan in-place y
+            // devuelven Null. `contains(v)` toma un T y devuelve Bool.
+            ("sort", "fn() -> Null".into()),
+            ("reverse", "fn() -> Null".into()),
+            ("contains", format!("fn({}) -> Bool", t.display(type_env))),
+            // Mini-tanda It — iteradores estilo Python.
+            (
+                "enumerate",
+                format!("fn() -> List<(Int, {})>", t.display(type_env)),
+            ),
+            (
+                "zip",
+                format!("fn(List<U>) -> List<({}, U)>", t.display(type_env)),
+            ),
+            (
+                "chain",
+                format!(
                     "fn(List<{}>) -> List<{}>",
                     t.display(type_env),
                     t.display(type_env)
-                )),
-                // Mini-tanda Mb — flatten + sort_by.
-                ("flatten", "fn() -> List<U>  // requiere List<List<U>>".to_string()),
-                ("sort_by", format!(
+                ),
+            ),
+            // Mini-tanda Mb — flatten + sort_by.
+            (
+                "flatten",
+                "fn() -> List<U>  // requiere List<List<U>>".to_string(),
+            ),
+            (
+                "sort_by",
+                format!(
                     "fn(fn({}, {}) -> Int) -> Null",
                     t.display(type_env),
                     t.display(type_env)
-                )),
-                // Mini-tanda Lx — predicados funcionales.
-                ("any", format!("fn(fn({}) -> Bool) -> Bool", t.display(type_env))),
-                ("all", format!("fn(fn({}) -> Bool) -> Bool", t.display(type_env))),
-                ("count", format!("fn(fn({}) -> Bool) -> Int", t.display(type_env))),
-                ("find_index", format!(
-                    "fn(fn({}) -> Bool) -> Result<Int>",
+                ),
+            ),
+            // Mini-tanda Lx — predicados funcionales.
+            (
+                "any",
+                format!("fn(fn({}) -> Bool) -> Bool", t.display(type_env)),
+            ),
+            (
+                "all",
+                format!("fn(fn({}) -> Bool) -> Bool", t.display(type_env)),
+            ),
+            (
+                "count",
+                format!("fn(fn({}) -> Bool) -> Int", t.display(type_env)),
+            ),
+            (
+                "find_index",
+                format!("fn(fn({}) -> Bool) -> Result<Int>", t.display(type_env)),
+            ),
+            // Mini-tanda Ex2 — flat_map + first / last.
+            (
+                "flat_map",
+                format!("fn(fn({}) -> List<U>) -> List<U>", t.display(type_env),),
+            ),
+            ("first", format!("fn() -> Result<{}>", t.display(type_env))),
+            ("last", format!("fn() -> Result<{}>", t.display(type_env))),
+            // Mini-tanda Mb2 — reducciones numéricas.
+            (
+                "min",
+                format!(
+                    "fn() -> Result<{}>  // List<Int> o List<Float>",
                     t.display(type_env)
-                )),
-                // Mini-tanda Ex2 — flat_map + first / last.
-                ("flat_map", format!(
-                    "fn(fn({}) -> List<U>) -> List<U>",
-                    t.display(type_env),
-                )),
-                ("first", format!("fn() -> Result<{}>", t.display(type_env))),
-                ("last", format!("fn() -> Result<{}>", t.display(type_env))),
-                // Mini-tanda Mb2 — reducciones numéricas.
-                ("min", format!("fn() -> Result<{}>  // List<Int> o List<Float>", t.display(type_env))),
-                ("max", format!("fn() -> Result<{}>  // List<Int> o List<Float>", t.display(type_env))),
-                ("sum", format!("fn() -> {}  // List<Int> o List<Float>", t.display(type_env))),
-                // Mini-tanda Mb3 — fold + product + to_map.
-                ("reduce", format!(
+                ),
+            ),
+            (
+                "max",
+                format!(
+                    "fn() -> Result<{}>  // List<Int> o List<Float>",
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "sum",
+                format!(
+                    "fn() -> {}  // List<Int> o List<Float>",
+                    t.display(type_env)
+                ),
+            ),
+            // Mini-tanda Mb3 — fold + product + to_map.
+            (
+                "reduce",
+                format!(
                     "fn(init: Acc, fn(Acc, {}) -> Acc) -> Acc",
                     t.display(type_env),
-                )),
-                ("product", format!("fn() -> {}  // List<Int> o List<Float>", t.display(type_env))),
-                ("to_map", "fn() -> Map<K, V>  // requiere List<(K, V)>".into()),
-                // Mini-tanda Mb4 — unique + partition.
-                ("unique", format!("fn() -> List<{}>  // dedup preservando orden", t.display(type_env))),
-                ("partition", format!(
+                ),
+            ),
+            (
+                "product",
+                format!(
+                    "fn() -> {}  // List<Int> o List<Float>",
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "to_map",
+                "fn() -> Map<K, V>  // requiere List<(K, V)>".into(),
+            ),
+            // Mini-tanda Mb4 — unique + partition.
+            (
+                "unique",
+                format!(
+                    "fn() -> List<{}>  // dedup preservando orden",
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "partition",
+                format!(
                     "fn(fn({}) -> Bool) -> (List<{}>, List<{}>)",
                     t.display(type_env),
                     t.display(type_env),
                     t.display(type_env),
-                )),
-                // Mini-tanda Mb5 — group_by + zip_with + max_by/min_by.
-                ("group_by", format!(
+                ),
+            ),
+            // Mini-tanda Mb5 — group_by + zip_with + max_by/min_by.
+            (
+                "group_by",
+                format!(
                     "fn(fn({}) -> K) -> Map<K, List<{}>>",
                     t.display(type_env),
                     t.display(type_env),
-                )),
-                ("zip_with", format!(
+                ),
+            ),
+            (
+                "zip_with",
+                format!(
                     "fn(List<U>, fn({}, U) -> V) -> List<V>",
                     t.display(type_env),
-                )),
-                ("max_by", format!(
+                ),
+            ),
+            (
+                "max_by",
+                format!(
                     "fn(fn({}) -> Int) -> Result<{}>",
                     t.display(type_env),
                     t.display(type_env),
-                )),
-                ("min_by", format!(
+                ),
+            ),
+            (
+                "min_by",
+                format!(
                     "fn(fn({}) -> Int) -> Result<{}>",
                     t.display(type_env),
                     t.display(type_env),
-                )),
-                // Mini-tanda Mb6 — scan + windows.
-                ("scan", format!(
+                ),
+            ),
+            // Mini-tanda Mb6 — scan + windows.
+            (
+                "scan",
+                format!(
                     "fn(init: Acc, fn(Acc, {}) -> Acc) -> List<Acc>",
                     t.display(type_env),
-                )),
-                ("windows", format!(
-                    "fn(n: Int) -> List<List<{}>>",
+                ),
+            ),
+            (
+                "windows",
+                format!("fn(n: Int) -> List<List<{}>>", t.display(type_env),),
+            ),
+            // Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle.
+            (
+                "take",
+                format!("fn(n: Int) -> List<{}>", t.display(type_env)),
+            ),
+            (
+                "drop",
+                format!("fn(n: Int) -> List<{}>", t.display(type_env)),
+            ),
+            (
+                "init",
+                format!(
+                    "fn() -> List<{}>  // todos menos el último",
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "tail",
+                format!(
+                    "fn() -> List<{}>  // todos menos el primero",
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "intersperse",
+                format!(
+                    "fn(sep: {}) -> List<{}>",
                     t.display(type_env),
-                )),
-                // Mini-tanda Mb7 — take/drop/init/tail/intersperse/cycle.
-                ("take", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
-                ("drop", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
-                ("init", format!("fn() -> List<{}>  // todos menos el último", t.display(type_env))),
-                ("tail", format!("fn() -> List<{}>  // todos menos el primero", t.display(type_env))),
-                ("intersperse", format!("fn(sep: {}) -> List<{}>", t.display(type_env), t.display(type_env))),
-                ("cycle", format!("fn(n: Int) -> List<{}>", t.display(type_env))),
-                // Mini-tanda Mb8 — starts_with/ends_with/insert_at/remove_at/zip_to_map.
-                ("starts_with", format!("fn(prefix: List<{}>) -> Bool", t.display(type_env))),
-                ("ends_with", format!("fn(suffix: List<{}>) -> Bool", t.display(type_env))),
-                ("insert_at", format!("fn(idx: Int, v: {}) -> List<{}>", t.display(type_env), t.display(type_env))),
-                ("remove_at", format!("fn(idx: Int) -> List<{}>", t.display(type_env))),
-                ("zip_to_map", format!("fn(values: List<V>) -> Map<{}, V>", t.display(type_env))),
-                // Mini-tanda Mb9 — split_at(i): parte la lista en dos en idx.
-                ("split_at", format!(
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "cycle",
+                format!("fn(n: Int) -> List<{}>", t.display(type_env)),
+            ),
+            // Mini-tanda Mb8 — starts_with/ends_with/insert_at/remove_at/zip_to_map.
+            (
+                "starts_with",
+                format!("fn(prefix: List<{}>) -> Bool", t.display(type_env)),
+            ),
+            (
+                "ends_with",
+                format!("fn(suffix: List<{}>) -> Bool", t.display(type_env)),
+            ),
+            (
+                "insert_at",
+                format!(
+                    "fn(idx: Int, v: {}) -> List<{}>",
+                    t.display(type_env),
+                    t.display(type_env)
+                ),
+            ),
+            (
+                "remove_at",
+                format!("fn(idx: Int) -> List<{}>", t.display(type_env)),
+            ),
+            (
+                "zip_to_map",
+                format!("fn(values: List<V>) -> Map<{}, V>", t.display(type_env)),
+            ),
+            // Mini-tanda Mb9 — split_at(i): parte la lista en dos en idx.
+            (
+                "split_at",
+                format!(
                     "fn(idx: Int) -> (List<{}>, List<{}>)",
                     t.display(type_env),
                     t.display(type_env),
-                )),
-            ],
-        ),
-        Type::Map(k, v) => method_items(
-            &[
-                ("get", format!(
+                ),
+            ),
+        ]),
+        Type::Map(k, v) => method_items(&[
+            (
+                "get",
+                format!(
                     "fn({}) -> Result<{}>",
                     k.display(type_env),
                     v.display(type_env)
-                )),
-                ("has", format!("fn({}) -> Bool", k.display(type_env))),
-                ("keys", format!("fn() -> List<{}>", k.display(type_env))),
-                ("values", format!("fn() -> List<{}>", v.display(type_env))),
-                ("len", "fn() -> Int".into()),
-                // Mini-tanda Ex — transformaciones funcionales.
-                ("filter", format!(
+                ),
+            ),
+            ("has", format!("fn({}) -> Bool", k.display(type_env))),
+            ("keys", format!("fn() -> List<{}>", k.display(type_env))),
+            ("values", format!("fn() -> List<{}>", v.display(type_env))),
+            ("len", "fn() -> Int".into()),
+            // Mini-tanda Ex — transformaciones funcionales.
+            (
+                "filter",
+                format!(
                     "fn(fn({}, {}) -> Bool) -> Map<{}, {}>",
                     k.display(type_env),
                     v.display(type_env),
                     k.display(type_env),
                     v.display(type_env),
-                )),
-                ("map_values", format!(
+                ),
+            ),
+            (
+                "map_values",
+                format!(
                     "fn(fn({}) -> U) -> Map<{}, U>",
                     v.display(type_env),
                     k.display(type_env),
-                )),
-                // Mini-tanda Ex2 — merge (last-write-wins).
-                ("merge", format!(
+                ),
+            ),
+            // Mini-tanda Ex2 — merge (last-write-wins).
+            (
+                "merge",
+                format!(
                     "fn(Map<{}, {}>) -> Map<{}, {}>",
                     k.display(type_env),
                     v.display(type_env),
                     k.display(type_env),
                     v.display(type_env),
-                )),
-                // Mini-tanda Up — update inmutable (last-write-wins
-                // sobre una sola key).
-                ("update", format!(
+                ),
+            ),
+            // Mini-tanda Up — update inmutable (last-write-wins
+            // sobre una sola key).
+            (
+                "update",
+                format!(
                     "fn({}, fn({}) -> {}) -> Map<{}, {}>",
                     k.display(type_env),
                     v.display(type_env),
                     v.display(type_env),
                     k.display(type_env),
                     v.display(type_env),
-                )),
-                // Mini-tanda Mb2 — keys_sorted: keys ordenadas.
-                ("keys_sorted", format!(
+                ),
+            ),
+            // Mini-tanda Mb2 — keys_sorted: keys ordenadas.
+            (
+                "keys_sorted",
+                format!(
                     "fn() -> List<{}>  // K comparable (Int/Float/Str/Bool)",
                     k.display(type_env),
-                )),
-                // Mini-tanda Mb3 — entries: pares (K, V) en orden de inserción.
-                ("entries", format!(
+                ),
+            ),
+            // Mini-tanda Mb3 — entries: pares (K, V) en orden de inserción.
+            (
+                "entries",
+                format!(
                     "fn() -> List<({}, {})>",
                     k.display(type_env),
                     v.display(type_env),
-                )),
-                // Mini-tanda Mb4 — invert: swap K ↔ V.
-                ("invert", format!(
+                ),
+            ),
+            // Mini-tanda Mb4 — invert: swap K ↔ V.
+            (
+                "invert",
+                format!(
                     "fn() -> Map<{}, {}>",
                     v.display(type_env),
                     k.display(type_env),
-                )),
-                // Mini-tanda Mb6 — merge_with: merge con callback.
-                ("merge_with", format!(
+                ),
+            ),
+            // Mini-tanda Mb6 — merge_with: merge con callback.
+            (
+                "merge_with",
+                format!(
                     "fn(Map<{}, {}>, fn({}, {}) -> {}) -> Map<{}, {}>",
                     k.display(type_env),
                     v.display(type_env),
@@ -986,22 +1159,22 @@ fn after_dot_completions(
                     v.display(type_env),
                     k.display(type_env),
                     v.display(type_env),
-                )),
-                // Mini-tanda Mb7 — with: functional update.
-                ("with", format!(
+                ),
+            ),
+            // Mini-tanda Mb7 — with: functional update.
+            (
+                "with",
+                format!(
                     "fn({}, {}) -> Map<{}, {}>",
                     k.display(type_env),
                     v.display(type_env),
                     k.display(type_env),
                     v.display(type_env),
-                )),
-                // Mini-tanda Mb9 — has_value: chequea si V está presente.
-                ("has_value", format!(
-                    "fn({}) -> Bool",
-                    v.display(type_env),
-                )),
-            ],
-        ),
+                ),
+            ),
+            // Mini-tanda Mb9 — has_value: chequea si V está presente.
+            ("has_value", format!("fn({}) -> Bool", v.display(type_env),)),
+        ]),
         Type::Str => method_items(&[
             ("upper", "fn() -> Str".into()),
             ("lower", "fn() -> Str".into()),
@@ -1092,8 +1265,17 @@ fn after_dot_completions(
         // recv/send/broadcast (parametrizados sobre T) + close.
         Type::WsConn(t) => method_items(&[
             ("recv", format!("fn() -> Result<{}>", t.display(type_env))),
-            ("send", format!("fn(msg: {}) -> Result<Null>", t.display(type_env))),
-            ("broadcast", format!("fn(msg: {}) -> Result<Null>  // a TODOS los clientes del endpoint", t.display(type_env))),
+            (
+                "send",
+                format!("fn(msg: {}) -> Result<Null>", t.display(type_env)),
+            ),
+            (
+                "broadcast",
+                format!(
+                    "fn(msg: {}) -> Result<Null>  // a TODOS los clientes del endpoint",
+                    t.display(type_env)
+                ),
+            ),
             ("close", "fn() -> Result<Null>".into()),
         ]),
         // PyAny y resto: sin info para sugerir.
@@ -1139,11 +1321,7 @@ fn render_default_expr(e: &crate::ast::Expr) -> String {
 /// que el filtro `cursor_line >= stmt.line` lo controle. Esto es
 /// conservador: a veces incluye bindings de scopes que ya cerraron
 /// (false-positive aceptable — completion noise pero útil).
-fn collect_local_bindings_at(
-    stmts: &[Stmt],
-    cursor_line: usize,
-    items: &mut Vec<CompletionItem>,
-) {
+fn collect_local_bindings_at(stmts: &[Stmt], cursor_line: usize, items: &mut Vec<CompletionItem>) {
     for stmt in stmts {
         let start = stmt.span().line;
         // Filtro mínimo: el stmt no puede estar después del cursor.
@@ -1274,13 +1452,23 @@ fn scope_level_completions(
                     ..CompletionItem::default()
                 });
             }
-            Stmt::FnDef { name, params, return_type, is_async, .. } => {
+            Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                is_async,
+                ..
+            } => {
                 // Fp — firma de la fn con tipos + defaults (cuando los hay).
                 // Fp.2 — varargs prefijado con `...`.
                 let params_str = params
                     .iter()
                     .map(|p| {
-                        let ty = p.type_.as_ref().map(|t| t.display_name()).unwrap_or_else(|| "Any".into());
+                        let ty = p
+                            .type_
+                            .as_ref()
+                            .map(|t| t.display_name())
+                            .unwrap_or_else(|| "Any".into());
                         let prefix = if p.varargs { "..." } else { "" };
                         let base = format!("{}{}: {}", prefix, p.name, ty);
                         if let Some(default) = &p.default {
@@ -1362,9 +1550,18 @@ fn scope_level_completions(
         ("round", "fn(x: Int|Float) -> Int"),
         ("clamp", "fn(x, lo, hi) -> Int|Float  // mismo tipo"),
         // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates).
-        ("env", "fn(key: Str) -> Result<Str>  // env var, Err si missing"),
-        ("env_or", "fn(key: Str, default: Str) -> Str  // env var con default"),
-        ("load_env", "fn(path: Str) -> Result<Null>  // parse KEY=VALUE file"),
+        (
+            "env",
+            "fn(key: Str) -> Result<Str>  // env var, Err si missing",
+        ),
+        (
+            "env_or",
+            "fn(key: Str, default: Str) -> Str  // env var con default",
+        ),
+        (
+            "load_env",
+            "fn(path: Str) -> Result<Null>  // parse KEY=VALUE file",
+        ),
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -1407,8 +1604,8 @@ fn scope_level_completions(
     // los promueve cuando el usuario tipea sus primeras letras.
     for kw in [
         "let", "fn", "if", "else", "while", "for", "loop", "match", "type", "return", "break",
-        "continue", "import", "from", "as", "in", "async", "await", "and", "or", "true",
-        "false", "null",
+        "continue", "import", "from", "as", "in", "async", "await", "and", "or", "true", "false",
+        "null",
     ] {
         items.push(CompletionItem {
             label: kw.into(),
@@ -1461,8 +1658,7 @@ mod tests {
 
     #[test]
     fn error_con_hint_concatena_sugerencia_al_message() {
-        let err = err_at(1, 1, "variable no definida")
-            .with_hint("¿quisiste decir `name`?");
+        let err = err_at(1, 1, "variable no definida").with_hint("¿quisiste decir `name`?");
         let diags = fitz_errors_to_diagnostics(&[err]);
         assert!(
             diags[0].message.contains("variable no definida"),
@@ -1470,7 +1666,9 @@ mod tests {
             diags[0].message,
         );
         assert!(
-            diags[0].message.contains("Sugerencia: ¿quisiste decir `name`?"),
+            diags[0]
+                .message
+                .contains("Sugerencia: ¿quisiste decir `name`?"),
             "message con hint: {}",
             diags[0].message,
         );
@@ -1558,7 +1756,10 @@ mod tests {
         // entonces el `TypeInfo` no se puede poblar.
         let src = "let x = \"sin cerrar";
         let (_program, _env, type_info, _defs, errors) = check_source_with_types(src);
-        assert!(!errors.is_empty(), "lexer debería rechazar string sin cerrar");
+        assert!(
+            !errors.is_empty(),
+            "lexer debería rechazar string sin cerrar"
+        );
         assert!(
             type_info.is_empty(),
             "TypeInfo debería estar vacío si la pipeline aborta en el lexer",
@@ -1629,7 +1830,10 @@ mod tests {
         let src = "   let x = 1";
         let (_program, _env, type_info, _defs, _errs) = check_source_with_types(src);
         let ty = hover_for_position(&type_info, 0, 0);
-        assert!(ty.is_none(), "esperaba None antes del primer token, dio {ty:?}");
+        assert!(
+            ty.is_none(),
+            "esperaba None antes del primer token, dio {ty:?}"
+        );
     }
 
     #[test]
@@ -1708,8 +1912,7 @@ mod tests {
         // devuelto debe ser de línea 1 (1-based, el Stmt::Assign de `x`).
         let src = "let x = 1\nlet y = x\n";
         let (_program, _env, _type_info, def_info, _errs) = check_source_with_types(src);
-        let def_span = definition_for_position(&def_info, 1, 8)
-            .expect("uso de x debe resolver");
+        let def_span = definition_for_position(&def_info, 1, 8).expect("uso de x debe resolver");
         assert_eq!(def_span.line, 1, "def en línea 1 (1-based)");
     }
 
@@ -1784,7 +1987,11 @@ mod tests {
         let text = "obj.";
         let ctx = detect_completion_context(text, 0, 4).unwrap();
         match ctx {
-            CompletionContext::AfterDot { recv_name, recv_line, recv_col } => {
+            CompletionContext::AfterDot {
+                recv_name,
+                recv_line,
+                recv_col,
+            } => {
                 // Receiver `obj` empieza en line 1, col 1 (Fitz 1-based).
                 assert_eq!(recv_name, "obj");
                 assert_eq!(recv_line, 1);
@@ -1849,7 +2056,10 @@ mod tests {
         assert!(labels.contains(&"x"), "falta field `x`: {labels:?}");
         assert!(labels.contains(&"y"), "falta field `y`: {labels:?}");
         // No debe incluir top-level: ya estamos en after-dot.
-        assert!(!labels.contains(&"print"), "no debería incluir builtins en after-dot");
+        assert!(
+            !labels.contains(&"print"),
+            "no debería incluir builtins en after-dot"
+        );
         // El kind debe ser FIELD.
         let item_x = items.iter().find(|i| i.label == "x").unwrap();
         assert_eq!(item_x.kind, Some(CompletionItemKind::FIELD));
@@ -1967,7 +2177,10 @@ mod tests {
         }
         // El detail de `enumerate` debe reflejar el tipo del elemento.
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
-        assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+        assert_eq!(
+            item_enum.detail.as_deref(),
+            Some("fn() -> List<(Int, Int)>")
+        );
     }
 
     #[test]
@@ -2000,7 +2213,10 @@ mod tests {
         let lines: Vec<&str> = src.split('\n').collect();
         let last_line = lines.len() as u32 - 2; // -2: descontamos la línea vacía final
         let items = completion_at_position(src, &program, &type_info, &env, last_line, 2);
-        let m = items.iter().find(|i| i.label == "distance_to").expect("falta distance_to");
+        let m = items
+            .iter()
+            .find(|i| i.label == "distance_to")
+            .expect("falta distance_to");
         let detail = m.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("other_x: Int") && detail.contains("other_y: Int"),
@@ -2142,7 +2358,11 @@ mod tests {
         }
         let item_sort_by = items.iter().find(|i| i.label == "sort_by").unwrap();
         assert!(
-            item_sort_by.detail.as_deref().unwrap_or("").contains("fn(Int, Int)"),
+            item_sort_by
+                .detail
+                .as_deref()
+                .unwrap_or("")
+                .contains("fn(Int, Int)"),
             "esperaba firma con `fn(Int, Int)`, dio: {:?}",
             item_sort_by.detail
         );
@@ -2164,7 +2384,10 @@ mod tests {
             );
         }
         let item_enum = items.iter().find(|i| i.label == "enumerate").unwrap();
-        assert_eq!(item_enum.detail.as_deref(), Some("fn() -> List<(Int, Int)>"));
+        assert_eq!(
+            item_enum.detail.as_deref(),
+            Some("fn() -> List<(Int, Int)>")
+        );
     }
 
     #[test]
@@ -2344,7 +2567,13 @@ mod tests {
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        for expected in ["starts_with", "ends_with", "insert_at", "remove_at", "zip_to_map"] {
+        for expected in [
+            "starts_with",
+            "ends_with",
+            "insert_at",
+            "remove_at",
+            "zip_to_map",
+        ] {
             assert!(
                 labels.contains(&expected),
                 "falta método `{expected}` (mini-tanda Mb8) en List: {labels:?}"
@@ -2438,7 +2667,11 @@ mod tests {
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, vec!["0", "1", "2"], "esperaba labels 0/1/2, dio {labels:?}");
+        assert_eq!(
+            labels,
+            vec!["0", "1", "2"],
+            "esperaba labels 0/1/2, dio {labels:?}"
+        );
         // Cada item es FIELD con detail = tipo del elemento.
         let it0 = &items[0];
         let it1 = &items[1];
@@ -2482,9 +2715,18 @@ mod tests {
         assert!(labels.contains(&"id"), "falta field `id`: {labels:?}");
         assert!(labels.contains(&"name"), "falta field `name`: {labels:?}");
         // Métodos custom (R.3 / V.5).
-        assert!(labels.contains(&"greet"), "falta método `greet`: {labels:?}");
-        assert!(labels.contains(&"double"), "falta método `double`: {labels:?}");
-        assert!(labels.contains(&"fetch"), "falta método async `fetch`: {labels:?}");
+        assert!(
+            labels.contains(&"greet"),
+            "falta método `greet`: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"double"),
+            "falta método `double`: {labels:?}"
+        );
+        assert!(
+            labels.contains(&"fetch"),
+            "falta método async `fetch`: {labels:?}"
+        );
         // Kind: fields como FIELD, métodos como METHOD.
         let it_id = items.iter().find(|i| i.label == "id").unwrap();
         let it_greet = items.iter().find(|i| i.label == "greet").unwrap();
@@ -2497,7 +2739,10 @@ mod tests {
         // Detail: firma con prefix `fn` o `async fn` y tipos de params.
         assert_eq!(it_greet.detail.as_deref(), Some("fn() -> Str"));
         assert_eq!(it_double.detail.as_deref(), Some("fn(n: Int) -> Int"));
-        assert_eq!(it_fetch.detail.as_deref(), Some("async fn() -> Result<Str>"));
+        assert_eq!(
+            it_fetch.detail.as_deref(),
+            Some("async fn() -> Result<Str>")
+        );
     }
 
     // ---- Mini-tanda Math + Mb9 + Int/Float methods ----
@@ -2522,7 +2767,10 @@ mod tests {
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 3);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"split_at"), "falta `split_at` en List: {labels:?}");
+        assert!(
+            labels.contains(&"split_at"),
+            "falta `split_at` en List: {labels:?}"
+        );
     }
 
     #[test]
@@ -2531,7 +2779,10 @@ mod tests {
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"has_value"), "falta `has_value` en Map: {labels:?}");
+        assert!(
+            labels.contains(&"has_value"),
+            "falta `has_value` en Map: {labels:?}"
+        );
     }
 
     #[test]
@@ -2541,7 +2792,10 @@ mod tests {
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         for expected in ["abs", "to_str", "to_str_base"] {
-            assert!(labels.contains(&expected), "falta `{expected}` en Int: {labels:?}");
+            assert!(
+                labels.contains(&expected),
+                "falta `{expected}` en Int: {labels:?}"
+            );
         }
     }
 
@@ -2552,7 +2806,10 @@ mod tests {
         let items = completion_at_position(src, &program, &type_info, &env, 1, 2);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
         for expected in ["abs", "to_str", "is_nan", "is_finite"] {
-            assert!(labels.contains(&expected), "falta `{expected}` en Float: {labels:?}");
+            assert!(
+                labels.contains(&expected),
+                "falta `{expected}` en Float: {labels:?}"
+            );
         }
     }
 
@@ -2582,7 +2839,7 @@ mod tests {
         let span = Span::new(1, 1);
         let range = ident_range_from_def(src, span).expect("debería resolver");
         assert_eq!(range.start, Position::new(0, 4)); // start de "foo"
-        assert_eq!(range.end, Position::new(0, 7));   // end de "foo"
+        assert_eq!(range.end, Position::new(0, 7)); // end de "foo"
     }
 
     #[test]
@@ -2591,7 +2848,7 @@ mod tests {
         let span = Span::new(1, 1);
         let range = ident_range_from_def(src, span).expect("debería resolver");
         assert_eq!(range.start, Position::new(0, 3)); // start de "greet"
-        assert_eq!(range.end, Position::new(0, 8));   // end de "greet"
+        assert_eq!(range.end, Position::new(0, 8)); // end de "greet"
     }
 
     #[test]
@@ -2603,8 +2860,8 @@ mod tests {
         let hover = make_hover_with_range(&ty, &env, src, 0, 6);
         assert!(hover.range.is_some(), "esperaba Range, fue None");
         let r = hover.range.unwrap();
-        assert_eq!(r.start, Position::new(0, 4));  // start de "count"
-        assert_eq!(r.end, Position::new(0, 9));    // end de "count"
+        assert_eq!(r.start, Position::new(0, 4)); // start de "count"
+        assert_eq!(r.end, Position::new(0, 9)); // end de "count"
     }
 
     #[test]
@@ -2613,7 +2870,8 @@ mod tests {
         // Crear un FitzError sintético apuntando a "unknown_var" (col 11).
         let err = FitzError::new(
             crate::error::ErrorKind::TypeError,
-            1, 11,
+            1,
+            11,
             "variable no definida: unknown_var",
         );
         let diagnostics = fitz_errors_to_diagnostics_with_source(&[err], src);
@@ -2630,7 +2888,10 @@ mod tests {
         // Cursor en la línea 2 (en el cuerpo de greet). LSP usa 0-based.
         let items = completion_at_position(src, &program, &type_info, &env, 1, 4);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"name"), "esperaba param `name`: {labels:?}");
+        assert!(
+            labels.contains(&"name"),
+            "esperaba param `name`: {labels:?}"
+        );
         assert!(labels.contains(&"age"), "esperaba param `age`: {labels:?}");
     }
 
@@ -2641,7 +2902,10 @@ mod tests {
         // Cursor en línea 3 (después del let).
         let items = completion_at_position(src, &program, &type_info, &env, 2, 4);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"mi_var"), "esperaba local `mi_var`: {labels:?}");
+        assert!(
+            labels.contains(&"mi_var"),
+            "esperaba local `mi_var`: {labels:?}"
+        );
     }
 
     #[test]
@@ -2653,7 +2917,10 @@ mod tests {
         // Cursor línea 2.
         let items = completion_at_position(src, &program, &type_info, &env, 1, 4);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(!labels.contains(&"posterior"), "no debería incluir let posterior: {labels:?}");
+        assert!(
+            !labels.contains(&"posterior"),
+            "no debería incluir let posterior: {labels:?}"
+        );
     }
 
     #[test]
@@ -2670,7 +2937,10 @@ mod tests {
         // Cursor adentro del for body (línea 3, en el let).
         let items = completion_at_position(src, &program, &type_info, &env, 2, 10);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        assert!(labels.contains(&"item"), "esperaba `item` del for: {labels:?}");
+        assert!(
+            labels.contains(&"item"),
+            "esperaba `item` del for: {labels:?}"
+        );
     }
 
     // ---- Mini-tanda LSPx — cross-module go-to-definition ----
@@ -2711,24 +2981,31 @@ mod tests {
             .expect("debería haber FromImport");
 
         // Resolver `User`: debe apuntar a foo.fitz línea 1.
-        let resolved =
-            resolve_cross_module_definition(&program, &doc_uri, import_span, "User")
-                .expect("esperaba resolución cross-module");
+        let resolved = resolve_cross_module_definition(&program, &doc_uri, import_span, "User")
+            .expect("esperaba resolución cross-module");
         let (target_uri, target_span) = resolved;
         // El target_uri es file:// del foo.fitz canonicalizado.
         let target_path = target_uri.to_file_path().unwrap();
         assert_eq!(
             target_path.canonicalize().unwrap(),
             foo_path.canonicalize().unwrap(),
-            "esperaba target_uri = foo.fitz, dio: {:?}", target_path
+            "esperaba target_uri = foo.fitz, dio: {:?}",
+            target_path
         );
-        assert_eq!(target_span.line, 1, "esperaba línea 1 (type User), dio: {}", target_span.line);
+        assert_eq!(
+            target_span.line, 1,
+            "esperaba línea 1 (type User), dio: {}",
+            target_span.line
+        );
 
         // Resolver `CAP`: línea 2 (let CAP = 100).
-        let resolved_cap =
-            resolve_cross_module_definition(&program, &doc_uri, import_span, "CAP")
-                .expect("esperaba resolución de CAP");
-        assert_eq!(resolved_cap.1.line, 2, "esperaba línea 2 (let CAP), dio: {}", resolved_cap.1.line);
+        let resolved_cap = resolve_cross_module_definition(&program, &doc_uri, import_span, "CAP")
+            .expect("esperaba resolución de CAP");
+        assert_eq!(
+            resolved_cap.1.line, 2,
+            "esperaba línea 2 (let CAP), dio: {}",
+            resolved_cap.1.line
+        );
 
         // Cleanup.
         let _ = std::fs::remove_dir_all(&dir);
@@ -2757,7 +3034,8 @@ mod tests {
             })
             .unwrap();
         // `NotImported` no figura en el import list → None.
-        let resolved = resolve_cross_module_definition(&program, &doc_uri, import_span, "NotImported");
+        let resolved =
+            resolve_cross_module_definition(&program, &doc_uri, import_span, "NotImported");
         assert!(resolved.is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -2767,14 +3045,21 @@ mod tests {
         let src = "fn greet(name: Str = \"amigo\") -> Str { return name }\n\n";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
-        let it = items.iter().find(|i| i.label == "greet").expect("falta greet");
+        let it = items
+            .iter()
+            .find(|i| i.label == "greet")
+            .expect("falta greet");
         let detail = it.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("name: Str = \"amigo\""),
             "esperaba `name: Str = \"amigo\"` en detail, fue: {}",
             detail
         );
-        assert!(detail.contains("-> Str"), "esperaba `-> Str` en detail, fue: {}", detail);
+        assert!(
+            detail.contains("-> Str"),
+            "esperaba `-> Str` en detail, fue: {}",
+            detail
+        );
     }
 
     #[test]
@@ -2783,8 +3068,13 @@ mod tests {
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 1, 0);
         let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-        for expected in ["abs", "min", "max", "pow", "sqrt", "ceil", "floor", "round", "clamp"] {
-            assert!(labels.contains(&expected), "falta builtin `{expected}`: {labels:?}");
+        for expected in [
+            "abs", "min", "max", "pow", "sqrt", "ceil", "floor", "round", "clamp",
+        ] {
+            assert!(
+                labels.contains(&expected),
+                "falta builtin `{expected}`: {labels:?}"
+            );
         }
     }
 }

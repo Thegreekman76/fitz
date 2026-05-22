@@ -235,10 +235,14 @@ fn resolve_status_value(
     match e {
         Expr::Int(n, _) => Some(*n),
         Expr::Ident(name, _) => consts.get(name).copied(),
-        Expr::UnaryOp { op: UnaryOpKind::Neg, operand, .. } => {
-            resolve_status_value(operand, consts).map(|n| -n)
-        }
-        Expr::BinOp { op, left, right, .. } => {
+        Expr::UnaryOp {
+            op: UnaryOpKind::Neg,
+            operand,
+            ..
+        } => resolve_status_value(operand, consts).map(|n| -n),
+        Expr::BinOp {
+            op, left, right, ..
+        } => {
             let l = resolve_status_value(left, consts)?;
             let r = resolve_status_value(right, consts)?;
             match op {
@@ -431,8 +435,7 @@ pub fn pseudo_routes_from_ast(
             let body_param_name = params.iter().find_map(|p| {
                 let is_path = template.params.contains(&p.name);
                 let is_query = template.query_params.contains(&p.name);
-                let is_header =
-                    header_params.iter().any(|(_, fitz, _)| fitz == &p.name);
+                let is_header = header_params.iter().any(|(_, fitz, _)| fitz == &p.name);
                 if is_path || is_query || is_header {
                     return None;
                 }
@@ -544,9 +547,7 @@ pub fn generate_openapi_with_version(
 fn build_paths(routes: &[OpenApiRouteInfo]) -> Value {
     let mut paths: Map<String, Value> = Map::new();
     for route in routes {
-        let entry = paths
-            .entry(route.path.clone())
-            .or_insert_with(|| json!({}));
+        let entry = paths.entry(route.path.clone()).or_insert_with(|| json!({}));
         let obj = entry
             .as_object_mut()
             .expect("entry inicializado como object literal");
@@ -557,10 +558,7 @@ fn build_paths(routes: &[OpenApiRouteInfo]) -> Value {
 
 fn build_operation(route: &OpenApiRouteInfo) -> Value {
     let mut op = Map::new();
-    op.insert(
-        "operationId".into(),
-        json!(route.handler_name.clone()),
-    );
+    op.insert("operationId".into(), json!(route.handler_name.clone()));
     op.insert(
         "summary".into(),
         json!(format!("Handler `{}`", route.handler_name)),
@@ -586,10 +584,7 @@ fn build_operation(route: &OpenApiRouteInfo) -> Value {
     // públicos NO emitimos `security` (el default OpenAPI es "ninguno"
     // — no necesitamos `security: []` explícito).
     if route.auth != crate::http::AuthSpec::None {
-        op.insert(
-            "security".into(),
-            json!([{ "bearerAuth": [] }]),
-        );
+        op.insert("security".into(), json!([{ "bearerAuth": [] }]));
     }
 
     op.insert(
@@ -704,7 +699,10 @@ fn build_responses_with_auth(
         resp.insert("401".into(), auth_error_response("Autenticación requerida"));
     }
     if auth == crate::http::AuthSpec::Admin && !resp.contains_key("403") {
-        resp.insert("403".into(), auth_error_response("Permiso denegado (admin)"));
+        resp.insert(
+            "403".into(),
+            auth_error_response("Permiso denegado (admin)"),
+        );
     }
     // Q.4: sumar entries por cada status code custom detectado en el
     // body. El body de un ReturnStatus es polimórfico (un handler
@@ -1006,10 +1004,7 @@ mod tests {
     #[test]
     fn schema_de_nullable_agrega_flag_nullable() {
         let s = type_expr_to_schema(&nullable(named("Str")));
-        assert_eq!(
-            s,
-            json!({ "type": "string", "nullable": true })
-        );
+        assert_eq!(s, json!({ "type": "string", "nullable": true }));
     }
 
     #[test]
@@ -1212,7 +1207,7 @@ mod tests {
         let consts = collect_top_level_int_consts(&program);
         assert_eq!(consts.get("NOT_FOUND").copied(), Some(404));
         assert_eq!(consts.get("CUSTOM").copied(), Some(-42));
-        assert!(consts.get("GREETING").is_none());
+        assert!(!consts.contains_key("GREETING"));
         assert_eq!(consts.get("SUM").copied(), Some(3));
         assert_eq!(consts.get("CHAINED").copied(), Some(405));
     }
@@ -1275,9 +1270,16 @@ mod tests {
         let responses = &schema["paths"]["/x"]["get"]["responses"];
         // 200 del return type, 500 default, sin codes adicionales.
         // El `return code { ... }` no resuelve estáticamente.
-        let codes: Vec<&str> = responses.as_object().unwrap().keys().map(|s| s.as_str()).collect();
+        let codes: Vec<&str> = responses
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(|s| s.as_str())
+            .collect();
         assert!(
-            !codes.iter().any(|c| *c == "400" || *c == "404" || *c == "401"),
+            !codes
+                .iter()
+                .any(|c| *c == "400" || *c == "404" || *c == "401"),
             "esperaba sin codes específicos del Ident dinámico, fue: {:?}",
             codes
         );
@@ -1508,7 +1510,10 @@ mod tests {
         let post = &schema["paths"]["/users"]["post"];
         assert_eq!(post["requestBody"]["required"], json!(true));
         let body_schema = &post["requestBody"]["content"]["application/json"]["schema"];
-        assert_eq!(body_schema, &json!({ "$ref": "#/components/schemas/UserInput" }));
+        assert_eq!(
+            body_schema,
+            &json!({ "$ref": "#/components/schemas/UserInput" })
+        );
         // Y `UserInput` está en components.schemas.
         let user_input_schema = &schema["components"]["schemas"]["UserInput"];
         assert_eq!(user_input_schema["type"], json!("object"));
@@ -1575,7 +1580,10 @@ mod tests {
             .unwrap();
         assert!(responses.contains_key("200"), "esperaba 200 (Ok)");
         assert!(responses.contains_key("500"), "esperaba 500 (Err fallback)");
-        assert!(responses.contains_key("404"), "esperaba 404 (Err con status literal)");
+        assert!(
+            responses.contains_key("404"),
+            "esperaba 404 (Err con status literal)"
+        );
     }
 
     #[test]

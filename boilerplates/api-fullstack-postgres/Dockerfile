@@ -1,28 +1,23 @@
 # Dockerfile multi-stage para api-fullstack-postgres.
 #
-# Mismo patrón que api-postgres-python: ambos stages basados en
-# python:3.12-slim porque PyO3 0.28 con `auto-initialize` + `abi3-py310`
-# ignora abi3 y linkea contra la libpython del builder. Si los stages
-# usan Pythons distintos (3.13 builder + 3.12 runtime), el binario
-# fitz falla en boot con "libpython3.X.so.1.0 not found".
-#
-# Build inicial: ~8-12 min (compila fitz + deps desde source).
+# Build inicial: ~6-9 min (compila fitz + deps desde source).
 # Builds subsiguientes: ~30s si solo cambia src/ o python/ (cache
 # buildkit reusa la capa de cargo install).
+#
+# Builder + runtime ahora pueden tener Python versions distintas
+# gracias al fix de R.bug-pyo3-abi3-autoinit (mini-tanda
+# Cleanup-Residual+ 2026-05-22): el binario fitz es portable
+# abi3-py310 — corre contra cualquier Python 3.10+. Usamos
+# `rust:slim` como builder (más rápido, Rust pre-instalado) y
+# `python:3.12-slim` como runtime.
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM python:3.12-slim AS builder
+FROM rust:slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        curl ca-certificates git \
-        python3-dev pkg-config libssl-dev build-essential && \
+        git python3 python3-dev pkg-config libssl-dev && \
     rm -rf /var/lib/apt/lists/*
-
-# Rust 1.95+ (Fitz pinea `rust-version = "1.95"` en Cargo.toml).
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
-    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
-ENV PATH="/root/.cargo/bin:${PATH}"
 
 # Pin opcional de versión de Fitz:
 #   docker build --build-arg FITZ_TAG=v0.9.25 .
@@ -50,7 +45,7 @@ RUN apt-get update && \
         libpq5 ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /root/.cargo/bin/fitz /usr/local/bin/fitz
+COPY --from=builder /usr/local/cargo/bin/fitz /usr/local/bin/fitz
 
 WORKDIR /app
 

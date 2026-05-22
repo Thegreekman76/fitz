@@ -275,8 +275,20 @@ fn main() {
         Commands::Init { name, http, no_git } => {
             init_project(name.as_deref(), http, no_git);
         }
-        Commands::Add { name, path, git, tag, rev } => {
-            add_dep_cmd(&name, path.as_deref(), git.as_deref(), tag.as_deref(), rev.as_deref());
+        Commands::Add {
+            name,
+            path,
+            git,
+            tag,
+            rev,
+        } => {
+            add_dep_cmd(
+                &name,
+                path.as_deref(),
+                git.as_deref(),
+                tag.as_deref(),
+                rev.as_deref(),
+            );
         }
         Commands::Remove { name } => {
             remove_dep_cmd(&name);
@@ -371,10 +383,7 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     };
 
     let manifest_text = fs::read_to_string(&manifest_path).unwrap_or_else(|e| {
-        eprintln!(
-            "✗ no se pudo leer `{}`: {e}",
-            manifest_path.display()
-        );
+        eprintln!("✗ no se pudo leer `{}`: {e}", manifest_path.display());
         std::process::exit(1);
     });
 
@@ -405,8 +414,8 @@ fn resolve_entry(file_opt: Option<PathBuf>) -> ResolvedEntry {
     // Fase 9.y.3.a — resolver deps eager (fail-fast con mensaje del
     // resolver). Si hay errores, abortamos antes de tocar el lockfile
     // o invocar al evaluator/codegen.
-    let resolved_deps = manifest::resolve_dependencies(&manifest, &manifest_dir)
-        .unwrap_or_else(|e| {
+    let resolved_deps =
+        manifest::resolve_dependencies(&manifest, &manifest_dir).unwrap_or_else(|e| {
             eprintln!("✗ no se pudieron resolver las dependencias: {e}");
             std::process::exit(1);
         });
@@ -487,7 +496,11 @@ fn py_types_file(source: &std::path::Path, out: Option<&std::path::Path>) {
         Some(path) => match fs::write(path, &output) {
             Ok(_) => println!("✓ types Fitz emitidos a {}", path.display()),
             Err(e) => {
-                eprintln!("✗ py-types: no se pudo escribir `{}`: {}", path.display(), e);
+                eprintln!(
+                    "✗ py-types: no se pudo escribir `{}`: {}",
+                    path.display(),
+                    e
+                );
                 std::process::exit(1);
             }
         },
@@ -560,9 +573,8 @@ fn openapi_file(path: &PathBuf) {
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
-    let (eval_result, registry) = http::with_active_registry(|| {
-        evaluator::eval_with_base_sync(program.clone(), base_dir)
-    });
+    let (eval_result, registry) =
+        http::with_active_registry(|| evaluator::eval_with_base_sync(program.clone(), base_dir));
     if let Err(e) = eval_result {
         eprintln!("{}", e);
         std::process::exit(1);
@@ -574,11 +586,7 @@ fn openapi_file(path: &PathBuf) {
         .server_config
         .as_ref()
         .and_then(|c| c.api_version.clone());
-    let schema = openapi::generate_openapi_with_version(
-        &routes,
-        &program,
-        api_version.as_deref(),
-    );
+    let schema = openapi::generate_openapi_with_version(&routes, &program, api_version.as_deref());
     match serde_json::to_string_pretty(&schema) {
         Ok(s) => println!("{}", s),
         Err(e) => {
@@ -614,11 +622,7 @@ fn check_file(path: &PathBuf) {
     if errors.is_empty() {
         println!("✓ {} — sin errores de tipo", path.display());
     } else {
-        eprintln!(
-            "✗ {} — {} error(es) de tipo:",
-            path.display(),
-            errors.len()
-        );
+        eprintln!("✗ {} — {} error(es) de tipo:", path.display(), errors.len());
         for e in &errors {
             eprintln!("  {}", e);
         }
@@ -783,7 +787,10 @@ fn build_file(
 
     if !output.status.success() {
         eprintln!("✗ cargo build falló al compilar el código generado:");
-        eprintln!("   (revisá {} para ver qué se intentó compilar.)", src_dir.display());
+        eprintln!(
+            "   (revisá {} para ver qué se intentó compilar.)",
+            src_dir.display()
+        );
         eprintln!("--- stderr de cargo ---");
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
         std::process::exit(1);
@@ -1019,7 +1026,10 @@ fn new_project(name: &str, http: bool, no_git: bool) {
 
     let target = PathBuf::from(name);
     if target.exists() {
-        eprintln!("✗ `{}` ya existe — borralo o elegí otro nombre.", target.display());
+        eprintln!(
+            "✗ `{}` ya existe — borralo o elegí otro nombre.",
+            target.display()
+        );
         std::process::exit(1);
     }
 
@@ -1175,7 +1185,9 @@ fn add_dep_cmd(
     // Build el spec según los flags. clap ya validó conflicts_with /
     // requires entre path/git/tag/rev; igual chequeamos defensivo.
     let spec = match (path_opt, git_opt) {
-        (Some(p), None) => manifest::AddDepSpec::Path { path: p.to_string() },
+        (Some(p), None) => manifest::AddDepSpec::Path {
+            path: p.to_string(),
+        },
         (None, Some(g)) => {
             let gitref = match (tag_opt, rev_opt) {
                 (Some(t), None) => fitz::git_dep::GitRef::Tag(t.to_string()),
@@ -1254,7 +1266,10 @@ fn remove_dep_cmd(name: &str) {
         }
     };
     if !removed {
-        eprintln!("✗ la dep `{name}` no estaba en `[dependencies]` de `{}`.", manifest_path.display());
+        eprintln!(
+            "✗ la dep `{name}` no estaba en `[dependencies]` de `{}`.",
+            manifest_path.display()
+        );
         std::process::exit(1);
     }
     if let Err(e) = std::fs::write(&manifest_path, &new_text) {
@@ -1273,7 +1288,10 @@ fn remove_dep_cmd(name: &str) {
             let lock_path = lockfile::lockfile_path(&ctx.manifest_dir);
             if lock_path.exists() {
                 if let Err(e) = std::fs::remove_file(&lock_path) {
-                    eprintln!("  (aviso: no se pudo borrar `{}`: {e})", lock_path.display());
+                    eprintln!(
+                        "  (aviso: no se pudo borrar `{}`: {e})",
+                        lock_path.display()
+                    );
                 } else {
                     println!("✓ borrado {} (deps vacías)", lock_path.display());
                 }
@@ -1345,7 +1363,10 @@ fn update_deps_cmd(name_filter: Option<&str>) {
     // user typea mal el nombre, no quiero silencio).
     if let Some(filter) = name_filter {
         if !parsed.dependencies.contains_key(filter) {
-            eprintln!("✗ la dep `{filter}` no está en `[dependencies]` de `{}`.", manifest_path.display());
+            eprintln!(
+                "✗ la dep `{filter}` no está en `[dependencies]` de `{}`.",
+                manifest_path.display()
+            );
             std::process::exit(1);
         }
     }
@@ -1587,11 +1608,7 @@ fn test_cmd(filter: Option<String>, file_arg: Option<PathBuf>) {
                     None => eval_test_source(&src.path, &dep_registry).await,
                 };
                 if let Err(e) = res {
-                    eprintln!(
-                        "✗ error cargando {}: {}",
-                        src.path.display(),
-                        e
-                    );
+                    eprintln!("✗ error cargando {}: {}", src.path.display(), e);
                     std::process::exit(1);
                 }
             }
@@ -1684,9 +1701,7 @@ fn discover_test_sources_from_manifest() -> (Vec<TestSource>, manifest::DepRegis
             .unwrap_or_default();
         entries.sort();
         for path in entries {
-            if path.is_file()
-                && path.extension().and_then(|e| e.to_str()) == Some("fitz")
-            {
+            if path.is_file() && path.extension().and_then(|e| e.to_str()) == Some("fitz") {
                 let file_name = path
                     .file_name()
                     .and_then(|n| n.to_str())
@@ -1746,8 +1761,7 @@ async fn eval_test_source(
     path: &std::path::Path,
     dep_registry: &manifest::DepRegistry,
 ) -> Result<(), String> {
-    let source = fs::read_to_string(path)
-        .map_err(|e| format!("no se pudo leer: {e}"))?;
+    let source = fs::read_to_string(path).map_err(|e| format!("no se pudo leer: {e}"))?;
 
     let tokens = lexer::tokenize(&source).map_err(|e| format!("{e}"))?;
     let program = parser::parse(tokens).map_err(|e| format!("{e}"))?;
@@ -1789,9 +1803,27 @@ fn run_test_registry(registry: &testing::TestRegistry, filter: Option<&str>) -> 
 
     // ANSI raw — usar colors solo si stdout es TTY (no redirigido).
     let use_color = std::io::stdout().is_terminal();
-    let green = |s: &str| if use_color { format!("\x1b[32m{s}\x1b[0m") } else { s.into() };
-    let red = |s: &str| if use_color { format!("\x1b[31m{s}\x1b[0m") } else { s.into() };
-    let bold = |s: &str| if use_color { format!("\x1b[1m{s}\x1b[0m") } else { s.into() };
+    let green = |s: &str| {
+        if use_color {
+            format!("\x1b[32m{s}\x1b[0m")
+        } else {
+            s.into()
+        }
+    };
+    let red = |s: &str| {
+        if use_color {
+            format!("\x1b[31m{s}\x1b[0m")
+        } else {
+            s.into()
+        }
+    };
+    let bold = |s: &str| {
+        if use_color {
+            format!("\x1b[1m{s}\x1b[0m")
+        } else {
+            s.into()
+        }
+    };
 
     let all = registry.tests();
     let total_discovered = all.len();
@@ -2008,8 +2040,7 @@ async fn run_dev_loop(target: DevTarget) -> Result<(), String> {
         .watch(&target.watch_dir, notify::RecursiveMode::Recursive)
         .map_err(|e| format!("no se pudo watch-ear `{}`: {e}", target.watch_dir.display()))?;
 
-    let (tokio_tx, mut tokio_rx) =
-        tokio::sync::mpsc::unbounded_channel::<notify::Event>();
+    let (tokio_tx, mut tokio_rx) = tokio::sync::mpsc::unbounded_channel::<notify::Event>();
     std::thread::spawn(move || {
         // Ignoramos errores del watcher (`Err`): el SO a veces emite
         // ruido (paths efímeros, permisos transitorios) que no nos
@@ -2153,11 +2184,7 @@ async fn drain_until_change(
 ) {
     let _ = wait_for_relevant_change(rx, watch_dir).await;
     // Debounce post-cambio.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_millis(100),
-        drain_pending(rx),
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), drain_pending(rx)).await;
 }
 
 /// Decide si un path del evento merece restart. Reglas:
@@ -2227,9 +2254,7 @@ fn relative_to(path: &std::path::Path, base: &std::path::Path) -> String {
 /// `sleep(100).await` y similares funcionen desde el prompt.
 fn repl_cmd() {
     println!("Fitz REPL");
-    println!(
-        "Tipos: `:help` para comandos disponibles. Ctrl+D para salir.\n"
-    );
+    println!("Tipos: `:help` para comandos disponibles. Ctrl+D para salir.\n");
 
     let mut editor = match rustyline::DefaultEditor::new() {
         Ok(e) => e,
@@ -2257,8 +2282,7 @@ fn repl_cmd() {
 /// podemos resolver el home dir (caso muy raro), devolvemos `None` y
 /// la sesión corre sin history persistente.
 fn repl_history_path() -> Option<PathBuf> {
-    let home = std::env::var_os("USERPROFILE")
-        .or_else(|| std::env::var_os("HOME"))?;
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
     let dir = PathBuf::from(home).join(".fitz");
     // Mejor intentamos crear el directorio acá; si falla, dejamos que
     // rustyline lo gestione en el `save_history` (que también va a
@@ -2271,10 +2295,7 @@ fn repl_history_path() -> Option<PathBuf> {
 /// si está incompleta), procesar comandos especiales `:`, parsear,
 /// evaluar contra el env compartido, imprimir el valor si era una
 /// expresión top-level.
-async fn repl_loop(
-    editor: &mut rustyline::DefaultEditor,
-    history_path: Option<&std::path::Path>,
-) {
+async fn repl_loop(editor: &mut rustyline::DefaultEditor, history_path: Option<&std::path::Path>) {
     let mut env = evaluator::new_repl_env();
     let base_dir = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
 
@@ -2346,14 +2367,16 @@ enum ReplReadError {
 /// El prompt cambia entre líneas: `fitz> ` para la primera línea,
 /// `...   ` para continuations. Mantiene el visual aligned con `fitz>`
 /// (4 chars cada uno).
-fn read_complete_input(
-    editor: &mut rustyline::DefaultEditor,
-) -> Result<String, ReplReadError> {
+fn read_complete_input(editor: &mut rustyline::DefaultEditor) -> Result<String, ReplReadError> {
     use rustyline::error::ReadlineError;
 
     let mut buffer = String::new();
     loop {
-        let prompt = if buffer.is_empty() { "fitz> " } else { "...   " };
+        let prompt = if buffer.is_empty() {
+            "fitz> "
+        } else {
+            "...   "
+        };
         let line = editor.readline(prompt);
         match line {
             Ok(line) => {
@@ -2628,11 +2651,7 @@ async fn load_into_repl_env(
 /// programa, si es `Stmt::Expr`, se evalúa devolviendo un `Value` que
 /// se imprime (paralelo a Python `_`). Para los demás stmts (let,
 /// fn, etc.) el output es silencioso.
-async fn eval_repl_input(
-    source: &str,
-    env: &mut fitz::env::EnvRef,
-    base_dir: &std::path::Path,
-) {
+async fn eval_repl_input(source: &str, env: &mut fitz::env::EnvRef, base_dir: &std::path::Path) {
     let tokens = match fitz::lexer::tokenize(source) {
         Ok(t) => t,
         Err(e) => {
@@ -2764,12 +2783,22 @@ fn lint_cmd(files: Vec<PathBuf>, deny: Vec<String>) {
     // Summary final.
     if total_findings == 0 && read_errors == 0 {
         if use_color {
-            println!("\n\x1b[32m✓ sin findings\x1b[0m ({} archivo(s) revisado(s))", targets.len());
+            println!(
+                "\n\x1b[32m✓ sin findings\x1b[0m ({} archivo(s) revisado(s))",
+                targets.len()
+            );
         } else {
-            println!("\n✓ sin findings ({} archivo(s) revisado(s))", targets.len());
+            println!(
+                "\n✓ sin findings ({} archivo(s) revisado(s))",
+                targets.len()
+            );
         }
     } else {
-        let f_word = if total_findings == 1 { "finding" } else { "findings" };
+        let f_word = if total_findings == 1 {
+            "finding"
+        } else {
+            "findings"
+        };
         println!(
             "\n{} {} en {} archivo(s){}",
             total_findings,
@@ -2823,7 +2852,12 @@ fn print_lint_finding(
         }
     } else {
         println!("\n{}: {} [{}]", label, finding.message, finding.name);
-        println!("  --> {}:{}:{}", path.display(), finding.line, finding.column);
+        println!(
+            "  --> {}:{}:{}",
+            path.display(),
+            finding.line,
+            finding.column
+        );
         if let Some(hint) = &finding.hint {
             println!("  = nota: {}", hint);
         }
@@ -2844,10 +2878,6 @@ fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
     } else {
         println!("\n----------------------------------------");
     }
-    eprintln!(
-        "▶ fitz dev (run #{}) — {}",
-        run_count,
-        target.display
-    );
+    eprintln!("▶ fitz dev (run #{}) — {}", run_count, target.display);
     eprintln!();
 }

@@ -308,10 +308,7 @@ print(u)
 ";
     let (stdout, exit) = build_and_run("instance-display", src);
     assert_eq!(exit, 0);
-    assert_lines(
-        &stdout,
-        &["User { id: 1, name: \"Fitz\", email: null }"],
-    );
+    assert_lines(&stdout, &["User { id: 1, name: \"Fitz\", email: null }"]);
 }
 
 #[test]
@@ -485,16 +482,7 @@ for v in xs {
     assert_eq!(exit, 0);
     assert_lines(
         &stdout,
-        &[
-            "[1, 2, 3]",
-            "3",
-            "[1, 2, 3, 4]",
-            "4",
-            "1",
-            "2",
-            "3",
-            "4",
-        ],
+        &["[1, 2, 3]", "3", "[1, 2, 3, 4]", "4", "1", "2", "3", "4"],
     );
 }
 
@@ -685,14 +673,7 @@ fn main() => 0
 @get(\"/x\")
 fn h() -> Str => \"ok\"
 ";
-    let (status, body) = build_spawn_request(
-        "mw3-passthrough",
-        src,
-        43370,
-        "GET",
-        "/x",
-        None,
-    );
+    let (status, body) = build_spawn_request("mw3-passthrough", src, 43370, "GET", "/x", None);
     assert_eq!(status, 200);
     assert!(body.contains("ok"));
 }
@@ -712,14 +693,8 @@ fn main() => 0
 @get(\"/protected\")
 fn h() -> Str => \"NO DEBERIA APARECER\"
 ";
-    let (status, body) = build_spawn_request(
-        "mw3-shortcircuit",
-        src,
-        43371,
-        "GET",
-        "/protected",
-        None,
-    );
+    let (status, body) =
+        build_spawn_request("mw3-shortcircuit", src, 43371, "GET", "/protected", None);
     assert_eq!(status, 401);
     assert!(body.contains("sin autorizacion"), "body fue: {}", body);
     assert!(!body.contains("NO DEBERIA APARECER"));
@@ -735,13 +710,8 @@ fn main() => 0
 @get(\"/api\")
 fn list_items() -> Str => \"[]\"
 ";
-    let (status, raw_headers) = build_spawn_request_raw(
-        "mw3-preflight",
-        src,
-        43372,
-        "OPTIONS",
-        "/api",
-    );
+    let (status, raw_headers) =
+        build_spawn_request_raw("mw3-preflight", src, 43372, "OPTIONS", "/api");
     assert_eq!(status, 204);
     let headers_lower = raw_headers.to_lowercase();
     assert!(
@@ -807,7 +777,8 @@ fn delete_task(id: Int) -> Str => \"deleted\"
     );
     assert_eq!(status, 204, "headers: {}", raw_headers);
     let h_lower = raw_headers.to_lowercase();
-    let methods_line = h_lower.lines()
+    let methods_line = h_lower
+        .lines()
         .find(|l| l.starts_with("access-control-allow-methods:"))
         .unwrap_or_else(|| panic!("falta Access-Control-Allow-Methods: {}", raw_headers))
         .to_string();
@@ -1006,13 +977,7 @@ fn main() => 0
 @get(\"/api\")
 fn list_items() -> Str => \"ok\"
 ";
-    let (status, raw_headers) = build_spawn_request_raw(
-        "mw3-cors-real",
-        src,
-        43373,
-        "GET",
-        "/api",
-    );
+    let (status, raw_headers) = build_spawn_request_raw("mw3-cors-real", src, 43373, "GET", "/api");
     assert_eq!(status, 200);
     let headers_lower = raw_headers.to_lowercase();
     assert!(
@@ -1169,10 +1134,7 @@ match describe_user(42) {
 ";
     let (stdout, exit) = build_and_run("try-propagation", src);
     assert_eq!(exit, 0);
-    assert_lines(
-        &stdout,
-        &["#1 es Fitz", "falló: usuario no encontrado"],
-    );
+    assert_lines(&stdout, &["#1 es Fitz", "falló: usuario no encontrado"]);
 }
 
 #[test]
@@ -1197,10 +1159,7 @@ match nadie {
 ";
     let (stdout, exit) = build_and_run("list-find-match", src);
     assert_eq!(exit, 0);
-    assert_lines(
-        &stdout,
-        &["hola, Fitz!", "falta: no encontrado"],
-    );
+    assert_lines(&stdout, &["hola, Fitz!", "falta: no encontrado"]);
 }
 
 #[test]
@@ -1221,10 +1180,7 @@ match m.get(\"z\") {
 ";
     let (stdout, exit) = build_and_run("map-get-match", src);
     assert_eq!(exit, 0);
-    assert_lines(
-        &stdout,
-        &["a vale 1", "err: clave no encontrada: z"],
-    );
+    assert_lines(&stdout, &["a vale 1", "err: clave no encontrada: z"]);
 }
 
 #[test]
@@ -1338,11 +1294,7 @@ let PREFIX = \"saludos, \"
 fn greet(name: Str) -> Str => \"{PREFIX}{name}\"
 type User { id: Int, name: Str }
 ";
-    let (stdout, exit) = build_and_run_multi(
-        "module-basic",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) = build_and_run_multi("module-basic", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(
         &stdout,
@@ -1358,11 +1310,7 @@ from utils import PREFIX
 print(PREFIX)
 ";
     let utils = "let PREFIX = \"prefijo\"";
-    let (stdout, exit) = build_and_run_multi(
-        "module-import-const",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) = build_and_run_multi("module-import-const", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["prefijo"]);
 }
@@ -1376,11 +1324,8 @@ import utils
 print(utils.greet(\"Patagonia\"))
 ";
     let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"";
-    let (stdout, exit) = build_and_run_multi(
-        "module-namespace-only",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("module-namespace-only", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["hola, Patagonia"]);
 }
@@ -1405,11 +1350,8 @@ let MAX = 99
 let HELLO = \"saludos\"
 type User { id: Int = MAX, name: Str = HELLO }
 ";
-    let (stdout, exit) = build_and_run_multi(
-        "module-default-with-const",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("module-default-with-const", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["99", "saludos"]);
 }
@@ -1423,11 +1365,8 @@ import utils as u
 print(u.greet(\"Fitz\"))
 ";
     let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"";
-    let (stdout, exit) = build_and_run_multi(
-        "module-import-alias-ns",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("module-import-alias-ns", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["hola, Fitz"]);
 }
@@ -1440,11 +1379,8 @@ from utils import greet as g
 print(g(\"Fitz\"))
 ";
     let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"";
-    let (stdout, exit) = build_and_run_multi(
-        "module-import-alias-fn",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("module-import-alias-fn", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["hola, Fitz"]);
 }
@@ -1461,11 +1397,8 @@ let p = Person { id: 7, name: \"Fitz\" }
 print(p)
 ";
     let utils = "type User { id: Int, name: Str }";
-    let (stdout, exit) = build_and_run_multi(
-        "module-import-alias-type",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("module-import-alias-type", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["User { id: 7, name: \"Fitz\" }"]);
 }
@@ -1484,25 +1417,17 @@ print(PREFIX)
 print(REMOTE)
 ";
     let utils = "let PREFIX = \"remoto\"";
-    let (stdout, exit) = build_and_run_multi(
-        "module-import-alias-const",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("module-import-alias-const", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["local", "remoto"]);
 }
 
 #[test]
 fn modulo_inexistente_aborta_build() {
-    let stderr = build_expect_fail_multi(
-        "module-not-found",
-        "import inexistente\nprint(0)\n",
-        &[],
-    );
+    let stderr = build_expect_fail_multi("module-not-found", "import inexistente\nprint(0)\n", &[]);
     assert!(
-        stderr.contains("no se encontró el módulo")
-            || stderr.contains("inexistente"),
+        stderr.contains("no se encontró el módulo") || stderr.contains("inexistente"),
         "esperaba mensaje de módulo no encontrado, fue: {}",
         stderr
     );
@@ -1551,11 +1476,7 @@ fn greet(name: Str) -> Str => \"{PREFIX}{name}\"
     let (stdout, exit) = build_and_run_multi(
         "f15-namespace-y-named-mixto",
         main,
-        &[
-            ("a.fitz", a),
-            ("b.fitz", b),
-            ("c.fitz", c),
-        ],
+        &[("a.fitz", a), ("b.fitz", b), ("c.fitz", c)],
     );
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["HOLA, FITZ"]);
@@ -1577,11 +1498,8 @@ fn x() -> Int => 1
 import a
 fn y() -> Int => 2
 ";
-    let stderr = build_expect_fail_multi(
-        "f15-ciclo-imports",
-        main,
-        &[("a.fitz", a), ("b.fitz", b)],
-    );
+    let stderr =
+        build_expect_fail_multi("f15-ciclo-imports", main, &[("a.fitz", a), ("b.fitz", b)]);
     assert!(
         stderr.contains("ciclo de imports"),
         "esperaba mensaje sobre ciclo de imports, fue: {}",
@@ -1604,11 +1522,8 @@ fn make_user(id: Int) -> User => User { id: id }
 ";
     let _b = ""; // sin uso
     let c = "type User { id: Int = 0 }";
-    let (stdout, exit) = build_and_run_multi(
-        "f15-type-compartido",
-        main,
-        &[("a.fitz", a), ("c.fitz", c)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("f15-type-compartido", main, &[("a.fitz", a), ("c.fitz", c)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["User { id: 7 }"]);
 }
@@ -1633,11 +1548,7 @@ print(utils.MAX)
 let SECONDS: Int = 60 * 60
 let MAX: Int = SECONDS / 36
 ";
-    let (stdout, exit) = build_and_run_multi(
-        "f14-let-const-eval",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) = build_and_run_multi("f14-let-const-eval", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["3600", "100"]);
 }
@@ -1652,11 +1563,7 @@ import utils
 print(utils.GREETING)
 ";
     let utils = "let GREETING: Str = \"hola, \" + \"Fitz\"";
-    let (stdout, exit) = build_and_run_multi(
-        "f14-let-str-concat",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) = build_and_run_multi("f14-let-str-concat", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["hola, Fitz"]);
 }
@@ -1766,8 +1673,7 @@ fn build_spawn_request(
             method, path, addr
         ),
     };
-    let mut stream =
-        std::net::TcpStream::connect(&addr).expect("connect");
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .ok();
@@ -1786,10 +1692,7 @@ fn build_spawn_request(
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body_start = raw
-        .find("\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(raw.len());
+    let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
     let body = raw[body_start..].to_string();
     (status, body)
 }
@@ -1800,14 +1703,7 @@ fn http_get_simple_responde_200_y_body() {
     // produce 200 + JSON con el string.
     let src = "@server(43210)\nfn main() => 0\n\
                @get(\"/\") fn index() -> Str => \"Fitz HTTP corriendo\"\n";
-    let (status, body) = build_spawn_request(
-        "http-get-simple",
-        src,
-        43210,
-        "GET",
-        "/",
-        None,
-    );
+    let (status, body) = build_spawn_request("http-get-simple", src, 43210, "GET", "/", None);
     assert_eq!(status, 200);
     assert_eq!(body.trim(), "\"Fitz HTTP corriendo\"");
 }
@@ -1849,14 +1745,8 @@ fn http_result_ok_responde_200_err_responde_500() {
         build_spawn_request("http-result-ok", src, 43212, "GET", "/d/10/2", None);
     assert_eq!(status_ok, 200);
     assert_eq!(body_ok.trim(), "5");
-    let (status_err, body_err) = build_spawn_request(
-        "http-result-err",
-        src,
-        43212,
-        "GET",
-        "/d/10/0",
-        None,
-    );
+    let (status_err, body_err) =
+        build_spawn_request("http-result-err", src, 43212, "GET", "/d/10/0", None);
     assert_eq!(status_err, 500);
     assert!(
         body_err.contains("\"error\":\"div por cero\""),
@@ -2009,8 +1899,7 @@ fn build_spawn_request_with_ct(
             method, path, addr
         ),
     };
-    let mut stream =
-        std::net::TcpStream::connect(&addr).expect("connect");
+    let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
     stream
         .set_read_timeout(Some(std::time::Duration::from_secs(2)))
         .ok();
@@ -2028,10 +1917,7 @@ fn build_spawn_request_with_ct(
         .nth(1)
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
-    let body_start = raw
-        .find("\r\n\r\n")
-        .map(|i| i + 4)
-        .unwrap_or(raw.len());
+    let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
     let body = raw[body_start..].to_string();
     (status, body)
 }
@@ -2052,7 +1938,11 @@ fn uc_http_post_urlencoded_parsea_a_map_str_str() {
         Some("name=Fitz&age=25"),
         Some("application/x-www-form-urlencoded"),
     );
-    assert_eq!(status, 200, "esperaba 200, fue: status={} body={}", status, body);
+    assert_eq!(
+        status, 200,
+        "esperaba 200, fue: status={} body={}",
+        status, body
+    );
     assert!(
         body.contains("\"name\":\"Fitz\"") && body.contains("\"age\":\"25\""),
         "esperaba body parsea pares name/age, fue: {}",
@@ -2100,7 +1990,11 @@ fn ha_http_content_type_text_plain_es_415_con_msg_claro() {
         Some("hola mundo"),
         Some("text/plain"),
     );
-    assert_eq!(status, 415, "esperaba 415, fue: status={} body={}", status, body);
+    assert_eq!(
+        status, 415,
+        "esperaba 415, fue: status={} body={}",
+        status, body
+    );
     assert!(
         body.contains("Content-Type no soportado"),
         "esperaba `Content-Type no soportado`, fue: {}",
@@ -2306,7 +2200,6 @@ fn mp_build_multipart_sin_boundary_es_400() {
         body
     );
 }
-
 
 #[test]
 fn f13_spike_lista_heterogenea_compila_y_paridad_bit_a_bit() {
@@ -2923,8 +2816,7 @@ fn build_spawn_requests(
                 method, path, addr
             ),
         };
-        let mut stream =
-            std::net::TcpStream::connect(&addr).expect("connect");
+        let mut stream = std::net::TcpStream::connect(&addr).expect("connect");
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .ok();
@@ -2939,10 +2831,7 @@ fn build_spawn_requests(
             .nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let body_start = raw
-            .find("\r\n\r\n")
-            .map(|i| i + 4)
-            .unwrap_or(raw.len());
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
         let body = raw[body_start..].to_string();
         results.push((status, body));
     }
@@ -2970,8 +2859,10 @@ fn http_state_get_lista_compartida() {
     let (status, body) = &results[0];
     assert_eq!(*status, 200);
     assert!(
-        body.contains("\"id\":1") && body.contains("\"name\":\"ana\"")
-            && body.contains("\"id\":2") && body.contains("\"name\":\"luis\""),
+        body.contains("\"id\":1")
+            && body.contains("\"name\":\"ana\"")
+            && body.contains("\"id\":2")
+            && body.contains("\"name\":\"luis\""),
         "esperaba lista con ambos users, body fue: {}",
         body
     );
@@ -3081,16 +2972,12 @@ fn http_state_delete_reconstruccion_lista() {
         "http-state-delete-rebuild",
         src,
         43323,
-        &[
-            ("DELETE", "/users/2", None),
-            ("GET", "/users", None),
-        ],
+        &[("DELETE", "/users/2", None), ("GET", "/users", None)],
     );
     assert_eq!(results[0].0, 200);
     assert_eq!(results[1].0, 200);
     assert!(
-        results[1].1.contains("\"name\":\"ana\"")
-            && !results[1].1.contains("\"name\":\"luis\""),
+        results[1].1.contains("\"name\":\"ana\"") && !results[1].1.contains("\"name\":\"luis\""),
         "GET post-delete debería tener solo ana, body: {}",
         results[1].1
     );
@@ -3104,12 +2991,7 @@ fn http_state_var_no_referenciada_no_se_promueve() {
     let src = "@server(43324)\nfn main() => 0\n\
                let saludo = \"ignorada\"\n\
                @get(\"/\") fn index() -> Str => \"ok\"\n";
-    let results = build_spawn_requests(
-        "http-state-unused",
-        src,
-        43324,
-        &[("GET", "/", None)],
-    );
+    let results = build_spawn_requests("http-state-unused", src, 43324, &[("GET", "/", None)]);
     assert_eq!(results[0].0, 200);
     assert!(
         results[0].1.contains("ok"),
@@ -3153,14 +3035,8 @@ fn http_status_codes_custom_401_y_body_json() {
                @get(\"/protected\") fn protected() -> Str {\n\
                    return 401 {\"message\": \"no autorizado\"}\n\
                }\n";
-    let (status, body) = build_spawn_request(
-        "http-status-401",
-        src,
-        43400,
-        "GET",
-        "/protected",
-        None,
-    );
+    let (status, body) =
+        build_spawn_request("http-status-401", src, 43400, "GET", "/protected", None);
     assert_eq!(status, 401, "esperaba status 401");
     assert!(
         body.contains("\"message\":\"no autorizado\""),
@@ -3179,25 +3055,13 @@ fn http_status_codes_polimorfico_mix_ok_y_404() {
                    if (id == 1) { return \"alice\" }\n\
                    return 404 {\"error\": \"no encontrado\"}\n\
                }\n";
-    let (status_ok, body_ok) = build_spawn_request(
-        "http-status-mix-ok",
-        src,
-        43401,
-        "GET",
-        "/u/1",
-        None,
-    );
+    let (status_ok, body_ok) =
+        build_spawn_request("http-status-mix-ok", src, 43401, "GET", "/u/1", None);
     assert_eq!(status_ok, 200);
     assert_eq!(body_ok.trim(), "\"alice\"");
 
-    let (status_404, body_404) = build_spawn_request(
-        "http-status-mix-404",
-        src,
-        43401,
-        "GET",
-        "/u/2",
-        None,
-    );
+    let (status_404, body_404) =
+        build_spawn_request("http-status-mix-404", src, 43401, "GET", "/u/2", None);
     assert_eq!(status_404, 404);
     assert!(
         body_404.contains("\"error\":\"no encontrado\""),
@@ -3545,8 +3409,7 @@ fn mini_tanda_c_comprehension_sobre_lista_compila_y_doblea() {
 fn mini_tanda_c_comprehension_sobre_range_con_filter() {
     // `[n for n in 0..10 if n % 2 == 0]` filtra pares. La anotación
     // `List<Int>` ayuda al codegen a tipar concreto el iter Int.
-    let src =
-        "let r: List<Int> = [n for n in 0..10 if n % 2 == 0]\nprint(r)\n";
+    let src = "let r: List<Int> = [n for n in 0..10 if n % 2 == 0]\nprint(r)\n";
     let (stdout, exit) = build_and_run("mini_tanda_c_comp_filter", src);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "[0, 2, 4, 6, 8]");
@@ -3833,7 +3696,10 @@ fn mini_tanda_err_plus_err_instance_compila_y_preserva_display() {
                }\n";
     let (stdout, exit) = build_and_run("mini_tanda_err_plus_instance", src);
     assert_eq!(exit, 0);
-    assert_eq!(stdout.trim(), "err: ApiError { status: 503, msg: \"unavailable\" }");
+    assert_eq!(
+        stdout.trim(),
+        "err: ApiError { status: 503, msg: \"unavailable\" }"
+    );
 }
 
 #[test]
@@ -3993,11 +3859,8 @@ fn cm_metodos_custom_sobre_tipos_importados_compilan() {
                      fn greet() -> Str { return \"hola, {name}\" }\n\
                      static fn admin() -> User { return User { id: 0, name: \"admin\" } }\n\
                  }\n";
-    let (stdout, exit) = build_and_run_multi(
-        "cm-cross-module-methods",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("cm-cross-module-methods", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(&stdout, &["hola, Ada", "hola, admin"]);
 }
@@ -4184,19 +4047,12 @@ fn mln_from_import_parens_multi_linea_compila_y_corre() {
     let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"\n\
                  fn shout(s: Str) -> Str => s.upper()\n\
                  type User { id: Int = 0, name: Str = \"anon\" }\n";
-    let (stdout, exit) = build_and_run_multi(
-        "mln-parens-multilinea",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) =
+        build_and_run_multi("mln-parens-multilinea", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(
         &stdout,
-        &[
-            "hola, Mln",
-            "MLN",
-            "User { id: 1, name: \"Fitz\" }",
-        ],
+        &["hola, Mln", "MLN", "User { id: 1, name: \"Fitz\" }"],
     );
 }
 
@@ -4215,11 +4071,7 @@ fn mln_from_import_parens_con_aliases_mixtos_compila() {
     let utils = "fn greet(name: Str) -> Str => \"hola, {name}\"\n\
                  fn shout(s: Str) -> Str => s.upper()\n\
                  type User { id: Int = 0, name: Str = \"anon\" }\n";
-    let (stdout, exit) = build_and_run_multi(
-        "mln-parens-aliases",
-        main,
-        &[("utils.fitz", utils)],
-    );
+    let (stdout, exit) = build_and_run_multi("mln-parens-aliases", main, &[("utils.fitz", utils)]);
     assert_eq!(exit, 0);
     assert_lines(
         &stdout,
@@ -4357,10 +4209,7 @@ fn mb_str_trim_start_y_end_compilan() {
     assert_eq!(exit, 0);
     // trim_start: recorta inicio, deja el sufijo intacto.
     // trim_end: recorta final, deja el prefijo intacto.
-    assert_eq!(
-        stdout,
-        "hola  \n  hola\nlinea\n\t\n\n\tlinea\n"
-    );
+    assert_eq!(stdout, "hola  \n  hola\nlinea\n\t\n\n\tlinea\n");
 }
 
 #[test]
@@ -4990,7 +4839,7 @@ fn fmt_g_general_compila() {
 }
 
 #[test]
-fn fmt_G_uppercase_compila() {
+fn fmt_g_uppercase_compila() {
     let src = "let w = 1234567890.0\n\
                print(\"{w:G}\")\n";
     let (stdout, exit) = build_and_run("fmt_G_uppercase", src);
@@ -5191,13 +5040,8 @@ fn main() => 0
 fn h() -> Str => \"ok\"
 ";
     // Request SIN Origin → no se emite header.
-    let (status, raw_headers) = build_spawn_request_raw(
-        "http-cors-echo-no-origin",
-        src,
-        43393,
-        "GET",
-        "/api",
-    );
+    let (status, raw_headers) =
+        build_spawn_request_raw("http-cors-echo-no-origin", src, 43393, "GET", "/api");
     assert_eq!(status, 200);
     let lower = raw_headers.to_lowercase();
     assert!(
@@ -5228,14 +5072,7 @@ fn get_user(id: Int) -> Result<Str, ApiErr> {
     return Ok(\"Ada\")
 }
 ";
-    let (status, body) = build_spawn_request(
-        "http-err-404",
-        src,
-        43390,
-        "GET",
-        "/users/0",
-        None,
-    );
+    let (status, body) = build_spawn_request("http-err-404", src, 43390, "GET", "/users/0", None);
     assert_eq!(status, 404);
     assert!(body.contains("no encontrado"), "body fue: {}", body);
     // El body es el Instance serializado (no envuelto en `{"error": ...}`).
@@ -5260,14 +5097,8 @@ fn get_user(id: Int) -> Result<Str, ApiErr> {
 }
 ";
     // Caso OK: status 200.
-    let (status_ok, body_ok) = build_spawn_request(
-        "http-err-ok",
-        src,
-        43391,
-        "GET",
-        "/users/5",
-        None,
-    );
+    let (status_ok, body_ok) =
+        build_spawn_request("http-err-ok", src, 43391, "GET", "/users/5", None);
     assert_eq!(status_ok, 200);
     assert!(body_ok.contains("hola"));
 }
@@ -5477,12 +5308,16 @@ fn fp3_named_args_basico_compila() {
                print(greet(greeting: \"Hey\", name: \"Roy\"))\n";
     let (stdout, exit) = build_and_run("fp3_named_basico", src);
     assert_eq!(exit, 0);
-    assert_eq!(stdout.trim(), "Hola, amigo\nHola, Fitz\nHi, amigo\nHey, Roy");
+    assert_eq!(
+        stdout.trim(),
+        "Hola, amigo\nHola, Fitz\nHi, amigo\nHey, Roy"
+    );
 }
 
 #[test]
 fn fp3_mezcla_posicional_y_named_compila() {
-    let src = "fn config(host: Str = \"127.0.0.1\", port: Int = 3000, debug: Bool = false) -> Str {\n\
+    let src =
+        "fn config(host: Str = \"127.0.0.1\", port: Int = 3000, debug: Bool = false) -> Str {\n\
                    return \"{host}:{port}/{debug}\"\n\
                }\n\
                print(config())\n\
@@ -5491,7 +5326,10 @@ fn fp3_mezcla_posicional_y_named_compila() {
                print(config(port: 9000, debug: true))\n";
     let (stdout, exit) = build_and_run("fp3_mezcla", src);
     assert_eq!(exit, 0);
-    assert_eq!(stdout.trim(), "127.0.0.1:3000/false\n0.0.0.0:3000/false\n0.0.0.0:8080/false\n127.0.0.1:9000/true");
+    assert_eq!(
+        stdout.trim(),
+        "127.0.0.1:3000/false\n0.0.0.0:3000/false\n0.0.0.0:8080/false\n127.0.0.1:9000/true"
+    );
 }
 
 // ---- Mini-tanda Sp.2 — return en match arm ------------------
@@ -5708,9 +5546,7 @@ fn build_spawn_auth_requests(
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(2)))
             .ok();
-        stream
-            .write_all(request.as_bytes())
-            .expect("send request");
+        stream.write_all(request.as_bytes()).expect("send request");
         let mut buf = Vec::new();
         stream.read_to_end(&mut buf).ok();
         let raw = String::from_utf8_lossy(&buf).into_owned();
@@ -5720,10 +5556,7 @@ fn build_spawn_auth_requests(
             .nth(1)
             .and_then(|s| s.parse().ok())
             .unwrap_or(0);
-        let body_start = raw
-            .find("\r\n\r\n")
-            .map(|i| i + 4)
-            .unwrap_or(raw.len());
+        let body_start = raw.find("\r\n\r\n").map(|i| i + 4).unwrap_or(raw.len());
         let body = raw[body_start..].to_string();
         results.push((status, body));
     }
@@ -5788,7 +5621,11 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     );
     // /public sin auth → 200 con body "sin auth"
     assert_eq!(results[0].0, 200, "public route 200, fue {:?}", results[0]);
-    assert!(results[0].1.contains("sin auth"), "body /public: {:?}", results[0].1);
+    assert!(
+        results[0].1.contains("sin auth"),
+        "body /public: {:?}",
+        results[0].1
+    );
 
     // /me sin Authorization → 401 con "falta Authorization"
     assert_eq!(results[1].0, 401, "/me sin auth 401, fue {:?}", results[1]);
@@ -5799,7 +5636,11 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     );
 
     // /me con token inválido → 401 con "token inválido"
-    assert_eq!(results[2].0, 401, "/me token inválido 401, fue {:?}", results[2]);
+    assert_eq!(
+        results[2].0, 401,
+        "/me token inválido 401, fue {:?}",
+        results[2]
+    );
     assert!(
         results[2].1.contains("token inválido"),
         "/me con token wrong body: {:?}",
@@ -5807,8 +5648,16 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     );
 
     // /me con user válido → 200 con "Alice"
-    assert_eq!(results[3].0, 200, "/me user válido 200, fue {:?}", results[3]);
-    assert!(results[3].1.contains("Alice"), "/me user body: {:?}", results[3].1);
+    assert_eq!(
+        results[3].0, 200,
+        "/me user válido 200, fue {:?}",
+        results[3]
+    );
+    assert!(
+        results[3].1.contains("Alice"),
+        "/me user body: {:?}",
+        results[3].1
+    );
 
     // /admin con rol user → 403
     assert_eq!(results[4].0, 403, "/admin user → 403, fue {:?}", results[4]);
@@ -5819,8 +5668,16 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     );
 
     // /admin con rol admin → 200 con "hola admin"
-    assert_eq!(results[5].0, 200, "/admin admin → 200, fue {:?}", results[5]);
-    assert!(results[5].1.contains("hola admin"), "/admin admin body: {:?}", results[5].1);
+    assert_eq!(
+        results[5].0, 200,
+        "/admin admin → 200, fue {:?}",
+        results[5]
+    );
+    assert!(
+        results[5].1.contains("hola admin"),
+        "/admin admin body: {:?}",
+        results[5].1
+    );
 }
 
 #[test]
@@ -5864,6 +5721,12 @@ print(\"verify-bad: {bad}\")\n\
 
 /// Spawn del binario WS + cliente que envía/recibe un mensaje texto.
 /// Devuelve la respuesta del server.
+///
+/// SERIAL es Mutex<()> sync intencional para serializar tests
+/// (cargo test corre tests en paralelo por default; SERIAL hace
+/// mutex global por test E2E que invoca rustc). Mantenerlo durante
+/// el await es deliberado — soltarlo defeats the purpose.
+#[allow(clippy::await_holding_lock)]
 async fn ws_build_send_recv(
     test_name: &str,
     src: &str,
@@ -6009,7 +5872,6 @@ fn ws_codegen_tipo_custom_marshaling_json() {
     assert_eq!(v["text"], serde_json::json!("re:hi"));
 }
 
-
 // ---------------------------------------------------------------------------
 // R.bug-deadlock — regression test (2026-05-21)
 // ---------------------------------------------------------------------------
@@ -6040,7 +5902,10 @@ fn r_bug_deadlock_str_interp_re_lock_mismo_arc_no_cuelga() {
                }\n\
                print(\"len={xs.len()} total={total(xs)}\")\n";
     let (stdout, exit) = build_and_run("r-bug-deadlock-str-interp", src);
-    assert_eq!(exit, 0, "binario debió terminar limpio (timeout = deadlock)");
+    assert_eq!(
+        exit, 0,
+        "binario debió terminar limpio (timeout = deadlock)"
+    );
     assert!(
         stdout.contains("len=2"),
         "esperaba `len=2` en stdout, fue: {}",
@@ -6172,11 +6037,8 @@ fn env_builtin_lee_var_existente_y_propaga_con_try() {
           Ok(v) => print(v),\n\
           Err(e) => print(\"err: {e}\")\n\
         }\n";
-    let (stdout, exit) = build_and_run_with_env(
-        "env-builtin-exists",
-        src,
-        &[("FITZ_E2E_GREETING", "mundo")],
-    );
+    let (stdout, exit) =
+        build_and_run_with_env("env-builtin-exists", src, &[("FITZ_E2E_GREETING", "mundo")]);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "hola, mundo!");
 }
@@ -6194,11 +6056,7 @@ fn env_builtin_var_missing_propaga_err() {
           Ok(v) => print(\"got: {v}\"),\n\
           Err(e) => print(\"caught: {e}\")\n\
         }\n";
-    let (stdout, exit) = build_and_run_with_env(
-        "env-builtin-missing",
-        src,
-        &[],
-    );
+    let (stdout, exit) = build_and_run_with_env("env-builtin-missing", src, &[]);
     assert_eq!(exit, 0);
     assert!(
         stdout.contains("caught:") && stdout.contains("FITZ_E2E_NUNCA_EXISTE_XYZ"),
@@ -6212,11 +6070,7 @@ fn env_or_builtin_devuelve_default_si_missing() {
     let src = "\
         let port = env_or(\"FITZ_E2E_NO_SET_PORT\", \"3000\")\n\
         print(\"port={port}\")\n";
-    let (stdout, exit) = build_and_run_with_env(
-        "env-or-default",
-        src,
-        &[],
-    );
+    let (stdout, exit) = build_and_run_with_env("env-or-default", src, &[]);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "port=3000");
 }
@@ -6226,11 +6080,8 @@ fn env_or_builtin_var_existente_ignora_default() {
     let src = "\
         let port = env_or(\"FITZ_E2E_PORT_REAL\", \"3000\")\n\
         print(\"port={port}\")\n";
-    let (stdout, exit) = build_and_run_with_env(
-        "env-or-real",
-        src,
-        &[("FITZ_E2E_PORT_REAL", "8080")],
-    );
+    let (stdout, exit) =
+        build_and_run_with_env("env-or-real", src, &[("FITZ_E2E_PORT_REAL", "8080")]);
     assert_eq!(exit, 0);
     assert_eq!(stdout.trim(), "port=8080");
 }

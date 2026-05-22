@@ -180,10 +180,7 @@ pub fn spawn_cron_scheduler(registry: Arc<CronRegistry>) {
     if jobs.is_empty() {
         return;
     }
-    eprintln!(
-        "🕐 Fitz scheduler arrancado con {} job(s) cron",
-        jobs.len()
-    );
+    eprintln!("🕐 Fitz scheduler arrancado con {} job(s) cron", jobs.len());
     for job in &jobs {
         eprintln!("   @cron  {} ({})", job.name, job.schedule);
     }
@@ -201,10 +198,7 @@ async fn run_cron_job(job: CronJob) {
         let Some(next) = job.schedule.upcoming(Utc).next() else {
             // El schedule no produce más disparos (e.g. una fecha
             // pasada con year fijo). Salimos limpio.
-            eprintln!(
-                "🕐 cron job '{}' agotó su schedule, terminando.",
-                job.name
-            );
+            eprintln!("🕐 cron job '{}' agotó su schedule, terminando.", job.name);
             return;
         };
         let delay = (next - now)
@@ -223,16 +217,10 @@ async fn run_cron_job(job: CronJob) {
 /// se descarta (los jobs son fire-and-forget desde el punto de vista
 /// del scheduler).
 async fn invoke_cron_handler(job: &CronJob) -> Result<(), String> {
-    use crate::evaluator::invoke_value;
     use crate::ast::Span;
+    use crate::evaluator::invoke_value;
 
-    let result = invoke_value(
-        job.handler.clone(),
-        Vec::new(),
-        &job.name,
-        Span::ZERO,
-    )
-    .await;
+    let result = invoke_value(job.handler.clone(), Vec::new(), &job.name, Span::ZERO).await;
     match result {
         Ok(value) => {
             // Si la fn es async, el value es un Future — lo

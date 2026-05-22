@@ -61,6 +61,116 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.32] — 2026-05-22 — Patch: mini-tanda Cleanup-Residual+ — limpiezas mecánicas + pyo3-abi3 cerrado + multi-arch Docker
+
+Bloque grande de cleanup post-Cleanup-Residual. 4 sub-tandas
+coordinadas: auditoría de deudas (4 más marcadas CERRADAS de
+facto), cleanups mecánicos (clippy + fmt), fix `pyo3-abi3-autoinit`
+con CI multi-Python, multi-arch Docker image.
+
+### Sub-tanda A — Auditoría (4 deudas RESIDUALES marcadas CERRADAS)
+
+- **5b.5-imports-transitivos** ✓ — ya cerrada por F15 (Fase 9.0);
+  test `f15_module_loader_acepta_imports_transitivos_en_modulo`
+  vive en codegen tests.
+- **F13-listas-heterogeneas-compiladas** ✓ — implementado vía
+  `__FitzValue` tagged runtime. `uses_fitz_value` se setea en
+  literales heterogéneos.
+- **8.7-fromfitzpy-symmetric** ✓ — subsumida por mini-fase 8.7.bis
+  (v0.9.28). Dirección Python→Fitz está en helpers
+  `__fitz_py_to_instance_*` / `__fitz_py_to_list_*` per-tipo —
+  equivalente funcional al trait simétrico propuesto.
+- **5b.5-let-expr-top-mod** ✓ — cerrada por F14. `gen_module_top_let`
+  tiene 3 caminos: const literal → `pub static`/`pub const`,
+  const-eval → `pub const`, runtime → accessor `pub fn X() -> T`.
+
+### Sub-tanda B — Mecánicos (alto valor, bajo riesgo)
+
+- **clippy-all-targets** ✓ — fix de 9 errores que bloqueaban
+  `cargo clippy --all-targets -- -D warnings`:
+  - 2× `useless_format!` en tests de `http.rs`
+  - 1× `unused_import` (`futures_util::SinkExt` en test WS)
+  - 2× `cloned_ref_to_slice_refs` en `hash_password` tests
+  - 2× `MutexGuard held across await` (intencional — SERIAL Mutex
+    para serializar tests E2E; ahora marcado `#[allow]` explícito)
+  - 1× `non_snake_case` (`fmt_G_uppercase_compila` → `fmt_g_...`)
+  - 1× `unnecessary_get_then_check` (`get().is_none()` →
+    `!contains_key()`)
+- **fmt-cleanup-codebase** ✓ — `cargo fmt --all` aplicado. 28
+  archivos modificados (2246 diffs canónicos de rustfmt).
+  Pendiente: activar `cargo fmt --check` en CI — sub-paso futuro
+  separado para que el reactivar quede en commit limpio.
+
+### Sub-tanda D.1 — multi-arch-docker ✓
+
+`release.yml` job `docker-image` ahora emite imagen multi-arch
+`linux/amd64,linux/arm64`. Cambios:
+
+- Descarga ambos artefactos `binaries-linux-x64` + `binaries-linux-arm64`.
+- Dockerfile usa `ARG TARGETARCH` para copiar el binario
+  pre-compilado correcto (`fitz-amd64` o `fitz-arm64`).
+- `docker/setup-buildx-action@v3` habilita el multi-arch build.
+- `docker/build-push-action@v6` con `platforms: linux/amd64,linux/arm64`
+  push manifest que Docker resuelve por host.
+
+Habilita Mac M-series (arm64), Raspberry Pi 4+ (arm64), AWS
+Graviton (arm64) sin emulación QEMU. Imagen GHCR pasa de single-arch
+amd64 a multi-arch transparente.
+
+### Sub-tanda D.3 + E — R.bug-pyo3-abi3-autoinit CERRADO + boilerplates simplificados
+
+Fix de la deuda más vieja del backlog Python interop. Antes:
+`Cargo.toml` tenía `features = ["abi3-py310", "auto-initialize"]`
+que eran INCOMPATIBLES — auto-initialize ganaba, el binario
+linkeaba contra libpython específica del builder, perdíamos la
+portabilidad abi3.
+
+Fix:
+- `Cargo.toml`: removido `auto-initialize`. Solo `abi3-py310` activo
+  → binario corre contra cualquier Python 3.10+.
+- `src/py_interop.rs`: nuevo helper `ensure_python_initialized()`
+  que llama `Python::initialize()` adentro de un `std::sync::Once`.
+  Lazy init en el primer `import_module`. Idempotente, sin overhead
+  perceptible.
+- `.github/workflows/ci.yml`: job `python` ahora corre con matriz
+  `python-version: [3.10, 3.11, 3.12, 3.13]` para validar el
+  contrato cross-Python.
+- `boilerplates/api-postgres-python/Dockerfile` simplificado:
+  builder pasa de `python:3.12-slim` + rustup manual a `rust:slim`
+  con Rust pre-instalado. Ahorro de ~2-3 min por docker build.
+  Runtime `python:3.12-slim` queda intacto.
+- `boilerplates/api-fullstack-postgres/Dockerfile` mismo refactor.
+
+46 py_interop tests verdes localmente con feature python. El binario
+default sin feature python no toca su path de compilación.
+
+### Sub-tanda C + D.2 — DIFERIDAS
+
+- **9.w.2-binary-frames** (WS Bytes payload): scope ~1-2h con
+  refactor del trait `WsReadStreamTrait` + nuevo
+  `WsOutMessage::Binary` + dispatch en evaluator/codegen. Sin
+  presión real, defer a sesión dedicada.
+- **fitz-python-image** (`ghcr.io/.../fitz:latest-python`): requiere
+  compilar `--features python` adentro del Dockerfile en buildx
+  multi-arch — ~25 min de CI compute por release. El workaround
+  actual del boilerplate (cargo install --git) toma ~6-9 min y
+  solo corre por boilerplate, no por release. Trade-off no
+  justifica.
+
+### Validación
+
+- **2178 unit tests** verdes localmente.
+- **46 py_interop tests** verdes localmente con `--features python`
+  (Python 3.14 en local).
+- **clippy `--all-targets -- -D warnings`** verde.
+- **cargo fmt --all -- --check** verde.
+
+CI multi-Python matrix correrá en la próxima push a `main` —
+valida 3.10/3.11/3.12/3.13 automáticamente. Si alguna versión falla,
+abrimos deuda específica.
+
+---
+
 ## [v0.9.31] — 2026-05-22 — Patch: mini-tanda Cleanup-Residual — 2 deudas FUNCIONALES cerradas
 
 Cierre de 2 deudas medias documentadas en

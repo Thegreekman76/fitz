@@ -118,9 +118,7 @@ pub fn pseudo_channels_from_ast(
             };
             // Detectar el WsConn<T> param para extraer T.
             let msg_type = params.iter().find_map(|p| match &p.type_ {
-                Some(TypeExpr::Generic { name: n, args })
-                    if n == "WsConn" && args.len() == 1 =>
-                {
+                Some(TypeExpr::Generic { name: n, args }) if n == "WsConn" && args.len() == 1 => {
                     Some(args[0].clone())
                 }
                 _ => None,
@@ -400,7 +398,11 @@ mod tests {
         let s = schema_for(src);
         let payload = &s["channels"]["/chat"]["messages"]["msg"]["payload"];
         // Tipo nominal → $ref a components/schemas.
-        assert!(payload["$ref"].is_string(), "esperaba $ref, fue: {:?}", payload);
+        assert!(
+            payload["$ref"].is_string(),
+            "esperaba $ref, fue: {:?}",
+            payload
+        );
     }
 
     #[test]

@@ -10,26 +10,26 @@
 // re-compilar todo el crate dos veces, los módulos se mueven a la lib
 // y los bins se migran a `use fitz::...`.
 
-pub mod lexer; // Fase 2.1 — tokenización
 pub mod ast; // Fase 2.2 — definición del AST
-pub mod parser; // Fase 2.3 — construcción del AST
-pub mod value; // Fase 2.4 — valores en runtime
-pub mod env; // Fase 2.4 — entornos / scopes
-pub mod evaluator; // Fase 2.4 — ejecución
-pub mod format; // Mini-tanda Fm — aplicación de FormatSpec en runtime
-pub mod error; // manejo de errores del compilador
-pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
-pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base
-pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
-pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
 pub mod asyncapi; // Fase 9.w.2.d — generador AsyncAPI 3.0 (WebSockets)
+pub mod codegen; // Fase 5b.1 — transpile AST → Rust → binario
 pub mod cron_jobs; // Fase 9.w.3 — registry + scheduler de jobs `@cron`
-pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
-pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
-pub mod git_dep; // Fase 9.y.3.c — git deps + cache local
+pub mod env; // Fase 2.4 — entornos / scopes
+pub mod error; // manejo de errores del compilador
+pub mod evaluator; // Fase 2.4 — ejecución
 pub mod fmt; // Fase 9.z.1 — formatter `fitz fmt` (pretty-printer del AST)
+pub mod format; // Mini-tanda Fm — aplicación de FormatSpec en runtime
+pub mod git_dep; // Fase 9.y.3.c — git deps + cache local
+pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
+pub mod lexer; // Fase 2.1 — tokenización
+pub mod lint;
+pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
+pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
+pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
+pub mod parser; // Fase 2.3 — construcción del AST
 pub mod testing; // Fase 9.z.2 — testing built-in (registry + @test + asserts)
-pub mod lint; // Fase 9.z.5 — `fitz lint` (4 lints + suppression)
+pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base
+pub mod value; // Fase 2.4 — valores en runtime // Fase 9.z.5 — `fitz lint` (4 lints + suppression)
 
 // Fase 8.1.2 — interop Python via PyO3 (feature opt-in `python`).
 // El módulo envuelve `Python::with_gil` + `py.import(...)` y produce

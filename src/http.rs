@@ -27,9 +27,9 @@
 
 use std::cell::RefCell;
 
-use crate::ast::{Expr, TypeExpr};
 #[cfg(test)]
 use crate::ast::Span;
+use crate::ast::{Expr, TypeExpr};
 use crate::value::{shared, ResultVariant, Value};
 
 // Fase 9.w.2 — re-exports para evitar paths largos en el resto del
@@ -420,10 +420,12 @@ impl ServerConfig {
     /// numérica (no resolvemos DNS — para evitar surpresas con un
     /// host literal que no es IP).
     pub fn to_socket_addr(&self) -> Result<std::net::SocketAddr, String> {
-        let ip: std::net::IpAddr = self
-            .host
-            .parse()
-            .map_err(|_| format!("host '{}' no es una IP válida (esperado IPv4/IPv6 literal)", self.host))?;
+        let ip: std::net::IpAddr = self.host.parse().map_err(|_| {
+            format!(
+                "host '{}' no es una IP válida (esperado IPv4/IPv6 literal)",
+                self.host
+            )
+        })?;
         Ok(std::net::SocketAddr::new(ip, self.port))
     }
 }
@@ -659,9 +661,7 @@ pub fn set_server_config(config: ServerConfig) -> Result<(), ServerConfig> {
 /// `Err` boxed para que `Result` no quede gigante (clippy
 /// `result_large_err`): `AuthProviderHandle` arrastra un `Value` que
 /// puede ser pesado por sus variantes (Arc<Mutex<>> de List/Map/etc.).
-pub fn set_auth_provider(
-    handle: AuthProviderHandle,
-) -> Result<(), Box<AuthProviderHandle>> {
+pub fn set_auth_provider(handle: AuthProviderHandle) -> Result<(), Box<AuthProviderHandle>> {
     HTTP_REGISTRY.with(|cell| {
         let mut borrow = cell.borrow_mut();
         let reg = borrow
@@ -713,9 +713,7 @@ pub fn registry_has_cron_jobs() -> bool {
 /// activo, o `None` si no hay registry. El caller (cron-only mode lo
 /// usa para `run_scheduler_only`).
 pub fn current_cron_registry() -> Option<std::sync::Arc<crate::cron_jobs::CronRegistry>> {
-    HTTP_REGISTRY.with(|cell| {
-        cell.borrow().as_ref().map(|reg| reg.cron_registry.clone())
-    })
+    HTTP_REGISTRY.with(|cell| cell.borrow().as_ref().map(|reg| reg.cron_registry.clone()))
 }
 
 // ---------------------------------------------------------------------------
@@ -829,9 +827,7 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
                         buf.push('}');
                     }
                     StrPart::Expr(other, _) => {
-                        return Err(PathError::UnsupportedInterpolation(
-                            format!("{:?}", other),
-                        ));
+                        return Err(PathError::UnsupportedInterpolation(format!("{:?}", other)));
                     }
                 }
             }
@@ -896,9 +892,7 @@ pub fn parse_path_template(expr: &Expr) -> Result<PathTemplate, PathError> {
                     name: name.to_string(),
                 });
             }
-            if path_params.contains(&name.to_string())
-                || query_params.contains(&name.to_string())
-            {
+            if path_params.contains(&name.to_string()) || query_params.contains(&name.to_string()) {
                 return Err(PathError::DuplicateParam(name.to_string()));
             }
             query_params.push(name.to_string());
@@ -1061,13 +1055,13 @@ pub fn value_to_outcome(value: &Value) -> HandlerOutcome {
             if let Value::Instance { fields, .. } = inner.as_ref() {
                 let status_opt = {
                     let g = fields.lock();
-                    g.iter()
-                        .find(|(k, _)| k == "status")
-                        .and_then(|(_, v)| if let Value::Int(n) = v {
+                    g.iter().find(|(k, _)| k == "status").and_then(|(_, v)| {
+                        if let Value::Int(n) = v {
                             Some(*n)
                         } else {
                             None
-                        })
+                        }
+                    })
                 };
                 if let Some(s) = status_opt {
                     // Mini-tanda HC.1 — status válido `[100, 1000)`
@@ -1220,7 +1214,8 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // otro camino).
         Value::Future(_) => {
             return Err(
-                "Future pendiente no es serializable — falta `.await` en algún lado del handler".to_string(),
+                "Future pendiente no es serializable — falta `.await` en algún lado del handler"
+                    .to_string(),
             );
         }
         // Fase 9.w.2 — `WsConn` es un handle vivo a una conexión WS,
@@ -1236,7 +1231,8 @@ pub fn value_to_json(value: &Value) -> Result<serde_json::Value, String> {
         // serializer, el handler lo devolvió por error.
         Value::NativeFn(_) => {
             return Err(
-                "función nativa no es serializable — `next` solo se puede invocar, no devolver".to_string(),
+                "función nativa no es serializable — `next` solo se puede invocar, no devolver"
+                    .to_string(),
             );
         }
         // CorsConfig (MW.2): opaco, no se serializa. Si llega acá,
@@ -1514,6 +1510,7 @@ pub fn coerce_path_param(raw: &str, declared_type: Option<&str>) -> Result<Value
 
 use std::collections::HashMap;
 
+use crate::evaluator::call_handler;
 use axum::{
     body::Body,
     extract::Path as AxumPath,
@@ -1522,7 +1519,6 @@ use axum::{
     routing::MethodRouter,
     Router,
 };
-use crate::evaluator::call_handler;
 
 /// Metadata estructural de una ruta que el thread tokio necesita
 /// para configurar el router. Es `Send + Sync + Clone` — no incluye
@@ -1660,13 +1656,9 @@ pub fn build_router_with_asyncapi(
                 meta.expects_body,
             )
         };
-        let route_handler = if meta.cors.is_some()
-            && !preflight_attached.contains(&meta.path)
-        {
+        let route_handler = if meta.cors.is_some() && !preflight_attached.contains(&meta.path) {
             preflight_attached.insert(meta.path.clone());
-            let merged = std::sync::Arc::new(
-                merged_cors_per_path[&meta.path].clone(),
-            );
+            let merged = std::sync::Arc::new(merged_cors_per_path[&meta.path].clone());
             attach_preflight(route_handler, merged)
         } else {
             route_handler
@@ -1697,9 +1689,7 @@ pub fn build_router_with_asyncapi(
         if !metas.iter().any(|m| m.path == "/docs") {
             router = router.route(
                 "/docs",
-                axum::routing::get(|| async {
-                    axum::response::Html(crate::openapi::SCALAR_HTML)
-                }),
+                axum::routing::get(|| async { axum::response::Html(crate::openapi::SCALAR_HTML) }),
             );
         }
     }
@@ -1768,7 +1758,8 @@ fn build_method_router(
                 let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(&registry, route_idx, Map::new(), Map::new(), Vec::new(), hm).await
+                    dispatch_request(&registry, route_idx, Map::new(), Map::new(), Vec::new(), hm)
+                        .await
                 }
             };
             wrap(method, h)
@@ -1810,7 +1801,15 @@ fn build_method_router(
                 let registry = registry.clone();
                 async move {
                     let hm = headers_to_map(&headers);
-                    dispatch_request(&registry, route_idx, Map::new(), Map::new(), body.to_vec(), hm).await
+                    dispatch_request(
+                        &registry,
+                        route_idx,
+                        Map::new(),
+                        Map::new(),
+                        body.to_vec(),
+                        hm,
+                    )
+                    .await
                 }
             };
             wrap(method, h)
@@ -1938,12 +1937,8 @@ fn build_ws_method_router(
                     .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
                     .collect();
                 let headers_arg = Value::Map(shared(headers_pairs));
-                let invoked = call_handler(
-                    provider.handler.clone(),
-                    vec![headers_arg],
-                    &provider.name,
-                )
-                .await;
+                let invoked =
+                    call_handler(provider.handler.clone(), vec![headers_arg], &provider.name).await;
                 let raw_result = match invoked {
                     Ok(v) => v,
                     Err(e) => {
@@ -2001,8 +1996,7 @@ fn build_ws_method_router(
                                 Value::Instance { fields, .. } => {
                                     let g = fields.lock();
                                     g.iter().any(|(k, v)| {
-                                        k == "role"
-                                            && matches!(v, Value::Str(s) if s == "admin")
+                                        k == "role" && matches!(v, Value::Str(s) if s == "admin")
                                     })
                                 }
                                 _ => false,
@@ -2100,9 +2094,7 @@ fn build_ws_method_router(
                 for name in &resolved_params {
                     if ws_conn_param_name.as_deref() == Some(name.as_str()) {
                         args.push(conn_value.clone());
-                    } else if auth_user_param_name.as_deref()
-                        == Some(name.as_str())
-                    {
+                    } else if auth_user_param_name.as_deref() == Some(name.as_str()) {
                         args.push(auth_user.clone().unwrap_or(Value::Null));
                     } else {
                         // Param no clasificado — bug del registro.
@@ -2134,10 +2126,7 @@ fn build_ws_method_router(
                         // Future, es bug. Cerramos.
                     }
                     Err(e) => {
-                        eprintln!(
-                            "WS handler '{}' falló: {}",
-                            handler_name, e.message,
-                        );
+                        eprintln!("WS handler '{}' falló: {}", handler_name, e.message,);
                     }
                 }
                 // Cleanup: desregistrar del broadcaster + cerrar
@@ -2187,10 +2176,7 @@ fn merge_cors_into(existing: &mut CorsConfig, other: &CorsConfig) {
     };
 }
 
-fn attach_preflight(
-    mr: MethodRouter,
-    cors: std::sync::Arc<CorsConfig>,
-) -> MethodRouter {
+fn attach_preflight(mr: MethodRouter, cors: std::sync::Arc<CorsConfig>) -> MethodRouter {
     mr.options(move |headers: axum::http::HeaderMap| {
         let cors = cors.clone();
         async move {
@@ -2248,8 +2234,8 @@ async fn dispatch_request(
 /// CORS headers que emitimos son válidos por construcción.
 fn outcome_to_response(outcome: HandlerOutcome) -> Response {
     let mut resp = Response::new(Body::from(outcome.body));
-    *resp.status_mut() = StatusCode::from_u16(outcome.status)
-        .unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
+    *resp.status_mut() =
+        StatusCode::from_u16(outcome.status).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
     resp.headers_mut().insert(
         axum::http::header::CONTENT_TYPE,
         HeaderValue::from_static(outcome.content_type),
@@ -2296,7 +2282,10 @@ fn build_request_value(
     Value::new_instance(
         "Request".to_string(),
         vec![
-            ("method".to_string(), Value::Str(method.as_str().to_string())),
+            (
+                "method".to_string(),
+                Value::Str(method.as_str().to_string()),
+            ),
             ("path".to_string(), Value::Str(path)),
             ("headers".to_string(), Value::Map(shared(headers_pairs))),
         ],
@@ -2476,8 +2465,8 @@ fn run_wrap_chain(
         let handler_args_clone = handler_args.clone();
         let post_clone = post_mws.clone();
         let remaining_clone = remaining.clone();
-        let next: crate::value::NativeAsyncFn = crate::value::NativeAsyncFn(
-            std::sync::Arc::new(move |_args: Vec<Value>| {
+        let next: crate::value::NativeAsyncFn =
+            crate::value::NativeAsyncFn(std::sync::Arc::new(move |_args: Vec<Value>| {
                 // Re-clone para cada invocación (puede llamarse 0+ veces).
                 let req2 = req_clone.clone();
                 let h2 = handler_clone.clone();
@@ -2497,8 +2486,7 @@ fn run_wrap_chain(
                         body,
                     })
                 }) as crate::value::FitzFuture
-            }),
-        );
+            }));
 
         // Invocar el Wrap mw con (request, next).
         let args = vec![request.clone(), Value::NativeFn(next)];
@@ -2550,12 +2538,8 @@ async fn handle_task(
     // recibe un único arg `Request` con method/path/headers; body y
     // query params no se exponen al middleware (deuda explícita).
     if !route.middlewares.is_empty() {
-        let request = build_request_value(
-            route.method,
-            &route.path,
-            &raw_path_params,
-            &raw_headers,
-        );
+        let request =
+            build_request_value(route.method, &route.path, &raw_path_params, &raw_headers);
         if let Some(outcome) = run_middleware_chain(&route.middlewares, &request).await {
             return outcome;
         }
@@ -2591,12 +2575,8 @@ async fn handle_task(
             .map(|(k, v)| (Value::Str(k.clone()), Value::Str(v.clone())))
             .collect();
         let headers_arg = Value::Map(crate::value::shared(headers_pairs));
-        let invoked = call_handler(
-            provider.handler.clone(),
-            vec![headers_arg],
-            &provider.name,
-        )
-        .await;
+        let invoked =
+            call_handler(provider.handler.clone(), vec![headers_arg], &provider.name).await;
         let raw_result = match invoked {
             Ok(v) => v,
             Err(e) => {
@@ -2673,10 +2653,7 @@ async fn handle_task(
                     Value::Str(s) => s,
                     other => format!("{}", other),
                 };
-                return HandlerOutcome::json(
-                    401,
-                    serde_json::json!({ "error": msg }),
-                );
+                return HandlerOutcome::json(401, serde_json::json!({ "error": msg }));
             }
             other => {
                 return HandlerOutcome::internal_error(format!(
@@ -2707,7 +2684,13 @@ async fn handle_task(
         let raw_ct = raw_headers.get("content-type").cloned();
         let ct_primary = raw_ct
             .as_ref()
-            .map(|ct| ct.split(';').next().unwrap_or("").trim().to_ascii_lowercase())
+            .map(|ct| {
+                ct.split(';')
+                    .next()
+                    .unwrap_or("")
+                    .trim()
+                    .to_ascii_lowercase()
+            })
             .unwrap_or_default();
 
         let is_urlencoded = ct_primary == "application/x-www-form-urlencoded";
@@ -2736,9 +2719,7 @@ async fn handle_task(
             // Mini-tanda MP2 — extraer boundary del Content-Type
             // (`multipart/form-data; boundary=<token>`). Sin boundary
             // → 400 claro.
-            let boundary = raw_ct
-                .as_deref()
-                .and_then(extract_multipart_boundary);
+            let boundary = raw_ct.as_deref().and_then(extract_multipart_boundary);
             match boundary {
                 None => {
                     return HandlerOutcome::json(
@@ -2751,10 +2732,7 @@ async fn handle_task(
                 Some(b) => match parse_multipart_body(&body_bytes, &b) {
                     Ok(v) => Some(v),
                     Err(msg) => {
-                        return HandlerOutcome::json(
-                            400,
-                            serde_json::json!({ "error": msg }),
-                        );
+                        return HandlerOutcome::json(400, serde_json::json!({ "error": msg }));
                     }
                 },
             }
@@ -2762,20 +2740,14 @@ async fn handle_task(
             match parse_urlencoded_body(&body_bytes) {
                 Ok(v) => Some(v),
                 Err(msg) => {
-                    return HandlerOutcome::json(
-                        400,
-                        serde_json::json!({ "error": msg }),
-                    );
+                    return HandlerOutcome::json(400, serde_json::json!({ "error": msg }));
                 }
             }
         } else {
             match parse_body(&body_bytes, bp) {
                 Ok(v) => Some(v),
                 Err(msg) => {
-                    return HandlerOutcome::json(
-                        400,
-                        serde_json::json!({ "error": msg }),
-                    );
+                    return HandlerOutcome::json(400, serde_json::json!({ "error": msg }));
                 }
             }
         }
@@ -2814,19 +2786,17 @@ async fn handle_task(
             // missing → Null. Si es obligatorio, missing → 400.
             let raw = raw_query_params.get(name);
             match (raw, *is_nullable) {
-                (Some(s), _) => {
-                    match coerce_path_param(s, head_type.as_deref()) {
-                        Ok(v) => args.push(v),
-                        Err(msg) => {
-                            return HandlerOutcome::json(
-                                400,
-                                serde_json::json!({
-                                    "error": format!("query param '{}': {}", name, msg),
-                                }),
-                            );
-                        }
+                (Some(s), _) => match coerce_path_param(s, head_type.as_deref()) {
+                    Ok(v) => args.push(v),
+                    Err(msg) => {
+                        return HandlerOutcome::json(
+                            400,
+                            serde_json::json!({
+                                "error": format!("query param '{}': {}", name, msg),
+                            }),
+                        );
                     }
-                }
+                },
                 (None, true) => args.push(Value::Null),
                 (None, false) => {
                     return HandlerOutcome::json(
@@ -2898,12 +2868,8 @@ async fn handle_task(
             .filter(|m| m.kind == MiddlewareKind::Post)
             .cloned()
             .collect();
-        let request = build_request_value(
-            route.method,
-            &route.path,
-            &raw_path_params,
-            &raw_headers,
-        );
+        let request =
+            build_request_value(route.method, &route.path, &raw_path_params, &raw_headers);
         run_wrap_chain(
             wraps,
             route.handler.clone(),
@@ -2922,7 +2888,8 @@ async fn handle_task(
         // HTTP devolvían "Future pendiente no es serializable" —
         // bug preexistente expuesto al cerrar 9.w.3.b (que necesita
         // async handlers que llamen `spawn(...)`).
-        let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await {
+        let mut outcome = match call_handler(route.handler.clone(), args, &route.handler_name).await
+        {
             Ok(value) => {
                 let resolved = await_if_future(value).await;
                 match resolved {
@@ -2938,13 +2905,13 @@ async fn handle_task(
         // modificar el body o agregar headers. Si hay middlewares Pre que
         // short-circuit, este path no corre (ya retornamos arriba con la
         // response del Pre).
-        if route.middlewares.iter().any(|m| m.kind == MiddlewareKind::Post) {
-            let request = build_request_value(
-                route.method,
-                &route.path,
-                &raw_path_params,
-                &raw_headers,
-            );
+        if route
+            .middlewares
+            .iter()
+            .any(|m| m.kind == MiddlewareKind::Post)
+        {
+            let request =
+                build_request_value(route.method, &route.path, &raw_path_params, &raw_headers);
             outcome = run_post_middlewares(&route.middlewares, &request, outcome).await;
         }
         outcome
@@ -2982,9 +2949,8 @@ async fn handle_task(
 /// Duplicados: last-wins (paralelo a la convención de `serde_urlencoded`).
 fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
     use crate::value::shared;
-    let s = std::str::from_utf8(bytes).map_err(|e| {
-        format!("body urlencoded inválido (UTF-8): {}", e)
-    })?;
+    let s = std::str::from_utf8(bytes)
+        .map_err(|e| format!("body urlencoded inválido (UTF-8): {}", e))?;
     let mut pairs: Vec<(Value, Value)> = Vec::new();
     if s.is_empty() {
         return Ok(Value::Map(shared(pairs)));
@@ -2996,9 +2962,7 @@ fn parse_urlencoded_body(bytes: &[u8]) -> Result<Value, String> {
         let k = url_decode(raw_k)?;
         let v = url_decode(raw_v)?;
         // Duplicados: last-wins. Eliminamos entry previa con misma key.
-        pairs.retain(|(existing_k, _)| {
-            !matches!(existing_k, Value::Str(s) if s == &k)
-        });
+        pairs.retain(|(existing_k, _)| !matches!(existing_k, Value::Str(s) if s == &k));
         pairs.push((Value::Str(k), Value::Str(v)));
     }
     Ok(Value::Map(shared(pairs)))
@@ -3080,9 +3044,8 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         };
         let headers_bytes = &body[..split_idx];
         let content_bytes = &body[split_idx + 4..];
-        let headers_str = std::str::from_utf8(headers_bytes).map_err(|e| {
-            format!("multipart: headers no son ASCII/UTF-8 válido: {}", e)
-        })?;
+        let headers_str = std::str::from_utf8(headers_bytes)
+            .map_err(|e| format!("multipart: headers no son ASCII/UTF-8 válido: {}", e))?;
 
         // Parse de headers de la part. Solo nos interesa
         // `Content-Disposition` (extrae `name` y `filename`) y
@@ -3106,9 +3069,7 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
         }
 
         let Some(name) = name_field else {
-            return Err(
-                "multipart: part sin `name` en Content-Disposition".to_string(),
-            );
+            return Err("multipart: part sin `name` en Content-Disposition".to_string());
         };
 
         let value = match filename {
@@ -3134,14 +3095,9 @@ fn parse_multipart_body(bytes: &[u8], boundary: &str) -> Result<Value, String> {
                 fields.push(("name".to_string(), name_val));
                 fields.push((
                     "content_type".to_string(),
-                    content_type_part
-                        .map(Value::Str)
-                        .unwrap_or(Value::Null),
+                    content_type_part.map(Value::Str).unwrap_or(Value::Null),
                 ));
-                fields.push((
-                    "content".to_string(),
-                    Value::Bytes(content_bytes.to_vec()),
-                ));
+                fields.push(("content".to_string(), Value::Bytes(content_bytes.to_vec())));
                 Value::new_instance("File".to_string(), fields)
             }
         };
@@ -3230,8 +3186,7 @@ fn parse_cd_params(s: &str) -> std::collections::HashMap<String, String> {
 /// URL-safe alphabet, con padding). Inline para evitar dep `base64`.
 /// Acepta cualquier slice de bytes, devuelve String ASCII.
 fn b64_encode_standard(bytes: &[u8]) -> String {
-    const TABLE: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut chunks = bytes.chunks(3);
     for c in chunks.by_ref() {
@@ -3263,15 +3218,14 @@ fn url_decode(s: &str) -> Result<String, String> {
         match c {
             '+' => out.push(' '),
             '%' => {
-                let h1 = chars.next().ok_or_else(|| {
-                    format!("urlencoded: %XX incompleto en offset {}", idx)
-                })?;
-                let h2 = chars.next().ok_or_else(|| {
-                    format!("urlencoded: %XX incompleto en offset {}", idx)
-                })?;
-                let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16).map_err(|_| {
-                    format!("urlencoded: %{}{} no es hex válido", h1, h2)
-                })?;
+                let h1 = chars
+                    .next()
+                    .ok_or_else(|| format!("urlencoded: %XX incompleto en offset {}", idx))?;
+                let h2 = chars
+                    .next()
+                    .ok_or_else(|| format!("urlencoded: %XX incompleto en offset {}", idx))?;
+                let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
+                    .map_err(|_| format!("urlencoded: %{}{} no es hex válido", h1, h2))?;
                 // Acumular bytes para chars multi-byte UTF-8.
                 out.push(byte as char);
                 idx += 3;
@@ -3294,8 +3248,8 @@ fn parse_body(bytes: &[u8], bp: &BodyParam) -> Result<Value, String> {
             bp.name,
         ));
     }
-    let json: serde_json::Value = serde_json::from_slice(bytes)
-        .map_err(|e| format!("body no es JSON válido: {}", e))?;
+    let json: serde_json::Value =
+        serde_json::from_slice(bytes).map_err(|e| format!("body no es JSON válido: {}", e))?;
     match &bp.declared_type {
         Some(t) => json_to_instance(&json, t),
         None => Ok(json_to_value(&json)),
@@ -3381,16 +3335,15 @@ pub fn serve(
         .enable_all()
         .build()?;
     runtime.block_on(async move {
-        let router = build_router_with_asyncapi(
-            &metas,
-            registry,
-            openapi_schema,
-            asyncapi_schema,
-        );
+        let router = build_router_with_asyncapi(&metas, registry, openapi_schema, asyncapi_schema);
         let listener = tokio::net::TcpListener::bind(addr).await?;
         eprintln!("🏔️  Fitz HTTP escuchando en http://{}", addr);
         for meta in &metas {
-            let arrow = if meta.is_ws { "WS " } else { meta.method.as_str() };
+            let arrow = if meta.is_ws {
+                "WS "
+            } else {
+                meta.method.as_str()
+            };
             eprintln!("   {} {}", arrow, meta.path);
         }
         if enable_docs {
@@ -3527,9 +3480,7 @@ impl WsBroadcasterTrait for WsBroadcaster {
         // lazy. Cada outbox_tx.send() es non-blocking (mpsc unbounded).
         let mut conns = self.conns.lock();
         if let Some(list) = conns.get_mut(endpoint) {
-            list.retain(|(_, tx)| {
-                tx.send(WsOutMessage::Text(payload.clone())).is_ok()
-            });
+            list.retain(|(_, tx)| tx.send(WsOutMessage::Text(payload.clone())).is_ok());
             if list.is_empty() {
                 conns.remove(endpoint);
             }
@@ -3556,11 +3507,7 @@ impl WsReadStreamTrait for WsReadStreamImpl {
     fn next_text_frame<'a>(
         &'a mut self,
     ) -> std::pin::Pin<
-        Box<
-            dyn std::future::Future<Output = Result<Option<String>, String>>
-                + Send
-                + 'a,
-        >,
+        Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + 'a>,
     > {
         use futures_util::StreamExt;
         Box::pin(async move {
@@ -3681,15 +3628,13 @@ pub fn build_ws_conn(
     let handle = WsConnHandle {
         endpoint,
         conn_id,
-        rx: std::sync::Arc::new(tokio::sync::Mutex::new(Box::new(WsReadStreamImpl {
-            inner: stream,
-        })
-            as Box<dyn WsReadStreamTrait + Send + Unpin>)),
+        rx: std::sync::Arc::new(tokio::sync::Mutex::new(
+            Box::new(WsReadStreamImpl { inner: stream })
+                as Box<dyn WsReadStreamTrait + Send + Unpin>,
+        )),
         outbox_tx,
         closed,
-        broadcaster: broadcaster as std::sync::Arc<
-            dyn WsBroadcasterTrait + Send + Sync,
-        >,
+        broadcaster: broadcaster as std::sync::Arc<dyn WsBroadcasterTrait + Send + Sync>,
         msg_type,
         env,
     };
@@ -3712,10 +3657,22 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn http_method_desde_nombre_de_decorator() {
-        assert_eq!(HttpMethod::from_decorator_name("get"), Some(HttpMethod::Get));
-        assert_eq!(HttpMethod::from_decorator_name("post"), Some(HttpMethod::Post));
-        assert_eq!(HttpMethod::from_decorator_name("put"), Some(HttpMethod::Put));
-        assert_eq!(HttpMethod::from_decorator_name("delete"), Some(HttpMethod::Delete));
+        assert_eq!(
+            HttpMethod::from_decorator_name("get"),
+            Some(HttpMethod::Get)
+        );
+        assert_eq!(
+            HttpMethod::from_decorator_name("post"),
+            Some(HttpMethod::Post)
+        );
+        assert_eq!(
+            HttpMethod::from_decorator_name("put"),
+            Some(HttpMethod::Put)
+        );
+        assert_eq!(
+            HttpMethod::from_decorator_name("delete"),
+            Some(HttpMethod::Delete)
+        );
         assert_eq!(HttpMethod::from_decorator_name("server"), None);
         assert_eq!(HttpMethod::from_decorator_name("patch"), None);
     }
@@ -3736,10 +3693,13 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn path_strinterp_con_un_param() {
         // `"/users/{id}"` → StrInterp([Lit("/users/"), Expr(Ident("id"))])
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("/users/".into()),
-            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
-        ], Span::ZERO);
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/users/".into()),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
+            ],
+            Span::ZERO,
+        );
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/users/{id}");
         assert_eq!(t.params, vec!["id".to_string()]);
@@ -3748,12 +3708,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn path_strinterp_con_varios_params_distintos() {
         // `"/orgs/{org}/users/{id}"`
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("/orgs/".into()),
-            StrPart::Expr(Expr::Ident("org".into(), Span::ZERO), None),
-            StrPart::Lit("/users/".into()),
-            StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
-        ], Span::ZERO);
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/orgs/".into()),
+                StrPart::Expr(Expr::Ident("org".into(), Span::ZERO), None),
+                StrPart::Lit("/users/".into()),
+                StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None),
+            ],
+            Span::ZERO,
+        );
         let t = parse_path_template(&e).unwrap();
         assert_eq!(t.path, "/orgs/{org}/users/{id}");
         assert_eq!(t.params, vec!["org".to_string(), "id".to_string()]);
@@ -3768,14 +3731,21 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn path_con_expresion_no_ident_es_error() {
         // `"{a+b}"` — interpolación con BinOp.
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("/".into()),
-            StrPart::Expr(Expr::BinOp {
-                op: crate::ast::BinOpKind::Add,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("b".into(), Span::ZERO)), span: Span::ZERO,
-            }, None),
-        ], Span::ZERO);
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/".into()),
+                StrPart::Expr(
+                    Expr::BinOp {
+                        op: crate::ast::BinOpKind::Add,
+                        left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                        right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    None,
+                ),
+            ],
+            Span::ZERO,
+        );
         let err = parse_path_template(&e).unwrap_err();
         assert!(matches!(err, PathError::UnsupportedInterpolation(_)));
     }
@@ -3783,12 +3753,15 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn path_con_params_duplicados_es_error() {
         // `"/a/{x}/b/{x}"`
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("/a/".into()),
-            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-            StrPart::Lit("/b/".into()),
-            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-        ], Span::ZERO);
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("/a/".into()),
+                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+                StrPart::Lit("/b/".into()),
+                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+            ],
+            Span::ZERO,
+        );
         let err = parse_path_template(&e).unwrap_err();
         assert_eq!(err, PathError::DuplicateParam("x".into()));
     }
@@ -3896,20 +3869,31 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn value_to_json_primitivos() {
-        assert_eq!(value_to_json(&Value::Int(42)).unwrap(), serde_json::json!(42));
-        assert_eq!(value_to_json(&Value::Float(3.14)).unwrap(), serde_json::json!(3.14));
-        assert_eq!(value_to_json(&Value::Str("hola".into())).unwrap(), serde_json::json!("hola"));
-        assert_eq!(value_to_json(&Value::Bool(true)).unwrap(), serde_json::json!(true));
-        assert_eq!(value_to_json(&Value::Null).unwrap(), serde_json::json!(null));
+        assert_eq!(
+            value_to_json(&Value::Int(42)).unwrap(),
+            serde_json::json!(42)
+        );
+        assert_eq!(
+            value_to_json(&Value::Float(3.14)).unwrap(),
+            serde_json::json!(3.14)
+        );
+        assert_eq!(
+            value_to_json(&Value::Str("hola".into())).unwrap(),
+            serde_json::json!("hola")
+        );
+        assert_eq!(
+            value_to_json(&Value::Bool(true)).unwrap(),
+            serde_json::json!(true)
+        );
+        assert_eq!(
+            value_to_json(&Value::Null).unwrap(),
+            serde_json::json!(null)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn value_to_json_lista() {
-        let v = Value::List(shared(vec![
-            Value::Int(1),
-            Value::Int(2),
-            Value::Int(3),
-        ]));
+        let v = Value::List(shared(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
         assert_eq!(value_to_json(&v).unwrap(), serde_json::json!([1, 2, 3]));
     }
 
@@ -3956,7 +3940,10 @@ mod tests {
         assert_eq!(value_to_json(&ok).unwrap(), serde_json::json!({ "Ok": 42 }));
 
         let err = Value::Result(ResultVariant::Err(Box::new(Value::Str("boom".into()))));
-        assert_eq!(value_to_json(&err).unwrap(), serde_json::json!({ "Err": "boom" }));
+        assert_eq!(
+            value_to_json(&err).unwrap(),
+            serde_json::json!({ "Err": "boom" })
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -4055,7 +4042,10 @@ mod tests {
     async fn outcome_de_http_response_sin_body_es_null_json() {
         // `HttpResponse { body: None }` → body JSON null. Reserva para
         // 204 No Content si llega; hoy el parser exige body explícito.
-        let v = Value::HttpResponse { status: 204, body: None };
+        let v = Value::HttpResponse {
+            status: 204,
+            body: None,
+        };
         let out = value_to_outcome(&v);
         assert_eq!(out.status, 204);
         assert_eq!(out.body, "null");
@@ -4106,8 +4096,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn path_param_bool_true_false() {
-        assert_eq!(coerce_path_param("true", Some("Bool")).unwrap(), Value::Bool(true));
-        assert_eq!(coerce_path_param("false", Some("Bool")).unwrap(), Value::Bool(false));
+        assert_eq!(
+            coerce_path_param("true", Some("Bool")).unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            coerce_path_param("false", Some("Bool")).unwrap(),
+            Value::Bool(false)
+        );
         assert!(coerce_path_param("maybe", Some("Bool")).is_err());
     }
 
@@ -4168,7 +4164,15 @@ mod tests {
         // `@get("/") fn hello() => "hola"`
         let src = "@get(\"/\")\nfn hello() => \"hola\"";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"hola\"");
     }
@@ -4179,7 +4183,15 @@ mod tests {
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "21".into());
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            params,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "42");
     }
@@ -4190,7 +4202,15 @@ mod tests {
         let registry = registry_from_source(src).await;
         let mut params = HashMap::new();
         params.insert("id".into(), "no-es-int".into());
-        let outcome = handle_task(&registry, 0, params, HashMap::new(), Vec::new(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            params,
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("Int"));
     }
@@ -4200,7 +4220,15 @@ mod tests {
         // El handler devuelve Err("boom"): runtime lo traduce a 500.
         let src = "@get(\"/\")\nfn h() => Err(\"boom\")";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("boom"));
     }
@@ -4212,7 +4240,15 @@ mod tests {
             @get(\"/u\")\nfn h() => User { id: 1, name: \"ana\" }\n\
         ";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         let parsed: serde_json::Value = serde_json::from_str(&outcome.body).unwrap();
         assert_eq!(parsed, serde_json::json!({ "id": 1, "name": "ana" }));
@@ -4383,7 +4419,9 @@ mod tests {
         .await;
         assert_eq!(outcome.status, 500);
         assert!(outcome.body.contains("loco"));
-        assert!(outcome.body.contains("valor inesperado") || outcome.body.contains("cortocircuitar"));
+        assert!(
+            outcome.body.contains("valor inesperado") || outcome.body.contains("cortocircuitar")
+        );
     }
 
     // ---- Mini-fase MW.2: cors built-in + inyección de headers ----
@@ -4405,10 +4443,7 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn cors_set_echo_si_origin_esta_en_la_lista() {
         let cfg = CorsConfig {
-            allow_origin: AllowOrigin::Set(vec![
-                "https://a.com".into(),
-                "https://b.com".into(),
-            ]),
+            allow_origin: AllowOrigin::Set(vec!["https://a.com".into(), "https://b.com".into()]),
             ..CorsConfig::permissive_default()
         };
         let headers = cfg.response_headers(Some("https://a.com"));
@@ -4468,10 +4503,16 @@ mod tests {
         assert_eq!(any.resolve(Some("https://x.com")), Some("*".to_string()));
 
         let single = AllowOrigin::Literal("https://x.com".to_string());
-        assert_eq!(single.resolve(Some("https://y.com")), Some("https://x.com".to_string()));
+        assert_eq!(
+            single.resolve(Some("https://y.com")),
+            Some("https://x.com".to_string())
+        );
 
         let set = AllowOrigin::Set(vec!["https://a.com".into(), "https://b.com".into()]);
-        assert_eq!(set.resolve(Some("https://b.com")), Some("https://b.com".to_string()));
+        assert_eq!(
+            set.resolve(Some("https://b.com")),
+            Some("https://b.com".to_string())
+        );
         assert_eq!(set.resolve(Some("https://evil.com")), None);
         assert_eq!(set.resolve(None), None);
     }
@@ -4510,7 +4551,11 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.status, 200);
-        let names: Vec<&str> = outcome.extra_headers.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = outcome
+            .extra_headers
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
         assert!(names.contains(&"access-control-allow-origin"));
         assert!(names.contains(&"access-control-allow-methods"));
         assert!(names.contains(&"access-control-allow-headers"));
@@ -4537,7 +4582,11 @@ mod tests {
         )
         .await;
         assert_eq!(outcome.status, 500);
-        let names: Vec<&str> = outcome.extra_headers.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = outcome
+            .extra_headers
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
         assert!(names.contains(&"access-control-allow-origin"));
     }
 
@@ -4614,7 +4663,11 @@ mod tests {
             headers,
         )
         .await;
-        let names: Vec<&str> = outcome.extra_headers.iter().map(|(n, _)| n.as_str()).collect();
+        let names: Vec<&str> = outcome
+            .extra_headers
+            .iter()
+            .map(|(n, _)| n.as_str())
+            .collect();
         // El header origin NO se emite (browser rechaza la response).
         assert!(!names.contains(&"access-control-allow-origin"));
         // El resto de headers CORS sí.
@@ -4711,7 +4764,7 @@ mod tests {
                 port: 8080,
                 enable_docs: true,
                 api_version: None,
-            ws_heartbeat_secs: 30,
+                ws_heartbeat_secs: 30,
             };
             assert!(set_server_config(first.clone()).is_ok());
             let second = ServerConfig {
@@ -4719,7 +4772,7 @@ mod tests {
                 port: 9090,
                 enable_docs: true,
                 api_version: None,
-            ws_heartbeat_secs: 30,
+                ws_heartbeat_secs: 30,
             };
             let err = set_server_config(second).unwrap_err();
             // El error contiene el config existente, no el nuevo.
@@ -4832,10 +4885,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn json_to_instance_caso_feliz() {
-        let t = type_value("User", vec![
-            ("id", "Int", false, None),
-            ("name", "Str", false, None),
-        ]);
+        let t = type_value(
+            "User",
+            vec![("id", "Int", false, None), ("name", "Str", false, None)],
+        );
         let json = serde_json::json!({ "id": 1, "name": "ana" });
         let v = json_to_instance(&json, &t).unwrap();
         match v {
@@ -4853,10 +4906,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn json_to_instance_campo_faltante_sin_default_ni_nullable_es_error() {
-        let t = type_value("User", vec![
-            ("id", "Int", false, None),
-            ("name", "Str", false, None),
-        ]);
+        let t = type_value(
+            "User",
+            vec![("id", "Int", false, None), ("name", "Str", false, None)],
+        );
         let json = serde_json::json!({ "id": 1 });
         let err = json_to_instance(&json, &t).unwrap_err();
         assert!(err.contains("name"));
@@ -4874,10 +4927,10 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn json_to_instance_campo_nullable_faltante_queda_null() {
-        let t = type_value("User", vec![
-            ("id", "Int", false, None),
-            ("email", "Str", true, None),
-        ]);
+        let t = type_value(
+            "User",
+            vec![("id", "Int", false, None), ("email", "Str", true, None)],
+        );
         let json = serde_json::json!({ "id": 1 });
         let v = json_to_instance(&json, &t).unwrap();
         match v {
@@ -4892,10 +4945,13 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn json_to_instance_default_literal_se_usa_si_falta() {
-        let t = type_value("User", vec![
-            ("id", "Int", false, None),
-            ("active", "Bool", false, Some(Expr::Bool(true, Span::ZERO))),
-        ]);
+        let t = type_value(
+            "User",
+            vec![
+                ("id", "Int", false, None),
+                ("active", "Bool", false, Some(Expr::Bool(true, Span::ZERO))),
+            ],
+        );
         let json = serde_json::json!({ "id": 1 });
         let v = json_to_instance(&json, &t).unwrap();
         match v {
@@ -4926,7 +4982,15 @@ mod tests {
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), Vec::new(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            Vec::new(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("body requerido"));
     }
@@ -4939,7 +5003,15 @@ mod tests {
         ";
         let registry = registry_from_source(src).await;
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body, HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            body,
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"fitz\"");
     }
@@ -4951,7 +5023,15 @@ mod tests {
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
         let registry = registry_from_source(src).await;
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), b"not json".to_vec(), HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            b"not json".to_vec(),
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("JSON"));
     }
@@ -4964,7 +5044,15 @@ mod tests {
         ";
         let registry = registry_from_source(src).await;
         let body = br#"{"name":"fitz"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body, HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            body,
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 400);
         assert!(outcome.body.contains("email"));
     }
@@ -4992,7 +5080,15 @@ mod tests {
         ";
         let registry = registry_from_source(src).await;
         let body = br#"{"name":"x"}"#.to_vec();
-        let outcome = handle_task(&registry, 0, HashMap::new(), HashMap::new(), body, HashMap::new()).await;
+        let outcome = handle_task(
+            &registry,
+            0,
+            HashMap::new(),
+            HashMap::new(),
+            body,
+            HashMap::new(),
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "\"x\"");
     }
@@ -5009,11 +5105,7 @@ mod tests {
 
     /// Helper: corre un request contra el router y devuelve
     /// (status, body string). Sin body, sin headers extra.
-    async fn run_oneshot(
-        src: &str,
-        method: axum::http::Method,
-        path: &str,
-    ) -> (u16, String) {
+    async fn run_oneshot(src: &str, method: axum::http::Method, path: &str) -> (u16, String) {
         run_oneshot_with_body(src, method, path, None).await
     }
 
@@ -5140,8 +5232,7 @@ mod tests {
         // 405 (axum default — el método no está registrado para ese path).
         // Sanity: sin CORS, no creamos preflight handler.
         let src = "@get(\"/api\")\nfn h() => \"ok\"";
-        let (status, _, _) =
-            run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
+        let (status, _, _) = run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
         assert_eq!(status, 405);
     }
 
@@ -5153,8 +5244,7 @@ mod tests {
             @get(\"/api\")\n\
             fn h() => \"ok\"\n\
         ";
-        let (status, headers, body) =
-            run_oneshot_full(src, axum::http::Method::GET, "/api").await;
+        let (status, headers, body) = run_oneshot_full(src, axum::http::Method::GET, "/api").await;
         assert_eq!(status, 200);
         assert_eq!(body, "\"ok\"");
         let origin = headers
@@ -5241,7 +5331,11 @@ mod tests {
             })
             .collect();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        (status, response_headers, String::from_utf8(bytes.to_vec()).unwrap())
+        (
+            status,
+            response_headers,
+            String::from_utf8(bytes.to_vec()).unwrap(),
+        )
     }
 
     #[tokio::test]
@@ -5251,8 +5345,7 @@ mod tests {
             @get(\"/api\")\n\
             fn h() => \"ok\"\n\
         ";
-        let (status, headers, _) =
-            run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
+        let (status, headers, _) = run_oneshot_full(src, axum::http::Method::OPTIONS, "/api").await;
         assert_eq!(status, 204);
         let max_age = headers
             .iter()
@@ -5286,8 +5379,7 @@ mod tests {
         // run_oneshot ya construye el router internamente — si paniqueara,
         // el test colgaría con un panic visible. Lo dejamos como smoke
         // de "no panic" además de validar que el GET sigue funcionando.
-        let (status, body) =
-            run_oneshot(src, axum::http::Method::GET, "/tasks").await;
+        let (status, body) = run_oneshot(src, axum::http::Method::GET, "/tasks").await;
         assert_eq!(status, 200);
         assert_eq!(body, "\"ok\"");
     }
@@ -5315,9 +5407,21 @@ mod tests {
             .expect("preflight debe traer Access-Control-Allow-Methods");
         // Orden de insertion: GET aparece primero (es el owner), POST
         // se mergea después. OPTIONS aparece una sola vez (dedup).
-        assert!(methods.contains("GET"), "merged methods debe incluir GET: {}", methods);
-        assert!(methods.contains("POST"), "merged methods debe incluir POST: {}", methods);
-        assert!(methods.contains("OPTIONS"), "merged methods debe incluir OPTIONS: {}", methods);
+        assert!(
+            methods.contains("GET"),
+            "merged methods debe incluir GET: {}",
+            methods
+        );
+        assert!(
+            methods.contains("POST"),
+            "merged methods debe incluir POST: {}",
+            methods
+        );
+        assert!(
+            methods.contains("OPTIONS"),
+            "merged methods debe incluir OPTIONS: {}",
+            methods
+        );
     }
 
     #[tokio::test]
@@ -5361,8 +5465,7 @@ mod tests {
             @post(\"/x\")\n\
             fn h2() => \"b\"\n\
         ";
-        let (status, headers, _) =
-            run_oneshot_full(src, axum::http::Method::OPTIONS, "/x").await;
+        let (status, headers, _) = run_oneshot_full(src, axum::http::Method::OPTIONS, "/x").await;
         assert_eq!(status, 204);
         let allowed_headers = headers
             .iter()
@@ -5373,7 +5476,11 @@ mod tests {
         // original. Authorization se suma del segundo. "content-type"
         // del segundo NO se duplica (case-insensitive match).
         let comma_count = allowed_headers.matches(',').count();
-        assert_eq!(comma_count, 1, "esperaba 2 headers (1 coma), got: {}", allowed_headers);
+        assert_eq!(
+            comma_count, 1,
+            "esperaba 2 headers (1 coma), got: {}",
+            allowed_headers
+        );
         assert!(allowed_headers.to_lowercase().contains("content-type"));
         assert!(allowed_headers.to_lowercase().contains("authorization"));
     }
@@ -5484,13 +5591,8 @@ mod tests {
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
-        let (status, body) = run_oneshot_with_body(
-            src,
-            axum::http::Method::POST,
-            "/users",
-            Some("not json"),
-        )
-        .await;
+        let (status, body) =
+            run_oneshot_with_body(src, axum::http::Method::POST, "/users", Some("not json")).await;
         assert_eq!(status, 400);
         assert!(body.contains("JSON"));
     }
@@ -5522,8 +5624,7 @@ mod tests {
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
-        let (status, body) =
-            run_oneshot(src, axum::http::Method::POST, "/users").await;
+        let (status, body) = run_oneshot(src, axum::http::Method::POST, "/users").await;
         assert_eq!(status, 400);
         assert!(body.contains("body requerido"));
     }
@@ -5547,13 +5648,8 @@ mod tests {
     #[tokio::test]
     async fn e2e_header_obligatorio_falta_es_400() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
-        let (status, body) = run_oneshot_with_headers(
-            src,
-            axum::http::Method::GET,
-            "/protected",
-            &[],
-        )
-        .await;
+        let (status, body) =
+            run_oneshot_with_headers(src, axum::http::Method::GET, "/protected", &[]).await;
         assert_eq!(status, 400);
         assert!(body.contains("Authorization"), "body fue: {}", body);
         assert!(body.contains("obligatorio"), "body fue: {}", body);
@@ -5562,13 +5658,8 @@ mod tests {
     #[tokio::test]
     async fn e2e_header_nullable_falta_handler_recibe_null() {
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) -> Str { return \"ok\" }";
-        let (status, body) = run_oneshot_with_headers(
-            src,
-            axum::http::Method::GET,
-            "/traced",
-            &[],
-        )
-        .await;
+        let (status, body) =
+            run_oneshot_with_headers(src, axum::http::Method::GET, "/traced", &[]).await;
         // Handler corre OK porque el header es opcional.
         assert_eq!(status, 200);
         assert_eq!(body, "\"ok\"");
@@ -5911,8 +6002,13 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
-        assert_eq!(outcome.status, 200, "esperaba 200, fue {} con body {}", outcome.status, outcome.body);
+        )
+        .await;
+        assert_eq!(
+            outcome.status, 200,
+            "esperaba 200, fue {} con body {}",
+            outcome.status, outcome.body
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -5928,7 +6024,8 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 415);
         assert!(
             outcome.body.contains("text/plain") && outcome.body.contains("application/json"),
@@ -5954,7 +6051,8 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 415);
         assert!(
             outcome.body.contains("octet-stream"),
@@ -5976,7 +6074,8 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 200);
     }
 
@@ -6033,7 +6132,11 @@ mod tests {
         let mws = vec![make_mw_post("wrapper")];
         let outcome = run_post_middlewares(&mws, &request, original).await;
         assert_eq!(outcome.status, 200);
-        assert!(outcome.body.contains("wrapped"), "esperaba body con `wrapped`, fue: {}", outcome.body);
+        assert!(
+            outcome.body.contains("wrapped"),
+            "esperaba body con `wrapped`, fue: {}",
+            outcome.body
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -6058,7 +6161,10 @@ mod tests {
         let reg = registry_with_post_body_route();
         let body = b"name=Fitz&age=25".to_vec();
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), "application/x-www-form-urlencoded".into());
+        headers.insert(
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        );
         let outcome = handle_task(
             &reg,
             0,
@@ -6066,8 +6172,13 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
-        assert_eq!(outcome.status, 200, "esperaba 200, fue {} con body {}", outcome.status, outcome.body);
+        )
+        .await;
+        assert_eq!(
+            outcome.status, 200,
+            "esperaba 200, fue {} con body {}",
+            outcome.status, outcome.body
+        );
         assert!(
             outcome.body.contains("\"name\":\"Fitz\"") && outcome.body.contains("\"age\":\"25\""),
             "esperaba name/age en body, fue: {}",
@@ -6081,7 +6192,10 @@ mod tests {
         // "hola mundo" + "Fitz Roy" con encoding (espacios como +)
         let body = b"greeting=hola+mundo&place=Fitz%20Roy".to_vec();
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), "application/x-www-form-urlencoded".into());
+        headers.insert(
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        );
         let outcome = handle_task(
             &reg,
             0,
@@ -6089,7 +6203,8 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         assert!(
             outcome.body.contains("\"greeting\":\"hola mundo\""),
@@ -6107,7 +6222,10 @@ mod tests {
     async fn mp_urlencoded_body_vacio_es_map_vacio() {
         let reg = registry_with_post_body_route();
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), "application/x-www-form-urlencoded".into());
+        headers.insert(
+            "content-type".into(),
+            "application/x-www-form-urlencoded".into(),
+        );
         let outcome = handle_task(
             &reg,
             0,
@@ -6115,7 +6233,8 @@ mod tests {
             std::collections::HashMap::new(),
             Vec::new(),
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 200);
         assert_eq!(outcome.body, "{}");
     }
@@ -6136,7 +6255,8 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 400);
         assert!(
             outcome.body.contains("boundary"),
@@ -6216,9 +6336,9 @@ mod tests {
         // Body con una part de tipo text field (sin filename).
         // Estructura: --<b>\r\n<hdr>\r\n\r\n<body>\r\n--<b>--
         let boundary = "----foo";
-        let body = format!(
+        let body =
             "------foo\r\nContent-Disposition: form-data; name=\"msg\"\r\n\r\nhola\r\n------foo--"
-        );
+                .to_string();
         let result = parse_multipart_body(body.as_bytes(), boundary).expect("parse OK");
         match result {
             Value::Map(entries) => {
@@ -6285,7 +6405,9 @@ mod tests {
         // FILE field ya funcionan (antes era 400, ahora se guardan
         // como `Value::Bytes` raw). Habilita uploads binarios.
         let boundary = "X";
-        let mut body = b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n".to_vec();
+        let mut body =
+            b"--X\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\n\r\n"
+                .to_vec();
         body.push(0xff);
         body.push(0xfe);
         body.extend_from_slice(b"\r\n--X--");
@@ -6329,9 +6451,7 @@ mod tests {
         // parseado como `Value::Map<Str, Value>`.
         let reg = registry_with_post_body_route();
         let boundary = "----my-boundary";
-        let body = format!(
-            "------my-boundary\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFitz\r\n------my-boundary--"
-        );
+        let body = "------my-boundary\r\nContent-Disposition: form-data; name=\"name\"\r\n\r\nFitz\r\n------my-boundary--".to_string();
         let mut headers = std::collections::HashMap::new();
         headers.insert(
             "content-type".into(),
@@ -6344,7 +6464,8 @@ mod tests {
             std::collections::HashMap::new(),
             body.into_bytes(),
             headers,
-        ).await;
+        )
+        .await;
         // `registry_with_post_body_route` espera body parseable como
         // `Map`, así que devolverá 200 con el body echo'd.
         assert_eq!(outcome.status, 200, "outcome body: {}", outcome.body);
@@ -6355,7 +6476,10 @@ mod tests {
         let reg = registry_with_post_body_route();
         let body = br#"{"foo": 42}"#.to_vec();
         let mut headers = std::collections::HashMap::new();
-        headers.insert("content-type".into(), "application/json; charset=utf-8".into());
+        headers.insert(
+            "content-type".into(),
+            "application/json; charset=utf-8".into(),
+        );
         let outcome = handle_task(
             &reg,
             0,
@@ -6363,7 +6487,8 @@ mod tests {
             std::collections::HashMap::new(),
             body,
             headers,
-        ).await;
+        )
+        .await;
         assert_eq!(outcome.status, 200);
     }
 
@@ -6486,12 +6611,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
         // Ruta sin `@authenticated`/`@admin` no toca el provider.
         // Smoke: no debería romperse aunque el programa tenga
         // `@auth_provider` declarado.
-        let (status, body) = run_oneshot(
-            AUTH_E2E_SOURCE,
-            axum::http::Method::GET,
-            "/public",
-        )
-        .await;
+        let (status, body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/public").await;
         assert_eq!(status, 200);
         assert_eq!(body, "\"sin auth\"");
     }
@@ -6500,12 +6620,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     async fn auth_authenticated_sin_header_devuelve_401() {
         // Sin header `Authorization` → provider emite `Err("falta...")`
         // → wrapper convierte a 401 con `{"error": "falta..."}`.
-        let (status, body) = run_oneshot(
-            AUTH_E2E_SOURCE,
-            axum::http::Method::GET,
-            "/me",
-        )
-        .await;
+        let (status, body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/me").await;
         assert_eq!(status, 401);
         assert!(
             body.contains("falta Authorization"),
@@ -6586,12 +6701,7 @@ fn admin_route(user: User) -> Str => \"hola admin\"\n\
     async fn auth_admin_sin_header_devuelve_401_no_403() {
         // Sin header, el provider falla con Err ANTES de evaluar role.
         // Resultado: 401 (no autenticado), no 403 (no autorizado).
-        let (status, _body) = run_oneshot(
-            AUTH_E2E_SOURCE,
-            axum::http::Method::GET,
-            "/admin",
-        )
-        .await;
+        let (status, _body) = run_oneshot(AUTH_E2E_SOURCE, axum::http::Method::GET, "/admin").await;
         assert_eq!(status, 401);
     }
 
@@ -6644,8 +6754,7 @@ fn me(user: User) -> Str => \"x\"\n\
         .await;
         let err = res.expect_err("esperaba error por @authenticated sin @auth_provider");
         assert!(
-            err.message.contains("@auth_provider")
-                && err.message.contains("antes"),
+            err.message.contains("@auth_provider") && err.message.contains("antes"),
             "esperaba mención de @auth_provider y orden, fue: {}",
             err.message
         );
@@ -6672,9 +6781,7 @@ fn me(user: User) -> Str => \"x\"\n\
     /// Helper: arma server desde src Fitz, lo bindea a 127.0.0.1:0 y
     /// devuelve (addr, handle). El handle se mantiene vivo el tiempo
     /// del test; al droppearlo, el server termina.
-    async fn spawn_ws_server(
-        src: &str,
-    ) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
+    async fn spawn_ws_server(src: &str) -> (std::net::SocketAddr, tokio::task::JoinHandle<()>) {
         // Evaluar el src adentro de un registry activo (igual que
         // `registry_from_source`), pero con `with_active_registry_async`
         // y conservando el Arc resultante.
@@ -6706,9 +6813,8 @@ fn me(user: User) -> Str => \"x\"\n\
     async fn ws_connect(
         addr: std::net::SocketAddr,
         path: &str,
-    ) -> tokio_tungstenite::WebSocketStream<
-        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-    > {
+    ) -> tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>
+    {
         let url = format!("ws://{}{}", addr, path);
         let (ws, _resp) = tokio_tungstenite::connect_async(&url)
             .await
@@ -6740,14 +6846,11 @@ fn me(user: User) -> Str => \"x\"\n\
             .expect("send");
 
         // Recibir la respuesta.
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            ws.next(),
-        )
-        .await
-        .expect("timeout")
-        .expect("frame")
-        .expect("ok");
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
         match resp {
             tungstenite::Message::Text(t) => {
                 assert_eq!(t.as_str(), "\"eco-hola\"");
@@ -6779,24 +6882,20 @@ fn me(user: User) -> Str => \"x\"\n\
         use futures_util::{SinkExt, StreamExt};
         // Damos un instante para que el server registre ambos conns.
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        a.send(tungstenite::Message::text("\"hola\"")).await.expect("send");
+        a.send(tungstenite::Message::text("\"hola\""))
+            .await
+            .expect("send");
 
-        let ra = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            a.next(),
-        )
-        .await
-        .expect("timeout")
-        .expect("frame")
-        .expect("ok");
-        let rb = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            b.next(),
-        )
-        .await
-        .expect("timeout")
-        .expect("frame")
-        .expect("ok");
+        let ra = tokio::time::timeout(std::time::Duration::from_secs(2), a.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        let rb = tokio::time::timeout(std::time::Duration::from_secs(2), b.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
         match (ra, rb) {
             (tungstenite::Message::Text(ta), tungstenite::Message::Text(tb)) => {
                 assert_eq!(ta.as_str(), "\"all-hola\"");
@@ -6854,20 +6953,16 @@ fn me(user: User) -> Str => \"x\"\n\
         ))
         .await
         .expect("send");
-        let resp = tokio::time::timeout(
-            std::time::Duration::from_secs(2),
-            ws.next(),
-        )
-        .await
-        .expect("timeout")
-        .expect("frame")
-        .expect("ok");
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
         match resp {
             tungstenite::Message::Text(t) => {
                 // Esperamos `{"user":"ada","text":"re:hi"}` (orden
                 // preservado por preserve_order de serde_json).
-                let v: serde_json::Value =
-                    serde_json::from_str(t.as_str()).expect("JSON valid");
+                let v: serde_json::Value = serde_json::from_str(t.as_str()).expect("JSON valid");
                 assert_eq!(v["user"], serde_json::json!("ada"));
                 assert_eq!(v["text"], serde_json::json!("re:hi"));
             }
@@ -6898,26 +6993,23 @@ fn me(user: User) -> Str => \"x\"\n\
         let mut ws = ws_connect(addr, "/hb").await;
         use futures_util::StreamExt;
         // Esperamos un Ping en hasta 3 segundos.
-        let frame = tokio::time::timeout(
-            std::time::Duration::from_secs(3),
-            async {
-                loop {
-                    match ws.next().await {
-                        Some(Ok(tungstenite::Message::Ping(_))) => {
-                            return tungstenite::Message::Ping(Vec::new().into());
-                        }
-                        Some(Ok(other)) => {
-                            // tokio-tungstenite responde Pings con Pongs
-                            // automáticamente, así que un Ping puede no
-                            // verse acá. Si vemos otro tipo, seguimos.
-                            let _ = other;
-                            continue;
-                        }
-                        _ => return tungstenite::Message::Close(None),
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                match ws.next().await {
+                    Some(Ok(tungstenite::Message::Ping(_))) => {
+                        return tungstenite::Message::Ping(Vec::new().into());
                     }
+                    Some(Ok(other)) => {
+                        // tokio-tungstenite responde Pings con Pongs
+                        // automáticamente, así que un Ping puede no
+                        // verse acá. Si vemos otro tipo, seguimos.
+                        let _ = other;
+                        continue;
+                    }
+                    _ => return tungstenite::Message::Close(None),
                 }
-            },
-        )
+            }
+        })
         .await;
         // tokio-tungstenite intercepta Pings y responde Pongs sin
         // expornerlos al .next() del cliente. La forma robusta de
@@ -6928,7 +7020,6 @@ fn me(user: User) -> Str => \"x\"\n\
         // tungstenite responde Pong automático).
         let _ = frame;
         // Sanity: la conn sigue conectada — podemos cerrarla limpia.
-        use futures_util::SinkExt;
         let _ = ws.close(None).await;
     }
 

@@ -195,8 +195,8 @@ fn fmt_stmt_list(ctx: &mut FmtCtx, stmts: &[Stmt], in_block: bool) {
         } else {
             after_what > 0
         };
-        let had_blank_in_source = block_allows_blank
-            && has_blank_between(ctx.trivia, after_what, stmt_start);
+        let had_blank_in_source =
+            block_allows_blank && has_blank_between(ctx.trivia, after_what, stmt_start);
         // Si el último comment emitido pertenece "al gap" entre prev_end_line
         // y stmt_start, suppress smart_blank (comment ya cumple esa función
         // de separación visual + queremos que el comment quede pegado al stmt).
@@ -250,7 +250,10 @@ fn emit_leading_comments(ctx: &mut FmtCtx, prev_end_line: usize, upper_bound: us
         }
         // Blank line antes del comment si en el original había una
         // entre el último item emitido y este comment.
-        let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line_excluding_current(ctx));
+        let after_what = std::cmp::max(
+            prev_end_line,
+            last_emitted_comment_line_excluding_current(ctx),
+        );
         if after_what > 0 && has_blank_between(ctx.trivia, after_what, c.line) {
             ctx.newline();
         }
@@ -265,7 +268,10 @@ fn emit_leading_comments(ctx: &mut FmtCtx, prev_end_line: usize, upper_bound: us
 fn emit_trailing_comments(ctx: &mut FmtCtx, prev_end_line: usize) {
     while ctx.comment_cursor < ctx.trivia.comments.len() {
         let c = &ctx.trivia.comments[ctx.comment_cursor];
-        let after_what = std::cmp::max(prev_end_line, last_emitted_comment_line_excluding_current(ctx));
+        let after_what = std::cmp::max(
+            prev_end_line,
+            last_emitted_comment_line_excluding_current(ctx),
+        );
         if after_what > 0 && has_blank_between(ctx.trivia, after_what, c.line) {
             ctx.newline();
         }
@@ -332,7 +338,9 @@ fn has_blank_between(trivia: &Trivia, lower_exclusive: usize, upper_exclusive: u
 /// tuviera. Mejora legibilidad sin contradecir intención (el user
 /// no puso blank pero no objeta que la haya).
 fn needs_blank_line_before_smart(prev: Option<&Stmt>, curr: &Stmt) -> bool {
-    let Some(prev) = prev else { return false; };
+    let Some(prev) = prev else {
+        return false;
+    };
     is_complex_top_level(prev) || is_complex_top_level(curr)
 }
 
@@ -365,7 +373,10 @@ fn end_line_of_stmt(stmt: &Stmt) -> usize {
         Stmt::Return(e, _) => Some(end_line_of_expr(e)),
         Stmt::ReturnStatus { status, body, .. } => {
             let s = end_line_of_expr(status);
-            body.as_ref().map(end_line_of_expr).map(|b| s.max(b)).or(Some(s))
+            body.as_ref()
+                .map(end_line_of_expr)
+                .map(|b| s.max(b))
+                .or(Some(s))
         }
         Stmt::Expr(e, _) => Some(end_line_of_expr(e)),
         Stmt::FnDef { body, .. }
@@ -400,20 +411,30 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             Some(m)
         }
         Expr::FnExpr { body, .. } => body.iter().map(end_line_of_stmt).max(),
-        Expr::Field { object, .. } | Expr::Index { object, .. } => {
-            Some(end_line_of_expr(object))
-        }
+        Expr::Field { object, .. } | Expr::Index { object, .. } => Some(end_line_of_expr(object)),
         Expr::TupleField { tuple, .. } => Some(end_line_of_expr(tuple)),
         Expr::Tuple(items, _) => items.iter().map(end_line_of_expr).max(),
         Expr::Loop { body, .. } => body.iter().map(end_line_of_stmt).max(),
-        Expr::Slice { object, start, end, .. } => {
+        Expr::Slice {
+            object, start, end, ..
+        } => {
             let mut m = end_line_of_expr(object);
-            if let Some(s) = start { m = m.max(end_line_of_expr(s)); }
-            if let Some(e) = end { m = m.max(end_line_of_expr(e)); }
+            if let Some(s) = start {
+                m = m.max(end_line_of_expr(s));
+            }
+            if let Some(e) = end {
+                m = m.max(end_line_of_expr(e));
+            }
             Some(m)
         }
         Expr::List(items, _) => items.iter().map(end_line_of_expr).max(),
-        Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+        Expr::ListComp {
+            expr,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             let mut m = end_line_of_expr(expr).max(end_line_of_expr(iter));
             for (_, it) in extra_clauses {
                 m = m.max(end_line_of_expr(it));
@@ -423,7 +444,14 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             }
             Some(m)
         }
-        Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+        Expr::MapComp {
+            key,
+            value,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             let mut m = end_line_of_expr(key)
                 .max(end_line_of_expr(value))
                 .max(end_line_of_expr(iter));
@@ -439,15 +467,23 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             .iter()
             .flat_map(|(k, v)| [end_line_of_expr(k), end_line_of_expr(v)])
             .max(),
-        Expr::Range { start: s, end: e, .. } => {
-            Some(end_line_of_expr(s).max(end_line_of_expr(e)))
-        }
-        Expr::If { condition, then, else_, .. } => {
+        Expr::Range {
+            start: s, end: e, ..
+        } => Some(end_line_of_expr(s).max(end_line_of_expr(e))),
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             let mut m = end_line_of_expr(condition);
             if let Some(s) = then.iter().map(end_line_of_stmt).max() {
                 m = m.max(s);
             }
-            if let Some(e) = else_.as_ref().and_then(|el| el.iter().map(end_line_of_stmt).max()) {
+            if let Some(e) = else_
+                .as_ref()
+                .and_then(|el| el.iter().map(end_line_of_stmt).max())
+            {
                 m = m.max(e);
             }
             Some(m)
@@ -461,9 +497,7 @@ fn end_line_of_expr(expr: &Expr) -> usize {
             }
             Some(m)
         }
-        Expr::StructLit { fields, .. } => {
-            fields.iter().map(|(_, e)| end_line_of_expr(e)).max()
-        }
+        Expr::StructLit { fields, .. } => fields.iter().map(|(_, e)| end_line_of_expr(e)).max(),
         Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             Some(end_line_of_expr(inner))
         }
@@ -476,8 +510,14 @@ fn end_line_of_expr(expr: &Expr) -> usize {
                 StrPart::Lit(_) => None,
             })
             .max(),
-        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _)
-        | Expr::Null(_) | Expr::Bytes(_, _) | Expr::Ident(_, _) | Expr::Error(_) => None,
+        Expr::Int(_, _)
+        | Expr::Float(_, _)
+        | Expr::Str(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Null(_)
+        | Expr::Bytes(_, _)
+        | Expr::Ident(_, _)
+        | Expr::Error(_) => None,
     };
     start.max(nested.unwrap_or(start))
 }
@@ -485,7 +525,12 @@ fn end_line_of_expr(expr: &Expr) -> usize {
 fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
     ctx.write_indent();
     match stmt {
-        Stmt::Assign { target, type_, value, span } => {
+        Stmt::Assign {
+            target,
+            type_,
+            value,
+            span,
+        } => {
             fmt_assign(ctx, target, type_.as_ref(), value, *span);
         }
         Stmt::Destructure { pattern, value, .. } => {
@@ -510,11 +555,30 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
             fmt_expr(ctx, expr);
         }
         Stmt::FnDef {
-            name, params, return_type, body, is_async, decorators, ..
+            name,
+            params,
+            return_type,
+            body,
+            is_async,
+            decorators,
+            ..
         } => {
-            fmt_fndef(ctx, name, params, return_type.as_ref(), body, *is_async, decorators);
+            fmt_fndef(
+                ctx,
+                name,
+                params,
+                return_type.as_ref(),
+                body,
+                *is_async,
+                decorators,
+            );
         }
-        Stmt::TypeDef { name, fields, methods, .. } => {
+        Stmt::TypeDef {
+            name,
+            fields,
+            methods,
+            ..
+        } => {
             fmt_typedef(ctx, name, fields, methods);
         }
         Stmt::Break(value, label, _) => {
@@ -535,7 +599,9 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
                 ctx.write(l);
             }
         }
-        Stmt::While { condition, body, .. } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             ctx.write("while (");
             fmt_expr(ctx, condition);
             ctx.write(") ");
@@ -545,7 +611,9 @@ fn fmt_stmt(ctx: &mut FmtCtx, stmt: &Stmt) {
             ctx.write("loop ");
             fmt_block(ctx, body);
         }
-        Stmt::For { var, iter, body, .. } => {
+        Stmt::For {
+            var, iter, body, ..
+        } => {
             ctx.write("for ");
             // Mini-tanda Md: var es Pattern (puede ser Ident, Wildcard,
             // Tuple). `fmt_pattern` ya cubre los 3 casos.
@@ -815,7 +883,9 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
         }
         Expr::Ident(name, _) => ctx.write(name),
         Expr::StrInterp(parts, _) => fmt_str_interp(ctx, parts),
-        Expr::BinOp { op, left, right, .. } => fmt_binop(ctx, op, left, right),
+        Expr::BinOp {
+            op, left, right, ..
+        } => fmt_binop(ctx, op, left, right),
         Expr::UnaryOp { op, operand, .. } => {
             match op {
                 UnaryOpKind::Neg => ctx.write("-"),
@@ -842,7 +912,13 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             fmt_expr(ctx, index);
             ctx.write("]");
         }
-        Expr::Slice { object, start, end, inclusive, .. } => {
+        Expr::Slice {
+            object,
+            start,
+            end,
+            inclusive,
+            ..
+        } => {
             fmt_expr(ctx, object);
             ctx.write("[");
             if let Some(s) = start {
@@ -881,7 +957,14 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
         // Mini-tanda C + Cmp+ — `[expr for var in iter ([for ...]*) (if filter)?]`.
         // Una línea con espacios canónicos. Multi-línea queda como
         // deuda residual si entra demanda.
-        Expr::ListComp { expr, var, iter, extra_clauses, filter, .. } => {
+        Expr::ListComp {
+            expr,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             ctx.write("[");
             ctx.write(&expr_to_inline_string(expr));
             ctx.write(" for ");
@@ -901,7 +984,15 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write("]");
         }
         // Mini-tanda Cmp+ — `{key: value for var in iter (for ...)* (if cond)?}`.
-        Expr::MapComp { key, value, var, iter, extra_clauses, filter, .. } => {
+        Expr::MapComp {
+            key,
+            value,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             ctx.write("{");
             ctx.write(&expr_to_inline_string(key));
             ctx.write(": ");
@@ -936,7 +1027,12 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             ctx.write("..");
             fmt_expr(ctx, end);
         }
-        Expr::If { condition, then, else_, .. } => {
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             ctx.write("if (");
             fmt_expr(ctx, condition);
             ctx.write(") ");
@@ -947,7 +1043,9 @@ fn fmt_expr(ctx: &mut FmtCtx, expr: &Expr) {
             }
         }
         Expr::Match { value, arms, .. } => fmt_match(ctx, value, arms),
-        Expr::StructLit { type_name, fields, .. } => {
+        Expr::StructLit {
+            type_name, fields, ..
+        } => {
             ctx.write(type_name);
             ctx.write(" { ");
             let parts: Vec<String> = fields
@@ -1145,7 +1243,11 @@ fn fmt_pattern(ctx: &mut FmtCtx, pat: &Pattern) {
         }
         Pattern::OkWildcard => ctx.write("Ok(_)"),
         Pattern::ErrWildcard => ctx.write("Err(_)"),
-        Pattern::Range { start, end, inclusive } => {
+        Pattern::Range {
+            start,
+            end,
+            inclusive,
+        } => {
             ctx.write(&start.to_string());
             ctx.write(if *inclusive { "..=" } else { ".." });
             ctx.write(&end.to_string());
@@ -1232,7 +1334,10 @@ mod tests {
     /// Asserta que `format_source(input)` == `expected`.
     fn check(input: &str, expected: &str) {
         let actual = format_source(input).unwrap_or_else(|e| panic!("parse: {e}"));
-        assert_eq!(actual, expected, "input:\n{input}\nactual:\n{actual}\nexpected:\n{expected}");
+        assert_eq!(
+            actual, expected,
+            "input:\n{input}\nactual:\n{actual}\nexpected:\n{expected}"
+        );
     }
 
     /// Asserta que `format_source` es idempotente sobre `input`.
@@ -1308,10 +1413,7 @@ mod tests {
 
     #[test]
     fn formatea_loop_con_break() {
-        check(
-            "loop { break }\n",
-            "loop {\n    break\n}\n",
-        );
+        check("loop { break }\n", "loop {\n    break\n}\n");
     }
 
     #[test]
@@ -1332,10 +1434,7 @@ mod tests {
 
     #[test]
     fn formatea_lista_y_mapa_inline() {
-        check(
-            "let xs = [1, 2, 3]\n",
-            "let xs = [1, 2, 3]\n",
-        );
+        check("let xs = [1, 2, 3]\n", "let xs = [1, 2, 3]\n");
         check(
             "let m = {\"a\": 1, \"b\": 2}\n",
             "let m = {\"a\": 1, \"b\": 2}\n",
@@ -1352,10 +1451,7 @@ mod tests {
 
     #[test]
     fn formatea_str_interp_con_var() {
-        check(
-            "print(\"hola, {name}\")\n",
-            "print(\"hola, {name}\")\n",
-        );
+        check("print(\"hola, {name}\")\n", "print(\"hola, {name}\")\n");
     }
 
     #[test]
@@ -1435,43 +1531,28 @@ fn main() {
 
     #[test]
     fn preserva_comment_de_linea_antes_de_stmt() {
-        check(
-            "// header\nlet x = 1\n",
-            "// header\nlet x = 1\n",
-        );
+        check("// header\nlet x = 1\n", "// header\nlet x = 1\n");
     }
 
     #[test]
     fn preserva_multiple_comments_seguidos() {
-        check(
-            "// uno\n// dos\nlet x = 1\n",
-            "// uno\n// dos\nlet x = 1\n",
-        );
+        check("// uno\n// dos\nlet x = 1\n", "// uno\n// dos\nlet x = 1\n");
     }
 
     #[test]
     fn preserva_blank_line_entre_stmts() {
-        check(
-            "let x = 1\n\nlet y = 2\n",
-            "let x = 1\n\nlet y = 2\n",
-        );
+        check("let x = 1\n\nlet y = 2\n", "let x = 1\n\nlet y = 2\n");
     }
 
     #[test]
     fn preserva_comment_trailing_en_misma_linea() {
-        check(
-            "let x = 1 // explicación\n",
-            "let x = 1  // explicación\n",
-        );
+        check("let x = 1 // explicación\n", "let x = 1  // explicación\n");
     }
 
     #[test]
     fn normaliza_comment_sin_espacio_post_slash() {
         // `//foo` se normaliza a `// foo`.
-        check(
-            "//foo\nlet x = 1\n",
-            "// foo\nlet x = 1\n",
-        );
+        check("//foo\nlet x = 1\n", "// foo\nlet x = 1\n");
     }
 
     #[test]
@@ -1529,10 +1610,7 @@ fn main() {
     #[test]
     fn multiples_blanks_consecutivas_se_colapsan_a_una() {
         // El user podría tener 3 blanks; el formatter colapsa a 1.
-        check(
-            "let x = 1\n\n\n\nlet y = 2\n",
-            "let x = 1\n\nlet y = 2\n",
-        );
+        check("let x = 1\n\n\n\nlet y = 2\n", "let x = 1\n\nlet y = 2\n");
     }
 
     #[test]

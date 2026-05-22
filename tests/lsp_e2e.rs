@@ -317,8 +317,7 @@ fn hover_sobre_literal_int_devuelve_tipo_en_markdown() {
 
     // Validamos: result.contents.kind == "markdown" y value contiene "Int".
     assert!(
-        hover_resp.contains(r#""kind":"markdown""#)
-            || hover_resp.contains(r#""kind": "markdown""#),
+        hover_resp.contains(r#""kind":"markdown""#) || hover_resp.contains(r#""kind": "markdown""#),
         "hover sin MarkupContent markdown: {hover_resp}",
     );
     assert!(
@@ -348,8 +347,7 @@ fn hover_sobre_literal_int_devuelve_tipo_en_markdown() {
         }
     };
     assert!(
-        null_resp.contains(r#""result":null"#)
-            || null_resp.contains(r#""result": null"#),
+        null_resp.contains(r#""result":null"#) || null_resp.contains(r#""result": null"#),
         "hover en posición sin spans debería ser null: {null_resp}",
     );
 
@@ -458,7 +456,9 @@ fn goto_definition_sobre_uso_de_var_local_devuelve_location_de_let() {
     }
 
     let def_builtin = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/definition","params":{"textDocument":{"uri":"file:///print.fitz"},"position":{"line":0,"character":0}}}"#;
-    stdin.write_all(&frame(def_builtin)).expect("write definition builtin");
+    stdin
+        .write_all(&frame(def_builtin))
+        .expect("write definition builtin");
     stdin.flush().expect("flush definition builtin");
 
     let deadline = Instant::now() + Duration::from_secs(5);
@@ -473,8 +473,7 @@ fn goto_definition_sobre_uso_de_var_local_devuelve_location_de_let() {
         }
     };
     assert!(
-        null_resp.contains(r#""result":null"#)
-            || null_resp.contains(r#""result": null"#),
+        null_resp.contains(r#""result":null"#) || null_resp.contains(r#""result": null"#),
         "definition sobre builtin debería ser null: {null_resp}",
     );
 
@@ -569,15 +568,16 @@ fn completion_after_dot_sobre_str_lista_metodos_built_in() {
     );
     // Sin métodos de List (que no aplican a Str).
     assert!(
-        !comp_resp.contains(r#""label":"push""#)
-            && !comp_resp.contains(r#""label": "push""#),
+        !comp_resp.contains(r#""label":"push""#) && !comp_resp.contains(r#""label": "push""#),
         "completion no debería incluir métodos de List: {comp_resp}",
     );
 
     // Segundo request: completion scope-level en línea 2 col 0
     // (después del newline final, contexto top-level).
     let comp_scope = r#"{"jsonrpc":"2.0","id":3,"method":"textDocument/completion","params":{"textDocument":{"uri":"file:///comp.fitz"},"position":{"line":2,"character":0}}}"#;
-    stdin.write_all(&frame(comp_scope)).expect("write completion scope");
+    stdin
+        .write_all(&frame(comp_scope))
+        .expect("write completion scope");
     stdin.flush().expect("flush completion scope");
 
     let deadline = Instant::now() + Duration::from_secs(5);

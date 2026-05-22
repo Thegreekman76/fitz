@@ -91,10 +91,17 @@ parking_lot = "0.12"
 #    corre contra cualquier Python 3.10/3.11/3.12/3.13 instalado en
 #    la máquina. Trade-off: APIs introducidas post-3.10 quedan
 #    fuera, pero ninguna importa para 8.1 (primitivos).
-#  - `auto-initialize`: PyO3 boota CPython en el primer
-#    `Python::with_gil`. Habilita el patrón lazy del 8.1 — programas
-#    sin imports Python no pagan el costo de boot.
-pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optional = true }
+#
+# Sub-tanda Cleanup-Residual+ (2026-05-22) — fix de
+# R.bug-pyo3-abi3-autoinit: removimos `auto-initialize`. Combinado
+# con `abi3-py310`, el feature `auto-initialize` "ganaba" y el
+# binario quedaba linkeado contra libpython específica del builder
+# (perdíamos la portabilidad abi3). El init manual lo hace el código
+# que invoca PyO3 (intérprete + codegen) vía
+# `pyo3::prepare_freethreaded_python()` antes del primer
+# `Python::attach`. Política nueva: el primer import `from python
+# import X` dispara el init lazy explícito.
+pyo3 = { version = "0.28", features = ["abi3-py310"], optional = true }
 
 # Fase 9.x.1.a — server LSP en `src/bin/fitz-lsp.rs`. Dep OPCIONAL detrás
 # de la feature `lsp`: el `cargo build` default sigue produciendo solo el

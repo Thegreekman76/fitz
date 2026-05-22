@@ -53,7 +53,9 @@ pub enum LockfileError {
     Serialize(toml::ser::Error),
     /// El lockfile en disco usa una versión que no entendemos. El
     /// `found` lleva la versión leída para citar en el mensaje.
-    UnsupportedVersion { found: u32 },
+    UnsupportedVersion {
+        found: u32,
+    },
 }
 
 impl fmt::Display for LockfileError {
@@ -150,9 +152,9 @@ pub fn write_lockfile_if_changed(
     if lockfile_matches(path, lockfile) {
         return Ok(false);
     }
-    let text = lockfile.to_toml_string().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
+    let text = lockfile
+        .to_toml_string()
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
     std::fs::write(path, text)?;
     Ok(true)
 }
@@ -223,10 +225,8 @@ mod tests {
 
     #[test]
     fn round_trip_preserva_estructura() {
-        let original = Lockfile::from_resolved(&[
-            dep("a", "0.1.0", "../a"),
-            dep("b", "0.2.0", "../b"),
-        ]);
+        let original =
+            Lockfile::from_resolved(&[dep("a", "0.1.0", "../a"), dep("b", "0.2.0", "../b")]);
         let toml_text = original.to_toml_string().unwrap();
         let parsed = Lockfile::parse(&toml_text).unwrap();
         assert_eq!(original, parsed);
@@ -268,7 +268,10 @@ source = "git+https://github.com/foo/bar#abc123"
         assert_eq!(l.packages.len(), 2);
         assert_eq!(l.packages[0].name, "utils");
         assert!(l.packages[0].source.is_none());
-        assert_eq!(l.packages[1].source.as_deref(), Some("git+https://github.com/foo/bar#abc123"));
+        assert_eq!(
+            l.packages[1].source.as_deref(),
+            Some("git+https://github.com/foo/bar#abc123")
+        );
     }
 
     #[test]

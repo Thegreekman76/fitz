@@ -60,9 +60,7 @@ pub type FitzFuture = Pin<Box<dyn Future<Output = FitzResult<Value>> + Send>>;
 /// siempre llega vacío. Wrapper struct (no type alias) para poder
 /// implementar `Debug` (el `dyn Fn` no lo deriva).
 #[derive(Clone)]
-pub struct NativeAsyncFn(
-    pub Arc<dyn Fn(Vec<Value>) -> FitzFuture + Send + Sync>,
-);
+pub struct NativeAsyncFn(pub Arc<dyn Fn(Vec<Value>) -> FitzFuture + Send + Sync>);
 
 impl std::fmt::Debug for NativeAsyncFn {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -408,7 +406,10 @@ pub enum Value {
 
     /// Rango exclusivo de Int. Iterable. Por ahora solo Int (Float
     /// no tiene una semántica discreta clara para iteración).
-    Range { start: i64, end: i64 },
+    Range {
+        start: i64,
+        end: i64,
+    },
 
     /// Instancia de un tipo custom: el resultado de evaluar un struct
     /// literal `User { id: 1, name: "x" }`. Guarda el nombre del tipo
@@ -768,32 +769,31 @@ impl PartialEq for Value {
             // coerciona también adentro de listas y mapas. Si los dos `Arc`
             // apuntan al mismo dato (alias del mismo origen), `Arc::ptr_eq`
             // es shortcut barato; si no, comparamos el contenido lockeando.
-            (Value::List(a), Value::List(b)) => {
-                Arc::ptr_eq(a, b) || *a.lock() == *b.lock()
-            }
-            (Value::Map(a), Value::Map(b)) => {
-                Arc::ptr_eq(a, b) || *a.lock() == *b.lock()
-            }
+            (Value::List(a), Value::List(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
+            (Value::Map(a), Value::Map(b)) => Arc::ptr_eq(a, b) || *a.lock() == *b.lock(),
             // Tuples (mini-tanda T): comparación estructural por
             // longitud y elementos. La coerción Int↔Float vale
             // recursivamente vía esta misma impl.
             (Value::Tuple(a), Value::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| x == y)
             }
-            (
-                Value::Range { start: s1, end: e1 },
-                Value::Range { start: s2, end: e2 },
-            ) => s1 == s2 && e1 == e2,
+            (Value::Range { start: s1, end: e1 }, Value::Range { start: s2, end: e2 }) => {
+                s1 == s2 && e1 == e2
+            }
             // Instancias se comparan estructuralmente: mismo tipo y mismo
             // contenido de campos (con el mismo orden, que está garantizado
             // por el evaluador porque sigue la declaración del `type`).
             // La coerción Int↔Float vale recursivamente vía esta misma impl.
             (
-                Value::Instance { type_name: t1, fields: f1 },
-                Value::Instance { type_name: t2, fields: f2 },
-            ) => {
-                t1 == t2 && (Arc::ptr_eq(f1, f2) || *f1.lock() == *f2.lock())
-            }
+                Value::Instance {
+                    type_name: t1,
+                    fields: f1,
+                },
+                Value::Instance {
+                    type_name: t2,
+                    fields: f2,
+                },
+            ) => t1 == t2 && (Arc::ptr_eq(f1, f2) || *f1.lock() == *f2.lock()),
             // Result se compara variante por variante, recursivamente.
             // Misma coerción Int↔Float adentro vía esta misma impl.
             (Value::Result(a), Value::Result(b)) => match (a, b) {
@@ -807,10 +807,7 @@ impl PartialEq for Value {
             // mismo `Arc<Mutex<Environment>>`. Estructural no tiene
             // sentido — el env puede contener funciones y otros
             // valores no-comparables.
-            (
-                Value::Module { env: e1, .. },
-                Value::Module { env: e2, .. },
-            ) => Arc::ptr_eq(e1, e2),
+            (Value::Module { env: e1, .. }, Value::Module { env: e2, .. }) => Arc::ptr_eq(e1, e2),
             // PyObject se compara por identidad del objeto Python
             // (`Py::as_ptr()` da el `*mut PyObject` subyacente, que es
             // único por objeto vivo). Dos handles a `math` importado dos
@@ -818,9 +815,7 @@ impl PartialEq for Value {
             // nuestro `Value::Module` cachea por path canonicalizado.
             // No hace falta tomar el GIL para leer el puntero.
             #[cfg(feature = "python")]
-            (Value::PyObject(a), Value::PyObject(b)) => {
-                a.0.as_ptr() == b.0.as_ptr()
-            }
+            (Value::PyObject(a), Value::PyObject(b)) => a.0.as_ptr() == b.0.as_ptr(),
             // WsConn — igualdad por identidad del Arc. Dos handles al
             // mismo conn comparten state; conns distintos jamás son
             // iguales estructuralmente (sockets distintos, broadcaster
@@ -919,10 +914,7 @@ mod tests {
     fn bytes_distinto_de_str_aunque_mismo_contenido() {
         // Bytes("hola") y Str("hola") son tipos distintos — PartialEq
         // devuelve false (paralelo a Int vs Str).
-        assert_ne!(
-            Value::Bytes(b"hola".to_vec()),
-            Value::Str("hola".into())
-        );
+        assert_ne!(Value::Bytes(b"hola".to_vec()), Value::Str("hola".into()));
     }
 
     #[test]
@@ -1096,19 +1088,31 @@ mod tests {
 
     #[test]
     fn display_instance_con_campos() {
-        let i = Value::new_instance("User".into(), vec![
+        let i = Value::new_instance(
+            "User".into(),
+            vec![
                 ("id".into(), Value::Int(1)),
                 ("name".into(), Value::Str("Fitz".into())),
-            ]);
+            ],
+        );
         // Strings llevan comillas adentro, igual que en List/Map.
         assert_eq!(i.to_string(), "User { id: 1, name: \"Fitz\" }");
     }
 
     #[test]
     fn igualdad_instance_estructural() {
-        let a = Value::new_instance("Point".into(), vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))]);
-        let b = Value::new_instance("Point".into(), vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))]);
-        let c = Value::new_instance("Point".into(), vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(3))]);
+        let a = Value::new_instance(
+            "Point".into(),
+            vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+        );
+        let b = Value::new_instance(
+            "Point".into(),
+            vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(2))],
+        );
+        let c = Value::new_instance(
+            "Point".into(),
+            vec![("x".into(), Value::Int(1)), ("y".into(), Value::Int(3))],
+        );
         assert_eq!(a, b);
         assert_ne!(a, c);
     }
@@ -1197,14 +1201,20 @@ mod tests {
     #[test]
     fn type_name_de_module() {
         let env = Environment::new();
-        let m = Value::Module { name: "utils".into(), env };
+        let m = Value::Module {
+            name: "utils".into(),
+            env,
+        };
         assert_eq!(m.type_name(), "Module");
     }
 
     #[test]
     fn display_module_muestra_nombre() {
         let env = Environment::new();
-        let m = Value::Module { name: "utils".into(), env };
+        let m = Value::Module {
+            name: "utils".into(),
+            env,
+        };
         assert_eq!(m.to_string(), "<module utils>");
     }
 
@@ -1213,13 +1223,22 @@ mod tests {
         // Mismo env → iguales. Esto modela "el mismo archivo importado
         // dos veces es el mismo módulo".
         let env = Environment::new();
-        let m1 = Value::Module { name: "utils".into(), env: env.clone() };
-        let m2 = Value::Module { name: "utils".into(), env: env.clone() };
+        let m1 = Value::Module {
+            name: "utils".into(),
+            env: env.clone(),
+        };
+        let m2 = Value::Module {
+            name: "utils".into(),
+            env: env.clone(),
+        };
         assert_eq!(m1, m2);
 
         // Distinto env → desiguales aunque el nombre coincida.
         let other_env = Environment::new();
-        let m3 = Value::Module { name: "utils".into(), env: other_env };
+        let m3 = Value::Module {
+            name: "utils".into(),
+            env: other_env,
+        };
         assert_ne!(m1, m3);
     }
 }

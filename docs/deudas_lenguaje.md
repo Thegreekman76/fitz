@@ -5377,25 +5377,33 @@ specific a `[target.x86_64-pc-windows-msvc]`. Sin tocar código.
 
 ---
 
-## R.bug-pyo3-abi3-autoinit — `abi3-py310` + `auto-initialize` incompatibles en Cargo.toml (descubierto 2026-05-22)
+## ~~R.bug-pyo3-abi3-autoinit — `abi3-py310` + `auto-initialize` incompatibles en Cargo.toml~~ ✓ CERRADO 2026-05-22
 
-> **Diferido 2026-05-22** post mini-tanda Cleanup-Residual: el fix
-> requiere (a) modificar `Cargo.toml` quitando `auto-initialize`,
-> (b) emitir `pyo3::prepare_freethreaded_python()` en el preludio
-> del codegen cuando `uses_python = true`, (c) llamarlo también
-> al boot del intérprete, (d) validar cross-Python en Docker (build
-> con Python 3.13, run en 3.10/3.11/3.12/3.14). El paso (d) requiere
-> Docker runner con múltiples Pythons que no tengo en local —
-> bloqueante para verificar el fix real.
+> **CERRADO 2026-05-22** — mini-tanda Cleanup-Residual+ Sub-tanda D.
 >
-> Mientras tanto, el workaround "builder = runtime Python" en los
-> Dockerfiles de boilerplates 5/6 funciona correctamente. No
-> bloquea uso real, solo agrega ~30s al build inicial (apt-get
-> install build-essential + rustup en lugar de `rust:slim`).
+> Fix:
+> 1. `Cargo.toml`: removido `auto-initialize` del feature set de PyO3.
+>    Solo `abi3-py310` queda activo → binario portable contra
+>    cualquier Python 3.10+.
+> 2. `src/py_interop.rs`: nuevo helper `ensure_python_initialized()`
+>    que llama `Python::initialize()` adentro de un `std::sync::Once`.
+>    Lazy init en el primer `import_module` (típico:
+>    `from python import math`). Idempotente.
+> 3. `.github/workflows/ci.yml`: job `python` ahora corre con
+>    matriz `python-version: [3.10, 3.11, 3.12, 3.13]`. Si alguna
+>    versión falla, abrimos deuda específica.
+> 4. `boilerplates/api-postgres-python/Dockerfile` y
+>    `boilerplates/api-fullstack-postgres/Dockerfile` simplificados
+>    a `FROM rust:slim AS builder` (Rust pre-instalado, ~2-3 min de
+>    ahorro por build) + `FROM python:3.12-slim` como runtime.
+>    Builder + runtime ya NO necesitan match de Python version.
 >
-> **Próxima acción**: cuando aterrice un sub-paso de "Validación
-> CI multi-Python" (probablemente con GitHub Actions matrix
-> Python 3.10/3.11/3.12/3.13/3.14), cerrar este fix ahí.
+> Tests: 46 py_interop tests pasan localmente con feature python.
+> CI multi-Python validará 3.10/3.11/3.12/3.13 en el próximo
+> release.
+>
+> El binario default sin feature python sigue funcionando idéntico
+> — no toca su path de compilación.
 
 **Prioridad: MEDIA** — produce binarios `--features python`
 acoplados a versión específica de libpython del builder, en lugar

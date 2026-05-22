@@ -174,15 +174,12 @@ impl fmt::Display for ManifestError {
             ManifestError::Serialize(e) => {
                 write!(f, "error serializando manifest: {e}")
             }
-            ManifestError::DepNotImplemented { name, reason } => write!(
-                f,
-                "dep `{name}`: {reason}"
-            ),
-            ManifestError::DepPathNotFound { name, path } => write!(
-                f,
-                "dep `{name}`: el path `{}` no existe.",
-                path.display()
-            ),
+            ManifestError::DepNotImplemented { name, reason } => {
+                write!(f, "dep `{name}`: {reason}")
+            }
+            ManifestError::DepPathNotFound { name, path } => {
+                write!(f, "dep `{name}`: el path `{}` no existe.", path.display())
+            }
             ManifestError::DepManifestInvalid { name, path, source } => write!(
                 f,
                 "dep `{name}`: manifest en `{}` inválido — {source}",
@@ -200,14 +197,12 @@ impl fmt::Display for ManifestError {
                  `git = \"...\"` con `tag`/`rev` (versiones sueltas \
                  tipo `\"1.0.0\"` llegan con el registry en 9.y.5)."
             ),
-            ManifestError::DepInvalidGitShape { name, reason } => write!(
-                f,
-                "dep `{name}` (git): {reason}"
-            ),
-            ManifestError::DepGitError { name, source } => write!(
-                f,
-                "dep `{name}` (git): {source}"
-            ),
+            ManifestError::DepInvalidGitShape { name, reason } => {
+                write!(f, "dep `{name}` (git): {reason}")
+            }
+            ManifestError::DepGitError { name, source } => {
+                write!(f, "dep `{name}` (git): {source}")
+            }
             ManifestError::EditParse(e) => write!(f, "error parseando manifest: {e}"),
         }
     }
@@ -303,7 +298,9 @@ pub fn find_manifest(start: &Path) -> Option<PathBuf> {
 /// el CLI parsea desde flags (`--path`, `--git`, `--tag`, `--rev`).
 #[derive(Debug, Clone, PartialEq)]
 pub enum AddDepSpec {
-    Path { path: String },
+    Path {
+        path: String,
+    },
     Git {
         url: String,
         gitref: crate::git_dep::GitRef,
@@ -335,7 +332,10 @@ pub fn add_dep_to_manifest(
 
     // Construir la inline table para la nueva dep.
     let inline = build_inline_dep_table(spec);
-    deps.insert(name, toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)));
+    deps.insert(
+        name,
+        toml_edit::Item::Value(toml_edit::Value::InlineTable(inline)),
+    );
 
     Ok(doc.to_string())
 }
@@ -586,11 +586,12 @@ fn resolve_git_dep(
     url: &str,
     gitref: crate::git_dep::GitRef,
 ) -> Result<ResolvedDep, ManifestError> {
-    let cloned =
-        crate::git_dep::clone_or_use_cache(url, &gitref).map_err(|e| ManifestError::DepGitError {
+    let cloned = crate::git_dep::clone_or_use_cache(url, &gitref).map_err(|e| {
+        ManifestError::DepGitError {
             name: name.to_string(),
             source: e,
-        })?;
+        }
+    })?;
 
     let dep_manifest_path = cloned.abs_path.join(MANIFEST_FILE);
     if !dep_manifest_path.is_file() {
@@ -606,13 +607,12 @@ fn resolve_git_dep(
             path: dep_manifest_path.clone(),
         }
     })?;
-    let dep_manifest = Manifest::parse(&dep_manifest_text).map_err(|e| {
-        ManifestError::DepManifestInvalid {
+    let dep_manifest =
+        Manifest::parse(&dep_manifest_text).map_err(|e| ManifestError::DepManifestInvalid {
             name: name.to_string(),
             path: dep_manifest_path.clone(),
             source: Box::new(e),
-        }
-    })?;
+        })?;
 
     let lib = match dep_manifest.lib {
         Some(l) => l,
@@ -651,12 +651,11 @@ fn resolve_path_dep(
     manifest_dir: &Path,
 ) -> Result<ResolvedDep, ManifestError> {
     let raw_path = manifest_dir.join(path_str);
-    let abs_path = std::fs::canonicalize(&raw_path).map_err(|_| {
-        ManifestError::DepPathNotFound {
+    let abs_path =
+        std::fs::canonicalize(&raw_path).map_err(|_| ManifestError::DepPathNotFound {
             name: name.to_string(),
             path: raw_path.clone(),
-        }
-    })?;
+        })?;
 
     let dep_manifest_path = abs_path.join(MANIFEST_FILE);
     if !dep_manifest_path.is_file() {
@@ -672,13 +671,12 @@ fn resolve_path_dep(
             path: dep_manifest_path.clone(),
         }
     })?;
-    let dep_manifest = Manifest::parse(&dep_manifest_text).map_err(|e| {
-        ManifestError::DepManifestInvalid {
+    let dep_manifest =
+        Manifest::parse(&dep_manifest_text).map_err(|e| ManifestError::DepManifestInvalid {
             name: name.to_string(),
             path: dep_manifest_path.clone(),
             source: Box::new(e),
-        }
-    })?;
+        })?;
 
     let lib = match dep_manifest.lib {
         Some(l) => l,
@@ -999,7 +997,10 @@ entry = "src/lib.fitz"
         assert_eq!(resolved.len(), 1);
         assert_eq!(resolved[0].name, "utils");
         assert_eq!(resolved[0].version, "0.1.0");
-        assert!(resolved[0].lib_entry.ends_with("src/lib.fitz") || resolved[0].lib_entry.ends_with("src\\lib.fitz"));
+        assert!(
+            resolved[0].lib_entry.ends_with("src/lib.fitz")
+                || resolved[0].lib_entry.ends_with("src\\lib.fitz")
+        );
         match &resolved[0].source {
             ResolvedDepSource::Path { declared } => assert_eq!(declared, "../utils"),
             other => panic!("se esperaba ResolvedDepSource::Path, fue {other:?}"),
@@ -1242,7 +1243,10 @@ entry = "src/lib.fitz"
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("tag") && msg.contains("rev"), "msg: {msg}");
-        assert!(msg.contains("reproducibilidad"), "msg debería citar reproducibilidad: {msg}");
+        assert!(
+            msg.contains("reproducibilidad"),
+            "msg debería citar reproducibilidad: {msg}"
+        );
     }
 
     #[test]
@@ -1277,7 +1281,12 @@ entry = "src/lib.fitz"
         let mut m = Manifest::new_default("importer").unwrap();
         m.dependencies.insert(
             "x".to_string(),
-            git_dep(Some("../x"), Some("https://example.com/r"), Some("v1"), None),
+            git_dep(
+                Some("../x"),
+                Some("https://example.com/r"),
+                Some("v1"),
+                None,
+            ),
         );
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
@@ -1288,10 +1297,8 @@ entry = "src/lib.fitz"
     fn resolve_tag_sin_git_aborta_pidiendo_url() {
         let importer_dir = tempfile::tempdir().unwrap();
         let mut m = Manifest::new_default("importer").unwrap();
-        m.dependencies.insert(
-            "x".to_string(),
-            git_dep(None, None, Some("v1"), None),
-        );
+        m.dependencies
+            .insert("x".to_string(), git_dep(None, None, Some("v1"), None));
         let err = resolve_dependencies(&m, importer_dir.path()).unwrap_err();
         let msg = err.to_string();
         assert!(msg.contains("requieren también `git"), "msg: {msg}");

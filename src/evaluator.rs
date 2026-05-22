@@ -33,8 +33,8 @@ use crate::env::{EnvRef, Environment};
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::format::format_value_with_spec;
 use crate::http::{
-    has_active_registry, parse_path_template, push_route, set_server_config, BodyParam,
-    HeaderSpec, HttpMethod, MiddlewareSpec, RouteSpec, ServerConfig,
+    has_active_registry, parse_path_template, push_route, set_server_config, BodyParam, HeaderSpec,
+    HttpMethod, MiddlewareSpec, RouteSpec, ServerConfig,
 };
 use crate::lexer::tokenize;
 use crate::parser::parse;
@@ -112,11 +112,7 @@ pub async fn eval(program: Program) -> FitzResult<()> {
 /// `name` se usa cosméticamente en mensajes de error de aridad
 /// (`invoke_value` lo cita); el runner luego prefija con
 /// `<source_file>::` si aplica.
-pub async fn run_test_handler(
-    handler: Value,
-    is_async: bool,
-    name: &str,
-) -> Result<(), FitzError> {
+pub async fn run_test_handler(handler: Value, is_async: bool, name: &str) -> Result<(), FitzError> {
     let value = invoke_value(handler, vec![], name, Span::ZERO)
         .await
         .map_err(signal_to_error)?;
@@ -565,9 +561,7 @@ fn collect_route_auth(
     decorators: &[Decorator],
     fn_name: &str,
 ) -> Result<crate::http::AuthSpec, EvalSignal> {
-    let err = |msg: String| {
-        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
-    };
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
     let mut spec = crate::http::AuthSpec::None;
     for deco in decorators {
         match deco.name.as_str() {
@@ -660,7 +654,10 @@ fn register_test(
     // otra cosa es bug del evaluator.
     let is_async = match handler {
         Value::Function { is_async, .. } => *is_async,
-        _ => unreachable!("@test sobre fn '{}': handler no es Value::Function", fn_name),
+        _ => unreachable!(
+            "@test sobre fn '{}': handler no es Value::Function",
+            fn_name
+        ),
     };
 
     crate::testing::push_test(crate::testing::TestSpec {
@@ -687,9 +684,7 @@ fn collect_headers(
     fn_name: &str,
     params: &[Param],
 ) -> Result<Vec<HeaderSpec>, EvalSignal> {
-    let err = |msg: String| {
-        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
-    };
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
     let mut headers: Vec<HeaderSpec> = Vec::new();
     for deco in decorators {
@@ -766,7 +761,10 @@ fn collect_headers(
             return Err(err(format!(
                 "@header(name=\"{}\"{}) sobre fn '{}': el handler no tiene un param llamado '{}'{}",
                 http_name,
-                into_alias.as_ref().map(|a| format!(", into=\"{}\"", a)).unwrap_or_default(),
+                into_alias
+                    .as_ref()
+                    .map(|a| format!(", into=\"{}\"", a))
+                    .unwrap_or_default(),
                 fn_name,
                 param_name,
                 if into_alias.is_none() {
@@ -792,7 +790,10 @@ fn collect_headers(
                 return Err(err(format!(
                     "@header(name=\"{}\") sobre fn '{}': el param '{}' debe ser `Str` o `Str?`, \
                      pero está declarado como `{}`",
-                    http_name, fn_name, param_name, other.display_name(),
+                    http_name,
+                    fn_name,
+                    param_name,
+                    other.display_name(),
                 )));
             }
             None => {
@@ -803,7 +804,10 @@ fn collect_headers(
                 )));
             }
         };
-        if headers.iter().any(|h| h.http_name.eq_ignore_ascii_case(&http_name)) {
+        if headers
+            .iter()
+            .any(|h| h.http_name.eq_ignore_ascii_case(&http_name))
+        {
             return Err(err(format!(
                 "@header(name=\"{}\") sobre fn '{}': declarado dos veces (el match es case-insensitive)",
                 http_name, fn_name,
@@ -823,9 +827,7 @@ fn collect_headers(
 /// validación de uniqueness (un solo `@server` por programa) la
 /// hace `http::set_server_config`.
 fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSignal> {
-    let err = |msg: String| {
-        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
-    };
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
     if !has_active_registry() {
         return Err(err(format!(
@@ -1003,7 +1005,9 @@ fn register_server_config(deco: &Decorator, fn_name: &str) -> Result<(), EvalSig
 /// Si el usuario quiere un Post explícito con un segundo param de
 /// tipo `Fn(...)` (raro), debe usar otro nombre o anotar como
 /// `Response` para evitar la auto-clasificación a Wrap.
-pub(crate) fn classify_2_arg_middleware(second_param: &crate::ast::Param) -> crate::http::MiddlewareKind {
+pub(crate) fn classify_2_arg_middleware(
+    second_param: &crate::ast::Param,
+) -> crate::http::MiddlewareKind {
     use crate::ast::TypeExpr;
     if let Some(ty) = &second_param.type_ {
         // Recursar adentro de Nullable por simetría con otros walkers.
@@ -1029,10 +1033,14 @@ async fn collect_middlewares(
     decorators: &[Decorator],
     fn_name: &str,
     env: &EnvRef,
-) -> Result<(Vec<MiddlewareSpec>, Option<std::sync::Arc<crate::http::CorsConfig>>), EvalSignal> {
-    let err = |msg: String| {
-        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
-    };
+) -> Result<
+    (
+        Vec<MiddlewareSpec>,
+        Option<std::sync::Arc<crate::http::CorsConfig>>,
+    ),
+    EvalSignal,
+> {
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
     let mut middlewares: Vec<MiddlewareSpec> = Vec::new();
     let mut cors: Option<std::sync::Arc<crate::http::CorsConfig>> = None;
@@ -1147,9 +1155,7 @@ fn register_http_route(
     env: &EnvRef,
 ) -> Result<(), EvalSignal> {
     // Helper local para mantener los mensajes consistentes.
-    let err = |msg: String| {
-        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
-    };
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
     // 7.0: ningún decorator HTTP de ruta acepta kwargs todavía. El
     // soporte para headers (7.6) podría sumarlos; por ahora corte
@@ -1261,7 +1267,9 @@ fn register_http_route(
                  inyectado por auth y NO acepta body separado. Considerá usar headers \
                  (`@header(name=\"...\")`) para los datos extra, o split en \
                  múltiples handlers.",
-                deco.name, fn_name, candidates.len(),
+                deco.name,
+                fn_name,
+                candidates.len(),
             )));
         }
         Some(candidates[0].name.clone())
@@ -1301,12 +1309,13 @@ fn register_http_route(
         // env no conoce, o no hay anotación, `declared_type` queda en
         // `None` y el runtime deserializa como `Value` libre
         // (Map/List/primitivos).
-        let declared_type = p.type_.as_ref().and_then(|t| {
-            match env.lock().get(t.head_name()) {
+        let declared_type = p
+            .type_
+            .as_ref()
+            .and_then(|t| match env.lock().get(t.head_name()) {
                 Some(v @ Value::Type { .. }) => Some(v),
                 _ => None,
-            }
-        });
+            });
         body_param = Some(BodyParam {
             name: p.name.clone(),
             declared_type,
@@ -1395,9 +1404,7 @@ fn register_ws_route(
     handler: &Value,
     _env: &EnvRef,
 ) -> Result<(), EvalSignal> {
-    let err = |msg: String| {
-        EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg))
-    };
+    let err = |msg: String| EvalSignal::Error(FitzError::new(ErrorKind::InvalidSyntax, 0, 0, msg));
 
     // El decorator `@ws` no admite kwargs.
     if let Some((key, _)) = deco.kwargs.first() {
@@ -1476,9 +1483,7 @@ fn register_ws_route(
     // (paralelo a register_http_route). En WS NO hay path/query/body
     // params, solo headers + WsConn + (optional) user. Así que el
     // user es el "leftover" entre los params no-WsConn-no-header.
-    let auth_user_param_name: Option<String> = if auth_spec
-        != crate::http::AuthSpec::None
-    {
+    let auth_user_param_name: Option<String> = if auth_spec != crate::http::AuthSpec::None {
         let candidates: Vec<&Param> = params
             .iter()
             .filter(|p| {
@@ -1662,17 +1667,22 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
     // así proyectos que ya funcionan con imports relativos siguen igual.
     // El fallback `import_root` cubre el caso típico de `data/foo.fitz`
     // que importa `from types.bar` esperando resolver al hermano.
-    let (base_dir, import_root) = LOADER.with(|cell| {
-        let borrow = cell.borrow();
-        borrow.as_ref().map(|l| (l.base_dir.clone(), l.import_root.clone()))
-    }).ok_or_else(|| {
-        EvalSignal::Error(FitzError::new(
-            ErrorKind::InvalidSyntax,
-            0, 0,
-            "no se puede resolver `import`: el loader no está instalado \
+    let (base_dir, import_root) = LOADER
+        .with(|cell| {
+            let borrow = cell.borrow();
+            borrow
+                .as_ref()
+                .map(|l| (l.base_dir.clone(), l.import_root.clone()))
+        })
+        .ok_or_else(|| {
+            EvalSignal::Error(FitzError::new(
+                ErrorKind::InvalidSyntax,
+                0,
+                0,
+                "no se puede resolver `import`: el loader no está instalado \
              (usar `eval` o `eval_with_base` como entrada)",
-        ))
-    })?;
+            ))
+        })?;
     let n = segments.len();
     let build_path = |base: &PathBuf| -> PathBuf {
         let mut path = base.clone();
@@ -1728,7 +1738,8 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         None => {
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                0, 0,
+                0,
+                0,
                 format!(
                     "no se encontró el módulo `{}` (buscado en `{}`)",
                     segments.join("."),
@@ -1771,7 +1782,8 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         });
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            0, 0,
+            0,
+            0,
             format!(
                 "ciclo de imports detectado: {} -> {}",
                 stack_text,
@@ -1787,12 +1799,9 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         Err(e) => {
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                0, 0,
-                format!(
-                    "error leyendo el módulo `{}`: {}",
-                    canonical.display(),
-                    e,
-                ),
+                0,
+                0,
+                format!("error leyendo el módulo `{}`: {}", canonical.display(), e,),
             )));
         }
     };
@@ -1839,16 +1848,14 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         .and_then(|n| n.to_str())
         .unwrap_or("<modulo>")
         .to_string();
-    let eval_result: EvalResult<()> = crate::testing::with_test_source_async(
-        module_label,
-        || async {
+    let eval_result: EvalResult<()> =
+        crate::testing::with_test_source_async(module_label, || async {
             for stmt in &module_program {
                 eval_stmt(stmt, module_env.clone()).await?;
             }
             Ok(())
-        },
-    )
-    .await;
+        })
+        .await;
 
     // Restaurar estado del loader.
     LOADER.with(|cell| {
@@ -1875,7 +1882,15 @@ async fn load_module(segments: &[String]) -> EvalResult<Value> {
         .collect();
     for type_name in typedef_names {
         let existing = module_env.lock().get(&type_name);
-        let Some(Value::Type { name, fields, methods, .. }) = existing else { continue };
+        let Some(Value::Type {
+            name,
+            fields,
+            methods,
+            ..
+        }) = existing
+        else {
+            continue;
+        };
         let mut resolved_defaults: Vec<(String, Value)> = Vec::new();
         for f in &fields {
             if let Some(expr) = &f.default {
@@ -1952,22 +1967,26 @@ fn signal_to_error(signal: EvalSignal) -> FitzError {
         // genérico "`return` fuera de función".
         EvalSignal::Return(Value::Result(ResultVariant::Err(e))) => FitzError::new(
             ErrorKind::InvalidSyntax,
-            0, 0,
+            0,
+            0,
             format!("operación `?` falló con Err: {}", *e),
         ),
         EvalSignal::Return(_) => FitzError::new(
             ErrorKind::ReturnOutsideFunction,
-            0, 0,
+            0,
+            0,
             "`return` solo puede usarse adentro de una función",
         ),
         EvalSignal::Break(_, _) => FitzError::new(
             ErrorKind::BreakOutsideLoop,
-            0, 0,
+            0,
+            0,
             "`break` solo puede usarse adentro de un loop",
         ),
         EvalSignal::Continue(_) => FitzError::new(
             ErrorKind::ContinueOutsideLoop,
-            0, 0,
+            0,
+            0,
             "`continue` solo puede usarse adentro de un loop",
         ),
     }
@@ -2601,7 +2620,8 @@ async fn eval_python_from_import(
     if path.len() != 1 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            0, 0,
+            0,
+            0,
             format!(
                 "`from python.{} import ...` no se soporta en Fase 8.1; \
                  usá `from python import {}` y accedé a sub-atributos con `.` (8.1.3)",
@@ -2611,8 +2631,7 @@ async fn eval_python_from_import(
         )));
     }
     for (name, alias) in names {
-        let module = crate::py_interop::import_module(name)
-            .map_err(EvalSignal::Error)?;
+        let module = crate::py_interop::import_module(name).map_err(EvalSignal::Error)?;
         let binding = alias.clone().unwrap_or_else(|| name.clone());
         env.lock().define(binding, module);
     }
@@ -2631,10 +2650,12 @@ async fn eval_python_from_import(
 ) -> EvalResult<Value> {
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::UndefinedVariable("python".to_string()),
-        0, 0,
+        0,
+        0,
         "`from python import ...` requiere recompilar `fitz` con interop Python habilitada. \
          Este binario se compiló sin la feature `python`. \
-         Recompilá con `cargo install --features python` (o `cargo build --features python`).".to_string(),
+         Recompilá con `cargo install --features python` (o `cargo build --features python`)."
+            .to_string(),
     )))
 }
 
@@ -2688,10 +2709,12 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
                     expected: format!("tupla de {} elementos", subs.len()),
                     found: format!("tupla de {} elementos", items.len()),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "tuple pattern del `for` espera {} elementos, recibió {}",
-                    subs.len(), items.len()
+                    subs.len(),
+                    items.len()
                 ),
             ))),
             other => Err(EvalSignal::Error(FitzError::new(
@@ -2699,7 +2722,8 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
                     expected: "Tuple".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "tuple pattern del `for` espera una tupla, recibió `{}`",
                     other.type_name()
@@ -2708,8 +2732,12 @@ fn bind_for_pattern(pat: &crate::ast::Pattern, value: Value, env: &EnvRef) -> Ev
         },
         other => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            0, 0,
-            format!("patrón `{:?}` no admitido en `for` (usá Ident, `_`, o Tuple)", other),
+            0,
+            0,
+            format!(
+                "patrón `{:?}` no admitido en `for` (usá Ident, `_`, o Tuple)",
+                other
+            ),
         ))),
     }
 }
@@ -2739,7 +2767,8 @@ async fn run_list_comp(
                             expected: "Bool".into(),
                             found: other.type_name().into(),
                         },
-                        s.line, s.column,
+                        s.line,
+                        s.column,
                         format!(
                             "el filtro `if` de la list comprehension debe ser `Bool`, no `{}`",
                             other.type_name()
@@ -2763,7 +2792,8 @@ async fn run_list_comp(
                     expected: "List o Range".into(),
                     found: other.type_name().into(),
                 },
-                s.line, s.column,
+                s.line,
+                s.column,
                 format!(
                     "list comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
                     other.type_name()
@@ -2805,7 +2835,8 @@ async fn run_map_comp(
                             expected: "Bool".into(),
                             found: other.type_name().into(),
                         },
-                        s.line, s.column,
+                        s.line,
+                        s.column,
                         format!(
                             "el filtro `if` de la map comprehension debe ser `Bool`, no `{}`",
                             other.type_name()
@@ -2830,7 +2861,8 @@ async fn run_map_comp(
                     expected: "List o Range".into(),
                     found: other.type_name().into(),
                 },
-                s.line, s.column,
+                s.line,
+                s.column,
                 format!(
                     "map comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
                     other.type_name()
@@ -2906,11 +2938,14 @@ fn match_pattern(pat: &Pattern, v: &Value) -> Option<Option<(String, Value)>> {
         (Pattern::Null, Value::Null) => Some(None),
         (Pattern::Wildcard, _) => Some(None),
         (Pattern::Ident(name), _) => Some(Some((name.clone(), v.clone()))),
-        (Pattern::Range { start, end, inclusive }, Value::Int(vv))
-            if start <= vv && (if *inclusive { vv <= end } else { vv < end }) =>
-        {
-            Some(None)
-        }
+        (
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            },
+            Value::Int(vv),
+        ) if start <= vv && (if *inclusive { vv <= end } else { vv < end }) => Some(None),
         (Pattern::OkBinding(name), Value::Result(ResultVariant::Ok(inner))) => {
             Some(Some((name.clone(), (**inner).clone())))
         }
@@ -3760,7 +3795,8 @@ fn resolve_named_args(
             let idx = param_names.iter().position(|p| p == &name).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "`{}` no tiene un parámetro llamado `{}`",
                         display_name, name
@@ -3772,11 +3808,9 @@ fn resolve_named_args(
             if slots[idx].is_some() {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
-                    span.line, span.column,
-                    format!(
-                        "`{}`: el argumento `{}` está duplicado",
-                        display_name, name
-                    ),
+                    span.line,
+                    span.column,
+                    format!("`{}`: el argumento `{}` está duplicado", display_name, name),
                 )));
             }
             slots[idx] = Some(value);
@@ -3784,7 +3818,8 @@ fn resolve_named_args(
             if after_named {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "`{}`: no se puede pasar un argumento posicional después de uno nombrado",
                         display_name
@@ -3835,7 +3870,12 @@ async fn invoke_value_named(
     // Hay nombres — el callee debe ser una Fitz Function con params
     // conocidos.
     match value {
-        Value::Function { params, body, closure, is_async } => {
+        Value::Function {
+            params,
+            body,
+            closure,
+            is_async,
+        } => {
             let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
             let slots = resolve_named_args(named_args, &param_names, display_name, span)?;
             // Reconstruir Vec<Value> rellenando defaults para los None.
@@ -3844,7 +3884,8 @@ async fn invoke_value_named(
                 // Varargs + named args no compatibles en MVP.
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::TypeError,
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "`{}` tiene un parámetro variádico; los argumentos nombrados \
                          no son compatibles con varargs en esta versión",
@@ -3864,7 +3905,8 @@ async fn invoke_value_named(
                                     expected: params.len(),
                                     found: slots.iter().filter(|s| s.is_some()).count(),
                                 },
-                                span.line, span.column,
+                                span.line,
+                                span.column,
                                 format!(
                                     "`{}`: falta el argumento `{}` (no tiene default)",
                                     display_name, param.name
@@ -3904,18 +3946,18 @@ async fn invoke_value_named(
         }
         Value::Builtin { name, .. } => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
-            span.line, span.column,
-            format!(
-                "el builtin `{}` no soporta argumentos nombrados",
-                name
-            ),
+            span.line,
+            span.column,
+            format!("el builtin `{}` no soporta argumentos nombrados", name),
         ))),
         other => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`{}` no es invocable o no soporta argumentos nombrados (es {})",
-                display_name, other.type_name()
+                display_name,
+                other.type_name()
             ),
         ))),
     }
@@ -3945,21 +3987,24 @@ async fn dispatch_method_named(
             let tname = type_name.clone();
             let type_val = env.lock().get(&tname);
             match type_val {
-                Some(Value::Type { methods, .. }) => {
-                    methods.iter().find(|m| m.name == method && !m.is_static).cloned()
-                }
+                Some(Value::Type { methods, .. }) => methods
+                    .iter()
+                    .find(|m| m.name == method && !m.is_static)
+                    .cloned(),
                 _ => None,
             }
         }
-        Value::Type { methods, .. } => {
-            methods.iter().find(|m| m.name == method && m.is_static).cloned()
-        }
+        Value::Type { methods, .. } => methods
+            .iter()
+            .find(|m| m.name == method && m.is_static)
+            .cloned(),
         _ => None,
     };
     let method_def = method_def_opt.ok_or_else(|| {
         EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "el método `.{}()` no acepta argumentos nombrados \
                  (solo soportado en métodos custom sobre `type`)",
@@ -3974,7 +4019,8 @@ async fn dispatch_method_named(
     if has_varargs {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::TypeError,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "el método `.{}()` tiene un parámetro variádico; \
                  los argumentos nombrados no son compatibles con varargs",
@@ -3993,7 +4039,8 @@ async fn dispatch_method_named(
                 let de = param.default.as_ref().ok_or_else(|| {
                     EvalSignal::Error(FitzError::new(
                         ErrorKind::TypeError,
-                        span.line, span.column,
+                        span.line,
+                        span.column,
                         format!(
                             "el método `.{}()`: falta el argumento `{}` (no tiene default)",
                             method, param.name
@@ -4054,9 +4101,9 @@ fn is_spawn_builtin(env: &EnvRef) -> bool {
 /// el Future deja la task ejecutándose detached (fire-and-forget) —
 /// idéntico a `tokio::spawn(...)` en Rust sin guardar el JoinHandle.
 async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<Value> {
-    use crate::value::{FutureCell, FitzFuture};
-    use std::sync::Arc;
+    use crate::value::{FitzFuture, FutureCell};
     use parking_lot::Mutex;
+    use std::sync::Arc;
 
     let err = |msg: String| {
         EvalSignal::Error(FitzError::new(
@@ -4087,8 +4134,7 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
         },
         _ => {
             return Err(err(
-                "spawn: el argumento debe ser un call literal a una fn `@background`."
-                    .to_string(),
+                "spawn: el argumento debe ser un call literal a una fn `@background`.".to_string(),
             ));
         }
     };
@@ -4171,7 +4217,10 @@ async fn eval_spawn_call(args: &[Expr], env: EnvRef, span: Span) -> EvalResult<V
 /// builtins, user-defined functions y errores de "no es invocable".
 #[async_recursion]
 pub async fn invoke_value(
-    value: Value, arg_values: Vec<Value>, display_name: &str, span: Span,
+    value: Value,
+    arg_values: Vec<Value>,
+    display_name: &str,
+    span: Span,
 ) -> EvalResult<Value> {
     match value {
         // Fase 9.z.2.a: `assert_throws` necesita invocar el callback
@@ -4180,9 +4229,10 @@ pub async fn invoke_value(
         // genérico de builtins; cualquier otro builtin va por la
         // rama de abajo. El stub `builtin_assert_throws_stub` emite
         // unreachable! si llegara a ejecutarse — sentinel del bug.
-        Value::Builtin { name: "assert_throws", .. } => {
-            assert_throws_impl(arg_values, span).await
-        }
+        Value::Builtin {
+            name: "assert_throws",
+            ..
+        } => assert_throws_impl(arg_values, span).await,
         Value::Builtin { func, .. } => func(&arg_values).map_err(EvalSignal::Error),
 
         // Mini-tanda Mw-Wrap — `Value::NativeFn` se invoca pasando los
@@ -4190,7 +4240,12 @@ pub async fn invoke_value(
         // su propia aridad (el caso típico es 0 args = `next()`).
         Value::NativeFn(native) => native.0(arg_values).await.map_err(EvalSignal::Error),
 
-        Value::Function { params, body, closure, is_async } => {
+        Value::Function {
+            params,
+            body,
+            closure,
+            is_async,
+        } => {
             // Fp — default params: si faltan args trailing y los params
             // tienen `default`, se rellenan.
             // Fp.2 — varargs: el último param (si es variádico) absorbe
@@ -4210,21 +4265,29 @@ pub async fn invoke_value(
                         expected: params.len(),
                         found: arg_values.len(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     if has_varargs {
                         format!(
                             "`{}` espera al menos {} argumento(s), recibió {}",
-                            display_name, required, arg_values.len(),
+                            display_name,
+                            required,
+                            arg_values.len(),
                         )
                     } else if required == params.len() {
                         format!(
                             "`{}` espera {} argumento(s), recibió {}",
-                            display_name, params.len(), arg_values.len(),
+                            display_name,
+                            params.len(),
+                            arg_values.len(),
                         )
                     } else {
                         format!(
                             "`{}` espera entre {} y {} argumento(s), recibió {}",
-                            display_name, required, params.len(), arg_values.len(),
+                            display_name,
+                            required,
+                            params.len(),
+                            arg_values.len(),
                         )
                     },
                 )));
@@ -4232,7 +4295,11 @@ pub async fn invoke_value(
 
             // Nuevo scope hijo del CLOSURE, no del caller. Lexical scoping.
             let call_env = Environment::new_child(closure);
-            let varargs_idx = if has_varargs { Some(params.len() - 1) } else { None };
+            let varargs_idx = if has_varargs {
+                Some(params.len() - 1)
+            } else {
+                None
+            };
             let provided = arg_values.len();
             let mut arg_iter = arg_values.into_iter();
             for (i, param) in params.iter().enumerate() {
@@ -4249,9 +4316,10 @@ pub async fn invoke_value(
                     // Default expr — se evalúa en el env del CLOSURE
                     // (donde la fn vive), no en el del caller. Match
                     // con la semántica de fields default y de Python.
-                    let default_expr = param.default.as_ref().expect(
-                        "params sin default ya fueron cubiertos por arity check",
-                    );
+                    let default_expr = param
+                        .default
+                        .as_ref()
+                        .expect("params sin default ya fueron cubiertos por arity check");
                     eval_expr(default_expr, call_env.clone()).await?
                 };
                 call_env.lock().define(param.name.clone(), value);
@@ -4315,8 +4383,13 @@ pub async fn invoke_value(
                 expected: "función".into(),
                 found: other.type_name().into(),
             },
-            span.line, span.column,
-            format!("`{}` no es invocable (es {})", display_name, other.type_name()),
+            span.line,
+            span.column,
+            format!(
+                "`{}` no es invocable (es {})",
+                display_name,
+                other.type_name()
+            ),
         ))),
     }
 }
@@ -4372,7 +4445,12 @@ async fn dispatch_method(
         }
     }
     // Mini-tanda St — método estático sobre Value::Type: `Type.make()`.
-    if let Value::Type { name: type_name, methods, .. } = &receiver {
+    if let Value::Type {
+        name: type_name,
+        methods,
+        ..
+    } = &receiver
+    {
         let resolved = methods.iter().find(|m| m.name == method).cloned();
         if let Some(m) = resolved {
             if !m.is_static {
@@ -4394,8 +4472,12 @@ async fn dispatch_method(
         // específico (mejor que el genérico "tipo X no tiene método").
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
-            format!("el tipo `{}` no tiene un método estático llamado `{}`", type_name, method),
+            span.line,
+            span.column,
+            format!(
+                "el tipo `{}` no tiene un método estático llamado `{}`",
+                type_name, method
+            ),
         )));
     }
     match (&receiver, method) {
@@ -4485,7 +4567,8 @@ async fn dispatch_method(
             if !args.is_empty() {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!("`Range.len()` no toma args, recibió {}", args.len()),
                 )));
             }
@@ -4571,49 +4654,76 @@ async fn dispatch_method(
         // `x.is_nan()` / `x.is_finite()`. Aridad fija; expect_arity.
         (Value::Int(_), "abs") => {
             expect_arity("abs", &args, 0, span)?;
-            let n = match receiver { Value::Int(n) => n, _ => unreachable!() };
+            let n = match receiver {
+                Value::Int(n) => n,
+                _ => unreachable!(),
+            };
             Ok(Value::Int(n.wrapping_abs()))
         }
         (Value::Int(_), "to_str") => {
             expect_arity("to_str", &args, 0, span)?;
-            let n = match receiver { Value::Int(n) => n, _ => unreachable!() };
+            let n = match receiver {
+                Value::Int(n) => n,
+                _ => unreachable!(),
+            };
             Ok(Value::Str(n.to_string()))
         }
         (Value::Int(_), "to_str_base") => {
             expect_arity("to_str_base", &args, 1, span)?;
-            let n = match receiver { Value::Int(n) => n, _ => unreachable!() };
+            let n = match receiver {
+                Value::Int(n) => n,
+                _ => unreachable!(),
+            };
             let base = match args.into_iter().next().unwrap() {
                 Value::Int(b) => b,
-                other => return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::TypeMismatch {
-                        expected: "Int".into(),
-                        found: other.type_name().into(),
-                    },
-                    span.line, span.column,
-                    format!("`Int.to_str_base()` espera `Int`, recibió `{}`", other.type_name()),
-                ))),
+                other => {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Int".into(),
+                            found: other.type_name().into(),
+                        },
+                        span.line,
+                        span.column,
+                        format!(
+                            "`Int.to_str_base()` espera `Int`, recibió `{}`",
+                            other.type_name()
+                        ),
+                    )))
+                }
             };
             let s = match base {
                 2 => format!("{:b}", n),
                 8 => format!("{:o}", n),
                 10 => n.to_string(),
                 16 => format!("{:x}", n),
-                _ => return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::InvalidSyntax,
-                    span.line, span.column,
-                    format!("`Int.to_str_base()` solo soporta bases 2, 8, 10 o 16; recibió {}", base),
-                ))),
+                _ => {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::InvalidSyntax,
+                        span.line,
+                        span.column,
+                        format!(
+                            "`Int.to_str_base()` solo soporta bases 2, 8, 10 o 16; recibió {}",
+                            base
+                        ),
+                    )))
+                }
             };
             Ok(Value::Str(s))
         }
         (Value::Float(_), "abs") => {
             expect_arity("abs", &args, 0, span)?;
-            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            let x = match receiver {
+                Value::Float(x) => x,
+                _ => unreachable!(),
+            };
             Ok(Value::Float(x.abs()))
         }
         (Value::Float(_), "to_str") => {
             expect_arity("to_str", &args, 0, span)?;
-            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            let x = match receiver {
+                Value::Float(x) => x,
+                _ => unreachable!(),
+            };
             // Mismo formato que Display del intérprete (3.0 → "3.0").
             let s = if x.is_finite() && x.fract() == 0.0 {
                 format!("{:.1}", x)
@@ -4624,12 +4734,18 @@ async fn dispatch_method(
         }
         (Value::Float(_), "is_nan") => {
             expect_arity("is_nan", &args, 0, span)?;
-            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            let x = match receiver {
+                Value::Float(x) => x,
+                _ => unreachable!(),
+            };
             Ok(Value::Bool(x.is_nan()))
         }
         (Value::Float(_), "is_finite") => {
             expect_arity("is_finite", &args, 0, span)?;
-            let x = match receiver { Value::Float(x) => x, _ => unreachable!() };
+            let x = match receiver {
+                Value::Float(x) => x,
+                _ => unreachable!(),
+            };
             Ok(Value::Bool(x.is_finite()))
         }
         (Value::Str(_), "trim") => str_trim(receiver, args, span),
@@ -4649,11 +4765,18 @@ async fn dispatch_method(
         // módulo y llamándola como cualquier función. No es method
         // dispatch real — el módulo no es "el receptor", solo el lugar
         // donde vive la función.
-        (Value::Module { name, env: module_env }, _) => {
+        (
+            Value::Module {
+                name,
+                env: module_env,
+            },
+            _,
+        ) => {
             let value = module_env.lock().get(method).ok_or_else(|| {
                 EvalSignal::Error(FitzError::new(
                     ErrorKind::UndefinedVariable(method.into()),
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!("el módulo `{}` no exporta `{}`", name, method),
                 ))
             })?;
@@ -4666,14 +4789,13 @@ async fn dispatch_method(
         // Cubre `math.sqrt(16.0)`, `os.path.join("a", "b")`, etc.
         #[cfg(feature = "python")]
         (Value::PyObject(handle), _) => {
-            let attr = crate::py_interop::get_attr(handle, method)
-                .map_err(|mut e| {
-                    if e.line == 0 && e.column == 0 {
-                        e.line = span.line;
-                        e.column = span.column;
-                    }
-                    EvalSignal::Error(e)
-                })?;
+            let attr = crate::py_interop::get_attr(handle, method).map_err(|mut e| {
+                if e.line == 0 && e.column == 0 {
+                    e.line = span.line;
+                    e.column = span.column;
+                }
+                EvalSignal::Error(e)
+            })?;
             invoke_value(attr, args, method, span).await
         }
         // Fase 9.w.2 — WsConn<T> métodos. Los 4 paramétricos:
@@ -4697,7 +4819,8 @@ async fn dispatch_method(
         ))),
         _ => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "el tipo `{}` no tiene un método llamado `{}`",
                 receiver.type_name(),
@@ -4717,16 +4840,19 @@ async fn dispatch_method(
 // `send`/`broadcast` serializan el `Value` a JSON y mandan text frame.
 // El error de transporte va por el `Result::Err` de Fitz.
 
-async fn ws_conn_recv(
-    receiver: Value,
-    args: Vec<Value>,
-    span: Span,
-) -> EvalResult<Value> {
+async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if !args.is_empty() {
         return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 0, found: args.len() },
-            span.line, span.column,
-            format!("`WsConn.recv()` no acepta argumentos, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`WsConn.recv()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
         )));
     }
     let handle = match receiver {
@@ -4764,24 +4890,16 @@ async fn ws_conn_recv(
                     let raw = crate::http::json_to_value(&j);
                     let coerced = match &handle.msg_type {
                         Some(annot) => {
-                            match coerce_to_annotation(
-                                annot,
-                                raw,
-                                handle.env.clone(),
-                            )
-                            .await
-                            {
+                            match coerce_to_annotation(annot, raw, handle.env.clone()).await {
                                 Ok(v) => v,
                                 Err(EvalSignal::Error(e)) => {
-                                    return Ok(Value::Result(
-                                        ResultVariant::Err(Box::new(
-                                            Value::Str(format!(
-                                                "WsConn.recv(): coerción al tipo `{}` falló: {}",
-                                                annot.display_name(),
-                                                e.message,
-                                            )),
+                                    return Ok(Value::Result(ResultVariant::Err(Box::new(
+                                        Value::Str(format!(
+                                            "WsConn.recv(): coerción al tipo `{}` falló: {}",
+                                            annot.display_name(),
+                                            e.message,
                                         )),
-                                    ));
+                                    ))));
                                 }
                                 Err(other) => return Err(other),
                             }
@@ -4790,12 +4908,9 @@ async fn ws_conn_recv(
                     };
                     Ok(Value::Result(ResultVariant::Ok(Box::new(coerced))))
                 }
-                Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(
-                    Value::Str(format!(
-                        "WsConn.recv(): frame JSON inválido: {}",
-                        e
-                    )),
-                )))),
+                Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                    format!("WsConn.recv(): frame JSON inválido: {}", e),
+                ))))),
             }
         }
         Ok(None) => {
@@ -4812,16 +4927,19 @@ async fn ws_conn_recv(
     }
 }
 
-async fn ws_conn_send(
-    receiver: Value,
-    args: Vec<Value>,
-    span: Span,
-) -> EvalResult<Value> {
+async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if args.len() != 1 {
         return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            span.line, span.column,
-            format!("`WsConn.send(msg)` espera 1 argumento, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`WsConn.send(msg)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
         )));
     }
     let handle = match receiver {
@@ -4837,12 +4955,9 @@ async fn ws_conn_send(
         Ok(j) => match serde_json::to_string(&j) {
             Ok(s) => s,
             Err(e) => {
-                return Ok(Value::Result(ResultVariant::Err(Box::new(
-                    Value::Str(format!(
-                        "WsConn.send(): no serializable: {}",
-                        e
-                    )),
-                ))));
+                return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                    format!("WsConn.send(): no serializable: {}", e),
+                )))));
             }
         },
         Err(msg) => {
@@ -4851,7 +4966,10 @@ async fn ws_conn_send(
             )))));
         }
     };
-    match handle.outbox_tx.send(crate::value::WsOutMessage::Text(payload)) {
+    match handle
+        .outbox_tx
+        .send(crate::value::WsOutMessage::Text(payload))
+    {
         Ok(()) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null)))),
         Err(_) => {
             handle
@@ -4864,16 +4982,19 @@ async fn ws_conn_send(
     }
 }
 
-async fn ws_conn_broadcast(
-    receiver: Value,
-    args: Vec<Value>,
-    span: Span,
-) -> EvalResult<Value> {
+async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if args.len() != 1 {
         return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            span.line, span.column,
-            format!("`WsConn.broadcast(msg)` espera 1 argumento, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`WsConn.broadcast(msg)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
         )));
     }
     let handle = match receiver {
@@ -4888,12 +5009,9 @@ async fn ws_conn_broadcast(
         Ok(j) => match serde_json::to_string(&j) {
             Ok(s) => s,
             Err(e) => {
-                return Ok(Value::Result(ResultVariant::Err(Box::new(
-                    Value::Str(format!(
-                        "WsConn.broadcast(): no serializable: {}",
-                        e
-                    )),
-                ))));
+                return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                    format!("WsConn.broadcast(): no serializable: {}", e),
+                )))));
             }
         },
         Err(msg) => {
@@ -4906,16 +5024,19 @@ async fn ws_conn_broadcast(
     Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null))))
 }
 
-fn ws_conn_close(
-    receiver: Value,
-    args: Vec<Value>,
-    span: Span,
-) -> EvalResult<Value> {
+fn ws_conn_close(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if !args.is_empty() {
         return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 0, found: args.len() },
-            span.line, span.column,
-            format!("`WsConn.close()` no acepta argumentos, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 0,
+                found: args.len(),
+            },
+            span.line,
+            span.column,
+            format!(
+                "`WsConn.close()` no acepta argumentos, recibió {}",
+                args.len()
+            ),
         )));
     }
     let handle = match receiver {
@@ -4972,16 +5093,22 @@ async fn invoke_custom_method(
                 expected: method.params.len(),
                 found: args.len(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             if required == method.params.len() {
                 format!(
                     "el método `.{}()` espera {} argumento(s), recibió {}",
-                    method.name, method.params.len(), args.len(),
+                    method.name,
+                    method.params.len(),
+                    args.len(),
                 )
             } else {
                 format!(
                     "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
-                    method.name, required, method.params.len(), args.len(),
+                    method.name,
+                    required,
+                    method.params.len(),
+                    args.len(),
                 )
             },
         )));
@@ -5058,16 +5185,22 @@ async fn invoke_static_method(
                 expected: method.params.len(),
                 found: args.len(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             if required == method.params.len() {
                 format!(
                     "el método estático `{}` espera {} argumento(s), recibió {}",
-                    method.name, method.params.len(), args.len(),
+                    method.name,
+                    method.params.len(),
+                    args.len(),
                 )
             } else {
                 format!(
                     "el método estático `{}` espera entre {} y {} argumento(s), recibió {}",
-                    method.name, required, method.params.len(), args.len(),
+                    method.name,
+                    required,
+                    method.params.len(),
+                    args.len(),
                 )
             },
         )));
@@ -5133,10 +5266,13 @@ fn expect_arity(method: &str, args: &[Value], expected: usize, span: Span) -> Ev
                 expected,
                 found: args.len(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`.{}()` espera {} argumento(s), recibió {}",
-                method, expected, args.len(),
+                method,
+                expected,
+                args.len(),
             ),
         )));
     }
@@ -5153,7 +5289,13 @@ async fn invoke_callback(
     method: &str,
     span: Span,
 ) -> EvalResult<Value> {
-    invoke_value(callback.clone(), vec![arg], &format!("callback de .{}()", method), span).await
+    invoke_value(
+        callback.clone(),
+        vec![arg],
+        &format!("callback de .{}()", method),
+        span,
+    )
+    .await
 }
 
 // ---- List ----
@@ -5181,7 +5323,8 @@ fn list_pop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
         Some(v) => Ok(v),
         None => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             "`.pop()` sobre lista vacía".to_string(),
         ))),
     }
@@ -5226,7 +5369,8 @@ async fn list_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.filter()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -5260,7 +5404,8 @@ async fn list_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.find()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -5307,7 +5452,8 @@ async fn list_any(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.any()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -5343,7 +5489,8 @@ async fn list_all(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.all()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -5378,7 +5525,8 @@ async fn list_count(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.count()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -5490,10 +5638,12 @@ fn require_numeric_list(
                     expected: "Int|Float".into(),
                     found: snapshot[0].type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
-                    method, snapshot[0].type_name(),
+                    method,
+                    snapshot[0].type_name(),
                 ),
             )));
         }
@@ -5510,7 +5660,8 @@ fn require_numeric_list(
                     expected: first_kind.into(),
                     found: kind.into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.{}()` requiere elementos del mismo tipo: vi `{}` y `{}`",
                     method, first_kind, kind,
@@ -5538,7 +5689,9 @@ fn list_min(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
             let mut best = i64::MAX;
             for v in snapshot {
                 if let Value::Int(n) = v {
-                    if n < best { best = n; }
+                    if n < best {
+                        best = n;
+                    }
                 }
             }
             Value::Int(best)
@@ -5574,7 +5727,9 @@ fn list_max(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
             let mut best = i64::MIN;
             for v in snapshot {
                 if let Value::Int(n) = v {
-                    if n > best { best = n; }
+                    if n > best {
+                        best = n;
+                    }
                 }
             }
             Value::Int(best)
@@ -5585,7 +5740,9 @@ fn list_max(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                 if let Value::Float(n) = v {
                     best = match best {
                         None => Some(n),
-                        Some(b) if n.partial_cmp(&b) == Some(std::cmp::Ordering::Greater) => Some(n),
+                        Some(b) if n.partial_cmp(&b) == Some(std::cmp::Ordering::Greater) => {
+                            Some(n)
+                        }
                         Some(b) => Some(b),
                     };
                 }
@@ -5648,7 +5805,9 @@ async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalR
         let ok = invoke_callback(callback, item, "find_index", span).await?;
         match ok {
             Value::Bool(true) => {
-                return Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(i as i64)))));
+                return Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(
+                    i as i64,
+                )))));
             }
             Value::Bool(false) => {}
             other => {
@@ -5657,7 +5816,8 @@ async fn list_find_index(receiver: Value, args: Vec<Value>, span: Span) -> EvalR
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.find_index()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -5697,10 +5857,12 @@ fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                     expected: first_kind.into(),
                     found: v.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.sort()` requiere elementos del mismo tipo: vi `{}` y `{}`",
-                    first_kind, v.type_name(),
+                    first_kind,
+                    v.type_name(),
                 ),
             )));
         }
@@ -5727,8 +5889,12 @@ fn list_sort(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
         other => {
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                span.line, span.column,
-                format!("`.sort()` no soporta `List<{}>` (solo Int/Float/Str/Bool)", other),
+                span.line,
+                span.column,
+                format!(
+                    "`.sort()` no soporta `List<{}>` (solo Int/Float/Str/Bool)",
+                    other
+                ),
             )));
         }
     }
@@ -5786,15 +5952,20 @@ fn range_step_by(start: i64, end: i64, args: Vec<Value>, span: Span) -> EvalResu
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`Range.step_by()` espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`Range.step_by()` espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
     if step <= 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!("`Range.step_by()` requiere n > 0, recibió {}", step),
         )));
     }
@@ -5837,7 +6008,8 @@ fn list_zip(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                     expected: "List".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`zip` espera otra `List`, recibió `{}`", other.type_name()),
             )));
         }
@@ -5868,8 +6040,12 @@ fn list_chain(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                     expected: "List".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`chain` espera otra `List`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`chain` espera otra `List`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -5901,10 +6077,12 @@ fn list_flatten(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                         expected: "List".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "`.flatten()` requiere `List<List<T>>`: el elemento [{}] es `{}`",
-                        i, other.type_name(),
+                        i,
+                        other.type_name(),
                     ),
                 )));
             }
@@ -5960,8 +6138,7 @@ async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
         for j in (i + 1)..n {
             let a = indexed[j].1.clone();
             let b = indexed[min_idx].1.clone();
-            let cmp_result =
-                invoke_value(cmp_fn.clone(), vec![a, b], "sort_by", span).await?;
+            let cmp_result = invoke_value(cmp_fn.clone(), vec![a, b], "sort_by", span).await?;
             let cmp_int = match cmp_result {
                 Value::Int(n) => n,
                 other => {
@@ -5970,7 +6147,8 @@ async fn list_sort_by(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
                             expected: "Int".into(),
                             found: other.type_name().into(),
                         },
-                        span.line, span.column,
+                        span.line,
+                        span.column,
                         format!(
                             "`.sort_by(cmp)` espera que cmp devuelva `Int`, recibió `{}`",
                             other.type_name(),
@@ -6086,8 +6264,12 @@ fn list_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Va
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`List.split_at()` espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`List.split_at()` espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -6130,10 +6312,12 @@ fn list_starts_or_ends_with(
                     expected: "List".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.{}()` espera una `List` como arg, recibió `{}`",
-                    method, other.type_name(),
+                    method,
+                    other.type_name(),
                 ),
             )));
         }
@@ -6146,7 +6330,11 @@ fn list_starts_or_ends_with(
     let result = if is_start {
         self_g.iter().take(other_g.len()).eq(other_g.iter())
     } else {
-        self_g.iter().rev().take(other_g.len()).eq(other_g.iter().rev())
+        self_g
+            .iter()
+            .rev()
+            .take(other_g.len())
+            .eq(other_g.iter().rev())
     };
     Ok(Value::Bool(result))
 }
@@ -6179,8 +6367,12 @@ fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`.insert_at()`: idx espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`.insert_at()`: idx espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -6188,7 +6380,8 @@ fn list_insert_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     if idx < 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!("`.insert_at()` no acepta idx negativo: recibió {}", idx),
         )));
     }
@@ -6218,8 +6411,12 @@ fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`.remove_at()`: idx espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`.remove_at()`: idx espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -6227,10 +6424,12 @@ fn list_remove_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
     if idx < 0 || (idx as usize) >= snapshot.len() {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`.remove_at()`: idx {} fuera de rango (len = {})",
-                idx, snapshot.len(),
+                idx,
+                snapshot.len(),
             ),
         )));
     }
@@ -6261,8 +6460,12 @@ fn list_zip_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                     expected: "List".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`.zip_to_map()` espera una `List`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`.zip_to_map()` espera una `List`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -6296,13 +6499,18 @@ fn list_take(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`.take()` espera `Int`, recibió `{}`", other.type_name()),
             )));
         }
     };
     let snapshot: Vec<Value> = items.lock().clone();
-    let take_n = if n <= 0 { 0 } else { (n as usize).min(snapshot.len()) };
+    let take_n = if n <= 0 {
+        0
+    } else {
+        (n as usize).min(snapshot.len())
+    };
     let out: Vec<Value> = snapshot.into_iter().take(take_n).collect();
     Ok(Value::new_list(out))
 }
@@ -6324,13 +6532,18 @@ fn list_drop(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`.drop()` espera `Int`, recibió `{}`", other.type_name()),
             )));
         }
     };
     let snapshot: Vec<Value> = items.lock().clone();
-    let drop_n = if n <= 0 { 0 } else { (n as usize).min(snapshot.len()) };
+    let drop_n = if n <= 0 {
+        0
+    } else {
+        (n as usize).min(snapshot.len())
+    };
     let out: Vec<Value> = snapshot.into_iter().skip(drop_n).collect();
     Ok(Value::new_list(out))
 }
@@ -6409,7 +6622,8 @@ fn list_cycle(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`.cycle()` espera `Int`, recibió `{}`", other.type_name()),
             )));
         }
@@ -6471,7 +6685,8 @@ fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`.windows()` espera `Int`, recibió `{}`", other.type_name()),
             )));
         }
@@ -6479,7 +6694,8 @@ fn list_windows(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     if n <= 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!("`.windows()` requiere n > 0, recibió {}", n),
         )));
     }
@@ -6546,8 +6762,12 @@ async fn list_zip_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRes
                     expected: "List".into(),
                     found: v.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`.zip_with()` espera otra `List`, recibió `{}`", v.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`.zip_with()` espera otra `List`, recibió `{}`",
+                    v.type_name()
+                ),
             )));
         }
     };
@@ -6598,10 +6818,12 @@ async fn list_max_min_by(
                         expected: "Int".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.{}()` tiene que devolver `Int`, devolvió `{}`",
-                        method, other.type_name(),
+                        method,
+                        other.type_name(),
                     ),
                 )));
             }
@@ -6610,7 +6832,11 @@ async fn list_max_min_by(
             None => Some((key, item)),
             Some((bk, bv)) => {
                 let take_new = if want_max { key > bk } else { key < bk };
-                if take_new { Some((key, item)) } else { Some((bk, bv)) }
+                if take_new {
+                    Some((key, item))
+                } else {
+                    Some((bk, bv))
+                }
             }
         };
     }
@@ -6652,7 +6878,8 @@ async fn list_partition(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "la callback de `.partition()` tiene que devolver Bool, devolvió `{}`",
                         other.type_name(),
@@ -6698,12 +6925,17 @@ fn list_to_map(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
                         expected: "Tuple(K, V)".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "`.to_map()` requiere `List<(K, V)>`: el elemento [{}] es `{}` (aridad {})",
                         i,
                         other.type_name(),
-                        if let Value::Tuple(p) = &other { p.len() } else { 0 },
+                        if let Value::Tuple(p) = &other {
+                            p.len()
+                        } else {
+                            0
+                        },
                     ),
                 )));
             }
@@ -6786,12 +7018,7 @@ async fn map_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
     let snapshot: Vec<(Value, Value)> = pairs.lock().clone();
     let mut out: Vec<(Value, Value)> = Vec::new();
     for (k, v) in snapshot {
-        let ok = invoke_value(
-            callback.clone(),
-            vec![k.clone(), v.clone()],
-            "filter",
-            span,
-        ).await?;
+        let ok = invoke_value(callback.clone(), vec![k.clone(), v.clone()], "filter", span).await?;
         match ok {
             Value::Bool(true) => out.push((k, v)),
             Value::Bool(false) => {}
@@ -6801,7 +7028,8 @@ async fn map_filter(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult
                         expected: "Bool".into(),
                         found: other.type_name().into(),
                     },
-                    span.line, span.column,
+                    span.line,
+                    span.column,
                     format!(
                         "el callback de `Map.filter()` debe devolver Bool, recibió `{}`",
                         other.type_name(),
@@ -6875,11 +7103,17 @@ fn map_merge(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
     };
     let other_pairs = match args.into_iter().next().unwrap() {
         Value::Map(p) => p,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Map".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.merge()` espera Map, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Map".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!("`.merge()` espera Map, recibió {}", other.type_name()),
+            )))
+        }
     };
     let mut out: Vec<(Value, Value)> = pairs.lock().clone();
     for (k, v) in other_pairs.lock().iter() {
@@ -6957,7 +7191,8 @@ async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
                     expected: "Map".into(),
                     found: v.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`.merge_with()` espera Map, recibió `{}`", v.type_name()),
             )));
         }
@@ -6968,12 +7203,8 @@ async fn map_merge_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalRe
         if let Some(slot_idx) = out.iter().position(|(ek, _)| ek == &k) {
             // Key duplicada: el callback decide.
             let v_self = out[slot_idx].1.clone();
-            let resolved = invoke_value(
-                cb.clone(),
-                vec![v_self, v_other],
-                "merge_with",
-                span,
-            ).await?;
+            let resolved =
+                invoke_value(cb.clone(), vec![v_self, v_other], "merge_with", span).await?;
             out[slot_idx].1 = resolved;
         } else {
             out.push((k, v_other));
@@ -7044,7 +7275,8 @@ fn map_keys_sorted(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                 expected: "Int|Float|Str|Bool".into(),
                 found: first_kind.into(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`.keys_sorted()` solo soporta keys `Int`/`Float`/`Str`/`Bool`, recibió `{}`",
                 first_kind,
@@ -7058,10 +7290,12 @@ fn map_keys_sorted(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                     expected: first_kind.into(),
                     found: k.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.keys_sorted()` requiere keys del mismo tipo: vi `{}` y `{}`",
-                    first_kind, k.type_name(),
+                    first_kind,
+                    k.type_name(),
                 ),
             )));
         }
@@ -7169,14 +7403,18 @@ fn fv_type_name(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
 /// `bytes.len()` — cantidad de bytes.
 fn bytes_len(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("len", &args, 0, span)?;
-    let Value::Bytes(bs) = receiver else { unreachable!() };
+    let Value::Bytes(bs) = receiver else {
+        unreachable!()
+    };
     Ok(Value::Int(bs.len() as i64))
 }
 
 /// `bytes.is_empty()` — atajo de `.len() == 0`.
 fn bytes_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("is_empty", &args, 0, span)?;
-    let Value::Bytes(bs) = receiver else { unreachable!() };
+    let Value::Bytes(bs) = receiver else {
+        unreachable!()
+    };
     Ok(Value::Bool(bs.is_empty()))
 }
 
@@ -7186,13 +7424,17 @@ fn bytes_is_empty(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<V
 fn bytes_to_str(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     expect_arity("to_str", &args, 0, span)?;
     let _ = span;
-    let Value::Bytes(bs) = receiver else { unreachable!() };
+    let Value::Bytes(bs) = receiver else {
+        unreachable!()
+    };
     match String::from_utf8(bs) {
         Ok(s) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(s))))),
-        Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(format!(
-            "Bytes.to_str(): contenido no es UTF-8 válido en offset {}",
-            e.utf8_error().valid_up_to()
-        )))))),
+        Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!(
+                "Bytes.to_str(): contenido no es UTF-8 válido en offset {}",
+                e.utf8_error().valid_up_to()
+            ),
+        ))))),
     }
 }
 
@@ -7236,10 +7478,12 @@ fn str_one_str_arg(
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.{}()` espera un argumento `Str`, recibió `{}`",
-                    method, other.type_name(),
+                    method,
+                    other.type_name(),
                 ),
             )));
         }
@@ -7297,16 +7541,24 @@ fn str_split_at(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`Str.split_at()` espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`Str.split_at()` espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
     if idx < 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
-            format!("`Str.split_at()` no acepta índice negativo: recibió {}", idx),
+            span.line,
+            span.column,
+            format!(
+                "`Str.split_at()` no acepta índice negativo: recibió {}",
+                idx
+            ),
         )));
     }
     let len = s.chars().count() as i64;
@@ -7420,7 +7672,8 @@ fn str_left(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("`Str.left()` espera `Int`, recibió `{}`", other.type_name()),
             )));
         }
@@ -7444,8 +7697,12 @@ fn str_right(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value>
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`Str.right()` espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`Str.right()` espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -7477,8 +7734,12 @@ fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`Str.center()`: arg 0 (width) espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`Str.center()`: arg 0 (width) espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -7490,15 +7751,20 @@ fn str_center(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`Str.center()`: arg 1 (ch) espera `Str`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`Str.center()`: arg 1 (ch) espera `Str`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
     if ch.chars().count() != 1 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`Str.center(width, ch)`: el char de relleno debe ser 1 caracter, recibió `\"{}\"`",
                 ch,
@@ -7539,8 +7805,12 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
@@ -7552,15 +7822,20 @@ fn str_repeat_with(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("`.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`", other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "`.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`",
+                    other.type_name()
+                ),
             )));
         }
     };
     if n < 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!("`.repeat_with()` no acepta n negativo: recibió {}", n),
         )));
     }
@@ -7650,19 +7925,37 @@ fn str_replace(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Valu
     let mut it = args.into_iter();
     let old = match it.next().unwrap() {
         Value::Str(x) => x,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.replace(old, new)` espera Str para el arg 1, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.replace(old, new)` espera Str para el arg 1, recibió {}",
+                    other.type_name()
+                ),
+            )))
+        }
     };
     let new_s = match it.next().unwrap() {
         Value::Str(x) => x,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.replace(old, new)` espera Str para el arg 2, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.replace(old, new)` espera Str para el arg 2, recibió {}",
+                    other.type_name()
+                ),
+            )))
+        }
     };
     Ok(Value::Str(s.replace(&old, &new_s)))
 }
@@ -7677,16 +7970,23 @@ fn str_repeat(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value
     };
     let n = match args.into_iter().next().unwrap() {
         Value::Int(n) => n,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Int".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.repeat()` espera Int, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!("`.repeat()` espera Int, recibió {}", other.type_name()),
+            )))
+        }
     };
     if n < 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!("`.repeat()` no acepta n negativo: recibió {}", n),
         )));
     }
@@ -7716,10 +8016,12 @@ fn str_pad_args(
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.{}(width, ch)`: arg 0 espera `Int`, recibió `{}`",
-                    method, other.type_name(),
+                    method,
+                    other.type_name(),
                 ),
             )));
         }
@@ -7732,10 +8034,12 @@ fn str_pad_args(
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`.{}(width, ch)`: arg 1 espera `Str`, recibió `{}`",
-                    method, other.type_name(),
+                    method,
+                    other.type_name(),
                 ),
             )));
         }
@@ -7793,16 +8097,24 @@ fn str_find(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> 
     };
     let needle = match args.into_iter().next().unwrap() {
         Value::Str(x) => x,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.find()` espera Str, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!("`.find()` espera Str, recibió {}", other.type_name()),
+            )))
+        }
     };
     // Rust `str::find` devuelve byte index; convertimos a char index.
     if let Some(byte_idx) = s.find(needle.as_str()) {
         let char_idx = s[..byte_idx].chars().count() as i64;
-        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(char_idx)))))
+        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(
+            char_idx,
+        )))))
     } else {
         Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
             "no encontrado".into(),
@@ -7820,15 +8132,23 @@ fn str_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Val
     };
     let needle = match args.into_iter().next().unwrap() {
         Value::Str(x) => x,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.index_of()` espera Str, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!("`.index_of()` espera Str, recibió {}", other.type_name()),
+            )))
+        }
     };
     if let Some(byte_idx) = s.find(needle.as_str()) {
         let char_idx = s[..byte_idx].chars().count() as i64;
-        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(char_idx)))))
+        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(
+            char_idx,
+        )))))
     } else {
         Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
             "no encontrado".into(),
@@ -7846,15 +8166,26 @@ fn str_last_index_of(receiver: Value, args: Vec<Value>, span: Span) -> EvalResul
     };
     let needle = match args.into_iter().next().unwrap() {
         Value::Str(x) => x,
-        other => return Err(EvalSignal::Error(FitzError::new(
-            ErrorKind::TypeMismatch { expected: "Str".into(), found: other.type_name().into() },
-            span.line, span.column,
-            format!("`.last_index_of()` espera Str, recibió {}", other.type_name()),
-        ))),
+        other => {
+            return Err(EvalSignal::Error(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                span.line,
+                span.column,
+                format!(
+                    "`.last_index_of()` espera Str, recibió {}",
+                    other.type_name()
+                ),
+            )))
+        }
     };
     if let Some(byte_idx) = s.rfind(needle.as_str()) {
         let char_idx = s[..byte_idx].chars().count() as i64;
-        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(char_idx)))))
+        Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Int(
+            char_idx,
+        )))))
     } else {
         Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
             "no encontrado".into(),
@@ -7932,14 +8263,19 @@ fn eval_shift(op: &BinOpKind, l: Value, r: Value, span: Span) -> EvalResult<Valu
     let (a, b) = match (&l, &r) {
         (Value::Int(a), Value::Int(b)) => (*a, *b),
         _ => {
-            let sym = if matches!(op, BinOpKind::Shl) { "<<" } else { ">>" };
+            let sym = if matches!(op, BinOpKind::Shl) {
+                "<<"
+            } else {
+                ">>"
+            };
             return type_error(sym, &l, &r, span);
         }
     };
     if !(0..64).contains(&b) {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "shift fuera de rango: el segundo operando debe estar en 0..64, recibió {}",
                 b
@@ -7996,7 +8332,12 @@ fn eval_div(l: Value, r: Value, span: Span) -> EvalResult<Value> {
 /// que no consume su entorno. Los closures `|a, b| a + b` que pasamos no
 /// capturan nada, así que cumplen. Esto evita repetir el match cuatro veces.
 fn arith<I, F>(
-    l: Value, r: Value, op_name: &str, int_op: I, float_op: F, span: Span,
+    l: Value,
+    r: Value,
+    op_name: &str,
+    int_op: I,
+    float_op: F,
+    span: Span,
 ) -> EvalResult<Value>
 where
     I: Fn(i64, i64) -> i64,
@@ -8055,7 +8396,11 @@ fn as_f64(v: &Value) -> Option<f64> {
 /// lado derecho cuando el izquierdo ya determina el resultado).
 #[async_recursion]
 async fn eval_logical(
-    op: &BinOpKind, left: &Expr, right: &Expr, env: EnvRef, span: Span,
+    op: &BinOpKind,
+    left: &Expr,
+    right: &Expr,
+    env: EnvRef,
+    span: Span,
 ) -> EvalResult<Value> {
     let lv = eval_expr(left, env.clone()).await?;
     let lb = expect_bool(&lv, op_name(op), "izquierdo", left.span())?;
@@ -8072,7 +8417,7 @@ async fn eval_logical(
     let rv = eval_expr(right, env).await?;
     let rb = expect_bool(&rv, op_name(op), "derecho", right.span())?;
     let _ = span; // mantenido por consistencia de firma con eval_binop
-    // Mini-tanda Xor — `a xor b` = `a != b` sobre Bool.
+                  // Mini-tanda Xor — `a xor b` = `a != b` sobre Bool.
     match op {
         BinOpKind::Xor => Ok(Value::Bool(lb != rb)),
         _ => Ok(Value::Bool(rb)),
@@ -8089,8 +8434,14 @@ fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> 
                 expected: "Bool".into(),
                 found: v.type_name().into(),
             },
-            span.line, span.column,
-            format!("operando {} de `{}` debe ser Bool, no `{}`", side, op, v.type_name()),
+            span.line,
+            span.column,
+            format!(
+                "operando {} de `{}` debe ser Bool, no `{}`",
+                side,
+                op,
+                v.type_name()
+            ),
         ))),
     }
 }
@@ -8099,12 +8450,25 @@ fn expect_bool(v: &Value, op: &str, side: &str, span: Span) -> EvalResult<bool> 
 fn op_name(op: &BinOpKind) -> &'static str {
     use BinOpKind::*;
     match op {
-        Add => "+", Sub => "-", Mul => "*", Div => "/", Mod => "%",
-        Eq => "==", NotEq => "!=",
-        Lt => "<", LtEq => "<=", Gt => ">", GtEq => ">=",
-        And => "and", Or => "or", Xor => "xor",
-        BitAnd => "&", BitOr => "|", BitXor => "^",
-        Shl => "<<", Shr => ">>",
+        Add => "+",
+        Sub => "-",
+        Mul => "*",
+        Div => "/",
+        Mod => "%",
+        Eq => "==",
+        NotEq => "!=",
+        Lt => "<",
+        LtEq => "<=",
+        Gt => ">",
+        GtEq => ">=",
+        And => "and",
+        Or => "or",
+        Xor => "xor",
+        BitAnd => "&",
+        BitOr => "|",
+        BitXor => "^",
+        Shl => "<<",
+        Shr => ">>",
     }
 }
 
@@ -8114,10 +8478,13 @@ fn type_error<T>(op: &str, l: &Value, r: &Value, span: Span) -> EvalResult<T> {
             expected: "operandos compatibles".into(),
             found: format!("{} {} {}", l.type_name(), op, r.type_name()),
         },
-        span.line, span.column,
+        span.line,
+        span.column,
         format!(
             "operación `{}` no soportada entre `{}` y `{}`",
-            op, l.type_name(), r.type_name()
+            op,
+            l.type_name(),
+            r.type_name()
         ),
     )))
 }
@@ -8125,7 +8492,8 @@ fn type_error<T>(op: &str, l: &Value, r: &Value, span: Span) -> EvalResult<T> {
 fn div_by_zero<T>(span: Span) -> EvalResult<T> {
     Err(EvalSignal::Error(FitzError::new(
         ErrorKind::DivisionByZero,
-        span.line, span.column,
+        span.line,
+        span.column,
         "división por cero",
     )))
 }
@@ -8145,10 +8513,12 @@ fn expect_int_for_range(v: &Value, side: &str, span: Span) -> EvalResult<i64> {
                 expected: "Int".into(),
                 found: other.type_name().into(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "el {} de un rango debe ser Int, no `{}`",
-                side, other.type_name()
+                side,
+                other.type_name()
             ),
         ))),
     }
@@ -8167,17 +8537,20 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
         Value::List(items) => {
             let i = match idx {
                 Value::Int(n) => *n,
-                other => return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::TypeMismatch {
-                        expected: "Int".into(),
-                        found: other.type_name().into(),
-                    },
-                    span.line, span.column,
-                    format!(
-                        "el índice de una lista debe ser Int, no `{}`",
-                        other.type_name()
-                    ),
-                ))),
+                other => {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Int".into(),
+                            found: other.type_name().into(),
+                        },
+                        span.line,
+                        span.column,
+                        format!(
+                            "el índice de una lista debe ser Int, no `{}`",
+                            other.type_name()
+                        ),
+                    )))
+                }
             };
             // I.1 (mini-tanda I) — índices negativos al estilo Python:
             // `xs[-1]` es el último, `xs[-2]` el penúltimo, etc. La
@@ -8190,11 +8563,9 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             if effective < 0 || effective >= len {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    span.line, span.column,
-                    format!(
-                        "índice fuera de rango: {} en lista de tamaño {}",
-                        i, len,
-                    ),
+                    span.line,
+                    span.column,
+                    format!("índice fuera de rango: {} en lista de tamaño {}", i, len,),
                 )));
             }
             Ok(borrowed[effective as usize].clone())
@@ -8206,17 +8577,20 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             // contrato que `s.len()`.
             let i = match idx {
                 Value::Int(n) => *n,
-                other => return Err(EvalSignal::Error(FitzError::new(
-                    ErrorKind::TypeMismatch {
-                        expected: "Int".into(),
-                        found: other.type_name().into(),
-                    },
-                    span.line, span.column,
-                    format!(
-                        "el índice de un Str debe ser Int, no `{}`",
-                        other.type_name()
-                    ),
-                ))),
+                other => {
+                    return Err(EvalSignal::Error(FitzError::new(
+                        ErrorKind::TypeMismatch {
+                            expected: "Int".into(),
+                            found: other.type_name().into(),
+                        },
+                        span.line,
+                        span.column,
+                        format!(
+                            "el índice de un Str debe ser Int, no `{}`",
+                            other.type_name()
+                        ),
+                    )))
+                }
             };
             let chars: Vec<char> = s.chars().collect();
             let len = chars.len() as i64;
@@ -8224,11 +8598,9 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             if effective < 0 || effective >= len {
                 return Err(EvalSignal::Error(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    span.line, span.column,
-                    format!(
-                        "índice fuera de rango: {} en Str de tamaño {}",
-                        i, len,
-                    ),
+                    span.line,
+                    span.column,
+                    format!("índice fuera de rango: {} en Str de tamaño {}", i, len,),
                 )));
             }
             Ok(Value::Str(chars[effective as usize].to_string()))
@@ -8243,7 +8615,8 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
             }
             Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("clave no encontrada en mapa: {}", idx),
             )))
         }
@@ -8252,7 +8625,8 @@ fn eval_index(obj: &Value, idx: &Value, span: Span) -> EvalResult<Value> {
                 expected: "List o Map".into(),
                 found: other.type_name().into(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "el tipo `{}` no soporta indexing con `[]`",
                 other.type_name()
@@ -8292,8 +8666,13 @@ fn eval_slice(
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
-                format!("el `{}` de un slice debe ser Int, recibió `{}`", name, other.type_name()),
+                span.line,
+                span.column,
+                format!(
+                    "el `{}` de un slice debe ser Int, recibió `{}`",
+                    name,
+                    other.type_name()
+                ),
             ))),
         }
     }
@@ -8337,7 +8716,8 @@ fn eval_slice(
                 expected: "List o Str".into(),
                 found: other.type_name().into(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             format!("el tipo `{}` no soporta slicing", other.type_name()),
         ))),
     }
@@ -8370,11 +8750,7 @@ fn eval_slice(
 //     necesario; ser permisivos evita fricción innecesaria).
 
 #[async_recursion]
-async fn coerce_to_annotation(
-    annot: &TypeExpr,
-    value: Value,
-    env: EnvRef,
-) -> EvalResult<Value> {
+async fn coerce_to_annotation(annot: &TypeExpr, value: Value, env: EnvRef) -> EvalResult<Value> {
     // Mini-fase R.missing-recursive-instance-coercion (2026-05-22) —
     // recursión sobre `List<T>` y `Map<K, V>` cuando el inner es
     // nominal o `Nullable(nominal)`. Para el caso typical
@@ -8451,9 +8827,12 @@ async fn coerce_to_annotation(
     // los primitivos no se construyen desde dicts.
     let ty_value = env.lock().get(&type_name);
     let (declared_type_name, declared_fields, resolved_defaults) = match ty_value {
-        Some(Value::Type { name, fields, resolved_defaults, .. }) => {
-            (name, fields, resolved_defaults)
-        }
+        Some(Value::Type {
+            name,
+            fields,
+            resolved_defaults,
+            ..
+        }) => (name, fields, resolved_defaults),
         _ => return Ok(Value::Map(map_pairs)),
     };
 
@@ -8462,16 +8841,15 @@ async fn coerce_to_annotation(
     // los cuales podría locker otro Mutex).
     let map_snapshot: Vec<(Value, Value)> = map_pairs.lock().clone();
 
-    let mut instance_fields: Vec<(String, Value)> =
-        Vec::with_capacity(declared_fields.len());
+    let mut instance_fields: Vec<(String, Value)> = Vec::with_capacity(declared_fields.len());
     for f in &declared_fields {
         // Buscar el campo en el map por su nombre. La key tiene que
         // ser un `Str` con el nombre exacto del field; otros tipos
         // de key se ignoran (no son representables como nombre de
         // campo Fitz).
-        let provided = map_snapshot.iter().find(|(k, _)| {
-            matches!(k, Value::Str(s) if s == &f.name)
-        });
+        let provided = map_snapshot
+            .iter()
+            .find(|(k, _)| matches!(k, Value::Str(s) if s == &f.name));
         let value = if let Some((_, v)) = provided {
             v.clone()
         } else if let Some((_, v)) = resolved_defaults.iter().find(|(n, _)| n == &f.name) {
@@ -8483,7 +8861,8 @@ async fn coerce_to_annotation(
         } else {
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
-                0, 0,
+                0,
+                0,
                 format!(
                     "no se puede coercer a `{}`: el dict no tiene el campo `{}` \
                      (requerido por el tipo, no es nullable ni tiene default)",
@@ -8536,7 +8915,8 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                     expected: "Int o Float".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!("no se puede negar un valor de tipo `{}`", other.type_name()),
             ))),
         },
@@ -8547,7 +8927,8 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                     expected: "Bool".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "el operador `not` requiere Bool, recibió `{}`",
                     other.type_name()
@@ -8562,7 +8943,8 @@ fn eval_unary(op: &UnaryOpKind, v: Value, span: Span) -> EvalResult<Value> {
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "el operador `~` requiere Int, recibió `{}`",
                     other.type_name()
@@ -8718,60 +9100,102 @@ fn register_builtins(env: &EnvRef) {
     // del receptor primitivo.
     env.lock().define(
         "popcount",
-        Value::Builtin { name: "popcount", func: builtin_popcount },
+        Value::Builtin {
+            name: "popcount",
+            func: builtin_popcount,
+        },
     );
     env.lock().define(
         "leading_zeros",
-        Value::Builtin { name: "leading_zeros", func: builtin_leading_zeros },
+        Value::Builtin {
+            name: "leading_zeros",
+            func: builtin_leading_zeros,
+        },
     );
     env.lock().define(
         "trailing_zeros",
-        Value::Builtin { name: "trailing_zeros", func: builtin_trailing_zeros },
+        Value::Builtin {
+            name: "trailing_zeros",
+            func: builtin_trailing_zeros,
+        },
     );
     env.lock().define(
         "rotate_left",
-        Value::Builtin { name: "rotate_left", func: builtin_rotate_left },
+        Value::Builtin {
+            name: "rotate_left",
+            func: builtin_rotate_left,
+        },
     );
     env.lock().define(
         "rotate_right",
-        Value::Builtin { name: "rotate_right", func: builtin_rotate_right },
+        Value::Builtin {
+            name: "rotate_right",
+            func: builtin_rotate_right,
+        },
     );
     // Mini-tanda Math — abs/min/max/pow/sqrt/ceil/floor/round/clamp.
     env.lock().define(
         "abs",
-        Value::Builtin { name: "abs", func: builtin_math_abs },
+        Value::Builtin {
+            name: "abs",
+            func: builtin_math_abs,
+        },
     );
     env.lock().define(
         "min",
-        Value::Builtin { name: "min", func: builtin_math_min },
+        Value::Builtin {
+            name: "min",
+            func: builtin_math_min,
+        },
     );
     env.lock().define(
         "max",
-        Value::Builtin { name: "max", func: builtin_math_max },
+        Value::Builtin {
+            name: "max",
+            func: builtin_math_max,
+        },
     );
     env.lock().define(
         "pow",
-        Value::Builtin { name: "pow", func: builtin_math_pow },
+        Value::Builtin {
+            name: "pow",
+            func: builtin_math_pow,
+        },
     );
     env.lock().define(
         "sqrt",
-        Value::Builtin { name: "sqrt", func: builtin_math_sqrt },
+        Value::Builtin {
+            name: "sqrt",
+            func: builtin_math_sqrt,
+        },
     );
     env.lock().define(
         "ceil",
-        Value::Builtin { name: "ceil", func: builtin_math_ceil },
+        Value::Builtin {
+            name: "ceil",
+            func: builtin_math_ceil,
+        },
     );
     env.lock().define(
         "floor",
-        Value::Builtin { name: "floor", func: builtin_math_floor },
+        Value::Builtin {
+            name: "floor",
+            func: builtin_math_floor,
+        },
     );
     env.lock().define(
         "round",
-        Value::Builtin { name: "round", func: builtin_math_round },
+        Value::Builtin {
+            name: "round",
+            func: builtin_math_round,
+        },
     );
     env.lock().define(
         "clamp",
-        Value::Builtin { name: "clamp", func: builtin_math_clamp },
+        Value::Builtin {
+            name: "clamp",
+            func: builtin_math_clamp,
+        },
     );
 
     // Fase 9.w.1.b — Auth nativa: módulos `jwt` y `hash` siempre
@@ -8785,29 +9209,47 @@ fn register_builtins(env: &EnvRef) {
     let jwt_env = Environment::new();
     jwt_env.lock().define(
         "encode",
-        Value::Builtin { name: "encode", func: builtin_jwt_encode },
+        Value::Builtin {
+            name: "encode",
+            func: builtin_jwt_encode,
+        },
     );
     jwt_env.lock().define(
         "decode",
-        Value::Builtin { name: "decode", func: builtin_jwt_decode },
+        Value::Builtin {
+            name: "decode",
+            func: builtin_jwt_decode,
+        },
     );
     env.lock().define(
         "jwt",
-        Value::Module { name: "jwt".into(), env: jwt_env },
+        Value::Module {
+            name: "jwt".into(),
+            env: jwt_env,
+        },
     );
 
     let hash_env = Environment::new();
     hash_env.lock().define(
         "password",
-        Value::Builtin { name: "password", func: builtin_hash_password },
+        Value::Builtin {
+            name: "password",
+            func: builtin_hash_password,
+        },
     );
     hash_env.lock().define(
         "verify",
-        Value::Builtin { name: "verify", func: builtin_hash_verify },
+        Value::Builtin {
+            name: "verify",
+            func: builtin_hash_verify,
+        },
     );
     env.lock().define(
         "hash",
-        Value::Module { name: "hash".into(), env: hash_env },
+        Value::Module {
+            name: "hash".into(),
+            env: hash_env,
+        },
     );
 }
 
@@ -8817,8 +9259,12 @@ fn register_builtins(env: &EnvRef) {
 fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`popcount(n)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -8829,8 +9275,12 @@ fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
                 expected: "Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`popcount(n)` espera `Int`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`popcount(n)` espera `Int`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -8840,9 +9290,16 @@ fn builtin_popcount(args: &[Value]) -> FitzResult<Value> {
 fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
-            format!("`leading_zeros(n)` espera 1 argumento, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`leading_zeros(n)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
         ));
     }
     match &args[0] {
@@ -8852,8 +9309,12 @@ fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
                 expected: "Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`leading_zeros(n)` espera `Int`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`leading_zeros(n)` espera `Int`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -8862,9 +9323,16 @@ fn builtin_leading_zeros(args: &[Value]) -> FitzResult<Value> {
 fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
-            format!("`trailing_zeros(n)` espera 1 argumento, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`trailing_zeros(n)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
         ));
     }
     match &args[0] {
@@ -8874,8 +9342,12 @@ fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
                 expected: "Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`trailing_zeros(n)` espera `Int`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`trailing_zeros(n)` espera `Int`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -8886,32 +9358,51 @@ fn builtin_trailing_zeros(args: &[Value]) -> FitzResult<Value> {
 fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
-            0, 0,
-            format!("`rotate_left(n, bits)` espera 2 args, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`rotate_left(n, bits)` espera 2 args, recibió {}",
+                args.len()
+            ),
         ));
     }
     let n = match &args[0] {
         Value::Int(n) => *n,
-        other => return Err(FitzError::new(
-            ErrorKind::TypeMismatch {
-                expected: "Int".into(),
-                found: other.type_name().into(),
-            },
-            0, 0,
-            format!("`rotate_left(n, bits)`: arg 0 espera `Int`, recibió `{}`", other.type_name()),
-        )),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`rotate_left(n, bits)`: arg 0 espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
+            ))
+        }
     };
     let bits = match &args[1] {
         Value::Int(b) => *b,
-        other => return Err(FitzError::new(
-            ErrorKind::TypeMismatch {
-                expected: "Int".into(),
-                found: other.type_name().into(),
-            },
-            0, 0,
-            format!("`rotate_left(n, bits)`: arg 1 espera `Int`, recibió `{}`", other.type_name()),
-        )),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`rotate_left(n, bits)`: arg 1 espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
+            ))
+        }
     };
     Ok(Value::Int(n.rotate_left(bits.rem_euclid(64) as u32)))
 }
@@ -8920,32 +9411,51 @@ fn builtin_rotate_left(args: &[Value]) -> FitzResult<Value> {
 fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
-            0, 0,
-            format!("`rotate_right(n, bits)` espera 2 args, recibió {}", args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`rotate_right(n, bits)` espera 2 args, recibió {}",
+                args.len()
+            ),
         ));
     }
     let n = match &args[0] {
         Value::Int(n) => *n,
-        other => return Err(FitzError::new(
-            ErrorKind::TypeMismatch {
-                expected: "Int".into(),
-                found: other.type_name().into(),
-            },
-            0, 0,
-            format!("`rotate_right(n, bits)`: arg 0 espera `Int`, recibió `{}`", other.type_name()),
-        )),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`rotate_right(n, bits)`: arg 0 espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
+            ))
+        }
     };
     let bits = match &args[1] {
         Value::Int(b) => *b,
-        other => return Err(FitzError::new(
-            ErrorKind::TypeMismatch {
-                expected: "Int".into(),
-                found: other.type_name().into(),
-            },
-            0, 0,
-            format!("`rotate_right(n, bits)`: arg 1 espera `Int`, recibió `{}`", other.type_name()),
-        )),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`rotate_right(n, bits)`: arg 1 espera `Int`, recibió `{}`",
+                    other.type_name()
+                ),
+            ))
+        }
     };
     Ok(Value::Int(n.rotate_right(bits.rem_euclid(64) as u32)))
 }
@@ -8961,8 +9471,12 @@ fn builtin_rotate_right(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`abs(x)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -8974,8 +9488,12 @@ fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
                 expected: "Int|Float".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`abs(x)` espera `Int` o `Float`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`abs(x)` espera `Int` o `Float`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -8983,9 +9501,17 @@ fn builtin_math_abs(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_min_max(args: &[Value], want_max: bool, name: &str) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
-            0, 0,
-            format!("`{}(a, b)` espera 2 argumentos, recibió {}", name, args.len()),
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
+            format!(
+                "`{}(a, b)` espera 2 argumentos, recibió {}",
+                name,
+                args.len()
+            ),
         ));
     }
     match (&args[0], &args[1]) {
@@ -8995,23 +9521,34 @@ fn builtin_math_min_max(args: &[Value], want_max: bool, name: &str) -> FitzResul
         }
         (Value::Float(a), Value::Float(b)) => {
             let r = if want_max {
-                if a > b { *a } else { *b }
+                if a > b {
+                    *a
+                } else {
+                    *b
+                }
             } else {
-                if a < b { *a } else { *b }
+                if a < b {
+                    *a
+                } else {
+                    *b
+                }
             };
             Ok(Value::Float(r))
         }
-        (other_a, other_b) => Err(FitzError::new(
-            ErrorKind::TypeMismatch {
-                expected: "Int+Int|Float+Float".into(),
-                found: format!("{}+{}", other_a.type_name(), other_b.type_name()),
-            },
-            0, 0,
-            format!(
+        (other_a, other_b) => {
+            Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int+Int|Float+Float".into(),
+                    found: format!("{}+{}", other_a.type_name(), other_b.type_name()),
+                },
+                0,
+                0,
+                format!(
                 "`{}(a, b)`: ambos args deben ser del mismo tipo Int o Float, recibió `{}` y `{}`",
                 name, other_a.type_name(), other_b.type_name(),
             ),
-        )),
+            ))
+        }
     }
 }
 
@@ -9026,8 +9563,12 @@ fn builtin_math_max(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_pow(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 2 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 2, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`pow(base, exp)` espera 2 args, recibió {}", args.len()),
         ));
     }
@@ -9038,44 +9579,66 @@ fn builtin_math_pow(args: &[Value]) -> FitzResult<Value> {
             _ => None,
         }
     };
-    let base = to_f(&args[0]).ok_or_else(|| FitzError::new(
-        ErrorKind::TypeMismatch {
-            expected: "Int|Float".into(),
-            found: args[0].type_name().into(),
-        },
-        0, 0,
-        format!("`pow(base, exp)`: arg 0 espera `Int` o `Float`, recibió `{}`", args[0].type_name()),
-    ))?;
-    let exp = to_f(&args[1]).ok_or_else(|| FitzError::new(
-        ErrorKind::TypeMismatch {
-            expected: "Int|Float".into(),
-            found: args[1].type_name().into(),
-        },
-        0, 0,
-        format!("`pow(base, exp)`: arg 1 espera `Int` o `Float`, recibió `{}`", args[1].type_name()),
-    ))?;
+    let base = to_f(&args[0]).ok_or_else(|| {
+        FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int|Float".into(),
+                found: args[0].type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`pow(base, exp)`: arg 0 espera `Int` o `Float`, recibió `{}`",
+                args[0].type_name()
+            ),
+        )
+    })?;
+    let exp = to_f(&args[1]).ok_or_else(|| {
+        FitzError::new(
+            ErrorKind::TypeMismatch {
+                expected: "Int|Float".into(),
+                found: args[1].type_name().into(),
+            },
+            0,
+            0,
+            format!(
+                "`pow(base, exp)`: arg 1 espera `Int` o `Float`, recibió `{}`",
+                args[1].type_name()
+            ),
+        )
+    })?;
     Ok(Value::Float(base.powf(exp)))
 }
 
 fn builtin_math_sqrt(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`sqrt(x)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
     let x = match &args[0] {
         Value::Int(n) => *n as f64,
         Value::Float(x) => *x,
-        other => return Err(FitzError::new(
-            ErrorKind::TypeMismatch {
-                expected: "Int|Float".into(),
-                found: other.type_name().into(),
-            },
-            0, 0,
-            format!("`sqrt(x)` espera `Int` o `Float`, recibió `{}`", other.type_name()),
-        )),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Int|Float".into(),
+                    found: other.type_name().into(),
+                },
+                0,
+                0,
+                format!(
+                    "`sqrt(x)` espera `Int` o `Float`, recibió `{}`",
+                    other.type_name()
+                ),
+            ))
+        }
     };
     Ok(Value::Float(x.sqrt()))
 }
@@ -9083,8 +9646,12 @@ fn builtin_math_sqrt(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_ceil(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`ceil(x)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -9096,8 +9663,12 @@ fn builtin_math_ceil(args: &[Value]) -> FitzResult<Value> {
                 expected: "Float|Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`ceil(x)` espera `Float` o `Int`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`ceil(x)` espera `Float` o `Int`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -9105,8 +9676,12 @@ fn builtin_math_ceil(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_floor(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`floor(x)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -9118,8 +9693,12 @@ fn builtin_math_floor(args: &[Value]) -> FitzResult<Value> {
                 expected: "Float|Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`floor(x)` espera `Float` o `Int`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`floor(x)` espera `Float` o `Int`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -9127,8 +9706,12 @@ fn builtin_math_floor(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 1 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 1, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`round(x)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -9141,8 +9724,12 @@ fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
                 expected: "Float|Int".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!("`round(x)` espera `Float` o `Int`, recibió `{}`", other.type_name()),
+            0,
+            0,
+            format!(
+                "`round(x)` espera `Float` o `Int`, recibió `{}`",
+                other.type_name()
+            ),
         )),
     }
 }
@@ -9150,8 +9737,12 @@ fn builtin_math_round(args: &[Value]) -> FitzResult<Value> {
 fn builtin_math_clamp(args: &[Value]) -> FitzResult<Value> {
     if args.len() != 3 {
         return Err(FitzError::new(
-            ErrorKind::WrongArgCount { expected: 3, found: args.len() },
-            0, 0,
+            ErrorKind::WrongArgCount {
+                expected: 3,
+                found: args.len(),
+            },
+            0,
+            0,
             format!("`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()),
         ));
     }
@@ -9208,8 +9799,12 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            0, 0,
-            format!("`sleep` espera 1 argumento (ms: Int), recibió {}", args.len()),
+            0,
+            0,
+            format!(
+                "`sleep` espera 1 argumento (ms: Int), recibió {}",
+                args.len()
+            ),
         ));
     }
     let ms = match &args[0] {
@@ -9220,8 +9815,12 @@ fn builtin_sleep(args: &[Value]) -> FitzResult<Value> {
                     expected: "Int".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
-                format!("`sleep` espera Int (milisegundos), recibió `{}`", other.type_name()),
+                0,
+                0,
+                format!(
+                    "`sleep` espera Int (milisegundos), recibió `{}`",
+                    other.type_name()
+                ),
             ));
         }
     };
@@ -9383,7 +9982,10 @@ fn cors_type_err(key: &str, expected: &str, found: &str) -> FitzError {
         },
         0,
         0,
-        format!("`cors`: la key '{}' espera {}, recibió `{}`", key, expected, found),
+        format!(
+            "`cors`: la key '{}' espera {}, recibió `{}`",
+            key, expected, found
+        ),
     )
 }
 
@@ -9419,7 +10021,8 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!("`len` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -9435,11 +10038,9 @@ fn builtin_len(args: &[Value]) -> FitzResult<Value> {
                     expected: "List, Map, Str, Bytes o Range".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
-                format!(
-                    "`len` no aplica a un valor de tipo `{}`",
-                    other.type_name()
-                ),
+                0,
+                0,
+                format!("`len` no aplica a un valor de tipo `{}`", other.type_name()),
             ));
         }
     };
@@ -9455,7 +10056,8 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!("`bytes` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -9466,11 +10068,9 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
                 expected: "Str".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
-            format!(
-                "`bytes(s)` espera Str, recibió `{}`",
-                other.type_name()
-            ),
+            0,
+            0,
+            format!("`bytes(s)` espera Str, recibió `{}`", other.type_name()),
         )),
     }
 }
@@ -9497,7 +10097,8 @@ fn builtin_env(args: &[Value]) -> FitzResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!("`env(key)` espera 1 argumento, recibió {}", args.len()),
         ));
     }
@@ -9509,13 +10110,16 @@ fn builtin_env(args: &[Value]) -> FitzResult<Value> {
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!("`env(key)` espera Str, recibió `{}`", other.type_name()),
             ));
         }
     };
     match std::env::var(&key) {
-        Ok(value) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(value))))),
+        Ok(value) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(
+            value,
+        ))))),
         Err(_) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
             format!("env var `{}` no definida", key),
         ))))),
@@ -9529,7 +10133,8 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
                 expected: 2,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!(
                 "`env_or(key, default)` espera 2 argumentos, recibió {}",
                 args.len()
@@ -9544,7 +10149,8 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "`env_or(key, default)` espera Str como primer arg, recibió `{}`",
                     other.type_name()
@@ -9560,7 +10166,8 @@ fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "`env_or(key, default)` espera Str como segundo arg, recibió `{}`",
                     other.type_name()
@@ -9579,8 +10186,12 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            0, 0,
-            format!("`load_env(path)` espera 1 argumento, recibió {}", args.len()),
+            0,
+            0,
+            format!(
+                "`load_env(path)` espera 1 argumento, recibió {}",
+                args.len()
+            ),
         ));
     }
     let path = match &args[0] {
@@ -9591,8 +10202,12 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
-                format!("`load_env(path)` espera Str, recibió `{}`", other.type_name()),
+                0,
+                0,
+                format!(
+                    "`load_env(path)` espera Str, recibió `{}`",
+                    other.type_name()
+                ),
             ));
         }
     };
@@ -9613,8 +10228,8 @@ fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
 /// Sin variable expansion (`$VAR`/`${VAR}`), sin multi-line, sin escape
 /// chars. Si entra demanda, mini-fase futura dedicada.
 fn parse_env_file(path: &str) -> Result<(), String> {
-    let contents = std::fs::read_to_string(path)
-        .map_err(|e| format!("no se pudo leer `{}`: {}", path, e))?;
+    let contents =
+        std::fs::read_to_string(path).map_err(|e| format!("no se pudo leer `{}`: {}", path, e))?;
     for (line_no, raw_line) in contents.lines().enumerate() {
         let line = raw_line.trim();
         if line.is_empty() || line.starts_with('#') {
@@ -9630,11 +10245,7 @@ fn parse_env_file(path: &str) -> Result<(), String> {
         let key = line[..eq_idx].trim();
         let mut value = line[eq_idx + 1..].trim().to_string();
         if key.is_empty() {
-            return Err(format!(
-                "{}:{}: key vacía antes del `=`",
-                path,
-                line_no + 1
-            ));
+            return Err(format!("{}:{}: key vacía antes del `=`", path, line_no + 1));
         }
         // Strip comillas dobles wrapping (si el valor abre y cierra con
         // `"`). Útil para `KEY="value with spaces"`. Sin escape interno
@@ -9685,7 +10296,8 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!(
                 "`assert` espera 1 o 2 argumentos (cond: Bool, msg: Str?), recibió {}",
                 args.len()
@@ -9700,7 +10312,8 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
                     expected: "Bool".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "`assert` espera `Bool` como primer argumento, recibió `{}`",
                     other.type_name()
@@ -9716,7 +10329,8 @@ fn builtin_assert(args: &[Value]) -> FitzResult<Value> {
                     expected: "Str".into(),
                     found: other.type_name().into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "`assert` espera `Str` como segundo argumento (mensaje), recibió `{}`",
                     other.type_name()
@@ -9745,7 +10359,8 @@ fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
                 expected: 2,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!(
                 "`assert_eq` espera 2 argumentos (left, right), recibió {}",
                 args.len()
@@ -9757,7 +10372,8 @@ fn builtin_assert_eq(args: &[Value]) -> FitzResult<Value> {
     }
     Err(FitzError::new(
         ErrorKind::InvalidSyntax,
-        0, 0,
+        0,
+        0,
         format!(
             "assert_eq falló:\n  left:  {}\n  right: {}",
             args[0], args[1]
@@ -9774,7 +10390,8 @@ fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
                 expected: 2,
                 found: args.len(),
             },
-            0, 0,
+            0,
+            0,
             format!(
                 "`assert_ne` espera 2 argumentos (left, right), recibió {}",
                 args.len()
@@ -9786,11 +10403,9 @@ fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
     }
     Err(FitzError::new(
         ErrorKind::InvalidSyntax,
-        0, 0,
-        format!(
-            "assert_ne falló: ambos lados son iguales ({})",
-            args[0]
-        ),
+        0,
+        0,
+        format!("assert_ne falló: ambos lados son iguales ({})", args[0]),
     ))
 }
 
@@ -9802,7 +10417,8 @@ fn builtin_assert_ne(args: &[Value]) -> FitzResult<Value> {
 fn builtin_assert_throws_stub(_args: &[Value]) -> FitzResult<Value> {
     Err(FitzError::new(
         ErrorKind::InvalidSyntax,
-        0, 0,
+        0,
+        0,
         "bug del evaluator: `assert_throws` stub invocado directamente. \
          El dispatcher debería haberlo interceptado."
             .to_string(),
@@ -9827,7 +10443,8 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
                 expected: 1,
                 found: args.len(),
             },
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`assert_throws` espera 1 argumento (callback: fn), recibió {}",
                 args.len()
@@ -9836,14 +10453,17 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
     }
     let callback = &args[0];
     let (param_count, is_async) = match callback {
-        Value::Function { params, is_async, .. } => (params.len(), *is_async),
+        Value::Function {
+            params, is_async, ..
+        } => (params.len(), *is_async),
         other => {
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::TypeMismatch {
                     expected: "Function".into(),
                     found: other.type_name().into(),
                 },
-                span.line, span.column,
+                span.line,
+                span.column,
                 format!(
                     "`assert_throws` espera una función como argumento, recibió `{}`",
                     other.type_name()
@@ -9854,7 +10474,8 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if param_count != 0 {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             format!(
                 "`assert_throws` espera una función con 0 params, recibió una con {}",
                 param_count
@@ -9864,7 +10485,8 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if is_async {
         return Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             "`assert_throws` no soporta callbacks `async fn` en el MVP. \
              Usá `match` sobre el `Result` o un helper sync."
                 .to_string(),
@@ -9873,7 +10495,8 @@ async fn assert_throws_impl(args: Vec<Value>, span: Span) -> EvalResult<Value> {
     match invoke_value(callback.clone(), vec![], "callback de assert_throws", span).await {
         Ok(_) => Err(EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
-            span.line, span.column,
+            span.line,
+            span.column,
             "assert_throws falló: se esperaba que la fn tirara un error, \
              pero retornó normalmente"
                 .to_string(),
@@ -10305,7 +10928,9 @@ mod tests {
         // El checker 6.2 ataja la mayoría de los casos, pero el
         // evaluator también valida: `.await` sobre Int → error claro.
         let expr = Expr::Await(Box::new(Expr::Int(42, Span::ZERO)), Span::ZERO);
-        let err = eval_expr_test(expr).await.expect_err("esperaba error del evaluator");
+        let err = eval_expr_test(expr)
+            .await
+            .expect_err("esperaba error del evaluator");
         match err {
             EvalSignal::Error(fitz_err) => {
                 assert!(
@@ -10326,7 +10951,8 @@ mod tests {
         let (env, res) = parse_eval_into_env(
             "async fn f() -> Int { return 42 }\n\
              let x = f().await",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
     }
@@ -10338,10 +10964,15 @@ mod tests {
         let (env, res) = parse_eval_into_env(
             "async fn f() -> Int { return 42 }\n\
              let pending = f()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("pending").expect("pending definida");
-        assert!(matches!(v, Value::Future(_)), "esperaba Value::Future, fue {:?}", v);
+        assert!(
+            matches!(v, Value::Future(_)),
+            "esperaba Value::Future, fue {:?}",
+            v
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -10353,7 +10984,8 @@ mod tests {
         let (env, res) = parse_eval_into_env(
             "async fn pausa() -> Null { return sleep(0).await }\n\
              let r = pausa().await",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Null));
     }
@@ -10365,7 +10997,11 @@ mod tests {
         let (env, res) = parse_eval_into_env("let f = sleep(100)").await;
         res.unwrap();
         let v = env.lock().get("f").expect("f definida");
-        assert!(matches!(v, Value::Future(_)), "esperaba Value::Future, fue {:?}", v);
+        assert!(
+            matches!(v, Value::Future(_)),
+            "esperaba Value::Future, fue {:?}",
+            v
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -10383,14 +11019,18 @@ mod tests {
         let first = eval_expr(
             &Expr::Await(Box::new(Expr::Ident("p".into(), Span::ZERO)), Span::ZERO),
             env.clone(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
         assert_eq!(first, Value::Int(1));
 
         // Segundo .await: error.
         let err = eval_expr(
             &Expr::Await(Box::new(Expr::Ident("p".into(), Span::ZERO)), Span::ZERO),
             env,
-        ).await.expect_err("segundo await debería fallar");
+        )
+        .await
+        .expect_err("segundo await debería fallar");
         match err {
             EvalSignal::Error(fitz_err) => {
                 assert!(fitz_err.message.contains("consumido"));
@@ -10403,31 +11043,48 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_int_literal() {
-        assert_eq!(eval_expr_test(Expr::Int(42, Span::ZERO)).await.unwrap(), Value::Int(42));
+        assert_eq!(
+            eval_expr_test(Expr::Int(42, Span::ZERO)).await.unwrap(),
+            Value::Int(42)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_float_literal() {
-        assert_eq!(eval_expr_test(Expr::Float(3.14, Span::ZERO)).await.unwrap(), Value::Float(3.14));
+        assert_eq!(
+            eval_expr_test(Expr::Float(3.14, Span::ZERO)).await.unwrap(),
+            Value::Float(3.14)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_string_literal() {
         assert_eq!(
-            eval_expr_test(Expr::Str("hola".into(), Span::ZERO)).await.unwrap(),
+            eval_expr_test(Expr::Str("hola".into(), Span::ZERO))
+                .await
+                .unwrap(),
             Value::Str("hola".into())
         );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_bool_literal() {
-        assert_eq!(eval_expr_test(Expr::Bool(true, Span::ZERO)).await.unwrap(), Value::Bool(true));
-        assert_eq!(eval_expr_test(Expr::Bool(false, Span::ZERO)).await.unwrap(), Value::Bool(false));
+        assert_eq!(
+            eval_expr_test(Expr::Bool(true, Span::ZERO)).await.unwrap(),
+            Value::Bool(true)
+        );
+        assert_eq!(
+            eval_expr_test(Expr::Bool(false, Span::ZERO)).await.unwrap(),
+            Value::Bool(false)
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_null_literal() {
-        assert_eq!(eval_expr_test(Expr::Null(Span::ZERO)).await.unwrap(), Value::Null);
+        assert_eq!(
+            eval_expr_test(Expr::Null(Span::ZERO)).await.unwrap(),
+            Value::Null
+        );
     }
 
     // ---- Ident ----
@@ -10437,7 +11094,9 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(99));
 
-        let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), env).await.unwrap();
+        let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), env)
+            .await
+            .unwrap();
         assert_eq!(result, Value::Int(99));
     }
 
@@ -10460,7 +11119,9 @@ mod tests {
         global.lock().define("x", Value::Str("from_global".into()));
 
         let child = Environment::new_child(global);
-        let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), child).await.unwrap();
+        let result = eval_expr(&Expr::Ident("x".into(), Span::ZERO), child)
+            .await
+            .unwrap();
         assert_eq!(result, Value::Str("from_global".into()));
     }
 
@@ -10526,24 +11187,41 @@ mod tests {
 
     /// Helper: construye `BinOp { op, left: l, right: r }` con boxes.
     fn binop(op: BinOpKind, l: Expr, r: Expr) -> Expr {
-        Expr::BinOp { op, left: Box::new(l), right: Box::new(r), span: Span::ZERO }
+        Expr::BinOp {
+            op,
+            left: Box::new(l),
+            right: Box::new(r),
+            span: Span::ZERO,
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn add_int_int_da_int() {
-        let e = binop(BinOpKind::Add, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO));
+        let e = binop(
+            BinOpKind::Add,
+            Expr::Int(2, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(5));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn add_int_float_promueve_a_float() {
-        let e = binop(BinOpKind::Add, Expr::Int(2, Span::ZERO), Expr::Float(0.5, Span::ZERO));
+        let e = binop(
+            BinOpKind::Add,
+            Expr::Int(2, Span::ZERO),
+            Expr::Float(0.5, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Float(2.5));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn add_float_int_promueve_a_float() {
-        let e = binop(BinOpKind::Add, Expr::Float(1.5, Span::ZERO), Expr::Int(2, Span::ZERO));
+        let e = binop(
+            BinOpKind::Add,
+            Expr::Float(1.5, Span::ZERO),
+            Expr::Int(2, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Float(3.5));
     }
 
@@ -10554,12 +11232,19 @@ mod tests {
             Expr::Str("hola ".into(), Span::ZERO),
             Expr::Str("mundo".into(), Span::ZERO),
         );
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("hola mundo".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("hola mundo".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn add_tipos_incompatibles_es_type_error() {
-        let e = binop(BinOpKind::Add, Expr::Str("x".into(), Span::ZERO), Expr::Int(1, Span::ZERO));
+        let e = binop(
+            BinOpKind::Add,
+            Expr::Str("x".into(), Span::ZERO),
+            Expr::Int(1, Span::ZERO),
+        );
         match eval_expr_test(e).await {
             Err(EvalSignal::Error(err)) => {
                 assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
@@ -10570,41 +11255,71 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn sub_mul_funcionan() {
-        let sub = binop(BinOpKind::Sub, Expr::Int(10, Span::ZERO), Expr::Int(3, Span::ZERO));
+        let sub = binop(
+            BinOpKind::Sub,
+            Expr::Int(10, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(sub).await.unwrap(), Value::Int(7));
 
-        let mul = binop(BinOpKind::Mul, Expr::Int(4, Span::ZERO), Expr::Int(5, Span::ZERO));
+        let mul = binop(
+            BinOpKind::Mul,
+            Expr::Int(4, Span::ZERO),
+            Expr::Int(5, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(mul).await.unwrap(), Value::Int(20));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn div_int_int_trunca() {
         // 10 / 3 = 3 (truncado), no 3.33
-        let e = binop(BinOpKind::Div, Expr::Int(10, Span::ZERO), Expr::Int(3, Span::ZERO));
+        let e = binop(
+            BinOpKind::Div,
+            Expr::Int(10, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(3));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn div_int_float_da_float() {
-        let e = binop(BinOpKind::Div, Expr::Int(10, Span::ZERO), Expr::Float(4.0, Span::ZERO));
+        let e = binop(
+            BinOpKind::Div,
+            Expr::Int(10, Span::ZERO),
+            Expr::Float(4.0, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Float(2.5));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn div_por_cero_int_es_error() {
-        let e = binop(BinOpKind::Div, Expr::Int(1, Span::ZERO), Expr::Int(0, Span::ZERO));
+        let e = binop(
+            BinOpKind::Div,
+            Expr::Int(1, Span::ZERO),
+            Expr::Int(0, Span::ZERO),
+        );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::DivisionByZero, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::DivisionByZero,
+                ..
+            })
         ));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn div_por_cero_float_es_error() {
-        let e = binop(BinOpKind::Div, Expr::Float(1.0, Span::ZERO), Expr::Float(0.0, Span::ZERO));
+        let e = binop(
+            BinOpKind::Div,
+            Expr::Float(1.0, Span::ZERO),
+            Expr::Float(0.0, Span::ZERO),
+        );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::DivisionByZero, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::DivisionByZero,
+                ..
+            })
         ));
     }
 
@@ -10613,39 +11328,75 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn eq_con_coercion_int_float() {
         // 1 == 1.0 → true
-        let e = binop(BinOpKind::Eq, Expr::Int(1, Span::ZERO), Expr::Float(1.0, Span::ZERO));
+        let e = binop(
+            BinOpKind::Eq,
+            Expr::Int(1, Span::ZERO),
+            Expr::Float(1.0, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(true));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn eq_tipos_distintos_da_false_sin_error() {
         // 1 == "1" → false (no error)
-        let e = binop(BinOpKind::Eq, Expr::Int(1, Span::ZERO), Expr::Str("1".into(), Span::ZERO));
+        let e = binop(
+            BinOpKind::Eq,
+            Expr::Int(1, Span::ZERO),
+            Expr::Str("1".into(), Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(false));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn noteq_funciona() {
-        let e = binop(BinOpKind::NotEq, Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO));
+        let e = binop(
+            BinOpKind::NotEq,
+            Expr::Int(1, Span::ZERO),
+            Expr::Int(2, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(true));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn lt_gt_lteq_gteq_numericos() {
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::Lt, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO))).await.unwrap(),
+            eval_expr_test(binop(
+                BinOpKind::Lt,
+                Expr::Int(2, Span::ZERO),
+                Expr::Int(3, Span::ZERO)
+            ))
+            .await
+            .unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::Gt, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO))).await.unwrap(),
+            eval_expr_test(binop(
+                BinOpKind::Gt,
+                Expr::Int(2, Span::ZERO),
+                Expr::Int(3, Span::ZERO)
+            ))
+            .await
+            .unwrap(),
             Value::Bool(false)
         );
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::LtEq, Expr::Int(3, Span::ZERO), Expr::Int(3, Span::ZERO))).await.unwrap(),
+            eval_expr_test(binop(
+                BinOpKind::LtEq,
+                Expr::Int(3, Span::ZERO),
+                Expr::Int(3, Span::ZERO)
+            ))
+            .await
+            .unwrap(),
             Value::Bool(true)
         );
         assert_eq!(
-            eval_expr_test(binop(BinOpKind::GtEq, Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO))).await.unwrap(),
+            eval_expr_test(binop(
+                BinOpKind::GtEq,
+                Expr::Int(2, Span::ZERO),
+                Expr::Int(3, Span::ZERO)
+            ))
+            .await
+            .unwrap(),
             Value::Bool(false)
         );
     }
@@ -10653,7 +11404,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn comparacion_con_promocion_int_float() {
         // 2 < 2.5 → true
-        let e = binop(BinOpKind::Lt, Expr::Int(2, Span::ZERO), Expr::Float(2.5, Span::ZERO));
+        let e = binop(
+            BinOpKind::Lt,
+            Expr::Int(2, Span::ZERO),
+            Expr::Float(2.5, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(true));
     }
 
@@ -10670,10 +11425,17 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn comparacion_entre_bool_es_type_error() {
         // Bool no se compara con <. Sí con ==.
-        let e = binop(BinOpKind::Lt, Expr::Bool(true, Span::ZERO), Expr::Bool(false, Span::ZERO));
+        let e = binop(
+            BinOpKind::Lt,
+            Expr::Bool(true, Span::ZERO),
+            Expr::Bool(false, Span::ZERO),
+        );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10681,7 +11443,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn and_true_true_da_true() {
-        let e = binop(BinOpKind::And, Expr::Bool(true, Span::ZERO), Expr::Bool(true, Span::ZERO));
+        let e = binop(
+            BinOpKind::And,
+            Expr::Bool(true, Span::ZERO),
+            Expr::Bool(true, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(true));
     }
 
@@ -10709,26 +11475,44 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_false_true_da_true() {
-        let e = binop(BinOpKind::Or, Expr::Bool(false, Span::ZERO), Expr::Bool(true, Span::ZERO));
+        let e = binop(
+            BinOpKind::Or,
+            Expr::Bool(false, Span::ZERO),
+            Expr::Bool(true, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Bool(true));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn and_con_no_bool_izquierda_es_type_error() {
-        let e = binop(BinOpKind::And, Expr::Int(1, Span::ZERO), Expr::Bool(true, Span::ZERO));
+        let e = binop(
+            BinOpKind::And,
+            Expr::Int(1, Span::ZERO),
+            Expr::Bool(true, Span::ZERO),
+        );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn and_con_no_bool_derecha_es_type_error() {
         // Para que el lado derecho se evalúe, el izquierdo debe ser true.
-        let e = binop(BinOpKind::And, Expr::Bool(true, Span::ZERO), Expr::Int(1, Span::ZERO));
+        let e = binop(
+            BinOpKind::And,
+            Expr::Bool(true, Span::ZERO),
+            Expr::Int(1, Span::ZERO),
+        );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10737,7 +11521,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn xor_tabla_de_verdad_completa() {
         // T xor T → F, T xor F → T, F xor T → T, F xor F → F.
-        for (l, r, expected) in [(true, true, false), (true, false, true), (false, true, true), (false, false, false)] {
+        for (l, r, expected) in [
+            (true, true, false),
+            (true, false, true),
+            (false, true, true),
+            (false, false, false),
+        ] {
             let e = binop(
                 BinOpKind::Xor,
                 Expr::Bool(l, Span::ZERO),
@@ -10769,10 +11558,17 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn xor_con_no_bool_es_type_error() {
-        let e = binop(BinOpKind::Xor, Expr::Int(1, Span::ZERO), Expr::Bool(true, Span::ZERO));
+        let e = binop(
+            BinOpKind::Xor,
+            Expr::Int(1, Span::ZERO),
+            Expr::Bool(true, Span::ZERO),
+        );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10781,7 +11577,11 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn expresion_anidada_2_mas_3_por_4_da_14() {
         // 2 + (3 * 4) — Stmt::Expr para verificar wiring completo.
-        let inner = binop(BinOpKind::Mul, Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO));
+        let inner = binop(
+            BinOpKind::Mul,
+            Expr::Int(3, Span::ZERO),
+            Expr::Int(4, Span::ZERO),
+        );
         let outer = binop(BinOpKind::Add, Expr::Int(2, Span::ZERO), inner);
         assert_eq!(eval_expr_test(outer).await.unwrap(), Value::Int(14));
     }
@@ -10792,7 +11592,8 @@ mod tests {
     async fn neg_int() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+            operand: Box::new(Expr::Int(5, Span::ZERO)),
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(-5));
     }
@@ -10801,7 +11602,8 @@ mod tests {
     async fn neg_float() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Float(3.14, Span::ZERO)), span: Span::ZERO,
+            operand: Box::new(Expr::Float(3.14, Span::ZERO)),
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Float(-3.14));
     }
@@ -10811,11 +11613,13 @@ mod tests {
         // -(-7) = 7
         let inner = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Int(7, Span::ZERO)), span: Span::ZERO,
+            operand: Box::new(Expr::Int(7, Span::ZERO)),
+            span: Span::ZERO,
         };
         let outer = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(inner), span: Span::ZERO,
+            operand: Box::new(inner),
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(outer).await.unwrap(), Value::Int(7));
     }
@@ -10824,11 +11628,15 @@ mod tests {
     async fn neg_de_bool_es_type_error() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Bool(true, Span::ZERO)), span: Span::ZERO,
+            operand: Box::new(Expr::Bool(true, Span::ZERO)),
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10836,11 +11644,15 @@ mod tests {
     async fn neg_de_string_es_type_error() {
         let e = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Str("hola".into(), Span::ZERO)), span: Span::ZERO,
+            operand: Box::new(Expr::Str("hola".into(), Span::ZERO)),
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10892,7 +11704,10 @@ mod tests {
         };
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10905,7 +11720,10 @@ mod tests {
         };
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10913,29 +11731,48 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mod_simple_positivo() {
-        let e = binop(BinOpKind::Mod, Expr::Int(10, Span::ZERO), Expr::Int(3, Span::ZERO));
+        let e = binop(
+            BinOpKind::Mod,
+            Expr::Int(10, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(1));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mod_exacto_da_cero() {
-        let e = binop(BinOpKind::Mod, Expr::Int(12, Span::ZERO), Expr::Int(4, Span::ZERO));
+        let e = binop(
+            BinOpKind::Mod,
+            Expr::Int(12, Span::ZERO),
+            Expr::Int(4, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(0));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mod_negativo_es_euclidean() {
         // Semántica euclidean: -7 % 3 = 2 (no -1 como `%` Rust).
-        let e = binop(BinOpKind::Mod, Expr::Int(-7, Span::ZERO), Expr::Int(3, Span::ZERO));
+        let e = binop(
+            BinOpKind::Mod,
+            Expr::Int(-7, Span::ZERO),
+            Expr::Int(3, Span::ZERO),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(2));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mod_por_cero_es_error_runtime() {
-        let e = binop(BinOpKind::Mod, Expr::Int(7, Span::ZERO), Expr::Int(0, Span::ZERO));
+        let e = binop(
+            BinOpKind::Mod,
+            Expr::Int(7, Span::ZERO),
+            Expr::Int(0, Span::ZERO),
+        );
         let err = eval_expr_test(e).await.unwrap_err();
         match err {
-            EvalSignal::Error(FitzError { kind: ErrorKind::DivisionByZero, .. }) => {}
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::DivisionByZero,
+                ..
+            }) => {}
             other => panic!("esperaba DivisionByZero, fue {:?}", other),
         }
     }
@@ -10949,7 +11786,10 @@ mod tests {
         );
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -10957,10 +11797,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_list_replace_in_place() {
-        let (env, res) = parse_eval_into_env(
-            "let xs = [1, 2, 3]\nxs[0] = 99",
-        )
-        .await;
+        let (env, res) = parse_eval_into_env("let xs = [1, 2, 3]\nxs[0] = 99").await;
         res.unwrap();
         let xs = env.lock().get("xs").unwrap();
         match xs {
@@ -10976,10 +11813,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_map_replace() {
-        let (env, res) = parse_eval_into_env(
-            "let m = {\"a\": 1, \"b\": 2}\nm[\"a\"] = 10",
-        )
-        .await;
+        let (env, res) = parse_eval_into_env("let m = {\"a\": 1, \"b\": 2}\nm[\"a\"] = 10").await;
         res.unwrap();
         let m = env.lock().get("m").unwrap();
         match m {
@@ -10995,10 +11829,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_map_insert_nuevo_va_al_final() {
-        let (env, res) = parse_eval_into_env(
-            "let m = {\"a\": 1}\nm[\"b\"] = 2",
-        )
-        .await;
+        let (env, res) = parse_eval_into_env("let m = {\"a\": 1}\nm[\"b\"] = 2").await;
         res.unwrap();
         let m = env.lock().get("m").unwrap();
         match m {
@@ -11014,10 +11845,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_list_out_of_bounds_es_error() {
-        let (_env, res) = parse_eval_into_env(
-            "let xs = [1, 2]\nxs[5] = 99",
-        )
-        .await;
+        let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[5] = 99").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("fuera de rango"),
@@ -11030,10 +11858,7 @@ mod tests {
     async fn assign_index_list_negativo_fuera_de_rango_es_error() {
         // I.1: `xs[-1] = ...` ahora es válido (wrap). El error solo
         // dispara si el wrap queda fuera de [0, len).
-        let (_env, res) = parse_eval_into_env(
-            "let xs = [1, 2]\nxs[-99] = 99",
-        )
-        .await;
+        let (_env, res) = parse_eval_into_env("let xs = [1, 2]\nxs[-99] = 99").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("fuera de rango"),
@@ -11044,10 +11869,7 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn assign_index_sobre_int_es_type_error() {
-        let (_env, res) = parse_eval_into_env(
-            "let x = 5\nx[0] = 1",
-        )
-        .await;
+        let (_env, res) = parse_eval_into_env("let x = 5\nx[0] = 1").await;
         // El checker lo caza primero (type error). Para validar el
         // runtime puro, deberíamos usar --no-typecheck via parse_eval
         // directo; acá nos quedamos con el error sea de tipo o de
@@ -11060,10 +11882,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn assign_define_variable_nueva_en_scope_local() {
         let env = Environment::new();
-        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
+        let stmt = Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(42, Span::ZERO),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
         assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
@@ -11074,10 +11898,12 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(1));
 
-        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
+        let stmt = Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(99, Span::ZERO),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
         assert_eq!(env.lock().get("x"), Some(Value::Int(99)));
@@ -11089,10 +11915,12 @@ mod tests {
         global.lock().define("x", Value::Int(1));
 
         let child = Environment::new_child(global.clone());
-        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
+        let stmt = Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(42, Span::ZERO),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, child).await.unwrap();
 
         // El cambio se ve en el global.
@@ -11104,10 +11932,12 @@ mod tests {
         let global = Environment::new();
         let child = Environment::new_child(global.clone());
 
-        let stmt = Stmt::Assign { target: AssignTarget::Ident("nueva".into()),
+        let stmt = Stmt::Assign {
+            target: AssignTarget::Ident("nueva".into()),
             type_: None,
             value: Expr::Int(7, Span::ZERO),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, child.clone()).await.unwrap();
 
         // Solo existe en child, no se propagó al padre.
@@ -11120,12 +11950,17 @@ mod tests {
         // type_: Some("Int") con value String — no falla (tipado gradual,
         // sin checks en runtime todavía).
         let env = Environment::new();
-        let stmt = Stmt::Assign { target: AssignTarget::Ident("x".into()),
+        let stmt = Stmt::Assign {
+            target: AssignTarget::Ident("x".into()),
             type_: Some(TypeExpr::named("Int")),
             value: Expr::Str("soy un string".into(), Span::ZERO),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         assert!(eval_stmt(&stmt, env.clone()).await.is_ok());
-        assert_eq!(env.lock().get("x"), Some(Value::Str("soy un string".into())));
+        assert_eq!(
+            env.lock().get("x"),
+            Some(Value::Str("soy un string".into()))
+        );
     }
 
     // ---- Expr::Call (builtins) ----
@@ -11137,7 +11972,10 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Str("test".into(), Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+            args: vec![Expr::Str("test".into(), Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Null);
     }
@@ -11151,11 +11989,15 @@ mod tests {
         let env = Environment::new();
         let call = Expr::Call {
             callee: Box::new(Expr::Ident("noexiste".into(), Span::ZERO)),
-            args: vec![], span: Span::ZERO,
+            args: vec![],
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::UndefinedVariable(_), .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::UndefinedVariable(_),
+                ..
+            })
         ));
     }
 
@@ -11164,11 +12006,17 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(5));
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("x".into(), Span::ZERO)), args: vec![], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -11180,11 +12028,15 @@ mod tests {
         let env = Environment::new();
         register_builtins(&env);
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::BinOp {
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+            args: vec![Expr::BinOp {
                 op: BinOpKind::Add,
                 left: Box::new(Expr::Int(1, Span::ZERO)),
-                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }], span: Span::ZERO,
+                right: Box::new(Expr::Int(2, Span::ZERO)),
+                span: Span::ZERO,
+            }],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Null);
     }
@@ -11193,11 +12045,14 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_interp_solo_con_literales_concatena() {
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("hola ".into()),
-            StrPart::Lit("mundo".into()),
-        ], Span::ZERO);
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("hola mundo".into()));
+        let e = Expr::StrInterp(
+            vec![StrPart::Lit("hola ".into()), StrPart::Lit("mundo".into())],
+            Span::ZERO,
+        );
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("hola mundo".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11205,11 +12060,14 @@ mod tests {
         let env = Environment::new();
         env.lock().define("name", Value::Str("Fitz".into()));
 
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("Hola, ".into()),
-            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-            StrPart::Lit("!".into()),
-        ], Span::ZERO);
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("Hola, ".into()),
+                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                StrPart::Lit("!".into()),
+            ],
+            Span::ZERO,
+        );
         assert_eq!(
             eval_expr(&e, env).await.unwrap(),
             Value::Str("Hola, Fitz!".into())
@@ -11221,23 +12079,34 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(42));
 
-        let e = Expr::StrInterp(vec![
-            StrPart::Lit("x es ".into()),
-            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-        ], Span::ZERO);
-        assert_eq!(eval_expr(&e, env).await.unwrap(), Value::Str("x es 42".into()));
+        let e = Expr::StrInterp(
+            vec![
+                StrPart::Lit("x es ".into()),
+                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+            ],
+            Span::ZERO,
+        );
+        assert_eq!(
+            eval_expr(&e, env).await.unwrap(),
+            Value::Str("x es 42".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_interp_evalua_expresiones_internas() {
         // "{1 + 2}" → "3"
-        let e = Expr::StrInterp(vec![
-            StrPart::Expr(Expr::BinOp {
-                op: BinOpKind::Add,
-                left: Box::new(Expr::Int(1, Span::ZERO)),
-                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }, None),
-        ], Span::ZERO);
+        let e = Expr::StrInterp(
+            vec![StrPart::Expr(
+                Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Int(1, Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                None,
+            )],
+            Span::ZERO,
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("3".into()));
     }
 
@@ -11249,26 +12118,36 @@ mod tests {
     fn fn_def(name: &str, params: Vec<&str>, body: Vec<Stmt>) -> Stmt {
         Stmt::FnDef {
             name: name.into(),
-            params: params.into_iter().map(|p| crate::ast::Param {
-                name: p.into(),
-                type_: None,
-                default: None,
-                varargs: false,
-            }).collect(),
+            params: params
+                .into_iter()
+                .map(|p| crate::ast::Param {
+                    name: p.into(),
+                    type_: None,
+                    default: None,
+                    varargs: false,
+                })
+                .collect(),
             return_type: None,
             body,
             is_async: false,
             decorators: vec![],
-         span: Span::ZERO }
+            span: Span::ZERO,
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn fn_sin_return_devuelve_null() {
         // fn f() { } ; f()
         let env = Environment::new();
-        eval_stmt(&fn_def("f", vec![], vec![]), env.clone()).await.unwrap();
+        eval_stmt(&fn_def("f", vec![], vec![]), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Null);
     }
 
@@ -11277,11 +12156,21 @@ mod tests {
         // fn f() { return 42 } ; f()
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(42, Span::ZERO), Span::ZERO)]),
+            &fn_def(
+                "f",
+                vec![],
+                vec![Stmt::Return(Expr::Int(42, Span::ZERO), Span::ZERO)],
+            ),
             env.clone(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(42));
     }
 
@@ -11290,14 +12179,23 @@ mod tests {
         // fn double(n) => n * 2 → body es vec![Return(n * 2)]
         // double(7) → 14
         let env = Environment::new();
-        let body = vec![Stmt::Return(Expr::BinOp {
-            op: BinOpKind::Mul,
-            left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-            right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-        }, Span::ZERO)];
-        eval_stmt(&fn_def("double", vec!["n"], body), env.clone()).await.unwrap();
+        let body = vec![Stmt::Return(
+            Expr::BinOp {
+                op: BinOpKind::Mul,
+                left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)),
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        )];
+        eval_stmt(&fn_def("double", vec!["n"], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("double".into(), Span::ZERO)), args: vec![Expr::Int(7, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
+            args: vec![Expr::Int(7, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(14));
     }
@@ -11306,14 +12204,23 @@ mod tests {
     async fn fn_con_dos_params_suma() {
         // fn add(a, b) => a + b ; add(3, 4) → 7
         let env = Environment::new();
-        let body = vec![Stmt::Return(Expr::BinOp {
-            op: BinOpKind::Add,
-            left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-            right: Box::new(Expr::Ident("b".into(), Span::ZERO)), span: Span::ZERO,
-        }, Span::ZERO)];
-        eval_stmt(&fn_def("add", vec!["a", "b"], body), env.clone()).await.unwrap();
+        let body = vec![Stmt::Return(
+            Expr::BinOp {
+                op: BinOpKind::Add,
+                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        )];
+        eval_stmt(&fn_def("add", vec!["a", "b"], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("add".into(), Span::ZERO)), args: vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("add".into(), Span::ZERO)),
+            args: vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(7));
     }
@@ -11328,10 +12235,19 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(10));
 
-        let body = vec![Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO)];
-        eval_stmt(&fn_def("get_x", vec![], body), env.clone()).await.unwrap();
+        let body = vec![Stmt::Return(
+            Expr::Ident("x".into(), Span::ZERO),
+            Span::ZERO,
+        )];
+        eval_stmt(&fn_def("get_x", vec![], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("get_x".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("get_x".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(10));
     }
 
@@ -11341,10 +12257,18 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(100));
 
-        let body = vec![Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO)];
-        eval_stmt(&fn_def("f", vec!["x"], body), env.clone()).await.unwrap();
+        let body = vec![Stmt::Return(
+            Expr::Ident("x".into(), Span::ZERO),
+            Span::ZERO,
+        )];
+        eval_stmt(&fn_def("f", vec!["x"], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(7, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![Expr::Int(7, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(7));
     }
@@ -11354,16 +12278,29 @@ mod tests {
         // fn f(a, b) ... ; f(1)
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec!["a", "b"], vec![Stmt::Return(Expr::Int(0, Span::ZERO), Span::ZERO)]),
+            &fn_def(
+                "f",
+                vec!["a", "b"],
+                vec![Stmt::Return(Expr::Int(0, Span::ZERO), Span::ZERO)],
+            ),
             env.clone(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![Expr::Int(1, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).await.unwrap_err(),
             EvalSignal::Error(FitzError {
-                kind: ErrorKind::WrongArgCount { expected: 2, found: 1 }, ..
+                kind: ErrorKind::WrongArgCount {
+                    expected: 2,
+                    found: 1
+                },
+                ..
             })
         ));
     }
@@ -11372,16 +12309,29 @@ mod tests {
     async fn fn_con_muchos_args_es_error() {
         let env = Environment::new();
         eval_stmt(
-            &fn_def("f", vec![], vec![Stmt::Return(Expr::Int(0, Span::ZERO), Span::ZERO)]),
+            &fn_def(
+                "f",
+                vec![],
+                vec![Stmt::Return(Expr::Int(0, Span::ZERO), Span::ZERO)],
+            ),
             env.clone(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).await.unwrap_err(),
             EvalSignal::Error(FitzError {
-                kind: ErrorKind::WrongArgCount { expected: 0, found: 2 }, ..
+                kind: ErrorKind::WrongArgCount {
+                    expected: 0,
+                    found: 2
+                },
+                ..
             })
         ));
     }
@@ -11405,23 +12355,35 @@ mod tests {
         // f(5) → 11
         let env = Environment::new();
         let body = vec![
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
                 },
-             span: Span::ZERO },
-            Stmt::Return(Expr::BinOp {
-                op: BinOpKind::Add,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO),
+                span: Span::ZERO,
+            },
+            Stmt::Return(
+                Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
         ];
-        eval_stmt(&fn_def("f", vec!["n"], body), env.clone()).await.unwrap();
+        eval_stmt(&fn_def("f", vec!["n"], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(5, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![Expr::Int(5, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(11));
     }
@@ -11437,9 +12399,15 @@ mod tests {
             Stmt::Return(Expr::Int(1, Span::ZERO), Span::ZERO),
             Stmt::Return(Expr::Int(2, Span::ZERO), Span::ZERO),
         ];
-        eval_stmt(&fn_def("f", vec![], body), env.clone()).await.unwrap();
+        eval_stmt(&fn_def("f", vec![], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(1));
     }
 
@@ -11447,19 +12415,32 @@ mod tests {
 
     /// Helper: arma `if cond { then } else? { else_ }`.
     fn if_expr(cond: Expr, then: Vec<Stmt>, else_: Option<Vec<Stmt>>) -> Expr {
-        Expr::If { condition: Box::new(cond), then, else_, span: Span::ZERO }
+        Expr::If {
+            condition: Box::new(cond),
+            then,
+            else_,
+            span: Span::ZERO,
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_true_sin_else_devuelve_valor_del_then() {
         // if true { 7 } → 7
-        let e = if_expr(Expr::Bool(true, Span::ZERO), vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)], None);
+        let e = if_expr(
+            Expr::Bool(true, Span::ZERO),
+            vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)],
+            None,
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(7));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn if_false_sin_else_devuelve_null() {
-        let e = if_expr(Expr::Bool(false, Span::ZERO), vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)], None);
+        let e = if_expr(
+            Expr::Bool(false, Span::ZERO),
+            vec![Stmt::Expr(Expr::Int(7, Span::ZERO), Span::ZERO)],
+            None,
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Null);
     }
 
@@ -11468,7 +12449,11 @@ mod tests {
         // if true { 1 } else { 2 } → 1
         let then = vec![Stmt::Expr(Expr::Int(1, Span::ZERO), Span::ZERO)];
         let else_ = vec![Stmt::Expr(Expr::Int(2, Span::ZERO), Span::ZERO)];
-        let e = if_expr(Expr::Bool(true, Span::ZERO), then.clone(), Some(else_.clone()));
+        let e = if_expr(
+            Expr::Bool(true, Span::ZERO),
+            then.clone(),
+            Some(else_.clone()),
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(1));
 
         let e = if_expr(Expr::Bool(false, Span::ZERO), then, Some(else_));
@@ -11481,7 +12466,10 @@ mod tests {
         let e = if_expr(Expr::Int(1, Span::ZERO), vec![], None);
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -11489,7 +12477,10 @@ mod tests {
     async fn if_evalua_solo_la_rama_correspondiente() {
         // El then es un Ident no definido. Si se evaluara, daría error.
         // Como cond es false, no se toca → resultado del else.
-        let then = vec![Stmt::Expr(Expr::Ident("no_existe".into(), Span::ZERO), Span::ZERO)];
+        let then = vec![Stmt::Expr(
+            Expr::Ident("no_existe".into(), Span::ZERO),
+            Span::ZERO,
+        )];
         let else_ = vec![Stmt::Expr(Expr::Int(99, Span::ZERO), Span::ZERO)];
         let e = if_expr(Expr::Bool(false, Span::ZERO), then, Some(else_));
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(99));
@@ -11503,18 +12494,24 @@ mod tests {
         let env = Environment::new();
         env.lock().define("x", Value::Int(1));
 
-        let if_stmt = Stmt::Expr(if_expr(
-            Expr::BinOp {
-                op: BinOpKind::Eq,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-            },
-            vec![Stmt::Assign { target: AssignTarget::Ident("y".into()),
-                type_: None,
-                value: Expr::Int(99, Span::ZERO),
-             span: Span::ZERO }],
-            None,
-        ), Span::ZERO);
+        let if_stmt = Stmt::Expr(
+            if_expr(
+                Expr::BinOp {
+                    op: BinOpKind::Eq,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                vec![Stmt::Assign {
+                    target: AssignTarget::Ident("y".into()),
+                    type_: None,
+                    value: Expr::Int(99, Span::ZERO),
+                    span: Span::ZERO,
+                }],
+                None,
+            ),
+            Span::ZERO,
+        );
         eval_stmt(&if_stmt, env.clone()).await.unwrap();
 
         assert_eq!(env.lock().get("y"), Some(Value::Int(99)));
@@ -11542,14 +12539,16 @@ mod tests {
     async fn if_como_expresion_en_assign() {
         // let r = if true { 42 } else { 0 }
         let env = Environment::new();
-        let stmt = Stmt::Assign { target: AssignTarget::Ident("r".into()),
+        let stmt = Stmt::Assign {
+            target: AssignTarget::Ident("r".into()),
             type_: None,
             value: if_expr(
                 Expr::Bool(true, Span::ZERO),
                 vec![Stmt::Expr(Expr::Int(42, Span::ZERO), Span::ZERO)],
                 Some(vec![Stmt::Expr(Expr::Int(0, Span::ZERO), Span::ZERO)]),
             ),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(42)));
     }
@@ -11567,30 +12566,47 @@ mod tests {
         let env = Environment::new();
 
         let body = vec![
-            Stmt::Expr(if_expr(
-                Expr::BinOp {
-                    op: BinOpKind::Eq,
-                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
-                },
-                vec![Stmt::Return(Expr::Int(1, Span::ZERO), Span::ZERO)],
-                None,
-            ), Span::ZERO),
-            Stmt::Return(Expr::BinOp {
-                op: BinOpKind::Mul,
-                left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                right: Box::new(Expr::Call { callee: Box::new(Expr::Ident("factorial".into(), Span::ZERO)), args: vec![Expr::BinOp {
-                        op: BinOpKind::Sub,
+            Stmt::Expr(
+                if_expr(
+                    Expr::BinOp {
+                        op: BinOpKind::Eq,
                         left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-                    }], span: Span::ZERO,
-                }), span: Span::ZERO,
-            }, Span::ZERO),
+                        right: Box::new(Expr::Int(0, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    vec![Stmt::Return(Expr::Int(1, Span::ZERO), Span::ZERO)],
+                    None,
+                ),
+                Span::ZERO,
+            ),
+            Stmt::Return(
+                Expr::BinOp {
+                    op: BinOpKind::Mul,
+                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    right: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("factorial".into(), Span::ZERO)),
+                        args: vec![Expr::BinOp {
+                            op: BinOpKind::Sub,
+                            left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                            right: Box::new(Expr::Int(1, Span::ZERO)),
+                            span: Span::ZERO,
+                        }],
+                        span: Span::ZERO,
+                    }),
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
         ];
 
-        eval_stmt(&fn_def("factorial", vec!["n"], body), env.clone()).await.unwrap();
+        eval_stmt(&fn_def("factorial", vec!["n"], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("factorial".into(), Span::ZERO)), args: vec![Expr::Int(5, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("factorial".into(), Span::ZERO)),
+            args: vec![Expr::Int(5, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(120));
     }
@@ -11600,7 +12616,11 @@ mod tests {
     use crate::ast::MatchArm;
 
     fn match_arm(pattern: Pattern, body: Expr) -> MatchArm {
-        MatchArm { pattern, guard: None, body: vec![Stmt::Expr(body, Span::ZERO)] }
+        MatchArm {
+            pattern,
+            guard: None,
+            body: vec![Stmt::Expr(body, Span::ZERO)],
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11608,7 +12628,8 @@ mod tests {
         // match 42 { _ => 99 } → 99
         let e = Expr::Match {
             value: Box::new(Expr::Int(42, Span::ZERO)),
-            arms: vec![match_arm(Pattern::Wildcard, Expr::Int(99, Span::ZERO))], span: Span::ZERO,
+            arms: vec![match_arm(Pattern::Wildcard, Expr::Int(99, Span::ZERO))],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(99));
     }
@@ -11623,9 +12644,11 @@ mod tests {
                 Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
                 },
-            )], span: Span::ZERO,
+            )],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(43));
     }
@@ -11641,15 +12664,25 @@ mod tests {
             arms: vec![
                 match_arm(
                     Pattern::Ident("x".into()),
-                    Expr::StrInterp(vec![
-                        StrPart::Lit("primer arm: ".into()),
-                        StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-                    ], Span::ZERO),
+                    Expr::StrInterp(
+                        vec![
+                            StrPart::Lit("primer arm: ".into()),
+                            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+                        ],
+                        Span::ZERO,
+                    ),
                 ),
-                match_arm(Pattern::Wildcard, Expr::Str("segundo arm".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+                match_arm(
+                    Pattern::Wildcard,
+                    Expr::Str("segundo arm".into(), Span::ZERO),
+                ),
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("primer arm: hola".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("primer arm: hola".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11658,7 +12691,11 @@ mod tests {
         let env = Environment::new();
         let e = Expr::Match {
             value: Box::new(Expr::Int(7, Span::ZERO)),
-            arms: vec![match_arm(Pattern::Ident("n".into()), Expr::Ident("n".into(), Span::ZERO))], span: Span::ZERO,
+            arms: vec![match_arm(
+                Pattern::Ident("n".into()),
+                Expr::Ident("n".into(), Span::ZERO),
+            )],
+            span: Span::ZERO,
         };
         eval_expr(&e, env.clone()).await.unwrap();
 
@@ -11677,11 +12714,13 @@ mod tests {
                     Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("v".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Int(1, Span::ZERO)),
+                        span: Span::ZERO,
                     },
                 ),
                 match_arm(Pattern::ErrBinding("e".into()), Expr::Int(-1, Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(6));
     }
@@ -11690,11 +12729,21 @@ mod tests {
     async fn match_err_binding_bindea_inner() {
         // match Err("boom") { Ok(v) => "ok", Err(e) => e } → "boom"
         let e = Expr::Match {
-            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)),
+            value: Box::new(Expr::Err(
+                Box::new(Expr::Str("boom".into(), Span::ZERO)),
+                Span::ZERO,
+            )),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
-                match_arm(Pattern::ErrBinding("e".into()), Expr::Ident("e".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+                match_arm(
+                    Pattern::OkBinding("v".into()),
+                    Expr::Str("ok".into(), Span::ZERO),
+                ),
+                match_arm(
+                    Pattern::ErrBinding("e".into()),
+                    Expr::Ident("e".into(), Span::ZERO),
+                ),
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("boom".into()));
     }
@@ -11705,9 +12754,13 @@ mod tests {
         let e = Expr::Match {
             value: Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(
+                    Pattern::OkBinding("v".into()),
+                    Expr::Str("ok".into(), Span::ZERO),
+                ),
                 match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("otro".into()));
     }
@@ -11718,11 +12771,18 @@ mod tests {
         let e = Expr::Match {
             value: Box::new(Expr::Int(5, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(
+                    Pattern::OkBinding("v".into()),
+                    Expr::Str("ok".into(), Span::ZERO),
+                ),
                 match_arm(Pattern::Wildcard, Expr::Str("no-result".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("no-result".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("no-result".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11735,7 +12795,8 @@ mod tests {
             arms: vec![
                 match_arm(Pattern::OkWildcard, Expr::Str("ok!".into(), Span::ZERO)),
                 match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("ok!".into()));
     }
@@ -11743,11 +12804,18 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn match_err_wildcard_matchea_err() {
         let e = Expr::Match {
-            value: Box::new(Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)),
+            value: Box::new(Expr::Err(
+                Box::new(Expr::Str("boom".into(), Span::ZERO)),
+                Span::ZERO,
+            )),
             arms: vec![
-                match_arm(Pattern::OkBinding("v".into()), Expr::Str("ok".into(), Span::ZERO)),
+                match_arm(
+                    Pattern::OkBinding("v".into()),
+                    Expr::Str("ok".into(), Span::ZERO),
+                ),
                 match_arm(Pattern::ErrWildcard, Expr::Str("falló".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("falló".into()));
     }
@@ -11760,7 +12828,8 @@ mod tests {
             arms: vec![
                 match_arm(Pattern::OkWildcard, Expr::Str("ok".into(), Span::ZERO)),
                 match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("otro".into()));
     }
@@ -11792,7 +12861,8 @@ print(_)\n";
                 match_arm(Pattern::Int(1), Expr::Str("uno".into(), Span::ZERO)),
                 match_arm(Pattern::Int(2), Expr::Str("dos".into(), Span::ZERO)),
                 match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("dos".into()));
     }
@@ -11806,9 +12876,13 @@ print(_)\n";
             arms: vec![
                 match_arm(Pattern::Int(1), Expr::Str("int".into(), Span::ZERO)),
                 match_arm(Pattern::Wildcard, Expr::Str("no-int".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("no-int".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("no-int".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11819,7 +12893,8 @@ print(_)\n";
                 match_arm(Pattern::Str("chau".into()), Expr::Int(1, Span::ZERO)),
                 match_arm(Pattern::Str("hola".into()), Expr::Int(2, Span::ZERO)),
                 match_arm(Pattern::Wildcard, Expr::Int(0, Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(2));
     }
@@ -11830,10 +12905,17 @@ print(_)\n";
             value: Box::new(Expr::Bool(true, Span::ZERO)),
             arms: vec![
                 match_arm(Pattern::Bool(false), Expr::Str("falso".into(), Span::ZERO)),
-                match_arm(Pattern::Bool(true), Expr::Str("verdadero".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+                match_arm(
+                    Pattern::Bool(true),
+                    Expr::Str("verdadero".into(), Span::ZERO),
+                ),
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("verdadero".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("verdadero".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11843,9 +12925,13 @@ print(_)\n";
             arms: vec![
                 match_arm(Pattern::Null, Expr::Str("es null".into(), Span::ZERO)),
                 match_arm(Pattern::Wildcard, Expr::Str("no null".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("es null".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("es null".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11853,11 +12939,18 @@ print(_)\n";
         let e = Expr::Match {
             value: Box::new(Expr::Int(-5, Span::ZERO)),
             arms: vec![
-                match_arm(Pattern::Int(-5), Expr::Str("menos cinco".into(), Span::ZERO)),
+                match_arm(
+                    Pattern::Int(-5),
+                    Expr::Str("menos cinco".into(), Span::ZERO),
+                ),
                 match_arm(Pattern::Wildcard, Expr::Str("otro".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("menos cinco".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("menos cinco".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -11869,21 +12962,29 @@ print(_)\n";
                 match_arm(Pattern::Int(1), Expr::Str("uno".into(), Span::ZERO)),
                 match_arm(
                     Pattern::Ident("n".into()),
-                    Expr::StrInterp(vec![
-                        StrPart::Lit("default ".into()),
-                        StrPart::Expr(Expr::Ident("n".into(), Span::ZERO), None),
-                    ], Span::ZERO),
+                    Expr::StrInterp(
+                        vec![
+                            StrPart::Lit("default ".into()),
+                            StrPart::Expr(Expr::Ident("n".into(), Span::ZERO), None),
+                        ],
+                        Span::ZERO,
+                    ),
                 ),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
-        assert_eq!(eval_expr_test(e).await.unwrap(), Value::Str("default 42".into()));
+        assert_eq!(
+            eval_expr_test(e).await.unwrap(),
+            Value::Str("default 42".into())
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn match_sin_arms_es_error() {
         let e = Expr::Match {
             value: Box::new(Expr::Int(1, Span::ZERO)),
-            arms: vec![], span: Span::ZERO,
+            arms: vec![],
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr_test(e).await.unwrap_err(),
@@ -11907,28 +13008,36 @@ print(_)\n";
             condition: Expr::BinOp {
                 op: BinOpKind::Lt,
                 left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(5, Span::ZERO)),
+                span: Span::ZERO,
             },
             body: vec![
-                Stmt::Assign { target: AssignTarget::Ident("total".into()),
+                Stmt::Assign {
+                    target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("total".into(), Span::ZERO)),
-                        right: Box::new(Expr::Ident("i".into(), Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        span: Span::ZERO,
                     },
-                 span: Span::ZERO },
-                Stmt::Assign { target: AssignTarget::Ident("i".into()),
+                    span: Span::ZERO,
+                },
+                Stmt::Assign {
+                    target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Int(1, Span::ZERO)),
+                        span: Span::ZERO,
                     },
-                 span: Span::ZERO },
+                    span: Span::ZERO,
+                },
             ],
-          label: None,
-          span: Span::ZERO };
+            label: None,
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(10)));
     }
@@ -11940,12 +13049,15 @@ print(_)\n";
 
         let stmt = Stmt::While {
             condition: Expr::Bool(false, Span::ZERO),
-            body: vec![Stmt::Assign { target: AssignTarget::Ident("counter".into()),
+            body: vec![Stmt::Assign {
+                target: AssignTarget::Ident("counter".into()),
                 type_: None,
                 value: Expr::Int(99, Span::ZERO),
-             span: Span::ZERO }],
-          label: None,
-          span: Span::ZERO };
+                span: Span::ZERO,
+            }],
+            label: None,
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("counter"), Some(Value::Int(0)));
     }
@@ -11959,26 +13071,35 @@ print(_)\n";
         let stmt = Stmt::While {
             condition: Expr::Bool(true, Span::ZERO),
             body: vec![
-                Stmt::Assign { target: AssignTarget::Ident("i".into()),
+                Stmt::Assign {
+                    target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Int(1, Span::ZERO)),
+                        span: Span::ZERO,
                     },
-                 span: Span::ZERO },
-                Stmt::Expr(Expr::If {
-                    condition: Box::new(Expr::BinOp {
-                        op: BinOpKind::Eq,
-                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-                    }),
-                    then: vec![Stmt::Break(None, None, Span::ZERO)],
-                    else_: None, span: Span::ZERO,
-                }, Span::ZERO),
+                    span: Span::ZERO,
+                },
+                Stmt::Expr(
+                    Expr::If {
+                        condition: Box::new(Expr::BinOp {
+                            op: BinOpKind::Eq,
+                            left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                            right: Box::new(Expr::Int(3, Span::ZERO)),
+                            span: Span::ZERO,
+                        }),
+                        then: vec![Stmt::Break(None, None, Span::ZERO)],
+                        else_: None,
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO,
+                ),
             ],
             label: None,
-          span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("i"), Some(Value::Int(3)));
     }
@@ -11999,37 +13120,50 @@ print(_)\n";
             condition: Expr::BinOp {
                 op: BinOpKind::Lt,
                 left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(5, Span::ZERO)),
+                span: Span::ZERO,
             },
             body: vec![
-                Stmt::Assign { target: AssignTarget::Ident("i".into()),
+                Stmt::Assign {
+                    target: AssignTarget::Ident("i".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Int(1, Span::ZERO)),
+                        span: Span::ZERO,
                     },
-                 span: Span::ZERO },
-                Stmt::Expr(Expr::If {
-                    condition: Box::new(Expr::BinOp {
-                        op: BinOpKind::Eq,
-                        left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-                    }),
-                    then: vec![Stmt::Continue(None, Span::ZERO)],
-                    else_: None, span: Span::ZERO,
-                }, Span::ZERO),
-                Stmt::Assign { target: AssignTarget::Ident("total".into()),
+                    span: Span::ZERO,
+                },
+                Stmt::Expr(
+                    Expr::If {
+                        condition: Box::new(Expr::BinOp {
+                            op: BinOpKind::Eq,
+                            left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                            right: Box::new(Expr::Int(3, Span::ZERO)),
+                            span: Span::ZERO,
+                        }),
+                        then: vec![Stmt::Continue(None, Span::ZERO)],
+                        else_: None,
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO,
+                ),
+                Stmt::Assign {
+                    target: AssignTarget::Ident("total".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("total".into(), Span::ZERO)),
-                        right: Box::new(Expr::Ident("i".into(), Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Ident("i".into(), Span::ZERO)),
+                        span: Span::ZERO,
                     },
-                 span: Span::ZERO },
+                    span: Span::ZERO,
+                },
             ],
             label: None,
-          span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(12)));
     }
@@ -12041,10 +13175,14 @@ print(_)\n";
             condition: Expr::Int(1, Span::ZERO),
             body: vec![],
             label: None,
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         assert!(matches!(
             eval_stmt(&stmt, env).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -12059,26 +13197,35 @@ print(_)\n";
         // }
         let stmt = Stmt::Loop {
             body: vec![
-                Stmt::Assign { target: AssignTarget::Ident("count".into()),
+                Stmt::Assign {
+                    target: AssignTarget::Ident("count".into()),
                     type_: None,
                     value: Expr::BinOp {
                         op: BinOpKind::Add,
                         left: Box::new(Expr::Ident("count".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Int(1, Span::ZERO)),
+                        span: Span::ZERO,
                     },
-                 span: Span::ZERO },
-                Stmt::Expr(Expr::If {
-                    condition: Box::new(Expr::BinOp {
-                        op: BinOpKind::Eq,
-                        left: Box::new(Expr::Ident("count".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
-                    }),
-                    then: vec![Stmt::Break(None, None, Span::ZERO)],
-                    else_: None, span: Span::ZERO,
-                }, Span::ZERO),
+                    span: Span::ZERO,
+                },
+                Stmt::Expr(
+                    Expr::If {
+                        condition: Box::new(Expr::BinOp {
+                            op: BinOpKind::Eq,
+                            left: Box::new(Expr::Ident("count".into(), Span::ZERO)),
+                            right: Box::new(Expr::Int(5, Span::ZERO)),
+                            span: Span::ZERO,
+                        }),
+                        then: vec![Stmt::Break(None, None, Span::ZERO)],
+                        else_: None,
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO,
+                ),
             ],
             label: None,
-          span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
         assert_eq!(env.lock().get("count"), Some(Value::Int(5)));
     }
@@ -12093,11 +13240,18 @@ print(_)\n";
         let body = vec![Stmt::While {
             condition: Expr::Bool(true, Span::ZERO),
             body: vec![Stmt::Return(Expr::Int(42, Span::ZERO), Span::ZERO)],
-         label: None,
-         span: Span::ZERO }];
-        eval_stmt(&fn_def("f", vec![], body), env.clone()).await.unwrap();
+            label: None,
+            span: Span::ZERO,
+        }];
+        eval_stmt(&fn_def("f", vec![], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(42));
     }
 
@@ -12130,7 +13284,8 @@ print(_)\n";
                 make_field("name", "Str", false),
             ],
             methods: vec![],
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         eval_stmt(&stmt, env.clone()).await.unwrap();
 
         let v = env.lock().get("User").expect("User no quedó en el env");
@@ -12165,11 +13320,16 @@ print(_)\n";
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
                 methods: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             env.clone(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let result = eval_expr(&Expr::Ident("User".into(), Span::ZERO), env).await.unwrap();
+        let result = eval_expr(&Expr::Ident("User".into(), Span::ZERO), env)
+            .await
+            .unwrap();
         assert!(matches!(result, Value::Type { .. }));
     }
 
@@ -12183,15 +13343,24 @@ print(_)\n";
                 name: "User".into(),
                 fields: vec![make_field("id", "Int", false)],
                 methods: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             env.clone(),
-        ).await.unwrap();
+        )
+        .await
+        .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("User".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO)], span: Span::ZERO,
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("User".into(), Span::ZERO)),
+            args: vec![Expr::Int(1, Span::ZERO)],
+            span: Span::ZERO,
         };
         assert!(matches!(
             eval_expr(&call, env).await.unwrap_err(),
-            EvalSignal::Error(FitzError { kind: ErrorKind::TypeMismatch { .. }, .. })
+            EvalSignal::Error(FitzError {
+                kind: ErrorKind::TypeMismatch { .. },
+                ..
+            })
         ));
     }
 
@@ -12210,37 +13379,64 @@ print(_)\n";
         //   Hola Fitz, x es 15
         //   30
         let program = vec![
-            Stmt::Assign { target: AssignTarget::Ident("name".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
-             span: Span::ZERO },
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+                span: Span::ZERO,
+            },
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(10, Span::ZERO)),
-                    right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(5, Span::ZERO)),
+                    span: Span::ZERO,
                 },
-             span: Span::ZERO },
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
-                    StrPart::Lit("Hola ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-                    StrPart::Lit(", x es ".into()),
-                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-                ], Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO),
+                span: Span::ZERO,
+            },
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::StrInterp(
+                        vec![
+                            StrPart::Lit("Hola ".into()),
+                            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                            StrPart::Lit(", x es ".into()),
+                            StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+                        ],
+                        Span::ZERO,
+                    )],
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
             fn_def(
                 "double",
                 vec!["n"],
-                vec![Stmt::Return(Expr::BinOp {
-                    op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }, Span::ZERO)],
+                vec![Stmt::Return(
+                    Expr::BinOp {
+                        op: BinOpKind::Mul,
+                        left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(2, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO,
+                )],
             ),
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-                }], span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::Call {
+                        callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
+                        args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                        span: Span::ZERO,
+                    }],
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
         ];
         assert!(eval(program).await.is_ok());
     }
@@ -12290,16 +13486,27 @@ print(factorial(5))
         // Verifica que el camino Assign → StrInterp → Call (builtin) funciona
         // end-to-end. La salida real se ve con `cargo run -- run examples/hello.fitz`.
         let program = vec![
-            Stmt::Assign { target: AssignTarget::Ident("name".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Patagonia".into(), Span::ZERO),
-             span: Span::ZERO },
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
-                    StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-                    StrPart::Lit("!".into()),
-                ], Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO),
+                span: Span::ZERO,
+            },
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::StrInterp(
+                        vec![
+                            StrPart::Lit("Hola, ".into()),
+                            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                            StrPart::Lit("!".into()),
+                        ],
+                        Span::ZERO,
+                    )],
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
         ];
         assert!(eval(program).await.is_ok());
     }
@@ -12340,35 +13547,52 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_list_vacia() {
-        let v = eval_expr_test(Expr::List(vec![], Span::ZERO)).await.unwrap();
+        let v = eval_expr_test(Expr::List(vec![], Span::ZERO))
+            .await
+            .unwrap();
         assert_eq!(v, Value::new_list(vec![]));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_list_con_literales() {
-        let v = eval_expr_test(Expr::List(vec![
-            Expr::Int(1, Span::ZERO),
-            Expr::Int(2, Span::ZERO),
-            Expr::Int(3, Span::ZERO),
-        ], Span::ZERO)).await.unwrap();
-        assert_eq!(v, Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)]));
+        let v = eval_expr_test(Expr::List(
+            vec![
+                Expr::Int(1, Span::ZERO),
+                Expr::Int(2, Span::ZERO),
+                Expr::Int(3, Span::ZERO),
+            ],
+            Span::ZERO,
+        ))
+        .await
+        .unwrap();
+        assert_eq!(
+            v,
+            Value::new_list(vec![Value::Int(1), Value::Int(2), Value::Int(3)])
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_list_con_expresiones() {
         // [1 + 1, 2 * 2]
-        let v = eval_expr_test(Expr::List(vec![
-            Expr::BinOp {
-                op: BinOpKind::Add,
-                left: Box::new(Expr::Int(1, Span::ZERO)),
-                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-            },
-            Expr::BinOp {
-                op: BinOpKind::Mul,
-                left: Box::new(Expr::Int(2, Span::ZERO)),
-                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            },
-        ], Span::ZERO)).await.unwrap();
+        let v = eval_expr_test(Expr::List(
+            vec![
+                Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Int(1, Span::ZERO)),
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Expr::BinOp {
+                    op: BinOpKind::Mul,
+                    left: Box::new(Expr::Int(2, Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+            ],
+            Span::ZERO,
+        ))
+        .await
+        .unwrap();
         assert_eq!(v, Value::new_list(vec![Value::Int(2), Value::Int(4)]));
     }
 
@@ -12382,10 +13606,15 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn evalua_map_con_pares() {
-        let v = eval_expr_test(Expr::Map(vec![
-            (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-            (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
-        ], Span::ZERO)).await.unwrap();
+        let v = eval_expr_test(Expr::Map(
+            vec![
+                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+            ],
+            Span::ZERO,
+        ))
+        .await
+        .unwrap();
         assert_eq!(
             v,
             Value::new_map(vec![
@@ -12404,7 +13633,9 @@ print(factorial(5))
             end: Box::new(Expr::Int(10, Span::ZERO)),
             inclusive: false,
             span: Span::ZERO,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(v, Value::Range { start: 0, end: 10 });
     }
 
@@ -12416,7 +13647,8 @@ print(factorial(5))
             end: Box::new(Expr::Float(1.5, Span::ZERO)),
             inclusive: false,
             span: Span::ZERO,
-        }).await;
+        })
+        .await;
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
@@ -12436,7 +13668,9 @@ print(factorial(5))
             end: Box::new(Expr::Int(10, Span::ZERO)),
             inclusive: true,
             span: Span::ZERO,
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert_eq!(v, Value::Range { start: 0, end: 11 });
     }
 
@@ -12455,10 +13689,8 @@ print(factorial(5))
     #[tokio::test(flavor = "current_thread")]
     async fn match_pattern_inclusive_matchea_end() {
         // match 100 { 0..=100 => "ok", _ => "fuera" } → "ok"
-        let (env, res) = parse_eval_into_env(
-            "let r = match 100 { 0..=100 => \"ok\", _ => \"fuera\" }",
-        )
-        .await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 100 { 0..=100 => \"ok\", _ => \"fuera\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
     }
@@ -12466,10 +13698,8 @@ print(factorial(5))
     #[tokio::test(flavor = "current_thread")]
     async fn match_pattern_exclusive_no_matchea_end() {
         // match 100 { 0..100 => "in", _ => "out" } → "out" (exclusive)
-        let (env, res) = parse_eval_into_env(
-            "let r = match 100 { 0..100 => \"in\", _ => \"out\" }",
-        )
-        .await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 100 { 0..100 => \"in\", _ => \"out\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("out".into())));
     }
@@ -12478,27 +13708,24 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_literal_int_matchea_primero() {
-        let (env, res) = parse_eval_into_env(
-            "let r = match 1 { 1 | 2 | 3 => \"ok\", _ => \"no\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 1 { 1 | 2 | 3 => \"ok\", _ => \"no\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_literal_int_matchea_segundo() {
-        let (env, res) = parse_eval_into_env(
-            "let r = match 2 { 1 | 2 | 3 => \"ok\", _ => \"no\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 2 { 1 | 2 | 3 => \"ok\", _ => \"no\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_literal_int_no_matchea() {
-        let (env, res) = parse_eval_into_env(
-            "let r = match 4 { 1 | 2 | 3 => \"ok\", _ => \"no\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 4 { 1 | 2 | 3 => \"ok\", _ => \"no\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("no".into())));
     }
@@ -12507,7 +13734,8 @@ print(factorial(5))
     async fn or_pattern_strings() {
         let (env, res) = parse_eval_into_env(
             "let r = match \"lun\" { \"lun\" | \"mar\" => \"laboral\", _ => \"x\" }",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("laboral".into())));
     }
@@ -12515,18 +13743,16 @@ print(factorial(5))
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_mezcla_int_y_range() {
         // 7 → matchea Range 5..=10 (segundo sub-pattern)
-        let (env, res) = parse_eval_into_env(
-            "let r = match 7 { 0 | 5..=10 => \"ok\", _ => \"x\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 7 { 0 | 5..=10 => \"ok\", _ => \"x\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("ok".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn or_pattern_ok_y_err_wildcard() {
-        let (env, res) = parse_eval_into_env(
-            "let r = match Ok(42) { Ok(_) | Err(_) => \"cualquier\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match Ok(42) { Ok(_) | Err(_) => \"cualquier\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("cualquier".into())));
     }
@@ -12539,7 +13765,8 @@ print(factorial(5))
         // ninguna var del pattern.
         let (env, res) = parse_eval_into_env(
             "let r = match 5 { 1 | 2 => \"chico\", 3 | 4 | 5 => \"medio\", _ => \"x\" }",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("medio".into())));
     }
@@ -12548,18 +13775,16 @@ print(factorial(5))
 
     #[tokio::test(flavor = "current_thread")]
     async fn guard_true_dispara_arm() {
-        let (env, res) = parse_eval_into_env(
-            "let r = match 10 { x if x > 5 => \"alto\", _ => \"bajo\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 10 { x if x > 5 => \"alto\", _ => \"bajo\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("alto".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn guard_false_pasa_al_siguiente_arm() {
-        let (env, res) = parse_eval_into_env(
-            "let r = match 3 { x if x > 5 => \"alto\", _ => \"bajo\" }",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let r = match 3 { x if x > 5 => \"alto\", _ => \"bajo\" }").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("bajo".into())));
     }
@@ -12586,16 +13811,16 @@ print(factorial(5))
     async fn guard_con_or_pattern_dispara_si_cond_true() {
         let (env, res) = parse_eval_into_env(
             "let r = match 4 { 1 | 2 | 3 | 4 if true => \"any\", _ => \"otro\" }",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("any".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn guard_no_bool_es_error() {
-        let (_env, res) = parse_eval_into_env(
-            "let r = match 1 { x if x => \"x\", _ => \"y\" }",
-        ).await;
+        let (_env, res) =
+            parse_eval_into_env("let r = match 1 { x if x => \"x\", _ => \"y\" }").await;
         let err = res.unwrap_err();
         assert!(err.message.contains("guard"));
     }
@@ -12608,7 +13833,8 @@ print(factorial(5))
             "let total = 0\n\
              total += 5\n\
              total += 10",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(15)));
     }
@@ -12618,7 +13844,8 @@ print(factorial(5))
         let (env, res) = parse_eval_into_env(
             "let n = 100\n\
              n -= 30",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("n"), Some(Value::Int(70)));
     }
@@ -12628,7 +13855,8 @@ print(factorial(5))
         let (env, res) = parse_eval_into_env(
             "let x = 6\n\
              x *= 7",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("x"), Some(Value::Int(42)));
     }
@@ -12638,7 +13866,8 @@ print(factorial(5))
         let (env, res) = parse_eval_into_env(
             "let q = 20\n\
              q /= 4",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("q"), Some(Value::Int(5)));
     }
@@ -12648,7 +13877,8 @@ print(factorial(5))
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3]\n\
              xs[0] += 10",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let xs = env.lock().get("xs").unwrap();
         match xs {
@@ -12668,7 +13898,8 @@ print(factorial(5))
         let (env, res) = parse_eval_into_env(
             "let suma = 0\n\
              for i in 1..=5 { suma += i }",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("suma"), Some(Value::Int(15)));
     }
@@ -12684,7 +13915,8 @@ print(factorial(5))
              }\n\
              let u = U { name: \"Ada\" }\n\
              let r = u.greet()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("hola, Ada".into())));
     }
@@ -12698,7 +13930,8 @@ print(factorial(5))
              }\n\
              let c = C { count: 10 }\n\
              let r = c.plus(5)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(15)));
     }
@@ -12715,7 +13948,8 @@ print(factorial(5))
              }\n\
              let z = C.zero()\n\
              let c = C.of(42)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         // Ambos son instancias de C. Verificamos via Display.
         let z = env.lock().get("z").unwrap();
@@ -12735,7 +13969,8 @@ print(factorial(5))
                  static fn broken() -> Int { return value }\n\
              }\n\
              let r = C.broken()",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("no definida") || err.message.contains("value"),
@@ -12755,7 +13990,8 @@ print(factorial(5))
              }\n\
              let c = C { value: 5 }\n\
              let r = c.make()",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("estático") && err.message.contains("C.make"),
@@ -12773,7 +14009,8 @@ print(factorial(5))
                  fn show() -> Int { return value }\n\
              }\n\
              let r = C.show()",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("instancia"),
@@ -12793,7 +14030,8 @@ print(factorial(5))
              }\n\
              let u = U { name: \"field-name\" }\n\
              let r = u.pick(\"param-name\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("param-name".into())));
     }
@@ -12806,7 +14044,8 @@ print(factorial(5))
              }\n\
              let u = U {}\n\
              let r = u.f(1, 2)",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(err.message.contains("espera 1"));
     }
@@ -12817,7 +14056,8 @@ print(factorial(5))
             "type U { name: Str }\n\
              let u = U { name: \"x\" }\n\
              let r = u.no_existe()",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(err.message.contains("no_existe"));
     }
@@ -12837,7 +14077,8 @@ print(factorial(5))
              let s = c.suma()\n\
              let r = c.resta()\n\
              let m = c.mult()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("s"), Some(Value::Int(13)));
         assert_eq!(env.lock().get("r"), Some(Value::Int(7)));
@@ -12856,7 +14097,8 @@ print(factorial(5))
              }\n\
              let p = P { x: 5 }\n\
              let r = p.double_p().show()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(10)));
     }
@@ -12867,9 +14109,19 @@ print(factorial(5))
     async fn index_list_con_int_valido() {
         // [10, 20, 30][1] → 20
         let v = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(10, Span::ZERO), Expr::Int(20, Span::ZERO), Expr::Int(30, Span::ZERO)], Span::ZERO)),
-            index: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-        }).await.unwrap();
+            object: Box::new(Expr::List(
+                vec![
+                    Expr::Int(10, Span::ZERO),
+                    Expr::Int(20, Span::ZERO),
+                    Expr::Int(30, Span::ZERO),
+                ],
+                Span::ZERO,
+            )),
+            index: Box::new(Expr::Int(1, Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await
+        .unwrap();
         assert_eq!(v, Value::Int(20));
     }
 
@@ -12877,9 +14129,14 @@ print(factorial(5))
     async fn index_list_fuera_de_rango_es_error() {
         // [1, 2][5]
         let res = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO)),
-            index: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
-        }).await;
+            object: Box::new(Expr::List(
+                vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+                Span::ZERO,
+            )),
+            index: Box::new(Expr::Int(5, Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await;
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => {
@@ -12893,12 +14150,19 @@ print(factorial(5))
     async fn index_list_negativo_wrappea_al_final() {
         // I.1 (mini-tanda I): `[1, 2][-1]` ahora wrap a `[1, 2][1]` = 2.
         let v = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO)),
+            object: Box::new(Expr::List(
+                vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+                Span::ZERO,
+            )),
             index: Box::new(Expr::UnaryOp {
                 op: UnaryOpKind::Neg,
-                operand: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-            }), span: Span::ZERO,
-        }).await.unwrap();
+                operand: Box::new(Expr::Int(1, Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            span: Span::ZERO,
+        })
+        .await
+        .unwrap();
         assert_eq!(v, Value::Int(2));
     }
 
@@ -12906,8 +14170,10 @@ print(factorial(5))
     async fn index_list_con_string_es_type_error() {
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::List(vec![Expr::Int(1, Span::ZERO)], Span::ZERO)),
-            index: Box::new(Expr::Str("a".into(), Span::ZERO)), span: Span::ZERO,
-        }).await;
+            index: Box::new(Expr::Str("a".into(), Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await;
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
@@ -12919,23 +14185,32 @@ print(factorial(5))
     async fn index_map_clave_existente() {
         // {"a": 1, "b": 2}["b"] → 2
         let v = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::Map(vec![
-                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-                (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
-            ], Span::ZERO)),
-            index: Box::new(Expr::Str("b".into(), Span::ZERO)), span: Span::ZERO,
-        }).await.unwrap();
+            object: Box::new(Expr::Map(
+                vec![
+                    (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                    (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+                ],
+                Span::ZERO,
+            )),
+            index: Box::new(Expr::Str("b".into(), Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await
+        .unwrap();
         assert_eq!(v, Value::Int(2));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn index_map_clave_inexistente_es_error() {
         let res = eval_expr_test(Expr::Index {
-            object: Box::new(Expr::Map(vec![
-                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-            ], Span::ZERO)),
-            index: Box::new(Expr::Str("z".into(), Span::ZERO)), span: Span::ZERO,
-        }).await;
+            object: Box::new(Expr::Map(
+                vec![(Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO))],
+                Span::ZERO,
+            )),
+            index: Box::new(Expr::Str("z".into(), Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await;
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => assert!(e.message.contains("clave no encontrada")),
@@ -12948,8 +14223,10 @@ print(factorial(5))
         // 42[0] — Int no se indexa
         let res = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Int(42, Span::ZERO)),
-            index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
-        }).await;
+            index: Box::new(Expr::Int(0, Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await;
         let err = res.unwrap_err();
         match err {
             EvalSignal::Error(e) => assert!(matches!(e.kind, ErrorKind::TypeMismatch { .. })),
@@ -12962,14 +14239,27 @@ print(factorial(5))
         // [[1, 2], [3, 4]][0][1] → 2
         let v = eval_expr_test(Expr::Index {
             object: Box::new(Expr::Index {
-                object: Box::new(Expr::List(vec![
-                    Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO),
-                    Expr::List(vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)], Span::ZERO),
-                ], Span::ZERO)),
-                index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
+                object: Box::new(Expr::List(
+                    vec![
+                        Expr::List(
+                            vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+                            Span::ZERO,
+                        ),
+                        Expr::List(
+                            vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)],
+                            Span::ZERO,
+                        ),
+                    ],
+                    Span::ZERO,
+                )),
+                index: Box::new(Expr::Int(0, Span::ZERO)),
+                span: Span::ZERO,
             }),
-            index: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-        }).await.unwrap();
+            index: Box::new(Expr::Int(1, Span::ZERO)),
+            span: Span::ZERO,
+        })
+        .await
+        .unwrap();
         assert_eq!(v, Value::Int(2));
     }
 
@@ -13772,11 +15062,15 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn ok_ctor_evalua_inner_antes_de_envolver() {
         // Ok(1 + 2) → Value::Result(Ok(Int(3)))
-        let e = Expr::Ok(Box::new(Expr::BinOp {
-            op: BinOpKind::Add,
-            left: Box::new(Expr::Int(1, Span::ZERO)),
-            right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-        }), Span::ZERO);
+        let e = Expr::Ok(
+            Box::new(Expr::BinOp {
+                op: BinOpKind::Add,
+                left: Box::new(Expr::Int(1, Span::ZERO)),
+                right: Box::new(Expr::Int(2, Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            Span::ZERO,
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), ok_value(Value::Int(3)));
     }
 
@@ -13785,20 +15079,32 @@ let r = match n {
         // Ok(7)? evaluado adentro de una función debería ser 7.
         // Lo testeamos directamente: como no hay return contenedor, el `?`
         // sobre Ok no emite ningún signal y la expresión vale 7.
-        let e = Expr::Try(Box::new(Expr::Ok(Box::new(Expr::Int(7, Span::ZERO)), Span::ZERO)), Span::ZERO);
+        let e = Expr::Try(
+            Box::new(Expr::Ok(Box::new(Expr::Int(7, Span::ZERO)), Span::ZERO)),
+            Span::ZERO,
+        );
         assert_eq!(eval_expr_test(e).await.unwrap(), Value::Int(7));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn try_sobre_err_emite_signal_return_con_err() {
         // Err("boom")? emite EvalSignal::Return(Value::Result(Err("boom"))).
-        let e = Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)), Span::ZERO);
+        let e = Expr::Try(
+            Box::new(Expr::Err(
+                Box::new(Expr::Str("boom".into(), Span::ZERO)),
+                Span::ZERO,
+            )),
+            Span::ZERO,
+        );
         let env = Environment::new();
         match eval_expr(&e, env).await {
             Err(EvalSignal::Return(v)) => {
                 assert_eq!(v, err_value(Value::Str("boom".into())));
             }
-            other => panic!("se esperaba EvalSignal::Return(Err(...)), se obtuvo {:?}", other),
+            other => panic!(
+                "se esperaba EvalSignal::Return(Err(...)), se obtuvo {:?}",
+                other
+            ),
         }
     }
 
@@ -13828,12 +15134,22 @@ let r = match n {
         // Acá lo que probamos es que `Ok(5)?` desempaqueta a 5 sin emitir
         // signal de retorno. La función devuelve ese 5 vía su return propio.
         let env = Environment::new();
-        let body = vec![Stmt::Return(Expr::Try(Box::new(Expr::Ok(Box::new(
-            Expr::Int(5, Span::ZERO),
-        ), Span::ZERO)), Span::ZERO), Span::ZERO)];
-        eval_stmt(&fn_def("pass", vec![], body), env.clone()).await.unwrap();
+        let body = vec![Stmt::Return(
+            Expr::Try(
+                Box::new(Expr::Ok(Box::new(Expr::Int(5, Span::ZERO)), Span::ZERO)),
+                Span::ZERO,
+            ),
+            Span::ZERO,
+        )];
+        eval_stmt(&fn_def("pass", vec![], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("pass".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("pass".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(eval_expr(&call, env).await.unwrap(), Value::Int(5));
     }
 
@@ -13843,15 +15159,35 @@ let r = match n {
         // boom() devuelve Value::Result(Err("nope")) sin ejecutar el return.
         let env = Environment::new();
         let body = vec![
-            Stmt::Assign { target: AssignTarget::Ident("_".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("_".into()),
                 type_: None,
-                value: Expr::Try(Box::new(Expr::Err(Box::new(Expr::Str("nope".into(), Span::ZERO)), Span::ZERO)), Span::ZERO),
-             span: Span::ZERO },
-            Stmt::Return(Expr::Ok(Box::new(Expr::Str("nunca llega".into(), Span::ZERO)), Span::ZERO), Span::ZERO),
+                value: Expr::Try(
+                    Box::new(Expr::Err(
+                        Box::new(Expr::Str("nope".into(), Span::ZERO)),
+                        Span::ZERO,
+                    )),
+                    Span::ZERO,
+                ),
+                span: Span::ZERO,
+            },
+            Stmt::Return(
+                Expr::Ok(
+                    Box::new(Expr::Str("nunca llega".into(), Span::ZERO)),
+                    Span::ZERO,
+                ),
+                Span::ZERO,
+            ),
         ];
-        eval_stmt(&fn_def("boom", vec![], body), env.clone()).await.unwrap();
+        eval_stmt(&fn_def("boom", vec![], body), env.clone())
+            .await
+            .unwrap();
 
-        let call = Expr::Call { callee: Box::new(Expr::Ident("boom".into(), Span::ZERO)), args: vec![], span: Span::ZERO };
+        let call = Expr::Call {
+            callee: Box::new(Expr::Ident("boom".into(), Span::ZERO)),
+            args: vec![],
+            span: Span::ZERO,
+        };
         assert_eq!(
             eval_expr(&call, env).await.unwrap(),
             err_value(Value::Str("nope".into())),
@@ -13925,7 +15261,13 @@ let r = match n {
         // En top-level, `Err(...)?` emite Return; el evaluador global lo
         // convierte en "return solo puede usarse adentro de una función".
         let env = Environment::new();
-        let stmt = Stmt::Expr(Expr::Try(Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)), Span::ZERO), Span::ZERO);
+        let stmt = Stmt::Expr(
+            Expr::Try(
+                Box::new(Expr::Err(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)),
+                Span::ZERO,
+            ),
+            Span::ZERO,
+        );
         match eval_stmt(&stmt, env.clone()).await {
             Err(EvalSignal::Return(_)) => {} // ok — el global lo traduciría.
             other => panic!("se esperaba EvalSignal::Return, se obtuvo {:?}", other),
@@ -13940,12 +15282,23 @@ let r = match n {
     async fn fn_expr_evalua_a_function() {
         // `fn(x) => x * 2` — evaluada sola, da un `Value::Function`.
         let fnexpr = Expr::FnExpr {
-            params: vec![crate::ast::Param { name: "x".into(), type_: None, default: None, varargs: false }],
-            body: vec![Stmt::Return(Expr::BinOp {
-                op: BinOpKind::Mul,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO)], is_async: false, span: Span::ZERO,
+            params: vec![crate::ast::Param {
+                name: "x".into(),
+                type_: None,
+                default: None,
+                varargs: false,
+            }],
+            body: vec![Stmt::Return(
+                Expr::BinOp {
+                    op: BinOpKind::Mul,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            )],
+            is_async: false,
+            span: Span::ZERO,
         };
         let env = Environment::new();
         let v = eval_expr(&fnexpr, env).await.unwrap();
@@ -14164,10 +15517,7 @@ let r = match n {
         let src = "let r = [1, 2, 3].find(fn(n) => n == 2)\n";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
-        assert_eq!(
-            env.lock().get("r"),
-            Some(ok_value(Value::Int(2))),
-        );
+        assert_eq!(env.lock().get("r"), Some(ok_value(Value::Int(2))),);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -14271,7 +15621,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = b\"hola\"\n\
              let b = b\"\\x00\\x01\\xff\"",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bytes(b"hola".to_vec())));
         assert_eq!(env.lock().get("b"), Some(Value::Bytes(vec![0, 1, 255])));
@@ -14283,7 +15634,8 @@ let r = match n {
             "let a = b\"hola\".len()\n\
              let b = b\"\".is_empty()\n\
              let c = b\"x\".is_empty()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(4)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(true)));
@@ -14292,9 +15644,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_to_str_ok() {
-        let (env, res) = parse_eval_into_env(
-            "let r = b\"hola\".to_str()",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r = b\"hola\".to_str()").await;
         res.unwrap();
         let r = env.lock().get("r").clone();
         match r {
@@ -14307,30 +15657,25 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_to_str_err_para_no_utf8() {
-        let (env, res) = parse_eval_into_env(
-            "let r = b\"\\xff\\xfe\".to_str()",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r = b\"\\xff\\xfe\".to_str()").await;
         res.unwrap();
         let r = env.lock().get("r").clone();
         match r {
-            Some(Value::Result(ResultVariant::Err(inner))) => {
-                match *inner {
-                    Value::Str(s) => assert!(
-                        s.contains("UTF-8"),
-                        "esperaba mensaje sobre UTF-8, fue: {}", s
-                    ),
-                    other => panic!("Err inner no es Str: {:?}", other),
-                }
-            }
+            Some(Value::Result(ResultVariant::Err(inner))) => match *inner {
+                Value::Str(s) => assert!(
+                    s.contains("UTF-8"),
+                    "esperaba mensaje sobre UTF-8, fue: {}",
+                    s
+                ),
+                other => panic!("Err inner no es Str: {:?}", other),
+            },
             other => panic!("esperaba Err(Str), fue: {:?}", other),
         }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_builtin_constructor() {
-        let (env, res) = parse_eval_into_env(
-            "let b = bytes(\"hola\")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let b = bytes(\"hola\")").await;
         res.unwrap();
         assert_eq!(env.lock().get("b"), Some(Value::Bytes(b"hola".to_vec())));
     }
@@ -14338,9 +15683,7 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn bytes_builtin_len_global_funciona() {
         // `len(b"...")` global también funciona.
-        let (env, res) = parse_eval_into_env(
-            "let n = len(b\"abcde\")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let n = len(b\"abcde\")").await;
         res.unwrap();
         assert_eq!(env.lock().get("n"), Some(Value::Int(5)));
     }
@@ -14364,7 +15707,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = \"hola mundo\".contains(\"mundo\")\n\
              let b = \"hola mundo\".contains(\"xyz\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
@@ -14372,9 +15716,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_contains_empty_string_es_true() {
-        let (env, res) = parse_eval_into_env(
-            "let a = \"hola\".contains(\"\")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let a = \"hola\".contains(\"\")").await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
     }
@@ -14386,7 +15728,8 @@ let r = match n {
              let b = \"hola.fitz\".ends_with(\".fitz\")\n\
              let c = \"hola.fitz\".starts_with(\"xyz\")\n\
              let d = \"hola.fitz\".ends_with(\".py\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(true)));
@@ -14396,9 +15739,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_contains_con_arg_no_str_es_error() {
-        let (_env, res) = parse_eval_into_env(
-            "let a = \"hola\".contains(1)",
-        ).await;
+        let (_env, res) = parse_eval_into_env("let a = \"hola\".contains(1)").await;
         let err = res.unwrap_err();
         assert!(matches!(err.kind, ErrorKind::TypeMismatch { .. }));
     }
@@ -14407,9 +15748,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_split_devuelve_list_str() {
-        let (env, res) = parse_eval_into_env(
-            "let parts = \"a,b,c\".split(\",\")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let parts = \"a,b,c\".split(\",\")").await;
         res.unwrap();
         let v = env.lock().get("parts").unwrap();
         let inner = match v {
@@ -14425,9 +15764,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_split_sin_match_devuelve_un_elemento() {
-        let (env, res) = parse_eval_into_env(
-            "let parts = \"abc\".split(\"|\")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let parts = \"abc\".split(\"|\")").await;
         res.unwrap();
         let v = env.lock().get("parts").unwrap();
         if let Value::List(items) = v {
@@ -14444,7 +15781,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = \"  hola  \".trim()\n\
              let b = \"\\nlinea\\n\".trim()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("hola".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
@@ -14457,7 +15795,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = \"  hola  \".trim_start()\n\
              let b = \"\\n\\tlinea\".trim_start()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("hola  ".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
@@ -14468,7 +15807,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = \"  hola  \".trim_end()\n\
              let b = \"linea\\n\\t\".trim_end()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("  hola".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("linea".into())));
@@ -14481,7 +15821,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xss: List<List<Int>> = [[1, 2], [3], [4, 5, 6]]\n\
              let flat = xss.flatten()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("flat").unwrap();
         if let Value::List(items) = v {
@@ -14490,8 +15831,12 @@ let r = match n {
             assert_eq!(
                 vals,
                 vec![
-                    Value::Int(1), Value::Int(2), Value::Int(3),
-                    Value::Int(4), Value::Int(5), Value::Int(6),
+                    Value::Int(1),
+                    Value::Int(2),
+                    Value::Int(3),
+                    Value::Int(4),
+                    Value::Int(5),
+                    Value::Int(6),
                 ]
             );
         } else {
@@ -14504,7 +15849,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xss: List<List<Int>> = []\n\
              let flat = xss.flatten()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("flat").unwrap();
         if let Value::List(items) = v {
@@ -14521,12 +15867,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]\n\
              xs.sort_by(fn(a, b) => a - b)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![1, 1, 2, 3, 4, 5, 6, 9]);
         } else {
             panic!("esperaba List");
@@ -14538,12 +15894,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [3, 1, 4]\n\
              xs.sort_by(fn(a, b) => b - a)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![4, 3, 1]);
         } else {
             panic!("esperaba List");
@@ -14554,9 +15920,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ir_range_enumerate_devuelve_pares_indice_valor() {
-        let (env, res) = parse_eval_into_env(
-            "let r = (0..3).enumerate()",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r = (0..3).enumerate()").await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -14579,13 +15943,15 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ir_range_zip_trunca_al_mas_corto() {
-        let (env, res) = parse_eval_into_env(
-            "let r = (0..10).zip([\"a\", \"b\", \"c\"])",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r = (0..10).zip([\"a\", \"b\", \"c\"])").await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
-            assert_eq!(items.lock().len(), 3, "esperaba 3 pares (trunca al más corto)");
+            assert_eq!(
+                items.lock().len(),
+                3,
+                "esperaba 3 pares (trunca al más corto)"
+            );
         } else {
             panic!("esperaba List");
         }
@@ -14593,14 +15959,21 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn ir_range_chain_concatena_con_list_int() {
-        let (env, res) = parse_eval_into_env(
-            "let r = (0..3).chain([100, 200])",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r = (0..3).chain([100, 200])").await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![0, 1, 2, 100, 200]);
         } else {
             panic!("esperaba List");
@@ -14612,7 +15985,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = (0..10).len()\n\
              let b = (0..=10).len()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(10)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(11)));
@@ -14625,7 +15999,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 10, \"b\": 20}\n\
              let r = m.update(\"a\", fn(v) => v + 100)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::Map(pairs) = v {
@@ -14642,7 +16017,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 10}\n\
              let r = m.update(\"missing\", fn(v) => v + 1000)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::Map(pairs) = v {
@@ -14660,12 +16036,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let pairs: List<(Int, Int)> = [(1, 10), (2, 20), (3, 30)]\n\
              let sums: List<Int> = [a + b for (a, b) in pairs]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("sums").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![11, 22, 33]);
         } else {
             panic!("esperaba List");
@@ -14679,12 +16065,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.flat_map(fn(n) => [n, n * 10])",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| if let Value::Int(n) = x { Some(*n) } else { None }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![1, 10, 2, 20, 3, 30]);
         } else {
             panic!("esperaba List");
@@ -14696,7 +16092,8 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let r = xs.flat_map(fn(n) => n)",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("List") || err.message.contains("flat_map"),
@@ -14713,13 +16110,22 @@ let r = match n {
              let b = xs.last()\n\
              let empty: List<Int> = []\n\
              let c = empty.first()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         let b = env.lock().get("b").unwrap();
         let c = env.lock().get("c").unwrap();
-        if let Value::Result(ResultVariant::Ok(inner)) = a { assert_eq!(*inner, Value::Int(10)); } else { panic!(); }
-        if let Value::Result(ResultVariant::Ok(inner)) = b { assert_eq!(*inner, Value::Int(30)); } else { panic!(); }
+        if let Value::Result(ResultVariant::Ok(inner)) = a {
+            assert_eq!(*inner, Value::Int(10));
+        } else {
+            panic!();
+        }
+        if let Value::Result(ResultVariant::Ok(inner)) = b {
+            assert_eq!(*inner, Value::Int(30));
+        } else {
+            panic!();
+        }
         assert!(matches!(c, Value::Result(ResultVariant::Err(_))));
     }
 
@@ -14729,7 +16135,8 @@ let r = match n {
             "let m1: Map<Str, Int> = {\"a\": 1, \"b\": 2}\n\
              let m2: Map<Str, Int> = {\"b\": 20, \"c\": 3}\n\
              let r = m1.merge(m2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::Map(pairs) = v {
@@ -14750,12 +16157,22 @@ let r = match n {
              let m2: Map<Str, Int> = {\"b\": 2, \"c\": 3}\n\
              let r = m1.merge(m2)\n\
              let ks: List<Str> = r.keys()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("ks").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let keys: Vec<String> = g.iter().filter_map(|x| if let Value::Str(s) = x { Some(s.clone()) } else { None }).collect();
+            let keys: Vec<String> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Str(s) = x {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(keys, vec!["a", "b", "c"]);
         } else {
             panic!("esperaba List");
@@ -14770,7 +16187,8 @@ let r = match n {
             "let s: Str = \"hola mundo, hola fitz\"\n\
              let a = s.find(\"hola\")\n\
              let b = s.find(\"nope\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         let b = env.lock().get("b").unwrap();
@@ -14786,7 +16204,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s: Str = \"hola mundo, hola fitz\"\n\
              let a = s.last_index_of(\"hola\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         if let Value::Result(ResultVariant::Ok(inner)) = a {
@@ -14805,7 +16224,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s: Str = \"café latte\"\n\
              let a = s.find(\"latte\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         if let Value::Result(ResultVariant::Ok(inner)) = a {
@@ -14821,7 +16241,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let scores: Map<Str, Int> = {\"ada\": 80, \"bob\": 45, \"cam\": 92}\n\
              let passing = scores.filter(fn(k, v) => v >= 60)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let passing = env.lock().get("passing").unwrap();
         if let Value::Map(pairs) = passing {
@@ -14836,7 +16257,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
              let doubled = m.map_values(fn(v) => v * 2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let doubled = env.lock().get("doubled").unwrap();
         if let Value::Map(pairs) = doubled {
@@ -14860,7 +16282,8 @@ let r = match n {
              let b = xs.any(fn(x) => x > 10)\n\
              let c = xs.all(fn(x) => x > 0)\n\
              let d = xs.all(fn(x) => x > 2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
@@ -14874,7 +16297,8 @@ let r = match n {
             "let empty: List<Int> = []\n\
              let a = empty.any(fn(x) => true)\n\
              let b = empty.all(fn(x) => false)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         // Lista vacía: any → false, all → true (vacuamente todo es
         // verdad, paralelo a Python/Rust).
@@ -14887,7 +16311,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let n = xs.count(fn(x) => x > 2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("n"), Some(Value::Int(3)));
     }
@@ -14898,7 +16323,8 @@ let r = match n {
             "let xs: List<Int> = [10, 20, 30, 40]\n\
              let a = xs.find_index(fn(x) => x == 30)\n\
              let b = xs.find_index(fn(x) => x > 100)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         let b = env.lock().get("b").unwrap();
@@ -14916,7 +16342,8 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r = xs.any(fn(x) => x)",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("Bool") || err.message.contains("any"),
@@ -14930,7 +16357,8 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(
             "let xs: List<Int> = [3, 1]\n\
              xs.sort_by(fn(a, b) => \"oops\")",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("Int") || err.message.contains("sort_by"),
@@ -14944,7 +16372,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = \"aaa\".replace(\"a\", \"bb\")\n\
              let b = \"hola mundo\".replace(\"o\", \"O\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("bbbbbb".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("hOla mundO".into())));
@@ -14955,7 +16384,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a = \"ab\".repeat(3)\n\
              let b = \"x\".repeat(0)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("ababab".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("".into())));
@@ -14963,9 +16393,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn str_repeat_con_negativo_es_error() {
-        let (_env, res) = parse_eval_into_env(
-            "let a = \"ab\".repeat(-1)",
-        ).await;
+        let (_env, res) = parse_eval_into_env("let a = \"ab\".repeat(-1)").await;
         let err = res.unwrap_err();
         assert!(err.message.contains("negativo"));
     }
@@ -14977,12 +16405,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs = [3, 1, 4, 1, 5, 9, 2, 6]\n\
              xs.sort()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|v| if let Value::Int(n) = v { Some(*n) } else { None }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![1, 1, 2, 3, 4, 5, 6, 9]);
         } else {
             panic!("esperaba List");
@@ -14994,7 +16432,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs = [\"zeta\", \"alfa\", \"beta\"]\n\
              xs.sort()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
@@ -15011,7 +16450,8 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(
             "let xs = [1, \"dos\", 3]\n\
              xs.sort()",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(err.message.contains("sort"));
     }
@@ -15021,7 +16461,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3, 4, 5]\n\
              xs.reverse()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
@@ -15039,7 +16480,8 @@ let r = match n {
             "let xs = [1, 2, 3, 4, 5]\n\
              let a = xs.contains(3)\n\
              let b = xs.contains(99)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
@@ -15051,7 +16493,8 @@ let r = match n {
             "let xs = [\"ada\", \"bob\"]\n\
              let a = xs.contains(\"ada\")\n\
              let b = xs.contains(\"dan\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
@@ -15066,7 +16509,8 @@ let r = match n {
              let a = xs[-1]\n\
              let b = xs[-2]\n\
              let c = xs[-5]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(50)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(40)));
@@ -15078,7 +16522,8 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3]\n\
              let a = xs[-4]",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(err.message.contains("fuera de rango"));
     }
@@ -15090,7 +16535,8 @@ let r = match n {
              let a = s[0]\n\
              let b = s[-1]\n\
              let c = s[2]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("f".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("z".into())));
@@ -15102,14 +16548,17 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs = [1, 2, 3, 4]\n\
              xs[-1] = 99",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
             assert_eq!(g[3], Value::Int(99));
             assert_eq!(g[0], Value::Int(1));
-        } else { panic!("esperaba List"); }
+        } else {
+            panic!("esperaba List");
+        }
     }
 
     // ---- I.2: slicing ----
@@ -15121,7 +16570,8 @@ let r = match n {
              let a = xs[1..3]\n\
              let b = xs[..2]\n\
              let c = xs[3..]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         for (name, expected) in [
             ("a", vec![Value::Int(20), Value::Int(30)]),
@@ -15132,7 +16582,9 @@ let r = match n {
             if let Value::List(items) = v {
                 let g = items.lock();
                 assert_eq!(g.as_slice(), expected.as_slice(), "binding `{}`", name);
-            } else { panic!("binding {} esperaba List", name); }
+            } else {
+                panic!("binding {} esperaba List", name);
+            }
         }
     }
 
@@ -15142,7 +16594,8 @@ let r = match n {
             "let xs = [10, 20, 30, 40, 50]\n\
              let a = xs[1..=3]\n\
              let b = xs[-2..]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         for (name, expected) in [
             ("a", vec![Value::Int(20), Value::Int(30), Value::Int(40)]),
@@ -15152,7 +16605,9 @@ let r = match n {
             if let Value::List(items) = v {
                 let g = items.lock();
                 assert_eq!(g.as_slice(), expected.as_slice(), "binding `{}`", name);
-            } else { panic!("binding {} esperaba List", name); }
+            } else {
+                panic!("binding {} esperaba List", name);
+            }
         }
     }
 
@@ -15163,7 +16618,8 @@ let r = match n {
              let a = xs[100..]\n\
              let b = xs[..100]\n\
              let c = xs[2..1]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         for (name, expected) in [
             ("a", vec![]),
@@ -15174,7 +16630,9 @@ let r = match n {
             if let Value::List(items) = v {
                 let g = items.lock();
                 assert_eq!(g.as_slice(), expected.as_slice(), "binding `{}`", name);
-            } else { panic!("binding {} esperaba List", name); }
+            } else {
+                panic!("binding {} esperaba List", name);
+            }
         }
     }
 
@@ -15185,13 +16643,16 @@ let r = match n {
             "let xs = [1, 2, 3, 4, 5]\n\
              let mid = xs[1..4]\n\
              mid[0] = 99",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
             assert_eq!(g[1], Value::Int(2), "xs original no debe haber cambiado");
-        } else { panic!("esperaba List"); }
+        } else {
+            panic!("esperaba List");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15201,7 +16662,8 @@ let r = match n {
              let a = s[0..4]\n\
              let b = s[5..]\n\
              let c = s[-4..]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Str("hola".into())));
         assert_eq!(env.lock().get("b"), Some(Value::Str("fitz".into())));
@@ -15216,7 +16678,8 @@ let r = match n {
              xs.sort()\n\
              xs.reverse()\n\
              let r = xs.contains(1)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Bool(false)));
     }
@@ -15280,7 +16743,10 @@ let r = match n {
         let hit = env.lock().get("hit").unwrap();
         match hit {
             Value::Result(ResultVariant::Ok(inner)) => match *inner {
-                Value::Instance { ref type_name, ref fields } => {
+                Value::Instance {
+                    ref type_name,
+                    ref fields,
+                } => {
                     assert_eq!(type_name, "User");
                     let f = fields.lock();
                     assert_eq!(f[0], ("id".into(), Value::Int(1)));
@@ -15304,10 +16770,7 @@ let r = match n {
     /// evalúa `main_src` con `base_dir` apuntando a ese tempdir, y
     /// devuelve `(env, resultado)`. El tempdir vive lo suficiente para
     /// que el loader pueda leer los archivos; se libera al final.
-    async fn eval_with_modules(
-        files: &[(&str, &str)],
-        main_src: &str,
-    ) -> (EnvRef, FitzResult<()>) {
+    async fn eval_with_modules(files: &[(&str, &str)], main_src: &str) -> (EnvRef, FitzResult<()>) {
         let dir = tempfile::tempdir().expect("creando tempdir");
         for (rel_path, content) in files {
             let full = dir.path().join(rel_path);
@@ -15320,7 +16783,10 @@ let r = match n {
         let tokens = crate::lexer::tokenize(main_src).expect("la fuente debe tokenizar");
         let program = crate::parser::parse(tokens).expect("la fuente debe parsear");
 
-        install_loader(dir.path().to_path_buf(), crate::manifest::DepRegistry::new());
+        install_loader(
+            dir.path().to_path_buf(),
+            crate::manifest::DepRegistry::new(),
+        );
         // Guard local: garantizamos uninstall aun ante panic en eval.
         let _guard = LoaderGuard;
 
@@ -15509,10 +16975,16 @@ let r = match n {
         let main = "import inexistente\n";
         let (_env, res) = eval_with_modules(&[], main).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("inexistente"),
-            "el mensaje debe nombrar el módulo: {}", err.message);
-        assert!(err.message.contains("no se encontró"),
-            "el mensaje debe decir 'no se encontró': {}", err.message);
+        assert!(
+            err.message.contains("inexistente"),
+            "el mensaje debe nombrar el módulo: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("no se encontró"),
+            "el mensaje debe decir 'no se encontró': {}",
+            err.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15538,8 +17010,11 @@ let r = match n {
         ";
         let (_env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("no exporta") && err.message.contains("missing"),
-            "msg: {}", err.message);
+        assert!(
+            err.message.contains("no exporta") && err.message.contains("missing"),
+            "msg: {}",
+            err.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15591,7 +17066,10 @@ let r = match n {
         res.unwrap();
         let u1 = env.lock().get("u1").unwrap();
         let u2 = env.lock().get("u2").unwrap();
-        assert_eq!(u1, u2, "el segundo import debe devolver el mismo módulo cacheado");
+        assert_eq!(
+            u1, u2,
+            "el segundo import debe devolver el mismo módulo cacheado"
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15610,8 +17088,11 @@ let r = match n {
         let main = "import a\n";
         let (_env, res) = eval_with_modules(&[("a.fitz", a), ("b.fitz", b)], main).await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("ciclo de imports"),
-            "msg: {}", err.message);
+        assert!(
+            err.message.contains("ciclo de imports"),
+            "msg: {}",
+            err.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -15629,10 +17110,8 @@ let r = match n {
             import sub.foo\n\
             let r = foo.outer()\n\
         ";
-        let (env, res) = eval_with_modules(&[
-            ("sub/foo.fitz", foo),
-            ("sub/bar.fitz", bar),
-        ], main).await;
+        let (env, res) =
+            eval_with_modules(&[("sub/foo.fitz", foo), ("sub/bar.fitz", bar)], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("desde bar".into())));
     }
@@ -15653,10 +17132,11 @@ let r = match n {
             from data.users import make\n\
             let u = make()\n\
         ";
-        let (env, res) = eval_with_modules(&[
-            ("types/user.fitz", user),
-            ("data/users.fitz", users_data),
-        ], main).await;
+        let (env, res) = eval_with_modules(
+            &[("types/user.fitz", user), ("data/users.fitz", users_data)],
+            main,
+        )
+        .await;
         res.unwrap();
         // Si el loader-absoluto funciona, `u` es una Instance de User
         // con id=1 y name="ada". Sin el fix, el module load fallaría
@@ -15666,10 +17146,13 @@ let r = match n {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
                 let f = fields.lock().clone();
-                assert_eq!(f, vec![
-                    ("id".to_string(), Value::Int(1)),
-                    ("name".to_string(), Value::Str("ada".into())),
-                ]);
+                assert_eq!(
+                    f,
+                    vec![
+                        ("id".to_string(), Value::Int(1)),
+                        ("name".to_string(), Value::Str("ada".into())),
+                    ]
+                );
             }
             other => panic!("esperaba Instance User, fue {:?}", other),
         }
@@ -15692,11 +17175,15 @@ let r = match n {
             import sub.foo\n\
             let r = foo.outer()\n\
         ";
-        let (env, res) = eval_with_modules(&[
-            ("bar.fitz", bar_root),
-            ("sub/foo.fitz", foo),
-            ("sub/bar.fitz", bar_sub),
-        ], main).await;
+        let (env, res) = eval_with_modules(
+            &[
+                ("bar.fitz", bar_root),
+                ("sub/foo.fitz", foo),
+                ("sub/bar.fitz", bar_sub),
+            ],
+            main,
+        )
+        .await;
         res.unwrap();
         // Resolución relativa: sub/bar.fitz (mismo dir que foo) gana.
         assert_eq!(env.lock().get("r"), Some(Value::Str("desde-sub".into())));
@@ -15756,7 +17243,10 @@ let r = match n {
         ";
         let (env, res) = eval_with_modules(&[("utils.fitz", utils)], main).await;
         res.unwrap();
-        assert_eq!(env.lock().get("g"), Some(Value::Str("saludos, Fitz".into())));
+        assert_eq!(
+            env.lock().get("g"),
+            Some(Value::Str("saludos, Fitz".into()))
+        );
     }
 
     // -----------------------------------------------------------------------
@@ -15777,7 +17267,11 @@ let r = match n {
         let (env, res) = parse_eval_into_env("from python import math\n").await;
         res.unwrap();
         let v = env.lock().get("math").expect("math debería estar bindeado");
-        assert!(matches!(v, Value::PyObject(_)), "se esperaba PyObject, fue: {:?}", v);
+        assert!(
+            matches!(v, Value::PyObject(_)),
+            "se esperaba PyObject, fue: {:?}",
+            v
+        );
     }
 
     #[cfg(feature = "python")]
@@ -15786,7 +17280,10 @@ let r = match n {
         let (env, res) = parse_eval_into_env("from python import math as m\n").await;
         res.unwrap();
         assert!(matches!(env.lock().get("m"), Some(Value::PyObject(_))));
-        assert!(env.lock().get("math").is_none(), "el nombre original no debe quedar bindeado");
+        assert!(
+            env.lock().get("math").is_none(),
+            "el nombre original no debe quedar bindeado"
+        );
     }
 
     #[cfg(feature = "python")]
@@ -15817,12 +17314,10 @@ let r = match n {
         // `from python.sqlalchemy.orm import Session` queda como deuda
         // menor — para 8.1 hay que importar `sqlalchemy` y bajar con
         // field access (8.1.3+). Mensaje debe ser claro citando 8.1.
-        let (_env, res) =
-            parse_eval_into_env("from python.sqlalchemy.orm import Session\n").await;
+        let (_env, res) = parse_eval_into_env("from python.sqlalchemy.orm import Session\n").await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("python.sqlalchemy.orm")
-                && err.message.contains("8.1"),
+            err.message.contains("python.sqlalchemy.orm") && err.message.contains("8.1"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -15863,9 +17358,7 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_math_pi_coerciona_a_float() {
-        let (env, res) = parse_eval_into_env(
-            "from python import math\nlet p = math.pi\n"
-        ).await;
+        let (env, res) = parse_eval_into_env("from python import math\nlet p = math.pi\n").await;
         res.unwrap();
         // Sacamos el binding fuera del lock para que el MutexGuard
         // se libere antes de que `env` se dropee al fin del scope.
@@ -15883,9 +17376,7 @@ let r = match n {
     async fn field_access_funcion_python_queda_pyobject_opaco() {
         // `math.sqrt` no se invoca, solo se lee. Debería quedar como
         // PyObject opaco listo para call en 8.1.4.
-        let (env, res) = parse_eval_into_env(
-            "from python import math\nlet f = math.sqrt\n"
-        ).await;
+        let (env, res) = parse_eval_into_env("from python import math\nlet f = math.sqrt\n").await;
         res.unwrap();
         assert!(matches!(env.lock().get("f"), Some(Value::PyObject(_))));
     }
@@ -15893,9 +17384,8 @@ let r = match n {
     #[cfg(feature = "python")]
     #[tokio::test(flavor = "current_thread")]
     async fn field_access_atributo_inexistente_emite_attributeerror() {
-        let (_env, res) = parse_eval_into_env(
-            "from python import math\nlet x = math.no_existe_xyz_813\n"
-        ).await;
+        let (_env, res) =
+            parse_eval_into_env("from python import math\nlet x = math.no_existe_xyz_813\n").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("AttributeError"),
@@ -16104,7 +17594,10 @@ let r = match n {
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         let s = env.lock().get("s").unwrap();
-        assert_eq!(ok_inner(s), Value::Str("{\"id\": 1, \"name\": \"x\"}".into()));
+        assert_eq!(
+            ok_inner(s),
+            Value::Str("{\"id\": 1, \"name\": \"x\"}".into())
+        );
     }
 
     #[cfg(feature = "python")]
@@ -16126,7 +17619,8 @@ let r = match n {
             ok_inner(s),
             Value::Str(
                 "[{\"id\": 1, \"email\": \"a@x.com\"}, \
-                  {\"id\": 2, \"email\": \"b@x.com\"}]".into()
+                  {\"id\": 2, \"email\": \"b@x.com\"}]"
+                    .into()
             ),
         );
     }
@@ -16488,10 +17982,13 @@ let r = match n {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
                 let f = fields.lock().clone();
-                assert_eq!(f, vec![
-                    ("id".to_string(), Value::Int(1)),
-                    ("name".to_string(), Value::Str("alice".into())),
-                ]);
+                assert_eq!(
+                    f,
+                    vec![
+                        ("id".to_string(), Value::Int(1)),
+                        ("name".to_string(), Value::Str("alice".into())),
+                    ]
+                );
             }
             other => panic!("esperaba Instance, fue {:?}", other),
         }
@@ -16532,10 +18029,13 @@ let r = match n {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
                 let f = fields.lock().clone();
-                assert_eq!(f, vec![
-                    ("id".to_string(), Value::Int(1)),
-                    ("email".to_string(), Value::Str("unknown@x.com".into())),
-                ]);
+                assert_eq!(
+                    f,
+                    vec![
+                        ("id".to_string(), Value::Int(1)),
+                        ("email".to_string(), Value::Str("unknown@x.com".into())),
+                    ]
+                );
             }
             other => panic!("esperaba Instance, fue {:?}", other),
         }
@@ -16554,10 +18054,13 @@ let r = match n {
         match row {
             Value::Instance { fields, .. } => {
                 let f = fields.lock().clone();
-                assert_eq!(f, vec![
-                    ("id".to_string(), Value::Int(1)),
-                    ("name".to_string(), Value::Null),
-                ]);
+                assert_eq!(
+                    f,
+                    vec![
+                        ("id".to_string(), Value::Int(1)),
+                        ("name".to_string(), Value::Null),
+                    ]
+                );
             }
             other => panic!("esperaba Instance, fue {:?}", other),
         }
@@ -16673,10 +18176,13 @@ let r = match n {
             Value::Instance { type_name, fields } => {
                 assert_eq!(type_name, "User");
                 let f = fields.lock().clone();
-                assert_eq!(f, vec![
-                    ("id".to_string(), Value::Int(7)),
-                    ("name".to_string(), Value::Str("alice".into())),
-                ]);
+                assert_eq!(
+                    f,
+                    vec![
+                        ("id".to_string(), Value::Int(7)),
+                        ("name".to_string(), Value::Str("alice".into())),
+                    ]
+                );
             }
             other => panic!("esperaba Instance, fue {:?}", other),
         }
@@ -16886,7 +18392,9 @@ let r = match n {
     async fn env_builtin_lee_var_existente_como_ok() {
         // SAFETY: tests serializados por #[test], cada test setea su
         // propia var con prefijo único.
-        unsafe { std::env::set_var("FITZ_TEST_ENV_EXISTS", "hola"); }
+        unsafe {
+            std::env::set_var("FITZ_TEST_ENV_EXISTS", "hola");
+        }
         let src = "let r = env(\"FITZ_TEST_ENV_EXISTS\")";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -16897,13 +18405,17 @@ let r = match n {
             }
             other => panic!("esperaba Ok(Str), fue {:?}", other),
         }
-        unsafe { std::env::remove_var("FITZ_TEST_ENV_EXISTS"); }
+        unsafe {
+            std::env::remove_var("FITZ_TEST_ENV_EXISTS");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_builtin_var_missing_devuelve_err() {
         // Confirmamos que la var no existe antes.
-        unsafe { std::env::remove_var("FITZ_TEST_ENV_MISSING_XYZ"); }
+        unsafe {
+            std::env::remove_var("FITZ_TEST_ENV_MISSING_XYZ");
+        }
         let src = "let r = env(\"FITZ_TEST_ENV_MISSING_XYZ\")";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -16929,7 +18441,9 @@ let r = match n {
         // Convención Unix: var vacía (`KEY=`) existe pero es "".
         // env() la trata como Ok("") — el caller que quiera tratarla
         // como missing usa `.is_empty()`.
-        unsafe { std::env::set_var("FITZ_TEST_ENV_EMPTY", ""); }
+        unsafe {
+            std::env::set_var("FITZ_TEST_ENV_EMPTY", "");
+        }
         let src = "let r = env(\"FITZ_TEST_ENV_EMPTY\")";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -16940,23 +18454,31 @@ let r = match n {
             }
             other => panic!("esperaba Ok(empty Str), fue {:?}", other),
         }
-        unsafe { std::env::remove_var("FITZ_TEST_ENV_EMPTY"); }
+        unsafe {
+            std::env::remove_var("FITZ_TEST_ENV_EMPTY");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_or_builtin_var_existente_ignora_default() {
-        unsafe { std::env::set_var("FITZ_TEST_ENV_OR_EXISTS", "real"); }
+        unsafe {
+            std::env::set_var("FITZ_TEST_ENV_OR_EXISTS", "real");
+        }
         let src = "let v = env_or(\"FITZ_TEST_ENV_OR_EXISTS\", \"fallback\")";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
         let v = env.lock().get("v").unwrap();
         assert_eq!(v, Value::Str("real".into()));
-        unsafe { std::env::remove_var("FITZ_TEST_ENV_OR_EXISTS"); }
+        unsafe {
+            std::env::remove_var("FITZ_TEST_ENV_OR_EXISTS");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn env_or_builtin_var_missing_usa_default() {
-        unsafe { std::env::remove_var("FITZ_TEST_ENV_OR_MISSING_XYZ"); }
+        unsafe {
+            std::env::remove_var("FITZ_TEST_ENV_OR_MISSING_XYZ");
+        }
         let src = "let v = env_or(\"FITZ_TEST_ENV_OR_MISSING_XYZ\", \"fallback\")";
         let (env, res) = parse_eval_into_env(src).await;
         res.unwrap();
@@ -16968,7 +18490,9 @@ let r = match n {
     async fn env_builtin_propagable_con_operador_try() {
         // Patrón canónico de uso: `fn get_secret() -> Result<Str> { let s = env("KEY")?; ... }`.
         // El `?` desempaca el Result; si missing, propaga el Err.
-        unsafe { std::env::set_var("FITZ_TEST_ENV_TRY", "secret-value"); }
+        unsafe {
+            std::env::set_var("FITZ_TEST_ENV_TRY", "secret-value");
+        }
         let src = "\
             fn read_secret() -> Result<Str> {\n\
                 let s = env(\"FITZ_TEST_ENV_TRY\")?\n\
@@ -16985,7 +18509,9 @@ let r = match n {
             }
             other => panic!("esperaba Ok, fue {:?}", other),
         }
-        unsafe { std::env::remove_var("FITZ_TEST_ENV_TRY"); }
+        unsafe {
+            std::env::remove_var("FITZ_TEST_ENV_TRY");
+        }
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -17014,10 +18540,16 @@ let r = match n {
             Value::Result(ResultVariant::Ok(ref inner)) if matches!(**inner, Value::Null)
         ));
         // Variables seteadas.
-        assert_eq!(eval_env.lock().get("a").unwrap(), Value::Str("alpha".into()));
+        assert_eq!(
+            eval_env.lock().get("a").unwrap(),
+            Value::Str("alpha".into())
+        );
         assert_eq!(eval_env.lock().get("b").unwrap(), Value::Str("beta".into()));
         // Comillas dobles stripped.
-        assert_eq!(eval_env.lock().get("c").unwrap(), Value::Str("with spaces".into()));
+        assert_eq!(
+            eval_env.lock().get("c").unwrap(),
+            Value::Str("with spaces".into())
+        );
         // Cleanup
         unsafe {
             std::env::remove_var("FITZ_TEST_LOAD_A");
@@ -17138,9 +18670,9 @@ let r = match n {
         // `os.path` es un submódulo. Field access debería darnos otro
         // PyObject opaco — al chequearlo con `__name__` confirmamos
         // que es realmente el submódulo correcto.
-        let (env, res) = parse_eval_into_env(
-            "from python import os\nlet p = os.path\nlet n = p.__name__\n"
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("from python import os\nlet p = os.path\nlet n = p.__name__\n")
+                .await;
         res.unwrap();
         let p = env.lock().get("p");
         assert!(matches!(p, Some(Value::PyObject(_))));
@@ -17188,8 +18720,7 @@ let r = match n {
         let src = "@patch(\"/x\")\nfn h() => 0";
         let err = parse_and_eval(src).await.unwrap_err();
         assert!(
-            err.message.contains("@patch")
-                && err.message.contains("no implementado"),
+            err.message.contains("@patch") && err.message.contains("no implementado"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -17201,7 +18732,8 @@ let r = match n {
         // error y define la fn en el env.
 
         let src = "@get(\"/users/{id}\")\nfn get_user(id: Int) => \"hola\"";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         assert_eq!(reg.routes.len(), 1);
         let r = &reg.routes[0];
@@ -17209,14 +18741,18 @@ let r = match n {
         assert_eq!(r.path, "/users/{id}");
         assert_eq!(r.path_params, vec!["id".to_string()]);
         assert_eq!(r.handler_name, "get_user");
-        assert_eq!(r.param_types, vec![("id".to_string(), Some("Int".into()), false)]);
+        assert_eq!(
+            r.param_types,
+            vec![("id".to_string(), Some("Int".into()), false)]
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_con_path_param_sin_param_de_handler_es_error() {
         // `@get("/{id}")` pero el handler no tiene un param `id`.
         let src = "@get(\"/{id}\")\nfn h() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("'{id}'") && err.message.contains("parámetro"),
@@ -17229,7 +18765,8 @@ let r = match n {
     async fn fndef_con_decorator_http_sin_args_es_error() {
         // `@get()` sin path.
         let src = "@get()\nfn h() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("@get") && err.message.contains("argumento"),
@@ -17242,7 +18779,8 @@ let r = match n {
     async fn fndef_decorator_http_path_no_string_es_error() {
         // `@get(42)` — path no es string.
         let src = "@get(42)\nfn h() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("string literal"),
@@ -17254,7 +18792,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn fndef_decorator_http_path_sin_slash_es_error() {
         let src = "@get(\"users\")\nfn h() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("'/'"),
@@ -17269,7 +18808,8 @@ let r = match n {
             type UserInput { name: Str }\n\
             @post(\"/users\")\nfn create(body: UserInput) => body\n\
         ";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         assert_eq!(reg.routes.len(), 1);
         let route = &reg.routes[0];
@@ -17287,7 +18827,8 @@ let r = match n {
         // `body` sin anotación: declared_type = None, runtime
         // deserializa como Value libre.
         let src = "@post(\"/log\")\nfn log(body) => body";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let bp = reg.routes[0].body_param.as_ref().unwrap();
         assert_eq!(bp.name, "body");
@@ -17302,7 +18843,8 @@ let r = match n {
             type B { y: Int }\n\
             @post(\"/x\")\nfn h(a: A, b: B) => a\n\
         ";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("solo se admite un parámetro body"),
@@ -17319,7 +18861,8 @@ let r = match n {
             type Q { name: Str }\n\
             @get(\"/search\")\nfn s(body: Q) => body.name\n\
         ";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         assert!(reg.routes[0].body_param.is_some());
     }
@@ -17332,7 +18875,8 @@ let r = match n {
             @server(8080, \"0.0.0.0\")\nfn main() => 0\n\
             @get(\"/\")\nfn h() => \"ok\"\n\
         ";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let cfg = reg.server_config.unwrap();
         assert_eq!(cfg.port, 8080);
@@ -17342,7 +18886,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_decorator_sin_args_no_pisa_default() {
         let src = "@server()\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let cfg = reg.server_config.unwrap();
         assert_eq!(cfg.port, 3000);
@@ -17352,7 +18897,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_decorator_solo_port_usa_host_default() {
         let src = "@server(9090)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let cfg = reg.server_config.unwrap();
         assert_eq!(cfg.port, 9090);
@@ -17362,7 +18908,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_port_no_int_es_error() {
         let src = "@server(\"8080\")\nfn cfg() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("port") && err.message.contains("Int"),
@@ -17374,7 +18921,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_port_fuera_de_rango_es_error() {
         let src = "@server(99999)\nfn cfg() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("rango"),
@@ -17386,7 +18934,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_host_invalido_es_error() {
         let src = "@server(8080, \"no-es-ip\")\nfn cfg() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("no-es-ip") && err.message.contains("IP"),
@@ -17398,7 +18947,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_demasiados_args_es_error() {
         let src = "@server(8080, \"0.0.0.0\", 42)\nfn cfg() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("2 args"),
@@ -17413,7 +18963,8 @@ let r = match n {
             @server(8080)\nfn a() => 0\n\
             @server(9090)\nfn b() => 0\n\
         ";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("ya tenía un @server"),
@@ -17425,7 +18976,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn programa_sin_server_decorator_da_resolved_config_default() {
         let src = "@get(\"/\")\nfn h() => 0";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         assert!(reg.server_config.is_none());
         let cfg = reg.resolved_config();
@@ -17439,7 +18991,8 @@ let r = match n {
     async fn server_decorator_acepta_kwarg_docs_false() {
         // 7.4: @server(3000, docs=false) popula enable_docs=false.
         let src = "@server(3000, docs=false)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let cfg = reg.server_config.unwrap();
         assert_eq!(cfg.port, 3000);
@@ -17449,7 +19002,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_decorator_acepta_kwarg_docs_true_explicito() {
         let src = "@server(3000, docs=true)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let cfg = reg.server_config.unwrap();
         assert!(cfg.enable_docs);
@@ -17459,7 +19013,8 @@ let r = match n {
     async fn server_decorator_default_enable_docs_es_true() {
         // Sin kwarg: default true.
         let src = "@server(3000)\nfn cfg() => 0\n@get(\"/\")\nfn h() => 0";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let cfg = reg.server_config.unwrap();
         assert!(cfg.enable_docs);
@@ -17468,7 +19023,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_decorator_docs_no_bool_es_error() {
         let src = "@server(3000, docs=\"si\")\nfn cfg() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("docs") && err.message.contains("Bool"),
@@ -17480,7 +19036,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn server_decorator_kwarg_desconocido_es_error() {
         let src = "@server(3000, version=\"1.0\")\nfn cfg() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("version") && err.message.contains("reconocido"),
@@ -17494,7 +19051,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_registra_spec_en_routespec() {
         let src = "@header(name=\"Authorization\")\n@get(\"/protected\")\nfn protected(authorization: Str) => authorization";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         assert_eq!(reg.routes.len(), 1);
         let route = &reg.routes[0];
@@ -17509,7 +19067,8 @@ let r = match n {
     async fn header_decorator_param_nullable_se_marca() {
         // @header sobre param Str? → is_nullable = true.
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\")\nfn traced(x_trace_id: Str?) => \"ok\"";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let h = &reg.routes[0].headers[0];
         assert_eq!(h.http_name, "X-Trace-Id");
@@ -17521,7 +19080,8 @@ let r = match n {
     async fn header_decorator_sin_param_correspondiente_es_error() {
         // El handler no tiene el param derivado del header.
         let src = "@header(name=\"Authorization\")\n@get(\"/x\")\nfn h() => \"ok\"";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("authorization") && err.message.contains("no tiene un param"),
@@ -17533,7 +19093,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn header_decorator_param_tipo_no_str_es_error() {
         let src = "@header(name=\"X-Count\")\n@get(\"/x\")\nfn h(x_count: Int) => x_count";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("`Str` o `Str?`") && err.message.contains("x_count"),
@@ -17546,7 +19107,8 @@ let r = match n {
     async fn header_decorator_duplicado_es_error() {
         // Dos @header con el mismo name → error (match case-insensitive).
         let src = "@header(name=\"Authorization\")\n@header(name=\"authorization\")\n@get(\"/x\")\nfn h(authorization: Str) => authorization";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("declarado dos veces") || err.message.contains("dos veces"),
@@ -17559,7 +19121,8 @@ let r = match n {
     async fn header_decorator_sin_decorator_de_ruta_es_error() {
         // @header solo (sin @get/@post/...) → error.
         let src = "@header(name=\"Authorization\")\nfn h(authorization: Str) => authorization";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("solo aplica sobre handlers HTTP"),
@@ -17772,8 +19335,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("ws_heartbeat_secs")
-                && err.message.contains("Int literal"),
+            err.message.contains("ws_heartbeat_secs") && err.message.contains("Int literal"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -17789,8 +19351,7 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("ws_heartbeat_secs")
-                && err.message.contains("Int literal"),
+            err.message.contains("ws_heartbeat_secs") && err.message.contains("Int literal"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -17857,7 +19418,8 @@ let r = match n {
         // Decoradores HTTP de ruta no aceptan kwargs (ni en 7.0 ni
         // antes de que 7.6 defina la convención de headers).
         let src = "@get(\"/x\", foo=1)\nfn h() => 0";
-        let (res, _reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, _reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("foo") && err.message.contains("nombre"),
@@ -17873,7 +19435,8 @@ let r = match n {
             @put(\"/users/{id}\")\nfn update(id: Int, name) => name\n\
             @delete(\"/users/{id}\")\nfn del(id: Int) => 0\n\
         ";
-        let (res, reg) = crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
+        let (res, reg) =
+            crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         assert_eq!(reg.routes.len(), 3);
         assert_eq!(reg.routes[0].method, crate::http::HttpMethod::Post);
@@ -17891,7 +19454,9 @@ let r = match n {
     // -----------------------------------------------------------------------
 
     async fn first_runtime_error(src: &str) -> FitzError {
-        parse_and_eval(src).await.expect_err("esperado un error de runtime")
+        parse_and_eval(src)
+            .await
+            .expect_err("esperado un error de runtime")
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -18115,10 +19680,10 @@ let r = match n {
         match c {
             Value::CorsConfig(cfg) => match &cfg.allow_origin {
                 crate::http::AllowOrigin::Set(items) => {
-                    assert_eq!(items, &vec![
-                        "https://a.com".to_string(),
-                        "https://b.com".to_string(),
-                    ]);
+                    assert_eq!(
+                        items,
+                        &vec!["https://a.com".to_string(), "https://b.com".to_string(),]
+                    );
                 }
                 other => panic!("se esperaba AllowOrigin::Set, fue: {:?}", other),
             },
@@ -18132,8 +19697,7 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("allow_origin")
-                && err.message.contains("Str | List<Str>"),
+            err.message.contains("allow_origin") && err.message.contains("Str | List<Str>"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -18146,8 +19710,7 @@ let r = match n {
         let (_env, res) = parse_eval_into_env(src).await;
         let err = res.unwrap_err();
         assert!(
-            err.message.contains("allow_origin")
-                && err.message.contains("Str | List<Str>"),
+            err.message.contains("allow_origin") && err.message.contains("Str | List<Str>"),
             "mensaje inesperado: {}",
             err.message,
         );
@@ -18292,7 +19855,10 @@ let r = match n {
             crate::http::with_active_registry_async(|| async { parse_and_eval(src).await }).await;
         res.unwrap();
         let r = &reg.routes[0];
-        assert!(r.middlewares.is_empty(), "cors NO debe entrar a middlewares chain");
+        assert!(
+            r.middlewares.is_empty(),
+            "cors NO debe entrar a middlewares chain"
+        );
         let cors = r.cors.as_ref().expect("se esperaba RouteSpec.cors");
         assert_eq!(
             cors.allow_origin,
@@ -18346,10 +19912,7 @@ let r = match n {
         // decorator es no-op silencioso. La fn queda definida en el
         // env normalmente (paralelo a `#[cfg(test)]` Rust: fuera del
         // runner, el código existe pero no se ejecuta).
-        let (env, res) = parse_eval_into_env(
-            "@test fn dummy() { let x = 1 }\nlet y = 42",
-        )
-        .await;
+        let (env, res) = parse_eval_into_env("@test fn dummy() { let x = 1 }\nlet y = 42").await;
         res.expect("@test sin registry no debe abortar");
         // `y` debe estar definida (la evaluación siguió).
         assert_eq!(env.lock().get("y"), Some(Value::Int(42)));
@@ -18365,12 +19928,11 @@ let r = match n {
         // Con un `TestRegistry` activo, `@test fn` empuja un `TestSpec`
         // al registry. La fn también queda en el env.
         let src = "@test fn suma() { assert_eq(2 + 2, 4) }";
-        let ((), registry) =
-            crate::testing::with_active_test_registry_async(|| async {
-                let (_env, res) = parse_eval_into_env(src).await;
-                res.expect("evaluación OK");
-            })
-            .await;
+        let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(src).await;
+            res.expect("evaluación OK");
+        })
+        .await;
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.tests()[0].name, "suma");
         assert!(!registry.tests()[0].is_async);
@@ -18379,12 +19941,11 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn test_decorator_async_fn_registra_is_async_true() {
         let src = "@test async fn carga() { let x = sleep(0).await }";
-        let ((), registry) =
-            crate::testing::with_active_test_registry_async(|| async {
-                let (_env, res) = parse_eval_into_env(src).await;
-                res.expect("evaluación OK");
-            })
-            .await;
+        let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(src).await;
+            res.expect("evaluación OK");
+        })
+        .await;
         assert_eq!(registry.len(), 1);
         assert_eq!(registry.tests()[0].name, "carga");
         assert!(registry.tests()[0].is_async);
@@ -18397,12 +19958,11 @@ let r = match n {
             @test fn segundo() { let y = 2 }\n\
             @test fn tercero() { let z = 3 }\n\
         ";
-        let ((), registry) =
-            crate::testing::with_active_test_registry_async(|| async {
-                let (_env, res) = parse_eval_into_env(src).await;
-                res.expect("evaluación OK");
-            })
-            .await;
+        let ((), registry) = crate::testing::with_active_test_registry_async(|| async {
+            let (_env, res) = parse_eval_into_env(src).await;
+            res.expect("evaluación OK");
+        })
+        .await;
         assert_eq!(registry.len(), 3);
         assert_eq!(registry.tests()[0].name, "primero");
         assert_eq!(registry.tests()[1].name, "segundo");
@@ -18556,10 +20116,8 @@ let r = match n {
     async fn assert_throws_callback_que_tira_pasa() {
         // El callback levanta vía `assert(false)`. assert_throws lo
         // atrapa y devuelve Null.
-        let (_, res) = parse_eval_into_env(
-            "assert_throws(fn() => assert(false, \"intencional\"))",
-        )
-        .await;
+        let (_, res) =
+            parse_eval_into_env("assert_throws(fn() => assert(false, \"intencional\"))").await;
         res.expect("assert_throws debería pasar (callback tira)");
     }
 
@@ -18631,10 +20189,7 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn list_comp_basica_doubla_cada_elemento() {
         let items = eval_to_list_vec("let r = [x * 2 for x in [1, 2, 3]]").await;
-        assert_eq!(
-            items,
-            vec![Value::Int(2), Value::Int(4), Value::Int(6)],
-        );
+        assert_eq!(items, vec![Value::Int(2), Value::Int(4), Value::Int(6)],);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -18647,8 +20202,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn list_comp_con_filter_solo_pares() {
-        let items =
-            eval_to_list_vec("let r = [x for x in [1, 2, 3, 4, 5] if x % 2 == 0]").await;
+        let items = eval_to_list_vec("let r = [x for x in [1, 2, 3, 4, 5] if x % 2 == 0]").await;
         assert_eq!(items, vec![Value::Int(2), Value::Int(4)]);
     }
 
@@ -18694,7 +20248,8 @@ let r = match n {
             "let xs: List<Int> = [3, 1, 4, 1, 5, 9, 2, 6]\n\
              let lo = xs.min()\n\
              let hi = xs.max()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let lo = env.lock().get("lo").unwrap();
         let hi = env.lock().get("hi").unwrap();
@@ -18713,7 +20268,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Float> = [1.5, 0.5, 2.5]\n\
              let lo = xs.min()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let lo = env.lock().get("lo").unwrap();
         match lo {
@@ -18727,7 +20283,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let r = xs.min()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let r = env.lock().get("r").unwrap();
         match r {
@@ -18743,7 +20300,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let total = xs.sum()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(15)));
     }
@@ -18753,7 +20311,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Float> = [1.5, 2.5, 3.0]\n\
              let total = xs.sum()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Float(7.0)));
     }
@@ -18763,7 +20322,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let total = xs.sum()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(0)));
     }
@@ -18777,7 +20337,8 @@ let r = match n {
         let (_, res) = parse_eval_into_env(
             "let xs = [\"a\", \"b\"]\n\
              let r = xs.sum()",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("List<Int>") || err.message.contains("Int|Float"),
@@ -18791,7 +20352,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"42\"\n\
              let p = s.pad_start(5, \"0\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("p"), Some(Value::Str("00042".into())));
     }
@@ -18801,7 +20363,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"hi\"\n\
              let p = s.pad_end(5, \".\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("p"), Some(Value::Str("hi...".into())));
     }
@@ -18811,7 +20374,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"hola, mundo\"\n\
              let p = s.pad_start(5, \"*\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("p"), Some(Value::Str("hola, mundo".into())));
     }
@@ -18821,7 +20385,8 @@ let r = match n {
         let (_, res) = parse_eval_into_env(
             "let s = \"42\"\n\
              let p = s.pad_start(5, \"ab\")",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("1 caracter") || err.message.contains("1 char"),
@@ -18835,15 +20400,26 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"b\": 2, \"a\": 1, \"c\": 3}\n\
              let ks = m.keys_sorted()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("ks").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let names: Vec<String> = g.iter().filter_map(|v| {
-                if let Value::Str(s) = v { Some(s.clone()) } else { None }
-            }).collect();
-            assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            let names: Vec<String> = g
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()]
+            );
         } else {
             panic!("esperaba List");
         }
@@ -18854,14 +20430,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Int, Str> = {3: \"c\", 1: \"a\", 2: \"b\"}\n\
              let ks = m.keys_sorted()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("ks").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|v| {
-                if let Value::Int(n) = v { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![1, 2, 3]);
         } else {
             panic!("esperaba List");
@@ -18873,7 +20457,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {}\n\
              let ks = m.keys_sorted()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("ks").unwrap();
         if let Value::List(items) = v {
@@ -18885,16 +20470,21 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rg_range_step_by_basico() {
-        let (env, res) = parse_eval_into_env(
-            "let xs = (0..10).step_by(2)",
-        ).await;
+        let (env, res) = parse_eval_into_env("let xs = (0..10).step_by(2)").await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|v| {
-                if let Value::Int(n) = v { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![0, 2, 4, 6, 8]);
         } else {
             panic!("esperaba List<Int>");
@@ -18903,16 +20493,21 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rg_range_step_by_inclusivo() {
-        let (env, res) = parse_eval_into_env(
-            "let xs = (0..=10).step_by(3)",
-        ).await;
+        let (env, res) = parse_eval_into_env("let xs = (0..=10).step_by(3)").await;
         res.unwrap();
         let v = env.lock().get("xs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|v| {
-                if let Value::Int(n) = v { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Int(n) = v {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // 0..=10 con step 3 → [0, 3, 6, 9]
             assert_eq!(nums, vec![0, 3, 6, 9]);
         } else {
@@ -18922,9 +20517,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rg_range_step_by_cero_es_error() {
-        let (_, res) = parse_eval_into_env(
-            "let xs = (0..10).step_by(0)",
-        ).await;
+        let (_, res) = parse_eval_into_env("let xs = (0..10).step_by(0)").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("n > 0"),
@@ -18935,9 +20528,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn rg_range_step_by_negativo_es_error() {
-        let (_, res) = parse_eval_into_env(
-            "let xs = (0..10).step_by(-1)",
-        ).await;
+        let (_, res) = parse_eval_into_env("let xs = (0..10).step_by(-1)").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("n > 0"),
@@ -18954,7 +20545,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let total: Int = xs.reduce(0, fn(acc, x) => acc + x)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(15)));
     }
@@ -18964,7 +20556,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let total: Int = xs.reduce(42, fn(acc, x) => acc + x)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("total"), Some(Value::Int(42)));
     }
@@ -18976,7 +20569,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let s: Str = xs.reduce(\"\", fn(acc, x) => \"{acc}{x}-\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("s"), Some(Value::Str("1-2-3-".into())));
     }
@@ -18986,7 +20580,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [2, 3, 4]\n\
              let p: Int = xs.product()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("p"), Some(Value::Int(24)));
     }
@@ -18996,7 +20591,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let p: Int = xs.product()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("p"), Some(Value::Int(1)));
     }
@@ -19006,7 +20602,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Float> = [1.5, 2.0, 2.0]\n\
              let p: Float = xs.product()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("p"), Some(Value::Float(6.0)));
     }
@@ -19016,15 +20613,26 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"abc\"\n\
              let cs: List<Str> = s.chars()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("cs").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let names: Vec<String> = g.iter().filter_map(|v| {
-                if let Value::Str(s) = v { Some(s.clone()) } else { None }
-            }).collect();
-            assert_eq!(names, vec!["a".to_string(), "b".to_string(), "c".to_string()]);
+            let names: Vec<String> = g
+                .iter()
+                .filter_map(|v| {
+                    if let Value::Str(s) = v {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                names,
+                vec!["a".to_string(), "b".to_string(), "c".to_string()]
+            );
         } else {
             panic!("esperaba List");
         }
@@ -19033,9 +20641,7 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn mb3_str_chars_unicode() {
         // Para chars no-ASCII contamos como un solo elemento.
-        let (env, res) = parse_eval_into_env(
-            "let cs: List<Str> = \"café\".chars()",
-        ).await;
+        let (env, res) = parse_eval_into_env("let cs: List<Str> = \"café\".chars()").await;
         res.unwrap();
         let v = env.lock().get("cs").unwrap();
         if let Value::List(items) = v {
@@ -19050,7 +20656,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
              let es: List<(Str, Int)> = m.entries()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("es").unwrap();
         if let Value::List(items) = v {
@@ -19074,7 +20681,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"b\", 2)]\n\
              let m: Map<Str, Int> = pairs.to_map()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("m").unwrap();
         if let Value::Map(pairs) = v {
@@ -19094,7 +20702,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let pairs: List<(Str, Int)> = [(\"a\", 1), (\"a\", 999)]\n\
              let m: Map<Str, Int> = pairs.to_map()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("m").unwrap();
         if let Value::Map(pairs) = v {
@@ -19115,7 +20724,8 @@ let r = match n {
              let back: Map<Str, Int> = m.entries().to_map()\n\
              let av: Result<Int> = back.get(\"a\")\n\
              let bv: Result<Int> = back.get(\"b\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let av = env.lock().get("av").unwrap();
         let bv = env.lock().get("bv").unwrap();
@@ -19136,14 +20746,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 2, 3, 1, 4, 3]\n\
              let r: List<Int> = xs.unique()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![1, 2, 3, 4]);
         } else {
             panic!("esperaba List");
@@ -19155,7 +20773,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Str> = [\"a\", \"b\", \"a\", \"c\", \"b\"]\n\
              let r: List<Str> = xs.unique()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -19170,23 +20789,40 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5, 6]\n\
              let split: (List<Int>, List<Int>) = xs.partition(fn(n: Int) => n % 2 == 0)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("split").unwrap();
         if let Value::Tuple(items) = v {
             assert_eq!(items.len(), 2);
             // Truthy (pares).
             if let Value::List(t) = &items[0] {
-                let nums: Vec<i64> = t.lock().iter().filter_map(|x| {
-                    if let Value::Int(n) = x { Some(*n) } else { None }
-                }).collect();
+                let nums: Vec<i64> = t
+                    .lock()
+                    .iter()
+                    .filter_map(|x| {
+                        if let Value::Int(n) = x {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 assert_eq!(nums, vec![2, 4, 6]);
             }
             // Falsy (impares).
             if let Value::List(f) = &items[1] {
-                let nums: Vec<i64> = f.lock().iter().filter_map(|x| {
-                    if let Value::Int(n) = x { Some(*n) } else { None }
-                }).collect();
+                let nums: Vec<i64> = f
+                    .lock()
+                    .iter()
+                    .filter_map(|x| {
+                        if let Value::Int(n) = x {
+                            Some(*n)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
                 assert_eq!(nums, vec![1, 3, 5]);
             }
         } else {
@@ -19199,7 +20835,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Int, Str> = {1: \"a\", 2: \"b\", 3: \"c\"}\n\
              let inv: Map<Str, Int> = m.invert()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("inv").unwrap();
         if let Value::Map(pairs) = v {
@@ -19218,7 +20855,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 1}\n\
              let inv: Map<Int, Str> = m.invert()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("inv").unwrap();
         if let Value::Map(pairs) = v {
@@ -19234,9 +20872,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb4_str_split_at_basico() {
-        let (env, res) = parse_eval_into_env(
-            "let pair: (Str, Str) = \"hola mundo\".split_at(4)",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let pair: (Str, Str) = \"hola mundo\".split_at(4)").await;
         res.unwrap();
         let v = env.lock().get("pair").unwrap();
         if let Value::Tuple(items) = v {
@@ -19253,17 +20890,28 @@ let r = match n {
             "let a: (Str, Str) = \"abc\".split_at(0)\n\
              let b: (Str, Str) = \"abc\".split_at(3)\n\
              let c: (Str, Str) = \"abc\".split_at(99)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         for (name, want_left, want_right) in &[
             ("a", "", "abc"),
             ("b", "abc", ""),
-            ("c", "abc", ""),  // idx > len → clamp a len
+            ("c", "abc", ""), // idx > len → clamp a len
         ] {
             let v = env.lock().get(name).unwrap();
             if let Value::Tuple(items) = v {
-                assert_eq!(items[0], Value::Str((*want_left).into()), "left de `{}`", name);
-                assert_eq!(items[1], Value::Str((*want_right).into()), "right de `{}`", name);
+                assert_eq!(
+                    items[0],
+                    Value::Str((*want_left).into()),
+                    "left de `{}`",
+                    name
+                );
+                assert_eq!(
+                    items[1],
+                    Value::Str((*want_right).into()),
+                    "right de `{}`",
+                    name
+                );
             } else {
                 panic!("esperaba Tuple para {}", name);
             }
@@ -19272,9 +20920,7 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb4_str_split_at_negativo_es_error() {
-        let (_, res) = parse_eval_into_env(
-            "let pair: (Str, Str) = \"abc\".split_at(-1)",
-        ).await;
+        let (_, res) = parse_eval_into_env("let pair: (Str, Str) = \"abc\".split_at(-1)").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("negativo"),
@@ -19291,14 +20937,22 @@ let r = match n {
             "let xs: List<Int> = [1, 2, 3]\n\
              let ys: List<Int> = [10, 20]\n\
              let r: List<Int> = [x + y for x in xs for y in ys]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // (1,10), (1,20), (2,10), (2,20), (3,10), (3,20)
             assert_eq!(nums, vec![11, 21, 12, 22, 13, 23]);
         } else {
@@ -19312,14 +20966,22 @@ let r = match n {
             "let xs: List<Int> = [1, 2, 3]\n\
              let ys: List<Int> = [10, 20]\n\
              let r: List<Int> = [x * y for x in xs for y in ys if x % 2 == 1]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // x impar: 1, 3 → (1,10), (1,20), (3,10), (3,20)
             assert_eq!(nums, vec![10, 20, 30, 60]);
         } else {
@@ -19329,9 +20991,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cmp_map_comp_basico() {
-        let (env, res) = parse_eval_into_env(
-            "let squares: Map<Int, Int> = {n: n * n for n in 1..=4}",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let squares: Map<Int, Int> = {n: n * n for n in 1..=4}").await;
         res.unwrap();
         let v = env.lock().get("squares").unwrap();
         if let Value::Map(pairs) = v {
@@ -19348,14 +21009,14 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn cmp_map_comp_con_filter() {
-        let (env, res) = parse_eval_into_env(
-            "let big: Map<Int, Int> = {n: n * 10 for n in 0..10 if n > 5}",
-        ).await;
+        let (env, res) =
+            parse_eval_into_env("let big: Map<Int, Int> = {n: n * 10 for n in 0..10 if n > 5}")
+                .await;
         res.unwrap();
         let v = env.lock().get("big").unwrap();
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
-            assert_eq!(g.len(), 4);  // 6, 7, 8, 9
+            assert_eq!(g.len(), 4); // 6, 7, 8, 9
         } else {
             panic!("esperaba Map");
         }
@@ -19367,7 +21028,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 1, 3]\n\
              let m: Map<Int, Int> = {x: x * 100 for x in xs}",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("m").unwrap();
         if let Value::Map(pairs) = v {
@@ -19393,7 +21055,8 @@ let r = match n {
              let c: Bool = xs.ends_with([4, 5])\n\
              let d: Bool = xs.ends_with([3, 5])\n\
              let e: Bool = xs.starts_with([])",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
@@ -19407,14 +21070,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 4, 5]\n\
              let r: List<Int> = xs.insert_at(2, 3)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![1, 2, 3, 4, 5]);
         }
     }
@@ -19424,7 +21095,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.insert_at(99, 9)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -19439,7 +21111,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [10, 20, 30, 40]\n\
              let r: List<Int> = xs.remove_at(2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -19454,9 +21127,14 @@ let r = match n {
         let (_, res) = parse_eval_into_env(
             "let xs: List<Int> = [1]\n\
              let r: List<Int> = xs.remove_at(5)",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
-        assert!(err.message.contains("fuera de rango"), "msg: {}", err.message);
+        assert!(
+            err.message.contains("fuera de rango"),
+            "msg: {}",
+            err.message
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -19465,7 +21143,8 @@ let r = match n {
             "let ks: List<Str> = [\"a\", \"b\", \"c\"]\n\
              let vs: List<Int> = [1, 2, 3]\n\
              let m: Map<Str, Int> = ks.zip_to_map(vs)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("m").unwrap();
         if let Value::Map(pairs) = v {
@@ -19479,7 +21158,8 @@ let r = match n {
             "let s = \"hola mundo\"\n\
              let l: Str = s.left(4)\n\
              let r: Str = s.right(5)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("l"), Some(Value::Str("hola".into())));
         assert_eq!(env.lock().get("r"), Some(Value::Str("mundo".into())));
@@ -19490,7 +21170,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"hi\"\n\
              let c: Str = s.center(10, \"-\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("c"), Some(Value::Str("----hi----".into())));
     }
@@ -19500,7 +21181,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"hola mundo\"\n\
              let c: Str = s.center(5, \"*\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("c"), Some(Value::Str("hola mundo".into())));
     }
@@ -19512,7 +21194,8 @@ let r = match n {
              let b: Int = popcount(255)\n\
              let c: Int = leading_zeros(1)\n\
              let d: Int = trailing_zeros(8)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(3)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(8)));
@@ -19525,7 +21208,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a: Int = rotate_left(1, 4)\n\
              let b: Int = rotate_right(16, 4)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(16)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(1)));
@@ -19540,7 +21224,8 @@ let r = match n {
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let a: List<Int> = xs.take(3)\n\
              let b: List<Int> = xs.drop(2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let a = env.lock().get("a").unwrap();
         if let Value::List(items) = a {
@@ -19558,7 +21243,8 @@ let r = match n {
             "let xs: List<Int> = [1, 2, 3, 4]\n\
              let i: List<Int> = xs.init()\n\
              let t: List<Int> = xs.tail()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let i = env.lock().get("i").unwrap();
         if let Value::List(items) = i {
@@ -19582,7 +21268,8 @@ let r = match n {
             "let xs: List<Int> = []\n\
              let i: List<Int> = xs.init()\n\
              let t: List<Int> = xs.tail()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let i = env.lock().get("i").unwrap();
         if let Value::List(items) = i {
@@ -19599,14 +21286,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [10, 20, 30]\n\
              let r: List<Int> = xs.intersperse(0)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let r = env.lock().get("r").unwrap();
         if let Value::List(items) = r {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             assert_eq!(nums, vec![10, 0, 20, 0, 30]);
         }
     }
@@ -19616,7 +21311,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let r: List<Int> = xs.cycle(3)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let r = env.lock().get("r").unwrap();
         if let Value::List(items) = r {
@@ -19629,7 +21325,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<Int> = xs.cycle(0)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let r = env.lock().get("r").unwrap();
         if let Value::List(items) = r {
@@ -19639,27 +21336,21 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb7_str_repeat_with_intercala_sep() {
-        let (env, res) = parse_eval_into_env(
-            "let r: Str = \"hi\".repeat_with(3, \", \")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(3, \", \")").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("hi, hi, hi".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb7_str_repeat_with_n_cero_es_vacio() {
-        let (env, res) = parse_eval_into_env(
-            "let r: Str = \"hi\".repeat_with(0, \", \")",
-        ).await;
+        let (env, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(0, \", \")").await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb7_str_repeat_with_n_negativo_es_error() {
-        let (_, res) = parse_eval_into_env(
-            "let r: Str = \"hi\".repeat_with(-1, \",\")",
-        ).await;
+        let (_, res) = parse_eval_into_env("let r: Str = \"hi\".repeat_with(-1, \",\")").await;
         let err = res.unwrap_err();
         assert!(err.message.contains("negativo"), "msg fue: {}", err.message);
     }
@@ -19670,7 +21361,8 @@ let r = match n {
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
              let m3: Map<Str, Int> = m.with(\"a\", 99)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         // m2: {"a": 1, "b": 2}
         let m2 = env.lock().get("m2").unwrap();
@@ -19694,7 +21386,8 @@ let r = match n {
             "let m: Map<Str, Int> = {\"a\": 1}\n\
              let m2: Map<Str, Int> = m.with(\"b\", 2)\n\
              let original_has_b: Bool = m.has(\"b\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("original_has_b"), Some(Value::Bool(false)));
     }
@@ -19706,14 +21399,22 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4]\n\
              let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // Cada paso del acc: 0+1=1, 1+2=3, 3+3=6, 6+4=10.
             assert_eq!(nums, vec![1, 3, 6, 10]);
         } else {
@@ -19726,7 +21427,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let r: List<Int> = xs.scan(0, fn(acc: Int, x: Int) => acc + x)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -19741,7 +21443,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let r: List<List<Int>> = xs.windows(3)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -19756,7 +21459,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2]\n\
              let r: List<List<Int>> = xs.windows(5)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
@@ -19771,7 +21475,8 @@ let r = match n {
         let (_, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3]\n\
              let r: List<List<Int>> = xs.windows(0)",
-        ).await;
+        )
+        .await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("n > 0"),
@@ -19786,14 +21491,18 @@ let r = match n {
             "let a: Map<Str, Int> = {\"x\": 1, \"y\": 2}\n\
              let b: Map<Str, Int> = {\"y\": 10, \"z\": 3}\n\
              let r: Map<Str, Int> = a.merge_with(b, fn(va: Int, vb: Int) => va + vb)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::Map(pairs) = v {
             let g = pairs.lock();
             // x: 1 (solo en a), y: 2+10=12 (conflict), z: 3 (solo en b).
             assert_eq!(g.len(), 3);
-            let y_val = g.iter().find(|(k, _)| k == &Value::Str("y".into())).map(|(_, v)| v.clone());
+            let y_val = g
+                .iter()
+                .find(|(k, _)| k == &Value::Str("y".into()))
+                .map(|(_, v)| v.clone());
             assert_eq!(y_val, Some(Value::Int(12)));
         } else {
             panic!("esperaba Map");
@@ -19925,14 +21634,22 @@ let r = match n {
             "let xs: List<Int> = [1, 2, 3, 4]\n\
              let ys: List<Int> = [10, 20]\n\
              let r: List<Int> = xs.zip_with(ys, fn(a: Int, b: Int) => a + b)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let nums: Vec<i64> = g.iter().filter_map(|x| {
-                if let Value::Int(n) = x { Some(*n) } else { None }
-            }).collect();
+            let nums: Vec<i64> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Int(n) = x {
+                        Some(*n)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
             // trunca a min(4, 2) = 2 elementos.
             assert_eq!(nums, vec![11, 22]);
         } else {
@@ -19967,7 +21684,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = []\n\
              let r: Result<Int> = xs.min_by(fn(n: Int) => n)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("r").unwrap();
         if let Value::Result(ResultVariant::Err(_)) = v {
@@ -19982,15 +21700,26 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"uno\\ndos\\ntres\"\n\
              let ls: List<Str> = s.lines()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("ls").unwrap();
         if let Value::List(items) = v {
             let g = items.lock();
-            let strs: Vec<String> = g.iter().filter_map(|x| {
-                if let Value::Str(s) = x { Some(s.clone()) } else { None }
-            }).collect();
-            assert_eq!(strs, vec!["uno".to_string(), "dos".to_string(), "tres".to_string()]);
+            let strs: Vec<String> = g
+                .iter()
+                .filter_map(|x| {
+                    if let Value::Str(s) = x {
+                        Some(s.clone())
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert_eq!(
+                strs,
+                vec!["uno".to_string(), "dos".to_string(), "tres".to_string()]
+            );
         } else {
             panic!("esperaba List");
         }
@@ -20001,7 +21730,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let s = \"a\\nb\\n\"\n\
              let ls: List<Str> = s.lines()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let v = env.lock().get("ls").unwrap();
         if let Value::List(items) = v {
@@ -20016,7 +21746,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let a: Bool = \"\".is_empty()\n\
              let b: Bool = \"hola\".is_empty()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("b"), Some(Value::Bool(false)));
@@ -20036,7 +21767,8 @@ let r = match n {
                  return r\n\
              }\n\
              let r: Int = run().await",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(42)));
     }
@@ -20053,7 +21785,8 @@ let r = match n {
                  return r\n\
              }\n\
              let r: Int = run().await",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(105)));
     }
@@ -20071,7 +21804,8 @@ let r = match n {
                  return r\n\
              }\n\
              let r: Int = run().await",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(11)));
     }
@@ -20083,7 +21817,8 @@ let r = match n {
             "let xs: List<Int> = [1, 2]\n\
              let ys: List<Int> = [10]\n\
              let r: List<Int> = [x + y for x in xs for y in ys]",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("x"), None);
         assert_eq!(env.lock().get("y"), None);
@@ -20097,7 +21832,8 @@ let r = match n {
             "let a: Int = abs(-5)\n\
              let b: Float = abs(-3.14)\n\
              let c: Int = abs(7)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(5)));
         assert_eq!(env.lock().get("b"), Some(Value::Float(3.14)));
@@ -20111,7 +21847,8 @@ let r = match n {
              let b: Int = max(3, 5)\n\
              let c: Float = min(1.5, 2.5)\n\
              let d: Float = max(1.5, 2.5)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(3)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(5)));
@@ -20125,7 +21862,8 @@ let r = match n {
             "let a: Float = pow(2, 10)\n\
              let b: Float = sqrt(16)\n\
              let c: Float = sqrt(2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Float(1024.0)));
         assert_eq!(env.lock().get("b"), Some(Value::Float(4.0)));
@@ -20145,7 +21883,8 @@ let r = match n {
              let b: Int = floor(3.8)\n\
              let c: Int = round(3.5)\n\
              let d: Int = ceil(7)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(4)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(3)));
@@ -20159,7 +21898,8 @@ let r = match n {
             "let a: Int = clamp(5, 0, 10)\n\
              let b: Int = clamp(-5, 0, 10)\n\
              let c: Int = clamp(15, 0, 10)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("a"), Some(Value::Int(5)));
         assert_eq!(env.lock().get("b"), Some(Value::Int(0)));
@@ -20170,20 +21910,19 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb9_str_swap_case() {
-        let (env, res) = parse_eval_into_env(
-            "let s: Str = \"Hola Mundo\".swap_case()",
-        ).await;
+        let (env, res) = parse_eval_into_env("let s: Str = \"Hola Mundo\".swap_case()").await;
         res.unwrap();
         assert_eq!(env.lock().get("s"), Some(Value::Str("hOLA mUNDO".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn mb9_str_title() {
-        let (env, res) = parse_eval_into_env(
-            "let s: Str = \"hola mundo de fitz\".title()",
-        ).await;
+        let (env, res) = parse_eval_into_env("let s: Str = \"hola mundo de fitz\".title()").await;
         res.unwrap();
-        assert_eq!(env.lock().get("s"), Some(Value::Str("Hola Mundo De Fitz".into())));
+        assert_eq!(
+            env.lock().get("s"),
+            Some(Value::Str("Hola Mundo De Fitz".into()))
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -20197,7 +21936,8 @@ let r = match n {
              let f: Bool = \"-42\".is_numeric()\n\
              let g: Bool = \"3.14.5\".is_numeric()\n\
              let h: Bool = \"\".is_alpha()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let env = env.lock();
         assert_eq!(env.get("a"), Some(Value::Bool(true)));
@@ -20217,7 +21957,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "let xs: List<Int> = [1, 2, 3, 4, 5]\n\
              let parts = xs.split_at(2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let env = env.lock();
         match env.get("parts") {
@@ -20242,7 +21983,8 @@ let r = match n {
              let a = xs.split_at(0)\n\
              let b = xs.split_at(10)\n\
              let c = xs.split_at(-1)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         // (0) → ([], [1,2,3]); (10) → ([1,2,3], []); (-1) → ([], [1,2,3])
         let env = env.lock();
@@ -20250,20 +21992,32 @@ let r = match n {
             if let (Value::List(l), Value::List(r)) = (&it[0], &it[1]) {
                 assert_eq!(l.lock().len(), 0);
                 assert_eq!(r.lock().len(), 3);
-            } else { panic!(); }
-        } else { panic!(); }
+            } else {
+                panic!();
+            }
+        } else {
+            panic!();
+        }
         if let Some(Value::Tuple(it)) = env.get("b") {
             if let (Value::List(l), Value::List(r)) = (&it[0], &it[1]) {
                 assert_eq!(l.lock().len(), 3);
                 assert_eq!(r.lock().len(), 0);
-            } else { panic!(); }
-        } else { panic!(); }
+            } else {
+                panic!();
+            }
+        } else {
+            panic!();
+        }
         if let Some(Value::Tuple(it)) = env.get("c") {
             if let (Value::List(l), Value::List(r)) = (&it[0], &it[1]) {
                 assert_eq!(l.lock().len(), 0);
                 assert_eq!(r.lock().len(), 3);
-            } else { panic!(); }
-        } else { panic!(); }
+            } else {
+                panic!();
+            }
+        } else {
+            panic!();
+        }
     }
 
     // ---- Mini-tanda Mb9: Map.has_value(v) ----
@@ -20274,7 +22028,8 @@ let r = match n {
             "let m: Map<Str, Int> = {\"a\": 1, \"b\": 2, \"c\": 3}\n\
              let yes: Bool = m.has_value(2)\n\
              let no: Bool = m.has_value(99)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("yes"), Some(Value::Bool(true)));
         assert_eq!(env.lock().get("no"), Some(Value::Bool(false)));
@@ -20290,7 +22045,8 @@ let r = match n {
              let c: Str = (255).to_str_base(16)\n\
              let d: Str = (10).to_str_base(2)\n\
              let e: Str = (8).to_str_base(8)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let env = env.lock();
         assert_eq!(env.get("a"), Some(Value::Int(5)));
@@ -20309,7 +22065,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r: Str = greet()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("amigo".into())));
     }
@@ -20319,7 +22076,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r: Str = greet(\"Fitz\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("Fitz".into())));
     }
@@ -20330,7 +22088,8 @@ let r = match n {
             "fn add(a: Int, b: Int = 10) -> Int { return a + b }\n\
              let r1: Int = add(5)\n\
              let r2: Int = add(5, 2)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r1"), Some(Value::Int(15)));
         assert_eq!(env.lock().get("r2"), Some(Value::Int(7)));
@@ -20343,7 +22102,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "fn count(...xs: Int) -> Int { return xs.len() }\n\
              let r: Int = count()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(0)));
     }
@@ -20359,7 +22119,8 @@ let r = match n {
              let a: Int = sum(1, 2, 3)\n\
              let b: Int = sum(10, 20)\n\
              let c: Int = sum()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let env = env.lock();
         assert_eq!(env.get("a"), Some(Value::Int(6)));
@@ -20372,7 +22133,8 @@ let r = match n {
         let (env, res) = parse_eval_into_env(
             "fn join(prefix: Str, ...xs: Str) -> Int { return xs.len() }\n\
              let r: Int = join(\"x\", \"a\", \"b\", \"c\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(3)));
     }
@@ -20386,7 +22148,8 @@ let r = match n {
                 return \"{greeting}, {name}\"\n\
              }\n\
              let r: Str = greet(name: \"Fitz\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("Hola, Fitz".into())));
     }
@@ -20398,7 +22161,8 @@ let r = match n {
                 return \"{greeting}, {name}\"\n\
              }\n\
              let r: Str = greet(\"Fitz\", greeting: \"Hi\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("Hi, Fitz".into())));
     }
@@ -20410,7 +22174,8 @@ let r = match n {
                 return \"{greeting}, {name}\"\n\
              }\n\
              let r: Str = greet(greeting: \"Hi\", name: \"Fitz\")",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("Hi, Fitz".into())));
     }
@@ -20420,7 +22185,8 @@ let r = match n {
         let (_, res) = parse_eval_into_env(
             "fn greet(name: Str) -> Str { return name }\n\
              let r = greet(unknown: \"x\")",
-        ).await;
+        )
+        .await;
         assert!(res.is_err(), "esperaba error por named arg inexistente");
     }
 
@@ -20438,7 +22204,8 @@ let r = match n {
              }\n\
              let a: Str = classify(0)\n\
              let b: Str = classify(5)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let env = env.lock();
         assert_eq!(env.get("a"), Some(Value::Str("cero".into())));
@@ -20458,7 +22225,8 @@ let r = match n {
                 }\n\
              }\n\
              let r: Int = f(0)",
-        ).await;
+        )
+        .await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Int(20)));
     }
@@ -20468,7 +22236,8 @@ let r = match n {
         let (_, res) = parse_eval_into_env(
             "fn greet(name: Str = \"amigo\") -> Str { return name }\n\
              let r = greet(\"a\", \"b\")",
-        ).await;
+        )
+        .await;
         assert!(res.is_err(), "esperaba error de aridad");
     }
 
@@ -20488,7 +22257,8 @@ let r = match n {
                 return xs\n\
              }\n\
              let r: List<Str> = make_list()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let r = env.lock().get("r");
         match r {
@@ -20508,7 +22278,8 @@ let r = match n {
              let b: Str = (3.14).to_str()\n\
              let c: Bool = (1.0).is_nan()\n\
              let d: Bool = (1.0).is_finite()",
-        ).await;
+        )
+        .await;
         res.unwrap();
         let env = env.lock();
         assert_eq!(env.get("a"), Some(Value::Float(3.14)));
@@ -20543,7 +22314,10 @@ let r = match n {
         }
         let hash = env.lock().get("hash").expect("hash debería estar bindeado");
         match hash {
-            Value::Module { name, env: hash_env } => {
+            Value::Module {
+                name,
+                env: hash_env,
+            } => {
                 assert_eq!(name, "hash");
                 assert!(hash_env.lock().get("password").is_some());
                 assert!(hash_env.lock().get("verify").is_some());
@@ -20608,7 +22382,8 @@ let r = match n {
                     // el secret no matchea. Verificamos que el mensaje no
                     // sea vacío y mencione la signature.
                     assert!(
-                        msg.to_lowercase().contains("signature") || msg.to_lowercase().contains("invalid"),
+                        msg.to_lowercase().contains("signature")
+                            || msg.to_lowercase().contains("invalid"),
                         "esperaba mención de signature/invalid, fue: {}",
                         msg
                     );
@@ -20641,7 +22416,8 @@ let r = match n {
     #[tokio::test(flavor = "current_thread")]
     async fn jwt_encode_y_decode_con_alg_explicito_hs384() {
         let payload = Value::new_map(vec![(Value::Str("ok".into()), Value::Bool(true))]);
-        let secret = Value::Str("secret-mas-largo-para-hs384-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
+        let secret =
+            Value::Str("secret-mas-largo-para-hs384-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".into());
         let alg = Value::Str("HS384".into());
         let token = builtin_jwt_encode(&[payload, secret.clone(), alg.clone()]).unwrap();
         let token_str = match token {
@@ -20649,7 +22425,8 @@ let r = match n {
             _ => panic!(),
         };
         // Decode con HS256 default debería fallar (alg mismatch).
-        let dec_default = builtin_jwt_decode(&[Value::Str(token_str.clone()), secret.clone()]).unwrap();
+        let dec_default =
+            builtin_jwt_decode(&[Value::Str(token_str.clone()), secret.clone()]).unwrap();
         assert!(matches!(dec_default, Value::Result(ResultVariant::Err(_))));
         // Decode con HS384 explícito tiene que andar.
         let dec_ok = builtin_jwt_decode(&[Value::Str(token_str), secret, alg]).unwrap();
@@ -20658,10 +22435,8 @@ let r = match n {
 
     #[tokio::test(flavor = "current_thread")]
     async fn jwt_encode_payload_no_map_es_error() {
-        let result = builtin_jwt_encode(&[
-            Value::Str("no es Map".into()),
-            Value::Str("secret".into()),
-        ]);
+        let result =
+            builtin_jwt_encode(&[Value::Str("no es Map".into()), Value::Str("secret".into())]);
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert!(err.message.contains("payload"));
@@ -20704,7 +22479,8 @@ let r = match n {
             hashed_str
         );
         // Verify con el plain original devuelve true.
-        let ok = builtin_hash_verify(&[Value::Str(plain.into()), Value::Str(hashed_str.clone())]).unwrap();
+        let ok = builtin_hash_verify(&[Value::Str(plain.into()), Value::Str(hashed_str.clone())])
+            .unwrap();
         assert_eq!(ok, Value::Bool(true));
         // Verify con plain incorrecto devuelve false.
         let bad = builtin_hash_verify(&[
@@ -20721,8 +22497,8 @@ let r = match n {
         // password() del mismo plain producen hashes distintos. Ambos
         // verifican OK contra el plain original.
         let plain = Value::Str("misma-pass".into());
-        let h1 = builtin_hash_password(&[plain.clone()]).unwrap();
-        let h2 = builtin_hash_password(&[plain.clone()]).unwrap();
+        let h1 = builtin_hash_password(std::slice::from_ref(&plain)).unwrap();
+        let h2 = builtin_hash_password(std::slice::from_ref(&plain)).unwrap();
         assert_ne!(h1, h2, "hashes deberían diferir por el salt random");
         let v1 = builtin_hash_verify(&[plain.clone(), h1]).unwrap();
         let v2 = builtin_hash_verify(&[plain, h2]).unwrap();
@@ -20800,10 +22576,8 @@ let r = match n {
     async fn cron_decorator_sin_registry_activo_es_error() {
         // `@cron("...")` sin contexto HTTP/registry → error claro.
         // Replica defensiva del checker (que no chequea contexto).
-        let (_, res) = parse_eval_into_env(
-            "@cron(\"0 0 * * *\")\nfn h() -> Null { return null }",
-        )
-        .await;
+        let (_, res) =
+            parse_eval_into_env("@cron(\"0 0 * * *\")\nfn h() -> Null { return null }").await;
         let err = res.unwrap_err();
         assert!(
             err.message.contains("@cron"),
@@ -20817,10 +22591,9 @@ let r = match n {
         // Con un HttpRegistry activo, `@cron("...")` empuja un CronJob
         // al cron_registry. La fn también queda en el env.
         let (env, registry) = crate::http::with_active_registry_async(|| async {
-            let (env, res) = parse_eval_into_env(
-                "@cron(\"*/5 * * * *\")\nfn tick() -> Null { return null }",
-            )
-            .await;
+            let (env, res) =
+                parse_eval_into_env("@cron(\"*/5 * * * *\")\nfn tick() -> Null { return null }")
+                    .await;
             res.expect("evaluación OK");
             env
         })
@@ -20831,7 +22604,10 @@ let r = match n {
         assert_eq!(jobs[0].name, "tick");
         assert!(!jobs[0].is_async);
         // La fn también queda en el env.
-        assert!(matches!(env.lock().get("tick"), Some(Value::Function { .. })));
+        assert!(matches!(
+            env.lock().get("tick"),
+            Some(Value::Function { .. })
+        ));
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -20877,10 +22653,8 @@ let r = match n {
     async fn background_decorator_no_registra_en_runtime() {
         // `@background` es solo marcador del checker; en runtime es
         // no-op. La fn queda definida en el env normalmente.
-        let (env, res) = parse_eval_into_env(
-            "@background\nfn send(addr: Str) -> Null { return null }",
-        )
-        .await;
+        let (env, res) =
+            parse_eval_into_env("@background\nfn send(addr: Str) -> Null { return null }").await;
         res.expect("evaluación OK");
         assert!(matches!(
             env.lock().get("send"),
@@ -20902,7 +22676,11 @@ let r = match n {
         .await;
         res.expect("evaluación OK");
         let f = env.lock().get("f").expect("f bindeado");
-        assert!(matches!(f, Value::Future(_)), "esperaba Future, fue {:?}", f);
+        assert!(
+            matches!(f, Value::Future(_)),
+            "esperaba Future, fue {:?}",
+            f
+        );
     }
 
     #[tokio::test(flavor = "current_thread")]

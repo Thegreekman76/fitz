@@ -216,10 +216,18 @@ jobs:
 
   # --- Job 3: imagen Docker base con `fitz` standalone -------------
   #
-  # Imagen `ghcr.io/<owner>/fitz:<version>` + `:latest`. Solo Linux
-  # x64 por simplicidad (la mayoría de los Dockerfiles de los users
-  # van a usar esta base). Multi-arch via `docker buildx` queda como
-  # mejora posterior si aparece demanda real.
+  # Imagen `ghcr.io/<owner>/fitz:<version>` + `:latest` multi-arch
+  # (`linux/amd64` + `linux/arm64`). El manifest agrega ambas archs;
+  # Docker selecciona automático según la plataforma del host.
+  # Habilita Mac M-series (arm64), Raspberry Pi 4+ (arm64), AWS
+  # Graviton (arm64) sin emulación.
+  #
+  # Cómo funciona: usamos buildx con `--platform linux/amd64,
+  # linux/arm64`. El Dockerfile referencia `TARGETARCH` (build arg
+  # automático que buildx setea por plataforma) para copiar el
+  # binario pre-compilado del job `build` correspondiente. Ambos
+  # binarios (linux-x64 + linux-arm64) ya existen como artefactos
+  # — solo los stageamos y elegimos en build time.
   docker-image:
     name: Docker image (ghcr.io)
     needs: build
@@ -234,14 +242,24 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: binaries-linux-x64
-          path: ./prebuilt
+          path: ./prebuilt-amd64
 
-      - name: Stage binary para Docker
+      - name: Download Linux ARM64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-linux-arm64
+          path: ./prebuilt-arm64
+
+      - name: Stage binarios para Docker (per-arch)
         run: |
-          BIN_PATH=$(find ./prebuilt -name "fitz" -type f | head -n 1)
+          BIN_AMD64=$(find ./prebuilt-amd64 -name "fitz" -type f | head -n 1)
+          BIN_ARM64=$(find ./prebuilt-arm64 -name "fitz" -type f | head -n 1)
           mkdir -p docker-stage
-          cp "$BIN_PATH" docker-stage/fitz
-          chmod +x docker-stage/fitz
+          # buildx setea TARGETARCH a "amd64"/"arm64". El Dockerfile
+          # hace COPY fitz-${TARGETARCH} /usr/local/bin/fitz.
+          cp "$BIN_AMD64" docker-stage/fitz-amd64
+          cp "$BIN_ARM64" docker-stage/fitz-arm64
+          chmod +x docker-stage/fitz-amd64 docker-stage/fitz-arm64
 
       - name: Derive version
         id: version
@@ -257,7 +275,7 @@ jobs:
         run: |
           cat > docker-stage/Dockerfile <<'EOF'
           # Imagen base con `fitz` standalone — usada por boilerplates
-          # Dockerizados como builder stage.
+          # Dockerizados como builder stage. Multi-arch (amd64+arm64).
           #
           # Uso típico desde un boilerplate:
           #   FROM ghcr.io/<owner>/fitz:latest AS builder
@@ -269,6 +287,10 @@ jobs:
           #   COPY --from=builder /app/target/release/<bin> /usr/local/bin/app
           #   CMD ["/usr/local/bin/app"]
           FROM debian:bookworm-slim
+          # `TARGETARCH` lo setea buildx automático: "amd64" o "arm64"
+          # según la plataforma del manifest. Usamos eso para elegir el
+          # binario pre-compilado correcto.
+          ARG TARGETARCH
           RUN apt-get update && \
               apt-get install -y --no-install-recommends \
                 ca-certificates curl build-essential pkg-config libssl-dev && \
@@ -280,11 +302,14 @@ jobs:
               ln -s /root/.cargo/bin/cargo /usr/local/bin/cargo && \
               ln -s /root/.cargo/bin/rustc /usr/local/bin/rustc
           ENV PATH="/root/.cargo/bin:${PATH}"
-          # Binario fitz pre-compilado del job `build`.
-          COPY fitz /usr/local/bin/fitz
+          # Binario fitz pre-compilado del job `build` para esta arch.
+          COPY fitz-${TARGETARCH} /usr/local/bin/fitz
           RUN chmod +x /usr/local/bin/fitz
           WORKDIR /app
           EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
       - name: Login to ghcr.io
         uses: docker/login-action@v3
@@ -299,11 +324,12 @@ jobs:
           OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
           echo "owner=$OWNER" >> $GITHUB_OUTPUT
 
-      - name: Build and push
+      - name: Build and push (multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: docker-stage
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             ghcr.io/${{ steps.image.outputs.owner }}/fitz:v${{ steps.version.outputs.version }}
             ghcr.io/${{ steps.image.outputs.owner }}/fitz:latest

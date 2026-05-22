@@ -58,10 +58,7 @@ pub fn generate_from_file(source: &Path) -> Result<String, String> {
         let models = collect_models(py, &module).map_err(|e| pyerr_to_string(py, e))?;
         let mut out = String::new();
         out.push_str("// Generado por `fitz py-types` — no editar a mano.\n");
-        out.push_str(&format!(
-            "// Fuente: {}\n\n",
-            source.display(),
-        ));
+        out.push_str(&format!("// Fuente: {}\n\n", source.display(),));
         for model in &models {
             emit_type(model, &mut out);
             out.push('\n');
@@ -88,10 +85,7 @@ fn import_file_as_module<'py>(
     module_name: &str,
 ) -> PyResult<Bound<'py, PyAny>> {
     let importlib_util = py.import("importlib.util")?;
-    let spec = importlib_util.call_method1(
-        "spec_from_file_location",
-        (module_name, abs_path),
-    )?;
+    let spec = importlib_util.call_method1("spec_from_file_location", (module_name, abs_path))?;
     if spec.is_none() {
         return Err(pyo3::exceptions::PyImportError::new_err(format!(
             "no se pudo armar el spec de import para `{}`",
@@ -106,10 +100,7 @@ fn import_file_as_module<'py>(
 
 /// Recolecta los modelos del módulo importado. Un "modelo" es
 /// cualquier clase top-level con atributo `__table__.columns`.
-fn collect_models<'py>(
-    py: Python<'py>,
-    module: &Bound<'py, PyAny>,
-) -> PyResult<Vec<Model>> {
+fn collect_models<'py>(py: Python<'py>, module: &Bound<'py, PyAny>) -> PyResult<Vec<Model>> {
     let module_name: String = module.getattr("__name__")?.extract()?;
     let dict = module.getattr("__dict__")?;
     let dict = dict.cast::<PyDict>()?;
@@ -158,10 +149,7 @@ fn collect_models<'py>(
 /// Recolecta los campos de la colección `columns` de una tabla. La
 /// colección debe ser iterable y dar objetos con
 /// `(name, type, nullable, default)`.
-fn collect_fields<'py>(
-    py: Python<'py>,
-    columns: &Bound<'py, PyAny>,
-) -> PyResult<Vec<Field>> {
+fn collect_fields<'py>(py: Python<'py>, columns: &Bound<'py, PyAny>) -> PyResult<Vec<Field>> {
     let iter = columns.try_iter()?;
     let mut fields: Vec<Field> = Vec::new();
     for col in iter {
@@ -231,9 +219,7 @@ fn extract_default<'py>(
     };
     // Si es callable, lo ignoramos.
     let builtins = py.import("builtins")?;
-    let is_callable: bool = builtins
-        .call_method1("callable", (&value,))?
-        .extract()?;
+    let is_callable: bool = builtins.call_method1("callable", (&value,))?.extract()?;
     if is_callable {
         return Ok(None);
     }
@@ -445,7 +431,7 @@ class DateTime: pass
         assert!(out.contains("c: Float"));
         assert!(out.contains("d: Str"));
         assert!(out.contains("e: Bool"));
-        assert!(out.contains("f: Str"));  // DateTime → Str ISO 8601
+        assert!(out.contains("f: Str")); // DateTime → Str ISO 8601
     }
 
     #[test]
@@ -482,7 +468,10 @@ class DateTime: pass
         );
         let out = run(&code).expect("generate ok");
         assert!(out.contains("created_at: Str"), "out:\n{}", out);
-        assert!(!out.contains("created_at: Str ="), "default callable debería ignorarse");
+        assert!(
+            !out.contains("created_at: Str ="),
+            "default callable debería ignorarse"
+        );
     }
 
     #[test]
@@ -493,8 +482,15 @@ class DateTime: pass
         );
         let out = run(&code).expect("generate ok");
         assert!(out.contains("payload: Any"), "out:\n{}", out);
-        assert!(out.contains("// ?"), "esperaba comentario citando tipo SQLA, out:\n{}", out);
-        assert!(out.contains("JSON"), "comentario debería citar el nombre original");
+        assert!(
+            out.contains("// ?"),
+            "esperaba comentario citando tipo SQLA, out:\n{}",
+            out
+        );
+        assert!(
+            out.contains("JSON"),
+            "comentario debería citar el nombre original"
+        );
     }
 
     #[test]

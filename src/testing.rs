@@ -150,9 +150,7 @@ where
         let registry = cell
             .borrow_mut()
             .take()
-            .expect(
-                "with_active_test_registry_async instaló un registry — debería estar presente",
-            );
+            .expect("with_active_test_registry_async instaló un registry — debería estar presente");
         *cell.borrow_mut() = prev;
         registry
     });
@@ -348,10 +346,7 @@ mod tests {
         assert!(current_test_source().is_none());
 
         let result = with_test_source("tests/math.fitz".to_string(), || {
-            assert_eq!(
-                current_test_source(),
-                Some("tests/math.fitz".to_string()),
-            );
+            assert_eq!(current_test_source(), Some("tests/math.fitz".to_string()),);
             "ok"
         });
         assert_eq!(result, "ok");

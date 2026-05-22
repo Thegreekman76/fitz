@@ -657,9 +657,7 @@ impl Parser {
                         continue;
                     }
                     self.advance();
-                    let field = self.expect_ident(
-                        "se esperaba nombre de campo después de '.'",
-                    )?;
+                    let field = self.expect_ident("se esperaba nombre de campo después de '.'")?;
                     expr = Expr::Field {
                         object: Box::new(expr),
                         field,
@@ -674,9 +672,14 @@ impl Parser {
                     self.no_struct_literal = prev;
                     let args = args_result?;
 
-                    let is_ok_or_err = matches!(&expr, Expr::Ident(n, _) if n == "Ok" || n == "Err");
+                    let is_ok_or_err =
+                        matches!(&expr, Expr::Ident(n, _) if n == "Ok" || n == "Err");
                     if is_ok_or_err {
-                        let name = if let Expr::Ident(n, _) = &expr { n.clone() } else { unreachable!() };
+                        let name = if let Expr::Ident(n, _) = &expr {
+                            n.clone()
+                        } else {
+                            unreachable!()
+                        };
                         if args.len() != 1 {
                             return Err(self.error(
                                 ErrorKind::InvalidSyntax,
@@ -696,7 +699,11 @@ impl Parser {
                             Expr::Err(Box::new(inner), ctor_span)
                         };
                     } else {
-                        expr = Expr::Call { callee: Box::new(expr), args, span };
+                        expr = Expr::Call {
+                            callee: Box::new(expr),
+                            args,
+                            span,
+                        };
                     }
                 }
                 Token::Question => {
@@ -770,17 +777,16 @@ impl Parser {
                     self.no_struct_literal = prev_no_struct;
                     self.in_slice_context = prev_slice;
                     expr = bracket_result?;
-                    self.expect(
-                        &Token::RBracket,
-                        "se esperaba ']' para cerrar el indexing",
-                    )?;
+                    self.expect(&Token::RBracket, "se esperaba ']' para cerrar el indexing")?;
                 }
                 Token::LBrace => {
                     let ident_info = match &expr {
                         Expr::Ident(n, s) => Some((n.clone(), *s)),
                         _ => None,
                     };
-                    let Some((name, ident_span)) = ident_info else { break };
+                    let Some((name, ident_span)) = ident_info else {
+                        break;
+                    };
 
                     if self.no_struct_literal {
                         if self.looks_like_struct_lit_body() {
@@ -829,13 +835,21 @@ impl Parser {
         // Vacío: `Empty {}`.
         if matches!(self.peek(), Token::RBrace) {
             self.advance();
-            return Ok(Expr::StructLit { type_name, fields, span });
+            return Ok(Expr::StructLit {
+                type_name,
+                fields,
+                span,
+            });
         }
         loop {
             self.skip_newlines();
             if matches!(self.peek(), Token::RBrace) {
                 self.advance();
-                return Ok(Expr::StructLit { type_name, fields, span });
+                return Ok(Expr::StructLit {
+                    type_name,
+                    fields,
+                    span,
+                });
             }
             if self.is_at_end() {
                 return Err(self.error(
@@ -843,8 +857,7 @@ impl Parser {
                     "se esperaba '}' para cerrar el struct literal",
                 ));
             }
-            let field_name =
-                self.expect_ident("se esperaba nombre de campo en struct literal")?;
+            let field_name = self.expect_ident("se esperaba nombre de campo en struct literal")?;
             self.expect(
                 &Token::Colon,
                 "se esperaba ':' después del nombre del campo en struct literal",
@@ -1159,10 +1172,7 @@ impl Parser {
 
     /// Helper: parsea un binding de `from ... import`: `Ident [as Ident]`.
     /// `is_first` solo cambia el mensaje de error del primer ident.
-    fn parse_from_import_name(
-        &mut self,
-        is_first: bool,
-    ) -> FitzResult<(String, Option<String>)> {
+    fn parse_from_import_name(&mut self, is_first: bool) -> FitzResult<(String, Option<String>)> {
         let name = self.expect_ident(if is_first {
             "se esperaba al menos un identificador después de 'import'"
         } else {
@@ -1183,15 +1193,11 @@ impl Parser {
     /// Siempre tiene al menos un elemento. Sirve para `import` y para
     /// `from ... import`.
     fn parse_module_path(&mut self) -> FitzResult<Vec<String>> {
-        let first = self.expect_ident(
-            "se esperaba nombre de módulo (identificador)",
-        )?;
+        let first = self.expect_ident("se esperaba nombre de módulo (identificador)")?;
         let mut segments = vec![first];
         while matches!(self.peek(), Token::Dot) {
             self.advance();
-            let next = self.expect_ident(
-                "se esperaba nombre de módulo después de '.'",
-            )?;
+            let next = self.expect_ident("se esperaba nombre de módulo después de '.'")?;
             segments.push(next);
         }
         Ok(segments)
@@ -1210,11 +1216,13 @@ impl Parser {
                 "se esperaba '=' en la declaración con destructuring",
             )?;
             let value = self.expression()?;
-            return Ok(Stmt::Destructure { pattern, value, span });
+            return Ok(Stmt::Destructure {
+                pattern,
+                value,
+                span,
+            });
         }
-        let name = self.expect_ident(
-            "se esperaba nombre de variable después de 'let'",
-        )?;
+        let name = self.expect_ident("se esperaba nombre de variable después de 'let'")?;
         let type_ = self.parse_optional_type_annotation()?;
         self.expect(&Token::Eq, "se esperaba '=' en la declaración")?;
         let value = self.expression()?;
@@ -1284,7 +1292,12 @@ impl Parser {
                     ));
                 }
             };
-            return Ok(Stmt::Assign { target, type_: None, value, span });
+            return Ok(Stmt::Assign {
+                target,
+                type_: None,
+                value,
+                span,
+            });
         }
 
         // Caso 3b — R.2.3: operadores compuestos `+=`/`-=`/`*=`/`/=`.
@@ -1313,17 +1326,36 @@ impl Parser {
             self.advance(); // consume el token `+=`/etc.
             let rhs = self.expression()?;
             let (target, target_as_expr) = match lhs {
-                Expr::Ident(n, ispan) => (
-                    AssignTarget::Ident(n.clone()),
-                    Expr::Ident(n, ispan),
+                Expr::Ident(n, ispan) => (AssignTarget::Ident(n.clone()), Expr::Ident(n, ispan)),
+                Expr::Field {
+                    object,
+                    field,
+                    span: fspan,
+                } => (
+                    AssignTarget::Field {
+                        object: object.clone(),
+                        field: field.clone(),
+                    },
+                    Expr::Field {
+                        object,
+                        field,
+                        span: fspan,
+                    },
                 ),
-                Expr::Field { object, field, span: fspan } => (
-                    AssignTarget::Field { object: object.clone(), field: field.clone() },
-                    Expr::Field { object, field, span: fspan },
-                ),
-                Expr::Index { object, index, span: ispan } => (
-                    AssignTarget::Index { object: object.clone(), index: index.clone() },
-                    Expr::Index { object, index, span: ispan },
+                Expr::Index {
+                    object,
+                    index,
+                    span: ispan,
+                } => (
+                    AssignTarget::Index {
+                        object: object.clone(),
+                        index: index.clone(),
+                    },
+                    Expr::Index {
+                        object,
+                        index,
+                        span: ispan,
+                    },
                 ),
                 _ => {
                     return Err(self.error(
@@ -1339,7 +1371,12 @@ impl Parser {
                 right: Box::new(rhs),
                 span: op_span,
             };
-            return Ok(Stmt::Assign { target, type_: None, value, span });
+            return Ok(Stmt::Assign {
+                target,
+                type_: None,
+                value,
+                span,
+            });
         }
 
         // Caso 1: sentencia-expresión.
@@ -1409,10 +1446,7 @@ impl Parser {
                     }
                     items.push(self.parse_type_expr()?);
                 }
-                self.expect(
-                    &Token::RParen,
-                    "se esperaba ')' para cerrar el tipo tupla",
-                )?;
+                self.expect(&Token::RParen, "se esperaba ')' para cerrar el tipo tupla")?;
                 let mut t = TypeExpr::Tuple(items);
                 if self.eat(&Token::Question) {
                     t = TypeExpr::Nullable(Box::new(t));
@@ -1620,9 +1654,7 @@ impl Parser {
     fn parse_fndef(&mut self, span: Span) -> FitzResult<Stmt> {
         let is_async = self.eat(&Token::Async);
         self.expect(&Token::Fn, "se esperaba 'fn'")?;
-        let name = self.expect_ident(
-            "se esperaba nombre de función después de 'fn'",
-        )?;
+        let name = self.expect_ident("se esperaba nombre de función después de 'fn'")?;
         self.expect(
             &Token::LParen,
             "se esperaba '(' después del nombre de función",
@@ -1699,7 +1731,12 @@ impl Parser {
             }
         };
 
-        Ok(Expr::FnExpr { params, body, is_async, span })
+        Ok(Expr::FnExpr {
+            params,
+            body,
+            is_async,
+            span,
+        })
     }
 
     /// Lista de parámetros, ya con '(' consumido. Termina consumiendo
@@ -1729,28 +1766,27 @@ impl Parser {
             // (Token::DotDot seguido de Token::Dot). Fitz tiene `..` para
             // Range y `..=` para Range inclusivo; tres `.` consecutivos
             // no colisionan con nada (el lexer empareja greedy).
-            let varargs = if matches!(self.peek(), Token::DotDot)
-                && matches!(self.peek_at(1), Token::Dot)
-            {
-                if saw_varargs {
-                    return Err(self.error(
-                        ErrorKind::UnexpectedToken,
-                        "solo puede haber un parámetro variádico, y debe ser el último",
-                    ));
-                }
-                self.advance(); // consume `..`
-                self.advance(); // consume `.`
-                saw_varargs = true;
-                true
-            } else {
-                if saw_varargs {
-                    return Err(self.error(
-                        ErrorKind::UnexpectedToken,
-                        "después de un parámetro variádico no puede haber más parámetros",
-                    ));
-                }
-                false
-            };
+            let varargs =
+                if matches!(self.peek(), Token::DotDot) && matches!(self.peek_at(1), Token::Dot) {
+                    if saw_varargs {
+                        return Err(self.error(
+                            ErrorKind::UnexpectedToken,
+                            "solo puede haber un parámetro variádico, y debe ser el último",
+                        ));
+                    }
+                    self.advance(); // consume `..`
+                    self.advance(); // consume `.`
+                    saw_varargs = true;
+                    true
+                } else {
+                    if saw_varargs {
+                        return Err(self.error(
+                            ErrorKind::UnexpectedToken,
+                            "después de un parámetro variádico no puede haber más parámetros",
+                        ));
+                    }
+                    false
+                };
             let name = self.expect_ident("se esperaba nombre de parámetro")?;
             let type_ = self.parse_optional_type_annotation()?;
             // Fp — default value `= <expr>`. Varargs no admite default.
@@ -1758,10 +1794,7 @@ impl Parser {
                 if varargs {
                     return Err(self.error(
                         ErrorKind::UnexpectedToken,
-                        format!(
-                            "el parámetro variádico `{}` no puede tener default",
-                            name
-                        ),
+                        format!("el parámetro variádico `{}` no puede tener default", name),
                     ));
                 }
                 self.advance(); // consume `=`
@@ -1785,7 +1818,12 @@ impl Parser {
                 }
                 None
             };
-            params.push(Param { name, type_, default, varargs });
+            params.push(Param {
+                name,
+                type_,
+                default,
+                varargs,
+            });
             self.skip_newlines();
             if matches!(self.peek(), Token::Comma) {
                 self.advance();
@@ -1889,7 +1927,12 @@ impl Parser {
         // siguiente arranca el cuerpo del while. Adentro de paréntesis sí.
         let condition = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
-        Ok(Stmt::While { condition, body, label, span })
+        Ok(Stmt::While {
+            condition,
+            body,
+            label,
+            span,
+        })
     }
 
     /// `loop { body }` — loop infinito. Solo se sale con `break` o `return`.
@@ -1928,13 +1971,22 @@ impl Parser {
         // Ident, Wildcard, Tuple — los 3 casos válidos en for. Otros
         // patterns (literales, Ok/Err, Range) el checker los rechaza.
         let var = self.parse_pattern()?;
-        self.expect(&Token::In, "se esperaba 'in' después de la variable de 'for'")?;
+        self.expect(
+            &Token::In,
+            "se esperaba 'in' después de la variable de 'for'",
+        )?;
         // El iterable no permite struct literal a primer nivel — el `{`
         // siguiente arranca el cuerpo del for. Adentro de paréntesis o
         // listas sí: `for u in [User { id: 1 }]`.
         let iter = self.expression_no_struct_lit()?;
         let body = self.parse_block()?;
-        Ok(Stmt::For { var, iter, body, label, span })
+        Ok(Stmt::For {
+            var,
+            iter,
+            body,
+            label,
+            span,
+        })
     }
 
     // ---------- if / match / type ----------
@@ -2003,10 +2055,7 @@ impl Parser {
             } else {
                 None
             };
-            self.expect(
-                &Token::FatArrow,
-                "se esperaba '=>' después del patrón",
-            )?;
+            self.expect(&Token::FatArrow, "se esperaba '=>' después del patrón")?;
             // Sp.2 — el cuerpo del arm puede ser:
             //   1. `return <expr>` / `break <expr>` / `continue` → Stmt directo.
             //   2. `{ <stmts> }` → bloque de stmts (parse_block).
@@ -2016,16 +2065,18 @@ impl Parser {
                     let stmt = self.parse_stmt()?;
                     vec![stmt]
                 }
-                Token::LBrace => {
-                    self.parse_block()?
-                }
+                Token::LBrace => self.parse_block()?,
                 _ => {
                     let (line, col) = self.current_pos();
                     let expr = self.expression()?;
                     vec![Stmt::Expr(expr, Span::new(line, col))]
                 }
             };
-            arms.push(MatchArm { pattern, guard, body });
+            arms.push(MatchArm {
+                pattern,
+                guard,
+                body,
+            });
             // Separador entre brazos: coma o newline. RBrace y EOF se
             // dejan pasar — el siguiente iter del loop los maneja:
             // RBrace termina el match, EOF cae a MissingClosingBrace.
@@ -2084,7 +2135,10 @@ impl Parser {
         // Validar restricciones del MVP: sin bindings en
         // sub-patterns. Mirá el doc comment de `Pattern::Or`.
         for sub in &subs {
-            if matches!(sub, Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_)) {
+            if matches!(
+                sub,
+                Pattern::Ident(_) | Pattern::OkBinding(_) | Pattern::ErrBinding(_)
+            ) {
                 return Err(self.error(
                     ErrorKind::InvalidSyntax,
                     "or-patterns no admiten bindings (usá '_' o desdoblá el arm)",
@@ -2123,10 +2177,7 @@ impl Parser {
                 )?;
                 return Ok(Pattern::Tuple(subs));
             }
-            self.expect(
-                &Token::RParen,
-                "se esperaba ')' para cerrar el pattern",
-            )?;
+            self.expect(&Token::RParen, "se esperaba ')' para cerrar el pattern")?;
             return Ok(first);
         }
         // Literales. Clonamos el peek antes de avanzar para no chocar con
@@ -2191,13 +2242,9 @@ impl Parser {
                     &Token::LParen,
                     "se esperaba '(' después de Ok/Err en patrón",
                 )?;
-                let binding = self.expect_ident(
-                    "se esperaba identificador para el binding de Ok/Err",
-                )?;
-                self.expect(
-                    &Token::RParen,
-                    "se esperaba ')' al final del patrón Ok/Err",
-                )?;
+                let binding =
+                    self.expect_ident("se esperaba identificador para el binding de Ok/Err")?;
+                self.expect(&Token::RParen, "se esperaba ')' al final del patrón Ok/Err")?;
                 // `_` adentro es wildcard (no bindea): cierra deuda
                 // vieja de 3.3 donde `_` se bindeaba como var.
                 return Ok(match (is_ok, binding.as_str()) {
@@ -2256,7 +2303,11 @@ impl Parser {
                 ));
             }
         };
-        Ok(Pattern::Range { start, end, inclusive })
+        Ok(Pattern::Range {
+            start,
+            end,
+            inclusive,
+        })
     }
 
     /// `type Name { field: TypeExpr [= default], ..., fn method(...) {...} }`.
@@ -2282,7 +2333,12 @@ impl Parser {
             self.skip_newlines();
             if matches!(self.peek(), Token::RBrace) {
                 self.advance();
-                return Ok(Stmt::TypeDef { name, fields, methods, span });
+                return Ok(Stmt::TypeDef {
+                    name,
+                    fields,
+                    methods,
+                    span,
+                });
             }
             if self.is_at_end() {
                 return Err(self.error(
@@ -2333,9 +2389,7 @@ impl Parser {
         let is_static = self.eat(&Token::Static);
         let is_async = self.eat(&Token::Async);
         self.expect(&Token::Fn, "se esperaba 'fn'")?;
-        let name = self.expect_ident(
-            "se esperaba nombre del método después de 'fn'",
-        )?;
+        let name = self.expect_ident("se esperaba nombre del método después de 'fn'")?;
         self.expect(
             &Token::LParen,
             "se esperaba '(' después del nombre del método",
@@ -2445,9 +2499,7 @@ impl Parser {
     /// idéntico.
     fn parse_one_decorator(&mut self) -> FitzResult<Decorator> {
         self.expect(&Token::At, "se esperaba '@'")?;
-        let name = self.expect_ident(
-            "se esperaba nombre de decorador después de '@'",
-        )?;
+        let name = self.expect_ident("se esperaba nombre de decorador después de '@'")?;
         // Si viene `(`, parseamos args; si no, decorator sin args.
         // El próximo significativo determina la rama (saltando newlines
         // no — el `(` debe venir en la misma línea que el nombre, para
@@ -2476,9 +2528,7 @@ impl Parser {
     /// Termina consumiendo el `)`. Acepta lista vacía, coma trailing
     /// y newlines entre elementos.
     #[allow(clippy::type_complexity)]
-    fn parse_decorator_args(
-        &mut self,
-    ) -> FitzResult<(Vec<Expr>, Vec<(String, Expr)>)> {
+    fn parse_decorator_args(&mut self) -> FitzResult<(Vec<Expr>, Vec<(String, Expr)>)> {
         let mut args: Vec<Expr> = Vec::new();
         let mut kwargs: Vec<(String, Expr)> = Vec::new();
         self.skip_newlines();
@@ -2492,8 +2542,8 @@ impl Parser {
             // Detección de kwarg: Ident seguido de `=` (Token::Eq).
             // `==` (Token::EqEq) NO dispara: es un BinOp en una expresión
             // posicional.
-            let is_kwarg = matches!(self.peek(), Token::Ident(_))
-                && matches!(self.peek_at(1), Token::Eq);
+            let is_kwarg =
+                matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_at(1), Token::Eq);
             if is_kwarg {
                 let key_tok = self.advance();
                 let key = match key_tok.token {
@@ -2567,10 +2617,12 @@ impl Parser {
             // name corresponde a un param real — eso lo hace el checker
             // y el evaluator/codegen al despachar la call.
             let (start_line, start_col) = self.current_pos();
-            let is_named = matches!(self.peek(), Token::Ident(_))
-                && matches!(self.peek_at(1), Token::Colon);
+            let is_named =
+                matches!(self.peek(), Token::Ident(_)) && matches!(self.peek_at(1), Token::Colon);
             let arg = if is_named {
-                let name = self.expect_ident("se esperaba nombre de argumento").unwrap();
+                let name = self
+                    .expect_ident("se esperaba nombre de argumento")
+                    .unwrap();
                 self.advance(); // consume `:`
                 let value = self.expression()?;
                 saw_named = true;
@@ -2603,10 +2655,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(
-            &Token::RParen,
-            "se esperaba ')' para cerrar la llamada",
-        )?;
+        self.expect(&Token::RParen, "se esperaba ')' para cerrar la llamada")?;
         Ok(args)
     }
 
@@ -2700,7 +2749,7 @@ impl Parser {
                     let mut items = vec![first];
                     while matches!(self.peek(), Token::Comma) {
                         self.advance(); // consume `,`
-                        // Trailing comma admitida: `(e,)` o `(e1, e2,)`.
+                                        // Trailing comma admitida: `(e,)` o `(e1, e2,)`.
                         if matches!(self.peek(), Token::RParen) {
                             break;
                         }
@@ -2709,17 +2758,11 @@ impl Parser {
                         self.no_struct_literal = prev2;
                         items.push(r?);
                     }
-                    self.expect(
-                        &Token::RParen,
-                        "se esperaba ')' para cerrar la tupla",
-                    )?;
+                    self.expect(&Token::RParen, "se esperaba ')' para cerrar la tupla")?;
                     return Ok(Expr::Tuple(items, tok_span));
                 }
                 // Sin coma → solo paréntesis de agrupación.
-                self.expect(
-                    &Token::RParen,
-                    "se esperaba ')' para cerrar el paréntesis",
-                )?;
+                self.expect(&Token::RParen, "se esperaba ')' para cerrar el paréntesis")?;
                 Ok(first)
             }
             other => Err(FitzError::new(
@@ -2773,10 +2816,7 @@ impl Parser {
                 break;
             }
         }
-        self.expect(
-            &Token::RBracket,
-            "se esperaba ']' para cerrar la lista",
-        )?;
+        self.expect(&Token::RBracket, "se esperaba ']' para cerrar la lista")?;
         Ok(Expr::List(items, span))
     }
 
@@ -2786,11 +2826,7 @@ impl Parser {
     /// Mini-tanda Cmp+ extiende esto para múltiples `for` clauses
     /// (cartesian product); el `if` opcional al final se evalúa adentro
     /// del loop más interno.
-    fn parse_list_comprehension_tail(
-        &mut self,
-        span: Span,
-        expr: Expr,
-    ) -> FitzResult<Expr> {
+    fn parse_list_comprehension_tail(&mut self, span: Span, expr: Expr) -> FitzResult<Expr> {
         let (var, iter, extra_clauses, filter) =
             self.parse_comprehension_clauses(&Token::RBracket, "list comprehension")?;
         self.expect(
@@ -2825,10 +2861,7 @@ impl Parser {
         Vec<(crate::ast::Pattern, Expr)>,
         Option<Box<Expr>>,
     )> {
-        self.expect(
-            &Token::For,
-            format!("se esperaba 'for' en {}", context),
-        )?;
+        self.expect(&Token::For, format!("se esperaba 'for' en {}", context))?;
         let var = self.parse_pattern()?;
         self.expect(
             &Token::In,
@@ -2845,7 +2878,10 @@ impl Parser {
             let extra_var = self.parse_pattern()?;
             self.expect(
                 &Token::In,
-                format!("se esperaba 'in' después de la variable extra en {}", context),
+                format!(
+                    "se esperaba 'in' después de la variable extra en {}",
+                    context
+                ),
             )?;
             self.skip_newlines();
             let extra_iter = self.expression()?;
@@ -2889,10 +2925,7 @@ impl Parser {
         // Primer par: `key: value`.
         self.skip_newlines();
         let key = self.expression()?;
-        self.expect(
-            &Token::Colon,
-            "se esperaba ':' entre clave y valor en mapa",
-        )?;
+        self.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
         self.skip_newlines();
         let value = self.expression()?;
         self.skip_newlines();
@@ -2933,19 +2966,13 @@ impl Parser {
             }
             self.skip_newlines();
             let key = self.expression()?;
-            self.expect(
-                &Token::Colon,
-                "se esperaba ':' entre clave y valor en mapa",
-            )?;
+            self.expect(&Token::Colon, "se esperaba ':' entre clave y valor en mapa")?;
             self.skip_newlines();
             let value = self.expression()?;
             pairs.push((key, value));
             self.skip_newlines();
         }
-        self.expect(
-            &Token::RBrace,
-            "se esperaba '}' para cerrar el mapa",
-        )?;
+        self.expect(&Token::RBrace, "se esperaba '}' para cerrar el mapa")?;
         Ok(Expr::Map(pairs, span))
     }
 }
@@ -2992,12 +3019,10 @@ pub fn parse_with_recovery(tokens: Vec<TokenWithPos>) -> (Program, Vec<FitzError
     // `FitzResult` para no duplicar código. `unwrap_or_else` es defensa
     // por si alguna ruta strict-residual se cuela — en ese caso, el
     // error se acumula como parte de la lista.
-    let stmts = parser
-        .parse_program()
-        .unwrap_or_else(|e| {
-            parser.recovered_errors.push(e);
-            Vec::new()
-        });
+    let stmts = parser.parse_program().unwrap_or_else(|e| {
+        parser.recovered_errors.push(e);
+        Vec::new()
+    });
     (stmts, parser.recovered_errors)
 }
 
@@ -3198,9 +3223,18 @@ fn parse_format_spec(s: &str) -> Result<FormatSpec, String> {
     // sign.
     if i < chars.len() {
         match chars[i] {
-            '+' => { spec.sign = Some(FormatSign::Plus); i += 1; }
-            '-' => { spec.sign = Some(FormatSign::Minus); i += 1; }
-            ' ' => { spec.sign = Some(FormatSign::Space); i += 1; }
+            '+' => {
+                spec.sign = Some(FormatSign::Plus);
+                i += 1;
+            }
+            '-' => {
+                spec.sign = Some(FormatSign::Minus);
+                i += 1;
+            }
+            ' ' => {
+                spec.sign = Some(FormatSign::Space);
+                i += 1;
+            }
             _ => {}
         }
     }
@@ -3413,10 +3447,10 @@ mod tests {
         // Antes de consumir: Let en (1, 1)
         assert_eq!(p.current_pos(), (1, 1));
         p.advance(); // consume Let
-        // Próximo token: Newline en (1, 4)
+                     // Próximo token: Newline en (1, 4)
         assert_eq!(p.current_pos(), (1, 4));
         p.advance(); // consume Newline
-        // Próximo token: Ident("x") en (2, 3)
+                     // Próximo token: Ident("x") en (2, 3)
         assert_eq!(p.current_pos(), (2, 3));
     }
 
@@ -3542,8 +3576,11 @@ mod tests {
         let e = parse_expr("f(x).await").unwrap();
         match e {
             Expr::Await(inner, _) => {
-                assert!(matches!(*inner, Expr::Call { .. }),
-                    "se esperaba Await(Call), inner fue {:?}", inner);
+                assert!(
+                    matches!(*inner, Expr::Call { .. }),
+                    "se esperaba Await(Call), inner fue {:?}",
+                    inner
+                );
             }
             other => panic!("se esperaba Await, se obtuvo {:?}", other),
         }
@@ -3571,8 +3608,11 @@ mod tests {
         let e = parse_expr("x.await?").unwrap();
         match e {
             Expr::Try(inner, _) => {
-                assert!(matches!(*inner, Expr::Await(..)),
-                    "se esperaba Try(Await(..)), fue {:?}", inner);
+                assert!(
+                    matches!(*inner, Expr::Await(..)),
+                    "se esperaba Try(Await(..)), fue {:?}",
+                    inner
+                );
             }
             other => panic!("se esperaba Try, se obtuvo {:?}", other),
         }
@@ -3631,7 +3671,10 @@ mod tests {
         let program = parse(tokens).expect("parse OK");
         let stmt = program.into_iter().next().expect("al menos 1 stmt");
         match stmt {
-            Stmt::FnDef { return_type: Some(TypeExpr::Generic { name, args }), .. } => {
+            Stmt::FnDef {
+                return_type: Some(TypeExpr::Generic { name, args }),
+                ..
+            } => {
                 assert_eq!(name, "Future");
                 assert_eq!(args.len(), 1);
                 assert!(matches!(&args[0], TypeExpr::Named(n) if n == "Int"));
@@ -3665,7 +3708,10 @@ mod tests {
 
     #[test]
     fn primary_identifier() {
-        assert_eq!(parse_expr("user").unwrap(), Expr::Ident("user".into(), Span::ZERO));
+        assert_eq!(
+            parse_expr("user").unwrap(),
+            Expr::Ident("user".into(), Span::ZERO)
+        );
     }
 
     #[test]
@@ -3695,7 +3741,8 @@ mod tests {
             Expr::BinOp {
                 op: BinOpKind::Add,
                 left: Box::new(Expr::Int(1, Span::ZERO)),
-                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(2, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3710,9 +3757,11 @@ mod tests {
                 left: Box::new(Expr::BinOp {
                     op: BinOpKind::Sub,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(3, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3728,8 +3777,10 @@ mod tests {
                 right: Box::new(Expr::BinOp {
                     op: BinOpKind::Mul,
                     left: Box::new(Expr::Int(2, Span::ZERO)),
-                    right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                    right: Box::new(Expr::Int(3, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
             }
         );
     }
@@ -3744,9 +3795,11 @@ mod tests {
                 left: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(3, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3761,9 +3814,11 @@ mod tests {
                 left: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(5, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3778,9 +3833,11 @@ mod tests {
                 left: Box::new(Expr::BinOp {
                     op: BinOpKind::Lt,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                right: Box::new(Expr::Bool(true, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Bool(true, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3791,7 +3848,8 @@ mod tests {
             parse_expr("-5").unwrap(),
             Expr::UnaryOp {
                 op: UnaryOpKind::Neg,
-                operand: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                operand: Box::new(Expr::Int(5, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3805,9 +3863,11 @@ mod tests {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::UnaryOp {
                     op: UnaryOpKind::Neg,
-                    operand: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                    operand: Box::new(Expr::Int(5, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(3, Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -3821,8 +3881,10 @@ mod tests {
                 op: UnaryOpKind::Neg,
                 operand: Box::new(Expr::UnaryOp {
                     op: UnaryOpKind::Neg,
-                    operand: Box::new(Expr::Ident("x".into(), Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                    operand: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
             }
         );
     }
@@ -3880,7 +3942,10 @@ mod tests {
             Expr::BinOp { op, left, .. } => {
                 assert_eq!(op, BinOpKind::Eq);
                 match *left {
-                    Expr::UnaryOp { op: UnaryOpKind::Not, .. } => {}
+                    Expr::UnaryOp {
+                        op: UnaryOpKind::Not,
+                        ..
+                    } => {}
                     other => panic!("esperaba UnaryOp Not, fue {:?}", other),
                 }
             }
@@ -3907,8 +3972,14 @@ mod tests {
         // 10 + 3 % 2 → 10 + (3 % 2)
         let expr = parse_expr("10 + 3 % 2").unwrap();
         match expr {
-            Expr::BinOp { op: BinOpKind::Add, right, .. } => match *right {
-                Expr::BinOp { op: BinOpKind::Mod, .. } => {}
+            Expr::BinOp {
+                op: BinOpKind::Add,
+                right,
+                ..
+            } => match *right {
+                Expr::BinOp {
+                    op: BinOpKind::Mod, ..
+                } => {}
                 other => panic!("esperaba BinOp Mod en right, fue {:?}", other),
             },
             other => panic!("esperaba BinOp Add raíz, fue {:?}", other),
@@ -3921,8 +3992,14 @@ mod tests {
         // niveles de precedencia).
         let expr = parse_expr("10 % 3 * 2").unwrap();
         match expr {
-            Expr::BinOp { op: BinOpKind::Mul, left, .. } => match *left {
-                Expr::BinOp { op: BinOpKind::Mod, .. } => {}
+            Expr::BinOp {
+                op: BinOpKind::Mul,
+                left,
+                ..
+            } => match *left {
+                Expr::BinOp {
+                    op: BinOpKind::Mod, ..
+                } => {}
                 other => panic!("esperaba BinOp Mod en left, fue {:?}", other),
             },
             other => panic!("esperaba BinOp Mul raíz, fue {:?}", other),
@@ -3934,7 +4011,10 @@ mod tests {
         let expr = parse_expr("7 % 3").unwrap();
         assert!(matches!(
             expr,
-            Expr::BinOp { op: BinOpKind::Mod, .. }
+            Expr::BinOp {
+                op: BinOpKind::Mod,
+                ..
+            }
         ));
     }
 
@@ -3944,7 +4024,11 @@ mod tests {
     fn assign_index_list_parsea() {
         let stmt = parse_one_stmt("xs[0] = 99");
         match stmt {
-            Stmt::Assign { target: AssignTarget::Index { object, index }, value, .. } => {
+            Stmt::Assign {
+                target: AssignTarget::Index { object, index },
+                value,
+                ..
+            } => {
                 assert!(matches!(*object, Expr::Ident(ref n, _) if n == "xs"));
                 assert!(matches!(*index, Expr::Int(0, _)));
                 assert!(matches!(value, Expr::Int(99, _)));
@@ -3957,7 +4041,11 @@ mod tests {
     fn assign_index_map_str_key_parsea() {
         let stmt = parse_one_stmt("m[\"a\"] = 10");
         match stmt {
-            Stmt::Assign { target: AssignTarget::Index { object, index }, value, .. } => {
+            Stmt::Assign {
+                target: AssignTarget::Index { object, index },
+                value,
+                ..
+            } => {
                 assert!(matches!(*object, Expr::Ident(ref n, _) if n == "m"));
                 assert!(matches!(*index, Expr::Str(ref s, _) if s == "a"));
                 assert!(matches!(value, Expr::Int(10, _)));
@@ -3971,8 +4059,17 @@ mod tests {
         // xs[i + 1] = ...
         let stmt = parse_one_stmt("xs[i + 1] = 99");
         match stmt {
-            Stmt::Assign { target: AssignTarget::Index { index, .. }, .. } => {
-                assert!(matches!(*index, Expr::BinOp { op: BinOpKind::Add, .. }));
+            Stmt::Assign {
+                target: AssignTarget::Index { index, .. },
+                ..
+            } => {
+                assert!(matches!(
+                    *index,
+                    Expr::BinOp {
+                        op: BinOpKind::Add,
+                        ..
+                    }
+                ));
             }
             other => panic!("esperaba Stmt::Assign Index, fue {:?}", other),
         }
@@ -3984,7 +4081,12 @@ mod tests {
     fn range_inclusive_expr_parsea() {
         let expr = parse_expr("0..=10").unwrap();
         match expr {
-            Expr::Range { start, end, inclusive, .. } => {
+            Expr::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } => {
                 assert!(matches!(*start, Expr::Int(0, _)));
                 assert!(matches!(*end, Expr::Int(10, _)));
                 assert!(inclusive, "..= debe parsear como inclusive");
@@ -4009,12 +4111,17 @@ mod tests {
         // 0..=59 en pattern de match.
         let stmt = parse_one_stmt("let r = match n { 0..=59 => \"F\", _ => \"otro\" }");
         match stmt {
-            Stmt::Assign { value: Expr::Match { arms, .. }, .. } => {
-                match &arms[0].pattern {
-                    Pattern::Range { start: 0, end: 59, inclusive: true } => {}
-                    other => panic!("esperaba Range inclusive 0..=59, fue {:?}", other),
-                }
-            }
+            Stmt::Assign {
+                value: Expr::Match { arms, .. },
+                ..
+            } => match &arms[0].pattern {
+                Pattern::Range {
+                    start: 0,
+                    end: 59,
+                    inclusive: true,
+                } => {}
+                other => panic!("esperaba Range inclusive 0..=59, fue {:?}", other),
+            },
             other => panic!("esperaba Stmt::Assign con Match, fue {:?}", other),
         }
     }
@@ -4029,8 +4136,10 @@ mod tests {
                 operand: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
             }
         );
     }
@@ -4042,7 +4151,8 @@ mod tests {
             Expr::BinOp {
                 op: BinOpKind::NotEq,
                 left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("y".into(), Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
+                span: Span::ZERO,
             }
         );
     }
@@ -4057,7 +4167,8 @@ mod tests {
             parse_expr("user.name").unwrap(),
             Expr::Field {
                 object: Box::new(Expr::Ident("user".into(), Span::ZERO)),
-                field: "name".into(), span: Span::ZERO,
+                field: "name".into(),
+                span: Span::ZERO,
             }
         );
     }
@@ -4070,9 +4181,11 @@ mod tests {
             Expr::Field {
                 object: Box::new(Expr::Field {
                     object: Box::new(Expr::Ident("user".into(), Span::ZERO)),
-                    field: "profile".into(), span: Span::ZERO,
+                    field: "profile".into(),
+                    span: Span::ZERO,
                 }),
-                field: "email".into(), span: Span::ZERO,
+                field: "email".into(),
+                span: Span::ZERO,
             }
         );
     }
@@ -4087,7 +4200,10 @@ mod tests {
     fn call_no_args() {
         assert_eq!(
             parse_expr("hello()").unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("hello".into(), Span::ZERO)), args: vec![], span: Span::ZERO,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("hello".into(), Span::ZERO)),
+                args: vec![],
+                span: Span::ZERO,
             }
         );
     }
@@ -4096,7 +4212,10 @@ mod tests {
     fn call_single_arg() {
         assert_eq!(
             parse_expr("print(42)").unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Int(42, Span::ZERO)], span: Span::ZERO,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                args: vec![Expr::Int(42, Span::ZERO)],
+                span: Span::ZERO,
             }
         );
     }
@@ -4105,7 +4224,14 @@ mod tests {
     fn call_multiple_args() {
         assert_eq!(
             parse_expr("sum(1, 2, 3)").unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("sum".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO)], span: Span::ZERO,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("sum".into(), Span::ZERO)),
+                args: vec![
+                    Expr::Int(1, Span::ZERO),
+                    Expr::Int(2, Span::ZERO),
+                    Expr::Int(3, Span::ZERO)
+                ],
+                span: Span::ZERO,
             }
         );
     }
@@ -4115,7 +4241,10 @@ mod tests {
         // Coma trailing válida — útil para diffs limpios.
         assert_eq!(
             parse_expr("sum(1, 2,)").unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("sum".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], span: Span::ZERO,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("sum".into(), Span::ZERO)),
+                args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+                span: Span::ZERO,
             }
         );
     }
@@ -4126,7 +4255,14 @@ mod tests {
         let src = "sum(\n  1,\n  2,\n  3\n)";
         assert_eq!(
             parse_expr(src).unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("sum".into(), Span::ZERO)), args: vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO)], span: Span::ZERO,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("sum".into(), Span::ZERO)),
+                args: vec![
+                    Expr::Int(1, Span::ZERO),
+                    Expr::Int(2, Span::ZERO),
+                    Expr::Int(3, Span::ZERO)
+                ],
+                span: Span::ZERO,
             }
         );
     }
@@ -4136,15 +4272,20 @@ mod tests {
         // print(1 + 2 * 3)
         assert_eq!(
             parse_expr("print(1 + 2 * 3)").unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::BinOp {
+            Expr::Call {
+                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                args: vec![Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
                     right: Box::new(Expr::BinOp {
                         op: BinOpKind::Mul,
                         left: Box::new(Expr::Int(2, Span::ZERO)),
-                        right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-                    }), span: Span::ZERO,
-                }], span: Span::ZERO,
+                        right: Box::new(Expr::Int(3, Span::ZERO)),
+                        span: Span::ZERO,
+                    }),
+                    span: Span::ZERO,
+                }],
+                span: Span::ZERO,
             }
         );
     }
@@ -4154,8 +4295,14 @@ mod tests {
         // print(double(x))
         assert_eq!(
             parse_expr("print(double(x))").unwrap(),
-            Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-                }], span: Span::ZERO,
+            Expr::Call {
+                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                args: vec![Expr::Call {
+                    callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                    span: Span::ZERO,
+                }],
+                span: Span::ZERO,
             }
         );
     }
@@ -4177,9 +4324,11 @@ mod tests {
             Expr::Call {
                 callee: Box::new(Expr::Field {
                     object: Box::new(Expr::Ident("foo".into(), Span::ZERO)),
-                    field: "bar".into(), span: Span::ZERO,
+                    field: "bar".into(),
+                    span: Span::ZERO,
                 }),
-                args: vec![], span: Span::ZERO,
+                args: vec![],
+                span: Span::ZERO,
             }
         );
     }
@@ -4194,10 +4343,15 @@ mod tests {
                 left: Box::new(Expr::Int(1, Span::ZERO)),
                 right: Box::new(Expr::BinOp {
                     op: BinOpKind::Mul,
-                    left: Box::new(Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Int(2, Span::ZERO)], span: Span::ZERO,
+                    left: Box::new(Expr::Call {
+                        callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+                        args: vec![Expr::Int(2, Span::ZERO)],
+                        span: Span::ZERO,
                     }),
-                    right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                    right: Box::new(Expr::Int(3, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
             }
         );
     }
@@ -4211,8 +4365,10 @@ mod tests {
                 op: UnaryOpKind::Neg,
                 operand: Box::new(Expr::Field {
                     object: Box::new(Expr::Ident("foo".into(), Span::ZERO)),
-                    field: "bar".into(), span: Span::ZERO,
-                }), span: Span::ZERO,
+                    field: "bar".into(),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
             }
         );
     }
@@ -4235,14 +4391,31 @@ mod tests {
     fn method_chain_de_3_lineas_anida_correctamente() {
         // xs\n.a()\n.b()\n.c() → Call(Field(Call(Field(Call(Field(xs, a)), b)), c))
         let e = parse_expr("xs\n  .a()\n  .b()\n  .c()").unwrap();
-        let Expr::Call { callee, .. } = e else { panic!("se esperaba Call externo") };
-        let Expr::Field { object, field, .. } = *callee else { panic!("callee externo debía ser Field") };
+        let Expr::Call { callee, .. } = e else {
+            panic!("se esperaba Call externo")
+        };
+        let Expr::Field { object, field, .. } = *callee else {
+            panic!("callee externo debía ser Field")
+        };
         assert_eq!(field, "c");
-        let Expr::Call { callee, .. } = *object else { panic!("nivel 2 debía ser Call") };
-        let Expr::Field { object, field, .. } = *callee else { panic!("callee nivel 2 debía ser Field") };
+        let Expr::Call { callee, .. } = *object else {
+            panic!("nivel 2 debía ser Call")
+        };
+        let Expr::Field { object, field, .. } = *callee else {
+            panic!("callee nivel 2 debía ser Field")
+        };
         assert_eq!(field, "b");
-        let Expr::Call { callee, .. } = *object else { panic!("nivel 3 debía ser Call") };
-        let Expr::Field { object: receptor, field, .. } = *callee else { panic!("callee nivel 3 debía ser Field") };
+        let Expr::Call { callee, .. } = *object else {
+            panic!("nivel 3 debía ser Call")
+        };
+        let Expr::Field {
+            object: receptor,
+            field,
+            ..
+        } = *callee
+        else {
+            panic!("callee nivel 3 debía ser Field")
+        };
         assert_eq!(field, "a");
         assert_eq!(*receptor, Expr::Ident("xs".into(), Span::ZERO));
     }
@@ -4283,12 +4456,19 @@ mod tests {
     #[test]
     fn method_chain_multilinea_funciona_en_rhs_de_let() {
         // Caso de uso canónico: chain como RHS de un `let`.
-        let program = parse_program_str("let nombres = users\n  .filter(activo)\n  .map(nombre)").unwrap();
+        let program =
+            parse_program_str("let nombres = users\n  .filter(activo)\n  .map(nombre)").unwrap();
         assert_eq!(program.len(), 1);
-        let Stmt::Assign { value, .. } = &program[0] else { panic!("se esperaba Assign") };
+        let Stmt::Assign { value, .. } = &program[0] else {
+            panic!("se esperaba Assign")
+        };
         // El value debe ser una Call con callee Field.
-        let Expr::Call { callee, .. } = value else { panic!("se esperaba Call en RHS") };
-        let Expr::Field { field, .. } = callee.as_ref() else { panic!("callee debía ser Field") };
+        let Expr::Call { callee, .. } = value else {
+            panic!("se esperaba Call en RHS")
+        };
+        let Expr::Field { field, .. } = callee.as_ref() else {
+            panic!("callee debía ser Field")
+        };
         assert_eq!(field, "map");
     }
 
@@ -4331,10 +4511,12 @@ mod tests {
     fn assign_with_let_no_type() {
         assert_eq!(
             parse_one_stmt("let x = 42"),
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(42, Span::ZERO),
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
     }
 
@@ -4342,10 +4524,12 @@ mod tests {
     fn assign_with_let_and_type() {
         assert_eq!(
             parse_one_stmt("let x: Int = 42"),
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: Some(TypeExpr::named("Int")),
                 value: Expr::Int(42, Span::ZERO),
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
     }
 
@@ -4353,10 +4537,12 @@ mod tests {
     fn assign_without_let_no_type() {
         assert_eq!(
             parse_one_stmt("x = 42"),
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(42, Span::ZERO),
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
     }
 
@@ -4364,10 +4550,12 @@ mod tests {
     fn assign_without_let_with_type() {
         assert_eq!(
             parse_one_stmt("name: Str = \"Fitz\""),
-            Stmt::Assign { target: AssignTarget::Ident("name".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("name".into()),
                 type_: Some(TypeExpr::named("Str")),
                 value: Expr::Str("Fitz".into(), Span::ZERO),
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
     }
 
@@ -4376,14 +4564,17 @@ mod tests {
         // x = 10 + 5
         assert_eq!(
             parse_one_stmt("x = 10 + 5"),
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(10, Span::ZERO)),
-                    right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(5, Span::ZERO)),
+                    span: Span::ZERO,
                 },
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
     }
 
@@ -4399,11 +4590,15 @@ mod tests {
     fn return_with_complex_expression() {
         assert_eq!(
             parse_one_stmt("return x + 1"),
-            Stmt::Return(Expr::BinOp {
-                op: BinOpKind::Add,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Return(
+                Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -4415,7 +4610,9 @@ mod tests {
         match parse_one_stmt("return 401 {\"message\": \"no autorizado\"}") {
             Stmt::ReturnStatus { status, body, .. } => {
                 assert!(matches!(status, Expr::Int(401, _)), "status: {:?}", status);
-                let Some(b) = body else { panic!("body esperado") };
+                let Some(b) = body else {
+                    panic!("body esperado")
+                };
                 assert!(matches!(b, Expr::Map(..)), "body debería ser Map: {:?}", b);
             }
             other => panic!("se esperaba ReturnStatus, fue: {:?}", other),
@@ -4448,7 +4645,10 @@ mod tests {
     fn return_sin_expresion_devuelve_null() {
         // `return` solo (con newline al final). El parser lo modela como
         // `Stmt::Return(Expr::Null(_), Span::ZERO)`.
-        assert_eq!(parse_one_stmt("return"), Stmt::Return(Expr::Null(Span::ZERO), Span::ZERO));
+        assert_eq!(
+            parse_one_stmt("return"),
+            Stmt::Return(Expr::Null(Span::ZERO), Span::ZERO)
+        );
     }
 
     #[test]
@@ -4459,7 +4659,10 @@ mod tests {
         let program = parse(tokens).unwrap();
         match &program[0] {
             Stmt::FnDef { body, .. } => {
-                assert_eq!(body, &vec![Stmt::Return(Expr::Null(Span::ZERO), Span::ZERO)]);
+                assert_eq!(
+                    body,
+                    &vec![Stmt::Return(Expr::Null(Span::ZERO), Span::ZERO)]
+                );
             }
             _ => panic!("se esperaba FnDef"),
         }
@@ -4469,8 +4672,14 @@ mod tests {
     fn expression_statement_with_call() {
         assert_eq!(
             parse_one_stmt("print(x)"),
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -4494,10 +4703,20 @@ mod tests {
         assert_eq!(program.len(), 2);
         let s0 = program[0].span();
         let s1 = program[1].span();
-        assert_eq!((s0.line, s0.column), (2, 3),
-            "esperaba (2,3) para `let`, fue ({},{})", s0.line, s0.column);
-        assert_eq!((s1.line, s1.column), (3, 1),
-            "esperaba (3,1) para `return`, fue ({},{})", s1.line, s1.column);
+        assert_eq!(
+            (s0.line, s0.column),
+            (2, 3),
+            "esperaba (2,3) para `let`, fue ({},{})",
+            s0.line,
+            s0.column
+        );
+        assert_eq!(
+            (s1.line, s1.column),
+            (3, 1),
+            "esperaba (3,1) para `return`, fue ({},{})",
+            s1.line,
+            s1.column
+        );
     }
 
     #[test]
@@ -4535,8 +4754,16 @@ mod tests {
     fn while_basic_parses() {
         let stmt = parse_one_stmt("while x < 10 { x = x + 1 }");
         match stmt {
-            Stmt::While { condition, body, .. } => {
-                assert!(matches!(condition, Expr::BinOp { op: BinOpKind::Lt, .. }));
+            Stmt::While {
+                condition, body, ..
+            } => {
+                assert!(matches!(
+                    condition,
+                    Expr::BinOp {
+                        op: BinOpKind::Lt,
+                        ..
+                    }
+                ));
                 assert_eq!(body.len(), 1);
                 assert!(matches!(body[0], Stmt::Assign { .. }));
             }
@@ -4571,11 +4798,15 @@ mod tests {
     fn and_basic_parses() {
         assert_eq!(
             parse_one_stmt("x and y"),
-            Stmt::Expr(Expr::BinOp {
-                op: BinOpKind::And,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("y".into(), Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::BinOp {
+                    op: BinOpKind::And,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -4583,11 +4814,15 @@ mod tests {
     fn or_basic_parses() {
         assert_eq!(
             parse_one_stmt("x or y"),
-            Stmt::Expr(Expr::BinOp {
-                op: BinOpKind::Or,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("y".into(), Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::BinOp {
+                    op: BinOpKind::Or,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -4597,12 +4832,15 @@ mod tests {
     fn xor_basic_parses() {
         assert_eq!(
             parse_one_stmt("x xor y"),
-            Stmt::Expr(Expr::BinOp {
-                op: BinOpKind::Xor,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
-                span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::BinOp {
+                    op: BinOpKind::Xor,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -4610,17 +4848,20 @@ mod tests {
     fn xor_misma_precedencia_que_or_left_assoc() {
         // `a xor b xor c` → `(a xor b) xor c`
         let stmt = parse_one_stmt("a xor b xor c");
-        let expected = Stmt::Expr(Expr::BinOp {
-            op: BinOpKind::Xor,
-            left: Box::new(Expr::BinOp {
+        let expected = Stmt::Expr(
+            Expr::BinOp {
                 op: BinOpKind::Xor,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                left: Box::new(Expr::BinOp {
+                    op: BinOpKind::Xor,
+                    left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
                 span: Span::ZERO,
-            }),
-            right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
-            span: Span::ZERO,
-        }, Span::ZERO);
+            },
+            Span::ZERO,
+        );
         assert_eq!(stmt, expected);
     }
 
@@ -4628,17 +4869,20 @@ mod tests {
     fn xor_y_or_chain_libremente_misma_precedencia() {
         // `a or b xor c` → `(a or b) xor c` (mismo nivel, left-assoc).
         let stmt = parse_one_stmt("a or b xor c");
-        let expected = Stmt::Expr(Expr::BinOp {
-            op: BinOpKind::Xor,
-            left: Box::new(Expr::BinOp {
-                op: BinOpKind::Or,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+        let expected = Stmt::Expr(
+            Expr::BinOp {
+                op: BinOpKind::Xor,
+                left: Box::new(Expr::BinOp {
+                    op: BinOpKind::Or,
+                    left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
                 span: Span::ZERO,
-            }),
-            right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
-            span: Span::ZERO,
-        }, Span::ZERO);
+            },
+            Span::ZERO,
+        );
         assert_eq!(stmt, expected);
     }
 
@@ -4646,17 +4890,20 @@ mod tests {
     fn and_tiene_mayor_precedencia_que_xor() {
         // `a and b xor c` → `(a and b) xor c`
         let stmt = parse_one_stmt("a and b xor c");
-        let expected = Stmt::Expr(Expr::BinOp {
-            op: BinOpKind::Xor,
-            left: Box::new(Expr::BinOp {
-                op: BinOpKind::And,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+        let expected = Stmt::Expr(
+            Expr::BinOp {
+                op: BinOpKind::Xor,
+                left: Box::new(Expr::BinOp {
+                    op: BinOpKind::And,
+                    left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
                 span: Span::ZERO,
-            }),
-            right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
-            span: Span::ZERO,
-        }, Span::ZERO);
+            },
+            Span::ZERO,
+        );
         assert_eq!(stmt, expected);
     }
 
@@ -4664,15 +4911,20 @@ mod tests {
     fn and_tiene_mayor_precedencia_que_or() {
         // `a and b or c` → `(a and b) or c`
         let stmt = parse_one_stmt("a and b or c");
-        let expected = Stmt::Expr(Expr::BinOp {
-            op: BinOpKind::Or,
-            left: Box::new(Expr::BinOp {
-                op: BinOpKind::And,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("b".into(), Span::ZERO)), span: Span::ZERO,
-            }),
-            right: Box::new(Expr::Ident("c".into(), Span::ZERO)), span: Span::ZERO,
-        }, Span::ZERO);
+        let expected = Stmt::Expr(
+            Expr::BinOp {
+                op: BinOpKind::Or,
+                left: Box::new(Expr::BinOp {
+                    op: BinOpKind::And,
+                    left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                right: Box::new(Expr::Ident("c".into(), Span::ZERO)),
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        );
         assert_eq!(stmt, expected);
     }
 
@@ -4680,19 +4932,25 @@ mod tests {
     fn comparacion_tiene_mayor_precedencia_que_and() {
         // `a > 0 and a < 10` → `(a > 0) and (a < 10)`
         let stmt = parse_one_stmt("a > 0 and a < 10");
-        let expected = Stmt::Expr(Expr::BinOp {
-            op: BinOpKind::And,
-            left: Box::new(Expr::BinOp {
-                op: BinOpKind::Gt,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
-            }),
-            right: Box::new(Expr::BinOp {
-                op: BinOpKind::Lt,
-                left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
-            }), span: Span::ZERO,
-        }, Span::ZERO);
+        let expected = Stmt::Expr(
+            Expr::BinOp {
+                op: BinOpKind::And,
+                left: Box::new(Expr::BinOp {
+                    op: BinOpKind::Gt,
+                    left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(0, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                right: Box::new(Expr::BinOp {
+                    op: BinOpKind::Lt,
+                    left: Box::new(Expr::Ident("a".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(10, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
+            },
+            Span::ZERO,
+        );
         assert_eq!(stmt, expected);
     }
 
@@ -4702,11 +4960,15 @@ mod tests {
         // Esto valida que el lookahead distingue Eq de EqEq.
         assert_eq!(
             parse_one_stmt("x == y"),
-            Stmt::Expr(Expr::BinOp {
-                op: BinOpKind::Eq,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Ident("y".into(), Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::BinOp {
+                    op: BinOpKind::Eq,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Ident("y".into(), Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -4717,15 +4979,23 @@ mod tests {
         assert_eq!(program.len(), 3);
         assert_eq!(
             program[0],
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::Int(1, Span::ZERO),
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
         assert_eq!(
             program[2],
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO)
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            )
         );
     }
 
@@ -4774,16 +5044,26 @@ mod tests {
             parse_one_stmt("fn double(n) => n * 2"),
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
+                params: vec![Param {
+                    name: "n".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false
+                }],
                 return_type: None,
-                body: vec![Stmt::Return(Expr::BinOp {
-                    op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }, Span::ZERO)],
+                body: vec![Stmt::Return(
+                    Expr::BinOp {
+                        op: BinOpKind::Mul,
+                        left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(2, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO
+                )],
                 is_async: false,
                 decorators: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -4801,14 +5081,19 @@ mod tests {
                     varargs: false,
                 }],
                 return_type: Some(TypeExpr::named("Int")),
-                body: vec![Stmt::Return(Expr::BinOp {
-                    op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }, Span::ZERO)],
+                body: vec![Stmt::Return(
+                    Expr::BinOp {
+                        op: BinOpKind::Mul,
+                        left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(2, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO
+                )],
                 is_async: false,
                 decorators: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -4819,13 +5104,25 @@ mod tests {
             parse_one_stmt("fn greet(name) { print(name) }"),
             Stmt::FnDef {
                 name: "greet".into(),
-                params: vec![Param { name: "name".into(), type_: None, default: None, varargs: false }],
+                params: vec![Param {
+                    name: "name".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false
+                }],
                 return_type: None,
-                body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("name".into(), Span::ZERO)], span: Span::ZERO,
-                }, Span::ZERO)],
+                body: vec![Stmt::Expr(
+                    Expr::Call {
+                        callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                        args: vec![Expr::Ident("name".into(), Span::ZERO)],
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO
+                )],
                 is_async: false,
                 decorators: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -4836,17 +5133,25 @@ mod tests {
             parse_one_stmt(src),
             Stmt::FnDef {
                 name: "calc".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
+                params: vec![Param {
+                    name: "n".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false
+                }],
                 return_type: None,
                 body: vec![
-                    Stmt::Assign { target: AssignTarget::Ident("x".into()),
+                    Stmt::Assign {
+                        target: AssignTarget::Ident("x".into()),
                         type_: None,
                         value: Expr::BinOp {
                             op: BinOpKind::Mul,
                             left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                            right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                            right: Box::new(Expr::Int(2, Span::ZERO)),
+                            span: Span::ZERO,
                         },
-                     span: Span::ZERO },
+                        span: Span::ZERO
+                    },
                     Stmt::Return(Expr::Ident("x".into(), Span::ZERO), Span::ZERO),
                 ],
                 is_async: false,
@@ -4861,7 +5166,15 @@ mod tests {
         // fn add(a: Int, b: Int) -> Int { return a + b }
         let stmt = parse_one_stmt("fn add(a: Int, b: Int) -> Int { return a + b }");
         match stmt {
-            Stmt::FnDef { name, params, return_type, body, is_async, decorators, .. } => {
+            Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                body,
+                is_async,
+                decorators,
+                ..
+            } => {
                 assert_eq!(name, "add");
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "a");
@@ -4900,7 +5213,12 @@ mod tests {
         // async fn fetch(id: Int) -> User { return user }
         let stmt = parse_one_stmt("async fn fetch(id: Int) -> User { return user }");
         match stmt {
-            Stmt::FnDef { name, is_async, return_type, .. } => {
+            Stmt::FnDef {
+                name,
+                is_async,
+                return_type,
+                ..
+            } => {
                 assert_eq!(name, "fetch");
                 assert!(is_async);
                 assert_eq!(return_type, Some(TypeExpr::named("User")));
@@ -4962,12 +5280,18 @@ mod tests {
 
     #[test]
     fn string_without_interpolation_is_plain_str() {
-        assert_eq!(parse_expr(r#""hola""#).unwrap(), Expr::Str("hola".into(), Span::ZERO));
+        assert_eq!(
+            parse_expr(r#""hola""#).unwrap(),
+            Expr::Str("hola".into(), Span::ZERO)
+        );
     }
 
     #[test]
     fn empty_string_is_plain_str() {
-        assert_eq!(parse_expr(r#""""#).unwrap(), Expr::Str("".into(), Span::ZERO));
+        assert_eq!(
+            parse_expr(r#""""#).unwrap(),
+            Expr::Str("".into(), Span::ZERO)
+        );
     }
 
     #[test]
@@ -4975,11 +5299,14 @@ mod tests {
         // "Hola, {name}!" → StrInterp([Lit, Expr, Lit])
         assert_eq!(
             parse_expr(r#""Hola, {name}!""#).unwrap(),
-            Expr::StrInterp(vec![
-                StrPart::Lit("Hola, ".into()),
-                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-                StrPart::Lit("!".into()),
-            ], Span::ZERO),
+            Expr::StrInterp(
+                vec![
+                    StrPart::Lit("Hola, ".into()),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                    StrPart::Lit("!".into()),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -4988,10 +5315,13 @@ mod tests {
         // "{x} es el valor" → StrInterp([Expr, Lit])
         assert_eq!(
             parse_expr(r#""{x} es el valor""#).unwrap(),
-            Expr::StrInterp(vec![
-                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-                StrPart::Lit(" es el valor".into()),
-            ], Span::ZERO),
+            Expr::StrInterp(
+                vec![
+                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+                    StrPart::Lit(" es el valor".into()),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5000,10 +5330,13 @@ mod tests {
         // "valor: {x}" → StrInterp([Lit, Expr])
         assert_eq!(
             parse_expr(r#""valor: {x}""#).unwrap(),
-            Expr::StrInterp(vec![
-                StrPart::Lit("valor: ".into()),
-                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-            ], Span::ZERO),
+            Expr::StrInterp(
+                vec![
+                    StrPart::Lit("valor: ".into()),
+                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5012,7 +5345,10 @@ mod tests {
         // "{x}" — sin literales alrededor.
         assert_eq!(
             parse_expr(r#""{x}""#).unwrap(),
-            Expr::StrInterp(vec![StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None)], Span::ZERO),
+            Expr::StrInterp(
+                vec![StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None)],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5021,13 +5357,16 @@ mod tests {
         // "Hola {name}, tenés {n} mensajes"
         assert_eq!(
             parse_expr(r#""Hola {name}, tenés {n} mensajes""#).unwrap(),
-            Expr::StrInterp(vec![
-                StrPart::Lit("Hola ".into()),
-                StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-                StrPart::Lit(", tenés ".into()),
-                StrPart::Expr(Expr::Ident("n".into(), Span::ZERO), None),
-                StrPart::Lit(" mensajes".into()),
-            ], Span::ZERO),
+            Expr::StrInterp(
+                vec![
+                    StrPart::Lit("Hola ".into()),
+                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                    StrPart::Lit(", tenés ".into()),
+                    StrPart::Expr(Expr::Ident("n".into(), Span::ZERO), None),
+                    StrPart::Lit(" mensajes".into()),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5036,14 +5375,21 @@ mod tests {
         // "respuesta: {40 + 2}"
         assert_eq!(
             parse_expr(r#""respuesta: {40 + 2}""#).unwrap(),
-            Expr::StrInterp(vec![
-                StrPart::Lit("respuesta: ".into()),
-                StrPart::Expr(Expr::BinOp {
-                    op: BinOpKind::Add,
-                    left: Box::new(Expr::Int(40, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }, None),
-            ], Span::ZERO),
+            Expr::StrInterp(
+                vec![
+                    StrPart::Lit("respuesta: ".into()),
+                    StrPart::Expr(
+                        Expr::BinOp {
+                            op: BinOpKind::Add,
+                            left: Box::new(Expr::Int(40, Span::ZERO)),
+                            right: Box::new(Expr::Int(2, Span::ZERO)),
+                            span: Span::ZERO,
+                        },
+                        None
+                    ),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5061,11 +5407,14 @@ mod tests {
         // "\{ {x} \}" → literal "{ ", interpolación de x, literal " }"
         assert_eq!(
             parse_expr(r#""\{ {x} \}""#).unwrap(),
-            Expr::StrInterp(vec![
-                StrPart::Lit("{ ".into()),
-                StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
-                StrPart::Lit(" }".into()),
-            ], Span::ZERO),
+            Expr::StrInterp(
+                vec![
+                    StrPart::Lit("{ ".into()),
+                    StrPart::Expr(Expr::Ident("x".into(), Span::ZERO), None),
+                    StrPart::Lit(" }".into()),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5106,7 +5455,8 @@ mod tests {
         assert!(
             err.column > 1,
             "se esperaba columna > 1, se obtuvo {} (msg: {})",
-            err.column, err.message,
+            err.column,
+            err.message,
         );
     }
 
@@ -5130,19 +5480,31 @@ mod tests {
         // if x < 5 { print(x) }
         let stmt = parse_one_stmt("if x < 5 { print(x) }");
         match stmt {
-            Stmt::Expr(Expr::If { condition, then, else_, .. }, _) => {
+            Stmt::Expr(
+                Expr::If {
+                    condition,
+                    then,
+                    else_,
+                    ..
+                },
+                _,
+            ) => {
                 assert_eq!(
                     *condition,
                     Expr::BinOp {
                         op: BinOpKind::Lt,
                         left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                        right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                        right: Box::new(Expr::Int(5, Span::ZERO)),
+                        span: Span::ZERO,
                     }
                 );
                 assert_eq!(then.len(), 1);
                 assert!(else_.is_none());
             }
-            other => panic!("se esperaba Stmt::Expr(If, Span::ZERO), se obtuvo {:?}", other),
+            other => panic!(
+                "se esperaba Stmt::Expr(If, Span::ZERO), se obtuvo {:?}",
+                other
+            ),
         }
     }
 
@@ -5163,11 +5525,23 @@ mod tests {
         // → If(a, [1], else: [Expr(If(b, [2], else: [3]))])
         let stmt = parse_one_stmt("if a { 1 } else if b { 2 } else { 3 }");
         match stmt {
-            Stmt::Expr(Expr::If { else_: Some(outer_else), .. }, _) => {
+            Stmt::Expr(
+                Expr::If {
+                    else_: Some(outer_else),
+                    ..
+                },
+                _,
+            ) => {
                 // El else exterior contiene una sola stmt: un Expr::If anidado.
                 assert_eq!(outer_else.len(), 1);
                 match &outer_else[0] {
-                    Stmt::Expr(Expr::If { else_: Some(inner_else), .. }, _) => {
+                    Stmt::Expr(
+                        Expr::If {
+                            else_: Some(inner_else),
+                            ..
+                        },
+                        _,
+                    ) => {
                         assert_eq!(inner_else.len(), 1);
                     }
                     other => panic!("se esperaba if anidado, se obtuvo {:?}", other),
@@ -5182,10 +5556,17 @@ mod tests {
         // status = if active { "on" } else { "off" }
         let stmt = parse_one_stmt(r#"status = if active { "on" } else { "off" }"#);
         match stmt {
-            Stmt::Assign { target: AssignTarget::Ident(name), value: Expr::If { .. }, .. } => {
+            Stmt::Assign {
+                target: AssignTarget::Ident(name),
+                value: Expr::If { .. },
+                ..
+            } => {
                 assert_eq!(name, "status");
             }
-            other => panic!("se esperaba Assign con If como valor, se obtuvo {:?}", other),
+            other => panic!(
+                "se esperaba Assign con If como valor, se obtuvo {:?}",
+                other
+            ),
         }
     }
 
@@ -5331,7 +5712,12 @@ mod tests {
         let src = "@get(\"/\")\nfn index() => \"hola\"";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::FnDef { name, is_async, decorators, .. } => {
+            Stmt::FnDef {
+                name,
+                is_async,
+                decorators,
+                ..
+            } => {
                 assert_eq!(name, "index");
                 assert!(!is_async);
                 assert_eq!(decorators.len(), 1);
@@ -5344,10 +5730,18 @@ mod tests {
 
     #[test]
     fn decorator_post_con_async_handler() {
-        let src = "@post(\"/users\")\nasync fn create_user(body: UserInput) -> User {\n  return body\n}";
+        let src =
+            "@post(\"/users\")\nasync fn create_user(body: UserInput) -> User {\n  return body\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::FnDef { name, is_async, return_type, params, decorators, .. } => {
+            Stmt::FnDef {
+                name,
+                is_async,
+                return_type,
+                params,
+                decorators,
+                ..
+            } => {
                 assert_eq!(name, "create_user");
                 assert!(is_async);
                 assert_eq!(return_type, Some(TypeExpr::named("User")));
@@ -5355,7 +5749,10 @@ mod tests {
                 assert_eq!(params[0].name, "body");
                 assert_eq!(decorators.len(), 1);
                 assert_eq!(decorators[0].name, "post");
-                assert_eq!(decorators[0].args, vec![Expr::Str("/users".into(), Span::ZERO)]);
+                assert_eq!(
+                    decorators[0].args,
+                    vec![Expr::Str("/users".into(), Span::ZERO)]
+                );
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
@@ -5380,7 +5777,10 @@ mod tests {
                 assert!(matches!(decorators[0].args[0], Expr::StrInterp(_, _)));
                 if let Expr::StrInterp(parts, _) = &decorators[0].args[0] {
                     assert_eq!(parts[0], StrPart::Lit("/users/".into()));
-                    assert_eq!(parts[1], StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None));
+                    assert_eq!(
+                        parts[1],
+                        StrPart::Expr(Expr::Ident("id".into(), Span::ZERO), None)
+                    );
                 }
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
@@ -5389,7 +5789,10 @@ mod tests {
             Stmt::FnDef { decorators, .. } => {
                 assert_eq!(decorators[0].name, "delete");
                 // Sin path params: llega como Str pelado.
-                assert_eq!(decorators[0].args, vec![Expr::Str("/users".into(), Span::ZERO)]);
+                assert_eq!(
+                    decorators[0].args,
+                    vec![Expr::Str("/users".into(), Span::ZERO)]
+                );
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
@@ -5418,10 +5821,13 @@ mod tests {
         let stmt = parse_one_stmt("@server(8080, \"0.0.0.0\")\nfn cfg() => 0");
         match stmt {
             Stmt::FnDef { decorators, .. } => {
-                assert_eq!(decorators[0].args, vec![
-                    Expr::Int(8080, Span::ZERO),
-                    Expr::Str("0.0.0.0".into(), Span::ZERO),
-                ]);
+                assert_eq!(
+                    decorators[0].args,
+                    vec![
+                        Expr::Int(8080, Span::ZERO),
+                        Expr::Str("0.0.0.0".into(), Span::ZERO),
+                    ]
+                );
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
@@ -5438,7 +5844,10 @@ mod tests {
                 assert_eq!(decorators.len(), 2);
                 assert_eq!(decorators[0].name, "get");
                 assert_eq!(decorators[1].name, "auth");
-                assert_eq!(decorators[1].args, vec![Expr::Str("admin".into(), Span::ZERO)]);
+                assert_eq!(
+                    decorators[1].args,
+                    vec![Expr::Str("admin".into(), Span::ZERO)]
+                );
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
         }
@@ -5551,10 +5960,7 @@ mod tests {
                 assert_eq!(d.args, vec![Expr::Int(3000, Span::ZERO)]);
                 assert_eq!(d.kwargs.len(), 2);
                 assert_eq!(d.kwargs[0].0, "host");
-                assert_eq!(
-                    d.kwargs[0].1,
-                    Expr::Str("0.0.0.0".into(), Span::ZERO)
-                );
+                assert_eq!(d.kwargs[0].1, Expr::Str("0.0.0.0".into(), Span::ZERO));
                 assert_eq!(d.kwargs[1].0, "docs");
                 assert_eq!(d.kwargs[1].1, Expr::Bool(false, Span::ZERO));
             }
@@ -5599,7 +6005,10 @@ mod tests {
                 assert_eq!(d.args.len(), 1);
                 assert!(matches!(
                     d.args[0],
-                    Expr::BinOp { op: BinOpKind::Eq, .. }
+                    Expr::BinOp {
+                        op: BinOpKind::Eq,
+                        ..
+                    }
                 ));
             }
             other => panic!("se esperaba FnDef, se obtuvo {:?}", other),
@@ -5622,34 +6031,48 @@ mod tests {
         // 1. name = "Fitz"
         assert_eq!(
             program[0],
-            Stmt::Assign { target: AssignTarget::Ident("name".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
 
         // 2. x = 10 + 5
         assert_eq!(
             program[1],
-            Stmt::Assign { target: AssignTarget::Ident("x".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("x".into()),
                 type_: None,
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(10, Span::ZERO)),
-                    right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(5, Span::ZERO)),
+                    span: Span::ZERO,
                 },
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
 
         // 3. print("Hola, {name}!")
         assert_eq!(
             program[2],
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::StrInterp(vec![
-                    StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-                    StrPart::Lit("!".into()),
-                ], Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO)
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::StrInterp(
+                        vec![
+                            StrPart::Lit("Hola, ".into()),
+                            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                            StrPart::Lit("!".into()),
+                        ],
+                        Span::ZERO
+                    )],
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            )
         );
 
         // 4. fn double(n) => n * 2
@@ -5657,24 +6080,43 @@ mod tests {
             program[3],
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
+                params: vec![Param {
+                    name: "n".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false
+                }],
                 return_type: None,
-                body: vec![Stmt::Return(Expr::BinOp {
-                    op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }, Span::ZERO)],
+                body: vec![Stmt::Return(
+                    Expr::BinOp {
+                        op: BinOpKind::Mul,
+                        left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(2, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO
+                )],
                 is_async: false,
                 decorators: vec![],
-             span: Span::ZERO }
+                span: Span::ZERO
+            }
         );
 
         // 5. print(double(x))
         assert_eq!(
             program[4],
-            Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Call { callee: Box::new(Expr::Ident("double".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-                }], span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::Call {
+                        callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
+                        args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                        span: Span::ZERO,
+                    }],
+                    span: Span::ZERO,
+                },
+                Span::ZERO
+            ),
         );
     }
 
@@ -5689,14 +6131,24 @@ mod tests {
 
     #[test]
     fn list_literal_single_element() {
-        assert_eq!(parse_expr("[42]").unwrap(), Expr::List(vec![Expr::Int(42, Span::ZERO)], Span::ZERO));
+        assert_eq!(
+            parse_expr("[42]").unwrap(),
+            Expr::List(vec![Expr::Int(42, Span::ZERO)], Span::ZERO)
+        );
     }
 
     #[test]
     fn list_literal_multiple_elements() {
         assert_eq!(
             parse_expr("[1, 2, 3]").unwrap(),
-            Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO)], Span::ZERO),
+            Expr::List(
+                vec![
+                    Expr::Int(1, Span::ZERO),
+                    Expr::Int(2, Span::ZERO),
+                    Expr::Int(3, Span::ZERO)
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5704,7 +6156,10 @@ mod tests {
     fn list_literal_trailing_comma() {
         assert_eq!(
             parse_expr("[1, 2,]").unwrap(),
-            Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO),
+            Expr::List(
+                vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5714,7 +6169,14 @@ mod tests {
         let src = "[\n  1,\n  2,\n  3,\n]";
         assert_eq!(
             parse_expr(src).unwrap(),
-            Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO)], Span::ZERO),
+            Expr::List(
+                vec![
+                    Expr::Int(1, Span::ZERO),
+                    Expr::Int(2, Span::ZERO),
+                    Expr::Int(3, Span::ZERO)
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5723,15 +6185,19 @@ mod tests {
         // [a, b + 1, "hola"]
         assert_eq!(
             parse_expr(r#"[a, b + 1, "hola"]"#).unwrap(),
-            Expr::List(vec![
-                Expr::Ident("a".into(), Span::ZERO),
-                Expr::BinOp {
-                    op: BinOpKind::Add,
-                    left: Box::new(Expr::Ident("b".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-                },
-                Expr::Str("hola".into(), Span::ZERO),
-            ], Span::ZERO),
+            Expr::List(
+                vec![
+                    Expr::Ident("a".into(), Span::ZERO),
+                    Expr::BinOp {
+                        op: BinOpKind::Add,
+                        left: Box::new(Expr::Ident("b".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(1, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    Expr::Str("hola".into(), Span::ZERO),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5740,10 +6206,19 @@ mod tests {
         // [[1, 2], [3, 4]]
         assert_eq!(
             parse_expr("[[1, 2], [3, 4]]").unwrap(),
-            Expr::List(vec![
-                Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)], Span::ZERO),
-                Expr::List(vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)], Span::ZERO),
-            ], Span::ZERO),
+            Expr::List(
+                vec![
+                    Expr::List(
+                        vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO)],
+                        Span::ZERO
+                    ),
+                    Expr::List(
+                        vec![Expr::Int(3, Span::ZERO), Expr::Int(4, Span::ZERO)],
+                        Span::ZERO
+                    ),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5762,7 +6237,10 @@ mod tests {
     fn map_literal_single_pair() {
         assert_eq!(
             parse_expr(r#"{"a": 1}"#).unwrap(),
-            Expr::Map(vec![(Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO))], Span::ZERO),
+            Expr::Map(
+                vec![(Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO))],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5770,10 +6248,13 @@ mod tests {
     fn map_literal_multiple_pairs_preserves_order() {
         assert_eq!(
             parse_expr(r#"{"a": 1, "b": 2}"#).unwrap(),
-            Expr::Map(vec![
-                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-                (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
-            ], Span::ZERO),
+            Expr::Map(
+                vec![
+                    (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                    (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5781,7 +6262,10 @@ mod tests {
     fn map_literal_trailing_comma() {
         assert_eq!(
             parse_expr(r#"{"a": 1,}"#).unwrap(),
-            Expr::Map(vec![(Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO))], Span::ZERO),
+            Expr::Map(
+                vec![(Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO))],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5790,10 +6274,13 @@ mod tests {
         let src = "{\n  \"a\": 1,\n  \"b\": 2,\n}";
         assert_eq!(
             parse_expr(src).unwrap(),
-            Expr::Map(vec![
-                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-                (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
-            ], Span::ZERO),
+            Expr::Map(
+                vec![
+                    (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                    (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5809,10 +6296,19 @@ mod tests {
         // [{"k": 1}, {"k": 2}]
         assert_eq!(
             parse_expr(r#"[{"k": 1}, {"k": 2}]"#).unwrap(),
-            Expr::List(vec![
-                Expr::Map(vec![(Expr::Str("k".into(), Span::ZERO), Expr::Int(1, Span::ZERO))], Span::ZERO),
-                Expr::Map(vec![(Expr::Str("k".into(), Span::ZERO), Expr::Int(2, Span::ZERO))], Span::ZERO),
-            ], Span::ZERO),
+            Expr::List(
+                vec![
+                    Expr::Map(
+                        vec![(Expr::Str("k".into(), Span::ZERO), Expr::Int(1, Span::ZERO))],
+                        Span::ZERO
+                    ),
+                    Expr::Map(
+                        vec![(Expr::Str("k".into(), Span::ZERO), Expr::Int(2, Span::ZERO))],
+                        Span::ZERO
+                    ),
+                ],
+                Span::ZERO
+            ),
         );
     }
 
@@ -5823,7 +6319,9 @@ mod tests {
             parse_expr("0..10").unwrap(),
             Expr::Range {
                 start: Box::new(Expr::Int(0, Span::ZERO)),
-                end: Box::new(Expr::Int(10, Span::ZERO)), inclusive: false, span: Span::ZERO,
+                end: Box::new(Expr::Int(10, Span::ZERO)),
+                inclusive: false,
+                span: Span::ZERO,
             },
         );
     }
@@ -5838,8 +6336,11 @@ mod tests {
                 end: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Ident("b".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-                }), inclusive: false, span: Span::ZERO,
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                inclusive: false,
+                span: Span::ZERO,
             },
         );
     }
@@ -5854,9 +6355,12 @@ mod tests {
                 op: BinOpKind::Lt,
                 left: Box::new(Expr::Range {
                     start: Box::new(Expr::Int(0, Span::ZERO)),
-                    end: Box::new(Expr::Ident("n".into(), Span::ZERO)), inclusive: false, span: Span::ZERO,
+                    end: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                    inclusive: false,
+                    span: Span::ZERO,
                 }),
-                right: Box::new(Expr::Int(10, Span::ZERO)), span: Span::ZERO,
+                right: Box::new(Expr::Int(10, Span::ZERO)),
+                span: Span::ZERO,
             },
         );
     }
@@ -5870,13 +6374,17 @@ mod tests {
                 start: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(1, Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
                 end: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(3, Span::ZERO)),
-                    right: Box::new(Expr::Int(4, Span::ZERO)), span: Span::ZERO,
-                }), inclusive: false, span: Span::ZERO,
+                    right: Box::new(Expr::Int(4, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                inclusive: false,
+                span: Span::ZERO,
             },
         );
     }
@@ -5896,9 +6404,12 @@ mod tests {
             Expr::Range {
                 start: Box::new(Expr::UnaryOp {
                     op: UnaryOpKind::Neg,
-                    operand: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
+                    operand: Box::new(Expr::Int(3, Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                end: Box::new(Expr::Int(3, Span::ZERO)), inclusive: false, span: Span::ZERO,
+                end: Box::new(Expr::Int(3, Span::ZERO)),
+                inclusive: false,
+                span: Span::ZERO,
             },
         );
     }
@@ -5910,7 +6421,8 @@ mod tests {
             parse_expr("xs[0]").unwrap(),
             Expr::Index {
                 object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
-                index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
+                index: Box::new(Expr::Int(0, Span::ZERO)),
+                span: Span::ZERO,
             },
         );
     }
@@ -5923,9 +6435,11 @@ mod tests {
             Expr::Index {
                 object: Box::new(Expr::Index {
                     object: Box::new(Expr::Ident("m".into(), Span::ZERO)),
-                    index: Box::new(Expr::Str("a".into(), Span::ZERO)), span: Span::ZERO,
+                    index: Box::new(Expr::Str("a".into(), Span::ZERO)),
+                    span: Span::ZERO,
                 }),
-                index: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                index: Box::new(Expr::Int(1, Span::ZERO)),
+                span: Span::ZERO,
             },
         );
     }
@@ -5936,10 +6450,16 @@ mod tests {
         assert_eq!(
             parse_expr("[1, 2, 3][1]").unwrap(),
             Expr::Index {
-                object: Box::new(Expr::List(vec![
-                    Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO),
-                ], Span::ZERO)),
-                index: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
+                object: Box::new(Expr::List(
+                    vec![
+                        Expr::Int(1, Span::ZERO),
+                        Expr::Int(2, Span::ZERO),
+                        Expr::Int(3, Span::ZERO),
+                    ],
+                    Span::ZERO
+                )),
+                index: Box::new(Expr::Int(1, Span::ZERO)),
+                span: Span::ZERO,
             },
         );
     }
@@ -5954,8 +6474,10 @@ mod tests {
                 index: Box::new(Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Ident("i".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(1, Span::ZERO)), span: Span::ZERO,
-                }), span: Span::ZERO,
+                    right: Box::new(Expr::Int(1, Span::ZERO)),
+                    span: Span::ZERO,
+                }),
+                span: Span::ZERO,
             },
         );
     }
@@ -5972,10 +6494,19 @@ mod tests {
         let stmt = parse_one_stmt("let xs = [1, 2, 3]");
         assert_eq!(
             stmt,
-            Stmt::Assign { target: AssignTarget::Ident("xs".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("xs".into()),
                 type_: None,
-                value: Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO)], Span::ZERO),
-             span: Span::ZERO },
+                value: Expr::List(
+                    vec![
+                        Expr::Int(1, Span::ZERO),
+                        Expr::Int(2, Span::ZERO),
+                        Expr::Int(3, Span::ZERO)
+                    ],
+                    Span::ZERO
+                ),
+                span: Span::ZERO
+            },
         );
     }
 
@@ -5985,13 +6516,18 @@ mod tests {
         let stmt = parse_one_stmt(r#"let m = {"a": 1, "b": 2}"#);
         assert_eq!(
             stmt,
-            Stmt::Assign { target: AssignTarget::Ident("m".into()),
+            Stmt::Assign {
+                target: AssignTarget::Ident("m".into()),
                 type_: None,
-                value: Expr::Map(vec![
-                    (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-                    (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
-                ], Span::ZERO),
-             span: Span::ZERO },
+                value: Expr::Map(
+                    vec![
+                        (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                        (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+                    ],
+                    Span::ZERO
+                ),
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6008,10 +6544,17 @@ mod tests {
             Stmt::For {
                 var: Pattern::Ident("x".into()),
                 iter: Expr::Ident("xs".into(), Span::ZERO),
-                body: vec![Stmt::Expr(Expr::Call { callee: Box::new(Expr::Ident("print".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-                }, Span::ZERO)],
+                body: vec![Stmt::Expr(
+                    Expr::Call {
+                        callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                        args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO
+                )],
                 label: None,
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6020,13 +6563,17 @@ mod tests {
         // for i in 0..10 { print(i) }
         let stmt = parse_one_stmt("for i in 0..10 { print(i) }");
         match stmt {
-            Stmt::For { var, iter, body, .. } => {
+            Stmt::For {
+                var, iter, body, ..
+            } => {
                 assert_eq!(var, Pattern::Ident("i".into()));
                 assert_eq!(
                     iter,
                     Expr::Range {
                         start: Box::new(Expr::Int(0, Span::ZERO)),
-                        end: Box::new(Expr::Int(10, Span::ZERO)), inclusive: false, span: Span::ZERO,
+                        end: Box::new(Expr::Int(10, Span::ZERO)),
+                        inclusive: false,
+                        span: Span::ZERO,
                     },
                 );
                 assert_eq!(body.len(), 1);
@@ -6041,7 +6588,17 @@ mod tests {
         let stmt = parse_one_stmt("for x in [1, 2, 3] { print(x) }");
         match stmt {
             Stmt::For { iter, .. } => {
-                assert_eq!(iter, Expr::List(vec![Expr::Int(1, Span::ZERO), Expr::Int(2, Span::ZERO), Expr::Int(3, Span::ZERO)], Span::ZERO));
+                assert_eq!(
+                    iter,
+                    Expr::List(
+                        vec![
+                            Expr::Int(1, Span::ZERO),
+                            Expr::Int(2, Span::ZERO),
+                            Expr::Int(3, Span::ZERO)
+                        ],
+                        Span::ZERO
+                    )
+                );
             }
             other => panic!("se esperaba For, se obtuvo {:?}", other),
         }
@@ -6087,7 +6644,14 @@ mod tests {
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 2);
-                assert_eq!(arms[0].pattern, Pattern::Range { start: 0, end: 10, inclusive: false });
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Range {
+                        start: 0,
+                        end: 10,
+                        inclusive: false
+                    }
+                );
                 assert_eq!(arms[1].pattern, Pattern::Wildcard);
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -6102,8 +6666,22 @@ mod tests {
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
                 assert_eq!(arms.len(), 3);
-                assert_eq!(arms[0].pattern, Pattern::Range { start: -10, end: 0, inclusive: false });
-                assert_eq!(arms[1].pattern, Pattern::Range { start: 0, end: 10, inclusive: false });
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Range {
+                        start: -10,
+                        end: 0,
+                        inclusive: false
+                    }
+                );
+                assert_eq!(
+                    arms[1].pattern,
+                    Pattern::Range {
+                        start: 0,
+                        end: 10,
+                        inclusive: false
+                    }
+                );
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }
@@ -6116,7 +6694,14 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                assert_eq!(arms[0].pattern, Pattern::Range { start: -5, end: -1, inclusive: false });
+                assert_eq!(
+                    arms[0].pattern,
+                    Pattern::Range {
+                        start: -5,
+                        end: -1,
+                        inclusive: false
+                    }
+                );
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
         }
@@ -6207,7 +6792,11 @@ mod tests {
                     arms[0].pattern,
                     Pattern::Or(vec![
                         Pattern::Int(0),
-                        Pattern::Range { start: 5, end: 10, inclusive: true },
+                        Pattern::Range {
+                            start: 5,
+                            end: 10,
+                            inclusive: true
+                        },
                     ])
                 );
             }
@@ -6285,7 +6874,14 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Expr(Expr::Match { arms, .. }, _) => {
-                assert!(matches!(arms[0].pattern, Pattern::Range { start: 0, end: 10, inclusive: true }));
+                assert!(matches!(
+                    arms[0].pattern,
+                    Pattern::Range {
+                        start: 0,
+                        end: 10,
+                        inclusive: true
+                    }
+                ));
                 assert!(arms[0].guard.is_some());
             }
             other => panic!("se esperaba Match, se obtuvo {:?}", other),
@@ -6328,10 +6924,16 @@ mod tests {
         let src = "x += 5";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { target: AssignTarget::Ident(name), value, .. } => {
+            Stmt::Assign {
+                target: AssignTarget::Ident(name),
+                value,
+                ..
+            } => {
                 assert_eq!(name, "x");
                 match value {
-                    Expr::BinOp { op, left, right, .. } => {
+                    Expr::BinOp {
+                        op, left, right, ..
+                    } => {
                         assert_eq!(op, BinOpKind::Add);
                         assert!(matches!(*left, Expr::Ident(ref n, _) if n == "x"));
                         assert!(matches!(*right, Expr::Int(5, _)));
@@ -6348,7 +6950,10 @@ mod tests {
         let src = "x -= 3";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::BinOp { op, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::BinOp { op, .. },
+                ..
+            } => {
                 assert_eq!(op, BinOpKind::Sub);
             }
             other => panic!("se esperaba Stmt::Assign con BinOp Sub, fue {:?}", other),
@@ -6360,7 +6965,10 @@ mod tests {
         let src = "x *= 7";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::BinOp { op, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::BinOp { op, .. },
+                ..
+            } => {
                 assert_eq!(op, BinOpKind::Mul);
             }
             other => panic!("se esperaba Stmt::Assign con BinOp Mul, fue {:?}", other),
@@ -6372,7 +6980,10 @@ mod tests {
         let src = "x /= 2";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::BinOp { op, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::BinOp { op, .. },
+                ..
+            } => {
                 assert_eq!(op, BinOpKind::Div);
             }
             other => panic!("se esperaba Stmt::Assign con BinOp Div, fue {:?}", other),
@@ -6385,9 +6996,19 @@ mod tests {
         let src = "c.count += 1";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { target: AssignTarget::Field { field, .. }, value, .. } => {
+            Stmt::Assign {
+                target: AssignTarget::Field { field, .. },
+                value,
+                ..
+            } => {
                 assert_eq!(field, "count");
-                assert!(matches!(value, Expr::BinOp { op: BinOpKind::Add, .. }));
+                assert!(matches!(
+                    value,
+                    Expr::BinOp {
+                        op: BinOpKind::Add,
+                        ..
+                    }
+                ));
             }
             other => panic!("se esperaba Stmt::Assign Field, fue {:?}", other),
         }
@@ -6399,8 +7020,18 @@ mod tests {
         let src = "xs[0] += 10";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { target: AssignTarget::Index { .. }, value, .. } => {
-                assert!(matches!(value, Expr::BinOp { op: BinOpKind::Add, .. }));
+            Stmt::Assign {
+                target: AssignTarget::Index { .. },
+                value,
+                ..
+            } => {
+                assert!(matches!(
+                    value,
+                    Expr::BinOp {
+                        op: BinOpKind::Add,
+                        ..
+                    }
+                ));
             }
             other => panic!("se esperaba Stmt::Assign Index, fue {:?}", other),
         }
@@ -6412,11 +7043,22 @@ mod tests {
         let src = "x += a + b * 2";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::BinOp { op: BinOpKind::Add, right, .. }, .. } => {
+            Stmt::Assign {
+                value:
+                    Expr::BinOp {
+                        op: BinOpKind::Add,
+                        right,
+                        ..
+                    },
+                ..
+            } => {
                 // right es `a + b * 2` también
                 assert!(matches!(*right, Expr::BinOp { .. }));
             }
-            other => panic!("se esperaba Stmt::Assign con RHS compuesto, fue {:?}", other),
+            other => panic!(
+                "se esperaba Stmt::Assign con RHS compuesto, fue {:?}",
+                other
+            ),
         }
     }
 
@@ -6429,7 +7071,12 @@ mod tests {
         let src = "type User { id: Int, name: Str }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::TypeDef { name, fields, methods, .. } => {
+            Stmt::TypeDef {
+                name,
+                fields,
+                methods,
+                ..
+            } => {
                 assert_eq!(name, "User");
                 assert_eq!(fields.len(), 2);
                 assert!(methods.is_empty());
@@ -6446,7 +7093,9 @@ mod tests {
                    }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::TypeDef { fields, methods, .. } => {
+            Stmt::TypeDef {
+                fields, methods, ..
+            } => {
                 assert_eq!(fields.len(), 1);
                 assert_eq!(methods.len(), 1);
                 assert_eq!(methods[0].name, "greet");
@@ -6516,7 +7165,9 @@ mod tests {
                    }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::TypeDef { fields, methods, .. } => {
+            Stmt::TypeDef {
+                fields, methods, ..
+            } => {
                 assert_eq!(fields.len(), 2, "fields: {:?}", fields);
                 assert_eq!(methods.len(), 2);
             }
@@ -6546,7 +7197,12 @@ mod tests {
         let src = "let u = User { id: 1, name: \"x\" }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::StructLit { type_name, fields, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::StructLit {
+                    type_name, fields, ..
+                },
+                ..
+            } => {
                 assert_eq!(type_name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "id");
@@ -6563,7 +7219,12 @@ mod tests {
         let src = "let u = Empty {}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::StructLit { type_name, fields, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::StructLit {
+                    type_name, fields, ..
+                },
+                ..
+            } => {
                 assert_eq!(type_name, "Empty");
                 assert!(fields.is_empty());
             }
@@ -6576,7 +7237,10 @@ mod tests {
         let src = "let u = User { id: 1, name: \"x\", }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::StructLit { fields, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::StructLit { fields, .. },
+                ..
+            } => {
                 assert_eq!(fields.len(), 2);
             }
             other => panic!("se esperaba StructLit, se obtuvo {:?}", other),
@@ -6589,7 +7253,10 @@ mod tests {
         let src = "let u = User {\n    id: 1\n    name: \"x\"\n}";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::StructLit { fields, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::StructLit { fields, .. },
+                ..
+            } => {
                 assert_eq!(fields.len(), 2);
             }
             other => panic!("se esperaba StructLit multilínea, se obtuvo {:?}", other),
@@ -6602,13 +7269,20 @@ mod tests {
         let stmt = parse_one_stmt(src);
         match stmt {
             Stmt::Assign {
-                value: Expr::StructLit { type_name, fields, .. }, ..
+                value: Expr::StructLit {
+                    type_name, fields, ..
+                },
+                ..
             } => {
                 assert_eq!(type_name, "Order");
                 assert_eq!(fields.len(), 1);
                 assert_eq!(fields[0].0, "user");
                 match &fields[0].1 {
-                    Expr::StructLit { type_name: inner_name, fields: inner_fields, .. } => {
+                    Expr::StructLit {
+                        type_name: inner_name,
+                        fields: inner_fields,
+                        ..
+                    } => {
                         assert_eq!(inner_name, "User");
                         assert_eq!(inner_fields.len(), 2);
                     }
@@ -6625,7 +7299,10 @@ mod tests {
         let src = "let p = Point { x: 1 + 2, y: f(3) }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::StructLit { fields, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::StructLit { fields, .. },
+                ..
+            } => {
                 assert!(matches!(fields[0].1, Expr::BinOp { .. }));
                 assert!(matches!(fields[1].1, Expr::Call { .. }));
             }
@@ -6655,7 +7332,10 @@ mod tests {
         let src = "let xs = [User { id: 1, name: \"a\" }, User { id: 2, name: \"b\" }]";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::List(items, _), .. } => {
+            Stmt::Assign {
+                value: Expr::List(items, _),
+                ..
+            } => {
                 assert_eq!(items.len(), 2);
                 assert!(matches!(items[0], Expr::StructLit { .. }));
                 assert!(matches!(items[1], Expr::StructLit { .. }));
@@ -6683,7 +7363,10 @@ mod tests {
         let src = "let v = m[Key { id: 1 }]";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::Assign { value: Expr::Index { index, .. }, .. } => {
+            Stmt::Assign {
+                value: Expr::Index { index, .. },
+                ..
+            } => {
                 assert!(matches!(*index, Expr::StructLit { .. }));
             }
             other => panic!("se esperaba Index con StructLit, se obtuvo {:?}", other),
@@ -6766,7 +7449,9 @@ mod tests {
         let src = "while x { print(x) }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::While { condition, body, .. } => {
+            Stmt::While {
+                condition, body, ..
+            } => {
                 assert_eq!(condition, Expr::Ident("x".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
             }
@@ -6781,7 +7466,9 @@ mod tests {
         let src = "for u in [User { id: 1, name: \"a\" }] { print(u) }";
         let stmt = parse_one_stmt(src);
         match stmt {
-            Stmt::For { var, iter, body, .. } => {
+            Stmt::For {
+                var, iter, body, ..
+            } => {
                 assert_eq!(var, Pattern::Ident("u".into()));
                 assert!(matches!(iter, Expr::List(_, _)));
                 assert_eq!(body.len(), 1);
@@ -6813,7 +7500,10 @@ mod tests {
     #[test]
     fn err_ctor_se_parsea_a_expr_err() {
         let e = parse_expr(r#"Err("boom")"#).unwrap();
-        assert_eq!(e, Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO));
+        assert_eq!(
+            e,
+            Expr::Err(Box::new(Expr::Str("boom".into(), Span::ZERO)), Span::ZERO)
+        );
     }
 
     #[test]
@@ -6826,8 +7516,10 @@ mod tests {
             right: Box::new(Expr::BinOp {
                 op: BinOpKind::Mul,
                 left: Box::new(Expr::Int(2, Span::ZERO)),
-                right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-            }), span: Span::ZERO,
+                right: Box::new(Expr::Int(3, Span::ZERO)),
+                span: Span::ZERO,
+            }),
+            span: Span::ZERO,
         };
         assert_eq!(e, Expr::Ok(Box::new(inner), Span::ZERO));
     }
@@ -6852,8 +7544,14 @@ mod tests {
         let e = parse_expr("f(x)?").unwrap();
         assert_eq!(
             e,
-            Expr::Try(Box::new(Expr::Call { callee: Box::new(Expr::Ident("f".into(), Span::ZERO)), args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-            }), Span::ZERO),
+            Expr::Try(
+                Box::new(Expr::Call {
+                    callee: Box::new(Expr::Ident("f".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                    span: Span::ZERO,
+                }),
+                Span::ZERO
+            ),
         );
     }
 
@@ -6861,20 +7559,27 @@ mod tests {
     fn try_sobre_identificador() {
         // x? → Try(Ident("x"))
         let e = parse_expr("x?").unwrap();
-        assert_eq!(e, Expr::Try(Box::new(Expr::Ident("x".into(), Span::ZERO)), Span::ZERO));
+        assert_eq!(
+            e,
+            Expr::Try(Box::new(Expr::Ident("x".into(), Span::ZERO)), Span::ZERO)
+        );
     }
 
     #[test]
     fn try_se_encadena_con_field_access() {
         // get(id)?.name → Field { object: Try(Call(get, [id])), field: "name" }
         let e = parse_expr("get(id)?.name").unwrap();
-        let inner_call = Expr::Call { callee: Box::new(Expr::Ident("get".into(), Span::ZERO)), args: vec![Expr::Ident("id".into(), Span::ZERO)], span: Span::ZERO,
+        let inner_call = Expr::Call {
+            callee: Box::new(Expr::Ident("get".into(), Span::ZERO)),
+            args: vec![Expr::Ident("id".into(), Span::ZERO)],
+            span: Span::ZERO,
         };
         assert_eq!(
             e,
             Expr::Field {
                 object: Box::new(Expr::Try(Box::new(inner_call), Span::ZERO)),
-                field: "name".into(), span: Span::ZERO,
+                field: "name".into(),
+                span: Span::ZERO,
             },
         );
     }
@@ -6883,8 +7588,14 @@ mod tests {
     fn try_anidado_con_ok_y_err() {
         // Ok(get(id)?) → Ok(Try(Call(get, [id])))
         let e = parse_expr("Ok(get(id)?)").unwrap();
-        let inner = Expr::Try(Box::new(Expr::Call { callee: Box::new(Expr::Ident("get".into(), Span::ZERO)), args: vec![Expr::Ident("id".into(), Span::ZERO)], span: Span::ZERO,
-        }), Span::ZERO);
+        let inner = Expr::Try(
+            Box::new(Expr::Call {
+                callee: Box::new(Expr::Ident("get".into(), Span::ZERO)),
+                args: vec![Expr::Ident("id".into(), Span::ZERO)],
+                span: Span::ZERO,
+            }),
+            Span::ZERO,
+        );
         assert_eq!(e, Expr::Ok(Box::new(inner), Span::ZERO));
     }
 
@@ -6899,7 +7610,10 @@ mod tests {
              }",
         );
         if let Stmt::Expr(Expr::Match { value, arms, .. }, _) = stmt {
-            assert_eq!(*value, Expr::Ok(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO));
+            assert_eq!(
+                *value,
+                Expr::Ok(Box::new(Expr::Int(1, Span::ZERO)), Span::ZERO)
+            );
             assert_eq!(arms.len(), 2);
             assert_eq!(arms[0].pattern, Pattern::OkBinding("v".into()));
             assert_eq!(arms[1].pattern, Pattern::ErrBinding("e".into()));
@@ -6917,7 +7631,11 @@ mod tests {
         // `import utils` → Stmt::Import con alias None.
         assert_eq!(
             parse_one_stmt("import utils"),
-            Stmt::Import { path: vec!["utils".into()], alias: None, span: Span::ZERO },
+            Stmt::Import {
+                path: vec!["utils".into()],
+                alias: None,
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6928,7 +7646,8 @@ mod tests {
             Stmt::Import {
                 path: vec!["sub".into(), "foo".into(), "bar".into()],
                 alias: None,
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6953,7 +7672,8 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["utils".into()],
                 names: vec![("slugify".into(), None)],
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6964,12 +7684,9 @@ mod tests {
             parse_one_stmt("from utils import a, b, c"),
             Stmt::FromImport {
                 path: vec!["utils".into()],
-                names: vec![
-                    ("a".into(), None),
-                    ("b".into(), None),
-                    ("c".into(), None),
-                ],
-             span: Span::ZERO },
+                names: vec![("a".into(), None), ("b".into(), None), ("c".into(), None),],
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6981,7 +7698,8 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["sub".into(), "foo".into()],
                 names: vec![("bar".into(), None)],
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -6993,7 +7711,8 @@ mod tests {
             Stmt::FromImport {
                 path: vec!["utils".into()],
                 names: vec![("a".into(), None), ("b".into(), None)],
-             span: Span::ZERO },
+                span: Span::ZERO
+            },
         );
     }
 
@@ -7006,11 +7725,7 @@ mod tests {
             parse_one_stmt("from utils import (a, b, c)"),
             Stmt::FromImport {
                 path: vec!["utils".into()],
-                names: vec![
-                    ("a".into(), None),
-                    ("b".into(), None),
-                    ("c".into(), None),
-                ],
+                names: vec![("a".into(), None), ("b".into(), None), ("c".into(), None),],
                 span: Span::ZERO,
             },
         );
@@ -7029,11 +7744,7 @@ mod tests {
             parse_one_stmt(src),
             Stmt::FromImport {
                 path: vec!["utils".into()],
-                names: vec![
-                    ("a".into(), None),
-                    ("b".into(), None),
-                    ("c".into(), None),
-                ],
+                names: vec![("a".into(), None), ("b".into(), None), ("c".into(), None),],
                 span: Span::ZERO,
             },
         );
@@ -7251,10 +7962,7 @@ mod tests {
     fn type_expr_nullable_sobre_named() {
         // User?
         let t = parse_assign_type("let u: User? = null");
-        assert_eq!(
-            t,
-            TypeExpr::Nullable(Box::new(TypeExpr::named("User"))),
-        );
+        assert_eq!(t, TypeExpr::Nullable(Box::new(TypeExpr::named("User"))),);
     }
 
     #[test]
@@ -7286,11 +7994,13 @@ mod tests {
     #[test]
     fn type_expr_en_param_y_return_de_fndef() {
         // fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }
-        let stmt = parse_one_stmt(
-            "fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }",
-        );
+        let stmt = parse_one_stmt("fn pick(xs: List<Int>) -> Result<Int> { return Ok(0) }");
         match stmt {
-            Stmt::FnDef { params, return_type, .. } => {
+            Stmt::FnDef {
+                params,
+                return_type,
+                ..
+            } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(
                     params[0].type_,
@@ -7314,9 +8024,7 @@ mod tests {
     #[test]
     fn type_expr_en_field_de_typedef_con_nullable() {
         // type User { id: Int, tags: List<Str>?, email: Str? }
-        let stmt = parse_one_stmt(
-            "type User { id: Int, tags: List<Str>?, email: Str? }",
-        );
+        let stmt = parse_one_stmt("type User { id: Int, tags: List<Str>?, email: Str? }");
         match stmt {
             Stmt::TypeDef { fields, .. } => {
                 assert_eq!(fields.len(), 3);
@@ -7624,7 +8332,13 @@ mod tests {
     fn comprehension_parsea_caso_basico() {
         let v = parse_first_let_value("let ys = [x for x in xs]");
         match v {
-            Expr::ListComp { expr, var, iter, filter, .. } => {
+            Expr::ListComp {
+                expr,
+                var,
+                iter,
+                filter,
+                ..
+            } => {
                 assert!(matches!(*expr, Expr::Ident(ref n, _) if n == "x"));
                 assert!(matches!(var, Pattern::Ident(ref n) if n == "x"));
                 assert!(matches!(*iter, Expr::Ident(ref n, _) if n == "xs"));
@@ -7704,7 +8418,10 @@ mod tests {
     fn format_spec_precision_float_se_parsea() {
         let spec = extract_first_strinterp_spec(r#"let r = "{x:.2f}""#).unwrap();
         assert_eq!(spec.precision, Some(2));
-        assert!(matches!(spec.kind, Some(crate::ast::FormatKind::FixedLower)));
+        assert!(matches!(
+            spec.kind,
+            Some(crate::ast::FormatKind::FixedLower)
+        ));
     }
 
     #[test]
@@ -7767,16 +8484,14 @@ mod tests {
         // `for (k, v) in m { ... }` con Pattern::Tuple de 2 idents.
         let stmt = parse_one_stmt("for (k, v) in m { print(k) }");
         match stmt {
-            Stmt::For { var, .. } => {
-                match var {
-                    Pattern::Tuple(subs) => {
-                        assert_eq!(subs.len(), 2);
-                        assert!(matches!(subs[0], Pattern::Ident(ref n) if n == "k"));
-                        assert!(matches!(subs[1], Pattern::Ident(ref n) if n == "v"));
-                    }
-                    other => panic!("esperaba Pattern::Tuple, dio {:?}", other),
+            Stmt::For { var, .. } => match var {
+                Pattern::Tuple(subs) => {
+                    assert_eq!(subs.len(), 2);
+                    assert!(matches!(subs[0], Pattern::Ident(ref n) if n == "k"));
+                    assert!(matches!(subs[1], Pattern::Ident(ref n) if n == "v"));
                 }
-            }
+                other => panic!("esperaba Pattern::Tuple, dio {:?}", other),
+            },
             other => panic!("esperaba Stmt::For, dio {:?}", other),
         }
     }
@@ -7815,7 +8530,8 @@ mod tests {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "x");
                 assert!(params[0].default.is_some(), "esperaba default");
-                if let Some(Expr::Int(5, _)) = params[0].default {} else {
+                if let Some(Expr::Int(5, _)) = params[0].default {
+                } else {
                     panic!("esperaba default Int(5), dio {:?}", params[0].default);
                 }
             }
@@ -7896,25 +8612,22 @@ mod tests {
 
     #[test]
     fn fp2_varargs_solo_ultimo_es_error() {
-        let result = parse_program_str(
-            "fn f(...xs: Int, ...ys: Int) -> Int { return 0 }",
-        );
+        let result = parse_program_str("fn f(...xs: Int, ...ys: Int) -> Int { return 0 }");
         assert!(result.is_err(), "esperaba error por varargs duplicado");
     }
 
     #[test]
     fn fp2_param_despues_de_varargs_es_error() {
-        let result = parse_program_str(
-            "fn f(...xs: Int, y: Int) -> Int { return 0 }",
+        let result = parse_program_str("fn f(...xs: Int, y: Int) -> Int { return 0 }");
+        assert!(
+            result.is_err(),
+            "esperaba error por param después de varargs"
         );
-        assert!(result.is_err(), "esperaba error por param después de varargs");
     }
 
     #[test]
     fn fp2_varargs_con_default_es_error() {
-        let result = parse_program_str(
-            "fn f(...xs: Int = 5) -> Int { return 0 }",
-        );
+        let result = parse_program_str("fn f(...xs: Int = 5) -> Int { return 0 }");
         assert!(result.is_err(), "esperaba error por varargs con default");
     }
 
@@ -7987,7 +8700,11 @@ mod tests {
         // El caso common: arm body de 1 stmt expr.
         let src = "let r = match 1 { 0 => \"a\"\n_ => \"b\" }";
         let program = parse_program_str(src).expect("parse OK");
-        if let Stmt::Assign { value: Expr::Match { arms, .. }, .. } = &program[0] {
+        if let Stmt::Assign {
+            value: Expr::Match { arms, .. },
+            ..
+        } = &program[0]
+        {
             for arm in arms {
                 assert_eq!(arm.body.len(), 1);
                 assert!(matches!(arm.body[0], Stmt::Expr(..)));

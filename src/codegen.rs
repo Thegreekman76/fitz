@@ -43,11 +43,12 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use crate::ast::{
-    AssignTarget, BinOpKind, Decorator, Expr, Field, Program, Stmt, StrPart, TypeExpr,
-    UnaryOpKind,
+    AssignTarget, BinOpKind, Decorator, Expr, Field, Program, Stmt, StrPart, TypeExpr, UnaryOpKind,
 };
 use crate::error::{ErrorKind, FitzError};
-use crate::types::{check_program, is_compatible, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId};
+use crate::types::{
+    check_program, is_compatible, resolve_type_expr, ResolvedField, Type, TypeEnv, TypeId,
+};
 
 // ---------------------------------------------------------------------------
 // API pública del codegen
@@ -171,7 +172,13 @@ pub fn generate_project(
         bin_name: stem.clone(),
         output_basename: raw_stem,
         cargo_toml: cargo_toml_for(
-            &stem, has_http, uses_async, uses_python, uses_auth, uses_ws, uses_jobs,
+            &stem,
+            has_http,
+            uses_async,
+            uses_python,
+            uses_auth,
+            uses_ws,
+            uses_jobs,
         ),
         main_rs,
         mod_files: loader.into_mod_files(),
@@ -213,7 +220,10 @@ fn collect_python_imports(program: &Program) -> Vec<PythonImport> {
                     .clone()
                     .or_else(|| path.last().cloned())
                     .unwrap_or_else(|| "python".to_string());
-                out.push(PythonImport { binding_name, dotted_path: dotted });
+                out.push(PythonImport {
+                    binding_name,
+                    dotted_path: dotted,
+                });
             }
             Stmt::FromImport { path, names, .. }
                 if path.first().map(|s| s.as_str()) == Some("python") =>
@@ -231,7 +241,10 @@ fn collect_python_imports(program: &Program) -> Vec<PythonImport> {
                         format!("{}.{}", base_segments.join("."), name)
                     };
                     let binding_name = alias.clone().unwrap_or_else(|| name.clone());
-                    out.push(PythonImport { binding_name, dotted_path: dotted });
+                    out.push(PythonImport {
+                        binding_name,
+                        dotted_path: dotted,
+                    });
                 }
             }
             _ => {}
@@ -254,7 +267,8 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
             {
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    0, 0,
+                    0,
+                    0,
                     "`import python` por sí solo no es un import válido — \
                      usá `import python.<modulo>` o `from python import <modulo>`."
                         .to_string(),
@@ -265,7 +279,8 @@ fn validate_python_imports_for_codegen(program: &Program) -> Result<(), FitzErro
             {
                 return Err(FitzError::new(
                     ErrorKind::InvalidSyntax,
-                    0, 0,
+                    0,
+                    0,
                     "`from python import ...`: falta especificar al menos un módulo".to_string(),
                 ));
             }
@@ -349,7 +364,9 @@ fn program_uses_jobs(program: &Program) -> bool {
             Expr::UnaryOp { operand, .. } => expr_uses_spawn(operand),
             Expr::Field { object, .. } => expr_uses_spawn(object),
             Expr::Index { object, index, .. } => expr_uses_spawn(object) || expr_uses_spawn(index),
-            Expr::Slice { object, start, end, .. } => {
+            Expr::Slice {
+                object, start, end, ..
+            } => {
                 expr_uses_spawn(object)
                     || start.as_ref().is_some_and(|s| expr_uses_spawn(s))
                     || end.as_ref().is_some_and(|x| expr_uses_spawn(x))
@@ -365,25 +382,44 @@ fn program_uses_jobs(program: &Program) -> bool {
                 StrPart::Expr(inner, _) => expr_uses_spawn(inner),
                 StrPart::Lit(_) => false,
             }),
-            Expr::If { condition, then, else_, .. } => {
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 expr_uses_spawn(condition)
                     || then.iter().any(stmt_uses_spawn)
-                    || else_.as_ref().is_some_and(|e| e.iter().any(stmt_uses_spawn))
+                    || else_
+                        .as_ref()
+                        .is_some_and(|e| e.iter().any(stmt_uses_spawn))
             }
             Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_spawn),
             Expr::Match { value, arms, .. } => {
-                expr_uses_spawn(value)
-                    || arms.iter().any(|a| a.body.iter().any(stmt_uses_spawn))
+                expr_uses_spawn(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_spawn))
             }
             Expr::Await(inner, _) | Expr::Try(inner, _) => expr_uses_spawn(inner),
             Expr::Loop { body, .. } => body.iter().any(stmt_uses_spawn),
-            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_spawn(expr)
                     || expr_uses_spawn(iter)
                     || extra_clauses.iter().any(|(_, it)| expr_uses_spawn(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_spawn(f))
             }
-            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_spawn(key)
                     || expr_uses_spawn(value)
                     || expr_uses_spawn(iter)
@@ -399,17 +435,16 @@ fn program_uses_jobs(program: &Program) -> bool {
         match s {
             Stmt::Expr(e, _) | Stmt::Return(e, _) => expr_uses_spawn(e),
             Stmt::Assign { value, .. } => expr_uses_spawn(value),
-            Stmt::While { condition, body, .. } => {
-                expr_uses_spawn(condition) || body.iter().any(stmt_uses_spawn)
-            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_spawn(condition) || body.iter().any(stmt_uses_spawn),
             Stmt::Loop { body, .. } => body.iter().any(stmt_uses_spawn),
             Stmt::For { iter, body, .. } => {
                 expr_uses_spawn(iter) || body.iter().any(stmt_uses_spawn)
             }
             Stmt::FnDef { body, .. } => body.iter().any(stmt_uses_spawn),
             Stmt::ReturnStatus { status, body, .. } => {
-                expr_uses_spawn(status)
-                    || body.as_ref().is_some_and(expr_uses_spawn)
+                expr_uses_spawn(status) || body.as_ref().is_some_and(expr_uses_spawn)
             }
             _ => false,
         }
@@ -435,10 +470,8 @@ fn program_uses_auth(program: &Program) -> bool {
                 // jwt.X(...) o hash.X(...).
                 if let Expr::Field { object, field, .. } = callee.as_ref() {
                     if let Expr::Ident(recv, _) = object.as_ref() {
-                        if (recv == "jwt"
-                            && matches!(field.as_str(), "encode" | "decode"))
-                            || (recv == "hash"
-                                && matches!(field.as_str(), "password" | "verify"))
+                        if (recv == "jwt" && matches!(field.as_str(), "encode" | "decode"))
+                            || (recv == "hash" && matches!(field.as_str(), "password" | "verify"))
                         {
                             return true;
                         }
@@ -446,30 +479,39 @@ fn program_uses_auth(program: &Program) -> bool {
                 }
                 expr_uses_auth(callee) || args.iter().any(expr_uses_auth)
             }
-            Expr::BinOp { left, right, .. } => {
-                expr_uses_auth(left) || expr_uses_auth(right)
-            }
+            Expr::BinOp { left, right, .. } => expr_uses_auth(left) || expr_uses_auth(right),
             Expr::UnaryOp { operand, .. } => expr_uses_auth(operand),
             Expr::Field { object, .. } => expr_uses_auth(object),
-            Expr::Index { object, index, .. } => {
-                expr_uses_auth(object) || expr_uses_auth(index)
-            }
-            Expr::Slice { object, start, end, .. } => {
+            Expr::Index { object, index, .. } => expr_uses_auth(object) || expr_uses_auth(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
                 expr_uses_auth(object)
                     || start.as_ref().is_some_and(|s| expr_uses_auth(s))
                     || end.as_ref().is_some_and(|x| expr_uses_auth(x))
             }
-            Expr::Range { start, end, .. } => {
-                expr_uses_auth(start) || expr_uses_auth(end)
-            }
+            Expr::Range { start, end, .. } => expr_uses_auth(start) || expr_uses_auth(end),
             Expr::List(items, _) => items.iter().any(expr_uses_auth),
-            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_auth(expr)
                     || expr_uses_auth(iter)
                     || extra_clauses.iter().any(|(_, it)| expr_uses_auth(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_auth(f))
             }
-            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_auth(key)
                     || expr_uses_auth(value)
                     || expr_uses_auth(iter)
@@ -479,21 +521,21 @@ fn program_uses_auth(program: &Program) -> bool {
             Expr::Map(pairs, _) => pairs
                 .iter()
                 .any(|(k, v)| expr_uses_auth(k) || expr_uses_auth(v)),
-            Expr::StructLit { fields, .. } => {
-                fields.iter().any(|(_, v)| expr_uses_auth(v))
-            }
+            Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_auth(v)),
             Expr::Tuple(items, _) => items.iter().any(expr_uses_auth),
             Expr::TupleField { tuple, .. } => expr_uses_auth(tuple),
-            Expr::If { condition, then, else_, .. } => {
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 expr_uses_auth(condition)
                     || then.iter().any(stmt_uses_auth)
-                    || else_
-                        .as_ref()
-                        .is_some_and(|b| b.iter().any(stmt_uses_auth))
+                    || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_auth))
             }
             Expr::Match { value, arms, .. } => {
-                expr_uses_auth(value)
-                    || arms.iter().any(|a| a.body.iter().any(stmt_uses_auth))
+                expr_uses_auth(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_auth))
             }
             Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_auth),
             Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
@@ -510,28 +552,25 @@ fn program_uses_auth(program: &Program) -> bool {
     }
     fn stmt_uses_auth(s: &Stmt) -> bool {
         match s {
-            Stmt::FnDef { decorators, body, .. } => {
-                decorators.iter().any(|d| {
-                    matches!(
-                        d.name.as_str(),
-                        "auth_provider" | "authenticated" | "admin"
-                    )
-                }) || body.iter().any(stmt_uses_auth)
+            Stmt::FnDef {
+                decorators, body, ..
+            } => {
+                decorators
+                    .iter()
+                    .any(|d| matches!(d.name.as_str(), "auth_provider" | "authenticated" | "admin"))
+                    || body.iter().any(stmt_uses_auth)
             }
             Stmt::Assign { value, .. } => expr_uses_auth(value),
             Stmt::Expr(e, _) => expr_uses_auth(e),
             Stmt::Return(e, _) => expr_uses_auth(e),
             Stmt::ReturnStatus { status, body, .. } => {
-                expr_uses_auth(status)
-                    || body.as_ref().is_some_and(expr_uses_auth)
+                expr_uses_auth(status) || body.as_ref().is_some_and(expr_uses_auth)
             }
-            Stmt::While { condition, body, .. } => {
-                expr_uses_auth(condition) || body.iter().any(stmt_uses_auth)
-            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_auth(condition) || body.iter().any(stmt_uses_auth),
             Stmt::Loop { body, .. } => body.iter().any(stmt_uses_auth),
-            Stmt::For { iter, body, .. } => {
-                expr_uses_auth(iter) || body.iter().any(stmt_uses_auth)
-            }
+            Stmt::For { iter, body, .. } => expr_uses_auth(iter) || body.iter().any(stmt_uses_auth),
             _ => false,
         }
     }
@@ -612,9 +651,7 @@ fn program_uses_fitz_value(program: &Program) -> bool {
     }
     fn expr_uses_fv(e: &Expr) -> bool {
         match e {
-            Expr::List(items, _) => {
-                list_is_heterogeneous(items) || items.iter().any(expr_uses_fv)
-            }
+            Expr::List(items, _) => list_is_heterogeneous(items) || items.iter().any(expr_uses_fv),
             Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
                 StrPart::Expr(inner, _) => expr_uses_fv(inner),
                 StrPart::Lit(_) => false,
@@ -625,22 +662,29 @@ fn program_uses_fitz_value(program: &Program) -> bool {
                 expr_uses_fv(callee) || args.iter().any(expr_uses_fv)
             }
             Expr::Field { object, .. } => expr_uses_fv(object),
-            Expr::Index { object, index, .. } => {
-                expr_uses_fv(object) || expr_uses_fv(index)
-            }
-            Expr::Slice { object, start, end, .. } => {
+            Expr::Index { object, index, .. } => expr_uses_fv(object) || expr_uses_fv(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
                 expr_uses_fv(object)
                     || start.as_ref().is_some_and(|s| expr_uses_fv(s))
                     || end.as_ref().is_some_and(|e| expr_uses_fv(e))
             }
             Expr::Map(pairs, _) => {
                 map_is_heterogeneous(pairs)
-                    || pairs.iter().any(|(k, v)| expr_uses_fv(k) || expr_uses_fv(v))
+                    || pairs
+                        .iter()
+                        .any(|(k, v)| expr_uses_fv(k) || expr_uses_fv(v))
             }
             Expr::Tuple(items, _) => items.iter().any(expr_uses_fv),
             Expr::TupleField { tuple, .. } => expr_uses_fv(tuple),
             Expr::Range { start, end, .. } => expr_uses_fv(start) || expr_uses_fv(end),
-            Expr::If { condition, then, else_, .. } => {
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 expr_uses_fv(condition)
                     || then.iter().any(stmt_uses_fv)
                     || else_.as_ref().is_some_and(|e| e.iter().any(stmt_uses_fv))
@@ -682,9 +726,10 @@ fn program_uses_fitz_value(program: &Program) -> bool {
             }
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, e)| expr_uses_fv(e)),
             Expr::NamedArg { value, .. } => expr_uses_fv(value),
-            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
-                expr_uses_fv(inner)
-            }
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_fv(inner),
             _ => false,
         }
     }
@@ -695,9 +740,7 @@ fn program_uses_fitz_value(program: &Program) -> bool {
         use crate::ast::TypeExpr;
         match t {
             TypeExpr::Named(n) => n == "Any",
-            TypeExpr::Generic { name, args } => {
-                name == "Any" || args.iter().any(type_expr_has_any)
-            }
+            TypeExpr::Generic { name, args } => name == "Any" || args.iter().any(type_expr_has_any),
             TypeExpr::Nullable(inner) => type_expr_has_any(inner),
             TypeExpr::Function { params, ret } => {
                 params.iter().any(type_expr_has_any) || type_expr_has_any(ret)
@@ -715,15 +758,20 @@ fn program_uses_fitz_value(program: &Program) -> bool {
             Stmt::ReturnStatus { status, body, .. } => {
                 expr_uses_fv(status) || body.as_ref().is_some_and(expr_uses_fv)
             }
-            Stmt::While { condition, body, .. } => {
-                expr_uses_fv(condition) || body.iter().any(stmt_uses_fv)
-            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_fv(condition) || body.iter().any(stmt_uses_fv),
             Stmt::Loop { body, .. } => body.iter().any(stmt_uses_fv),
-            Stmt::For { iter, body, .. } => {
-                expr_uses_fv(iter) || body.iter().any(stmt_uses_fv)
-            }
-            Stmt::FnDef { params, return_type, body, .. } => {
-                params.iter().any(|p| p.type_.as_ref().is_some_and(type_expr_has_any))
+            Stmt::For { iter, body, .. } => expr_uses_fv(iter) || body.iter().any(stmt_uses_fv),
+            Stmt::FnDef {
+                params,
+                return_type,
+                body,
+                ..
+            } => {
+                params
+                    .iter()
+                    .any(|p| p.type_.as_ref().is_some_and(type_expr_has_any))
                     || return_type.as_ref().is_some_and(type_expr_has_any)
                     || body.iter().any(stmt_uses_fv)
             }
@@ -750,9 +798,7 @@ fn program_uses_fmt_helpers(program: &Program) -> bool {
     fn expr_uses_fmt(e: &Expr) -> bool {
         match e {
             Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
-                StrPart::Expr(inner, Some(spec)) => {
-                    spec_needs_helper(spec) || expr_uses_fmt(inner)
-                }
+                StrPart::Expr(inner, Some(spec)) => spec_needs_helper(spec) || expr_uses_fmt(inner),
                 StrPart::Expr(inner, None) => expr_uses_fmt(inner),
                 StrPart::Lit(_) => false,
             }),
@@ -762,33 +808,53 @@ fn program_uses_fmt_helpers(program: &Program) -> bool {
                 expr_uses_fmt(callee) || args.iter().any(expr_uses_fmt)
             }
             Expr::Field { object, .. } => expr_uses_fmt(object),
-            Expr::Index { object, index, .. } => {
-                expr_uses_fmt(object) || expr_uses_fmt(index)
-            }
-            Expr::Slice { object, start, end, .. } => {
+            Expr::Index { object, index, .. } => expr_uses_fmt(object) || expr_uses_fmt(index),
+            Expr::Slice {
+                object, start, end, ..
+            } => {
                 expr_uses_fmt(object)
                     || start.as_ref().is_some_and(|s| expr_uses_fmt(s))
                     || end.as_ref().is_some_and(|e| expr_uses_fmt(e))
             }
             Expr::List(items, _) => items.iter().any(expr_uses_fmt),
-            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_fmt(expr)
                     || expr_uses_fmt(iter)
                     || extra_clauses.iter().any(|(_, it)| expr_uses_fmt(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_fmt(f))
             }
-            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_fmt(key)
                     || expr_uses_fmt(value)
                     || expr_uses_fmt(iter)
                     || extra_clauses.iter().any(|(_, it)| expr_uses_fmt(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_fmt(f))
             }
-            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_fmt(k) || expr_uses_fmt(v)),
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_fmt(k) || expr_uses_fmt(v)),
             Expr::Tuple(items, _) => items.iter().any(expr_uses_fmt),
             Expr::TupleField { tuple, .. } => expr_uses_fmt(tuple),
             Expr::Range { start, end, .. } => expr_uses_fmt(start) || expr_uses_fmt(end),
-            Expr::If { condition, then, else_, .. } => {
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 expr_uses_fmt(condition)
                     || then.iter().any(stmt_uses_fmt)
                     || else_.as_ref().is_some_and(|b| b.iter().any(stmt_uses_fmt))
@@ -799,9 +865,10 @@ fn program_uses_fmt_helpers(program: &Program) -> bool {
             Expr::Loop { body, .. } => body.iter().any(stmt_uses_fmt),
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_fmt(v)),
             Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_fmt),
-            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
-                expr_uses_fmt(inner)
-            }
+            Expr::Ok(inner, _)
+            | Expr::Err(inner, _)
+            | Expr::Try(inner, _)
+            | Expr::Await(inner, _) => expr_uses_fmt(inner),
             _ => false,
         }
     }
@@ -814,13 +881,11 @@ fn program_uses_fmt_helpers(program: &Program) -> bool {
                 expr_uses_fmt(status) || body.as_ref().is_some_and(expr_uses_fmt)
             }
             Stmt::Expr(e, _) => expr_uses_fmt(e),
-            Stmt::While { condition, body, .. } => {
-                expr_uses_fmt(condition) || body.iter().any(stmt_uses_fmt)
-            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_fmt(condition) || body.iter().any(stmt_uses_fmt),
             Stmt::Loop { body, .. } => body.iter().any(stmt_uses_fmt),
-            Stmt::For { iter, body, .. } => {
-                expr_uses_fmt(iter) || body.iter().any(stmt_uses_fmt)
-            }
+            Stmt::For { iter, body, .. } => expr_uses_fmt(iter) || body.iter().any(stmt_uses_fmt),
             _ => false,
         }
     }
@@ -843,41 +908,68 @@ fn program_uses_async(program: &Program) -> bool {
             Expr::UnaryOp { operand, .. } => expr_uses_async(operand),
             Expr::Field { object, .. } => expr_uses_async(object),
             Expr::Index { object, index, .. } => expr_uses_async(object) || expr_uses_async(index),
-            Expr::Slice { object, start, end, .. } => {
+            Expr::Slice {
+                object, start, end, ..
+            } => {
                 expr_uses_async(object)
                     || start.as_ref().is_some_and(|s| expr_uses_async(s))
                     || end.as_ref().is_some_and(|e| expr_uses_async(e))
             }
             Expr::List(items, _) => items.iter().any(expr_uses_async),
-            Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+            Expr::ListComp {
+                expr,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_async(expr)
                     || expr_uses_async(iter)
                     || extra_clauses.iter().any(|(_, it)| expr_uses_async(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_async(f))
             }
-            Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+            Expr::MapComp {
+                key,
+                value,
+                iter,
+                extra_clauses,
+                filter,
+                ..
+            } => {
                 expr_uses_async(key)
                     || expr_uses_async(value)
                     || expr_uses_async(iter)
                     || extra_clauses.iter().any(|(_, it)| expr_uses_async(it))
                     || filter.as_ref().is_some_and(|f| expr_uses_async(f))
             }
-            Expr::Map(pairs, _) => pairs.iter().any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
+            Expr::Map(pairs, _) => pairs
+                .iter()
+                .any(|(k, v)| expr_uses_async(k) || expr_uses_async(v)),
             Expr::Tuple(items, _) => items.iter().any(expr_uses_async),
             Expr::TupleField { tuple, .. } => expr_uses_async(tuple),
             Expr::Loop { body, .. } => body.iter().any(stmt_uses_async),
             Expr::Range { start, end, .. } => expr_uses_async(start) || expr_uses_async(end),
-            Expr::If { condition, then, else_, .. } => {
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 expr_uses_async(condition)
                     || then.iter().any(stmt_uses_async)
-                    || else_.as_ref().map(|b| b.iter().any(stmt_uses_async)).unwrap_or(false)
+                    || else_
+                        .as_ref()
+                        .map(|b| b.iter().any(stmt_uses_async))
+                        .unwrap_or(false)
             }
             Expr::Match { value, arms, .. } => {
                 expr_uses_async(value) || arms.iter().any(|a| a.body.iter().any(stmt_uses_async))
             }
             Expr::StructLit { fields, .. } => fields.iter().any(|(_, v)| expr_uses_async(v)),
             Expr::FnExpr { body, .. } => body.iter().any(stmt_uses_async),
-            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => expr_uses_async(inner),
+            Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) => {
+                expr_uses_async(inner)
+            }
             Expr::StrInterp(parts, _) => parts.iter().any(|p| match p {
                 StrPart::Expr(e, _) => expr_uses_async(e),
                 StrPart::Lit(_) => false,
@@ -892,13 +984,12 @@ fn program_uses_async(program: &Program) -> bool {
             Stmt::Assign { value, .. } => expr_uses_async(value),
             Stmt::Return(e, _) => expr_uses_async(e),
             Stmt::ReturnStatus { status, body, .. } => {
-                expr_uses_async(status)
-                    || body.as_ref().map(expr_uses_async).unwrap_or(false)
+                expr_uses_async(status) || body.as_ref().map(expr_uses_async).unwrap_or(false)
             }
             Stmt::Expr(e, _) => expr_uses_async(e),
-            Stmt::While { condition, body, .. } => {
-                expr_uses_async(condition) || body.iter().any(stmt_uses_async)
-            }
+            Stmt::While {
+                condition, body, ..
+            } => expr_uses_async(condition) || body.iter().any(stmt_uses_async),
             Stmt::Loop { body, .. } => body.iter().any(stmt_uses_async),
             Stmt::For { iter, body, .. } => {
                 expr_uses_async(iter) || body.iter().any(stmt_uses_async)
@@ -952,11 +1043,12 @@ fn detect_shared_state(program: &Program) -> (Vec<String>, HashMap<String, Vec<S
     let mut fn_deps: HashMap<String, Vec<String>> = HashMap::new();
     let mut used_globally: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in program {
-        if let Stmt::FnDef { name, params, body, .. } = s {
-            let mut locals: std::collections::HashSet<String> = params
-                .iter()
-                .map(|p| p.name.clone())
-                .collect();
+        if let Stmt::FnDef {
+            name, params, body, ..
+        } = s
+        {
+            let mut locals: std::collections::HashSet<String> =
+                params.iter().map(|p| p.name.clone()).collect();
             let mut refs: std::collections::HashSet<String> = std::collections::HashSet::new();
             for stmt in body {
                 walk_stmt_for_state_refs(stmt, &candidates, &mut locals, &mut refs);
@@ -992,10 +1084,7 @@ fn detect_shared_state(program: &Program) -> (Vec<String>, HashMap<String, Vec<S
 //     hace falta hoistar — el let queda como local de main()).
 // Devuelve los stmts en el orden de aparición original (necesario
 // para que un hoist que referencia otro const ya esté declarado).
-fn collect_f12_hoists<'a>(
-    program: &'a Program,
-    main_stmts: &[&'a Stmt],
-) -> Vec<&'a Stmt> {
+fn collect_f12_hoists<'a>(program: &'a Program, main_stmts: &[&'a Stmt]) -> Vec<&'a Stmt> {
     // Paso 1: candidatos = `Stmt::Assign(Ident(name), hoistable_value)`
     // únicos en main_stmts.
     let mut counts: HashMap<String, usize> = HashMap::new();
@@ -1031,10 +1120,8 @@ fn collect_f12_hoists<'a>(
     let mut referenced: std::collections::HashSet<String> = std::collections::HashSet::new();
     for s in program {
         if let Stmt::FnDef { params, body, .. } = s {
-            let mut locals: std::collections::HashSet<String> = params
-                .iter()
-                .map(|p| p.name.clone())
-                .collect();
+            let mut locals: std::collections::HashSet<String> =
+                params.iter().map(|p| p.name.clone()).collect();
             let mut refs = std::collections::HashSet::new();
             for stmt in body {
                 walk_stmt_for_state_refs(stmt, &candidates, &mut locals, &mut refs);
@@ -1071,9 +1158,9 @@ fn contains_return_status_stmts(stmts: &[Stmt]) -> bool {
 fn contains_return_status_stmt(stmt: &Stmt) -> bool {
     match stmt {
         Stmt::ReturnStatus { .. } => true,
-        Stmt::While { body, .. }
-        | Stmt::Loop { body, .. }
-        | Stmt::For { body, .. } => contains_return_status_stmts(body),
+        Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
+            contains_return_status_stmts(body)
+        }
         Stmt::Assign { value, .. } => contains_return_status_expr(value),
         Stmt::Return(e, _) | Stmt::Expr(e, _) => contains_return_status_expr(e),
         _ => false,
@@ -1174,7 +1261,9 @@ fn walk_stmt_for_state_refs(
                 walk_expr_for_state_refs(b, candidates, locals, refs);
             }
         }
-        Stmt::While { condition, body, .. } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             walk_expr_for_state_refs(condition, candidates, locals, refs);
             for s in body {
                 walk_stmt_for_state_refs(s, candidates, locals, refs);
@@ -1185,7 +1274,9 @@ fn walk_stmt_for_state_refs(
                 walk_stmt_for_state_refs(s, candidates, locals, refs);
             }
         }
-        Stmt::For { var, iter, body, .. } => {
+        Stmt::For {
+            var, iter, body, ..
+        } => {
             walk_expr_for_state_refs(iter, candidates, locals, refs);
             // Mini-tanda Md: extraemos todos los bindings del Pattern.
             let names = collect_pattern_idents(var);
@@ -1198,7 +1289,10 @@ fn walk_stmt_for_state_refs(
             // Mantenemos los bindings (igual que antes, conservador).
         }
         Stmt::Break(_, _, _) | Stmt::Continue(_, _) => {}
-        Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
+        Stmt::FnDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Import { .. }
+        | Stmt::FromImport { .. } => {}
         // Fase 9.0.1 (F15): walkers estáticos del codegen ignoran
         // Error nodes — la API strict que llama al codegen nunca los
         // produce, pero defendemos contra panic si entran.
@@ -1239,7 +1333,12 @@ fn walk_expr_for_state_refs(
                 refs.insert(name.clone());
             }
         }
-        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) | Expr::Bytes(_, _) => {}
+        Expr::Int(_, _)
+        | Expr::Float(_, _)
+        | Expr::Str(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Null(_)
+        | Expr::Bytes(_, _) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let StrPart::Expr(inner, _) = p {
@@ -1260,7 +1359,12 @@ fn walk_expr_for_state_refs(
                 walk_expr_for_state_refs(a, candidates, locals, refs);
             }
         }
-        Expr::If { condition, then, else_, .. } => {
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             walk_expr_for_state_refs(condition, candidates, locals, refs);
             for s in then {
                 walk_stmt_for_state_refs(s, candidates, locals, refs);
@@ -1283,7 +1387,14 @@ fn walk_expr_for_state_refs(
         // Mini-tanda C — list comprehension. El `var` introducido es
         // local adentro del expr/filter, lo sumamos a locals para no
         // marcar falso positivo si shadowea un state var del scope.
-        Expr::ListComp { expr, var, iter, extra_clauses, filter, .. } => {
+        Expr::ListComp {
+            expr,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             walk_expr_for_state_refs(iter, candidates, locals, refs);
             // Mini-tanda Up — `var` ahora es Pattern. Recolectamos todos
             // los nombres del pattern (Ident/Tuple recursivo) y los
@@ -1317,7 +1428,15 @@ fn walk_expr_for_state_refs(
             }
         }
         // Mini-tanda Cmp+ — map comprehension análoga a ListComp.
-        Expr::MapComp { key, value, var, iter, extra_clauses, filter, .. } => {
+        Expr::MapComp {
+            key,
+            value,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             walk_expr_for_state_refs(iter, candidates, locals, refs);
             let mut added: Vec<String> = Vec::new();
             collect_pattern_bindings(var, &mut added);
@@ -1354,10 +1473,16 @@ fn walk_expr_for_state_refs(
             walk_expr_for_state_refs(object, candidates, locals, refs);
             walk_expr_for_state_refs(index, candidates, locals, refs);
         }
-        Expr::Slice { object, start, end, .. } => {
+        Expr::Slice {
+            object, start, end, ..
+        } => {
             walk_expr_for_state_refs(object, candidates, locals, refs);
-            if let Some(s) = start { walk_expr_for_state_refs(s, candidates, locals, refs); }
-            if let Some(e) = end { walk_expr_for_state_refs(e, candidates, locals, refs); }
+            if let Some(s) = start {
+                walk_expr_for_state_refs(s, candidates, locals, refs);
+            }
+            if let Some(e) = end {
+                walk_expr_for_state_refs(e, candidates, locals, refs);
+            }
         }
         Expr::Tuple(items, _) => {
             for it in items {
@@ -1445,7 +1570,10 @@ fn sanitize_crate_name(raw: &str) -> String {
             }
         })
         .collect();
-    if s.chars().next().is_none_or(|c| c.is_ascii_digit() || c == '-') {
+    if s.chars()
+        .next()
+        .is_none_or(|c| c.is_ascii_digit() || c == '-')
+    {
         s = format!("fitz_{}", s);
     }
     s
@@ -1712,9 +1840,7 @@ impl ModuleLoader {
     fn collect_imports(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
             match stmt {
-                Stmt::Import { path, .. }
-                    if path.first().map(|s| s.as_str()) == Some("python") =>
-                {
+                Stmt::Import { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
                     continue;
                 }
                 Stmt::FromImport { path, .. }
@@ -1725,9 +1851,9 @@ impl ModuleLoader {
                 Stmt::Import { path, alias, .. } => {
                     let idx = self.load_module(path)?;
                     // PreF8.4: alias gana sobre el último segmento.
-                    let binding_name = alias.clone().unwrap_or_else(|| {
-                        path.last().cloned().unwrap_or_default()
-                    });
+                    let binding_name = alias
+                        .clone()
+                        .unwrap_or_else(|| path.last().cloned().unwrap_or_default());
                     self.bindings.insert(
                         binding_name,
                         ResolvedBinding::Namespace { module_index: idx },
@@ -1847,8 +1973,7 @@ impl ModuleLoader {
                 e
             ))
         })?;
-        let tokens =
-            crate::lexer::tokenize(&source).map_err(|e| loader_err(e.message.clone()))?;
+        let tokens = crate::lexer::tokenize(&source).map_err(|e| loader_err(e.message.clone()))?;
         let module_program =
             crate::parser::parse(tokens).map_err(|e| loader_err(e.message.clone()))?;
         let (module_env, _types, _defs, type_errors) = check_program(&module_program);
@@ -1869,9 +1994,7 @@ impl ModuleLoader {
         let mut local_bindings: HashMap<String, ResolvedBinding> = HashMap::new();
         for stmt in &module_program {
             match stmt {
-                Stmt::Import { path, .. }
-                    if path.first().map(|s| s.as_str()) == Some("python") =>
-                {
+                Stmt::Import { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
                     return Err(loader_err(format!(
                         "el módulo `{}` usa `from python import ...`: imports Python \
                          dentro de módulos transitivos no se soportan todavía. \
@@ -1889,17 +2012,25 @@ impl ModuleLoader {
                         segments.join(".")
                     )));
                 }
-                Stmt::Import { path: nested, alias, .. } => {
+                Stmt::Import {
+                    path: nested,
+                    alias,
+                    ..
+                } => {
                     let idx = self.load_module(nested)?;
-                    let binding_name = alias.clone().unwrap_or_else(|| {
-                        nested.last().cloned().unwrap_or_default()
-                    });
+                    let binding_name = alias
+                        .clone()
+                        .unwrap_or_else(|| nested.last().cloned().unwrap_or_default());
                     local_bindings.insert(
                         binding_name,
                         ResolvedBinding::Namespace { module_index: idx },
                     );
                 }
-                Stmt::FromImport { path: nested, names, .. } => {
+                Stmt::FromImport {
+                    path: nested,
+                    names,
+                    ..
+                } => {
                     let idx = self.load_module(nested)?;
                     for (name, alias) in names {
                         let kind = self.classify_named(idx, name)?;
@@ -1922,8 +2053,12 @@ impl ModuleLoader {
         // codegen recibe los bindings locales + las firmas de todos los
         // módulos ya cargados, así puede emitir `use crate::<other>::...`
         // y resolver expresiones cross-module adentro del módulo.
-        let rust_content =
-            generate_module_rs_with_bindings(&module_program, &module_env, &local_bindings, &self.modules)?;
+        let rust_content = generate_module_rs_with_bindings(
+            &module_program,
+            &module_env,
+            &local_bindings,
+            &self.modules,
+        )?;
 
         let mod_name = segments.last().cloned().unwrap_or_default();
         let rel_path = mod_rel_path_from_segments(segments);
@@ -2034,21 +2169,20 @@ impl ModuleLoader {
                     }
                     NamedKind::Fn | NamedKind::Const => {
                         if needs_alias {
-                            output.push_str(&format!(
-                                "use {}::{} as {};\n",
-                                qualifier, item, local
-                            ));
+                            output
+                                .push_str(&format!("use {}::{} as {};\n", qualifier, item, local));
                         } else {
-                            output.push_str(&format!(
-                                "use {}::{};\n",
-                                qualifier, item
-                            ));
+                            output.push_str(&format!("use {}::{};\n", qualifier, item));
                         }
                     }
                 }
             }
         }
-        if self.bindings.values().any(|b| matches!(b, ResolvedBinding::Named { .. })) {
+        if self
+            .bindings
+            .values()
+            .any(|b| matches!(b, ResolvedBinding::Named { .. }))
+        {
             output.push('\n');
         }
     }
@@ -2295,8 +2429,7 @@ fn collect_module_sigs(
     let mut type_sigs: HashMap<String, TypeSig> = HashMap::new();
     let mut fn_sigs: HashMap<String, FnSig> = HashMap::new();
     let mut const_sigs: HashMap<String, Type> = HashMap::new();
-    let mut accessor_consts: std::collections::HashSet<String> =
-        std::collections::HashSet::new();
+    let mut accessor_consts: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     for stmt in program {
         match stmt {
@@ -2363,12 +2496,27 @@ fn collect_module_sigs(
                     })?,
                     None => Type::Null,
                 };
-                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                let defaults: Vec<Option<Expr>> =
+                    params.iter().map(|p| p.default.clone()).collect();
                 let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
-                fn_sigs.insert(name.clone(), FnSig { params: ps, ret, defaults, has_varargs, param_names });
+                fn_sigs.insert(
+                    name.clone(),
+                    FnSig {
+                        params: ps,
+                        ret,
+                        defaults,
+                        has_varargs,
+                        param_names,
+                    },
+                );
             }
-            Stmt::Assign { target, type_, value, .. } => {
+            Stmt::Assign {
+                target,
+                type_,
+                value,
+                ..
+            } => {
                 // Solo bindings simples a un Ident.
                 let AssignTarget::Ident(name) = target else {
                     return Err(loader_err(
@@ -2465,13 +2613,31 @@ fn is_const_eval_expr(e: &Expr) -> bool {
         // Str literal NO es const-eval para `String` (la lógica de
         // gen_module_top_let lo maneja aparte como `pub static &str`).
         Expr::Str(_, _) => false,
-        Expr::BinOp { op, left, right, .. } => {
+        Expr::BinOp {
+            op, left, right, ..
+        } => {
             use crate::ast::BinOpKind::*;
             // Operadores que Rust acepta como const sobre primitivos.
             matches!(
                 op,
-                Add | Sub | Mul | Div | Mod | Eq | NotEq | Lt | LtEq | Gt | GtEq
-                | And | Or | Xor | BitAnd | BitOr | BitXor | Shl | Shr
+                Add | Sub
+                    | Mul
+                    | Div
+                    | Mod
+                    | Eq
+                    | NotEq
+                    | Lt
+                    | LtEq
+                    | Gt
+                    | GtEq
+                    | And
+                    | Or
+                    | Xor
+                    | BitAnd
+                    | BitOr
+                    | BitXor
+                    | Shl
+                    | Shr
             ) && is_const_eval_expr(left)
                 && is_const_eval_expr(right)
         }
@@ -2546,7 +2712,13 @@ fn generate_main_rs(
     // cada handler con `@authenticated`/`@admin` emita la invocación
     // correcta.
     for stmt in program {
-        if let Stmt::FnDef { name, decorators, is_async, .. } = stmt {
+        if let Stmt::FnDef {
+            name,
+            decorators,
+            is_async,
+            ..
+        } = stmt
+        {
             if decorators.iter().any(|d| d.name == "auth_provider") {
                 ctx.auth_provider_name = Some(name.clone());
                 ctx.auth_provider_is_async = *is_async;
@@ -2611,9 +2783,7 @@ fn partition_program_stmts(program: &Program) -> Result<PartitionedProgram<'_>, 
         match s {
             Stmt::TypeDef { .. } => type_defs.push(s),
             Stmt::FnDef {
-                name,
-                decorators,
-                ..
+                name, decorators, ..
             } => {
                 if decorators.is_empty() {
                     top_fns.push(s);
@@ -2915,7 +3085,13 @@ fn emit_main_rs_body(
     // Fase 9.w.3.c — pre-poblar `cron_jobs_info` desde `p.cron_fns` para
     // que `gen_main`/`gen_http_main` puedan emitir el registro de jobs.
     for stmt in &p.cron_fns {
-        if let Stmt::FnDef { name, decorators, is_async, .. } = stmt {
+        if let Stmt::FnDef {
+            name,
+            decorators,
+            is_async,
+            ..
+        } = stmt
+        {
             if let Some(deco) = decorators.iter().find(|d| d.name == "cron") {
                 if let Some(Expr::Str(expr, _)) = deco.args.first() {
                     ctx.cron_jobs_info.push(CronJobInfo {
@@ -3645,7 +3821,12 @@ impl<'a> CodegenCtx<'a> {
         entries.sort_by(|a, b| a.0.cmp(b.0));
         let mut emitted_any = false;
         for (local, binding) in entries {
-            if let ResolvedBinding::Named { module_index, item, kind } = binding {
+            if let ResolvedBinding::Named {
+                module_index,
+                item,
+                kind,
+            } = binding
+            {
                 // Mini-fase loader-absoluto (Paso 4): path Rust completo
                 // del módulo cargado (ej: "types::user" para nested,
                 // "utils" para flat).
@@ -3675,10 +3856,8 @@ impl<'a> CodegenCtx<'a> {
                                 qualifier, item, local
                             ));
                         } else {
-                            self.output.push_str(&format!(
-                                "use crate::{}::{};\n",
-                                qualifier, item
-                            ));
+                            self.output
+                                .push_str(&format!("use crate::{}::{};\n", qualifier, item));
                         }
                     }
                 }
@@ -3732,9 +3911,12 @@ impl<'a> CodegenCtx<'a> {
         };
         let m = self.loaded_modules.get(idx)?;
         let prefix = self.mod_path_prefix();
-        m.fn_sigs
-            .get(fn_name)
-            .map(|sig| (format!("{}{}::{}", prefix, m.mod_qualifier, fn_name), sig.clone()))
+        m.fn_sigs.get(fn_name).map(|sig| {
+            (
+                format!("{}{}::{}", prefix, m.mod_qualifier, fn_name),
+                sig.clone(),
+            )
+        })
     }
 
     // --- emit helpers -----------------------------------------------------
@@ -3804,10 +3986,7 @@ impl<'a> CodegenCtx<'a> {
     /// despachamos: el `?` se aplica DESPUÉS del await sobre el
     /// `Result<PyAny>` resultante. Sintaxis válida:
     /// `let v: Float = py_async_fn(arg)?.await?`
-    fn try_gen_python_await(
-        &mut self,
-        inner: &Expr,
-    ) -> Result<Option<(String, Type)>, FitzError> {
+    fn try_gen_python_await(&mut self, inner: &Expr) -> Result<Option<(String, Type)>, FitzError> {
         // Patrón canónico Fitz: `<py_call>?.await`. El AST es
         // `Await(Try(Call con callee/method PyAny))`. El `?` desempaca
         // el `Result<Any>` que el call envuelve (per 8.4 → 8.3); el
@@ -4572,16 +4751,12 @@ where
         self.emit("// Código generado por Fitz 5b — no editar a mano.\n");
         // El `#![allow(...)]` es atributo de crate, solo en main.rs.
         if matches!(self.mode, GenMode::Main) {
-            self.emit(
-                "#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n",
-            );
+            self.emit("#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n");
         } else {
             // En un módulo emitimos los allows como atributos del
             // archivo (`#![...]` también funciona en mods; el efecto
             // se acota al mod).
-            self.emit(
-                "#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n",
-            );
+            self.emit("#![allow(unused_mut, unused_variables, unused_assignments, dead_code)]\n\n");
         }
         // Arc<Mutex<>> es la representación de las instancias de
         // tipos custom — coincide con el modelo del intérprete post-
@@ -4920,7 +5095,11 @@ where
         // (scheduler corre en workers separados sin bloquear el main),
         // current_thread cuando es solo async sin jobs.
         if self.uses_async || self.uses_jobs {
-            let flavor = if self.uses_jobs { "multi_thread" } else { "current_thread" };
+            let flavor = if self.uses_jobs {
+                "multi_thread"
+            } else {
+                "current_thread"
+            };
             self.emit(&format!("#[tokio::main(flavor = \"{}\")]\n", flavor));
             self.emit("async fn main() {\n");
         } else {
@@ -4948,7 +5127,11 @@ where
         // locales sería redundante (e incompatible cuando declared con
         // un tipo Rust distinto).
         for stmt in stmts {
-            if let Stmt::Assign { target: AssignTarget::Ident(name), .. } = stmt {
+            if let Stmt::Assign {
+                target: AssignTarget::Ident(name),
+                ..
+            } = stmt
+            {
                 if self.hoisted_main_lets.contains_key(name) {
                     continue;
                 }
@@ -4963,7 +5146,9 @@ where
         // cancelarían inmediatamente.
         if has_cron {
             self.emit("    let _ = tokio::signal::ctrl_c().await;\n");
-            self.emit("    eprintln!(\"\\n\\u{1F550} Fitz scheduler recibió Ctrl+C, terminando.\");\n");
+            self.emit(
+                "    eprintln!(\"\\n\\u{1F550} Fitz scheduler recibió Ctrl+C, terminando.\");\n",
+            );
         }
         self.pop_scope();
         self.indent -= 1;
@@ -4987,12 +5172,8 @@ where
         // y que el preludio HTTP los emita como structs Rust legítimos.
         for builtin in &["Request", "Response"] {
             if let Some(id) = self.env.lookup(builtin) {
-                let resolved: Vec<ResolvedField> = self
-                    .env
-                    .info(id)
-                    .fields
-                    .clone()
-                    .unwrap_or_default();
+                let resolved: Vec<ResolvedField> =
+                    self.env.info(id).fields.clone().unwrap_or_default();
                 let combined: Vec<TypeSigField> = resolved
                     .iter()
                     .map(|r| TypeSigField {
@@ -5004,18 +5185,32 @@ where
                 self.fields_by_id.insert(id, resolved);
                 self.type_sigs.insert(
                     (*builtin).to_string(),
-                    TypeSig { id, fields: combined },
+                    TypeSig {
+                        id,
+                        fields: combined,
+                    },
                 );
             }
         }
         for stmt in program {
-            let Stmt::TypeDef { name, fields: ast_fields, methods, .. } = stmt else { continue };
+            let Stmt::TypeDef {
+                name,
+                fields: ast_fields,
+                methods,
+                ..
+            } = stmt
+            else {
+                continue;
+            };
             // R.3 — pre-registrar métodos custom por nombre del tipo.
             if !methods.is_empty() {
                 self.type_methods.insert(name.clone(), methods.clone());
             }
             let id = self.env.lookup(name).ok_or_else(|| {
-                self.err(format!("tipo `{}` no registrado en el TypeEnv (¿checker no corrió?)", name))
+                self.err(format!(
+                    "tipo `{}` no registrado en el TypeEnv (¿checker no corrió?)",
+                    name
+                ))
             })?;
             let resolved: Vec<ResolvedField> = match &self.env.info(id).fields {
                 Some(fs) => fs.clone(),
@@ -5042,7 +5237,13 @@ where
                 });
             }
             self.fields_by_id.insert(id, resolved);
-            self.type_sigs.insert(name.clone(), TypeSig { id, fields: combined });
+            self.type_sigs.insert(
+                name.clone(),
+                TypeSig {
+                    id,
+                    fields: combined,
+                },
+            );
         }
 
         // 5b.5: enriquecer con tipos importados via `from foo import User`.
@@ -5078,9 +5279,10 @@ where
                 let m = self.loaded_modules.get(module_index).ok_or_else(|| {
                     self.err(format!("módulo no cargado al registrar `{}`", item))
                 })?;
-                let sig = m.type_sigs.get(&item).cloned().ok_or_else(|| {
-                    self.err(format!("el módulo no expone el tipo `{}`", item))
-                })?;
+                let sig =
+                    m.type_sigs.get(&item).cloned().ok_or_else(|| {
+                        self.err(format!("el módulo no expone el tipo `{}`", item))
+                    })?;
                 let methods = m.type_methods.get(&item).cloned();
                 (sig, methods)
             };
@@ -5133,14 +5335,24 @@ where
     fn pre_register_top_lets(&mut self, program: &Program) -> Result<(), FitzError> {
         for stmt in program {
             let stmt_span = stmt.span();
-            let Stmt::Assign { target, type_, value, .. } = stmt else { continue };
-            let AssignTarget::Ident(name) = target else { continue };
+            let Stmt::Assign {
+                target,
+                type_,
+                value,
+                ..
+            } = stmt
+            else {
+                continue;
+            };
+            let AssignTarget::Ident(name) = target else {
+                continue;
+            };
             let ty = match type_ {
                 Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
-                    self.err_at(stmt_span, format!(
-                        "let `{}` del módulo: anotación: {}",
-                        name, e.message
-                    ))
+                    self.err_at(
+                        stmt_span,
+                        format!("let `{}` del módulo: anotación: {}", name, e.message),
+                    )
                 })?,
                 None => infer_literal_type(value).unwrap_or(Type::Any),
             };
@@ -5192,9 +5404,16 @@ where
                 let params_tys: Vec<Type> = params
                     .iter()
                     .enumerate()
-                    .map(|(i, p)| self.resolve_param_type(
-                        name, &p.name, p.type_.as_ref(), fn_span, i, program,
-                    ))
+                    .map(|(i, p)| {
+                        self.resolve_param_type(
+                            name,
+                            &p.name,
+                            p.type_.as_ref(),
+                            fn_span,
+                            i,
+                            program,
+                        )
+                    })
                     .collect::<Result<_, _>>()?;
                 let inner_ret = match return_type {
                     Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
@@ -5202,18 +5421,14 @@ where
                             e.kind,
                             fn_span.line,
                             fn_span.column,
-                            format!(
-                                "fn `{}`: return type no resuelve: {}",
-                                name, e.message
-                            ),
+                            format!("fn `{}`: return type no resuelve: {}", name, e.message),
                         )
                     })?,
                     // Mini-tanda Hpx.2 — sin anotación: inferir del body
                     // walkeando los `Stmt::Return` y consultando TypeInfo
                     // del checker. Si no hay returns explícitos, fallback
                     // a Null (igual al comportamiento histórico).
-                    None => infer_return_type_from_body(body, self.type_info)
-                        .unwrap_or(Type::Null),
+                    None => infer_return_type_from_body(body, self.type_info).unwrap_or(Type::Null),
                 };
                 // Fase 6.6: la firma EXTERNA de una `async fn` envuelve
                 // su return type en `Future<T>` — espejo de lo que hace
@@ -5228,12 +5443,19 @@ where
                 } else {
                     inner_ret
                 };
-                let defaults: Vec<Option<Expr>> = params.iter().map(|p| p.default.clone()).collect();
+                let defaults: Vec<Option<Expr>> =
+                    params.iter().map(|p| p.default.clone()).collect();
                 let has_varargs = params.last().map(|p| p.varargs).unwrap_or(false);
                 let param_names: Vec<String> = params.iter().map(|p| p.name.clone()).collect();
                 self.fn_sigs.insert(
                     name.clone(),
-                    FnSig { params: params_tys, ret, defaults, has_varargs, param_names },
+                    FnSig {
+                        params: params_tys,
+                        ret,
+                        defaults,
+                        has_varargs,
+                        param_names,
+                    },
                 );
             }
         }
@@ -5289,17 +5511,20 @@ where
             // TypeInfo. Si el tipo es concreto, usarlo. Sino, error
             // claro con sugerencia.
             None => {
-                if let Some(inferred) = infer_param_type_from_call_sites(
-                    program, fn_name, param_idx, self.type_info,
-                ) {
+                if let Some(inferred) =
+                    infer_param_type_from_call_sites(program, fn_name, param_idx, self.type_info)
+                {
                     return Ok(inferred);
                 }
-                Err(self.err_at(fn_span, format!(
-                    "fn `{}`: el parámetro `{}` necesita una anotación de tipo (5b.1) — \
+                Err(self.err_at(
+                    fn_span,
+                    format!(
+                        "fn `{}`: el parámetro `{}` necesita una anotación de tipo (5b.1) — \
                      el codegen no pudo inferirlo desde call sites. Workaround: anotar \
                      manualmente (`{}: Str`, `{}: Int`, etc.).",
-                    fn_name, param_name, param_name, param_name,
-                )))
+                        fn_name, param_name, param_name, param_name,
+                    ),
+                ))
             }
         }
     }
@@ -5389,7 +5614,12 @@ where
         .unwrap();
         if sig.fields.is_empty() {
             // `Foo {}` — sin espacios.
-            writeln!(&mut self.output, "        write!(__f, \"{} {{{{}}}}\")\n    }}\n}}\n", name).unwrap();
+            writeln!(
+                &mut self.output,
+                "        write!(__f, \"{} {{{{}}}}\")\n    }}\n}}\n",
+                name
+            )
+            .unwrap();
         } else {
             writeln!(&mut self.output, "        write!(__f, \"{} {{{{\")?;", name).unwrap();
             for (i, f) in sig.fields.iter().enumerate() {
@@ -5705,7 +5935,8 @@ where
         writeln!(
             &mut self.output,
             "fn __fitz_py_to_list_{n}(obj: &__FitzPyObject) -> Arc<Mutex<Vec<Arc<Mutex<{d}>>>>> {{",
-            n = name, d = data_name
+            n = name,
+            d = data_name
         )
         .unwrap();
         self.emit("    Python::attach(|py| {\n");
@@ -5752,7 +5983,9 @@ where
             .cloned()
             .ok_or_else(|| self.err(format!("tipo `{}` no pre-registrado", name)))?;
         for f in &sig.fields {
-            let Some(default_expr) = &f.default else { continue };
+            let Some(default_expr) = &f.default else {
+                continue;
+            };
             let rust_ty = rust_type_for(&f.type_, self.env)?;
             let (code, ty) = self.gen_expr(default_expr)?;
             let coerced = coerce(&code, &ty, &f.type_, self.env);
@@ -5785,9 +6018,9 @@ where
             unreachable!("gen_top_fn solo se llama sobre Stmt::FnDef");
         };
 
-        let is_http_handler = decorators.iter().any(|d| {
-            matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
-        });
+        let is_http_handler = decorators
+            .iter()
+            .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"));
         // MW.3: una fn referenciada como `@middleware(name)` en algún
         // FnDef se trata como contexto HTTP (paridad con el checker en
         // types.rs). Su return type Rust override a
@@ -5930,16 +6163,12 @@ where
         // F17.4b migró a LazyLock para destrabar multi-thread.
         if let Some(deps) = self.fn_state_deps.get(name).cloned() {
             for dep_name in &deps {
-                let ty = self
-                    .state_var_types
-                    .get(dep_name)
-                    .cloned()
-                    .ok_or_else(|| {
-                        self.err(format!(
-                            "fn `{}` referencia state `{}` pero el tipo no se resolvió",
-                            name, dep_name
-                        ))
-                    })?;
+                let ty = self.state_var_types.get(dep_name).cloned().ok_or_else(|| {
+                    self.err(format!(
+                        "fn `{}` referencia state `{}` pero el tipo no se resolvió",
+                        name, dep_name
+                    ))
+                })?;
                 let static_name = state_var_static_name(dep_name);
                 let rust_ty = rust_type_for(&ty, self.env)?;
                 self.emit_indent();
@@ -6209,7 +6438,8 @@ where
             }
             _ => Err(self.err(
                 "destructure_pattern_to_rust: pattern no puro pasó al camino puro \
-                 (bug del codegen)".to_string(),
+                 (bug del codegen)"
+                    .to_string(),
             )),
         }
     }
@@ -6234,7 +6464,10 @@ where
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
         let declared_ty = match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
-                self.err_at(value.span(), format!("anotación de `{}` no resuelve: {}", name, e.message))
+                self.err_at(
+                    value.span(),
+                    format!("anotación de `{}` no resuelve: {}", name, e.message),
+                )
             })?,
             None => rhs_ty.clone(),
         };
@@ -6304,7 +6537,13 @@ where
     // original no se emita como local de `main()` después.
     fn gen_main_hoisted_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let stmt_span = stmt.span();
-        let Stmt::Assign { target, type_, value, .. } = stmt else {
+        let Stmt::Assign {
+            target,
+            type_,
+            value,
+            ..
+        } = stmt
+        else {
             unreachable!("gen_main_hoisted_let solo se llama sobre Stmt::Assign");
         };
         let AssignTarget::Ident(name) = target else {
@@ -6314,10 +6553,10 @@ where
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
         let declared_ty = match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
-                self.err_at(value.span(), format!(
-                    "let `{}` (hoist): anotación: {}",
-                    name, e.message
-                ))
+                self.err_at(
+                    value.span(),
+                    format!("let `{}` (hoist): anotación: {}", name, e.message),
+                )
             })?,
             None => rhs_ty.clone(),
         };
@@ -6330,7 +6569,8 @@ where
                     "static {}: &str = {};\n",
                     name,
                     rust_str_literal(s),
-                ).unwrap();
+                )
+                .unwrap();
                 self.hoisted_main_lets.insert(name.clone(), declared_ty);
                 return Ok(());
             }
@@ -6372,11 +6612,18 @@ where
 
     fn gen_module_top_let(&mut self, stmt: &Stmt) -> Result<(), FitzError> {
         let stmt_span = stmt.span();
-        let Stmt::Assign { target, type_, value, .. } = stmt else {
+        let Stmt::Assign {
+            target,
+            type_,
+            value,
+            ..
+        } = stmt
+        else {
             unreachable!("gen_module_top_let solo se llama sobre Stmt::Assign");
         };
         let AssignTarget::Ident(name) = target else {
-            return Err(self.err_at(stmt_span,
+            return Err(self.err_at(
+                stmt_span,
                 "asignación a campo a nivel top de módulo: no soportada (solo `let X = <expr>`)",
             ));
         };
@@ -6388,10 +6635,10 @@ where
 
         let declared_ty = match type_ {
             Some(t) => resolve_type_expr(t, self.env).map_err(|e| {
-                self.err_at(value.span(), format!(
-                    "let `{}`: anotación: {}",
-                    name, e.message
-                ))
+                self.err_at(
+                    value.span(),
+                    format!("let `{}`: anotación: {}", name, e.message),
+                )
             })?,
             None => rhs_ty.clone(),
         };
@@ -6418,22 +6665,12 @@ where
             match &declared_ty {
                 Type::Int => {
                     let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int, self.env);
-                    writeln!(
-                        &mut self.output,
-                        "pub const {}: i64 = {};\n",
-                        name, coerced
-                    )
-                    .unwrap();
+                    writeln!(&mut self.output, "pub const {}: i64 = {};\n", name, coerced).unwrap();
                     return Ok(());
                 }
                 Type::Float => {
                     let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float, self.env);
-                    writeln!(
-                        &mut self.output,
-                        "pub const {}: f64 = {};\n",
-                        name, coerced
-                    )
-                    .unwrap();
+                    writeln!(&mut self.output, "pub const {}: f64 = {};\n", name, coerced).unwrap();
                     return Ok(());
                 }
                 Type::Bool => {
@@ -6454,11 +6691,14 @@ where
 
         // Camino 3: runtime — accessor function `pub fn X() -> T { ... }`.
         let ret_rs = rust_type_for(&declared_ty, self.env).map_err(|_| {
-            self.err_at(value.span(), format!(
-                "let `{}`: tipo `{}` no soportado a nivel top de módulo",
-                name,
-                display_type(&declared_ty, self.env)
-            ))
+            self.err_at(
+                value.span(),
+                format!(
+                    "let `{}`: tipo `{}` no soportado a nivel top de módulo",
+                    name,
+                    display_type(&declared_ty, self.env)
+                ),
+            )
         })?;
         let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
         writeln!(
@@ -6540,10 +6780,13 @@ where
                 .unwrap();
                 Ok(())
             }
-            other => Err(self.err_at(object.span(), format!(
-                "asignación a índice `[...] = v` no soportada sobre `{}` (solo List y Map)",
-                type_name(other)
-            ))),
+            other => Err(self.err_at(
+                object.span(),
+                format!(
+                    "asignación a índice `[...] = v` no soportada sobre `{}` (solo List y Map)",
+                    type_name(other)
+                ),
+            )),
         }
     }
 
@@ -6555,11 +6798,14 @@ where
     ) -> Result<(), FitzError> {
         let (obj_code, obj_ty) = self.gen_expr(object)?;
         let Type::Nominal(id) = &obj_ty else {
-            return Err(self.err_at(object.span(), format!(
-                "asignación a campo `.{}` sobre `{}`: solo se soporta sobre instancias",
-                field,
-                type_name(&obj_ty)
-            )));
+            return Err(self.err_at(
+                object.span(),
+                format!(
+                    "asignación a campo `.{}` sobre `{}`: solo se soporta sobre instancias",
+                    field,
+                    type_name(&obj_ty)
+                ),
+            ));
         };
         let info_name = self.env.info(*id).name.clone();
         // Defensivo: el checker garantiza fields resueltos. Si llegamos
@@ -6571,10 +6817,13 @@ where
             ))
         })?;
         let Some(f) = declared.iter().find(|f| f.name == field) else {
-            return Err(self.err_at(object.span(), format!(
-                "el tipo `{}` no tiene un campo llamado `{}`",
-                info_name, field
-            )));
+            return Err(self.err_at(
+                object.span(),
+                format!(
+                    "el tipo `{}` no tiene un campo llamado `{}`",
+                    info_name, field
+                ),
+            ));
         };
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
         let coerced = coerce(&rhs_code, &rhs_ty, &f.type_, self.env);
@@ -6610,13 +6859,16 @@ where
             // `return <status> { ... }`, es un valor que no encaja como
             // gate-only. Por consistencia con MW.1 (donde el runtime da
             // 500 con mensaje claro), abortar con error de codegen:
-            return Err(self.err_at(e.span(), format!(
-                "middleware: `return` con un valor no-null no es válido — \
+            return Err(self.err_at(
+                e.span(),
+                format!(
+                    "middleware: `return` con un valor no-null no es válido — \
                  un middleware debe usar `return null` (o ningún return) \
                  para continuar la cadena, o `return <status> {{ ... }}` \
                  para cortocircuitar. Recibió `{}`",
-                type_name(&ty)
-            )));
+                    type_name(&ty)
+                ),
+            ));
         }
         if self.response_mode {
             // En response mode, todos los returns se envuelven en
@@ -6714,10 +6966,13 @@ where
         }
         let (status_code, status_ty) = self.gen_expr(status)?;
         if !matches!(status_ty, Type::Int) {
-            return Err(self.err_at(span, format!(
-                "el status code de `return` debe ser Int, recibió `{}`",
-                type_name(&status_ty)
-            )));
+            return Err(self.err_at(
+                span,
+                format!(
+                    "el status code de `return` debe ser Int, recibió `{}`",
+                    type_name(&status_ty)
+                ),
+            ));
         }
         let body_code = match body {
             Some(b) => {
@@ -6779,7 +7034,12 @@ where
         Ok(())
     }
 
-    fn gen_loop(&mut self, body: &[Stmt], label: Option<&str>, ret_expected: &Type) -> Result<(), FitzError> {
+    fn gen_loop(
+        &mut self,
+        body: &[Stmt],
+        label: Option<&str>,
+        ret_expected: &Type,
+    ) -> Result<(), FitzError> {
         self.emit_indent();
         if let Some(l) = label {
             self.emit(&format!("'{}: ", l));
@@ -6820,7 +7080,13 @@ where
         let label_prefix = label.map(|l| format!("'{}: ", l)).unwrap_or_default();
 
         // Range case — solo Pattern::Ident y Wildcard tienen sentido.
-        if let Expr::Range { start, end, inclusive, .. } = iter {
+        if let Expr::Range {
+            start,
+            end,
+            inclusive,
+            ..
+        } = iter
+        {
             let (start_code, _) = self.gen_expr(start)?;
             let (end_code, _) = self.gen_expr(end)?;
             let op = if *inclusive { "..=" } else { ".." };
@@ -6864,7 +7130,8 @@ where
                 // a Map). Caso canónico: `for (i, x) in xs.enumerate()`.
                 if let (Pattern::Tuple(subs), Type::Tuple(item_tys)) = (var, &elem_ty) {
                     if subs.len() == item_tys.len() {
-                        let mut bindings: Vec<(String, Vec<(String, Type)>)> = Vec::with_capacity(subs.len());
+                        let mut bindings: Vec<(String, Vec<(String, Type)>)> =
+                            Vec::with_capacity(subs.len());
                         for (sub, ty) in subs.iter().zip(item_tys.iter()) {
                             let bnd = pattern_to_simple_binding(sub, ty)
                                 .map_err(|msg| self.err_at(iter.span(), msg))?;
@@ -7693,11 +7960,7 @@ where
         }
     }
 
-    fn gen_unary(
-        &mut self,
-        op: &UnaryOpKind,
-        operand: &Expr,
-    ) -> Result<(String, Type), FitzError> {
+    fn gen_unary(&mut self, op: &UnaryOpKind, operand: &Expr) -> Result<(String, Type), FitzError> {
         let (code, ty) = self.gen_expr(operand)?;
         match op {
             UnaryOpKind::Neg => Ok((format!("(-{})", code), ty)),
@@ -7753,16 +8016,20 @@ where
                     if let Some((path, sig)) = self.resolve_namespace_call(ns, field) {
                         return self.gen_call_with_sig(&path, &sig, args, call_span);
                     }
-                    return Err(self.err_at(call_span, format!(
-                        "el módulo `{}` no exporta una función llamada `{}`",
-                        ns, field
-                    )));
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "el módulo `{}` no exporta una función llamada `{}`",
+                            ns, field
+                        ),
+                    ));
                 }
             }
             return self.gen_method_call(object, field, args, call_span);
         }
         let Expr::Ident(name, _) = callee else {
-            return Err(self.err_at(callee.span(),
+            return Err(self.err_at(
+                callee.span(),
                 "llamadas con callee complejo (FnExpr inline u otro Expr): no soportadas",
             ));
         };
@@ -7781,10 +8048,17 @@ where
                 callee = callee_code,
                 args = args_code,
             );
-            return Ok((code, Type::Result { ok: Box::new(Type::PyAny), err: Box::new(Type::Str) }));
+            return Ok((
+                code,
+                Type::Result {
+                    ok: Box::new(Type::PyAny),
+                    err: Box::new(Type::Str),
+                },
+            ));
         }
         if name == "print" {
-            return Err(self.err_at(call_span,
+            return Err(self.err_at(
+                call_span,
                 "`print(...)` solo puede usarse como sentencia, no como expresión en 5b.1",
             ));
         }
@@ -7810,10 +8084,10 @@ where
         ) && !self.fn_sigs.contains_key(name)
         {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`{}` espera 1 argumento, recibió {}",
-                    name, args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`{}` espera 1 argumento, recibió {}", name, args.len()),
+                ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             let coerced = coerce(&arg_code, &arg_ty, &Type::Int, self.env);
@@ -7832,10 +8106,14 @@ where
             && !self.fn_sigs.contains_key(name)
         {
             if args.len() != 2 {
-                return Err(self.err_at(call_span, format!(
-                    "`{}` espera 2 argumentos (n, bits), recibió {}",
-                    name, args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`{}` espera 2 argumentos (n, bits), recibió {}",
+                        name,
+                        args.len()
+                    ),
+                ));
             }
             let (n_code, n_ty) = self.gen_expr(&args[0])?;
             let (b_code, b_ty) = self.gen_expr(&args[1])?;
@@ -7860,25 +8138,30 @@ where
         // ceil/floor/round devuelven Int.
         if matches!(name.as_str(), "abs") && !self.fn_sigs.contains_key(name) {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`abs(x)` espera 1 argumento, recibió {}", args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`abs(x)` espera 1 argumento, recibió {}", args.len()),
+                ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             return match arg_ty {
                 Type::Int => Ok((format!("({}).wrapping_abs()", arg_code), Type::Int)),
                 Type::Float => Ok((format!("({}).abs()", arg_code), Type::Float)),
-                other => Err(self.err_at(call_span, format!(
-                    "`abs(x)` espera `Int` o `Float`, recibió `{}`",
-                    display_type(&other, self.env)
-                ))),
+                other => Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`abs(x)` espera `Int` o `Float`, recibió `{}`",
+                        display_type(&other, self.env)
+                    ),
+                )),
             };
         }
         if matches!(name.as_str(), "min" | "max") && !self.fn_sigs.contains_key(name) {
             if args.len() != 2 {
-                return Err(self.err_at(call_span, format!(
-                    "`{}(a, b)` espera 2 args, recibió {}", name, args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`{}(a, b)` espera 2 args, recibió {}", name, args.len()),
+                ));
             }
             let (a_code, a_ty) = self.gen_expr(&args[0])?;
             let (b_code, b_ty) = self.gen_expr(&args[1])?;
@@ -7896,83 +8179,104 @@ where
                         Type::Float,
                     ))
                 }
-                (a, b) => Err(self.err_at(call_span, format!(
-                    "`{}(a, b)`: args deben ser ambos Int o ambos Float, recibió `{}` y `{}`",
-                    name,
-                    display_type(a, self.env),
-                    display_type(b, self.env)
-                ))),
+                (a, b) => Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`{}(a, b)`: args deben ser ambos Int o ambos Float, recibió `{}` y `{}`",
+                        name,
+                        display_type(a, self.env),
+                        display_type(b, self.env)
+                    ),
+                )),
             };
         }
         if matches!(name.as_str(), "pow") && !self.fn_sigs.contains_key(name) {
             if args.len() != 2 {
-                return Err(self.err_at(call_span, format!(
-                    "`pow(base, exp)` espera 2 args, recibió {}", args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`pow(base, exp)` espera 2 args, recibió {}", args.len()),
+                ));
             }
             let (a_code, a_ty) = self.gen_expr(&args[0])?;
             let (b_code, b_ty) = self.gen_expr(&args[1])?;
             let a_f = match a_ty {
                 Type::Int => format!("({} as f64)", a_code),
                 Type::Float => a_code,
-                other => return Err(self.err_at(call_span, format!(
-                    "`pow(base, exp)`: base debe ser Int o Float, recibió `{}`",
-                    display_type(&other, self.env)
-                ))),
+                other => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`pow(base, exp)`: base debe ser Int o Float, recibió `{}`",
+                            display_type(&other, self.env)
+                        ),
+                    ))
+                }
             };
             let b_f = match b_ty {
                 Type::Int => format!("({} as f64)", b_code),
                 Type::Float => b_code,
-                other => return Err(self.err_at(call_span, format!(
-                    "`pow(base, exp)`: exp debe ser Int o Float, recibió `{}`",
-                    display_type(&other, self.env)
-                ))),
+                other => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`pow(base, exp)`: exp debe ser Int o Float, recibió `{}`",
+                            display_type(&other, self.env)
+                        ),
+                    ))
+                }
             };
             return Ok((format!("({a_f}).powf({b_f})"), Type::Float));
         }
         if matches!(name.as_str(), "sqrt") && !self.fn_sigs.contains_key(name) {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`sqrt(x)` espera 1 argumento, recibió {}", args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`sqrt(x)` espera 1 argumento, recibió {}", args.len()),
+                ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             let coerced = match arg_ty {
                 Type::Int => format!("({} as f64)", arg_code),
                 Type::Float => arg_code,
-                other => return Err(self.err_at(call_span, format!(
-                    "`sqrt(x)` espera `Int` o `Float`, recibió `{}`",
-                    display_type(&other, self.env)
-                ))),
+                other => {
+                    return Err(self.err_at(
+                        call_span,
+                        format!(
+                            "`sqrt(x)` espera `Int` o `Float`, recibió `{}`",
+                            display_type(&other, self.env)
+                        ),
+                    ))
+                }
             };
             return Ok((format!("({}).sqrt()", coerced), Type::Float));
         }
-        if matches!(name.as_str(), "ceil" | "floor" | "round")
-            && !self.fn_sigs.contains_key(name)
-        {
+        if matches!(name.as_str(), "ceil" | "floor" | "round") && !self.fn_sigs.contains_key(name) {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`{}(x)` espera 1 argumento, recibió {}", name, args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`{}(x)` espera 1 argumento, recibió {}", name, args.len()),
+                ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             return match arg_ty {
                 Type::Int => Ok((arg_code, Type::Int)),
-                Type::Float => Ok((
-                    format!("({}).{}() as i64", arg_code, name),
-                    Type::Int,
+                Type::Float => Ok((format!("({}).{}() as i64", arg_code, name), Type::Int)),
+                other => Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`{}(x)` espera `Float` o `Int`, recibió `{}`",
+                        name,
+                        display_type(&other, self.env)
+                    ),
                 )),
-                other => Err(self.err_at(call_span, format!(
-                    "`{}(x)` espera `Float` o `Int`, recibió `{}`",
-                    name, display_type(&other, self.env)
-                ))),
             };
         }
         if matches!(name.as_str(), "clamp") && !self.fn_sigs.contains_key(name) {
             if args.len() != 3 {
-                return Err(self.err_at(call_span, format!(
-                    "`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`clamp(x, lo, hi)` espera 3 args, recibió {}", args.len()),
+                ));
             }
             let (x_code, x_ty) = self.gen_expr(&args[0])?;
             let (lo_code, lo_ty) = self.gen_expr(&args[1])?;
@@ -8001,10 +8305,10 @@ where
         // con ese nombre, su sig gana.
         if name == "env" && !self.fn_sigs.contains_key(name) {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`env(key)` espera 1 argumento, recibió {}",
-                    args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!("`env(key)` espera 1 argumento, recibió {}", args.len()),
+                ));
             }
             let (k_code, k_ty) = self.gen_expr(&args[0])?;
             let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
@@ -8018,10 +8322,13 @@ where
         }
         if name == "env_or" && !self.fn_sigs.contains_key(name) {
             if args.len() != 2 {
-                return Err(self.err_at(call_span, format!(
-                    "`env_or(key, default)` espera 2 argumentos, recibió {}",
-                    args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`env_or(key, default)` espera 2 argumentos, recibió {}",
+                        args.len()
+                    ),
+                ));
             }
             let (k_code, k_ty) = self.gen_expr(&args[0])?;
             let (d_code, d_ty) = self.gen_expr(&args[1])?;
@@ -8034,10 +8341,13 @@ where
         }
         if name == "load_env" && !self.fn_sigs.contains_key(name) {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`load_env(path)` espera 1 argumento, recibió {}",
-                    args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`load_env(path)` espera 1 argumento, recibió {}",
+                        args.len()
+                    ),
+                ));
             }
             let (p_code, p_ty) = self.gen_expr(&args[0])?;
             let p_coerced = coerce(&p_code, &p_ty, &Type::Str, self.env);
@@ -8054,10 +8364,13 @@ where
         // antes y el builtin no dispara — misma política que `len`.
         if name == "sleep" && !self.fn_sigs.contains_key(name) {
             if args.len() != 1 {
-                return Err(self.err_at(call_span, format!(
-                    "`sleep` espera 1 argumento (ms: Int), recibió {}",
-                    args.len()
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`sleep` espera 1 argumento (ms: Int), recibió {}",
+                        args.len()
+                    ),
+                ));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             let coerced = coerce(&arg_code, &arg_ty, &Type::Int, self.env);
@@ -8079,18 +8392,18 @@ where
                     format!("(({}).chars().count() as i64)", arg_code),
                     Type::Int,
                 )),
-                Type::Bytes => Ok((
-                    format!("(({}).len() as i64)", arg_code),
-                    Type::Int,
-                )),
+                Type::Bytes => Ok((format!("(({}).len() as i64)", arg_code), Type::Int)),
                 Type::List(_) | Type::Map(_, _) => Ok((
                     format!("(({}).lock().unwrap().len() as i64)", arg_code),
                     Type::Int,
                 )),
-                other => Err(self.err_at(arg_span, format!(
-                    "`len(...)`: no aplica a `{}` — solo Str, Bytes, List<T> y Map<K, V>",
-                    display_type(&other, self.env)
-                ))),
+                other => Err(self.err_at(
+                    arg_span,
+                    format!(
+                        "`len(...)`: no aplica a `{}` — solo Str, Bytes, List<T> y Map<K, V>",
+                        display_type(&other, self.env)
+                    ),
+                )),
             };
         }
         // Mini-tanda Bytes — constructor builtin `bytes(s: Str) -> Bytes`.
@@ -8099,22 +8412,25 @@ where
             let arg_span = args[0].span();
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
             if !matches!(arg_ty, Type::Str) {
-                return Err(self.err_at(arg_span, format!(
-                    "`bytes(...)`: el argumento debe ser Str, recibió `{}`",
-                    display_type(&arg_ty, self.env)
-                )));
+                return Err(self.err_at(
+                    arg_span,
+                    format!(
+                        "`bytes(...)`: el argumento debe ser Str, recibió `{}`",
+                        display_type(&arg_ty, self.env)
+                    ),
+                ));
             }
-            return Ok((
-                format!("({}).as_bytes().to_vec()", arg_code),
-                Type::Bytes,
-            ));
+            return Ok((format!("({}).as_bytes().to_vec()", arg_code), Type::Bytes));
         }
         // 5b.5: si el nombre está en `module_bindings` como `Named`
         // (`from foo import greet`), la firma viene del módulo, no
         // de `fn_sigs`. El `use foo::greet;` ya lo agregó al scope
         // Rust, así que el call se emite con el name directo.
-        if let Some(ResolvedBinding::Named { module_index, item, kind }) =
-            self.module_bindings.get(name).cloned()
+        if let Some(ResolvedBinding::Named {
+            module_index,
+            item,
+            kind,
+        }) = self.module_bindings.get(name).cloned()
         {
             if matches!(kind, NamedKind::Fn) {
                 if let Some(m) = self.loaded_modules.get(module_index) {
@@ -8135,7 +8451,13 @@ where
             // Defaults solo aplican a callees por nombre resolubles en
             // `fn_sigs`. Estricta aridad acá.
             let arity = params.len();
-            let sig = FnSig { params, ret: *ret, defaults: vec![None; arity], has_varargs: false, param_names: Vec::new() };
+            let sig = FnSig {
+                params,
+                ret: *ret,
+                defaults: vec![None; arity],
+                has_varargs: false,
+                param_names: Vec::new(),
+            };
             return self.gen_call_with_sig(name, &sig, args, call_span);
         }
 
@@ -8185,7 +8507,12 @@ where
                 ),
             ));
         }
-        let Expr::Call { callee: inner_callee, args: inner_args, .. } = &args[0] else {
+        let Expr::Call {
+            callee: inner_callee,
+            args: inner_args,
+            ..
+        } = &args[0]
+        else {
             return Err(self.err_at(
                 call_span,
                 "spawn: el argumento debe ser un call literal a una fn `@background`.".to_string(),
@@ -8203,7 +8530,10 @@ where
         let sig = self.fn_sigs.get(target_name).cloned().ok_or_else(|| {
             self.err_at(
                 call_span,
-                format!("spawn: la fn `{}` no está definida en este scope.", target_name),
+                format!(
+                    "spawn: la fn `{}` no está definida en este scope.",
+                    target_name
+                ),
             )
         })?;
         // Generar el código de los args, coercionando al tipo del param.
@@ -8273,17 +8603,23 @@ where
         let has_named = args.iter().any(|a| matches!(a, Expr::NamedArg { .. }));
         if has_named {
             if sig.param_names.is_empty() {
-                return Err(self.err_at(call_span, format!(
+                return Err(self.err_at(
+                    call_span,
+                    format!(
                     "`{}` no soporta argumentos nombrados (callee indirecto sin info de nombres)",
                     callee_expr
-                )));
+                ),
+                ));
             }
             if sig.has_varargs {
-                return Err(self.err_at(call_span, format!(
-                    "`{}` tiene un parámetro variádico; los argumentos nombrados \
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`{}` tiene un parámetro variádico; los argumentos nombrados \
                      no son compatibles con varargs en esta versión",
-                    callee_expr
-                )));
+                        callee_expr
+                    ),
+                ));
             }
             // Reordenar a posicional. Cada slot se rellena con un Expr
             // (el value del NamedArg, el positional original, o el
@@ -8294,17 +8630,24 @@ where
             for arg in args {
                 if let Expr::NamedArg { name, value, .. } = arg {
                     after_named = true;
-                    let idx = sig.param_names.iter().position(|p| p == name).ok_or_else(|| {
-                        self.err_at(call_span, format!(
-                            "`{}` no tiene un parámetro llamado `{}`",
-                            callee_expr, name
-                        ))
-                    })?;
+                    let idx = sig
+                        .param_names
+                        .iter()
+                        .position(|p| p == name)
+                        .ok_or_else(|| {
+                            self.err_at(
+                                call_span,
+                                format!(
+                                    "`{}` no tiene un parámetro llamado `{}`",
+                                    callee_expr, name
+                                ),
+                            )
+                        })?;
                     if slots[idx].is_some() {
-                        return Err(self.err_at(call_span, format!(
-                            "`{}`: el argumento `{}` está duplicado",
-                            callee_expr, name
-                        )));
+                        return Err(self.err_at(
+                            call_span,
+                            format!("`{}`: el argumento `{}` está duplicado", callee_expr, name),
+                        ));
                     }
                     slots[idx] = Some((**value).clone());
                 } else {
@@ -8315,10 +8658,14 @@ where
                         )));
                     }
                     if next_pos >= sig.param_names.len() {
-                        return Err(self.err_at(call_span, format!(
-                            "`{}` espera {} argumento(s), recibió más",
-                            callee_expr, sig.param_names.len()
-                        )));
+                        return Err(self.err_at(
+                            call_span,
+                            format!(
+                                "`{}` espera {} argumento(s), recibió más",
+                                callee_expr,
+                                sig.param_names.len()
+                            ),
+                        ));
                     }
                     slots[next_pos] = Some(arg.clone());
                     next_pos += 1;
@@ -8331,10 +8678,13 @@ where
                     Some(e) => reordered.push(e),
                     None => {
                         let de = sig.defaults[i].as_ref().ok_or_else(|| {
-                            self.err_at(call_span, format!(
-                                "`{}`: falta el argumento `{}` (no tiene default)",
-                                callee_expr, sig.param_names[i]
-                            ))
+                            self.err_at(
+                                call_span,
+                                format!(
+                                    "`{}`: falta el argumento `{}` (no tiene default)",
+                                    callee_expr, sig.param_names[i]
+                                ),
+                            )
                         })?;
                         reordered.push(de.clone());
                     }
@@ -8354,28 +8704,46 @@ where
         };
         let too_many = !sig.has_varargs && args.len() > sig.params.len();
         if args.len() < required || too_many {
-            return Err(self.err_at(call_span, if sig.has_varargs {
-                format!(
-                    "`{}` espera al menos {} argumento(s), recibió {}",
-                    callee_expr, required, args.len(),
-                )
-            } else if required == sig.params.len() {
-                format!(
-                    "`{}` espera {} argumento(s), recibió {}",
-                    callee_expr, sig.params.len(), args.len(),
-                )
-            } else {
-                format!(
-                    "`{}` espera entre {} y {} argumento(s), recibió {}",
-                    callee_expr, required, sig.params.len(), args.len(),
-                )
-            }));
+            return Err(self.err_at(
+                call_span,
+                if sig.has_varargs {
+                    format!(
+                        "`{}` espera al menos {} argumento(s), recibió {}",
+                        callee_expr,
+                        required,
+                        args.len(),
+                    )
+                } else if required == sig.params.len() {
+                    format!(
+                        "`{}` espera {} argumento(s), recibió {}",
+                        callee_expr,
+                        sig.params.len(),
+                        args.len(),
+                    )
+                } else {
+                    format!(
+                        "`{}` espera entre {} y {} argumento(s), recibió {}",
+                        callee_expr,
+                        required,
+                        sig.params.len(),
+                        args.len(),
+                    )
+                },
+            ));
         }
-        let varargs_idx = if sig.has_varargs { Some(sig.params.len() - 1) } else { None };
+        let varargs_idx = if sig.has_varargs {
+            Some(sig.params.len() - 1)
+        } else {
+            None
+        };
         let mut arg_codes: Vec<String> = Vec::with_capacity(sig.params.len());
 
         // Args posicionales hasta el varargs (si hay).
-        let positional_count = if let Some(i) = varargs_idx { i } else { sig.params.len() };
+        let positional_count = if let Some(i) = varargs_idx {
+            i
+        } else {
+            sig.params.len()
+        };
         for (i, expected) in sig.params.iter().enumerate().take(positional_count) {
             if i < args.len() {
                 let (code, ty) = self.gen_expr(&args[i])?;
@@ -8383,10 +8751,13 @@ where
             } else {
                 // Fill con default.
                 let default_expr = sig.defaults[i].as_ref().ok_or_else(|| {
-                    self.err_at(call_span, format!(
+                    self.err_at(
+                        call_span,
+                        format!(
                         "`{}`: el parámetro {} no tiene default y no fue provisto (bug interno)",
                         callee_expr, i + 1,
-                    ))
+                    ),
+                    )
                 })?;
                 let (code, ty) = self.gen_expr(default_expr)?;
                 arg_codes.push(coerce(&code, &ty, &sig.params[i], self.env));
@@ -8453,11 +8824,14 @@ where
             Type::Map(k, v) if matches!(k.as_ref(), Type::Str) && matches!(v.as_ref(), Type::Str)
         );
         if !payload_ok {
-            return Err(self.err_at(args[0].span(), format!(
+            return Err(self.err_at(
+                args[0].span(),
+                format!(
                 "`jwt.encode` en `fitz build` MVP: el payload debe ser `Map<Str, Str>` strict. \
                  Heterogéneos (`Map<Str, Any>`) son deuda post-MVP. Recibió `{}`.",
                 payload_ty.display(self.env)
-            )));
+            ),
+            ));
         }
         let (secret_code, secret_ty) = self.gen_expr(&args[1])?;
         let secret_c = coerce(&secret_code, &secret_ty, &Type::Str, self.env);
@@ -8500,10 +8874,7 @@ where
             "None".to_string()
         };
         Ok((
-            format!(
-                "__fitz_jwt_decode({}, {}, {})",
-                token_c, secret_c, alg_code
-            ),
+            format!("__fitz_jwt_decode({}, {}, {})", token_c, secret_c, alg_code),
             Type::Result {
                 ok: Box::new(Type::Map(Box::new(Type::Str), Box::new(Type::Str))),
                 err: Box::new(Type::Str),
@@ -8517,17 +8888,17 @@ where
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         if args.len() != 1 {
-            return Err(self.err_at(call_span, format!(
-                "`hash.password` espera 1 argumento (plain: Str), recibió {}",
-                args.len()
-            )));
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`hash.password` espera 1 argumento (plain: Str), recibió {}",
+                    args.len()
+                ),
+            ));
         }
         let (code, ty) = self.gen_expr(&args[0])?;
         let coerced = coerce(&code, &ty, &Type::Str, self.env);
-        Ok((
-            format!("__fitz_hash_password({})", coerced),
-            Type::Str,
-        ))
+        Ok((format!("__fitz_hash_password({})", coerced), Type::Str))
     }
 
     fn gen_auth_hash_verify(
@@ -8536,10 +8907,13 @@ where
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         if args.len() != 2 {
-            return Err(self.err_at(call_span, format!(
-                "`hash.verify` espera 2 argumentos (plain: Str, hashed: Str), recibió {}",
-                args.len()
-            )));
+            return Err(self.err_at(
+                call_span,
+                format!(
+                    "`hash.verify` espera 2 argumentos (plain: Str, hashed: Str), recibió {}",
+                    args.len()
+                ),
+            ));
         }
         let (plain_code, plain_ty) = self.gen_expr(&args[0])?;
         let plain_c = coerce(&plain_code, &plain_ty, &Type::Str, self.env);
@@ -8570,7 +8944,8 @@ where
                 match method {
                     "recv" => {
                         if !args.is_empty() {
-                            return Err(self.err_at(call_span,
+                            return Err(self.err_at(
+                                call_span,
                                 format!("`WsConn.recv()` no acepta args, recibió {}", args.len()),
                             ));
                         }
@@ -8584,10 +8959,14 @@ where
                     }
                     "send" | "broadcast" => {
                         if args.len() != 1 {
-                            return Err(self.err_at(call_span, format!(
-                                "`WsConn.{}(msg)` espera 1 arg, recibió {}",
-                                method, args.len()
-                            )));
+                            return Err(self.err_at(
+                                call_span,
+                                format!(
+                                    "`WsConn.{}(msg)` espera 1 arg, recibió {}",
+                                    method,
+                                    args.len()
+                                ),
+                            ));
                         }
                         let (msg_code, msg_ty) = self.gen_expr(&args[0])?;
                         let coerced = coerce(&msg_code, &msg_ty, inner_t, self.env);
@@ -8601,14 +8980,12 @@ where
                     }
                     "close" => {
                         if !args.is_empty() {
-                            return Err(self.err_at(call_span,
+                            return Err(self.err_at(
+                                call_span,
                                 format!("`WsConn.close()` no acepta args, recibió {}", args.len()),
                             ));
                         }
-                        return Ok((
-                            format!("({{ ({}).close(); () }})", obj_code),
-                            Type::Null,
-                        ));
+                        return Ok((format!("({{ ({}).close(); () }})", obj_code), Type::Null));
                     }
                     _ => {
                         return Err(self.err_at(call_span, format!(
@@ -8644,7 +9021,13 @@ where
         // antes que el bloque general de Range que materializa a
         // `Vec<i64>` para enumerate/zip/chain.
         if method == "step_by" {
-            if let Expr::Range { start, end, inclusive, .. } = object {
+            if let Expr::Range {
+                start,
+                end,
+                inclusive,
+                ..
+            } = object
+            {
                 check_method_arity(method, args, 1)?;
                 let (start_code, start_ty) = self.gen_expr(start)?;
                 let (end_code, end_ty) = self.gen_expr(end)?;
@@ -8672,7 +9055,13 @@ where
         // método podemos materializarlo inline a un `Vec<i64>` y dejar
         // que el resto del dispatch lo trate como `List<Int>`. Habilita
         // el patrón canónico `for (i, n) in (0..10).enumerate()`.
-        let (obj_code, obj_ty) = if let Expr::Range { start, end, inclusive, .. } = object {
+        let (obj_code, obj_ty) = if let Expr::Range {
+            start,
+            end,
+            inclusive,
+            ..
+        } = object
+        {
             let (start_code, start_ty) = self.gen_expr(start)?;
             let (end_code, end_ty) = self.gen_expr(end)?;
             let start_c = coerce(&start_code, &start_ty, &Type::Int, self.env);
@@ -8707,7 +9096,13 @@ where
                 name = rust_str_literal(method),
                 args = args_code,
             );
-            return Ok((code, Type::Result { ok: Box::new(Type::PyAny), err: Box::new(Type::Str) }));
+            return Ok((
+                code,
+                Type::Result {
+                    ok: Box::new(Type::PyAny),
+                    err: Box::new(Type::Str),
+                },
+            ));
         }
         match (&obj_ty, method) {
             // ---- F13.D — methods universales sobre cualquier tipo
@@ -10301,11 +10696,12 @@ where
                     type_name, method.name, p.name
                 ))
             })?;
-            let pty = crate::types::resolve_type_expr(pty_expr, self.env)
-                .map_err(|e| self.err(format!(
+            let pty = crate::types::resolve_type_expr(pty_expr, self.env).map_err(|e| {
+                self.err(format!(
                     "método `{}.{}`: tipo del parámetro `{}` no resoluble: {:?}",
                     type_name, method.name, p.name, e
-                )))?;
+                ))
+            })?;
             rust_params.push(format!("{}: {}", p.name, rust_type_for(&pty, self.env)?));
             param_types.push(pty);
         }
@@ -10315,11 +10711,12 @@ where
                 type_name, method.name
             ))
         })?;
-        let ret_ty = crate::types::resolve_type_expr(ret_ty_expr, self.env)
-            .map_err(|e| self.err(format!(
+        let ret_ty = crate::types::resolve_type_expr(ret_ty_expr, self.env).map_err(|e| {
+            self.err(format!(
                 "método `{}.{}`: tipo de retorno no resoluble: {:?}",
                 type_name, method.name, e
-            )))?;
+            ))
+        })?;
         // Para async methods, el ret type declarado por el usuario es
         // `T`, pero el `pub async fn` Rust auto-envuelve en
         // `impl Future<Output = T>`. El interior del body sigue
@@ -10393,25 +10790,25 @@ where
             method.params.iter().map(|p| p.name.as_str()).collect();
         self.push_scope();
         if !method.is_static {
-        for f in &sig.fields {
-            if param_names.contains(f.name.as_str()) {
-                continue;
+            for f in &sig.fields {
+                if param_names.contains(f.name.as_str()) {
+                    continue;
+                }
+                let rty = rust_type_for(&f.type_, self.env)?;
+                writeln!(
+                    &mut self.output,
+                    "        let mut {name}: {rty} = self.{name}.clone();",
+                    name = f.name,
+                    rty = rty
+                )
+                .unwrap();
+                // Suppress unused-var warnings cuando el método no usa el field.
+                writeln!(&mut self.output, "        let _ = &{};", f.name).unwrap();
+                self.declare_var(f.name.clone(), f.type_.clone());
             }
-            let rty = rust_type_for(&f.type_, self.env)?;
-            writeln!(
-                &mut self.output,
-                "        let mut {name}: {rty} = self.{name}.clone();",
-                name = f.name,
-                rty = rty
-            )
-            .unwrap();
-            // Suppress unused-var warnings cuando el método no usa el field.
-            writeln!(&mut self.output, "        let _ = &{};", f.name).unwrap();
-            self.declare_var(f.name.clone(), f.type_.clone());
-        }
         } // cierre de `if !method.is_static`
-        // Registrar params en el scope del codegen (sobreescriben
-        // homónimos por el `declare_var`).
+          // Registrar params en el scope del codegen (sobreescriben
+          // homónimos por el `declare_var`).
         for (p, pty) in method.params.iter().zip(param_types.iter()) {
             self.declare_var(p.name.clone(), pty.clone());
         }
@@ -10465,19 +10862,33 @@ where
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         // Fp — aridad con defaults para métodos estáticos.
-        let required = method_def.params.iter().filter(|p| p.default.is_none()).count();
+        let required = method_def
+            .params
+            .iter()
+            .filter(|p| p.default.is_none())
+            .count();
         if args.len() < required || args.len() > method_def.params.len() {
-            return Err(self.err_at(call_span, if required == method_def.params.len() {
-                format!(
-                    "el método estático `{}.{}` espera {} argumento(s), recibió {}",
-                    type_name, method_def.name, method_def.params.len(), args.len(),
-                )
-            } else {
-                format!(
-                    "el método estático `{}.{}` espera entre {} y {} argumento(s), recibió {}",
-                    type_name, method_def.name, required, method_def.params.len(), args.len(),
-                )
-            }));
+            return Err(self.err_at(
+                call_span,
+                if required == method_def.params.len() {
+                    format!(
+                        "el método estático `{}.{}` espera {} argumento(s), recibió {}",
+                        type_name,
+                        method_def.name,
+                        method_def.params.len(),
+                        args.len(),
+                    )
+                } else {
+                    format!(
+                        "el método estático `{}.{}` espera entre {} y {} argumento(s), recibió {}",
+                        type_name,
+                        method_def.name,
+                        required,
+                        method_def.params.len(),
+                        args.len(),
+                    )
+                },
+            ));
         }
 
         let mut arg_codes: Vec<String> = Vec::with_capacity(method_def.params.len());
@@ -10532,20 +10943,32 @@ where
         call_span: crate::ast::Span,
     ) -> Result<(String, Type), FitzError> {
         let _ = type_name; // disponible para mensajes de error futuros
-        // Fp — aridad con defaults para custom methods.
-        let required = method_def.params.iter().filter(|p| p.default.is_none()).count();
+                           // Fp — aridad con defaults para custom methods.
+        let required = method_def
+            .params
+            .iter()
+            .filter(|p| p.default.is_none())
+            .count();
         if args.len() < required || args.len() > method_def.params.len() {
-            return Err(self.err_at(call_span, if required == method_def.params.len() {
-                format!(
-                    "el método `.{}()` espera {} argumento(s), recibió {}",
-                    method_def.name, method_def.params.len(), args.len(),
-                )
-            } else {
-                format!(
-                    "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
-                    method_def.name, required, method_def.params.len(), args.len(),
-                )
-            }));
+            return Err(self.err_at(
+                call_span,
+                if required == method_def.params.len() {
+                    format!(
+                        "el método `.{}()` espera {} argumento(s), recibió {}",
+                        method_def.name,
+                        method_def.params.len(),
+                        args.len(),
+                    )
+                } else {
+                    format!(
+                        "el método `.{}()` espera entre {} y {} argumento(s), recibió {}",
+                        method_def.name,
+                        required,
+                        method_def.params.len(),
+                        args.len(),
+                    )
+                },
+            ));
         }
 
         // Resolver tipos de params y return (con anotaciones del MethodDef).
@@ -10656,8 +11079,7 @@ where
         args: &[Expr],
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("map", args, 1)?;
-        let (callback_code, ret_ty) =
-            self.gen_callback_inline(&args[0], elem_ty, None, "map")?;
+        let (callback_code, ret_ty) = self.gen_callback_inline(&args[0], elem_ty, None, "map")?;
         let code = format!(
             "{{ \
                 let __items: Vec<_> = ({}).lock().unwrap().clone(); \
@@ -10725,7 +11147,13 @@ where
             }}",
             obj_code, callback_code, elem_rs
         );
-        Ok((code, Type::Result { ok: Box::new(elem_ty.clone()), err: Box::new(Type::Str) }))
+        Ok((
+            code,
+            Type::Result {
+                ok: Box::new(elem_ty.clone()),
+                err: Box::new(Type::Str),
+            },
+        ))
     }
 
     /// S.3 — `xs.sort()` IN-PLACE. Soporta `List<T>` para T en
@@ -10746,16 +11174,16 @@ where
             Type::Int | Type::Str | Type::Bool => "a.cmp(b)".to_string(),
             Type::Float => "a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)".to_string(),
             other => {
-                return Err(self.err_at(call_span, format!(
-                    "`.sort()` no soporta `List<{}>` en `fitz build` (hoy: Int/Float/Str/Bool)",
-                    display_type(other, self.env),
-                )));
+                return Err(self.err_at(
+                    call_span,
+                    format!(
+                        "`.sort()` no soporta `List<{}>` en `fitz build` (hoy: Int/Float/Str/Bool)",
+                        display_type(other, self.env),
+                    ),
+                ));
             }
         };
-        let code = format!(
-            "({}).lock().unwrap().sort_by(|a, b| {})",
-            obj_code, cmp
-        );
+        let code = format!("({}).lock().unwrap().sort_by(|a, b| {})", obj_code, cmp);
         Ok((code, Type::Null))
     }
 
@@ -10816,7 +11244,13 @@ where
             }}",
             obj_code, coerced_key, val_rs, key_show
         );
-        Ok((code, Type::Result { ok: Box::new(val_ty.clone()), err: Box::new(Type::Str) }))
+        Ok((
+            code,
+            Type::Result {
+                ok: Box::new(val_ty.clone()),
+                err: Box::new(Type::Str),
+            },
+        ))
     }
 
     /// `m.has(k)` → búsqueda lineal por igualdad → bool.
@@ -10867,27 +11301,38 @@ where
         if let Expr::Ident(name, _) = arg {
             if let Some((sig_params, sig_ret)) = self.resolve_named_callback(name) {
                 if sig_params.len() != 1 {
-                    return Err(self.err_at(arg_span, format!(
-                        "el callback de `.{}` toma 1 parámetro, la fn `{}` declara {}",
-                        method, name, sig_params.len(),
-                    )));
+                    return Err(self.err_at(
+                        arg_span,
+                        format!(
+                            "el callback de `.{}` toma 1 parámetro, la fn `{}` declara {}",
+                            method,
+                            name,
+                            sig_params.len(),
+                        ),
+                    ));
                 }
                 if !is_compatible(param_ty, &sig_params[0]) {
-                    return Err(self.err_at(arg_span, format!(
-                        "el callback `{}` espera `{}`, pero el elemento es `{}`",
-                        name,
-                        display_type(&sig_params[0], self.env),
-                        display_type(param_ty, self.env),
-                    )));
+                    return Err(self.err_at(
+                        arg_span,
+                        format!(
+                            "el callback `{}` espera `{}`, pero el elemento es `{}`",
+                            name,
+                            display_type(&sig_params[0], self.env),
+                            display_type(param_ty, self.env),
+                        ),
+                    ));
                 }
                 if let Some(want) = expected_ret_ty {
                     if !is_compatible(&sig_ret, want) {
-                        return Err(self.err_at(arg_span, format!(
-                            "el callback `{}` debe retornar `{}`, retorna `{}`",
-                            name,
-                            display_type(want, self.env),
-                            display_type(&sig_ret, self.env),
-                        )));
+                        return Err(self.err_at(
+                            arg_span,
+                            format!(
+                                "el callback `{}` debe retornar `{}`, retorna `{}`",
+                                name,
+                                display_type(want, self.env),
+                                display_type(&sig_ret, self.env),
+                            ),
+                        ));
                     }
                 }
                 return Ok((name.clone(), sig_ret));
@@ -10896,26 +11341,34 @@ where
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),
             _ => {
-                return Err(self.err_at(arg_span, format!(
-                    "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}` \
+                return Err(self.err_at(
+                    arg_span,
+                    format!(
+                        "`.{}(...)` exige un callback inline `fn(x) => ...` o `fn(x) {{ ... }}` \
                      o el nombre de una fn top-level (`fn(...) -> ...`).",
-                    method
-                )));
+                        method
+                    ),
+                ));
             }
         };
         if params.len() != 1 {
-            return Err(self.err_at(arg_span, format!(
-                "el callback de `.{}` toma 1 parámetro, recibió {}",
-                method,
-                params.len()
-            )));
+            return Err(self.err_at(
+                arg_span,
+                format!(
+                    "el callback de `.{}` toma 1 parámetro, recibió {}",
+                    method,
+                    params.len()
+                ),
+            ));
         }
         let param_name = params[0].name.clone();
 
         // Inferimos el ret type en dry-run sobre el primer Stmt::Return
         // del body, o el último Stmt::Expr no-print, o Null.
         let inferred_ret = self.infer_callback_ret_silently(body, &param_name, param_ty)?;
-        let ret_ty = expected_ret_ty.cloned().unwrap_or_else(|| inferred_ret.clone());
+        let ret_ty = expected_ret_ty
+            .cloned()
+            .unwrap_or_else(|| inferred_ret.clone());
 
         let param_ty_rs = rust_type_for(param_ty, self.env)?;
         let ret_ty_rs = rust_type_for(&ret_ty, self.env)?;
@@ -10981,9 +11434,7 @@ where
             "filter" => Type::Bool, // Map.filter
             _ => Type::Any,
         };
-        self.gen_binary_callback_inline_with_ret(
-            arg, param0_ty, param1_ty, &expected_ret, method,
-        )
+        self.gen_binary_callback_inline_with_ret(arg, param0_ty, param1_ty, &expected_ret, method)
     }
 
     /// Mini-tanda Mb3 — versión explícita: el caller pasa el
@@ -11005,34 +11456,48 @@ where
         if let Expr::Ident(name, _) = arg {
             if let Some((sig_params, sig_ret)) = self.resolve_named_callback(name) {
                 if sig_params.len() != 2 {
-                    return Err(self.err_at(arg_span, format!(
-                        "el callback de `.{}` toma 2 parámetros, la fn `{}` declara {}",
-                        method, name, sig_params.len(),
-                    )));
+                    return Err(self.err_at(
+                        arg_span,
+                        format!(
+                            "el callback de `.{}` toma 2 parámetros, la fn `{}` declara {}",
+                            method,
+                            name,
+                            sig_params.len(),
+                        ),
+                    ));
                 }
                 if !is_compatible(param0_ty, &sig_params[0]) {
-                    return Err(self.err_at(arg_span, format!(
-                        "el callback `{}` espera `{}` en el param[0], recibe `{}`",
-                        name,
-                        display_type(&sig_params[0], self.env),
-                        display_type(param0_ty, self.env),
-                    )));
+                    return Err(self.err_at(
+                        arg_span,
+                        format!(
+                            "el callback `{}` espera `{}` en el param[0], recibe `{}`",
+                            name,
+                            display_type(&sig_params[0], self.env),
+                            display_type(param0_ty, self.env),
+                        ),
+                    ));
                 }
                 if !is_compatible(param1_ty, &sig_params[1]) {
-                    return Err(self.err_at(arg_span, format!(
-                        "el callback `{}` espera `{}` en el param[1], recibe `{}`",
-                        name,
-                        display_type(&sig_params[1], self.env),
-                        display_type(param1_ty, self.env),
-                    )));
+                    return Err(self.err_at(
+                        arg_span,
+                        format!(
+                            "el callback `{}` espera `{}` en el param[1], recibe `{}`",
+                            name,
+                            display_type(&sig_params[1], self.env),
+                            display_type(param1_ty, self.env),
+                        ),
+                    ));
                 }
                 if !is_compatible(&sig_ret, &expected_ret) {
-                    return Err(self.err_at(arg_span, format!(
-                        "el callback `{}` debe retornar `{}`, retorna `{}`",
-                        name,
-                        display_type(&expected_ret, self.env),
-                        display_type(&sig_ret, self.env),
-                    )));
+                    return Err(self.err_at(
+                        arg_span,
+                        format!(
+                            "el callback `{}` debe retornar `{}`, retorna `{}`",
+                            name,
+                            display_type(&expected_ret, self.env),
+                            display_type(&sig_ret, self.env),
+                        ),
+                    ));
                 }
                 return Ok(name.clone());
             }
@@ -11040,19 +11505,25 @@ where
         let (params, body) = match arg {
             Expr::FnExpr { params, body, .. } => (params, body),
             _ => {
-                return Err(self.err_at(arg_span, format!(
+                return Err(self.err_at(
+                    arg_span,
+                    format!(
                     "`.{}(...)` exige un callback inline `fn(a, b) => ...` o `fn(a, b) {{ ... }}` \
                      o el nombre de una fn top-level (`fn(...) -> ...`).",
                     method
-                )));
+                ),
+                ));
             }
         };
         if params.len() != 2 {
-            return Err(self.err_at(arg_span, format!(
-                "el callback de `.{}` toma 2 parámetros, recibió {}",
-                method,
-                params.len()
-            )));
+            return Err(self.err_at(
+                arg_span,
+                format!(
+                    "el callback de `.{}` toma 2 parámetros, recibió {}",
+                    method,
+                    params.len()
+                ),
+            ));
         }
         let p0_name = params[0].name.clone();
         let p1_name = params[1].name.clone();
@@ -11126,17 +11597,20 @@ where
         let mut param_types: Vec<Type> = Vec::with_capacity(params.len());
         for p in params {
             let Some(te) = p.type_.as_ref() else {
-                return Err(self.err_at(fn_span, format!(
-                    "función anónima `fn({})`: el parámetro `{}` necesita una anotación de \
+                return Err(self.err_at(
+                    fn_span,
+                    format!(
+                        "función anónima `fn({})`: el parámetro `{}` necesita una anotación de \
                      tipo en el subset compilable (deuda 5b.1). Anotalo o usá `fitz run`.",
-                    p.name, p.name
-                )));
+                        p.name, p.name
+                    ),
+                ));
             };
             let t = resolve_type_expr(te, self.env).map_err(|e| {
-                self.err_at(fn_span, format!(
-                    "función anónima: parámetro `{}`: {}",
-                    p.name, e.message
-                ))
+                self.err_at(
+                    fn_span,
+                    format!("función anónima: parámetro `{}`: {}", p.name, e.message),
+                )
             })?;
             param_types.push(t);
         }
@@ -11211,9 +11685,7 @@ where
             // Rust requiere que el body del closure esté entre `{}`
             // cuando hay return type explícito. Por eso envolvemos:
             // `|...| -> Pin<...> { Box::pin(async move { ... }) }`.
-            let body_wrapped = format!(
-                "{{ Box::pin(async move {{ {body_str} }}) }}"
-            );
+            let body_wrapped = format!("{{ Box::pin(async move {{ {body_str} }}) }}");
             (pinned, body_wrapped, Type::Future(Box::new(ret_ty.clone())))
         } else {
             (
@@ -11227,7 +11699,11 @@ where
                 .iter()
                 .map(|p| rust_type_for(p, self.env))
                 .collect::<Result<_, _>>()?;
-            format!("Arc<dyn Fn({}) -> {} + Send + Sync>", ps.join(", "), closure_ret_ty_rs)
+            format!(
+                "Arc<dyn Fn({}) -> {} + Send + Sync>",
+                ps.join(", "),
+                closure_ret_ty_rs
+            )
         };
 
         // Si hay capturas no-Copy, emitimos un bloque que cline las
@@ -11242,11 +11718,13 @@ where
             }
         }
 
-        let closure = format!(
-            "|{params_sig}| -> {closure_ret_ty_rs} {closure_body}",
-        );
+        let closure = format!("|{params_sig}| -> {closure_ret_ty_rs} {closure_body}",);
         let code = if clones.is_empty() {
-            format!("(Arc::new(move {closure}) as {cast_target})", closure = closure, cast_target = cast_target)
+            format!(
+                "(Arc::new(move {closure}) as {cast_target})",
+                closure = closure,
+                cast_target = cast_target
+            )
         } else {
             format!(
                 "{{ {clones}Arc::new(move {closure}) as {cast_target} }}",
@@ -11278,14 +11756,22 @@ where
     ) -> Result<Type, FitzError> {
         let target: Option<&Expr> = body
             .iter()
-            .find_map(|s| if let Stmt::Return(e, _) = s { Some(e) } else { None })
+            .find_map(|s| {
+                if let Stmt::Return(e, _) = s {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
             .or_else(|| {
                 body.last().and_then(|s| match s {
                     Stmt::Expr(e, _) if !is_print_call(e) => Some(e),
                     _ => None,
                 })
             });
-        let Some(e) = target else { return Ok(Type::Null) };
+        let Some(e) = target else {
+            return Ok(Type::Null);
+        };
 
         self.push_scope();
         for (p, t) in params.iter().zip(param_types.iter()) {
@@ -11312,14 +11798,22 @@ where
     ) -> Result<Type, FitzError> {
         let target: Option<&Expr> = body
             .iter()
-            .find_map(|s| if let Stmt::Return(e, _) = s { Some(e) } else { None })
+            .find_map(|s| {
+                if let Stmt::Return(e, _) = s {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
             .or_else(|| {
                 body.last().and_then(|s| match s {
                     Stmt::Expr(e, _) if !is_print_call(e) => Some(e),
                     _ => None,
                 })
             });
-        let Some(e) = target else { return Ok(Type::Null) };
+        let Some(e) = target else {
+            return Ok(Type::Null);
+        };
 
         self.push_scope();
         self.declare_var(param_name.to_string(), param_ty.clone());
@@ -11345,7 +11839,13 @@ where
         }
         let target: Option<&Expr> = body
             .iter()
-            .find_map(|s| if let Stmt::Return(e, _) = s { Some(e) } else { None })
+            .find_map(|s| {
+                if let Stmt::Return(e, _) = s {
+                    Some(e)
+                } else {
+                    None
+                }
+            })
             .or_else(|| {
                 body.last().and_then(|s| match s {
                     Stmt::Expr(e, _) if !is_print_call(e) => Some(e),
@@ -11370,7 +11870,13 @@ where
     /// type / brazo del match opuesto).
     fn gen_ok(&mut self, inner: &Expr) -> Result<(String, Type), FitzError> {
         let (code, ty) = self.gen_expr(inner)?;
-        Ok((format!("Ok({})", code), Type::Result { ok: Box::new(ty), err: Box::new(Type::Str) }))
+        Ok((
+            format!("Ok({})", code),
+            Type::Result {
+                ok: Box::new(ty),
+                err: Box::new(Type::Str),
+            },
+        ))
     }
 
     /// `Err(e)` → `Err(<e como String>)`. El Err side está pinned a String
@@ -11434,10 +11940,13 @@ where
             // camino no se ejerce mucho.)
             Type::Any => Type::Any,
             other => {
-                return Err(self.err_at(inner_span, format!(
-                    "operador `?` sobre `{}`: el operando debe ser `Result<T>`",
-                    display_type(other, self.env)
-                )));
+                return Err(self.err_at(
+                    inner_span,
+                    format!(
+                        "operador `?` sobre `{}`: el operando debe ser `Result<T>`",
+                        display_type(other, self.env)
+                    ),
+                ));
             }
         };
         let ret = self.ret_stack.last().cloned().unwrap_or(Type::Null);
@@ -11445,7 +11954,8 @@ where
             Type::Result { .. } => {}
             Type::Any => {}
             _ => {
-                return Err(self.err_at(inner_span,
+                return Err(self.err_at(
+                    inner_span,
                     "operador `?` solo puede usarse adentro de una función que retorne \
                      `Result<...>`",
                 ));
@@ -11496,7 +12006,8 @@ where
 
         for arm in arms {
             self.push_scope();
-            let (pat_code, inner_guard) = self.gen_pattern(&arm.pattern, &scrut_ty, &inner_ok_ty)?;
+            let (pat_code, inner_guard) =
+                self.gen_pattern(&arm.pattern, &scrut_ty, &inner_ok_ty)?;
             if matches!(&arm.pattern, crate::ast::Pattern::Or(_)) {
                 has_or_arm = true;
             }
@@ -11507,12 +12018,7 @@ where
             if arm.guard.is_some() {
                 has_or_arm = true; // reuso el flag "forzar catch-all"
             } else {
-                update_arm_coverage(
-                    &arm.pattern,
-                    &mut has_catch_all,
-                    &mut has_ok,
-                    &mut has_err,
-                );
+                update_arm_coverage(&arm.pattern, &mut has_catch_all, &mut has_ok, &mut has_err);
             }
             // R.2.2 — el guard explícito del arm se gen-expr-ea en el
             // scope con los bindings del pattern visibles.
@@ -11613,12 +12119,9 @@ where
         // rustc acepte el match. Casos exhaustivos sin agregar nada:
         //   - hay un Ident/Wildcard arm;
         //   - el scrutinee es Result<T> y tenemos al menos un Ok y un Err.
-        let result_exhaustive =
-            inner_ok_ty.is_some() && has_ok && has_err;
+        let result_exhaustive = inner_ok_ty.is_some() && has_ok && has_err;
         if !has_catch_all && (!result_exhaustive || has_or_arm) {
-            arm_pieces.push(
-                "_ => panic!(\"el `match` no matcheó ningún brazo\")".to_string(),
-            );
+            arm_pieces.push("_ => panic!(\"el `match` no matcheó ningún brazo\")".to_string());
         }
 
         // Tipo de salida: lub de los arms; si fallan a unificar, Any.
@@ -11632,11 +12135,7 @@ where
             acc
         };
 
-        let code = format!(
-            "(match {} {{ {} }})",
-            scrut_code,
-            arm_pieces.join(", ")
-        );
+        let code = format!("(match {} {{ {} }})", scrut_code, arm_pieces.join(", "));
         Ok((code, result_ty))
     }
 
@@ -11701,14 +12200,21 @@ where
             }
             Pattern::OkWildcard => Ok(("Ok(_)".to_string(), None)),
             Pattern::ErrWildcard => Ok(("Err(_)".to_string(), None)),
-            Pattern::Range { start, end, inclusive } => {
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 // Mini-tanda Rt — counter para nombre único.
                 let op = if *inclusive { "..=" } else { ".." };
                 let id = self.pattern_slot_counter;
                 self.pattern_slot_counter += 1;
                 Ok((
                     format!("__n_{}", id),
-                    Some(format!("({}i64{}{}i64).contains(&__n_{})", start, op, end, id)),
+                    Some(format!(
+                        "({}i64{}{}i64).contains(&__n_{})",
+                        start, op, end, id
+                    )),
                 ))
             }
             Pattern::Or(subs) => {
@@ -11833,7 +12339,11 @@ where
     /// como en el checker (5.3.1): primer elemento define el tipo, los
     /// demás deben unificar via `lub` (Int↔Float, T↔Null). Mezcla
     /// irrecuperable o lista vacía sin contexto → error claro.
-    fn gen_list_lit(&mut self, items: &[Expr], _list_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
+    fn gen_list_lit(
+        &mut self,
+        items: &[Expr],
+        _list_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
         if items.is_empty() {
             // Lista vacía: no podemos sintetizar T. Emitimos un código
             // genérico `Vec::new()` y devolvemos `List<Any>`. El
@@ -11883,20 +12393,14 @@ where
                 .iter()
                 .map(|(c, t)| wrap_as_fitz_value_with_env(c, t, env))
                 .collect::<Result<Vec<_>, FitzError>>()?;
-            let code = format!(
-                "Arc::new(Mutex::new(vec![{}]))",
-                wrapped.join(", ")
-            );
+            let code = format!("Arc::new(Mutex::new(vec![{}]))", wrapped.join(", "));
             return Ok((code, Type::List(Box::new(Type::Any))));
         }
         let coerced: Vec<String> = item_codes_tys
             .iter()
             .map(|(c, t)| coerce(c, t, &common_ty, self.env))
             .collect();
-        let code = format!(
-            "Arc::new(Mutex::new(vec![{}]))",
-            coerced.join(", ")
-        );
+        let code = format!("Arc::new(Mutex::new(vec![{}]))", coerced.join(", "));
         Ok((code, Type::List(Box::new(common_ty))))
     }
 
@@ -11927,10 +12431,13 @@ where
             let (fc, ft) = self.gen_expr(f)?;
             if !matches!(ft, Type::Bool) {
                 self.pop_scope();
-                return Err(self.err_at(f.span(), format!(
-                    "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
-                    display_type(&ft, self.env)
-                )));
+                return Err(self.err_at(
+                    f.span(),
+                    format!(
+                        "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                        display_type(&ft, self.env)
+                    ),
+                ));
             }
             Some(fc)
         } else {
@@ -11986,10 +12493,13 @@ where
             let (fc, ft) = self.gen_expr(f)?;
             if !matches!(ft, Type::Bool) {
                 self.pop_scope();
-                return Err(self.err_at(f.span(), format!(
-                    "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
-                    display_type(&ft, self.env)
-                )));
+                return Err(self.err_at(
+                    f.span(),
+                    format!(
+                        "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
+                        display_type(&ft, self.env)
+                    ),
+                ));
             }
             Some(fc)
         } else {
@@ -12040,23 +12550,29 @@ where
         iter: &Expr,
     ) -> Result<String, FitzError> {
         // Resolver el iter: Range o List<T>.
-        let (iter_code, elem_ty) = if let Expr::Range { start, end, inclusive, .. } = iter {
+        let (iter_code, elem_ty) = if let Expr::Range {
+            start,
+            end,
+            inclusive,
+            ..
+        } = iter
+        {
             let (s_code, _) = self.gen_expr(start)?;
             let (e_code, _) = self.gen_expr(end)?;
             let op = if *inclusive { "..=" } else { ".." };
-            (
-                format!("({s_code} as i64){op}({e_code} as i64)"),
-                Type::Int,
-            )
+            (format!("({s_code} as i64){op}({e_code} as i64)"), Type::Int)
         } else {
             let (ic, it_ty) = self.gen_expr(iter)?;
             let elem_ty = match &it_ty {
                 Type::List(inner) => (**inner).clone(),
                 other => {
-                    return Err(self.err_at(iter.span(), format!(
+                    return Err(self.err_at(
+                        iter.span(),
+                        format!(
                         "comprehension necesita un iterable (`Range` o `List<T>`), recibió `{}`",
                         display_type(other, self.env)
-                    )));
+                    ),
+                    ));
                 }
             };
             if matches!(elem_ty, Type::Any) {
@@ -12107,7 +12623,11 @@ where
     /// (mismas reglas que List). Para `m["k"]` (Index) y `m.get(k)` la
     /// búsqueda es lineal O(n), pero matchea exactamente lo que hace
     /// el intérprete.
-    fn gen_map_lit(&mut self, pairs: &[(Expr, Expr)], map_span: crate::ast::Span) -> Result<(String, Type), FitzError> {
+    fn gen_map_lit(
+        &mut self,
+        pairs: &[(Expr, Expr)],
+        map_span: crate::ast::Span,
+    ) -> Result<(String, Type), FitzError> {
         if pairs.is_empty() {
             return Ok((
                 "Arc::new(Mutex::new(Vec::new()))".to_string(),
@@ -12166,10 +12686,7 @@ where
                     Ok::<_, FitzError>(format!("({}, {})", k_wrap, v_wrap))
                 })
                 .collect::<Result<Vec<_>, _>>()?;
-            let code = format!(
-                "Arc::new(Mutex::new(vec![{}]))",
-                pieces.join(", ")
-            );
+            let code = format!("Arc::new(Mutex::new(vec![{}]))", pieces.join(", "));
             return Ok((
                 code,
                 // El tipo resultante es Map<Any, Any> sintáctico, que
@@ -12187,10 +12704,7 @@ where
                 )
             })
             .collect();
-        let code = format!(
-            "Arc::new(Mutex::new(vec![{}]))",
-            pieces.join(", ")
-        );
+        let code = format!("Arc::new(Mutex::new(vec![{}]))", pieces.join(", "));
         Ok((code, Type::Map(Box::new(common_k), Box::new(common_v))))
     }
 
@@ -12216,10 +12730,13 @@ where
         match &obj_ty {
             Type::List(inner) => {
                 if !matches!(idx_ty, Type::Int) {
-                    return Err(self.err_at(index.span(), format!(
-                        "indexing de lista con `{}`: el índice debe ser Int",
-                        display_type(&idx_ty, self.env)
-                    )));
+                    return Err(self.err_at(
+                        index.span(),
+                        format!(
+                            "indexing de lista con `{}`: el índice debe ser Int",
+                            display_type(&idx_ty, self.env)
+                        ),
+                    ));
                 }
                 // I.1 (mini-tanda I) — índices negativos: `xs[-1]`
                 // = último. Convertimos a `effective = len + i` si
@@ -12247,10 +12764,13 @@ where
             // tomar `.as_str()` para que no se dropee como temporary.
             Type::Str => {
                 if !matches!(idx_ty, Type::Int) {
-                    return Err(self.err_at(index.span(), format!(
-                        "indexing de Str con `{}`: el índice debe ser Int",
-                        display_type(&idx_ty, self.env)
-                    )));
+                    return Err(self.err_at(
+                        index.span(),
+                        format!(
+                            "indexing de Str con `{}`: el índice debe ser Int",
+                            display_type(&idx_ty, self.env)
+                        ),
+                    ));
                 }
                 let code = format!(
                     "{{ \
@@ -12290,10 +12810,13 @@ where
                 );
                 Ok((code, (**v_ty).clone()))
             }
-            other => Err(self.err_at(index_span, format!(
-                "indexing `[]` sobre `{}`: solo soportado en List<T> y Map<K, V>",
-                display_type(other, self.env)
-            ))),
+            other => Err(self.err_at(
+                index_span,
+                format!(
+                    "indexing `[]` sobre `{}`: solo soportado en List<T> y Map<K, V>",
+                    display_type(other, self.env)
+                ),
+            )),
         }
     }
 
@@ -12384,10 +12907,13 @@ where
                 );
                 Ok((code, Type::Str))
             }
-            other => Err(self.err_at(slice_span, format!(
-                "slicing `[..]` sobre `{}`: solo soportado en List<T> y Str",
-                display_type(other, self.env)
-            ))),
+            other => Err(self.err_at(
+                slice_span,
+                format!(
+                    "slicing `[..]` sobre `{}`: solo soportado en List<T> y Str",
+                    display_type(other, self.env)
+                ),
+            )),
         }
     }
 
@@ -12407,10 +12933,13 @@ where
         // este chequeo es defensa en profundidad.
         for (provided_name, _) in provided {
             if !sig.fields.iter().any(|f| &f.name == provided_name) {
-                return Err(self.err_at(struct_span, format!(
-                    "el tipo `{}` no tiene un campo llamado `{}`",
-                    type_name, provided_name
-                )));
+                return Err(self.err_at(
+                    struct_span,
+                    format!(
+                        "el tipo `{}` no tiene un campo llamado `{}`",
+                        type_name, provided_name
+                    ),
+                ));
             }
         }
 
@@ -12452,7 +12981,13 @@ where
                     // Usamos `item` (nombre dentro del módulo), no
                     // `type_name` (alias local). F15: prefix `crate::`
                     // cuando el codegen es de un módulo.
-                    format!("{}{}::__default_{}_{}()", self.mod_path_prefix(), mod_name, item, f.name)
+                    format!(
+                        "{}{}::__default_{}_{}()",
+                        self.mod_path_prefix(),
+                        mod_name,
+                        item,
+                        f.name
+                    )
                 } else {
                     let (code, ty) = self.gen_expr(default_expr)?;
                     coerce(&code, &ty, &f.type_, self.env)
@@ -12460,10 +12995,13 @@ where
             } else if matches!(f.type_, Type::Nullable(_)) {
                 "None".to_string()
             } else {
-                return Err(self.err_at(struct_span, format!(
+                return Err(self.err_at(
+                    struct_span,
+                    format!(
                     "falta el campo `{}` al instanciar `{}` (no tiene default y no es nullable)",
                     f.name, type_name
-                )));
+                ),
+                ));
             };
             field_codes.push(format!("{}: {}", f.name, value_code));
         }
@@ -12490,16 +13028,17 @@ where
         // porque `Ident("foo")` no está en `scopes` (los imports no
         // declaran var en el codegen), pero sí en `module_bindings`.
         if let Expr::Ident(ns, _) = object {
-            if let Some(ResolvedBinding::Namespace { .. }) =
-                self.module_bindings.get(ns).cloned()
-            {
+            if let Some(ResolvedBinding::Namespace { .. }) = self.module_bindings.get(ns).cloned() {
                 if let Some((code, ty)) = self.resolve_namespace_field(ns, field) {
                     return Ok((code, ty));
                 }
-                return Err(self.err_at(field_span, format!(
-                    "el módulo `{}` no exporta `{}` (ni fn ni constante)",
-                    ns, field
-                )));
+                return Err(self.err_at(
+                    field_span,
+                    format!(
+                        "el módulo `{}` no exporta `{}` (ni fn ni constante)",
+                        ns, field
+                    ),
+                ));
             }
         }
 
@@ -12520,11 +13059,14 @@ where
             ));
         }
         let Type::Nominal(id) = &obj_ty else {
-            return Err(self.err_at(object.span(), format!(
+            return Err(self.err_at(
+                object.span(),
+                format!(
                 "field access `.{}` sobre `{}`: solo se soporta sobre instancias de tipos custom",
                 field,
                 type_name(&obj_ty)
-            )));
+            ),
+            ));
         };
         let info_name = self.env.info(*id).name.clone();
         // Defensivo: el checker garantiza fields resueltos. Si llegamos
@@ -12536,10 +13078,13 @@ where
             ))
         })?;
         let Some(f) = declared.iter().find(|f| f.name == field) else {
-            return Err(self.err_at(field_span, format!(
-                "el tipo `{}` no tiene un campo llamado `{}`",
-                info_name, field
-            )));
+            return Err(self.err_at(
+                field_span,
+                format!(
+                    "el tipo `{}` no tiene un campo llamado `{}`",
+                    info_name, field
+                ),
+            ));
         };
         // F17.4b: emitimos el acceso como bloque con scope acotado.
         // Cada acceso bindea su propio Arc + guard en el bloque, así el
@@ -12587,9 +13132,7 @@ where
             None => (None, None),
         };
 
-        let want_value = else_stmts_opt.is_some()
-            && then_tail.is_some()
-            && else_tail.is_some();
+        let want_value = else_stmts_opt.is_some() && then_tail.is_some() && else_tail.is_some();
 
         if want_value {
             // Modo expresión: evaluamos los tails y unificamos.
@@ -12608,11 +13151,14 @@ where
                 (stmts, c, t)
             };
             let result_ty = lub(&then_tail_ty, &else_tail_ty).map_err(|_| {
-                self.err_at(if_span, format!(
-                    "ramas de `if` con tipos incompatibles: `{}` y `{}`",
-                    type_name(&then_tail_ty),
-                    type_name(&else_tail_ty)
-                ))
+                self.err_at(
+                    if_span,
+                    format!(
+                        "ramas de `if` con tipos incompatibles: `{}` y `{}`",
+                        type_name(&then_tail_ty),
+                        type_name(&else_tail_ty)
+                    ),
+                )
             })?;
             let then_tail_coerced = coerce(&then_tail_code, &then_tail_ty, &result_ty, self.env);
             let else_tail_coerced = coerce(&else_tail_code, &else_tail_ty, &result_ty, self.env);
@@ -12636,22 +13182,33 @@ where
                 self.push_scope();
                 let mut full = self.gen_block_to_string(&then_stmts)?;
                 if let Some(e) = then_tail {
-                    full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(e.clone(), crate::ast::Span::ZERO))?);
+                    full.push_str(
+                        &self.gen_stmt_to_string(&Stmt::Expr(e.clone(), crate::ast::Span::ZERO))?,
+                    );
                 }
                 self.pop_scope();
                 full
             };
-            let mut code = format!("if {} {{\n{}{}}}", cond_code, then_block, self.indent_str_outer());
+            let mut code = format!(
+                "if {} {{\n{}{}}}",
+                cond_code,
+                then_block,
+                self.indent_str_outer()
+            );
             if let Some(else_stmts) = else_stmts_opt {
-                let else_block = {
-                    self.push_scope();
-                    let mut full = self.gen_block_to_string(&else_stmts)?;
-                    if let Some(e) = else_tail {
-                        full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(e.clone(), crate::ast::Span::ZERO))?);
-                    }
-                    self.pop_scope();
-                    full
-                };
+                let else_block =
+                    {
+                        self.push_scope();
+                        let mut full = self.gen_block_to_string(&else_stmts)?;
+                        if let Some(e) = else_tail {
+                            full.push_str(&self.gen_stmt_to_string(&Stmt::Expr(
+                                e.clone(),
+                                crate::ast::Span::ZERO,
+                            ))?);
+                        }
+                        self.pop_scope();
+                        full
+                    };
                 write!(
                     &mut code,
                     " else {{\n{}{}}}",
@@ -12673,10 +13230,7 @@ where
     ///
     /// La indentación NO se gestiona acá — el caller decide si la
     /// modifica adentro de `f` y la restaura.
-    fn with_temp_output<R>(
-        &mut self,
-        f: impl FnOnce(&mut Self) -> R,
-    ) -> (String, R) {
+    fn with_temp_output<R>(&mut self, f: impl FnOnce(&mut Self) -> R) -> (String, R) {
         let saved = std::mem::take(&mut self.output);
         let result = f(self);
         let captured = std::mem::replace(&mut self.output, saved);
@@ -12750,12 +13304,7 @@ where
         let data_name = format!("{}Data", name);
 
         // impl __ToFitzJson for <Foo>Data
-        writeln!(
-            &mut self.output,
-            "impl __ToFitzJson for {} {{",
-            data_name
-        )
-        .unwrap();
+        writeln!(&mut self.output, "impl __ToFitzJson for {} {{", data_name).unwrap();
         self.emit("    fn __to_fitz_json(&self) -> serde_json::Value {\n");
         self.emit("        let mut __obj = serde_json::Map::new();\n");
         for f in &sig.fields {
@@ -12770,12 +13319,7 @@ where
         self.emit("    }\n}\n\n");
 
         // impl __FromFitzJson for <Foo>Data
-        writeln!(
-            &mut self.output,
-            "impl __FromFitzJson for {} {{",
-            data_name
-        )
-        .unwrap();
+        writeln!(&mut self.output, "impl __FromFitzJson for {} {{", data_name).unwrap();
         self.emit("    fn __from_fitz_json(__j: &serde_json::Value) -> Result<Self, String> {\n");
         writeln!(
             &mut self.output,
@@ -12807,7 +13351,12 @@ where
         // sin default ni nullable → error.
         for f in &sig.fields {
             let rust_ty = rust_type_for(&f.type_, self.env)?;
-            writeln!(&mut self.output, "        let {}: {} = match __obj.get(\"{}\") {{", f.name, rust_ty, f.name).unwrap();
+            writeln!(
+                &mut self.output,
+                "        let {}: {} = match __obj.get(\"{}\") {{",
+                f.name, rust_ty, f.name
+            )
+            .unwrap();
             writeln!(
                 &mut self.output,
                 "            Some(__v) => <{} as __FromFitzJson>::__from_fitz_json(__v)?,",
@@ -12978,11 +13527,18 @@ where
     /// de stmts y el loop de `gen_http_handler_wrapper`).
     fn precompute_cors_merge(&mut self, http_fns: &[&Stmt]) -> Result<(), FitzError> {
         for stmt in http_fns {
-            let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            let Stmt::FnDef {
+                name, decorators, ..
+            } = stmt
+            else {
+                continue;
+            };
             // Path del primer decorator HTTP (`@get`/`@post`/`@put`/`@delete`).
             let path = decorators.iter().find_map(|d| {
                 let m = matches!(d.name.as_str(), "get" | "post" | "put" | "delete");
-                if !m { return None; }
+                if !m {
+                    return None;
+                }
                 d.args.first()
             });
             let Some(path_arg) = path else { continue };
@@ -12992,13 +13548,18 @@ where
             // de "un solo cors por handler" lo hace `extract_middleware_specs`
             // al emitir; acá tomamos el primero que aparezca (consistente
             // con el orden de los decorators).
-            let cors_cfg = decorators.iter()
+            let cors_cfg = decorators
+                .iter()
                 .filter(|d| d.name == "middleware")
                 .find_map(|d| {
                     let arg = d.args.first()?;
-                    let Expr::Call { callee, args, .. } = arg else { return None };
+                    let Expr::Call { callee, args, .. } = arg else {
+                        return None;
+                    };
                     let is_cors = matches!(callee.as_ref(), Expr::Ident(n, _) if n == "cors");
-                    if !is_cors { return None; }
+                    if !is_cors {
+                        return None;
+                    }
                     parse_build_cors_args(args).ok()
                 });
             let Some(cors_cfg) = cors_cfg else { continue };
@@ -13106,7 +13667,10 @@ where
             let te = p.type_.as_ref().ok_or_else(|| {
                 self.err_at(
                     stmt.span(),
-                    format!("@ws fn `{}`: param `{}` necesita anotación de tipo", name, p.name),
+                    format!(
+                        "@ws fn `{}`: param `{}` necesita anotación de tipo",
+                        name, p.name
+                    ),
                 )
             })?;
             let ty = resolve_type_expr(te, self.env).map_err(|e| {
@@ -13225,8 +13789,7 @@ where
             )
             .unwrap();
         } else {
-            writeln!(&mut self.output, "        let _ = {}(__conn).await;", name)
-                .unwrap();
+            writeln!(&mut self.output, "        let _ = {}(__conn).await;", name).unwrap();
         }
         // Cleanup.
         self.emit("        __fitz_ws_unregister(&__endpoint, __conn_id);\n");
@@ -13273,8 +13836,12 @@ where
             ""
         };
         // Build Map<Str,Str> de headers.
-        self.emit("    let __auth_headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = {\n");
-        self.emit("        let mut __pairs: Vec<(String, String)> = Vec::with_capacity(__hmap.len());\n");
+        self.emit(
+            "    let __auth_headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = {\n",
+        );
+        self.emit(
+            "        let mut __pairs: Vec<(String, String)> = Vec::with_capacity(__hmap.len());\n",
+        );
         self.emit("        for (k, v) in __hmap.iter() {\n");
         self.emit("            if let Ok(vs) = v.to_str() {\n");
         self.emit("                __pairs.push((k.as_str().to_string(), vs.to_string()));\n");
@@ -13346,15 +13913,16 @@ where
         // decorator HTTP. Si llegamos acá sin uno, es un bug del codegen.
         let http_deco = decorators
             .iter()
-            .find(|d| {
-                matches!(d.name.as_str(), "get" | "post" | "put" | "delete")
-            })
+            .find(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete"))
             .ok_or_else(|| self.err(format!("fn `{}`: sin decorator HTTP", name)))?;
         let path_arg = http_deco.args.first().ok_or_else(|| {
-            self.err_at(fn_span, format!(
-                "fn `{}`: @{} requiere un path como primer arg",
-                name, http_deco.name
-            ))
+            self.err_at(
+                fn_span,
+                format!(
+                    "fn `{}`: @{} requiere un path como primer arg",
+                    name, http_deco.name
+                ),
+            )
         })?;
         let (path, query_template_params) = parse_http_path(path_arg)?;
         let template_params = extract_path_template_names(&path);
@@ -13385,13 +13953,19 @@ where
         let mut resolved_params: Vec<(String, Type)> = Vec::with_capacity(params.len());
         for p in params {
             let te = p.type_.as_ref().ok_or_else(|| {
-                self.err_at(fn_span, format!(
-                    "fn `{}`: parámetro `{}` necesita anotación de tipo",
-                    name, p.name
-                ))
+                self.err_at(
+                    fn_span,
+                    format!(
+                        "fn `{}`: parámetro `{}` necesita anotación de tipo",
+                        name, p.name
+                    ),
+                )
             })?;
             let t = resolve_type_expr(te, self.env).map_err(|e| {
-                self.err_at(fn_span, format!("fn `{}`: parámetro `{}`: {}", name, p.name, e.message))
+                self.err_at(
+                    fn_span,
+                    format!("fn `{}`: parámetro `{}`: {}", name, p.name, e.message),
+                )
             })?;
             resolved_params.push((p.name.clone(), t));
         }
@@ -13401,11 +13975,14 @@ where
         // evaluator.
         for qname in &query_template_params {
             if !resolved_params.iter().any(|(n, _)| n == qname) {
-                return Err(self.err_at(fn_span, format!(
-                    "fn `{}`: el query param `{}` está en el path pero el handler no \
+                return Err(self.err_at(
+                    fn_span,
+                    format!(
+                        "fn `{}`: el query param `{}` está en el path pero el handler no \
                      tiene un parámetro con ese nombre",
-                    name, qname
-                )));
+                        name, qname
+                    ),
+                ));
             }
         }
 
@@ -13422,14 +13999,17 @@ where
             match p {
                 Some(Type::Str) | Some(Type::Nullable(_)) => {}
                 Some(other) => {
-                    return Err(self.err_at(fn_span, format!(
-                        "fn `{}`: @header(name=\"{}\") espera un param `Str` o `Str?`, \
+                    return Err(self.err_at(
+                        fn_span,
+                        format!(
+                            "fn `{}`: @header(name=\"{}\") espera un param `Str` o `Str?`, \
                          pero `{}` está declarado como `{}`",
-                        name,
-                        http_name,
-                        fitz_param,
-                        type_name(other),
-                    )));
+                            name,
+                            http_name,
+                            fitz_param,
+                            type_name(other),
+                        ),
+                    ));
                 }
                 None => {} // ya cazado por evaluator/checker
             }
@@ -13452,42 +14032,50 @@ where
             }
         }
         if auth != crate::http::AuthSpec::None && self.auth_provider_name.is_none() {
-            return Err(self.err_at(fn_span, format!(
-                "fn `{}`: `@authenticated`/`@admin` exige declarar un \
+            return Err(self.err_at(
+                fn_span,
+                format!(
+                    "fn `{}`: `@authenticated`/`@admin` exige declarar un \
                  `@auth_provider` antes en el archivo.",
-                name,
-            )));
+                    name,
+                ),
+            ));
         }
-        let auth_user_param_name: Option<String> =
-            if auth != crate::http::AuthSpec::None {
-                let candidates: Vec<&str> = resolved_params
-                    .iter()
-                    .filter(|(n, _)| {
-                        !template_params.iter().any(|tp| tp == n)
-                            && !query_template_params.iter().any(|q| q == n)
-                            && !header_specs.iter().any(|(_, fp, _)| fp == n)
-                    })
-                    .map(|(n, _)| n.as_str())
-                    .collect();
-                if candidates.is_empty() {
-                    return Err(self.err_at(fn_span, format!(
+        let auth_user_param_name: Option<String> = if auth != crate::http::AuthSpec::None {
+            let candidates: Vec<&str> = resolved_params
+                .iter()
+                .filter(|(n, _)| {
+                    !template_params.iter().any(|tp| tp == n)
+                        && !query_template_params.iter().any(|q| q == n)
+                        && !header_specs.iter().any(|(_, fp, _)| fp == n)
+                })
+                .map(|(n, _)| n.as_str())
+                .collect();
+            if candidates.is_empty() {
+                return Err(self.err_at(
+                    fn_span,
+                    format!(
                         "fn `{}`: falta param del tipo `User` (inyectado por auth).",
                         name,
-                    )));
-                }
-                if candidates.len() > 1 {
-                    return Err(self.err_at(fn_span, format!(
+                    ),
+                ));
+            }
+            if candidates.len() > 1 {
+                return Err(self.err_at(
+                    fn_span,
+                    format!(
                         "fn `{}`: hay {} params que no son path/query/header. \
                          En MVP, un handler protegido por auth admite solo el \
                          param `user` y NO body separado.",
                         name,
                         candidates.len(),
-                    )));
-                }
-                Some(candidates[0].to_string())
-            } else {
-                None
-            };
+                    ),
+                ));
+            }
+            Some(candidates[0].to_string())
+        } else {
+            None
+        };
 
         // Categorizar: cada param es path / query / header / body / auth_user.
         let mut path_params: Vec<(String, Type)> = Vec::new();
@@ -13507,10 +14095,10 @@ where
                 // Auth-injected user — NO es body, lo maneja el wrapper auth.
                 continue;
             } else if body_param.is_some() {
-                return Err(self.err_at(fn_span, format!(
-                    "fn `{}`: solo se admite un body param por handler",
-                    name
-                )));
+                return Err(self.err_at(
+                    fn_span,
+                    format!("fn `{}`: solo se admite un body param por handler", name),
+                ));
             } else {
                 body_param = Some((n.clone(), t.clone()));
             }
@@ -13518,7 +14106,10 @@ where
 
         let resolved_ret = match return_type {
             Some(te) => resolve_type_expr(te, self.env).map_err(|e| {
-                self.err_at(fn_span, format!("fn `{}`: return type: {}", name, e.message))
+                self.err_at(
+                    fn_span,
+                    format!("fn `{}`: return type: {}", name, e.message),
+                )
             })?,
             None => Type::Null,
         };
@@ -13673,7 +14264,9 @@ where
             )
             .unwrap();
         }
-        self.emit("    let __req: Request = std::sync::Arc::new(std::sync::Mutex::new(RequestData {\n");
+        self.emit(
+            "    let __req: Request = std::sync::Arc::new(std::sync::Mutex::new(RequestData {\n",
+        );
         writeln!(
             &mut self.output,
             "        method: \"{}\".to_string(),",
@@ -13694,7 +14287,9 @@ where
             self.emit("        return __apply_cors_and_respond(\n");
             self.emit("            (\n");
             self.emit("                axum::http::StatusCode::from_u16(__resp.status)\n");
-            self.emit("                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+            self.emit(
+                "                    .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n",
+            );
             self.emit("                axum::Json(__resp.body),\n");
             self.emit("            ).into_response(),\n");
             if sig.has_cors {
@@ -13888,11 +14483,7 @@ where
         // su firma Rust (`pub async fn`) devuelve un `Future`; el
         // wrapper await-ea sobre la marcha para obtener el `T` interno
         // y procesarlo igual que un handler sync.
-        let call_args: Vec<String> = sig
-            .resolved_params
-            .iter()
-            .map(|(n, _)| n.clone())
-            .collect();
+        let call_args: Vec<String> = sig.resolved_params.iter().map(|(n, _)| n.clone()).collect();
         let await_suffix = if sig.is_async { ".await" } else { "" };
         writeln!(
             &mut self.output,
@@ -14028,7 +14619,9 @@ where
                 self.emit("                let __msg = format!(\"status code inválido en Err: {} (debe estar en 100..1000)\", __raw_status);\n");
                 self.emit("                (\n");
                 self.emit("                    axum::http::StatusCode::INTERNAL_SERVER_ERROR,\n");
-                self.emit("                    axum::Json(serde_json::json!({\"error\": __msg})),\n");
+                self.emit(
+                    "                    axum::Json(serde_json::json!({\"error\": __msg})),\n",
+                );
                 self.emit("                ).into_response()\n");
                 self.emit("            }\n");
                 self.emit("        },\n");
@@ -14065,7 +14658,9 @@ where
                 }
                 self.emit("    let __built = (\n");
                 self.emit("        axum::http::StatusCode::from_u16(__resp.status)\n");
-                self.emit("            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n");
+                self.emit(
+                    "            .unwrap_or(axum::http::StatusCode::INTERNAL_SERVER_ERROR),\n",
+                );
                 self.emit("        axum::Json(__resp.body),\n");
                 self.emit("    ).into_response();\n");
             } else {
@@ -14105,23 +14700,33 @@ where
     /// (para que el preflight handler y los wrappers de todos los métodos
     /// del path resuelvan los mismos headers contra el mismo origin).
     fn cors_resolve_fn_for(&self, sig: &HandlerSig) -> String {
-        let owner_name = self.cors_preflight_owner.get(&sig.path)
+        let owner_name = self
+            .cors_preflight_owner
+            .get(&sig.path)
             .cloned()
             .unwrap_or_else(|| sig.name.clone());
         cors_resolve_fn_name(&owner_name)
     }
 
     fn emit_cors_helpers(&mut self, sig: &HandlerSig) {
-        if sig.mw_cors.is_none() { return };
+        if sig.mw_cors.is_none() {
+            return;
+        };
         // Solo el owner del path emite preflight. Non-owners skipean
         // — su .route(...) tampoco va a llevar .options() en gen_http_main,
         // y sus wrappers comparten el `__cors_resolve_<OWNER>` via
         // `cors_resolve_fn_for(sig)`.
-        let is_owner = self.cors_preflight_owner.get(&sig.path)
+        let is_owner = self
+            .cors_preflight_owner
+            .get(&sig.path)
             .map(|n| n == &sig.name)
             .unwrap_or(false);
-        if !is_owner { return };
-        let cors = self.cors_merged_per_path.get(&sig.path)
+        if !is_owner {
+            return;
+        };
+        let cors = self
+            .cors_merged_per_path
+            .get(&sig.path)
             .expect("cors_merged_per_path debe tener entry si is_owner")
             .clone();
         let resolve_fn = cors_resolve_fn_name(&sig.name);
@@ -14170,7 +14775,9 @@ where
             // (mismo comportamiento que Set sin match).
             BuildAllowOrigin::Echo => {
                 self.emit("    if let Some(__req) = origin {\n");
-                self.emit("        __out.push((\"access-control-allow-origin\", __req.to_string()));\n");
+                self.emit(
+                    "        __out.push((\"access-control-allow-origin\", __req.to_string()));\n",
+                );
                 self.emit("    }\n");
             }
         }
@@ -14293,12 +14900,16 @@ where
         let cfg = server_config.clone().unwrap_or_default();
         let mut user_paths: std::collections::HashSet<String> = std::collections::HashSet::new();
         for stmt in http_fns {
-            let Stmt::FnDef { decorators, .. } = stmt else { continue };
+            let Stmt::FnDef { decorators, .. } = stmt else {
+                continue;
+            };
             for d in decorators {
                 if !matches!(d.name.as_str(), "get" | "post" | "put" | "delete") {
                     continue;
                 }
-                let Some(path_arg) = d.args.first() else { continue };
+                let Some(path_arg) = d.args.first() else {
+                    continue;
+                };
                 let (path, _q) = parse_http_path(path_arg)?;
                 user_paths.insert(path);
             }
@@ -14345,9 +14956,7 @@ where
                 self.emit("static __FITZ_SCALAR_HTML: &str = r###\"");
                 self.emit(crate::openapi::SCALAR_HTML);
                 self.emit("\"###;\n\n");
-                self.emit(
-                    "async fn __serve_docs() -> axum::response::Html<&'static str> {\n",
-                );
+                self.emit("async fn __serve_docs() -> axum::response::Html<&'static str> {\n");
                 self.emit("    axum::response::Html(__FITZ_SCALAR_HTML)\n");
                 self.emit("}\n\n");
             }
@@ -14355,9 +14964,8 @@ where
         // Fase 9.w.2.d — schema AsyncAPI 3.0 embebido cuando hay
         // handlers @ws. Mismo patrón que OpenAPI: pre-compute desde
         // AST, embebe como `static &str`, serve handler `__serve_asyncapi_json`.
-        let auto_asyncapi = cfg.enable_docs
-            && !user_paths.contains("/asyncapi.json")
-            && !ws_fns.is_empty();
+        let auto_asyncapi =
+            cfg.enable_docs && !user_paths.contains("/asyncapi.json") && !ws_fns.is_empty();
         if auto_asyncapi {
             let channels = crate::asyncapi::pseudo_channels_from_ast(program)?;
             let schema = crate::asyncapi::generate_asyncapi_with_version(
@@ -14411,7 +15019,12 @@ where
         self.emit_indent();
         self.emit("let __app = axum::Router::new()\n");
         for stmt in http_fns {
-            let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            let Stmt::FnDef {
+                name, decorators, ..
+            } = stmt
+            else {
+                continue;
+            };
             for d in decorators {
                 let method = match d.name.as_str() {
                     "get" => "get",
@@ -14433,7 +15046,9 @@ where
                 // OPTIONS del owner. Sin esta lógica, axum panic con
                 // "Overlapping method route. Handler for `OPTIONS /x`
                 // already exists" al construir el Router.
-                let is_owner = self.cors_preflight_owner.get(&path)
+                let is_owner = self
+                    .cors_preflight_owner
+                    .get(&path)
                     .map(|n| n == name)
                     .unwrap_or(false);
                 self.emit_indent();
@@ -14458,7 +15073,12 @@ where
         // monta como axum GET (el handshake HTTP es GET) que internamente
         // hace el upgrade.
         for stmt in ws_fns {
-            let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            let Stmt::FnDef {
+                name, decorators, ..
+            } = stmt
+            else {
+                continue;
+            };
             for d in decorators {
                 if d.name != "ws" {
                     continue;
@@ -14486,7 +15106,9 @@ where
         }
         if auto_asyncapi {
             self.emit_indent();
-            self.emit("    .route(\"/asyncapi.json\", axum::routing::get(__serve_asyncapi_json))\n");
+            self.emit(
+                "    .route(\"/asyncapi.json\", axum::routing::get(__serve_asyncapi_json))\n",
+            );
         }
         if auto_docs {
             self.emit_indent();
@@ -14511,7 +15133,9 @@ where
         )
         .unwrap();
         self.emit_indent();
-        self.emit("let __listener = tokio::net::TcpListener::bind(__addr).await.expect(\"bind\");\n");
+        self.emit(
+            "let __listener = tokio::net::TcpListener::bind(__addr).await.expect(\"bind\");\n",
+        );
         // Fase 9.w.3.c — spawnea cron jobs ANTES de `axum::serve`. Los
         // tasks corren en el runtime tokio multi_thread del HTTP; cuando
         // el server termina (Ctrl+C), los tasks se cancelan al dropear
@@ -14535,12 +15159,7 @@ where
 fn parse_http_path(expr: &Expr) -> Result<(String, Vec<String>), FitzError> {
     match crate::http::parse_path_template(expr) {
         Ok(t) => Ok((t.path, t.query_params)),
-        Err(e) => Err(FitzError::new(
-            ErrorKind::TypeError,
-            0,
-            0,
-            e.message(),
-        )),
+        Err(e) => Err(FitzError::new(ErrorKind::TypeError, 0, 0, e.message())),
     }
 }
 
@@ -14565,7 +15184,8 @@ fn parse_http_path_legacy(expr: &Expr) -> Result<String, FitzError> {
                             0,
                             0,
                             "el path de un decorator HTTP solo admite literal Str o \
-                             interpolación de identificadores: `\"/users/{id}\"`".to_string(),
+                             interpolación de identificadores: `\"/users/{id}\"`"
+                                .to_string(),
                         ));
                     }
                 }
@@ -14626,14 +15246,30 @@ fn emit_query_param_coerce(
     if nullable {
         // Opcional: missing → None, presente y coerce OK → Some(v),
         // presente con coerce err → 400.
-        writeln!(output, "    let {name}: Option<{rust_base}> = match __qmap.get(\"{name}\") {{").unwrap();
+        writeln!(
+            output,
+            "    let {name}: Option<{rust_base}> = match __qmap.get(\"{name}\") {{"
+        )
+        .unwrap();
         writeln!(output, "        Some(__s) => {{").unwrap();
-        writeln!(output, "            let __r: Result<{rust_base}, String> = {parse_expr};").unwrap();
+        writeln!(
+            output,
+            "            let __r: Result<{rust_base}, String> = {parse_expr};"
+        )
+        .unwrap();
         writeln!(output, "            match __r {{").unwrap();
         writeln!(output, "                Ok(__v) => Some(__v),").unwrap();
         writeln!(output, "                Err(__e) => return (").unwrap();
-        writeln!(output, "                    axum::http::StatusCode::BAD_REQUEST,").unwrap();
-        writeln!(output, "                    axum::Json(serde_json::json!({{\"error\": __e}})),").unwrap();
+        writeln!(
+            output,
+            "                    axum::http::StatusCode::BAD_REQUEST,"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "                    axum::Json(serde_json::json!({{\"error\": __e}})),"
+        )
+        .unwrap();
         writeln!(output, "                ).into_response(),").unwrap();
         writeln!(output, "            }}").unwrap();
         writeln!(output, "        }}").unwrap();
@@ -14642,14 +15278,30 @@ fn emit_query_param_coerce(
     } else {
         // Obligatorio: missing → 400; presente y coerce OK → v;
         // presente con coerce err → 400.
-        writeln!(output, "    let {name}: {rust_base} = match __qmap.get(\"{name}\") {{").unwrap();
+        writeln!(
+            output,
+            "    let {name}: {rust_base} = match __qmap.get(\"{name}\") {{"
+        )
+        .unwrap();
         writeln!(output, "        Some(__s) => {{").unwrap();
-        writeln!(output, "            let __r: Result<{rust_base}, String> = {parse_expr};").unwrap();
+        writeln!(
+            output,
+            "            let __r: Result<{rust_base}, String> = {parse_expr};"
+        )
+        .unwrap();
         writeln!(output, "            match __r {{").unwrap();
         writeln!(output, "                Ok(__v) => __v,").unwrap();
         writeln!(output, "                Err(__e) => return (").unwrap();
-        writeln!(output, "                    axum::http::StatusCode::BAD_REQUEST,").unwrap();
-        writeln!(output, "                    axum::Json(serde_json::json!({{\"error\": __e}})),").unwrap();
+        writeln!(
+            output,
+            "                    axum::http::StatusCode::BAD_REQUEST,"
+        )
+        .unwrap();
+        writeln!(
+            output,
+            "                    axum::Json(serde_json::json!({{\"error\": __e}})),"
+        )
+        .unwrap();
         writeln!(output, "                ).into_response(),").unwrap();
         writeln!(output, "            }}").unwrap();
         writeln!(output, "        }}").unwrap();
@@ -14793,8 +15445,7 @@ fn merge_build_cors_into(existing: &mut BuildCorsConfig, other: &BuildCorsConfig
 ///
 /// Validaciones espejo del built-in runtime (en `evaluator.rs`).
 fn parse_build_cors_args(args: &[Expr]) -> Result<BuildCorsConfig, FitzError> {
-    let err =
-        |msg: &str| FitzError::new(ErrorKind::TypeError, 0, 0, msg.to_string());
+    let err = |msg: &str| FitzError::new(ErrorKind::TypeError, 0, 0, msg.to_string());
     if args.len() > 1 {
         return Err(err(
             "`cors` espera 0 o 1 argumento (un Map literal de configuración)",
@@ -14851,8 +15502,12 @@ fn parse_build_cors_args(args: &[Expr]) -> Result<BuildCorsConfig, FitzError> {
                         "`cors`: 'allow_origin' debe ser un Str literal o una List<Str> literal",
                     )),
                 },
-                "allow_methods" => cfg.allow_methods = Some(parse_build_str_list(v, "allow_methods")?),
-                "allow_headers" => cfg.allow_headers = Some(parse_build_str_list(v, "allow_headers")?),
+                "allow_methods" => {
+                    cfg.allow_methods = Some(parse_build_str_list(v, "allow_methods")?)
+                }
+                "allow_headers" => {
+                    cfg.allow_headers = Some(parse_build_str_list(v, "allow_headers")?)
+                }
                 "max_age" => match v {
                     Expr::Int(n, _) => cfg.max_age = Some(*n),
                     _ => return Err(err("`cors`: 'max_age' debe ser un Int literal")),
@@ -15876,7 +16531,9 @@ fn collect_captures_stmt(
                 collect_captures_expr(b, params, locals, ctx, seen, out);
             }
         }
-        Stmt::While { condition, body, .. } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             collect_captures_expr(condition, params, locals, ctx, seen, out);
             for s in body {
                 collect_captures_stmt(s, params, locals, ctx, seen, out);
@@ -15887,7 +16544,9 @@ fn collect_captures_stmt(
                 collect_captures_stmt(s, params, locals, ctx, seen, out);
             }
         }
-        Stmt::For { var, iter, body, .. } => {
+        Stmt::For {
+            var, iter, body, ..
+        } => {
             collect_captures_expr(iter, params, locals, ctx, seen, out);
             // Mini-tanda Md: var es Pattern, extraemos todos los idents.
             for name in collect_pattern_idents(var) {
@@ -15898,7 +16557,10 @@ fn collect_captures_stmt(
             }
         }
         Stmt::Break(_, _, _) | Stmt::Continue(_, _) => {}
-        Stmt::FnDef { .. } | Stmt::TypeDef { .. } | Stmt::Import { .. } | Stmt::FromImport { .. } => {}
+        Stmt::FnDef { .. }
+        | Stmt::TypeDef { .. }
+        | Stmt::Import { .. }
+        | Stmt::FromImport { .. } => {}
         // Fase 9.0.1 (F15): walker estático no-op.
         Stmt::Error(_) => {}
     }
@@ -15939,7 +16601,12 @@ fn collect_captures_expr(
                 }
             }
         }
-        Expr::Int(_, _) | Expr::Float(_, _) | Expr::Str(_, _) | Expr::Bool(_, _) | Expr::Null(_) | Expr::Bytes(_, _) => {}
+        Expr::Int(_, _)
+        | Expr::Float(_, _)
+        | Expr::Str(_, _)
+        | Expr::Bool(_, _)
+        | Expr::Null(_)
+        | Expr::Bytes(_, _) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let crate::ast::StrPart::Expr(inner, _) = p {
@@ -15960,7 +16627,11 @@ fn collect_captures_expr(
                 collect_captures_expr(a, params, locals, ctx, seen, out);
             }
         }
-        Expr::FnExpr { params: inner_params, body, .. } => {
+        Expr::FnExpr {
+            params: inner_params,
+            body,
+            ..
+        } => {
             // Closure anidada: sus params introducen un scope nuevo.
             // Para detectar capturas del FnExpr exterior, nos importa
             // todo lo que esa closure interior use desde nuestro
@@ -15972,7 +16643,8 @@ fn collect_captures_expr(
             }
             // Las locals de la closure interna son separadas — no las
             // mezclamos con las del outer.
-            let mut inner_locals: std::collections::HashSet<String> = std::collections::HashSet::new();
+            let mut inner_locals: std::collections::HashSet<String> =
+                std::collections::HashSet::new();
             for s in body {
                 collect_captures_stmt(s, &merged, &mut inner_locals, ctx, seen, out);
             }
@@ -15984,10 +16656,16 @@ fn collect_captures_expr(
             collect_captures_expr(object, params, locals, ctx, seen, out);
             collect_captures_expr(index, params, locals, ctx, seen, out);
         }
-        Expr::Slice { object, start, end, .. } => {
+        Expr::Slice {
+            object, start, end, ..
+        } => {
             collect_captures_expr(object, params, locals, ctx, seen, out);
-            if let Some(s) = start { collect_captures_expr(s, params, locals, ctx, seen, out); }
-            if let Some(e) = end { collect_captures_expr(e, params, locals, ctx, seen, out); }
+            if let Some(s) = start {
+                collect_captures_expr(s, params, locals, ctx, seen, out);
+            }
+            if let Some(e) = end {
+                collect_captures_expr(e, params, locals, ctx, seen, out);
+            }
         }
         Expr::Tuple(items, _) => {
             for it in items {
@@ -16011,7 +16689,14 @@ fn collect_captures_expr(
         // adentro del expr/filter (paralelo a walk_expr_for_state_refs).
         // Mini-tanda Up — `var` ahora es Pattern; recolectamos sus
         // nombres y los marcamos locals para el walk del body.
-        Expr::ListComp { expr, var, iter, extra_clauses, filter, .. } => {
+        Expr::ListComp {
+            expr,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             collect_captures_expr(iter, params, locals, ctx, seen, out);
             let mut added: Vec<String> = Vec::new();
             collect_pattern_bindings(var, &mut added);
@@ -16038,7 +16723,15 @@ fn collect_captures_expr(
             }
         }
         // Mini-tanda Cmp+ — map comprehension.
-        Expr::MapComp { key, value, var, iter, extra_clauses, filter, .. } => {
+        Expr::MapComp {
+            key,
+            value,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             collect_captures_expr(iter, params, locals, ctx, seen, out);
             let mut added: Vec<String> = Vec::new();
             collect_pattern_bindings(var, &mut added);
@@ -16075,7 +16768,12 @@ fn collect_captures_expr(
             collect_captures_expr(start, params, locals, ctx, seen, out);
             collect_captures_expr(end, params, locals, ctx, seen, out);
         }
-        Expr::If { condition, then, else_, .. } => {
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             collect_captures_expr(condition, params, locals, ctx, seen, out);
             for s in then {
                 collect_captures_stmt(s, params, locals, ctx, seen, out);
@@ -16130,10 +16828,7 @@ pub fn has_unannotated_fn_params(program: &Program) -> bool {
 /// `Param.type_` con un TypeExpr sintetizado desde el Type resuelto.
 /// Si la inferencia falla, deja el Param como estaba — el codegen
 /// reportará error con sugerencia (resolve_param_type fallback).
-pub fn fill_inferred_param_types(
-    program: &mut Program,
-    type_info: &crate::types::TypeInfo,
-) {
+pub fn fill_inferred_param_types(program: &mut Program, type_info: &crate::types::TypeInfo) {
     // Iterar sobre una copia de los fn names porque vamos a mutar el
     // program y necesitamos buscar call sites sobre el program ORIGINAL.
     let inferences: Vec<(String, usize, Type)> = {
@@ -16257,12 +16952,12 @@ fn infer_param_type_from_call_sites(
         type_info: &crate::types::TypeInfo,
     ) -> Option<Type> {
         match stmt {
-            Stmt::Expr(e, _)
-            | Stmt::Return(e, _)
-            | Stmt::Assign { value: e, .. } => walk_expr(e, fn_name, param_idx, type_info),
-            Stmt::While { body, .. }
-            | Stmt::Loop { body, .. }
-            | Stmt::For { body, .. } => walk_stmts(body, fn_name, param_idx, type_info),
+            Stmt::Expr(e, _) | Stmt::Return(e, _) | Stmt::Assign { value: e, .. } => {
+                walk_expr(e, fn_name, param_idx, type_info)
+            }
+            Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
+                walk_stmts(body, fn_name, param_idx, type_info)
+            }
             Stmt::FnDef { body, .. } => walk_stmts(body, fn_name, param_idx, type_info),
             _ => None,
         }
@@ -16297,7 +16992,12 @@ fn infer_param_type_from_call_sites(
                 }
                 None
             }
-            Expr::If { condition, then, else_, .. } => {
+            Expr::If {
+                condition,
+                then,
+                else_,
+                ..
+            } => {
                 if let Some(t) = walk_expr(condition, fn_name, param_idx, type_info) {
                     return Some(t);
                 }
@@ -16320,10 +17020,8 @@ fn infer_param_type_from_call_sites(
                 }
                 None
             }
-            Expr::BinOp { left, right, .. } => {
-                walk_expr(left, fn_name, param_idx, type_info)
-                    .or_else(|| walk_expr(right, fn_name, param_idx, type_info))
-            }
+            Expr::BinOp { left, right, .. } => walk_expr(left, fn_name, param_idx, type_info)
+                .or_else(|| walk_expr(right, fn_name, param_idx, type_info)),
             Expr::List(items, _) => {
                 for it in items {
                     if let Some(t) = walk_expr(it, fn_name, param_idx, type_info) {
@@ -16348,10 +17046,7 @@ fn infer_param_type_from_call_sites(
 /// El walker es shallow para Stmts comunes (Return, ReturnStatus, Expr,
 /// Assign) y descende en Stmts con cuerpos (If/Match/While/Loop/For)
 /// para capturar returns anidados.
-fn infer_return_type_from_body(
-    body: &[Stmt],
-    type_info: &crate::types::TypeInfo,
-) -> Option<Type> {
+fn infer_return_type_from_body(body: &[Stmt], type_info: &crate::types::TypeInfo) -> Option<Type> {
     let mut collected: Vec<Type> = Vec::new();
     collect_return_types(body, type_info, &mut collected);
     if collected.is_empty() {
@@ -16374,11 +17069,7 @@ fn infer_return_type_from_body(
     Some(current)
 }
 
-fn collect_return_types(
-    stmts: &[Stmt],
-    type_info: &crate::types::TypeInfo,
-    out: &mut Vec<Type>,
-) {
+fn collect_return_types(stmts: &[Stmt], type_info: &crate::types::TypeInfo, out: &mut Vec<Type>) {
     for stmt in stmts {
         match stmt {
             Stmt::Return(e, _) => {
@@ -16386,9 +17077,9 @@ fn collect_return_types(
                     out.push(t.clone());
                 }
             }
-            Stmt::While { body, .. }
-            | Stmt::Loop { body, .. }
-            | Stmt::For { body, .. } => collect_return_types(body, type_info, out),
+            Stmt::While { body, .. } | Stmt::Loop { body, .. } | Stmt::For { body, .. } => {
+                collect_return_types(body, type_info, out)
+            }
             Stmt::Expr(e, _) | Stmt::Assign { value: e, .. } => {
                 // Algunos Expr llevan stmts adentro (If/Match/Loop body).
                 collect_returns_in_expr(e, type_info, out);
@@ -16398,11 +17089,7 @@ fn collect_return_types(
     }
 }
 
-fn collect_returns_in_expr(
-    expr: &Expr,
-    type_info: &crate::types::TypeInfo,
-    out: &mut Vec<Type>,
-) {
+fn collect_returns_in_expr(expr: &Expr, type_info: &crate::types::TypeInfo, out: &mut Vec<Type>) {
     match expr {
         Expr::If { then, else_, .. } => {
             collect_return_types(then, type_info, out);
@@ -16444,17 +17131,13 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
         (Type::Null, other) | (other, Type::Null) if !matches!(other, Type::Null) => {
             Ok(Type::Nullable(Box::new(other.clone())))
         }
-        (Type::Nullable(inner), other) | (other, Type::Nullable(inner))
-            if **inner == *other =>
-        {
+        (Type::Nullable(inner), other) | (other, Type::Nullable(inner)) if **inner == *other => {
             Ok(Type::Nullable(inner.clone()))
         }
         (Type::Nullable(a_in), Type::Nullable(b_in)) => {
             lub(a_in, b_in).map(|t| Type::Nullable(Box::new(t)))
         }
-        (Type::List(a_in), Type::List(b_in)) => {
-            lub(a_in, b_in).map(|t| Type::List(Box::new(t)))
-        }
+        (Type::List(a_in), Type::List(b_in)) => lub(a_in, b_in).map(|t| Type::List(Box::new(t))),
         (Type::Map(ak, av), Type::Map(bk, bv)) => {
             let k = lub(ak, bk)?;
             let v = lub(av, bv)?;
@@ -16463,9 +17146,11 @@ fn lub(a: &Type, b: &Type) -> Result<Type, ()> {
         // Result<a> ↔ Result<b> recursivo. Cubre el caso típico de
         // `match r { Ok(v) => Ok(v + 1), Err(e) => Err(e) }`: ambas
         // ramas son Result<T, String> con el mismo T, lub = T.
-        (Type::Result { ok: a_in, err: _ }, Type::Result { ok: b_in, err: _ }) => {
-            lub(a_in, b_in).map(|t| Type::Result { ok: Box::new(t), err: Box::new(Type::Str) })
-        }
+        (Type::Result { ok: a_in, err: _ }, Type::Result { ok: b_in, err: _ }) => lub(a_in, b_in)
+            .map(|t| Type::Result {
+                ok: Box::new(t),
+                err: Box::new(Type::Str),
+            }),
         // Any cede al concreto. Permite que `Err("x")` (Result<Any>)
         // unifique con `Ok(42)` (Result<Int>) → Result<Int>.
         (Type::Any, other) | (other, Type::Any) => Ok(other.clone()),
@@ -16526,12 +17211,7 @@ fn update_arm_coverage(
 ///   - Result<T>: pattern match (Ok+Ok recurse, Err+Err == String).
 ///   - Function/Future/Any: `false` (Fitz nunca compara funciones, y
 ///     Future/Any no llegan a tipos de campo de `type`).
-fn field_eq_expr(
-    ty: &Type,
-    lhs: &str,
-    rhs: &str,
-    _env: &TypeEnv,
-) -> Result<String, FitzError> {
+fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<String, FitzError> {
     // `_env` se conserva en la firma por simetría con `rust_type_for`
     // y para no romper call sites si en el futuro hace falta resolver
     // un Nominal por TypeId (hoy todos los casos se manejan por la
@@ -16615,20 +17295,16 @@ fn field_eq_expr(
         // Fase 9.w.2: `WsConn<T>` tampoco es comparable — el conn lleva
         // handles a streams Mutex<>'eados, dos conns distintos jamás
         // son "iguales" estructuralmente.
-        Type::Function { .. }
-        | Type::Future(_)
-        | Type::WsConn(_)
-        | Type::Any
-        | Type::PyAny => Ok("false".to_string()),
+        Type::Function { .. } | Type::Future(_) | Type::WsConn(_) | Type::Any | Type::PyAny => {
+            Ok("false".to_string())
+        }
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
         // implementa PartialEq para tuples si cada slot lo hace,
         // así que `lhs == rhs` funciona directamente para tipos
         // primitivos. Para tuples con nominales/listas/maps
         // adentro, los elementos individuales ya tienen su impl
         // custom, así que `==` recursea bien.
-        Type::Tuple(_) => {
-            Ok(format!("({}) == ({})", lhs, rhs))
-        }
+        Type::Tuple(_) => Ok(format!("({}) == ({})", lhs, rhs)),
     }
 }
 
@@ -16759,11 +17435,7 @@ fn wrap_as_fitz_value(code: &str, ty: &Type) -> Result<String, FitzError> {
 /// que pasaban `env`. Tras simplificar el Nominal a capturar Display
 /// directo, `wrap_as_fitz_value` no necesita el env, pero los call
 /// sites lo pasan por uniformidad — el wrapper ignora el env.
-fn wrap_as_fitz_value_with_env(
-    code: &str,
-    ty: &Type,
-    _env: &TypeEnv,
-) -> Result<String, FitzError> {
+fn wrap_as_fitz_value_with_env(code: &str, ty: &Type, _env: &TypeEnv) -> Result<String, FitzError> {
     wrap_as_fitz_value(code, ty)
 }
 
@@ -17072,12 +17744,7 @@ fn coerce(code: &str, from: &Type, to: &Type, env: &TypeEnv) -> String {
     }
 }
 
-fn numeric_coerce(
-    lc: &str,
-    lt: &Type,
-    rc: &str,
-    rt: &Type,
-) -> Option<(String, String, Type)> {
+fn numeric_coerce(lc: &str, lt: &Type, rc: &str, rt: &Type) -> Option<(String, String, Type)> {
     match (lt, rt) {
         (Type::Int, Type::Int) => Some((lc.into(), rc.into(), Type::Int)),
         (Type::Float, Type::Float) => Some((lc.into(), rc.into(), Type::Float)),
@@ -17352,10 +18019,7 @@ fn format_spec_to_rust(
                 }
             };
             let precision = spec.precision.unwrap_or(6);
-            helper_wrapper = Some(format!(
-                "__fitz_fmt_percent({}, {})",
-                coerced_f, precision
-            ));
+            helper_wrapper = Some(format!("__fitz_fmt_percent({}, {})", coerced_f, precision));
             ""
         }
     };
@@ -17447,7 +18111,10 @@ fn format_spec_to_rust(
 fn inline_display_stmt(code: &str, ty: &Type) -> String {
     match ty {
         Type::Int | Type::Bool => format!("        write!(__f, \"{{}}\", {})?;\n", code),
-        Type::Float => format!("        write!(__f, \"{{}}\", __fitz_fmt_float({}))?;\n", code),
+        Type::Float => format!(
+            "        write!(__f, \"{{}}\", __fitz_fmt_float({}))?;\n",
+            code
+        ),
         // Para Str adentro de Instance, mostramos con comillas dobles
         // alrededor (igual que el `write_inline_value` del intérprete).
         Type::Str => format!("        write!(__f, \"\\\"{{}}\\\"\", {})?;\n", code),
@@ -17609,7 +18276,11 @@ mod tests {
         assert!(ast_test::fn_is_async(f), "esperaba async fn, no era async");
         // Sanidad: return type es i64.
         let ret = ast_test::fn_return_type(f).unwrap_or_default();
-        assert!(ret.contains("i64"), "esperaba return type i64, fue: {}", ret);
+        assert!(
+            ret.contains("i64"),
+            "esperaba return type i64, fue: {}",
+            ret
+        );
     }
 
     #[test]
@@ -17624,10 +18295,9 @@ mod tests {
     #[test]
     fn await_emite_dot_await_rust() {
         // `inner().await` → `(inner()).await` Rust.
-        let code = gen(
-            "async fn inner() -> Int { return 1 }\n\
-             async fn outer() -> Int { return inner().await }",
-        ).unwrap();
+        let code = gen("async fn inner() -> Int { return 1 }\n\
+             async fn outer() -> Int { return inner().await }")
+        .unwrap();
         // Inspeccionamos el body de `outer`: debe contener un
         // `.await` aplicado al call.
         let file = ast_test::parse(&code);
@@ -17645,12 +18315,11 @@ mod tests {
     #[test]
     fn sleep_builtin_emite_fitz_sleep_helper_y_call() {
         // `sleep(100)` → `__fitz_sleep(100i64)` + preludio del helper.
-        let code = gen(
-            "async fn f() -> Int {\n\
+        let code = gen("async fn f() -> Int {\n\
                  let _ = sleep(100).await\n\
                  return 0\n\
-             }",
-        ).unwrap();
+             }")
+        .unwrap();
         // Helper `__fitz_sleep` debe estar en el preludio del crate.
         assert!(
             code.contains("async fn __fitz_sleep"),
@@ -17704,7 +18373,10 @@ mod tests {
         let toml = cargo_toml_for("foo", false, false, true, false, false, false);
         assert!(toml.contains("[dependencies]"), "esperaba sección deps");
         assert!(toml.contains("pyo3"), "esperaba pyo3 en deps");
-        assert!(toml.contains("\"abi3-py310\""), "esperaba feature abi3-py310");
+        assert!(
+            toml.contains("\"abi3-py310\""),
+            "esperaba feature abi3-py310"
+        );
         assert!(
             toml.contains("\"auto-initialize\""),
             "esperaba feature auto-initialize"
@@ -17732,10 +18404,9 @@ mod tests {
     fn cli_con_async_emite_tokio_main_y_async_main() {
         // Programa CLI sin HTTP con async fn declarada → `fn main()`
         // se emite como `#[tokio::main(...)] async fn main()`.
-        let code = gen(
-            "async fn pause() -> Int { return 0 }\n\
-             print(\"hi\")",
-        ).unwrap();
+        let code = gen("async fn pause() -> Int { return 0 }\n\
+             print(\"hi\")")
+        .unwrap();
         assert!(
             code.contains("#[tokio::main"),
             "esperaba `#[tokio::main]` en el output"
@@ -18261,14 +18932,7 @@ mod tests {
         /// segmento final del path (ej. `thread_local`). None si no hay.
         pub fn find_top_macro<'a>(file: &'a File, name: &str) -> Option<&'a syn::ItemMacro> {
             file.items.iter().find_map(|i| match i {
-                Item::Macro(im)
-                    if im
-                        .mac
-                        .path
-                        .segments
-                        .last()
-                        .is_some_and(|s| s.ident == name) =>
-                {
+                Item::Macro(im) if im.mac.path.segments.last().is_some_and(|s| s.ident == name) => {
                     Some(im)
                 }
                 _ => None,
@@ -18560,8 +19224,7 @@ mod tests {
         let code = gen("let n = 5\nlet s = \"x es {n}\"").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let args = ast_test::first_macro_args_in_stmts(stmts, "format")
-            .expect("falta format!");
+        let args = ast_test::first_macro_args_in_stmts(stmts, "format").expect("falta format!");
         assert!(
             args.contains("\"x es {}\""),
             "esperaba template `\"x es {{}}\"`, got: {}",
@@ -18583,8 +19246,7 @@ mod tests {
         let code = gen("let name = \"Fitz\"\nlet s = \"hola, {name}\"").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let args = ast_test::first_macro_args_in_stmts(stmts, "format")
-            .expect("falta format!");
+        let args = ast_test::first_macro_args_in_stmts(stmts, "format").expect("falta format!");
         assert!(
             args.contains("\"hola, {}\"") && args.contains("name . clone"),
             "esperaba `format!(\"hola, {{}}\", name.clone())`, got: {}",
@@ -18609,9 +19271,7 @@ mod tests {
         // contiene tanto `a` como `b` (separación por espacio en el
         // format string es el formato canónico, pero acá nos basta con
         // estructura: 1 println, args contienen ambas vars).
-        let file = ast_test::parse(
-            &gen("let a: Int = 1\nlet b: Int = 2\nprint(a, b)").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let a: Int = 1\nlet b: Int = 2\nprint(a, b)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert_eq!(ast_test::count_macro_calls(stmts, "println"), 1);
         // Inspeccionamos el último stmt (debería ser el println!).
@@ -18640,9 +19300,7 @@ mod tests {
 
     #[test]
     fn fn_top_level_emite_signature_completa() {
-        let file = ast_test::parse(
-            &gen("fn double(n: Int) -> Int { return n * 2 }").unwrap(),
-        );
+        let file = ast_test::parse(&gen("fn double(n: Int) -> Int { return n * 2 }").unwrap());
         let f = ast_test::find_item_fn(&file, "double").expect("falta fn double");
         assert_eq!(ast_test::fn_arity(f), 1);
         assert_eq!(ast_test::fn_param_types(f), vec!["i64".to_string()]);
@@ -18655,9 +19313,7 @@ mod tests {
         // `=> n * 2` deben emitir la misma signatura y un `return` en
         // el body. La diferencia con el test anterior es solo sintáctica
         // del lado de Fitz.
-        let file = ast_test::parse(
-            &gen("fn double(n: Int) -> Int => n * 2").unwrap(),
-        );
+        let file = ast_test::parse(&gen("fn double(n: Int) -> Int => n * 2").unwrap());
         let f = ast_test::find_item_fn(&file, "double").expect("falta fn double");
         assert_eq!(ast_test::fn_arity(f), 1);
         assert_eq!(ast_test::fn_return_type(f).as_deref(), Some("i64"));
@@ -18674,10 +19330,8 @@ mod tests {
     #[test]
     fn llamada_a_fn_top_level_resuelve_return_type() {
         let file = ast_test::parse(
-            &gen(
-                "fn double(n: Int) -> Int => n * 2\n\
-                 let x = double(5)",
-            )
+            &gen("fn double(n: Int) -> Int => n * 2\n\
+                 let x = double(5)")
             .unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
@@ -18695,8 +19349,7 @@ mod tests {
     #[test]
     fn if_else_genera_estructura_rust() {
         let file = ast_test::parse(
-            &gen("let x = 1\nif (x > 0) { print(\"pos\") } else { print(\"neg\") }")
-                .unwrap(),
+            &gen("let x = 1\nif (x > 0) { print(\"pos\") } else { print(\"neg\") }").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let if_expr = ast_test::find_if(stmts).expect("falta if/else en main");
@@ -18709,9 +19362,7 @@ mod tests {
 
     #[test]
     fn while_genera_estructura_rust() {
-        let file = ast_test::parse(
-            &gen("let n = 0\nwhile (n < 3) { n = n + 1 }").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let n = 0\nwhile (n < 3) { n = n + 1 }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let w = ast_test::find_while_loop(stmts).expect("falta while loop");
         let cond = ast_test::ts(&*w.cond);
@@ -18798,9 +19449,7 @@ mod tests {
     fn comparacion_str_usa_as_str() {
         // Comparar Strings con `<`/`>` requiere `.as_str()` (Strings no
         // implementan `PartialOrd<&str>` directamente; sí `&str` con `&str`).
-        let file = ast_test::parse(
-            &gen("let a = \"hola\"\nlet b = a < \"mundo\"").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let a = \"hola\"\nlet b = a < \"mundo\"").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::contains_method_call(stmts, "as_str"),
@@ -18858,8 +19507,7 @@ mod tests {
     #[test]
     fn struct_lit_emite_arc_new_mutex_new() {
         let file = ast_test::parse(
-            &gen("type User { id: Int, name: Str }\nlet u = User { id: 1, name: \"x\" }")
-                .unwrap(),
+            &gen("type User { id: Int, name: Str }\nlet u = User { id: 1, name: \"x\" }").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "u").expect("falta let u");
@@ -18882,8 +19530,8 @@ mod tests {
     #[test]
     fn struct_lit_aplica_default_inline_si_falta_campo() {
         // `active: Bool = true` debe inyectarse cuando no se pasa.
-        let code = gen("type C { port: Int, active: Bool = true }\nlet c = C { port: 8080 }")
-            .unwrap();
+        let code =
+            gen("type C { port: Int, active: Bool = true }\nlet c = C { port: 8080 }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "c").expect("falta let c");
@@ -18911,8 +19559,8 @@ mod tests {
 
     #[test]
     fn struct_lit_valor_str_a_campo_nullable_se_envuelve_en_some() {
-        let code = gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: \"a@b\" }")
-            .unwrap();
+        let code =
+            gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: \"a@b\" }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "u").expect("falta let u");
@@ -18928,8 +19576,8 @@ mod tests {
 
     #[test]
     fn struct_lit_null_literal_a_campo_nullable_es_none() {
-        let code = gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: null }")
-            .unwrap();
+        let code =
+            gen("type U { id: Int, email: Str? }\nlet u = U { id: 1, email: null }").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "u").expect("falta let u");
@@ -18969,8 +19617,7 @@ mod tests {
     #[test]
     fn field_access_str_emite_lock_clone() {
         let file = ast_test::parse(
-            &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nlet s = u.name")
-                .unwrap(),
+            &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nlet s = u.name").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "s").expect("falta let s");
@@ -18986,8 +19633,7 @@ mod tests {
     #[test]
     fn field_assign_emite_lock() {
         let file = ast_test::parse(
-            &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nu.name = \"y\"")
-                .unwrap(),
+            &gen("type U { name: Str }\nlet u = U { name: \"x\" }\nu.name = \"y\"").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         // Post-F17.4b: el field assign emite `(obj).lock().unwrap().<f> = ...`.
@@ -19001,20 +19647,16 @@ mod tests {
     fn pasar_instance_a_fn_clona_el_rc() {
         // El Ident `u` de tipo Nominal se evalúa como `u.clone()` al
         // pasarlo a `f(u)`. Esto preserva el aliasing del intérprete.
-        let code = gen(
-            "type U { id: Int }\nfn f(x: U) -> Int => x.id\nlet u = U { id: 1 }\nlet n = f(u)",
-        )
-        .unwrap();
+        let code =
+            gen("type U { id: Int }\nfn f(x: U) -> Int => x.id\nlet u = U { id: 1 }\nlet n = f(u)")
+                .unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("falta let n");
         let init_expr = ast_test::local_init_expr(l).expect("falta init de n");
         let call = match init_expr {
             syn::Expr::Call(c) => c,
-            other => panic!(
-                "esperaba init como Call, fue: {}",
-                ast_test::ts(other)
-            ),
+            other => panic!("esperaba init como Call, fue: {}", ast_test::ts(other)),
         };
         assert_eq!(ast_test::ts(&*call.func), "f", "callee debería ser `f`");
         assert_eq!(call.args.len(), 1, "esperaba 1 arg");
@@ -19034,8 +19676,7 @@ mod tests {
         let code = gen("type U { id: Int }\nlet u = U { id: 1 }\nprint(u)").unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let args = ast_test::first_macro_args_in_stmts(stmts, "println")
-            .expect("falta println!");
+        let args = ast_test::first_macro_args_in_stmts(stmts, "println").expect("falta println!");
         assert!(
             args.contains("format !")
                 && (args.contains("& *") || args.contains("&*"))
@@ -19049,9 +19690,8 @@ mod tests {
     fn tipo_anidado_compila_con_nullable_de_nominal() {
         // `type Order { user: User? }` se traduce a un campo de tipo
         // `Option<User>` (= `Option<Arc<Mutex<UserData>>>`).
-        let file = ast_test::parse(
-            &gen("type User { name: Str }\ntype Order { user: User? }").unwrap(),
-        );
+        let file =
+            ast_test::parse(&gen("type User { name: Str }\ntype Order { user: User? }").unwrap());
         let s = ast_test::find_item_struct(&file, "OrderData").expect("falta OrderData");
         let user_field = s
             .fields
@@ -19068,10 +19708,9 @@ mod tests {
 
     #[test]
     fn igualdad_estructural_entre_instancias_emite_lock_eq() {
-        let code = gen(
-            "type U { id: Int }\nlet a = U { id: 1 }\nlet b = U { id: 1 }\nlet eq = a == b",
-        )
-        .unwrap();
+        let code =
+            gen("type U { id: Int }\nlet a = U { id: 1 }\nlet b = U { id: 1 }\nlet eq = a == b")
+                .unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "eq").expect("falta let eq");
@@ -19085,11 +19724,7 @@ mod tests {
             lock_count,
             init
         );
-        assert!(
-            init.contains("=="),
-            "esperaba operador `==`, fue: {}",
-            init
-        );
+        assert!(init.contains("=="), "esperaba operador `==`, fue: {}", init);
     }
 
     // ---- 5b.2+: if como expresión con valor ----
@@ -19213,10 +19848,7 @@ mod tests {
         let file = ast_test::parse(&gen("if (true) { 1 }").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let if_expr = ast_test::find_if(stmts).expect("falta if");
-        assert!(
-            if_expr.else_branch.is_none(),
-            "el if no debe tener else"
-        );
+        assert!(if_expr.else_branch.is_none(), "el if no debe tener else");
         // El último stmt del then-block debe ser `Stmt::Expr` con `;`
         // (semicolon presente — sería tail expression sin él).
         let last_then = if_expr.then_branch.stmts.last().expect("then vacío");
@@ -19478,11 +20110,9 @@ mod tests {
     fn f13_b_nominal_en_lista_heterogenea_captura_display() {
         // F13.B — Nominal adentro de lista heterogénea se captura
         // como String via Display del Data.
-        let code = gen(
-            "type User { id: Int }\n\
+        let code = gen("type User { id: Int }\n\
              let u = User { id: 1 }\n\
-             let xs = [u, 42]",
-        )
+             let xs = [u, 42]")
         .unwrap();
         assert!(
             code.contains("__FitzValue::Nominal(format!"),
@@ -19498,9 +20128,7 @@ mod tests {
     fn map_literal_emite_vec_pares() {
         // `{"a": 1, "b": 2}` se modela como
         // `Arc<Mutex<Vec<(String, i64)>>>` con tuplas como items.
-        let file = ast_test::parse(
-            &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "m").expect("falta let m");
         assert_eq!(
@@ -19509,8 +20137,8 @@ mod tests {
             "tipo declarado de m"
         );
         let init = ast_test::local_init_expr(l).unwrap();
-        let vec_args = ast_test::find_macro_args(init, "vec")
-            .expect("esperaba un macro vec! con los pares");
+        let vec_args =
+            ast_test::find_macro_args(init, "vec").expect("esperaba un macro vec! con los pares");
         // Verifico que ambas tuplas (clave, valor) aparezcan.
         for pair in [
             "(String :: from (\"a\") , 1i64)",
@@ -19567,9 +20195,7 @@ mod tests {
         // I.1 (mini-tanda I): el indexing ahora emite un bloque
         // con bounds check + wrap negativo + clone. Verificamos
         // que las piezas clave estén presentes.
-        let file = ast_test::parse(
-            &gen("let xs: List<Int> = [10, 20]\nlet x = xs[0]").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let xs: List<Int> = [10, 20]\nlet x = xs[0]").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "x").expect("falta let x");
         // El binding `x` debe quedar tipado i64 (List<Int> indexing).
@@ -19591,9 +20217,8 @@ mod tests {
     #[test]
     fn map_indexing_emite_busqueda_lineal_con_panic() {
         // `m["a"]` → bloque que linea la búsqueda y paniquea si falta.
-        let file = ast_test::parse(
-            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m[\"a\"]").unwrap(),
-        );
+        let file =
+            ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m[\"a\"]").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("falta let n");
         let init = ast_test::local_init_expr(l).unwrap();
@@ -19630,7 +20255,9 @@ mod tests {
         // paréntesis y formato.
         let chain = ast_test::method_chain_names(&fl.expr);
         assert!(
-            chain.windows(3).any(|w| w == ["unwrap", "clone", "into_iter"]),
+            chain
+                .windows(3)
+                .any(|w| w == ["unwrap", "clone", "into_iter"]),
             "esperaba chain `lock().unwrap().clone().into_iter()` en el for, fue: {:?}",
             chain
         );
@@ -19638,10 +20265,7 @@ mod tests {
 
     #[test]
     fn for_sobre_list_de_any_es_error() {
-        assert_err_contains(
-            "let xs = []\nfor v in xs { print(v) }",
-            &["List<Any>"],
-        );
+        assert_err_contains("let xs = []\nfor v in xs { print(v) }", &["List<Any>"]);
     }
 
     #[test]
@@ -19700,9 +20324,7 @@ mod tests {
     fn len_builtin_global_sobre_list_resuelve_a_lock_len() {
         // `len(xs)` despacha por tipo del argumento — mismo código que
         // `xs.len()` para List/Map; para Str sigue siendo chars().count.
-        let file = ast_test::parse(
-            &gen("let xs: List<Int> = [1]\nlet n = len(xs)").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let xs: List<Int> = [1]\nlet n = len(xs)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("falta let n");
         assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
@@ -19746,8 +20368,7 @@ mod tests {
     #[test]
     fn list_map_con_fnexpr_inline_emite_closure() {
         let file = ast_test::parse(
-            &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.map(fn(x) => x * 2)")
-                .unwrap(),
+            &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.map(fn(x) => x * 2)").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "ys").expect("falta let ys");
@@ -19785,8 +20406,7 @@ mod tests {
         // Filter usa un for manual (no .filter()) porque el callback
         // toma T por valor pero `Iterator::filter` quiere &T.
         let file = ast_test::parse(
-            &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.filter(fn(x) => x > 1)")
-                .unwrap(),
+            &gen("let xs: List<Int> = [1, 2, 3]\nlet ys = xs.filter(fn(x) => x > 1)").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "ys").expect("falta let ys");
@@ -19813,10 +20433,8 @@ mod tests {
         // estructura: el tipo de salida del primer map alimenta al
         // siguiente sin friction.
         let file = ast_test::parse(
-            &gen(
-                "let xs: List<Int> = [1, 2]\n\
-                 let ys = xs.map(fn(x) => x * 2).map(fn(x) => x + 1)",
-            )
+            &gen("let xs: List<Int> = [1, 2]\n\
+                 let ys = xs.map(fn(x) => x * 2).map(fn(x) => x + 1)")
             .unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
@@ -19863,8 +20481,7 @@ mod tests {
     #[test]
     fn map_keys_emite_lista_nueva_de_claves() {
         let file = ast_test::parse(
-            &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\nlet ks = m.keys()")
-                .unwrap(),
+            &gen("let m: Map<Str, Int> = {\"a\": 1, \"b\": 2}\nlet ks = m.keys()").unwrap(),
         );
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "ks").expect("falta let ks");
@@ -19917,9 +20534,8 @@ mod tests {
 
     #[test]
     fn map_len_metodo_emite_borrow_len_as_i64() {
-        let file = ast_test::parse(
-            &gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m.len()").unwrap(),
-        );
+        let file =
+            ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1}\nlet n = m.len()").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         let l = ast_test::find_let(stmts, "n").expect("falta let n");
         assert_eq!(ast_test::local_type(l).as_deref(), Some("i64"));
@@ -20068,11 +20684,9 @@ mod tests {
         // F12: param `f: Fn(Int) -> Int` en la firma de la fn top-level
         // debe traducirse a `Arc<dyn Fn(i64) -> i64>` en el header.
         let file = ast_test::parse(
-            &gen(
-                "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
+            &gen("fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
                  fn square(n: Int) -> Int => n * n\n\
-                 print(apply(square, 7))",
-            )
+                 print(apply(square, 7))")
             .unwrap(),
         );
         // Header de `apply`: tipos de params + return type.
@@ -20090,9 +20704,7 @@ mod tests {
         // La llamada `apply(square, 7)` debe envolver `square` en
         // `Arc::new(square)`. Lo busco como sub-string sobre el `main`
         // tokenizado (la llamada vive adentro del print).
-        let main_text = ast_test::ts(
-            ast_test::find_item_fn(&file, "main").expect("falta fn main"),
-        );
+        let main_text = ast_test::ts(ast_test::find_item_fn(&file, "main").expect("falta fn main"));
         assert!(
             main_text.contains("apply ((Arc :: new (square)"),
             "esperaba `apply((Arc::new(square) as ...))` en main, fue: {}",
@@ -20106,17 +20718,14 @@ mod tests {
         // con retorno `Arc<dyn Fn(i64) -> i64>`. La closure interna que
         // captura `x` se traduce con `move`.
         let file = ast_test::parse(
-            &gen(
-                "fn make_adder(x: Int) -> Fn(Int) -> Int {\n\
+            &gen("fn make_adder(x: Int) -> Fn(Int) -> Int {\n\
                      return fn(y: Int) => x + y\n\
                  }\n\
                  let add5: Fn(Int) -> Int = make_adder(5)\n\
-                 print(add5(3))",
-            )
+                 print(add5(3))")
             .unwrap(),
         );
-        let make_adder = ast_test::find_item_fn(&file, "make_adder")
-            .expect("falta fn make_adder");
+        let make_adder = ast_test::find_item_fn(&file, "make_adder").expect("falta fn make_adder");
         assert_eq!(
             ast_test::fn_param_types(make_adder),
             vec!["i64"],
@@ -20143,11 +20752,9 @@ mod tests {
         // preservar el aliasing semántico sin consumir la var del
         // caller.
         let file = ast_test::parse(
-            &gen(
-                "let saludo = \"hola\"\n\
+            &gen("let saludo = \"hola\"\n\
                  let f: Fn(Str) -> Str = fn(n: Str) => \"{saludo}, {n}!\"\n\
-                 print(f(\"Fitz\"))",
-            )
+                 print(f(\"Fitz\"))")
             .unwrap(),
         );
         // El clone afuera y el closure interno viven adentro del init
@@ -20178,9 +20785,7 @@ mod tests {
         // El cuerpo del main debe tener una llamada `f(10i64)` adentro
         // del println!. Lo busco sobre la representación tokenizada
         // (es un macro call, el argumento entero se ve serializado).
-        let main_text = ast_test::ts(
-            ast_test::find_item_fn(&file, "main").expect("falta fn main"),
-        );
+        let main_text = ast_test::ts(ast_test::find_item_fn(&file, "main").expect("falta fn main"));
         assert!(
             main_text.contains("f (10i64)"),
             "esperaba `f(10i64)` en main, fue: {}",
@@ -20194,15 +20799,11 @@ mod tests {
         // intermedia — emite el `Arc::new(move |n: i64| ...)` inline
         // como argumento.
         let file = ast_test::parse(
-            &gen(
-                "fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
-                 print(apply(fn(n: Int) => n * 10, 7))",
-            )
+            &gen("fn apply(f: Fn(Int) -> Int, x: Int) -> Int => f(x)\n\
+                 print(apply(fn(n: Int) => n * 10, 7))")
             .unwrap(),
         );
-        let main_text = ast_test::ts(
-            ast_test::find_item_fn(&file, "main").expect("falta fn main"),
-        );
+        let main_text = ast_test::ts(ast_test::find_item_fn(&file, "main").expect("falta fn main"));
         assert!(
             main_text.contains("apply ((Arc :: new (move | n : i64 |"),
             "esperaba el FnExpr emitido inline como arg de apply, fue: {}",
@@ -20240,9 +20841,7 @@ mod tests {
 
     #[test]
     fn print_de_mapa_emite_iter_inline_con_llaves() {
-        let file = ast_test::parse(
-            &gen("let m: Map<Str, Int> = {\"a\": 1}\nprint(m)").unwrap(),
-        );
+        let file = ast_test::parse(&gen("let m: Map<Str, Int> = {\"a\": 1}\nprint(m)").unwrap());
         let stmts = ast_test::main_block_stmts(&file);
         assert!(
             ast_test::count_macro_calls(stmts, "println") >= 1,
@@ -20273,7 +20872,6 @@ mod tests {
     // 5b.6 por los tests específicos de HTTP más abajo.)
 
     // ---- 5b.6: HTTP / @server / handlers --------------------------------
-
 
     #[test]
     fn http_main_emite_tokio_main_async() {
@@ -20335,8 +20933,8 @@ mod tests {
         let src = "@get(\"/u/{id}\") fn get_user(id: Int) -> Str => \"x\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
         let file = ast_test::parse(&code);
-        let handler = ast_test::find_item_fn(&file, "__handler_get_user")
-            .expect("falta __handler_get_user");
+        let handler =
+            ast_test::find_item_fn(&file, "__handler_get_user").expect("falta __handler_get_user");
         let pats_tys = ast_test::fn_param_pats_and_types(handler);
         assert!(
             pats_tys.iter().any(|(p, t)| {
@@ -20375,8 +20973,8 @@ mod tests {
         let src = "@get(\"/d/{n}\") fn divide(n: Int) -> Result<Int> { return Ok(n * 2) }";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper = ast_test::find_item_fn(&file, "__handler_divide")
-            .expect("falta __handler_divide");
+        let wrapper =
+            ast_test::find_item_fn(&file, "__handler_divide").expect("falta __handler_divide");
         assert!(
             ast_test::fn_body_has_match_arm_pat(wrapper, "Ok (__v)")
                 || ast_test::fn_body_has_match_arm_pat(wrapper, "Ok(__v)"),
@@ -20414,8 +21012,7 @@ mod tests {
                    }";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let protected =
-            ast_test::find_item_fn(&file, "protected").expect("falta fn protected");
+        let protected = ast_test::find_item_fn(&file, "protected").expect("falta fn protected");
         assert_eq!(
             ast_test::fn_return_type(protected).as_deref(),
             Some("__FitzResponse"),
@@ -20447,14 +21044,10 @@ mod tests {
                    }";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let get_user =
-            ast_test::find_item_fn(&file, "get_user").expect("falta fn get_user");
+        let get_user = ast_test::find_item_fn(&file, "get_user").expect("falta fn get_user");
         // El return de Str "alice" debe envolverse en status 200.
         assert!(
-            ast_test::fn_body_returns_any_matching(
-                get_user,
-                &["__FitzResponse", "status : 200"],
-            ),
+            ast_test::fn_body_returns_any_matching(get_user, &["__FitzResponse", "status : 200"],),
             "esperaba return con `__FitzResponse {{ status: 200, ... }}`, body:\n{}",
             ast_test::fn_body_text(get_user)
         );
@@ -20479,8 +21072,7 @@ mod tests {
                    }";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper =
-            ast_test::find_item_fn(&file, "__handler_p").expect("falta __handler_p");
+        let wrapper = ast_test::find_item_fn(&file, "__handler_p").expect("falta __handler_p");
         let resp =
             ast_test::find_local_in_fn(wrapper, "__resp").expect("falta let __resp en wrapper");
         assert_eq!(
@@ -20547,8 +21139,8 @@ mod tests {
             "esperaba extractor Query<HashMap<String, String>>, got: {:?}",
             pats_tys
         );
-        let limit = ast_test::find_local_in_fn(wrapper, "limit")
-            .expect("falta `let limit` en wrapper");
+        let limit =
+            ast_test::find_local_in_fn(wrapper, "limit").expect("falta `let limit` en wrapper");
         assert_eq!(
             ast_test::local_type(&limit).as_deref(),
             Some("i64"),
@@ -20556,8 +21148,7 @@ mod tests {
         );
         let init = ast_test::local_init(&limit).unwrap_or_default();
         assert!(
-            init.contains("__qmap . get (\"limit\")")
-                || init.contains("__qmap .get (\"limit\")"),
+            init.contains("__qmap . get (\"limit\")") || init.contains("__qmap .get (\"limit\")"),
             "esperaba init que matchea __qmap.get(\"limit\"), got: {}",
             init
         );
@@ -20578,8 +21169,8 @@ mod tests {
         let file = ast_test::parse(&code);
         let wrapper = ast_test::find_item_fn(&file, "__handler_list_items")
             .expect("falta __handler_list_items");
-        let limit = ast_test::find_local_in_fn(wrapper, "limit")
-            .expect("falta `let limit` en wrapper");
+        let limit =
+            ast_test::find_local_in_fn(wrapper, "limit").expect("falta `let limit` en wrapper");
         assert_eq!(
             ast_test::local_type(&limit).as_deref(),
             Some("Option < i64 >"),
@@ -20599,10 +21190,9 @@ mod tests {
         let src = "@get(\"/x?name={name}\") fn h(name: Str) -> Str => name";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper =
-            ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
-        let name = ast_test::find_local_in_fn(wrapper, "name")
-            .expect("falta `let name` en wrapper");
+        let wrapper = ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
+        let name =
+            ast_test::find_local_in_fn(wrapper, "name").expect("falta `let name` en wrapper");
         assert_eq!(
             ast_test::local_type(&name).as_deref(),
             Some("String"),
@@ -20628,10 +21218,8 @@ mod tests {
         let src = "@get(\"/x?on={on}\") fn h(on: Bool) -> Bool => on";
         let code = gen(src).unwrap();
         let file = ast_test::parse(&code);
-        let wrapper =
-            ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
-        let on = ast_test::find_local_in_fn(wrapper, "on")
-            .expect("falta `let on` en wrapper");
+        let wrapper = ast_test::find_item_fn(&file, "__handler_h").expect("falta __handler_h");
+        let on = ast_test::find_local_in_fn(wrapper, "on").expect("falta `let on` en wrapper");
         assert_eq!(
             ast_test::local_type(&on).as_deref(),
             Some("bool"),
@@ -20675,8 +21263,8 @@ mod tests {
             "esperaba extractor Query<HashMap>, got: {:?}",
             pats_tys
         );
-        let limit = ast_test::find_local_in_fn(wrapper, "limit")
-            .expect("falta `let limit` en wrapper");
+        let limit =
+            ast_test::find_local_in_fn(wrapper, "limit").expect("falta `let limit` en wrapper");
         assert_eq!(
             ast_test::local_type(&limit).as_deref(),
             Some("Option < i64 >"),
@@ -20723,8 +21311,7 @@ mod tests {
         let pats_tys = ast_test::fn_param_pats_and_types(wrapper);
         assert!(
             pats_tys.iter().any(|(p, t)| {
-                p.contains("body_body_bytes")
-                    && t.contains("axum :: body :: Bytes")
+                p.contains("body_body_bytes") && t.contains("axum :: body :: Bytes")
             }),
             "esperaba extractor body_body_bytes: axum::body::Bytes, got: {:?}",
             pats_tys
@@ -21008,8 +21595,7 @@ mod tests {
         let main = ast_test::find_item_fn(&file, "main").expect("falta fn main");
         let body = ast_test::fn_body_text(main);
         assert!(
-            body.contains("\"0.0.0.0:8080\" . parse")
-                || body.contains("\"0.0.0.0:8080\".parse"),
+            body.contains("\"0.0.0.0:8080\" . parse") || body.contains("\"0.0.0.0:8080\".parse"),
             "esperaba `\"0.0.0.0:8080\".parse()` en fn main, got:\n{}",
             body
         );
@@ -21203,7 +21789,9 @@ mod tests {
             body
         );
         assert!(
-            body.contains("BAD_REQUEST") && body.contains("Authorization") && body.contains("obligatorio"),
+            body.contains("BAD_REQUEST")
+                && body.contains("Authorization")
+                && body.contains("obligatorio"),
             "esperaba branch 400 con mensaje 'obligatorio', body:\n{}",
             body
         );
@@ -21214,8 +21802,8 @@ mod tests {
         let src = "@header(name=\"X-Trace-Id\")\n@get(\"/traced\") fn traced(x_trace_id: Str?) -> Str => \"ok\"";
         let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
         let file = ast_test::parse(&code);
-        let handler = ast_test::find_item_fn(&file, "__handler_traced")
-            .expect("falta __handler_traced");
+        let handler =
+            ast_test::find_item_fn(&file, "__handler_traced").expect("falta __handler_traced");
         let body = ast_test::fn_body_text(handler);
         // Option<String> para el binding.
         assert!(
@@ -21278,15 +21866,13 @@ mod tests {
         // LazyLock<...> = LazyLock::new(|| ...);`. Validación liviana
         // por sub-string sobre el output (no hay helper `find_top_static`).
         assert!(
-            code.contains("static __FITZ_STATE_USERS")
-                && code.contains("LazyLock"),
+            code.contains("static __FITZ_STATE_USERS") && code.contains("LazyLock"),
             "esperaba `static __FITZ_STATE_USERS: ... LazyLock<...>`, got:\n{}",
             code
         );
         // Cada fn que toca la state debe materializarla con `(*X).clone()`.
         let file = ast_test::parse(&code);
-        let list_users =
-            ast_test::find_item_fn(&file, "list_users").expect("falta fn list_users");
+        let list_users = ast_test::find_item_fn(&file, "list_users").expect("falta fn list_users");
         let body = ast_test::fn_body_text(list_users);
         assert!(
             body.contains("__FITZ_STATE_USERS") && body.contains(". clone"),
@@ -21316,14 +21902,18 @@ mod tests {
         // no via `gen` (que solo devuelve main.rs). Pasamos por el API
         // pública para validar.
         use std::path::Path;
-        let tokens = crate::lexer::tokenize(
-            "@get(\"/\") fn index() -> Str => \"ok\"",
-        )
-        .unwrap();
+        let tokens = crate::lexer::tokenize("@get(\"/\") fn index() -> Str => \"ok\"").unwrap();
         let program = crate::parser::parse(tokens).unwrap();
         let (env, types_info, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty(), "checker errors: {:?}", errs);
-        let project = generate_project(Path::new("test.fitz"), &program, &env, &types_info, crate::manifest::DepRegistry::new()).unwrap();
+        let project = generate_project(
+            Path::new("test.fitz"),
+            &program,
+            &env,
+            &types_info,
+            crate::manifest::DepRegistry::new(),
+        )
+        .unwrap();
         assert!(
             project.cargo_toml.contains("axum = \"0.8\""),
             "esperaba axum en Cargo.toml, got:\n{}",
@@ -21348,7 +21938,14 @@ mod tests {
         let program = crate::parser::parse(tokens).unwrap();
         let (env, types_info, _defs, errs) = crate::types::check_program(&program);
         assert!(errs.is_empty());
-        let project = generate_project(Path::new("test.fitz"), &program, &env, &types_info, crate::manifest::DepRegistry::new()).unwrap();
+        let project = generate_project(
+            Path::new("test.fitz"),
+            &program,
+            &env,
+            &types_info,
+            crate::manifest::DepRegistry::new(),
+        )
+        .unwrap();
         assert!(
             !project.cargo_toml.contains("axum"),
             "no debería haber axum en Cargo.toml sin HTTP, got:\n{}",
@@ -21387,8 +21984,7 @@ mod tests {
     #[test]
     fn result_type_anotacion_emite_result_t_string() {
         // `Result<Int>` Fitz → `Result<i64, String>` Rust.
-        let code =
-            gen("fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }").unwrap();
+        let code = gen("fn divide(a: Int, b: Int) -> Result<Int> { return Ok(a / b) }").unwrap();
         let file = ast_test::parse(&code);
         let divide = ast_test::find_item_fn(&file, "divide").expect("falta fn divide");
         assert_eq!(
@@ -21416,10 +22012,7 @@ mod tests {
         let file = ast_test::parse(&code);
         let boom = ast_test::find_item_fn(&file, "boom").expect("falta fn boom");
         assert!(
-            ast_test::fn_body_returns_any_matching(
-                boom,
-                &["Err", "String :: from", "\"explotó\""],
-            ),
+            ast_test::fn_body_returns_any_matching(boom, &["Err", "String :: from", "\"explotó\""],),
             "esperaba `return Err(String::from(\"explotó\"))`, body:\n{}",
             ast_test::fn_body_text(boom)
         );
@@ -21449,14 +22042,11 @@ mod tests {
     #[test]
     fn try_operador_emite_question_mark_rust() {
         // Adentro de fn que retorna Result, `expr?` → `<expr>?` Rust.
-        let code = gen(
-            "fn find_user(id: Int) -> Result<Int> { return Ok(id) }\n\
-             fn describe(id: Int) -> Result<Str> { let u = find_user(id)?\n return Ok(\"x\") }",
-        )
+        let code = gen("fn find_user(id: Int) -> Result<Int> { return Ok(id) }\n\
+             fn describe(id: Int) -> Result<Str> { let u = find_user(id)?\n return Ok(\"x\") }")
         .unwrap();
         let file = ast_test::parse(&code);
-        let describe =
-            ast_test::find_item_fn(&file, "describe").expect("falta fn describe");
+        let describe = ast_test::find_item_fn(&file, "describe").expect("falta fn describe");
         let u = ast_test::find_local_in_fn(describe, "u").expect("falta `let u`");
         let init = ast_test::local_init_expr(&u).expect("`let u` sin init");
         // Atraviesa paréntesis externos opcionales y verifica Try.
@@ -21485,10 +22075,7 @@ mod tests {
         // (return_stack vacío, sin contexto a chequear) pero el
         // codegen lo ataja: `?` Rust solo funciona adentro de fns
         // que retornen Result. Sin ese contexto, no podemos emitirlo.
-        assert_err_contains(
-            "let x = Ok(1)?",
-            &["?", "Result"],
-        );
+        assert_err_contains("let x = Ok(1)?", &["?", "Result"]);
     }
 
     #[test]
@@ -21549,11 +22136,9 @@ mod tests {
     fn match_ok_binding_introduce_var_en_scope() {
         // El binding `u` adentro del arm `Ok(u)` debe poder usarse
         // (acceso a `.id`, paso a `print`, etc.).
-        let code = gen(
-            "type User { id: Int }\n\
+        let code = gen("type User { id: Int }\n\
              fn find_user(id: Int) -> Result<User> { return Ok(User { id: id }) }\n\
-             match find_user(1) { Ok(u) => print(u.id), Err(e) => print(e) }",
-        )
+             match find_user(1) { Ok(u) => print(u.id), Err(e) => print(e) }")
         .unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
@@ -21580,15 +22165,13 @@ mod tests {
     fn print_de_result_emite_match_inline() {
         // `print(r)` con `r: Result<T>` produce un match inline que
         // formatea `Ok(...)` o `Err("...")` igual al intérprete.
-        let code = gen(
-            "fn ok42() -> Result<Int> { return Ok(42) }\n\
-             let r = ok42()\nprint(r)",
-        )
+        let code = gen("fn ok42() -> Result<Int> { return Ok(42) }\n\
+             let r = ok42()\nprint(r)")
         .unwrap();
         let file = ast_test::parse(&code);
         let stmts = ast_test::main_block_stmts(&file);
-        let println_args = ast_test::first_macro_args_in_stmts(stmts, "println")
-            .expect("falta println! en main");
+        let println_args =
+            ast_test::first_macro_args_in_stmts(stmts, "println").expect("falta println! en main");
         assert!(
             println_args.contains("Ok (__v)")
                 && println_args.contains("format !")
@@ -21597,8 +22180,7 @@ mod tests {
             println_args
         );
         assert!(
-            println_args.contains("Err (__e)")
-                && println_args.contains("\"Err(\\\"{}\\\")\""),
+            println_args.contains("Err (__e)") && println_args.contains("\"Err(\\\"{}\\\")\""),
             "esperaba arm `Err(__e) => format!(\"Err(\\\"{{}}\\\")\", __e)`, println! args:\n{}",
             println_args
         );
@@ -21655,8 +22237,7 @@ mod tests {
             ast_test::vis_is_pub(&user_data.vis),
             "esperaba `pub struct UserData`"
         );
-        let user_alias =
-            ast_test::find_item_type(&file, "User").expect("falta type alias User");
+        let user_alias = ast_test::find_item_type(&file, "User").expect("falta type alias User");
         assert!(
             ast_test::vis_is_pub(&user_alias.vis),
             "esperaba `pub type User`"
@@ -21693,8 +22274,7 @@ mod tests {
     fn modulo_let_int_top_level_se_emite_como_pub_const() {
         let code = gen_module("let MAX_RETRIES: Int = 5").unwrap();
         let file = ast_test::parse(&code);
-        let max = ast_test::find_item_const(&file, "MAX_RETRIES")
-            .expect("falta const MAX_RETRIES");
+        let max = ast_test::find_item_const(&file, "MAX_RETRIES").expect("falta const MAX_RETRIES");
         assert!(
             ast_test::vis_is_pub(&max.vis),
             "esperaba `pub const MAX_RETRIES`"
@@ -21726,10 +22306,7 @@ mod tests {
     fn modulo_top_level_acepta_expr_no_const_como_pub_fn() {
         // F14: una RHS no const-eval (call a fn, field access, etc.) a
         // nivel top de módulo se emite como accessor fn `pub fn X() -> T`.
-        let code = gen_module(
-            "fn make() -> Int => 42\nlet X: Int = make()",
-        )
-        .unwrap();
+        let code = gen_module("fn make() -> Int => 42\nlet X: Int = make()").unwrap();
         let file = ast_test::parse(&code);
         let x = ast_test::find_item_fn(&file, "X").expect("falta fn X");
         assert!(ast_test::vis_is_pub(&x.vis), "esperaba `pub fn X`");
@@ -21784,10 +22361,7 @@ mod tests {
     #[test]
     fn lt_let_ok_binding_subpattern_extrae_resultado() {
         // `let (Ok(v), tag) = ...`: bindings = [v, tag].
-        let code = gen(
-            "let (Ok(v), tag) = (Ok(99), \"result\")\nprint(v)\nprint(tag)\n",
-        )
-        .unwrap();
+        let code = gen("let (Ok(v), tag) = (Ok(99), \"result\")\nprint(v)\nprint(tag)\n").unwrap();
         assert!(
             code.contains("__destr_scrut"),
             "esperaba match wrapper, got:\n{}",
@@ -21810,10 +22384,7 @@ mod tests {
     fn lt_let_str_literal_subpattern_usa_guard_inline() {
         // `let ("ada", n) = ...`: el Str literal genera un guard
         // `__s_X.as_str() == "ada"` en el brazo del match.
-        let code = gen(
-            "let (\"ada\", n) = (\"ada\", 7)\nprint(n)\n",
-        )
-        .unwrap();
+        let code = gen("let (\"ada\", n) = (\"ada\", 7)\nprint(n)\n").unwrap();
         assert!(
             code.contains("__destr_scrut"),
             "esperaba match wrapper, got:\n{}",
@@ -21829,10 +22400,7 @@ mod tests {
     #[test]
     fn lt_let_range_subpattern_usa_guard_contains() {
         // `let (0..100, y) = ...`: Range emite guard `(0..100).contains(&__n_X)`.
-        let code = gen(
-            "let (0..100, y) = (50, \"yes\")\nprint(y)\n",
-        )
-        .unwrap();
+        let code = gen("let (0..100, y) = (50, \"yes\")\nprint(y)\n").unwrap();
         assert!(
             code.contains(".contains(&__n_"),
             "esperaba guard `(0..100).contains(&__n_X)`, got:\n{}",
@@ -21860,7 +22428,9 @@ mod tests {
     /// legítimamente (ej. `__fitz_env`); las assertions sobre la fn
     /// `fail` específica filtran ese ruido.
     fn extract_fail_body(code: &str) -> String {
-        let idx = code.find("fn fail").expect("no encontré `fn fail` en el output");
+        let idx = code
+            .find("fn fail")
+            .expect("no encontré `fn fail` en el output");
         // Tomamos hasta el siguiente `fn ` que no sea `fn fail`. Lean:
         // alcanza con cortar en el siguiente "\nfn " que arrancaría una
         // fn distinta.
@@ -21875,12 +22445,10 @@ mod tests {
         // rechazaba con error de codegen. Post-El: emite `Err(<list>)`
         // directo con el `Arc<Mutex<Vec<i64>>>` intacto, sin coerción
         // a String.
-        let code = gen(
-            "fn fail() -> Result<Int, List<Int>> {\n\
+        let code = gen("fn fail() -> Result<Int, List<Int>> {\n\
                  return Err([1, 2, 3])\n\
              }\n\
-             fail()",
-        )
+             fail()")
         .unwrap();
         let fail_body = extract_fail_body(&code);
         assert!(
@@ -21902,12 +22470,10 @@ mod tests {
 
     #[test]
     fn el_err_map_se_emite_directo() {
-        let code = gen(
-            "fn fail() -> Result<Int, Map<Str, Int>> {\n\
+        let code = gen("fn fail() -> Result<Int, Map<Str, Int>> {\n\
                  return Err({\"a\": 1, \"b\": 2})\n\
              }\n\
-             fail()",
-        )
+             fail()")
         .unwrap();
         let fail_body = extract_fail_body(&code);
         assert!(
@@ -21930,9 +22496,7 @@ mod tests {
         // `gen_module` (que NO toma loader) sigue funcionando con
         // imports stmts en el AST — los stmts se ignoran (ya los
         // procesó el loader).
-        let code = gen_module(
-            "from segundo import dos\nfn x() -> Int => dos()",
-        );
+        let code = gen_module("from segundo import dos\nfn x() -> Int => dos()");
         assert!(
             code.is_err(),
             "gen_module sin loader: el cuerpo de `x` referencia `dos` \
@@ -21951,14 +22515,14 @@ mod tests {
     fn modulo_top_level_str_concat_se_emite_como_pub_fn() {
         // F14: `let X = "a" + "b"` no es const-eval (Rust no acepta
         // `String + String` en const) → accessor fn `pub fn X() -> String`.
-        let code = gen_module(
-            "let GREETING: Str = \"hola, \" + \"Fitz\"",
-        )
-        .unwrap();
+        let code = gen_module("let GREETING: Str = \"hola, \" + \"Fitz\"").unwrap();
         let file = ast_test::parse(&code);
         let greeting = ast_test::find_item_fn(&file, "GREETING")
             .expect("falta fn GREETING (esperaba accessor para Str concat)");
-        assert!(ast_test::vis_is_pub(&greeting.vis), "esperaba `pub fn GREETING`");
+        assert!(
+            ast_test::vis_is_pub(&greeting.vis),
+            "esperaba `pub fn GREETING`"
+        );
         assert_eq!(
             ast_test::fn_return_type(greeting).as_deref(),
             Some("String"),
@@ -21971,14 +22535,15 @@ mod tests {
         // PREFIX como `pub static`, greet la usa adentro de su body.
         // Comprobamos que el codegen del módulo no se queja de
         // "variable desconocida".
-        let code = gen_module(
-            "let PREFIX = \"hola, \"\nfn greet(name: Str) -> Str => \"{PREFIX}{name}\"",
-        )
-        .unwrap();
+        let code =
+            gen_module("let PREFIX = \"hola, \"\nfn greet(name: Str) -> Str => \"{PREFIX}{name}\"")
+                .unwrap();
         let file = ast_test::parse(&code);
-        let prefix = ast_test::find_item_static(&file, "PREFIX")
-            .expect("falta static PREFIX");
-        assert!(ast_test::vis_is_pub(&prefix.vis), "esperaba `pub static PREFIX`");
+        let prefix = ast_test::find_item_static(&file, "PREFIX").expect("falta static PREFIX");
+        assert!(
+            ast_test::vis_is_pub(&prefix.vis),
+            "esperaba `pub static PREFIX`"
+        );
         assert_eq!(ast_test::ts(&*prefix.ty), "& str");
         assert_eq!(ast_test::ts(&*prefix.expr), "\"hola, \"");
         let greet = ast_test::find_item_fn(&file, "greet").expect("falta fn greet");
@@ -22266,8 +22831,7 @@ mod tests {
         let program = parse(tokens).expect("parse OK");
         let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
-            !errors.is_empty()
-                && errors.iter().any(|e| e.message.contains("no_existe")),
+            !errors.is_empty() && errors.iter().any(|e| e.message.contains("no_existe")),
             "esperaba error del checker sobre `no_existe`, fue: {:?}",
             errors
         );
@@ -22282,8 +22846,7 @@ mod tests {
         let program = parse(tokens).expect("parse OK");
         let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
-            !errors.is_empty()
-                && errors.iter().any(|e| e.message.contains("1 ar")),
+            !errors.is_empty() && errors.iter().any(|e| e.message.contains("1 ar")),
             "esperaba error del checker sobre aridad, fue: {:?}",
             errors
         );
@@ -22298,8 +22861,7 @@ mod tests {
         let program = parse(tokens).expect("parse OK");
         let (_env, _types, _defs, errors) = check_program(&program);
         assert!(
-            !errors.is_empty()
-                && errors.iter().any(|e| e.message.contains("Bool")),
+            !errors.is_empty() && errors.iter().any(|e| e.message.contains("Bool")),
             "esperaba error del checker sobre ret type, fue: {:?}",
             errors
         );

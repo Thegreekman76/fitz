@@ -469,19 +469,13 @@ pub enum AssignTarget {
     /// `objeto.campo = ...` — mutación de un campo de una `Instance`.
     /// `object` es cualquier expresión que evalúe a `Value::Instance`;
     /// el evaluador chequea esto en runtime y emite error si no.
-    Field {
-        object: Box<Expr>,
-        field: String,
-    },
+    Field { object: Box<Expr>, field: String },
     /// `objeto[indice] = ...` — asignación a índice de `List` o `Map`
     /// (R.1.3, mini-fase R). Para `List`, el índice tiene que ser
     /// `Int` en rango; out-of-bounds → error runtime. Para `Map`, la
     /// clave puede ser cualquier tipo hashable; si ya existe se
     /// sobreescribe, si no, se inserta preservando insertion order.
-    Index {
-        object: Box<Expr>,
-        index: Box<Expr>,
-    },
+    Index { object: Box<Expr>, index: Box<Expr> },
 }
 
 /// Posición de un nodo del AST en el archivo fuente. La acompaña a
@@ -725,15 +719,24 @@ impl Stmt {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum BinOpKind {
-    Add, Sub, Mul, Div,
+    Add,
+    Sub,
+    Mul,
+    Div,
     /// R.1.2 — operador módulo (`%`). Solo válido sobre `Int`
     /// en MVP. Semántica euclidean: el resultado tiene siempre
     /// el mismo signo del divisor (paralelo a Python, distinto
     /// del `%` Rust que es truncate-toward-zero). `n % 0` →
     /// error runtime claro.
     Mod,
-    Eq, NotEq, Lt, LtEq, Gt, GtEq,
-    And, Or,
+    Eq,
+    NotEq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    And,
+    Or,
     /// Mini-tanda Xor — `a xor b` lógico (paralelo a `and`/`or`).
     /// Solo válido sobre `Bool`. Equivalente a `a != b` sobre Bool
     /// pero más declarativo.
@@ -741,7 +744,11 @@ pub enum BinOpKind {
     /// Mini-tanda Bits — operadores bit-a-bit sobre `Int`. El
     /// checker rechaza cualquier otro tipo. Shifts `<<`/`>>` con
     /// RHS negativo o >= 64 → error de runtime.
-    BitAnd, BitOr, BitXor, Shl, Shr,
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -962,7 +969,11 @@ pub enum Pattern {
     /// matchea si el valor es Int y `start <= v < end` (o `<= end`).
     /// Solo Int por ahora (Float complica la representación discreta).
     /// `inclusive` aportado por R.1.4 (mini-fase R).
-    Range { start: i64, end: i64, inclusive: bool },
+    Range {
+        start: i64,
+        end: i64,
+        inclusive: bool,
+    },
     /// `(p1, p2, ...)` — matchea si el valor es una tupla de la
     /// misma longitud y cada sub-patrón matchea su slot
     /// (mini-tanda T). Tupla vacía `()` matchea solo `Tuple([])`.
@@ -981,7 +992,6 @@ pub enum Pattern {
     ///    se mantiene como pattern simple, no envuelto en `Or`.
     Or(Vec<Pattern>),
 }
-
 
 /// Decorador aplicado a una `Stmt::FnDef`: `@nombre(args..., key=value...)`.
 ///
@@ -1037,7 +1047,8 @@ mod tests {
                 target: AssignTarget::Ident("name".into()),
                 type_: None,
                 value: Expr::Str("Fitz".into(), Span::ZERO),
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             // x = 10 + 5
             Stmt::Assign {
                 target: AssignTarget::Ident("x".into()),
@@ -1045,46 +1056,72 @@ mod tests {
                 value: Expr::BinOp {
                     op: BinOpKind::Add,
                     left: Box::new(Expr::Int(10, Span::ZERO)),
-                    right: Box::new(Expr::Int(5, Span::ZERO)), span: Span::ZERO,
+                    right: Box::new(Expr::Int(5, Span::ZERO)),
+                    span: Span::ZERO,
                 },
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             // print("Hola, {name}!")
-            Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
-                args: vec![Expr::StrInterp(vec![
-                    StrPart::Lit("Hola, ".into()),
-                    StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
-                    StrPart::Lit("!".into()),
-                ], Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::StrInterp(
+                        vec![
+                            StrPart::Lit("Hola, ".into()),
+                            StrPart::Expr(Expr::Ident("name".into(), Span::ZERO), None),
+                            StrPart::Lit("!".into()),
+                        ],
+                        Span::ZERO,
+                    )],
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
             // fn double(n) => n * 2
             Stmt::FnDef {
                 name: "double".into(),
-                params: vec![Param { name: "n".into(), type_: None, default: None, varargs: false }],
+                params: vec![Param {
+                    name: "n".into(),
+                    type_: None,
+                    default: None,
+                    varargs: false,
+                }],
                 return_type: None,
-                body: vec![Stmt::Return(Expr::BinOp {
-                    op: BinOpKind::Mul,
-                    left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
-                    right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-                }, Span::ZERO)],
+                body: vec![Stmt::Return(
+                    Expr::BinOp {
+                        op: BinOpKind::Mul,
+                        left: Box::new(Expr::Ident("n".into(), Span::ZERO)),
+                        right: Box::new(Expr::Int(2, Span::ZERO)),
+                        span: Span::ZERO,
+                    },
+                    Span::ZERO,
+                )],
                 is_async: false,
                 decorators: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             // print(double(x))
-            Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
-                args: vec![Expr::Call {
-                    callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
-                    args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-                }], span: Span::ZERO,
-            }, Span::ZERO),
+            Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::Call {
+                        callee: Box::new(Expr::Ident("double".into(), Span::ZERO)),
+                        args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                        span: Span::ZERO,
+                    }],
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            ),
         ];
 
         assert_eq!(program.len(), 5);
 
         // Verificación puntual: la 4ta sentencia es la fn def de `double`.
         match &program[3] {
-            Stmt::FnDef { name, params, body, .. } => {
+            Stmt::FnDef {
+                name, params, body, ..
+            } => {
                 assert_eq!(name, "double");
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "n");
@@ -1107,7 +1144,10 @@ mod tests {
     #[test]
     fn ast_supports_break_and_continue_inside_loops() {
         // Stmt::Break y Stmt::Continue son sentencias por sí mismas.
-        let stmts: Vec<Stmt> = vec![Stmt::Break(None, None, Span::ZERO), Stmt::Continue(None, Span::ZERO)];
+        let stmts: Vec<Stmt> = vec![
+            Stmt::Break(None, None, Span::ZERO),
+            Stmt::Continue(None, Span::ZERO),
+        ];
         assert_eq!(stmts[0], Stmt::Break(None, None, Span::ZERO));
         assert_eq!(stmts[1], Stmt::Continue(None, Span::ZERO));
     }
@@ -1115,15 +1155,19 @@ mod tests {
     #[test]
     fn list_literal_holds_arbitrary_exprs() {
         // `[1, x, 2 + 3]`
-        let list = Expr::List(vec![
-            Expr::Int(1, Span::ZERO),
-            Expr::Ident("x".into(), Span::ZERO),
-            Expr::BinOp {
-                op: BinOpKind::Add,
-                left: Box::new(Expr::Int(2, Span::ZERO)),
-                right: Box::new(Expr::Int(3, Span::ZERO)), span: Span::ZERO,
-            },
-        ], Span::ZERO);
+        let list = Expr::List(
+            vec![
+                Expr::Int(1, Span::ZERO),
+                Expr::Ident("x".into(), Span::ZERO),
+                Expr::BinOp {
+                    op: BinOpKind::Add,
+                    left: Box::new(Expr::Int(2, Span::ZERO)),
+                    right: Box::new(Expr::Int(3, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+            ],
+            Span::ZERO,
+        );
         match list {
             Expr::List(items, _) => assert_eq!(items.len(), 3),
             _ => panic!("se esperaba List"),
@@ -1133,10 +1177,13 @@ mod tests {
     #[test]
     fn map_literal_preserva_orden_de_pares() {
         // `{"a": 1, "b": 2}`
-        let map = Expr::Map(vec![
-            (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
-            (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
-        ], Span::ZERO);
+        let map = Expr::Map(
+            vec![
+                (Expr::Str("a".into(), Span::ZERO), Expr::Int(1, Span::ZERO)),
+                (Expr::Str("b".into(), Span::ZERO), Expr::Int(2, Span::ZERO)),
+            ],
+            Span::ZERO,
+        );
         match map {
             Expr::Map(pairs, _) => {
                 assert_eq!(pairs.len(), 2);
@@ -1170,7 +1217,8 @@ mod tests {
         // `xs[0]`
         let ix = Expr::Index {
             object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
-            index: Box::new(Expr::Int(0, Span::ZERO)), span: Span::ZERO,
+            index: Box::new(Expr::Int(0, Span::ZERO)),
+            span: Span::ZERO,
         };
         match ix {
             Expr::Index { object, index, .. } => {
@@ -1187,14 +1235,21 @@ mod tests {
         let f = Stmt::For {
             var: Pattern::Ident("x".into()),
             iter: Expr::Ident("xs".into(), Span::ZERO),
-            body: vec![Stmt::Expr(Expr::Call {
-                callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
-                args: vec![Expr::Ident("x".into(), Span::ZERO)], span: Span::ZERO,
-            }, Span::ZERO)],
+            body: vec![Stmt::Expr(
+                Expr::Call {
+                    callee: Box::new(Expr::Ident("print".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("x".into(), Span::ZERO)],
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            )],
             label: None,
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         match f {
-            Stmt::For { var, iter, body, .. } => {
+            Stmt::For {
+                var, iter, body, ..
+            } => {
                 assert_eq!(var, Pattern::Ident("x".into()));
                 assert_eq!(iter, Expr::Ident("xs".into(), Span::ZERO));
                 assert_eq!(body.len(), 1);
@@ -1206,9 +1261,17 @@ mod tests {
     #[test]
     fn pattern_range_guarda_extremos_como_int() {
         // `match n { 0..10 => "chico", _ => "grande" }` — solo el patrón.
-        let p = Pattern::Range { start: 0, end: 10, inclusive: false };
+        let p = Pattern::Range {
+            start: 0,
+            end: 10,
+            inclusive: false,
+        };
         match p {
-            Pattern::Range { start, end, inclusive } => {
+            Pattern::Range {
+                start,
+                end,
+                inclusive,
+            } => {
                 assert_eq!(start, 0);
                 assert_eq!(end, 10);
                 assert!(!inclusive);
@@ -1225,10 +1288,13 @@ mod tests {
             fields: vec![
                 ("id".into(), Expr::Int(1, Span::ZERO)),
                 ("name".into(), Expr::Str("x".into(), Span::ZERO)),
-            ], span: Span::ZERO,
+            ],
+            span: Span::ZERO,
         };
         match lit {
-            Expr::StructLit { type_name, fields, .. } => {
+            Expr::StructLit {
+                type_name, fields, ..
+            } => {
                 assert_eq!(type_name, "User");
                 assert_eq!(fields.len(), 2);
                 assert_eq!(fields[0].0, "id");
@@ -1277,10 +1343,17 @@ mod tests {
     #[test]
     fn try_y_ctors_son_componibles() {
         // `Ok(get(id)?)` — un `?` adentro de un constructor `Ok`.
-        let e = Expr::Ok(Box::new(Expr::Try(Box::new(Expr::Call {
-            callee: Box::new(Expr::Ident("get".into(), Span::ZERO)),
-            args: vec![Expr::Ident("id".into(), Span::ZERO)], span: Span::ZERO,
-        }), Span::ZERO)), Span::ZERO);
+        let e = Expr::Ok(
+            Box::new(Expr::Try(
+                Box::new(Expr::Call {
+                    callee: Box::new(Expr::Ident("get".into(), Span::ZERO)),
+                    args: vec![Expr::Ident("id".into(), Span::ZERO)],
+                    span: Span::ZERO,
+                }),
+                Span::ZERO,
+            )),
+            Span::ZERO,
+        );
         if let Expr::Ok(inner, _) = e {
             assert!(matches!(*inner, Expr::Try(_, _)));
         } else {
@@ -1293,7 +1366,8 @@ mod tests {
         // -x → UnaryOp { op: Neg, operand: Ident("x") }
         let expr = Expr::UnaryOp {
             op: UnaryOpKind::Neg,
-            operand: Box::new(Expr::Ident("x".into(), Span::ZERO)), span: Span::ZERO,
+            operand: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+            span: Span::ZERO,
         };
         match expr {
             Expr::UnaryOp { op, operand, .. } => {
@@ -1314,9 +1388,11 @@ mod tests {
         let call = Expr::Call {
             callee: Box::new(Expr::Field {
                 object: Box::new(Expr::Ident("xs".into(), Span::ZERO)),
-                field: "map".into(), span: Span::ZERO,
+                field: "map".into(),
+                span: Span::ZERO,
             }),
-            args: vec![Expr::Ident("f".into(), Span::ZERO)], span: Span::ZERO,
+            args: vec![Expr::Ident("f".into(), Span::ZERO)],
+            span: Span::ZERO,
         };
         match call {
             Expr::Call { callee, args, .. } => {
@@ -1331,12 +1407,23 @@ mod tests {
     fn fn_expr_envuelve_params_y_body() {
         // `fn(x) => x * 2` — versión sin nombre.
         let fnexpr = Expr::FnExpr {
-            params: vec![Param { name: "x".into(), type_: None, default: None, varargs: false }],
-            body: vec![Stmt::Return(Expr::BinOp {
-                op: BinOpKind::Mul,
-                left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
-                right: Box::new(Expr::Int(2, Span::ZERO)), span: Span::ZERO,
-            }, Span::ZERO)], is_async: false, span: Span::ZERO,
+            params: vec![Param {
+                name: "x".into(),
+                type_: None,
+                default: None,
+                varargs: false,
+            }],
+            body: vec![Stmt::Return(
+                Expr::BinOp {
+                    op: BinOpKind::Mul,
+                    left: Box::new(Expr::Ident("x".into(), Span::ZERO)),
+                    right: Box::new(Expr::Int(2, Span::ZERO)),
+                    span: Span::ZERO,
+                },
+                Span::ZERO,
+            )],
+            is_async: false,
+            span: Span::ZERO,
         };
         match fnexpr {
             Expr::FnExpr { params, body, .. } => {
@@ -1356,7 +1443,11 @@ mod tests {
     #[test]
     fn import_simple_guarda_path_de_un_segmento() {
         // `import utils` → Stmt::Import { path: ["utils"], alias: None }
-        let s = Stmt::Import { path: vec!["utils".into()], alias: None, span: Span::ZERO };
+        let s = Stmt::Import {
+            path: vec!["utils".into()],
+            alias: None,
+            span: Span::ZERO,
+        };
         match s {
             Stmt::Import { path, alias, .. } => {
                 assert_eq!(path, vec!["utils".to_string()]);
@@ -1369,7 +1460,11 @@ mod tests {
     #[test]
     fn import_punteado_guarda_segmentos_en_orden() {
         // `import sub.foo` → Stmt::Import { path: ["sub", "foo"], alias: None }
-        let s = Stmt::Import { path: vec!["sub".into(), "foo".into()], alias: None, span: Span::ZERO };
+        let s = Stmt::Import {
+            path: vec!["sub".into(), "foo".into()],
+            alias: None,
+            span: Span::ZERO,
+        };
         match s {
             Stmt::Import { path, .. } => {
                 assert_eq!(path.len(), 2);
@@ -1386,7 +1481,8 @@ mod tests {
         let s = Stmt::FromImport {
             path: vec!["utils".into()],
             names: vec![("slugify".into(), None), ("parse".into(), None)],
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         match s {
             Stmt::FromImport { path, names, .. } => {
                 assert_eq!(path, vec!["utils".to_string()]);
@@ -1427,7 +1523,8 @@ mod tests {
             body: vec![],
             is_async: false,
             decorators: vec![],
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         if let Stmt::FnDef { decorators, .. } = f {
             assert!(decorators.is_empty());
         } else {
@@ -1445,10 +1542,19 @@ mod tests {
             body: vec![],
             is_async: false,
             decorators: vec![
-                Decorator { name: "get".into(), args: vec![Expr::Str("/x".into(), Span::ZERO)], kwargs: vec![] },
-                Decorator { name: "auth".into(), args: vec![Expr::Str("admin".into(), Span::ZERO)], kwargs: vec![] },
+                Decorator {
+                    name: "get".into(),
+                    args: vec![Expr::Str("/x".into(), Span::ZERO)],
+                    kwargs: vec![],
+                },
+                Decorator {
+                    name: "auth".into(),
+                    args: vec![Expr::Str("admin".into(), Span::ZERO)],
+                    kwargs: vec![],
+                },
             ],
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         if let Stmt::FnDef { decorators, .. } = f {
             assert_eq!(decorators.len(), 2);
             assert_eq!(decorators[0].name, "get");
@@ -1465,7 +1571,8 @@ mod tests {
             target: AssignTarget::Ident("x".into()),
             type_: None,
             value: Expr::Int(1, Span::ZERO),
-         span: Span::ZERO };
+            span: Span::ZERO,
+        };
         if let Stmt::Assign { target, .. } = s1 {
             assert_eq!(target, AssignTarget::Ident("x".into()));
         } else {
@@ -1480,8 +1587,13 @@ mod tests {
             },
             type_: None,
             value: Expr::Str("x".into(), Span::ZERO),
-         span: Span::ZERO };
-        if let Stmt::Assign { target: AssignTarget::Field { object, field }, .. } = s2 {
+            span: Span::ZERO,
+        };
+        if let Stmt::Assign {
+            target: AssignTarget::Field { object, field },
+            ..
+        } = s2
+        {
             assert_eq!(*object, Expr::Ident("user".into(), Span::ZERO));
             assert_eq!(field, "name");
         } else {
@@ -1547,9 +1659,9 @@ mod tests {
         assert_eq!(n.head_name(), "List");
 
         // Nullable de Nullable cae al fondo.
-        let nn = TypeExpr::Nullable(Box::new(TypeExpr::Nullable(Box::new(
-            TypeExpr::named("Int"),
-        ))));
+        let nn = TypeExpr::Nullable(Box::new(TypeExpr::Nullable(Box::new(TypeExpr::named(
+            "Int",
+        )))));
         assert_eq!(nn.head_name(), "Int");
     }
 

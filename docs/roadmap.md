@@ -7641,3 +7641,195 @@ sección es índice resumen + cronología.
 `@ws`, streaming HTTP/SSE, `@authenticated`/`@admin` auth nativa
 JWT, `@cron`, `@background` jobs sin Celery, etc.). ORM nativo +
 migraciones autogeneradas escala a Fase 10.
+
+---
+
+## Mini-fase D — Distribución / instaladores multi-platform 📦
+
+Estado: **pendiente** (planificada, sin sub-pasos cerrados).
+
+Cierra el último gap entre "Fitz tiene binarios en cada release"
+y "un usuario nuevo escribe un solo comando y queda con `fitz`
+en el PATH". Hoy el flujo asume que el usuario sabe bajar el
+binario correcto de GitHub Releases, extraerlo y agregarlo al
+PATH manualmente — fricción innecesaria para el caso 90% (alguien
+que ya escribe código y quiere probar el lenguaje sin compilar
+desde fuente ni levantar Docker).
+
+**Pre-requisitos ya cumplidos**:
+- Binarios multi-platform en cada release (`release.yml` con
+  matriz Linux x64/ARM + Windows x64 + macOS ARM).
+- Imagen Docker `ghcr.io/<owner>/fitz:vX.Y.Z` publicada en cada
+  tag.
+- Sitio MkDocs en `thegreekman76.github.io/fitz/` (host natural
+  para los install scripts).
+- Repo público (cumplido antes del 2026-05-22).
+
+**Sub-pasos**:
+
+### D.1 — Install script (curl|sh + PowerShell)
+
+`install.sh` (Unix) e `install.ps1` (Windows) hospedados en el
+sitio MkDocs / GitHub Pages. El usuario corre:
+
+```bash
+# Linux / macOS
+curl -sSf https://thegreekman76.github.io/fitz/install.sh | sh
+
+# Windows (PowerShell)
+irm https://thegreekman76.github.io/fitz/install.ps1 | iex
+```
+
+Lo que hace el script:
+
+1. Detecta OS + arch via `uname -sm` (Unix) o `$env:PROCESSOR_ARCHITECTURE` (Windows).
+2. Consulta el release más reciente con `gh api repos/Thegreekman76/fitz/releases/latest`
+   (o `curl` directo a la API REST de GitHub si `gh` no está
+   instalado).
+3. Baja el asset correcto del release (Linux x64 / Linux ARM /
+   Windows x64 / macOS ARM).
+4. Extrae el archivo a `~/.fitz/bin/fitz` (Unix) o
+   `%USERPROFILE%\.fitz\bin\fitz.exe` (Windows).
+5. Sugiere agregar `~/.fitz/bin` al PATH (no modifica `.bashrc`/
+   `.zshrc`/`PATH` automáticamente — el usuario decide).
+6. Smoke `fitz --version` al final.
+
+Flags opcionales: `--version <vX.Y.Z>` (instala una versión
+específica en vez de la última), `--prefix <path>` (override de
+`~/.fitz`).
+
+**Hosting**: el `install.sh` vive como archivo estático adentro
+de `docs/` y se sirve via MkDocs. Workflow `docs.yml` lo deploya
+junto al sitio. URL canónica: `https://thegreekman76.github.io/fitz/install.sh`.
+
+**Tests**: smoke manual en cada plataforma (no automatizado en
+CI — los scripts tocan filesystem real, agregan complejidad sin
+mucho payoff).
+
+### D.2 — Homebrew tap (`fitz-lang/homebrew-tap`)
+
+Repo separado `Thegreekman76/homebrew-tap` con formula que apunta
+al release de GitHub. Usuarios:
+
+```bash
+brew tap Thegreekman76/tap
+brew install fitz
+```
+
+La formula referencia los assets del release de GitHub (no
+construye desde fuente — usa los binarios pre-compilados):
+
+```ruby
+class Fitz < Formula
+  desc "Lenguaje compilado con HTTP/async/interop Python first-class"
+  homepage "https://thegreekman76.github.io/fitz/"
+  version "X.Y.Z"
+
+  if OS.mac? && Hardware::CPU.arm?
+    url "https://github.com/Thegreekman76/fitz/releases/download/vX.Y.Z/fitz-darwin-arm64.tar.gz"
+    sha256 "..."
+  elsif OS.linux? && Hardware::CPU.intel?
+    url ".../fitz-linux-x86_64.tar.gz"
+    sha256 "..."
+  elsif OS.linux? && Hardware::CPU.arm?
+    url ".../fitz-linux-aarch64.tar.gz"
+    sha256 "..."
+  end
+
+  def install
+    bin.install "fitz"
+    bin.install "fitz-lsp" if File.exist?("fitz-lsp")
+  end
+
+  test do
+    system "#{bin}/fitz", "--version"
+  end
+end
+```
+
+**Auto-actualización**: workflow GitHub Actions en el repo del
+tap (o adentro del `release.yml` principal) que en cada tag `v*`
+abre PR al tap actualizando `version` + `url` + `sha256` de cada
+plataforma.
+
+**Alcance**: tap propio sin ir a `homebrew-core` (que exige
+proyecto estable + uso comprobado + maintainer activo).
+
+### D.3 — Scoop bucket (`fitz-lang/scoop-bucket`)
+
+Repo separado `Thegreekman76/scoop-bucket` con manifest del bin
+de Windows. Usuarios:
+
+```powershell
+scoop bucket add fitz https://github.com/Thegreekman76/scoop-bucket
+scoop install fitz
+```
+
+Manifest `bucket/fitz.json` mínimo:
+
+```json
+{
+  "version": "X.Y.Z",
+  "description": "Lenguaje compilado con HTTP/async/interop Python first-class",
+  "homepage": "https://thegreekman76.github.io/fitz/",
+  "license": "MIT",
+  "url": "https://github.com/Thegreekman76/fitz/releases/download/vX.Y.Z/fitz-windows-x86_64.zip",
+  "hash": "...",
+  "bin": ["fitz.exe", "fitz-lsp.exe"],
+  "checkver": "github",
+  "autoupdate": {
+    "url": "https://github.com/Thegreekman76/fitz/releases/download/v$version/fitz-windows-x86_64.zip"
+  }
+}
+```
+
+`checkver: "github"` + `autoupdate` hacen que `scoop` detecte
+nuevas versiones sin update manual del manifest.
+
+### Cierre formal
+
+Al cerrar D.3, las tres modalidades de instalación quedan vivas
+y el README del repo principal suma sección "Instalación" con:
+
+- Una línea para Unix (`curl | sh`).
+- Una línea para Windows (`irm | iex`).
+- Una línea para Homebrew.
+- Una línea para Scoop.
+- Link al release de GitHub para descarga manual.
+- Link a la imagen Docker para deploys.
+
+Cap "Cómo empezar" de la guía (cap inicial) refresca con los
+nuevos comandos.
+
+### Deuda anexa (NO bloquea la mini-fase)
+
+- **Code signing macOS** (Apple Developer ID, ~$99/año) — sin
+  esto, primer launch en macOS muestra warning "developer
+  cannot be verified". Requiere notarization de Apple
+  (workflow `codesign + notarytool` adentro del `release.yml`).
+- **Code signing Windows** (cert code-signing, ~$200-400/año
+  según CA) — sin esto, SmartScreen muestra warning "publisher
+  unknown" al primer ejecutar. Decidible cuando el proyecto
+  tenga uso real.
+- **WinGet manifest** (`winget install fitz-lang.fitz`) —
+  equivalente Microsoft Store al Scoop. Más alcance que Scoop
+  (viene pre-instalado en Windows 11) pero exige proceso de
+  approval en el repo `microsoft/winget-pkgs`. Diferible hasta
+  que Scoop quede chico.
+- **Publicar a crates.io** (`cargo install fitz`) — gratis,
+  exige decidir nombre + ownership en el registry. Es la ruta
+  más directa para usuarios Rust pero NO sirve para el caso 90%
+  (compila desde fuente, ~3-5 min en una máquina lenta).
+- **Bundling CPython embebido** (`fitz build --bundle-python`)
+  — tracked separadamente como sub-paso futuro post-8.7
+  (decisión python-build-standalone vs PyOxidizer pendiente).
+
+**Estimación**: D.1 ~1-2 días (script + smoke en cada
+plataforma), D.2 ~medio día (formula + workflow de
+auto-update), D.3 ~medio día (manifest + smoke). Total
+mini-fase: ~3-4 días de trabajo dedicado.
+
+**Próximo norte tras la mini-fase D**: cierre del inventario
+del plan post-boilerplates (paso 4 del plan) o salto directo a
+Fase 10 (Stack DB nativo) según prioridad del autor al
+arrancar.

@@ -558,7 +558,10 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             } else {
                 Type::Str
             };
-            Ok(Type::Result { ok: Box::new(ok), err: Box::new(err) })
+            Ok(Type::Result {
+                ok: Box::new(ok),
+                err: Box::new(err),
+            })
         }
         "Future" => {
             expect_arity(name, 1, args)?;
@@ -629,8 +632,14 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
     env.set_fields(
         req_id,
         vec![
-            ResolvedField { name: "method".into(), type_: Type::Str },
-            ResolvedField { name: "path".into(), type_: Type::Str },
+            ResolvedField {
+                name: "method".into(),
+                type_: Type::Str,
+            },
+            ResolvedField {
+                name: "path".into(),
+                type_: Type::Str,
+            },
             ResolvedField {
                 name: "headers".into(),
                 type_: Type::Map(Box::new(Type::Str), Box::new(Type::Str)),
@@ -672,7 +681,10 @@ fn register_http_builtin_types(env: &mut TypeEnv) {
                 name: "content_type".into(),
                 type_: Type::Nullable(Box::new(Type::Str)),
             },
-            ResolvedField { name: "content".into(), type_: Type::Bytes },
+            ResolvedField {
+                name: "content".into(),
+                type_: Type::Bytes,
+            },
         ],
     );
 }
@@ -764,9 +776,7 @@ pub fn resolve_program(program: &Program) -> (TypeEnv, Vec<FitzError>) {
                 match resolve_type_expr(&f.type_, &env) {
                     Ok(t) => {
                         if let Some(default) = &f.default {
-                            if let Err(e) =
-                                check_field_default(name, &f.name, &t, default, &env)
-                            {
+                            if let Err(e) = check_field_default(name, &f.name, &t, default, &env) {
                                 errors.push(e);
                             }
                         }
@@ -1279,7 +1289,10 @@ impl<'a> CheckCtx<'a> {
             VarBinding {
                 ty: Type::Function {
                     params: vec![Type::Str],
-                    ret: Box::new(Type::Result { ok: Box::new(Type::Str), err: Box::new(Type::Str) }),
+                    ret: Box::new(Type::Result {
+                        ok: Box::new(Type::Str),
+                        err: Box::new(Type::Str),
+                    }),
                 },
                 annotated: false,
                 def_span: Span::ZERO,
@@ -1310,7 +1323,10 @@ impl<'a> CheckCtx<'a> {
             VarBinding {
                 ty: Type::Function {
                     params: vec![Type::Str],
-                    ret: Box::new(Type::Result { ok: Box::new(Type::Null), err: Box::new(Type::Str) }),
+                    ret: Box::new(Type::Result {
+                        ok: Box::new(Type::Null),
+                        err: Box::new(Type::Str),
+                    }),
                 },
                 annotated: false,
                 def_span: Span::ZERO,
@@ -1373,8 +1389,8 @@ impl<'a> CheckCtx<'a> {
                     },
                     annotated: false,
                     def_span: Span::ZERO,
-                defaults_count: 0,
-                has_varargs: false,
+                    defaults_count: 0,
+                    has_varargs: false,
                 },
             );
         }
@@ -1388,8 +1404,8 @@ impl<'a> CheckCtx<'a> {
                     },
                     annotated: false,
                     def_span: Span::ZERO,
-                defaults_count: 0,
-                has_varargs: false,
+                    defaults_count: 0,
+                    has_varargs: false,
                 },
             );
         }
@@ -1407,8 +1423,8 @@ impl<'a> CheckCtx<'a> {
                     ty: Type::Any,
                     annotated: false,
                     def_span: Span::ZERO,
-                defaults_count: 0,
-                has_varargs: false,
+                    defaults_count: 0,
+                    has_varargs: false,
                 },
             );
         }
@@ -1436,7 +1452,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: false,
                     def_span,
                     defaults_count: 0,
-                has_varargs: false,
+                    has_varargs: false,
                 },
             );
         }
@@ -1454,7 +1470,7 @@ impl<'a> CheckCtx<'a> {
                     annotated: true,
                     def_span,
                     defaults_count: 0,
-                has_varargs: false,
+                    has_varargs: false,
                 },
             );
         }
@@ -1561,10 +1577,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         // Fp.3 — NamedArg solo es válido adentro de Call.args; el
         // dispatcher de calls lo procesa. Verlo acá indica bug.
         Expr::NamedArg { name, value, span } => {
-            ctx.error_at(*span, format!(
-                "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
-                name
-            ));
+            ctx.error_at(
+                *span,
+                format!(
+                    "argumento nombrado `{}:` no puede aparecer fuera de una llamada",
+                    name
+                ),
+            );
             synthesize_expr(ctx, value)
         }
 
@@ -1604,19 +1623,27 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     if let Some(t) = items.get(*index) {
                         t.clone()
                     } else {
-                        ctx.error_at(*span, format!(
-                            "tupla de {} elementos no tiene índice `{}`",
-                            items.len(), index
-                        ));
+                        ctx.error_at(
+                            *span,
+                            format!(
+                                "tupla de {} elementos no tiene índice `{}`",
+                                items.len(),
+                                index
+                            ),
+                        );
                         Type::Any
                     }
                 }
                 Type::Any | Type::PyAny => Type::Any,
                 other => {
-                    ctx.error_at(*span, format!(
-                        "acceso `.{}` solo aplica a tuplas, recibí `{}`",
-                        index, other.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "acceso `.{}` solo aplica a tuplas, recibí `{}`",
+                            index,
+                            other.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -1644,9 +1671,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // `ctx.def_info` (que requiere &mut self). Fase 9.x.3:
             // registramos el `def_span` para go-to-definition cuando
             // existe (no es builtin con Span::ZERO).
-            let resolved = ctx
-                .lookup_binding(name)
-                .map(|b| (b.ty.clone(), b.def_span));
+            let resolved = ctx.lookup_binding(name).map(|b| (b.ty.clone(), b.def_span));
             if let Some((ty, def_span)) = resolved {
                 ctx.def_info.record(*span, def_span);
                 return ty;
@@ -1668,10 +1693,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 UnaryOpKind::Neg => match &t {
                     Type::Int | Type::Float | Type::Any => t,
                     other => {
-                        ctx.error_at(*span, format!(
-                            "el operador `-` (negación) espera Int o Float, recibió `{}`",
-                            other.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            *span,
+                            format!(
+                                "el operador `-` (negación) espera Int o Float, recibió `{}`",
+                                other.display(ctx.types)
+                            ),
+                        );
                         Type::Any
                     }
                 },
@@ -1682,10 +1710,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 UnaryOpKind::Not => match &t {
                     Type::Bool | Type::Any => Type::Bool,
                     other => {
-                        ctx.error_at(*span, format!(
-                            "el operador `not` espera Bool, recibió `{}`",
-                            other.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            *span,
+                            format!(
+                                "el operador `not` espera Bool, recibió `{}`",
+                                other.display(ctx.types)
+                            ),
+                        );
                         Type::Bool
                     }
                 },
@@ -1693,32 +1724,48 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 UnaryOpKind::BitNot => match &t {
                     Type::Int | Type::Any => Type::Int,
                     other => {
-                        ctx.error_at(*span, format!(
-                            "el operador `~` espera Int, recibió `{}`",
-                            other.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            *span,
+                            format!(
+                                "el operador `~` espera Int, recibió `{}`",
+                                other.display(ctx.types)
+                            ),
+                        );
                         Type::Int
                     }
                 },
             }
         }
 
-        Expr::BinOp { op, left, right, span } => {
+        Expr::BinOp {
+            op,
+            left,
+            right,
+            span,
+        } => {
             let lt = infer_expr(ctx, left);
             let rt = infer_expr(ctx, right);
             infer_binop(ctx, op, &lt, &rt, *span)
         }
 
-        Expr::If { condition, then, else_, .. } => {
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             // Condición debe ser Bool (o Any).
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
                 // Apuntamos al span de la condición misma — mejor
                 // pista que el `if` mismo.
-                ctx.error_at(condition.span(), format!(
-                    "la condición de `if` debe ser Bool, recibió `{}`",
-                    cond_ty.display(ctx.types)
-                ));
+                ctx.error_at(
+                    condition.span(),
+                    format!(
+                        "la condición de `if` debe ser Bool, recibió `{}`",
+                        cond_ty.display(ctx.types)
+                    ),
+                );
             }
             // Cada rama es un bloque; el "tipo" de un if-stmt es el
             // de su última expresión-stmt. Para 5.3.1 nos alcanza con
@@ -1759,7 +1806,14 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         // Tipa cada `for` clause (iter como List/Range, var via pattern),
         // bindeando en scopes anidados; valida `filter: Bool` adentro
         // del scope más interno; tipa `expr: U` y devuelve `List<U>`.
-        Expr::ListComp { expr, var, iter, extra_clauses, filter, span } => {
+        Expr::ListComp {
+            expr,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            span,
+        } => {
             ctx.push_scope();
             check_comp_clause_in_checker(ctx, var, iter, *span);
             for (extra_var, extra_iter) in extra_clauses {
@@ -1768,10 +1822,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if let Some(f) = filter {
                 let f_ty = infer_expr(ctx, f);
                 if !is_compatible(&f_ty, &Type::Bool) {
-                    ctx.error_at(f.span(), format!(
-                        "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
-                        f_ty.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        f.span(),
+                        format!(
+                            "el filtro `if` de la list comprehension debe ser `Bool`, recibió `{}`",
+                            f_ty.display(ctx.types)
+                        ),
+                    );
                 }
             }
             let elem_ty = infer_expr(ctx, expr);
@@ -1782,7 +1839,15 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
         // Mini-tanda Cmp+ — `{key: value for ...}`. Análogo a ListComp:
         // tipa cada clause, valida filter, y tipa key+value en el scope
         // más interno. Devuelve `Map<K, V>`.
-        Expr::MapComp { key, value, var, iter, extra_clauses, filter, span } => {
+        Expr::MapComp {
+            key,
+            value,
+            var,
+            iter,
+            extra_clauses,
+            filter,
+            span,
+        } => {
             ctx.push_scope();
             check_comp_clause_in_checker(ctx, var, iter, *span);
             for (extra_var, extra_iter) in extra_clauses {
@@ -1791,10 +1856,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             if let Some(f) = filter {
                 let f_ty = infer_expr(ctx, f);
                 if !is_compatible(&f_ty, &Type::Bool) {
-                    ctx.error_at(f.span(), format!(
-                        "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
-                        f_ty.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        f.span(),
+                        format!(
+                            "el filtro `if` de la map comprehension debe ser `Bool`, recibió `{}`",
+                            f_ty.display(ctx.types)
+                        ),
+                    );
                 }
             }
             let key_ty = infer_expr(ctx, key);
@@ -1834,17 +1902,24 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             for (label, e) in [("inicio", start.as_ref()), ("fin", end.as_ref())] {
                 let t = infer_expr(ctx, e);
                 if !is_compatible(&t, &Type::Int) {
-                    ctx.error_at(e.span(), format!(
-                        "{} del rango debe ser Int, recibió `{}`",
-                        label,
-                        t.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        e.span(),
+                        format!(
+                            "{} del rango debe ser Int, recibió `{}`",
+                            label,
+                            t.display(ctx.types)
+                        ),
+                    );
                 }
             }
             Type::Range
         }
 
-        Expr::StructLit { type_name, fields, span } => {
+        Expr::StructLit {
+            type_name,
+            fields,
+            span,
+        } => {
             // Sintetiza Nominal si el nombre del tipo está declarado.
             // Validar campos contra el `type` declarado: faltantes,
             // extras, tipos incompatibles.
@@ -1854,10 +1929,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // resolve_program ya reporta tipos desconocidos
                     // como campos/anotaciones; un StructLit con
                     // nombre inexistente sí es propio del checker.
-                    ctx.error_at(*span, format!(
-                        "no existe el tipo `{}` para instanciar",
-                        type_name
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!("no existe el tipo `{}` para instanciar", type_name),
+                    );
                     // Igual evaluamos los valores para detectar errores
                     // adentro.
                     for (_, v) in fields {
@@ -1881,17 +1956,15 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     declared.iter().map(|f| f.name.as_str()).collect();
                 for (n, _, fs) in &provided_types {
                     if !declared_names.contains(n.as_str()) {
-                        ctx.error_at(*fs, format!(
-                            "el tipo `{}` no tiene un campo llamado `{}`",
-                            type_name, n
-                        ));
+                        ctx.error_at(
+                            *fs,
+                            format!("el tipo `{}` no tiene un campo llamado `{}`", type_name, n),
+                        );
                     }
                     // Mini-tanda Vp — struct lit no puede setear campos
                     // privados desde afuera del type body. Útil para
                     // forzar uso de constructores estáticos (mini-tanda St).
-                    if is_private_field(n)
-                        && ctx.current_type != Some(id)
-                    {
+                    if is_private_field(n) && ctx.current_type != Some(id) {
                         ctx.error_at(*fs, format!(
                             "el campo `{}.{}` es privado: no se puede setear desde un struct lit afuera de los métodos del tipo `{}` (usá un constructor estático como `{}.new(...)`)",
                             type_name, n, type_name, type_name
@@ -1906,13 +1979,16 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 for f in &declared {
                     match provided_map.get(f.name.as_str()) {
                         Some((actual, fs)) if !is_compatible(actual, &f.type_) => {
-                            ctx.error_at(*fs, format!(
-                                "el campo `{}.{}` espera `{}`, recibió `{}`",
-                                type_name,
-                                f.name,
-                                f.type_.display(ctx.types),
-                                actual.display(ctx.types)
-                            ));
+                            ctx.error_at(
+                                *fs,
+                                format!(
+                                    "el campo `{}.{}` espera `{}`, recibió `{}`",
+                                    type_name,
+                                    f.name,
+                                    f.type_.display(ctx.types),
+                                    actual.display(ctx.types)
+                                ),
+                            );
                         }
                         Some(_) => {}
                         None => {
@@ -1933,7 +2009,11 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             Type::Nominal(id)
         }
 
-        Expr::Field { object, field, span } => {
+        Expr::Field {
+            object,
+            field,
+            span,
+        } => {
             let obj_ty = infer_expr(ctx, object);
             match &obj_ty {
                 Type::Nominal(id) => {
@@ -1944,9 +2024,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             // Mini-tanda Vp — campos privados (`_*`)
                             // solo accesibles desde adentro del body
                             // de un método del MISMO type.
-                            if is_private_field(field)
-                                && ctx.current_type != Some(*id)
-                            {
+                            if is_private_field(field) && ctx.current_type != Some(*id) {
                                 ctx.error_at(*span, format!(
                                     "el campo `{}.{}` es privado (prefijo `_`); solo accesible desde métodos del propio tipo `{}`",
                                     type_name, field, type_name
@@ -1994,12 +2072,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // real. Si el receiver es built-in (List/Map/Str), el
                 // checker tipa el value adentro del NamedArg y delega
                 // al dispatcher general — el runtime emite error claro.
-                let args_ty: Vec<Type> = args.iter().map(|a| {
-                    match a {
+                let args_ty: Vec<Type> = args
+                    .iter()
+                    .map(|a| match a {
                         Expr::NamedArg { value, .. } => infer_expr(ctx, value),
                         other => infer_expr(ctx, other),
-                    }
-                }).collect();
+                    })
+                    .collect();
                 // 8.4: receptor PyAny — el método se invoca cruzando
                 // a Python via dispatch_method (8.1.4). El runtime
                 // envuelve TODO call Python en `Result<T>` (8.3); el
@@ -2010,7 +2089,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // forzado a manejar la falla estáticamente, igual
                 // que cualquier `Result<T>` nativo.
                 if matches!(obj_ty, Type::PyAny) {
-                    return Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) };
+                    return Type::Result {
+                        ok: Box::new(Type::Any),
+                        err: Box::new(Type::Str),
+                    };
                 }
                 return match infer_method_call(ctx, &obj_ty, field, &args_ty, *span) {
                     Some(ret) => ret,
@@ -2036,10 +2118,7 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // `Function{...}` y caemos a la ruta normal.
             if let Expr::Ident(name, _) = callee.as_ref() {
                 if name == "spawn"
-                    && matches!(
-                        ctx.lookup_binding("spawn").map(|b| &b.ty),
-                        Some(Type::Any)
-                    )
+                    && matches!(ctx.lookup_binding("spawn").map(|b| &b.ty), Some(Type::Any))
                 {
                     return check_spawn_call(ctx, args, *span);
                 }
@@ -2052,12 +2131,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // real ocurre en `infer_call_with_named_args` cuando el
             // callee es un Ident resoluble.
             let callee_ty = infer_expr(ctx, callee);
-            let args_ty: Vec<Type> = args.iter().map(|a| {
-                match a {
+            let args_ty: Vec<Type> = args
+                .iter()
+                .map(|a| match a {
                     Expr::NamedArg { value, .. } => infer_expr(ctx, value),
                     other => infer_expr(ctx, other),
-                }
-            }).collect();
+                })
+                .collect();
             match callee_ty {
                 // Gradual: callee de tipo desconocido no se chequea.
                 Type::Any => Type::Any,
@@ -2065,7 +2145,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Python y vuelve envuelto en `Result<T>` (decisión
                 // 8.3). Cubre `let f = math.sqrt; f(25.0)` (callee
                 // resuelto por Ident después del field access).
-                Type::PyAny => Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) },
+                Type::PyAny => Type::Result {
+                    ok: Box::new(Type::Any),
+                    err: Box::new(Type::Str),
+                },
                 Type::Function { params, ret } => {
                     let label = describe_callee(callee);
                     // Fp — la function-signature en `Type::Function` no
@@ -2082,7 +2165,11 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // call site valida cada arg contra T (no contra
                     // List<T>); aridad mínima incluye al menos los
                     // params previos al varargs.
-                    let max_arity = if has_varargs { usize::MAX } else { params.len() };
+                    let max_arity = if has_varargs {
+                        usize::MAX
+                    } else {
+                        params.len()
+                    };
                     let required = if has_varargs {
                         // Varargs acepta 0+ args en el último slot, así
                         // que la aridad mínima es total - 1 (el varargs
@@ -2097,22 +2184,32 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // posiciones). Validamos solo aridad mínima global.
                     let has_named_args = args.iter().any(|a| matches!(a, Expr::NamedArg { .. }));
                     if args.len() < required || args.len() > max_arity {
-                        ctx.error_at(*span, if has_varargs {
-                            format!(
-                                "{} espera al menos {} argumento(s), recibió {}",
-                                label, required, args.len(),
-                            )
-                        } else if required == params.len() {
-                            format!(
-                                "{} espera {} argumento(s), recibió {}",
-                                label, params.len(), args.len(),
-                            )
-                        } else {
-                            format!(
-                                "{} espera entre {} y {} argumento(s), recibió {}",
-                                label, required, params.len(), args.len(),
-                            )
-                        });
+                        ctx.error_at(
+                            *span,
+                            if has_varargs {
+                                format!(
+                                    "{} espera al menos {} argumento(s), recibió {}",
+                                    label,
+                                    required,
+                                    args.len(),
+                                )
+                            } else if required == params.len() {
+                                format!(
+                                    "{} espera {} argumento(s), recibió {}",
+                                    label,
+                                    params.len(),
+                                    args.len(),
+                                )
+                            } else {
+                                format!(
+                                    "{} espera entre {} y {} argumento(s), recibió {}",
+                                    label,
+                                    required,
+                                    params.len(),
+                                    args.len(),
+                                )
+                            },
+                        );
                     } else if !has_named_args {
                         for (i, actual) in args_ty.iter().enumerate() {
                             // Fp.2 — para el slot varargs (el último),
@@ -2128,28 +2225,36 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                             };
                             let expected = &params[expected_idx];
                             if !is_compatible(actual, expected) {
-                                ctx.error_at(args[i].span(), format!(
-                                    "{}: el argumento {} espera `{}`, recibió `{}`",
-                                    label,
-                                    i + 1,
-                                    expected.display(ctx.types),
-                                    actual.display(ctx.types)
-                                ));
+                                ctx.error_at(
+                                    args[i].span(),
+                                    format!(
+                                        "{}: el argumento {} espera `{}`, recibió `{}`",
+                                        label,
+                                        i + 1,
+                                        expected.display(ctx.types),
+                                        actual.display(ctx.types)
+                                    ),
+                                );
                             }
                         }
                     }
                     *ret
                 }
                 other => {
-                    ctx.error_at(callee.span(), format!(
-                        "`{}` no es una función",
-                        other.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        callee.span(),
+                        format!("`{}` no es una función", other.display(ctx.types)),
+                    );
                     Type::Any
                 }
             }
         }
-        Expr::FnExpr { params, body, is_async, span } => {
+        Expr::FnExpr {
+            params,
+            body,
+            is_async,
+            span,
+        } => {
             // Walkeamos el body con un scope nuevo y los params
             // bindeados (con su tipo declarado o `Any` si la
             // anotación faltó). El tipo del FnExpr es `Function`;
@@ -2207,17 +2312,26 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 ret: Box::new(final_ret),
             }
         }
-        Expr::Slice { object, start, end, span, .. } => {
+        Expr::Slice {
+            object,
+            start,
+            end,
+            span,
+            ..
+        } => {
             let obj_ty = infer_expr(ctx, object);
             for (name, e) in [("start", start), ("end", end)] {
                 if let Some(inner) = e {
                     let t = infer_expr(ctx, inner);
                     if !is_compatible(&t, &Type::Int) {
-                        ctx.error_at(inner.span(), format!(
-                            "el `{}` de un slice debe ser Int, recibió `{}`",
-                            name,
-                            t.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            inner.span(),
+                            format!(
+                                "el `{}` de un slice debe ser Int, recibió `{}`",
+                                name,
+                                t.display(ctx.types),
+                            ),
+                        );
                     }
                 }
             }
@@ -2226,37 +2340,50 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 Type::Str => Type::Str,
                 Type::Any | Type::Nominal(_) => Type::Any,
                 other => {
-                    ctx.error_at(*span, format!(
-                        "el tipo `{}` no soporta slicing con `[..]`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "el tipo `{}` no soporta slicing con `[..]`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             }
         }
 
-        Expr::Index { object, index, span } => {
+        Expr::Index {
+            object,
+            index,
+            span,
+        } => {
             let obj_ty = infer_expr(ctx, object);
             let idx_ty = infer_expr(ctx, index);
             match obj_ty.base() {
                 Type::List(t) => {
                     if !is_compatible(&idx_ty, &Type::Int) {
-                        ctx.error_at(index.span(), format!(
-                            "el índice de una `List` debe ser Int, recibió `{}`",
-                            idx_ty.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            index.span(),
+                            format!(
+                                "el índice de una `List` debe ser Int, recibió `{}`",
+                                idx_ty.display(ctx.types)
+                            ),
+                        );
                     }
                     (**t).clone()
                 }
                 Type::Map(k, v) => {
                     if !is_compatible(&idx_ty, k) {
-                        ctx.error_at(index.span(), format!(
-                            "el índice de un `Map<{}, {}>` debe ser `{}`, recibió `{}`",
-                            k.display(ctx.types),
-                            v.display(ctx.types),
-                            k.display(ctx.types),
-                            idx_ty.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            index.span(),
+                            format!(
+                                "el índice de un `Map<{}, {}>` debe ser `{}`, recibió `{}`",
+                                k.display(ctx.types),
+                                v.display(ctx.types),
+                                k.display(ctx.types),
+                                idx_ty.display(ctx.types)
+                            ),
+                        );
                     }
                     (**v).clone()
                 }
@@ -2267,10 +2394,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     // `s.len()` que cuenta chars). Negativos soportados:
                     // `s[-1]` = último.
                     if !is_compatible(&idx_ty, &Type::Int) {
-                        ctx.error_at(index.span(), format!(
-                            "el índice de un `Str` debe ser Int, recibió `{}`",
-                            idx_ty.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            index.span(),
+                            format!(
+                                "el índice de un `Str` debe ser Int, recibió `{}`",
+                                idx_ty.display(ctx.types)
+                            ),
+                        );
                     }
                     Type::Str
                 }
@@ -2279,10 +2409,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Any es el escape habitual.
                 Type::Any | Type::Nominal(_) => Type::Any,
                 other => {
-                    ctx.error_at(*span, format!(
-                        "el tipo `{}` no soporta indexing con `[]`",
-                        other.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "el tipo `{}` no soporta indexing con `[]`",
+                            other.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -2309,10 +2442,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 if let Some(guard_expr) = &arm.guard {
                     let guard_ty = infer_expr(ctx, guard_expr);
                     if !matches!(guard_ty, Type::Bool | Type::Any) {
-                        ctx.error_at(guard_expr.span(), format!(
-                            "el guard de un arm debe ser Bool, recibí {}",
-                            guard_ty.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            guard_expr.span(),
+                            format!(
+                                "el guard de un arm debe ser Bool, recibí {}",
+                                guard_ty.display(ctx.types)
+                            ),
+                        );
                     }
                 }
                 // Sp.2 — chequear el body (Vec<Stmt>) y derivar el tipo
@@ -2376,14 +2512,20 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
             // el mismo flujo. La anotación destino (`-> Result<T, E>`)
             // gana sobre el inferido.
             let t = infer_expr(ctx, inner);
-            Type::Result { ok: Box::new(t), err: Box::new(Type::Any) }
+            Type::Result {
+                ok: Box::new(t),
+                err: Box::new(Type::Any),
+            }
         }
         Expr::Err(inner, _) => {
             // Mini-tanda Re+ — el tipo del E ahora se infiere desde el
             // value. T queda Any sin contexto; el LUB/anotación destino
             // lo refinará.
             let e_ty = infer_expr(ctx, inner);
-            Type::Result { ok: Box::new(Type::Any), err: Box::new(e_ty) }
+            Type::Result {
+                ok: Box::new(Type::Any),
+                err: Box::new(e_ty),
+            }
         }
         Expr::Await(inner, span) => {
             // 6.2: semántica completa del checker.
@@ -2430,10 +2572,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // el helper combinado).
                 Type::PyAny => Type::Any,
                 other => {
-                    ctx.error_at(*span, format!(
-                        "`.await` solo aplica a `Future<T>`, recibió `{}`",
-                        other.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "`.await` solo aplica a `Future<T>`, recibió `{}`",
+                            other.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -2446,7 +2591,10 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                 // Cubre el caso típico de método built-in (callee
                 // Field) que todavía devuelve Any hasta 5.3.4.
                 Type::Any => Type::Any,
-                Type::Result { ok: inner_ty, err: _ } => {
+                Type::Result {
+                    ok: inner_ty,
+                    err: _,
+                } => {
                     // Si estamos adentro de una función con
                     // return_type concreto, exigimos que sea Result —
                     // el `?` propaga un `Err(_)` vía `return`, así que
@@ -2464,10 +2612,13 @@ fn synthesize_expr(ctx: &mut CheckCtx, e: &Expr) -> Type {
                     (**inner_ty).clone()
                 }
                 other => {
-                    ctx.error_at(*span, format!(
-                        "el operador `?` requiere un `Result`, recibió `{}`",
-                        other.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "el operador `?` requiere un `Result`, recibió `{}`",
+                            other.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -2552,12 +2703,19 @@ fn lub(a: &Type, b: &Type) -> Type {
             Type::Map(Box::new(lub(ak, bk)), Box::new(lub(av, bv)))
         }
         // Mini-tanda Re+: lub recursivo en ambos lados (ok y err).
-        (Type::Result { ok: a_ok, err: a_err }, Type::Result { ok: b_ok, err: b_err }) => {
+        (
             Type::Result {
-                ok: Box::new(lub(a_ok, b_ok)),
-                err: Box::new(lub(a_err, b_err)),
-            }
-        }
+                ok: a_ok,
+                err: a_err,
+            },
+            Type::Result {
+                ok: b_ok,
+                err: b_err,
+            },
+        ) => Type::Result {
+            ok: Box::new(lub(a_ok, b_ok)),
+            err: Box::new(lub(a_err, b_err)),
+        },
         (Type::Future(ai), Type::Future(bi)) => Type::Future(Box::new(lub(ai, bi))),
         (Type::Nullable(ai), Type::Nullable(bi)) => Type::Nullable(Box::new(lub(ai, bi))),
         _ => Type::Any,
@@ -2685,27 +2843,44 @@ fn infer_method_call(
                 }
                 // Aridad.
                 if args_ty.len() != nm.params.len() {
-                    ctx.error_at(span, format!(
-                        "el método `{}.{}` espera {} argumento(s), recibió {}",
-                        info.name, method, nm.params.len(), args_ty.len()
-                    ));
-                    let ret = if nm.is_async { Type::Future(Box::new(nm.ret)) } else { nm.ret };
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "el método `{}.{}` espera {} argumento(s), recibió {}",
+                            info.name,
+                            method,
+                            nm.params.len(),
+                            args_ty.len()
+                        ),
+                    );
+                    let ret = if nm.is_async {
+                        Type::Future(Box::new(nm.ret))
+                    } else {
+                        nm.ret
+                    };
                     return Some(ret);
                 }
                 // Tipos de args (compatible_with semánticamente).
                 for (i, (got, expected)) in args_ty.iter().zip(nm.params.iter()).enumerate() {
                     if !is_compatible(got, expected) {
-                        ctx.error_at(span, format!(
-                            "el método `{}.{}` arg #{}: esperaba `{}`, recibió `{}`",
-                            info.name,
-                            method,
-                            i,
-                            expected.display(ctx.types),
-                            got.display(ctx.types)
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "el método `{}.{}` arg #{}: esperaba `{}`, recibió `{}`",
+                                info.name,
+                                method,
+                                i,
+                                expected.display(ctx.types),
+                                got.display(ctx.types)
+                            ),
+                        );
                     }
                 }
-                let ret = if nm.is_async { Type::Future(Box::new(nm.ret)) } else { nm.ret };
+                let ret = if nm.is_async {
+                    Type::Future(Box::new(nm.ret))
+                } else {
+                    nm.ret
+                };
                 Some(ret)
             } else {
                 // Método inexistente sobre nominal → gradual (Any).
@@ -2735,11 +2910,14 @@ fn infer_method_call(
             // Tipos sin métodos built-in: `42.foo()` y similares.
             // El evaluator también corta, acá nos adelantamos con
             // mensaje específico.
-            ctx.error_at(span, format!(
-                "el tipo `{}` no tiene el método `{}`",
-                other.display(ctx.types),
-                method
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "el tipo `{}` no tiene el método `{}`",
+                    other.display(ctx.types),
+                    method
+                ),
+            );
             Some(Type::Any)
         }
     }
@@ -2747,12 +2925,7 @@ fn infer_method_call(
 
 /// Mini-tanda Mb9 — signatures de métodos sobre primitivos Int/Float.
 /// Lista acotada por simplicidad; ampliar si entra demanda.
-fn infer_int_method(
-    ctx: &mut CheckCtx,
-    method: &str,
-    args_ty: &[Type],
-    span: Span,
-) -> Type {
+fn infer_int_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "abs" => {
             check_method_arity(ctx, "abs", args_ty, 0, span);
@@ -2766,29 +2939,30 @@ fn infer_int_method(
             if check_method_arity(ctx, "to_str_base", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`Int.to_str_base()` espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Int.to_str_base()` espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Str
         }
         _ => {
-            ctx.error_at(span, format!(
-                "`Int` no tiene el método `{}` (hoy: abs/to_str/to_str_base)",
-                method,
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "`Int` no tiene el método `{}` (hoy: abs/to_str/to_str_base)",
+                    method,
+                ),
+            );
             Type::Any
         }
     }
 }
 
-fn infer_float_method(
-    ctx: &mut CheckCtx,
-    method: &str,
-    args_ty: &[Type],
-    span: Span,
-) -> Type {
+fn infer_float_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "abs" => {
             check_method_arity(ctx, "abs", args_ty, 0, span);
@@ -2803,10 +2977,13 @@ fn infer_float_method(
             Type::Bool
         }
         _ => {
-            ctx.error_at(span, format!(
-                "`Float` no tiene el método `{}` (hoy: abs/to_str/is_nan/is_finite)",
-                method,
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "`Float` no tiene el método `{}` (hoy: abs/to_str/is_nan/is_finite)",
+                    method,
+                ),
+            );
             Type::Any
         }
     }
@@ -2815,12 +2992,7 @@ fn infer_float_method(
 /// Mini-tanda Ir — signatures de métodos built-in sobre `Range`. El
 /// Range conceptualmente es un `List<Int>` lazy; los métodos coinciden
 /// con los de `List<Int>` para enumerate/zip/chain, más `len`.
-fn infer_range_method(
-    ctx: &mut CheckCtx,
-    method: &str,
-    args_ty: &[Type],
-    span: Span,
-) -> Type {
+fn infer_range_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "enumerate" => {
             check_method_arity(ctx, "enumerate", args_ty, 0, span);
@@ -2834,10 +3006,13 @@ fn infer_range_method(
                 Type::List(inner) => (**inner).clone(),
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`Range.zip()` espera `List<U>`, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Range.zip()` espera `List<U>`, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             };
@@ -2850,18 +3025,24 @@ fn infer_range_method(
             match args_ty[0].base() {
                 Type::List(inner) => {
                     if !is_compatible(inner, &Type::Int) {
-                        ctx.error_at(span, format!(
-                            "`Range.chain()` espera `List<Int>`, recibió `List<{}>`",
-                            inner.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`Range.chain()` espera `List<Int>`, recibió `List<{}>`",
+                                inner.display(ctx.types),
+                            ),
+                        );
                     }
                 }
                 Type::Any => {}
                 other => {
-                    ctx.error_at(span, format!(
-                        "`Range.chain()` espera `List<Int>`, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Range.chain()` espera `List<Int>`, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::List(Box::new(Type::Int))
@@ -2876,18 +3057,24 @@ fn infer_range_method(
             if check_method_arity(ctx, "step_by", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`Range.step_by()` espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Range.step_by()` espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::List(Box::new(Type::Int))
         }
         _ => {
-            ctx.error_at(span, format!(
-                "`Range` no tiene el método `{}` (hoy: enumerate/zip/chain/len/step_by)",
-                method,
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "`Range` no tiene el método `{}` (hoy: enumerate/zip/chain/len/step_by)",
+                    method,
+                ),
+            );
             Type::Any
         }
     }
@@ -2915,12 +3102,15 @@ fn check_method_arity(
     span: Span,
 ) -> bool {
     if args_ty.len() != expected {
-        ctx.error_at(span, format!(
-            "el método `{}` espera {} argumento(s), recibió {}",
-            method,
-            expected,
-            args_ty.len()
-        ));
+        ctx.error_at(
+            span,
+            format!(
+                "el método `{}` espera {} argumento(s), recibió {}",
+                method,
+                expected,
+                args_ty.len()
+            ),
+        );
         false
     } else {
         true
@@ -2943,42 +3133,54 @@ fn check_unary_callback(
         Type::Any => Type::Any,
         Type::Function { params, ret } => {
             if params.len() != 1 {
-                ctx.error_at(span, format!(
-                    "la callback de `.{}()` debe tomar 1 argumento, recibió {}",
-                    method,
-                    params.len()
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "la callback de `.{}()` debe tomar 1 argumento, recibió {}",
+                        method,
+                        params.len()
+                    ),
+                );
                 return (**ret).clone();
             }
             // El param del callback tiene que poder recibir un T
             // (el tipo de los elementos). Si el callback declaró un
             // tipo concreto incompatible, error.
             if !is_compatible(elem_ty, &params[0]) {
-                ctx.error_at(span, format!(
-                    "la callback de `.{}()` recibe elementos `{}` pero su parámetro es `{}`",
-                    method,
-                    elem_ty.display(ctx.types),
-                    params[0].display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "la callback de `.{}()` recibe elementos `{}` pero su parámetro es `{}`",
+                        method,
+                        elem_ty.display(ctx.types),
+                        params[0].display(ctx.types)
+                    ),
+                );
             }
             if let Some(expected) = expected_ret {
                 if !is_compatible(ret, expected) {
-                    ctx.error_at(span, format!(
-                        "la callback de `.{}()` debe devolver `{}`, devuelve `{}`",
-                        method,
-                        expected.display(ctx.types),
-                        ret.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "la callback de `.{}()` debe devolver `{}`, devuelve `{}`",
+                            method,
+                            expected.display(ctx.types),
+                            ret.display(ctx.types)
+                        ),
+                    );
                 }
             }
             (**ret).clone()
         }
         other => {
-            ctx.error_at(span, format!(
-                "la callback de `.{}()` debe ser una función, recibió `{}`",
-                method,
-                other.display(ctx.types)
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "la callback de `.{}()` debe ser una función, recibió `{}`",
+                    method,
+                    other.display(ctx.types)
+                ),
+            );
             Type::Any
         }
     }
@@ -2996,11 +3198,14 @@ fn infer_list_method(
             check_method_arity(ctx, "push", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, t) {
-                    ctx.error_at(span, format!(
-                        "`push` sobre `List<{}>` recibió `{}`",
-                        t.display(ctx.types),
-                        arg.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`push` sobre `List<{}>` recibió `{}`",
+                            t.display(ctx.types),
+                            arg.display(ctx.types)
+                        ),
+                    );
                 }
             }
             Type::Null
@@ -3029,10 +3234,16 @@ fn infer_list_method(
         }
         "find" => {
             if !check_method_arity(ctx, "find", args_ty, 1, span) {
-                return Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) };
+                return Type::Result {
+                    ok: Box::new(t.clone()),
+                    err: Box::new(Type::Str),
+                };
             }
             check_unary_callback(ctx, &args_ty[0], t, "find", Some(&Type::Bool), span);
-            Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
+            Type::Result {
+                ok: Box::new(t.clone()),
+                err: Box::new(Type::Str),
+            }
         }
         // Mini-tanda Lx — predicados funcionales sobre List<T>.
         // Todos toman `fn(T) -> Bool`. Devuelven Bool/Int/Result<Int>.
@@ -3052,7 +3263,10 @@ fn infer_list_method(
             if check_method_arity(ctx, "find_index", args_ty, 1, span) {
                 check_unary_callback(ctx, &args_ty[0], t, "find_index", Some(&Type::Bool), span);
             }
-            Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }
+            Type::Result {
+                ok: Box::new(Type::Int),
+                err: Box::new(Type::Str),
+            }
         }
         // Mini-tanda Ex2 — `flat_map(fn(T) -> List<U>)` → `List<U>`.
         // El callback debe devolver una lista; inferimos U del ret type.
@@ -3063,37 +3277,49 @@ fn infer_list_method(
             let inner_u = match &args_ty[0] {
                 Type::Function { params, ret } => {
                     if params.len() != 1 {
-                        ctx.error_at(span, format!(
-                            "`.flat_map()`: el callback toma 1 param, tiene {}",
-                            params.len(),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`.flat_map()`: el callback toma 1 param, tiene {}",
+                                params.len(),
+                            ),
+                        );
                         return Type::List(Box::new(Type::Any));
                     }
                     if !is_compatible(t, &params[0]) && !is_compatible(&params[0], t) {
-                        ctx.error_at(span, format!(
-                            "`.flat_map()`: param del callback es `{}`, esperaba `{}`",
-                            params[0].display(ctx.types),
-                            t.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`.flat_map()`: param del callback es `{}`, esperaba `{}`",
+                                params[0].display(ctx.types),
+                                t.display(ctx.types),
+                            ),
+                        );
                     }
                     match &**ret {
                         Type::List(u) => (**u).clone(),
                         Type::Any => Type::Any,
                         other => {
-                            ctx.error_at(span, format!(
+                            ctx.error_at(
+                                span,
+                                format!(
                                 "`.flat_map()`: el callback debe retornar `List<U>`, retorna `{}`",
                                 other.display(ctx.types),
-                            ));
+                            ),
+                            );
                             Type::Any
                         }
                     }
                 }
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.flat_map()` espera un callback, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.flat_map()` espera un callback, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             };
@@ -3102,7 +3328,10 @@ fn infer_list_method(
         // Mini-tanda Ex2 — `first()` / `last()` → `Result<T>`.
         "first" | "last" => {
             check_method_arity(ctx, method, args_ty, 0, span);
-            Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
+            Type::Result {
+                ok: Box::new(t.clone()),
+                err: Box::new(Type::Str),
+            }
         }
         // Mini-tanda Mb2 — reducciones numéricas sobre `List<Int>`
         // o `List<Float>`. `min`/`max` devuelven `Result<T>` porque
@@ -3112,15 +3341,19 @@ fn infer_list_method(
         "min" | "max" => {
             check_method_arity(ctx, method, args_ty, 0, span);
             match t {
-                Type::Int | Type::Float | Type::Any => {
-                    Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
-                }
+                Type::Int | Type::Float | Type::Any => Type::Result {
+                    ok: Box::new(t.clone()),
+                    err: Box::new(Type::Str),
+                },
                 other => {
                     ctx.error_at(span, format!(
                         "`.{}()` solo se aplica sobre `List<Int>` o `List<Float>`, recibió `List<{}>`",
                         method, other.display(ctx.types),
                     ));
-                    Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) }
+                    Type::Result {
+                        ok: Box::new(Type::Any),
+                        err: Box::new(Type::Str),
+                    }
                 }
             }
         }
@@ -3162,15 +3395,7 @@ fn infer_list_method(
                 return Type::Any;
             }
             let acc_ty = args_ty[0].clone();
-            check_binary_callback(
-                ctx,
-                &args_ty[1],
-                &acc_ty,
-                t,
-                "reduce",
-                Some(&acc_ty),
-                span,
-            );
+            check_binary_callback(ctx, &args_ty[1], &acc_ty, t, "reduce", Some(&acc_ty), span);
             acc_ty
         }
         // Mini-tanda Mb3 — `to_map()`: convierte `List<(K, V)>` →
@@ -3230,44 +3455,59 @@ fn infer_list_method(
                 Type::List(inner) => (**inner).clone(),
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.zip_with()` espera `List<U>` como primer arg, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.zip_with()` espera `List<U>` como primer arg, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     return Type::List(Box::new(Type::Any));
                 }
             };
             let v_ty = match &args_ty[1] {
                 Type::Function { params, ret } => {
                     if params.len() != 2 {
-                        ctx.error_at(span, format!(
-                            "`.zip_with()`: el callback toma 2 params, tiene {}",
-                            params.len(),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`.zip_with()`: el callback toma 2 params, tiene {}",
+                                params.len(),
+                            ),
+                        );
                         return Type::List(Box::new(Type::Any));
                     }
                     if !is_compatible(t, &params[0]) {
-                        ctx.error_at(span, format!(
-                            "`.zip_with()`: param[0] del callback es `{}`, esperaba `{}`",
-                            params[0].display(ctx.types),
-                            t.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`.zip_with()`: param[0] del callback es `{}`, esperaba `{}`",
+                                params[0].display(ctx.types),
+                                t.display(ctx.types),
+                            ),
+                        );
                     }
                     if !is_compatible(&u_ty, &params[1]) {
-                        ctx.error_at(span, format!(
-                            "`.zip_with()`: param[1] del callback es `{}`, esperaba `{}`",
-                            params[1].display(ctx.types),
-                            u_ty.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`.zip_with()`: param[1] del callback es `{}`, esperaba `{}`",
+                                params[1].display(ctx.types),
+                                u_ty.display(ctx.types),
+                            ),
+                        );
                     }
                     (**ret).clone()
                 }
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.zip_with()` espera un callback, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.zip_with()` espera un callback, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             };
@@ -3280,7 +3520,10 @@ fn infer_list_method(
             if check_method_arity(ctx, method, args_ty, 1, span) {
                 check_unary_callback(ctx, &args_ty[0], t, method, Some(&Type::Int), span);
             }
-            Type::Result { ok: Box::new(t.clone()), err: Box::new(Type::Str) }
+            Type::Result {
+                ok: Box::new(t.clone()),
+                err: Box::new(Type::Str),
+            }
         }
         // Mini-tanda Mb6 — `scan(init, fn(acc, x) -> Acc) -> List<Acc>`.
         // Fold con outputs intermedios. Mismo shape que reduce salvo
@@ -3290,15 +3533,7 @@ fn infer_list_method(
                 return Type::List(Box::new(Type::Any));
             }
             let acc_ty = args_ty[0].clone();
-            check_binary_callback(
-                ctx,
-                &args_ty[1],
-                &acc_ty,
-                t,
-                "scan",
-                Some(&acc_ty),
-                span,
-            );
+            check_binary_callback(ctx, &args_ty[1], &acc_ty, t, "scan", Some(&acc_ty), span);
             Type::List(Box::new(acc_ty))
         }
         // Mini-tanda Mb6 — `windows(n) -> List<List<T>>`. Cada ventana
@@ -3307,10 +3542,13 @@ fn infer_list_method(
             if check_method_arity(ctx, "windows", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`.windows()` espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.windows()` espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::List(Box::new(Type::List(Box::new(t.clone()))))
         }
@@ -3320,10 +3558,13 @@ fn infer_list_method(
             if check_method_arity(ctx, "split_at", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`List.split_at()` espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`List.split_at()` espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Tuple(vec![
                 Type::List(Box::new(t.clone())),
@@ -3337,22 +3578,28 @@ fn infer_list_method(
                 match args_ty[0].base() {
                     Type::List(inner) => {
                         if !is_compatible(inner, t) {
-                            ctx.error_at(span, format!(
-                                "`.{}()`: espera `List<{}>`, recibió `List<{}>`",
-                                method,
-                                t.display(ctx.types),
-                                inner.display(ctx.types),
-                            ));
+                            ctx.error_at(
+                                span,
+                                format!(
+                                    "`.{}()`: espera `List<{}>`, recibió `List<{}>`",
+                                    method,
+                                    t.display(ctx.types),
+                                    inner.display(ctx.types),
+                                ),
+                            );
                         }
                     }
                     Type::Any => {}
                     other => {
-                        ctx.error_at(span, format!(
-                            "`.{}()`: espera `List<{}>`, recibió `{}`",
-                            method,
-                            t.display(ctx.types),
-                            other.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`.{}()`: espera `List<{}>`, recibió `{}`",
+                                method,
+                                t.display(ctx.types),
+                                other.display(ctx.types),
+                            ),
+                        );
                     }
                 }
             }
@@ -3363,17 +3610,23 @@ fn infer_list_method(
         "insert_at" => {
             if check_method_arity(ctx, "insert_at", args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
-                    ctx.error_at(span, format!(
-                        "`.insert_at(i, v)`: arg 0 (idx) espera `Int`, recibió `{}`",
-                        args_ty[0].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.insert_at(i, v)`: arg 0 (idx) espera `Int`, recibió `{}`",
+                            args_ty[0].display(ctx.types),
+                        ),
+                    );
                 }
                 if !is_compatible(&args_ty[1], t) {
-                    ctx.error_at(span, format!(
-                        "`.insert_at(i, v)`: v es `{}`, debe ser compatible con `{}`",
-                        args_ty[1].display(ctx.types),
-                        t.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.insert_at(i, v)`: v es `{}`, debe ser compatible con `{}`",
+                            args_ty[1].display(ctx.types),
+                            t.display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::List(Box::new(t.clone()))
@@ -3383,10 +3636,13 @@ fn infer_list_method(
             if check_method_arity(ctx, "remove_at", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`.remove_at(i)`: idx espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.remove_at(i)`: idx espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::List(Box::new(t.clone()))
         }
@@ -3400,10 +3656,13 @@ fn infer_list_method(
                 Type::List(inner) => (**inner).clone(),
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.zip_to_map()` espera `List<V>`, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.zip_to_map()` espera `List<V>`, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             };
@@ -3415,10 +3674,14 @@ fn infer_list_method(
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`.{}()` espera `Int`, recibió `{}`",
-                    method, args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.{}()` espera `Int`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::List(Box::new(t.clone()))
         }
@@ -3433,11 +3696,14 @@ fn infer_list_method(
             if check_method_arity(ctx, "intersperse", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], t)
             {
-                ctx.error_at(span, format!(
-                    "`.intersperse()`: sep es `{}`, debe ser compatible con `{}`",
-                    args_ty[0].display(ctx.types),
-                    t.display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.intersperse()`: sep es `{}`, debe ser compatible con `{}`",
+                        args_ty[0].display(ctx.types),
+                        t.display(ctx.types),
+                    ),
+                );
             }
             Type::List(Box::new(t.clone()))
         }
@@ -3454,11 +3720,14 @@ fn infer_list_method(
             if check_method_arity(ctx, "contains", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], t)
             {
-                ctx.error_at(span, format!(
-                    "`List<{}>.contains()` recibió `{}`",
-                    t.display(ctx.types),
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`List<{}>.contains()` recibió `{}`",
+                        t.display(ctx.types),
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Bool
         }
@@ -3480,11 +3749,14 @@ fn infer_list_method(
                 Type::List(inner) => (**inner).clone(),
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`List<{}>.zip()` espera `List<U>`, recibió `{}`",
-                        t.display(ctx.types),
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`List<{}>.zip()` espera `List<U>`, recibió `{}`",
+                            t.display(ctx.types),
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             };
@@ -3499,22 +3771,28 @@ fn infer_list_method(
             match args_ty[0].base() {
                 Type::List(inner) => {
                     if !is_compatible(inner, t) {
-                        ctx.error_at(span, format!(
-                            "`List<{}>.chain()` espera `List<{}>`, recibió `List<{}>`",
-                            t.display(ctx.types),
-                            t.display(ctx.types),
-                            inner.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`List<{}>.chain()` espera `List<{}>`, recibió `List<{}>`",
+                                t.display(ctx.types),
+                                t.display(ctx.types),
+                                inner.display(ctx.types),
+                            ),
+                        );
                     }
                 }
                 Type::Any => {}
                 other => {
-                    ctx.error_at(span, format!(
-                        "`List<{}>.chain()` espera `List<{}>`, recibió `{}`",
-                        t.display(ctx.types),
-                        t.display(ctx.types),
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`List<{}>.chain()` espera `List<{}>`, recibió `{}`",
+                            t.display(ctx.types),
+                            t.display(ctx.types),
+                            other.display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::List(Box::new(t.clone()))
@@ -3529,10 +3807,13 @@ fn infer_list_method(
                 Type::List(inner) => Type::List(inner.clone()),
                 Type::Any => Type::List(Box::new(Type::Any)),
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.flatten()` requiere `List<List<U>>`, el receptor es `List<{}>`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.flatten()` requiere `List<List<U>>`, el receptor es `List<{}>`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -3563,10 +3844,13 @@ fn infer_list_method(
                             }
                         }
                         if !is_compatible(ret, &Type::Int) {
-                            ctx.error_at(span, format!(
+                            ctx.error_at(
+                                span,
+                                format!(
                                 "`.sort_by(cmp)`: el callback debe retornar `Int`, retorna `{}`",
                                 ret.display(ctx.types),
-                            ));
+                            ),
+                            );
                         }
                     }
                 }
@@ -3574,20 +3858,26 @@ fn infer_list_method(
                     // Gradual: callback sin tipo concreto, no chequeo.
                 }
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.sort_by(cmp)` espera `fn(T, T) -> Int`, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.sort_by(cmp)` espera `fn(T, T) -> Int`, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::Null
         }
         _ => {
-            ctx.error_at(span, format!(
-                "`List<{}>` no tiene el método `{}`",
-                t.display(ctx.types),
-                method
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "`List<{}>` no tiene el método `{}`",
+                    t.display(ctx.types),
+                    method
+                ),
+            );
             Type::Any
         }
     }
@@ -3606,28 +3896,37 @@ fn infer_map_method(
             check_method_arity(ctx, "get", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, k) {
-                    ctx.error_at(span, format!(
-                        "`get` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
-                        k.display(ctx.types),
-                        v.display(ctx.types),
-                        k.display(ctx.types),
-                        arg.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`get` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
+                            k.display(ctx.types),
+                            v.display(ctx.types),
+                            k.display(ctx.types),
+                            arg.display(ctx.types)
+                        ),
+                    );
                 }
             }
-            Type::Result { ok: Box::new(v.clone()), err: Box::new(Type::Str) }
+            Type::Result {
+                ok: Box::new(v.clone()),
+                err: Box::new(Type::Str),
+            }
         }
         "has" => {
             check_method_arity(ctx, "has", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, k) {
-                    ctx.error_at(span, format!(
-                        "`has` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
-                        k.display(ctx.types),
-                        v.display(ctx.types),
-                        k.display(ctx.types),
-                        arg.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`has` sobre `Map<{}, {}>` espera una clave `{}`, recibió `{}`",
+                            k.display(ctx.types),
+                            v.display(ctx.types),
+                            k.display(ctx.types),
+                            arg.display(ctx.types)
+                        ),
+                    );
                 }
             }
             Type::Bool
@@ -3661,11 +3960,14 @@ fn infer_map_method(
             if check_method_arity(ctx, "has_value", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], v)
             {
-                ctx.error_at(span, format!(
-                    "`Map.has_value()` espera `{}`, recibió `{}`",
-                    v.display(ctx.types),
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Map.has_value()` espera `{}`, recibió `{}`",
+                        v.display(ctx.types),
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Bool
         }
@@ -3676,18 +3978,24 @@ fn infer_map_method(
                 return Type::Map(Box::new(k.clone()), Box::new(v.clone()));
             }
             if !is_compatible(&args_ty[0], k) {
-                ctx.error_at(span, format!(
-                    "`.with()`: la key debe ser `{}`, recibió `{}`",
-                    k.display(ctx.types),
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.with()`: la key debe ser `{}`, recibió `{}`",
+                        k.display(ctx.types),
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             if !is_compatible(&args_ty[1], v) {
-                ctx.error_at(span, format!(
-                    "`.with()`: el value debe ser `{}`, recibió `{}`",
-                    v.display(ctx.types),
-                    args_ty[1].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.with()`: el value debe ser `{}`, recibió `{}`",
+                        v.display(ctx.types),
+                        args_ty[1].display(ctx.types),
+                    ),
+                );
             }
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
@@ -3717,21 +4025,16 @@ fn infer_map_method(
                 }
                 Type::Any => {}
                 other => {
-                    ctx.error_at(span, format!(
-                        "`.merge_with()` espera otro `Map`, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.merge_with()` espera otro `Map`, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                 }
             }
-            check_binary_callback(
-                ctx,
-                &args_ty[1],
-                v,
-                v,
-                "merge_with",
-                Some(v),
-                span,
-            );
+            check_binary_callback(ctx, &args_ty[1], v, v, "merge_with", Some(v), span);
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
         "values" => {
@@ -3748,15 +4051,7 @@ fn infer_map_method(
         // devuelve Map<K, U>.
         "filter" => {
             if check_method_arity(ctx, "filter", args_ty, 1, span) {
-                check_binary_callback(
-                    ctx,
-                    &args_ty[0],
-                    k,
-                    v,
-                    "filter",
-                    Some(&Type::Bool),
-                    span,
-                );
+                check_binary_callback(ctx, &args_ty[0], k, v, "filter", Some(&Type::Bool), span);
             }
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
         }
@@ -3769,12 +4064,15 @@ fn infer_map_method(
             }
             // Arg 0: key, debe ser compatible con K.
             if !is_compatible(&args_ty[0], k) {
-                ctx.error_at(span, format!(
-                    "`Map<{}, _>.update()`: la key debe ser `{}`, recibió `{}`",
-                    k.display(ctx.types),
-                    k.display(ctx.types),
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Map<{}, _>.update()`: la key debe ser `{}`, recibió `{}`",
+                        k.display(ctx.types),
+                        k.display(ctx.types),
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             // Arg 1: callback fn(V) -> V (mismo V, no transforma tipo).
             check_unary_callback(ctx, &args_ty[1], v, "update", Some(v), span);
@@ -3805,10 +4103,13 @@ fn infer_map_method(
                 }
                 Type::Any => {}
                 other => {
-                    ctx.error_at(span, format!(
-                        "`Map.merge()` espera otro `Map`, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Map.merge()` espera otro `Map`, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::Map(Box::new(k.clone()), Box::new(v.clone()))
@@ -3822,39 +4123,51 @@ fn infer_map_method(
             let cb_ret = match &args_ty[0] {
                 Type::Function { params, ret } => {
                     if params.len() != 1 {
-                        ctx.error_at(span, format!(
-                            "`Map.map_values()`: el callback debe tener 1 param, tiene {}",
-                            params.len(),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`Map.map_values()`: el callback debe tener 1 param, tiene {}",
+                                params.len(),
+                            ),
+                        );
                         return Type::Map(Box::new(k.clone()), Box::new(Type::Any));
                     }
                     if !is_compatible(v, &params[0]) && !is_compatible(&params[0], v) {
-                        ctx.error_at(span, format!(
-                            "`Map.map_values()`: el callback espera `{}`, los values son `{}`",
-                            params[0].display(ctx.types),
-                            v.display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`Map.map_values()`: el callback espera `{}`, los values son `{}`",
+                                params[0].display(ctx.types),
+                                v.display(ctx.types),
+                            ),
+                        );
                     }
                     (**ret).clone()
                 }
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(span, format!(
-                        "`Map.map_values()` espera un callback, recibió `{}`",
-                        other.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Map.map_values()` espera un callback, recibió `{}`",
+                            other.display(ctx.types),
+                        ),
+                    );
                     Type::Any
                 }
             };
             Type::Map(Box::new(k.clone()), Box::new(cb_ret))
         }
         _ => {
-            ctx.error_at(span, format!(
-                "`Map<{}, {}>` no tiene el método `{}`",
-                k.display(ctx.types),
-                v.display(ctx.types),
-                method
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "`Map<{}, {}>` no tiene el método `{}`",
+                    k.display(ctx.types),
+                    v.display(ctx.types),
+                    method
+                ),
+            );
             Type::Any
         }
     }
@@ -3875,37 +4188,49 @@ fn check_binary_callback(
     match cb_ty {
         Type::Function { params, ret } => {
             if params.len() != 2 {
-                ctx.error_at(span, format!(
-                    "`.{}` espera un callback de 2 params, recibió uno de {} params",
-                    method,
-                    params.len(),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.{}` espera un callback de 2 params, recibió uno de {} params",
+                        method,
+                        params.len(),
+                    ),
+                );
                 return;
             }
             if !is_compatible(&params[0], p0_ty) && !is_compatible(p0_ty, &params[0]) {
-                ctx.error_at(span, format!(
-                    "`.{}`: param[0] del callback es `{}`, esperaba `{}`",
-                    method,
-                    params[0].display(ctx.types),
-                    p0_ty.display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.{}`: param[0] del callback es `{}`, esperaba `{}`",
+                        method,
+                        params[0].display(ctx.types),
+                        p0_ty.display(ctx.types),
+                    ),
+                );
             }
             if !is_compatible(&params[1], p1_ty) && !is_compatible(p1_ty, &params[1]) {
-                ctx.error_at(span, format!(
-                    "`.{}`: param[1] del callback es `{}`, esperaba `{}`",
-                    method,
-                    params[1].display(ctx.types),
-                    p1_ty.display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`.{}`: param[1] del callback es `{}`, esperaba `{}`",
+                        method,
+                        params[1].display(ctx.types),
+                        p1_ty.display(ctx.types),
+                    ),
+                );
             }
             if let Some(want_ret) = expected_ret {
                 if !is_compatible(ret, want_ret) {
-                    ctx.error_at(span, format!(
-                        "`.{}`: el callback debe retornar `{}`, retorna `{}`",
-                        method,
-                        want_ret.display(ctx.types),
-                        ret.display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`.{}`: el callback debe retornar `{}`, retorna `{}`",
+                            method,
+                            want_ret.display(ctx.types),
+                            ret.display(ctx.types),
+                        ),
+                    );
                 }
             }
         }
@@ -3913,11 +4238,14 @@ fn check_binary_callback(
             // Gradual: callback sin tipo concreto, no chequeo.
         }
         other => {
-            ctx.error_at(span, format!(
-                "`.{}` espera un callback, recibió `{}`",
-                method,
-                other.display(ctx.types),
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "`.{}` espera un callback, recibió `{}`",
+                    method,
+                    other.display(ctx.types),
+                ),
+            );
         }
     }
 }
@@ -4005,12 +4333,7 @@ fn infer_wsconn_method(
 }
 
 /// Mini-tanda Bytes — métodos del primitivo `Bytes`.
-fn infer_bytes_method(
-    ctx: &mut CheckCtx,
-    method: &str,
-    args_ty: &[Type],
-    span: Span,
-) -> Type {
+fn infer_bytes_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "len" => {
             check_method_arity(ctx, "len", args_ty, 0, span);
@@ -4028,21 +4351,19 @@ fn infer_bytes_method(
             }
         }
         _ => {
-            ctx.error_at(span, format!(
-                "el tipo `Bytes` no tiene el método `{}` (soportados: len, is_empty, to_str)",
-                method
-            ));
+            ctx.error_at(
+                span,
+                format!(
+                    "el tipo `Bytes` no tiene el método `{}` (soportados: len, is_empty, to_str)",
+                    method
+                ),
+            );
             Type::Any
         }
     }
 }
 
-fn infer_str_method(
-    ctx: &mut CheckCtx,
-    method: &str,
-    args_ty: &[Type],
-    span: Span,
-) -> Type {
+fn infer_str_method(ctx: &mut CheckCtx, method: &str, args_ty: &[Type], span: Span) -> Type {
     match method {
         "len" => {
             check_method_arity(ctx, "len", args_ty, 0, span);
@@ -4058,11 +4379,14 @@ fn infer_str_method(
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Str)
             {
-                ctx.error_at(span, format!(
-                    "`Str.{}()` espera `Str`, recibió `{}`",
-                    method,
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Str.{}()` espera `Str`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Bool
         }
@@ -4078,10 +4402,13 @@ fn infer_str_method(
             if check_method_arity(ctx, "split_at", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`Str.split_at()` espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Str.split_at()` espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Tuple(vec![Type::Str, Type::Str])
         }
@@ -4110,11 +4437,14 @@ fn infer_str_method(
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`Str.{}()` espera `Int`, recibió `{}`",
-                    method,
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Str.{}()` espera `Int`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Str
         }
@@ -4123,16 +4453,22 @@ fn infer_str_method(
         "center" => {
             if check_method_arity(ctx, "center", args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
-                    ctx.error_at(span, format!(
-                        "`Str.center(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
-                        args_ty[0].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Str.center(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
+                            args_ty[0].display(ctx.types),
+                        ),
+                    );
                 }
                 if !is_compatible(&args_ty[1], &Type::Str) {
-                    ctx.error_at(span, format!(
-                        "`Str.center(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
-                        args_ty[1].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Str.center(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
+                            args_ty[1].display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::Str
@@ -4142,16 +4478,22 @@ fn infer_str_method(
         "repeat_with" => {
             if check_method_arity(ctx, "repeat_with", args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
-                    ctx.error_at(span, format!(
-                        "`Str.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`",
-                        args_ty[0].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Str.repeat_with()`: arg 0 (n) espera `Int`, recibió `{}`",
+                            args_ty[0].display(ctx.types),
+                        ),
+                    );
                 }
                 if !is_compatible(&args_ty[1], &Type::Str) {
-                    ctx.error_at(span, format!(
-                        "`Str.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`",
-                        args_ty[1].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Str.repeat_with()`: arg 1 (sep) espera `Str`, recibió `{}`",
+                            args_ty[1].display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::Str
@@ -4161,10 +4503,13 @@ fn infer_str_method(
             if check_method_arity(ctx, "split", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Str)
             {
-                ctx.error_at(span, format!(
-                    "`Str.split()` espera `Str` como separador, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Str.split()` espera `Str` como separador, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::List(Box::new(Type::Str))
         }
@@ -4181,11 +4526,14 @@ fn infer_str_method(
             if check_method_arity(ctx, "replace", args_ty, 2, span) {
                 for (i, name) in ["old", "new"].iter().enumerate() {
                     if !is_compatible(&args_ty[i], &Type::Str) {
-                        ctx.error_at(span, format!(
-                            "`Str.replace({}, ...)` espera `Str`, recibió `{}`",
-                            name,
-                            args_ty[i].display(ctx.types),
-                        ));
+                        ctx.error_at(
+                            span,
+                            format!(
+                                "`Str.replace({}, ...)` espera `Str`, recibió `{}`",
+                                name,
+                                args_ty[i].display(ctx.types),
+                            ),
+                        );
                     }
                 }
             }
@@ -4195,10 +4543,13 @@ fn infer_str_method(
             if check_method_arity(ctx, "repeat", args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Int)
             {
-                ctx.error_at(span, format!(
-                    "`Str.repeat()` espera `Int`, recibió `{}`",
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Str.repeat()` espera `Int`, recibió `{}`",
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
             Type::Str
         }
@@ -4209,16 +4560,24 @@ fn infer_str_method(
         "pad_start" | "pad_end" => {
             if check_method_arity(ctx, method, args_ty, 2, span) {
                 if !is_compatible(&args_ty[0], &Type::Int) {
-                    ctx.error_at(span, format!(
-                        "`Str.{}(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
-                        method, args_ty[0].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Str.{}(width, ch)`: arg 0 (width) espera `Int`, recibió `{}`",
+                            method,
+                            args_ty[0].display(ctx.types),
+                        ),
+                    );
                 }
                 if !is_compatible(&args_ty[1], &Type::Str) {
-                    ctx.error_at(span, format!(
-                        "`Str.{}(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
-                        method, args_ty[1].display(ctx.types),
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "`Str.{}(width, ch)`: arg 1 (ch) espera `Str`, recibió `{}`",
+                            method,
+                            args_ty[1].display(ctx.types),
+                        ),
+                    );
                 }
             }
             Type::Str
@@ -4229,13 +4588,19 @@ fn infer_str_method(
             if check_method_arity(ctx, method, args_ty, 1, span)
                 && !is_compatible(&args_ty[0], &Type::Str)
             {
-                ctx.error_at(span, format!(
-                    "`Str.{}()` espera `Str`, recibió `{}`",
-                    method,
-                    args_ty[0].display(ctx.types),
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "`Str.{}()` espera `Str`, recibió `{}`",
+                        method,
+                        args_ty[0].display(ctx.types),
+                    ),
+                );
             }
-            Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) }
+            Type::Result {
+                ok: Box::new(Type::Int),
+                err: Box::new(Type::Str),
+            }
         }
         _ => {
             ctx.error_at(span, format!("`Str` no tiene el método `{}`", method));
@@ -4293,10 +4658,13 @@ fn check_comp_clause_in_checker(
         Type::Range => Type::Int,
         Type::Any => Type::Any,
         other => {
-            ctx.error_at(iter.span(), format!(
-                "comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
-                other.display(ctx.types)
-            ));
+            ctx.error_at(
+                iter.span(),
+                format!(
+                    "comprehension necesita un iterable (`List` o `Range`), recibió `{}`",
+                    other.display(ctx.types)
+                ),
+            );
             Type::Any
         }
     };
@@ -4332,19 +4700,25 @@ fn bind_for_pattern_in_checker(
                     }
                 }
                 other => {
-                    ctx.error_at(fallback_span, format!(
+                    ctx.error_at(
+                        fallback_span,
+                        format!(
                         "tuple pattern del `for` espera una tupla de {} elementos, recibió `{}`",
                         subs.len(),
                         other.display(ctx.types)
-                    ));
+                    ),
+                    );
                 }
             }
         }
         other => {
-            ctx.error_at(fallback_span, format!(
-                "patrón `{:?}` no admitido como variable de `for` (usá Ident, `_`, o tupla)",
-                other
-            ));
+            ctx.error_at(
+                fallback_span,
+                format!(
+                    "patrón `{:?}` no admitido como variable de `for` (usá Ident, `_`, o tupla)",
+                    other
+                ),
+            );
         }
     }
 }
@@ -4385,27 +4759,30 @@ fn validate_format_spec_for_type(
         FormatKind::String => true,
     };
     if !ok {
-        ctx.error_at(span, format!(
-            "format spec `{}` no es compatible con tipo `{}` (esperaba {})",
-            kind.to_char(),
-            ty.display(ctx.types),
-            match kind {
-                FormatKind::FixedLower
-                | FormatKind::FixedUpper
-                | FormatKind::ExponentLower
-                | FormatKind::ExponentUpper
-                | FormatKind::GeneralLower
-                | FormatKind::GeneralUpper
-                | FormatKind::Percent => "Float o Int",
-                FormatKind::Decimal
-                | FormatKind::Binary
-                | FormatKind::Octal
-                | FormatKind::HexLower
-                | FormatKind::HexUpper
-                | FormatKind::Char => "Int",
-                FormatKind::String => "cualquier tipo",
-            },
-        ));
+        ctx.error_at(
+            span,
+            format!(
+                "format spec `{}` no es compatible con tipo `{}` (esperaba {})",
+                kind.to_char(),
+                ty.display(ctx.types),
+                match kind {
+                    FormatKind::FixedLower
+                    | FormatKind::FixedUpper
+                    | FormatKind::ExponentLower
+                    | FormatKind::ExponentUpper
+                    | FormatKind::GeneralLower
+                    | FormatKind::GeneralUpper
+                    | FormatKind::Percent => "Float o Int",
+                    FormatKind::Decimal
+                    | FormatKind::Binary
+                    | FormatKind::Octal
+                    | FormatKind::HexLower
+                    | FormatKind::HexUpper
+                    | FormatKind::Char => "Int",
+                    FormatKind::String => "cualquier tipo",
+                },
+            ),
+        );
     }
 }
 
@@ -4440,10 +4817,13 @@ fn check_result_match_exhaustiveness(
         (false, true) => "`Ok`",
         _ => "`Ok` y `Err`",
     };
-    ctx.error_at(span, format!(
-        "match sobre `Result` no es exhaustivo: falta el caso {}",
-        missing
-    ));
+    ctx.error_at(
+        span,
+        format!(
+            "match sobre `Result` no es exhaustivo: falta el caso {}",
+            missing
+        ),
+    );
 }
 
 /// Bindea las variables introducidas por un patrón en el scope
@@ -4451,12 +4831,7 @@ fn check_result_match_exhaustiveness(
 /// `arm_span` es el span de aproximación que el binding usa como
 /// `def_span` (Fase 9.x.3) — sin span propio en `Pattern` (deuda
 /// S1), el caller pasa el span del body del MatchArm.
-fn bind_pattern(
-    ctx: &mut CheckCtx,
-    pat: &crate::ast::Pattern,
-    scrutinee: &Type,
-    arm_span: Span,
-) {
+fn bind_pattern(ctx: &mut CheckCtx, pat: &crate::ast::Pattern, scrutinee: &Type, arm_span: Span) {
     use crate::ast::Pattern;
     match pat {
         Pattern::Ident(name) => {
@@ -4515,13 +4890,7 @@ fn bind_pattern(
 
 /// Sintetiza el tipo de un BinOp dado los tipos de sus operandos.
 /// Aplica coerción Int→Float donde corresponde.
-fn infer_binop(
-    ctx: &mut CheckCtx,
-    op: &BinOpKind,
-    lt: &Type,
-    rt: &Type,
-    span: Span,
-) -> Type {
+fn infer_binop(ctx: &mut CheckCtx, op: &BinOpKind, lt: &Type, rt: &Type, span: Span) -> Type {
     // Si cualquiera de los operandos es Any, no podemos chequear
     // con confianza — devolvemos Any sin error.
     if matches!(lt, Type::Any) || matches!(rt, Type::Any) {
@@ -4532,16 +4901,19 @@ fn infer_binop(
             // Numérico o Str+Str.
             match (lt, rt) {
                 (Type::Int, Type::Int) => Type::Int,
-                (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
-                    Type::Float
-                }
+                (Type::Int, Type::Float)
+                | (Type::Float, Type::Int)
+                | (Type::Float, Type::Float) => Type::Float,
                 (Type::Str, Type::Str) => Type::Str,
                 _ => {
-                    ctx.error_at(span, format!(
-                        "el operador `+` no acepta `{}` y `{}`",
-                        lt.display(ctx.types),
-                        rt.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "el operador `+` no acepta `{}` y `{}`",
+                            lt.display(ctx.types),
+                            rt.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -4555,16 +4927,19 @@ fn infer_binop(
             };
             match (lt, rt) {
                 (Type::Int, Type::Int) => Type::Int,
-                (Type::Int, Type::Float) | (Type::Float, Type::Int) | (Type::Float, Type::Float) => {
-                    Type::Float
-                }
+                (Type::Int, Type::Float)
+                | (Type::Float, Type::Int)
+                | (Type::Float, Type::Float) => Type::Float,
                 _ => {
-                    ctx.error_at(span, format!(
-                        "el operador `{}` espera operandos numéricos, recibió `{}` y `{}`",
-                        sym,
-                        lt.display(ctx.types),
-                        rt.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        span,
+                        format!(
+                            "el operador `{}` espera operandos numéricos, recibió `{}` y `{}`",
+                            sym,
+                            lt.display(ctx.types),
+                            rt.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             }
@@ -4575,11 +4950,14 @@ fn infer_binop(
         BinOpKind::Mod => match (lt, rt) {
             (Type::Int, Type::Int) | (Type::Any, _) | (_, Type::Any) => Type::Int,
             _ => {
-                ctx.error_at(span, format!(
-                    "el operador `%` espera Int en ambos lados, recibió `{}` y `{}`",
-                    lt.display(ctx.types),
-                    rt.display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "el operador `%` espera Int en ambos lados, recibió `{}` y `{}`",
+                        lt.display(ctx.types),
+                        rt.display(ctx.types)
+                    ),
+                );
                 Type::Int
             }
         },
@@ -4594,11 +4972,14 @@ fn infer_binop(
                     | (Type::Str, Type::Str)
             );
             if !ok {
-                ctx.error_at(span, format!(
-                    "comparación entre `{}` y `{}` no soportada",
-                    lt.display(ctx.types),
-                    rt.display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "comparación entre `{}` y `{}` no soportada",
+                        lt.display(ctx.types),
+                        rt.display(ctx.types)
+                    ),
+                );
             }
             Type::Bool
         }
@@ -4609,23 +4990,32 @@ fn infer_binop(
         }
         BinOpKind::And | BinOpKind::Or | BinOpKind::Xor => {
             if !matches!(lt, Type::Bool) {
-                ctx.error_at(span, format!(
-                    "el operador lógico espera Bool, lado izquierdo es `{}`",
-                    lt.display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "el operador lógico espera Bool, lado izquierdo es `{}`",
+                        lt.display(ctx.types)
+                    ),
+                );
             }
             if !matches!(rt, Type::Bool) {
-                ctx.error_at(span, format!(
-                    "el operador lógico espera Bool, lado derecho es `{}`",
-                    rt.display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "el operador lógico espera Bool, lado derecho es `{}`",
+                        rt.display(ctx.types)
+                    ),
+                );
             }
             Type::Bool
         }
         // Mini-tanda Bits — todos los bitwise solo Int. Cualquier
         // otro tipo dispara error de tipo claro.
-        BinOpKind::BitAnd | BinOpKind::BitOr | BinOpKind::BitXor
-        | BinOpKind::Shl | BinOpKind::Shr => {
+        BinOpKind::BitAnd
+        | BinOpKind::BitOr
+        | BinOpKind::BitXor
+        | BinOpKind::Shl
+        | BinOpKind::Shr => {
             let sym = match op {
                 BinOpKind::BitAnd => "&",
                 BinOpKind::BitOr => "|",
@@ -4635,18 +5025,24 @@ fn infer_binop(
                 _ => unreachable!(),
             };
             if !matches!(lt, Type::Int | Type::Any) {
-                ctx.error_at(span, format!(
-                    "el operador bit-a-bit `{}` espera Int, lado izquierdo es `{}`",
-                    sym,
-                    lt.display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "el operador bit-a-bit `{}` espera Int, lado izquierdo es `{}`",
+                        sym,
+                        lt.display(ctx.types)
+                    ),
+                );
             }
             if !matches!(rt, Type::Int | Type::Any) {
-                ctx.error_at(span, format!(
-                    "el operador bit-a-bit `{}` espera Int, lado derecho es `{}`",
-                    sym,
-                    rt.display(ctx.types)
-                ));
+                ctx.error_at(
+                    span,
+                    format!(
+                        "el operador bit-a-bit `{}` espera Int, lado derecho es `{}`",
+                        sym,
+                        rt.display(ctx.types)
+                    ),
+                );
             }
             Type::Int
         }
@@ -4691,18 +5087,29 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
     }
     match (actual, expected) {
         (Type::List(a), Type::List(b)) => is_compatible(a, b),
-        (Type::Map(ka, va), Type::Map(kb, vb)) => {
-            is_compatible(ka, kb) && is_compatible(va, vb)
-        }
+        (Type::Map(ka, va), Type::Map(kb, vb)) => is_compatible(ka, kb) && is_compatible(va, vb),
         // Mini-tanda Re+: ambos lados (ok y err) deben ser compatibles.
-        (Type::Result { ok: a_ok, err: a_err }, Type::Result { ok: b_ok, err: b_err }) => {
-            is_compatible(a_ok, b_ok) && is_compatible(a_err, b_err)
-        }
+        (
+            Type::Result {
+                ok: a_ok,
+                err: a_err,
+            },
+            Type::Result {
+                ok: b_ok,
+                err: b_err,
+            },
+        ) => is_compatible(a_ok, b_ok) && is_compatible(a_err, b_err),
         (Type::Future(a), Type::Future(b)) => is_compatible(a, b),
         (Type::Nullable(a), Type::Nullable(b)) => is_compatible(a, b),
         (
-            Type::Function { params: pa, ret: ra },
-            Type::Function { params: pb, ret: rb },
+            Type::Function {
+                params: pa,
+                ret: ra,
+            },
+            Type::Function {
+                params: pb,
+                ret: rb,
+            },
         ) => {
             pa.len() == pb.len()
                 && pa.iter().zip(pb.iter()).all(|(a, b)| is_compatible(a, b))
@@ -4712,8 +5119,7 @@ pub fn is_compatible(actual: &Type, expected: &Type) -> bool {
         // slot es compatible. `(Int, Str)` ↔ `(Float, Str)` por la
         // promoción Int→Float en cada slot.
         (Type::Tuple(a), Type::Tuple(b)) => {
-            a.len() == b.len()
-                && a.iter().zip(b.iter()).all(|(x, y)| is_compatible(x, y))
+            a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| is_compatible(x, y))
         }
         _ => actual == expected,
     }
@@ -4732,34 +5138,49 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
     match stmt {
         // Mini-tanda T — destructuring. Inferimos el tipo del RHS y
         // bindeamos cada slot del pattern.
-        Stmt::Destructure { pattern, value, span } => {
+        Stmt::Destructure {
+            pattern,
+            value,
+            span,
+        } => {
             let value_ty = infer_expr(ctx, value);
             // Si el value tipa como Tuple, validamos arity.
             if let Type::Tuple(items) = &value_ty {
                 if let crate::ast::Pattern::Tuple(subs) = pattern {
                     if items.len() != subs.len() {
-                        ctx.error_at(*span, format!(
+                        ctx.error_at(
+                            *span,
+                            format!(
                             "destructuring de tupla: el pattern tiene {} slots, el valor tiene {}",
                             subs.len(), items.len()
-                        ));
+                        ),
+                        );
                     }
                 }
             }
             bind_pattern(ctx, pattern, &value_ty, *span);
         }
-        Stmt::Assign { target, type_, value, span } => {
+        Stmt::Assign {
+            target,
+            type_,
+            value,
+            span,
+        } => {
             let value_ty = infer_expr(ctx, value);
             if let AssignTarget::Ident(name) = target {
                 match type_ {
                     Some(ann) => {
                         let declared = resolve_type_expr(ann, ctx.types).unwrap_or(Type::Any);
                         if !is_compatible(&value_ty, &declared) {
-                            ctx.error_at(*span, format!(
-                                "`{}` declarado como `{}` recibió un valor `{}`",
-                                name,
-                                declared.display(ctx.types),
-                                value_ty.display(ctx.types)
-                            ));
+                            ctx.error_at(
+                                *span,
+                                format!(
+                                    "`{}` declarado como `{}` recibió un valor `{}`",
+                                    name,
+                                    declared.display(ctx.types),
+                                    value_ty.display(ctx.types)
+                                ),
+                            );
                         }
                         // Una anotación explícita "redeclara" el binding
                         // con el tipo declarado y marca annotated=true.
@@ -4778,12 +5199,15 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                             Some(existing) if existing.annotated => {
                                 let existing_ty = existing.ty.clone();
                                 if !is_compatible(&value_ty, &existing_ty) {
-                                    ctx.error_at(*span, format!(
-                                        "`{}` declarado como `{}` recibió un valor `{}`",
-                                        name,
-                                        existing_ty.display(ctx.types),
-                                        value_ty.display(ctx.types)
-                                    ));
+                                    ctx.error_at(
+                                        *span,
+                                        format!(
+                                            "`{}` declarado como `{}` recibió un valor `{}`",
+                                            name,
+                                            existing_ty.display(ctx.types),
+                                            value_ty.display(ctx.types)
+                                        ),
+                                    );
                                 }
                                 // Conservamos el binding anotado — la
                                 // reasignación no relaja el tipo.
@@ -4820,40 +5244,47 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                                     // Mini-tanda Vp — asignar a un campo
                                     // privado solo se permite desde
                                     // métodos del propio tipo.
-                                    if is_private_field(field)
-                                        && ctx.current_type != Some(*id)
-                                    {
+                                    if is_private_field(field) && ctx.current_type != Some(*id) {
                                         ctx.error_at(*span, format!(
                                             "el campo `{}.{}` es privado (prefijo `_`); no se puede asignar desde afuera del tipo `{}`",
                                             type_name, field, type_name
                                         ));
                                     }
                                     if !is_compatible(&value_ty, &f.type_) {
-                                        ctx.error_at(*span, format!(
-                                            "el campo `{}.{}` espera `{}`, recibió `{}`",
-                                            type_name,
-                                            field,
-                                            f.type_.display(ctx.types),
-                                            value_ty.display(ctx.types)
-                                        ));
+                                        ctx.error_at(
+                                            *span,
+                                            format!(
+                                                "el campo `{}.{}` espera `{}`, recibió `{}`",
+                                                type_name,
+                                                field,
+                                                f.type_.display(ctx.types),
+                                                value_ty.display(ctx.types)
+                                            ),
+                                        );
                                     }
                                 }
                                 None => {
-                                    ctx.error_at(*span, format!(
-                                        "el tipo `{}` no tiene un campo llamado `{}`",
-                                        type_name, field
-                                    ));
+                                    ctx.error_at(
+                                        *span,
+                                        format!(
+                                            "el tipo `{}` no tiene un campo llamado `{}`",
+                                            type_name, field
+                                        ),
+                                    );
                                 }
                             }
                         }
                     }
                     other => {
-                        ctx.error_at(*span, format!(
-                            "asignación a campo `.{}` sobre `{}`: solo se permite \
+                        ctx.error_at(
+                            *span,
+                            format!(
+                                "asignación a campo `.{}` sobre `{}`: solo se permite \
                              sobre instancias de un tipo custom",
-                            field,
-                            other.display(ctx.types)
-                        ));
+                                field,
+                                other.display(ctx.types)
+                            ),
+                        );
                     }
                 }
             }
@@ -4868,42 +5299,57 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                     Type::Any => { /* gradual */ }
                     Type::List(item_ty) => {
                         if !is_compatible(&idx_ty, &Type::Int) {
-                            ctx.error_at(*span, format!(
-                                "el índice de `List<{}>` debe ser `Int`, recibió `{}`",
-                                item_ty.display(ctx.types),
-                                idx_ty.display(ctx.types)
-                            ));
+                            ctx.error_at(
+                                *span,
+                                format!(
+                                    "el índice de `List<{}>` debe ser `Int`, recibió `{}`",
+                                    item_ty.display(ctx.types),
+                                    idx_ty.display(ctx.types)
+                                ),
+                            );
                         }
                         if !is_compatible(&value_ty, item_ty) {
-                            ctx.error_at(*span, format!(
-                                "la lista contiene `{}`, no se puede asignar `{}`",
-                                item_ty.display(ctx.types),
-                                value_ty.display(ctx.types)
-                            ));
+                            ctx.error_at(
+                                *span,
+                                format!(
+                                    "la lista contiene `{}`, no se puede asignar `{}`",
+                                    item_ty.display(ctx.types),
+                                    value_ty.display(ctx.types)
+                                ),
+                            );
                         }
                     }
                     Type::Map(k_ty, v_ty) => {
                         if !is_compatible(&idx_ty, k_ty) {
-                            ctx.error_at(*span, format!(
-                                "la clave del map es `{}`, recibió `{}`",
-                                k_ty.display(ctx.types),
-                                idx_ty.display(ctx.types)
-                            ));
+                            ctx.error_at(
+                                *span,
+                                format!(
+                                    "la clave del map es `{}`, recibió `{}`",
+                                    k_ty.display(ctx.types),
+                                    idx_ty.display(ctx.types)
+                                ),
+                            );
                         }
                         if !is_compatible(&value_ty, v_ty) {
-                            ctx.error_at(*span, format!(
-                                "el map contiene `{}`, no se puede asignar `{}`",
-                                v_ty.display(ctx.types),
-                                value_ty.display(ctx.types)
-                            ));
+                            ctx.error_at(
+                                *span,
+                                format!(
+                                    "el map contiene `{}`, no se puede asignar `{}`",
+                                    v_ty.display(ctx.types),
+                                    value_ty.display(ctx.types)
+                                ),
+                            );
                         }
                     }
                     other => {
-                        ctx.error_at(*span, format!(
-                            "asignación a índice `[...] = v` no soportada sobre `{}` \
+                        ctx.error_at(
+                            *span,
+                            format!(
+                                "asignación a índice `[...] = v` no soportada sobre `{}` \
                              (solo `List` y `Map`)",
-                            other.display(ctx.types)
-                        ));
+                                other.display(ctx.types)
+                            ),
+                        );
                     }
                 }
             }
@@ -4916,7 +5362,8 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // estático claro. El evaluator también lo emitía en
             // runtime, pero el checker lo caza antes.
             if ctx.return_stack.is_empty() {
-                ctx.error_at(*span,
+                ctx.error_at(
+                    *span,
                     "`return` solo puede usarse adentro de una función".to_string(),
                 );
             }
@@ -4925,11 +5372,14 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // return_type ausente (Any), no chequeamos.
             if let Some(expected) = ctx.return_stack.last().cloned() {
                 if !is_compatible(&ret_ty, &expected) {
-                    ctx.error_at(*span, format!(
-                        "`return` devuelve `{}` pero la función declara `{}`",
-                        ret_ty.display(ctx.types),
-                        expected.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "`return` devuelve `{}` pero la función declara `{}`",
+                            ret_ty.display(ctx.types),
+                            expected.display(ctx.types)
+                        ),
+                    );
                 }
             }
             // Alimentamos el frame inferido de la fn contenedora.
@@ -4959,10 +5409,13 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             }
             // Status debe ser Int (rango 100-599 se valida en runtime).
             if !is_compatible(&status_ty, &Type::Int) {
-                ctx.error_at(*span, format!(
-                    "el status code de `return` debe ser Int, recibió `{}`",
-                    status_ty.display(ctx.types)
-                ));
+                ctx.error_at(
+                    *span,
+                    format!(
+                        "el status code de `return` debe ser Int, recibió `{}`",
+                        status_ty.display(ctx.types)
+                    ),
+                );
             }
             // El body puede ser cualquier valor serializable; no chequeamos
             // contra el `return_type` formal del handler (es polimórfico:
@@ -5007,12 +5460,10 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // El pre-scan llena `ctx.middleware_fn_names` antes del walk.
             // Fase 9.w.2: `@ws("/path")` también cuenta como HTTP-like —
             // permite `return <status> { ... }` antes del upgrade.
-            let is_http_handler = decorators.iter().any(|d| {
-                matches!(
-                    d.name.as_str(),
-                    "get" | "post" | "put" | "delete" | "ws"
-                )
-            }) || ctx.middleware_fn_names.contains(fn_name);
+            let is_http_handler = decorators
+                .iter()
+                .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "ws"))
+                || ctx.middleware_fn_names.contains(fn_name);
             // Fase 9.w.1 — validar `@authenticated`/`@admin` contra el
             // `@auth_provider` recolectado pre-walk. Errores van a
             // `ctx.errors`; no interrumpe el chequeo del body.
@@ -5065,13 +5516,21 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             // Ya validada por resolve_program.
         }
 
-        Stmt::While { condition, body, span, .. } => {
+        Stmt::While {
+            condition,
+            body,
+            span,
+            ..
+        } => {
             let cond_ty = infer_expr(ctx, condition);
             if !is_compatible(&cond_ty, &Type::Bool) {
-                ctx.error_at(*span, format!(
-                    "la condición de `while` debe ser Bool, recibió `{}`",
-                    cond_ty.display(ctx.types)
-                ));
+                ctx.error_at(
+                    *span,
+                    format!(
+                        "la condición de `while` debe ser Bool, recibió `{}`",
+                        cond_ty.display(ctx.types)
+                    ),
+                );
             }
             ctx.push_scope();
             ctx.loop_depth += 1;
@@ -5088,7 +5547,13 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             ctx.pop_scope();
         }
 
-        Stmt::For { var, iter, body, span, .. } => {
+        Stmt::For {
+            var,
+            iter,
+            body,
+            span,
+            ..
+        } => {
             // Mini-tanda Md — `var` ahora es un Pattern. Tipo del elem
             // depende del iter: List<T> → T; Range → Int; Map<K, V> →
             // Tuple([K, V]) (cada iteración produce un par).
@@ -5099,10 +5564,13 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
                 Type::Map(k, v) => Type::Tuple(vec![(**k).clone(), (**v).clone()]),
                 Type::Any => Type::Any,
                 other => {
-                    ctx.error_at(*span, format!(
-                        "el iterable de `for` debe ser List, Range o Map, recibió `{}`",
-                        other.display(ctx.types)
-                    ));
+                    ctx.error_at(
+                        *span,
+                        format!(
+                            "el iterable de `for` debe ser List, Range o Map, recibió `{}`",
+                            other.display(ctx.types)
+                        ),
+                    );
                     Type::Any
                 }
             };
@@ -5128,16 +5596,20 @@ fn check_stmt(ctx: &mut CheckCtx, stmt: &Stmt) {
             }
             // R.2.4 (F3): `break` huérfano (fuera de loop) → error.
             if ctx.loop_depth == 0 {
-                ctx.error_at(*span,
-                    "`break` solo puede usarse adentro de un loop (`while`, `loop`, `for`)".to_string(),
+                ctx.error_at(
+                    *span,
+                    "`break` solo puede usarse adentro de un loop (`while`, `loop`, `for`)"
+                        .to_string(),
                 );
             }
         }
         Stmt::Continue(_label, span) => {
             // R.2.4 (F3): `continue` huérfano (fuera de loop) → error.
             if ctx.loop_depth == 0 {
-                ctx.error_at(*span,
-                    "`continue` solo puede usarse adentro de un loop (`while`, `loop`, `for`)".to_string(),
+                ctx.error_at(
+                    *span,
+                    "`continue` solo puede usarse adentro de un loop (`while`, `loop`, `for`)"
+                        .to_string(),
                 );
             }
         }
@@ -5287,9 +5759,7 @@ fn callee_has_varargs(ctx: &CheckCtx, callee: &Expr) -> bool {
 /// una binding con `def_span` conocido registra `(use_span → def_span)`
 /// en `DefinitionInfo`. La CLI (`fitz run`/`build`/`check`) descarta
 /// ambos; el LSP (Fase 9.x) los consume para hover y go-to-definition.
-pub fn check_program(
-    program: &Program,
-) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
+pub fn check_program(program: &Program) -> (TypeEnv, TypeInfo, DefinitionInfo, Vec<FitzError>) {
     let (env, mut errors) = resolve_program(program);
     // Encapsulamos `ctx` en un bloque para que su préstamo sobre `env`
     // termine antes del return: queremos mover `env`, `ctx.type_info`
@@ -5329,14 +5799,18 @@ pub fn check_program(
 /// disponibles como locales en el scope del body.
 fn check_custom_methods(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
-        let Stmt::TypeDef { name, methods, .. } = stmt else { continue };
+        let Stmt::TypeDef { name, methods, .. } = stmt else {
+            continue;
+        };
         if methods.is_empty() {
             continue;
         }
         // Recuperar los fields resueltos del tipo (poblados por
         // `resolve_program`). Si el tipo no existe → silencioso
         // (ya hubo error en resolve_program).
-        let Some(id) = ctx.types.lookup(name) else { continue };
+        let Some(id) = ctx.types.lookup(name) else {
+            continue;
+        };
         let resolved_fields = match &ctx.types.info(id).fields {
             Some(fs) => fs.clone(),
             None => continue,
@@ -5566,7 +6040,10 @@ fn collect_auth_provider(ctx: &mut CheckCtx, program: &Program) {
             let has_role_field = info
                 .fields
                 .as_ref()
-                .map(|fs| fs.iter().any(|f| f.name == "role" && matches!(f.type_, Type::Str)))
+                .map(|fs| {
+                    fs.iter()
+                        .any(|f| f.name == "role" && matches!(f.type_, Type::Str))
+                })
                 .unwrap_or(false);
             first = Some((name.clone(), *fn_span));
             ctx.auth_provider = Some(AuthProviderInfo {
@@ -5614,12 +6091,9 @@ fn check_auth_decorators(
         }
         // 2) Solo sobre handlers HTTP (incluye `@ws` desde Fase 9.w.2 —
         // el wrapper de auth corre antes del upgrade HTTP→WS).
-        let is_handler = decorators.iter().any(|d| {
-            matches!(
-                d.name.as_str(),
-                "get" | "post" | "put" | "delete" | "ws"
-            )
-        });
+        let is_handler = decorators
+            .iter()
+            .any(|d| matches!(d.name.as_str(), "get" | "post" | "put" | "delete" | "ws"));
         if !is_handler {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -5866,9 +6340,17 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
         return Type::Future(Box::new(Type::Any));
     }
     let inner_call = match &args[0] {
-        Expr::Call { callee, args: inner_args, .. } => (callee, inner_args),
+        Expr::Call {
+            callee,
+            args: inner_args,
+            ..
+        } => (callee, inner_args),
         Expr::NamedArg { value, .. } => match value.as_ref() {
-            Expr::Call { callee, args: inner_args, .. } => (callee, inner_args),
+            Expr::Call {
+                callee,
+                args: inner_args,
+                ..
+            } => (callee, inner_args),
             _ => {
                 ctx.errors.push(FitzError::new(
                     ErrorKind::TypeError,
@@ -5878,7 +6360,7 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
                 ));
                 return Type::Future(Box::new(Type::Any));
             }
-        }
+        },
         _ => {
             ctx.errors.push(FitzError::new(
                 ErrorKind::TypeError,
@@ -5950,7 +6432,12 @@ fn check_spawn_call(ctx: &mut CheckCtx, args: &[Expr], span: Span) -> Type {
 /// nombres para tener el set listo antes del walk.
 fn collect_background_fns(ctx: &mut CheckCtx, program: &Program) {
     for stmt in program {
-        let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+        let Stmt::FnDef {
+            name, decorators, ..
+        } = stmt
+        else {
+            continue;
+        };
         if decorators.iter().any(|d| d.name == "background") {
             ctx.background_fns.insert(name.clone());
         }
@@ -6017,7 +6504,16 @@ fn check_cron_decorator(
         }
     }
     // 2) Conflictos con otros decoradores HTTP / WS / background.
-    let conflicting = ["get", "post", "put", "delete", "ws", "background", "auth_provider", "test"];
+    let conflicting = [
+        "get",
+        "post",
+        "put",
+        "delete",
+        "ws",
+        "background",
+        "auth_provider",
+        "test",
+    ];
     for other in decorators {
         if conflicting.contains(&other.name.as_str()) {
             ctx.errors.push(FitzError::new(
@@ -6124,7 +6620,16 @@ fn check_background_decorator(
             ),
         ));
     }
-    let conflicting = ["get", "post", "put", "delete", "ws", "cron", "auth_provider", "test"];
+    let conflicting = [
+        "get",
+        "post",
+        "put",
+        "delete",
+        "ws",
+        "cron",
+        "auth_provider",
+        "test",
+    ];
     for other in decorators {
         if conflicting.contains(&other.name.as_str()) {
             ctx.errors.push(FitzError::new(
@@ -6202,7 +6707,10 @@ mod tests {
     #[test]
     fn future_sin_argumento_es_error_de_aridad() {
         let env = TypeEnv::new();
-        let te = TypeExpr::Generic { name: "Future".into(), args: vec![] };
+        let te = TypeExpr::Generic {
+            name: "Future".into(),
+            args: vec![],
+        };
         let err = resolve_type_expr(&te, &env).expect_err("aridad 0 debe fallar");
         assert!(matches!(err.kind, ErrorKind::TypeError));
     }
@@ -6212,10 +6720,7 @@ mod tests {
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "Future".into(),
-            args: vec![
-                TypeExpr::Named("Int".into()),
-                TypeExpr::Named("Str".into()),
-            ],
+            args: vec![TypeExpr::Named("Int".into()), TypeExpr::Named("Str".into())],
         };
         let err = resolve_type_expr(&te, &env).expect_err("aridad 2 debe fallar");
         assert!(matches!(err.kind, ErrorKind::TypeError));
@@ -6259,7 +6764,10 @@ mod tests {
                  return fetch().await\n\
              }",
         );
-        assert!(!errors.is_empty(), "esperaba error en .await dentro de fn sync");
+        assert!(
+            !errors.is_empty(),
+            "esperaba error en .await dentro de fn sync"
+        );
         let msg = &errors[0].message;
         assert!(
             msg.contains(".await") && msg.contains("async fn"),
@@ -6345,7 +6853,10 @@ mod tests {
                  return cb()\n\
              }",
         );
-        assert!(!errors.is_empty(), "esperaba error en el `.await` del closure");
+        assert!(
+            !errors.is_empty(),
+            "esperaba error en el `.await` del closure"
+        );
         let msg = &errors[0].message;
         assert!(
             msg.contains("async fn"),
@@ -6369,12 +6880,14 @@ mod tests {
         // porque el operando es Any (gradual escape). Si hay errores
         // otros, los inspeccionamos — pero el mensaje específico de
         // "Future" no debe aparecer.
-        let any_future_err = errors.iter().any(|e|
-            e.message.contains("Future") && e.message.contains(".await")
-        );
-        assert!(!any_future_err,
+        let any_future_err = errors
+            .iter()
+            .any(|e| e.message.contains("Future") && e.message.contains(".await"));
+        assert!(
+            !any_future_err,
             "el await sobre Any no debería disparar error de Future, fue: {:?}",
-            errors);
+            errors
+        );
     }
 
     // ---- Fase 6.3: built-in `sleep` ----
@@ -6433,7 +6946,11 @@ mod tests {
              let u = U { name: \"x\" }\n\
              u.name = \"y\"",
         );
-        assert!(errors.is_empty(), "no debería haber errores, fue {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "no debería haber errores, fue {:?}",
+            errors
+        );
     }
 
     #[test]
@@ -6608,7 +7125,8 @@ mod tests {
         // si el FromImport pasa.
         // Filtramos el error de import si lo hay y verificamos que
         // NO haya error específico sobre el field.
-        let field_errors: Vec<_> = errors.iter()
+        let field_errors: Vec<_> = errors
+            .iter()
             .filter(|e| e.message.contains("campo") || e.message.contains(".anything"))
             .collect();
         assert!(
@@ -6626,7 +7144,11 @@ mod tests {
              let u = U { email: \"x\" }\n\
              u.email = null",
         );
-        assert!(errors.is_empty(), "Null compatible con Str?, fue: {:?}", errors);
+        assert!(
+            errors.is_empty(),
+            "Null compatible con Str?, fue: {:?}",
+            errors
+        );
     }
 
     // ---- fin C-F2 ----
@@ -6742,7 +7264,10 @@ mod tests {
         let r = resolve_type_expr(&t, &env).unwrap();
         assert_eq!(
             r,
-            Type::Result { ok: Box::new(Type::List(Box::new(Type::Int))), err: Box::new(Type::Str) },
+            Type::Result {
+                ok: Box::new(Type::List(Box::new(Type::Int))),
+                err: Box::new(Type::Str)
+            },
         );
     }
 
@@ -6763,10 +7288,7 @@ mod tests {
             args: vec![TypeExpr::named("Int")],
         }));
         let r = resolve_type_expr(&t, &env).unwrap();
-        assert_eq!(
-            r,
-            Type::Nullable(Box::new(Type::List(Box::new(Type::Int)))),
-        );
+        assert_eq!(r, Type::Nullable(Box::new(Type::List(Box::new(Type::Int)))),);
     }
 
     #[test]
@@ -6862,9 +7384,7 @@ mod tests {
 
     #[test]
     fn type_con_generico_y_nullable_se_resuelve() {
-        let (env, errors) = resolve_str(
-            "type Post { tags: List<Str>, author: Str? }",
-        );
+        let (env, errors) = resolve_str("type Post { tags: List<Str>, author: Str? }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
         let id = env.lookup("Post").unwrap();
         let fields = env.info(id).fields.as_ref().unwrap();
@@ -6915,15 +7435,14 @@ mod tests {
     #[test]
     fn type_redeclarado_es_error() {
         let (_, errors) = resolve_str("type Foo { x: Int }\ntype Foo { y: Str }");
-        assert!(errors.iter().any(|e| e.message.contains("Foo")
-            && e.message.contains("más de una vez")));
+        assert!(errors
+            .iter()
+            .any(|e| e.message.contains("Foo") && e.message.contains("más de una vez")));
     }
 
     #[test]
     fn default_literal_compatible_pasa() {
-        let (_, errors) = resolve_str(
-            "type Cfg { port: Int = 3000, debug: Bool = false }",
-        );
+        let (_, errors) = resolve_str("type Cfg { port: Int = 3000, debug: Bool = false }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
@@ -6968,9 +7487,7 @@ mod tests {
 
     #[test]
     fn fndef_con_anotaciones_resueltas() {
-        let (_, errors) = resolve_str(
-            "fn add(a: Int, b: Int) -> Int { return a + b }",
-        );
+        let (_, errors) = resolve_str("fn add(a: Int, b: Int) -> Int { return a + b }");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
@@ -7058,7 +7575,8 @@ mod tests {
                     default: None,
                 }],
                 methods: vec![],
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             Stmt::FnDef {
                 name: "noop".into(),
                 params: vec![Param {
@@ -7071,12 +7589,14 @@ mod tests {
                 body: vec![],
                 is_async: false,
                 decorators: Vec::<Decorator>::new(),
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
             Stmt::Assign {
                 target: AssignTarget::Ident("v".into()),
                 type_: Some(TE::Nullable(Box::new(TE::named("X")))),
                 value: Expr::Null(Span::ZERO),
-             span: Span::ZERO },
+                span: Span::ZERO,
+            },
         ];
         let (env, errors) = resolve_program(&program);
         assert!(errors.is_empty(), "errores: {:?}", errors);
@@ -7178,10 +7698,7 @@ mod tests {
 
     #[test]
     fn binop_mul_rechaza_str() {
-        assert_error_with(
-            "let x = \"a\" * 2",
-            &["`*`", "operandos numéricos", "Str"],
-        );
+        assert_error_with("let x = \"a\" * 2", &["`*`", "operandos numéricos", "Str"]);
     }
 
     #[test]
@@ -7230,18 +7747,12 @@ mod tests {
 
     #[test]
     fn unary_not_sobre_int_es_type_error() {
-        assert_error_with(
-            "let x = not 5",
-            &["not", "Bool", "Int"],
-        );
+        assert_error_with("let x = not 5", &["not", "Bool", "Int"]);
     }
 
     #[test]
     fn unary_not_sobre_str_es_type_error() {
-        assert_error_with(
-            "let x = not \"hola\"",
-            &["not", "Bool", "Str"],
-        );
+        assert_error_with("let x = not \"hola\"", &["not", "Bool", "Str"]);
     }
 
     #[test]
@@ -7270,18 +7781,12 @@ mod tests {
 
     #[test]
     fn op_modulo_con_float_es_type_error() {
-        assert_error_with(
-            "let r = 10.0 % 3",
-            &["%", "Int", "Float"],
-        );
+        assert_error_with("let r = 10.0 % 3", &["%", "Int", "Float"]);
     }
 
     #[test]
     fn op_modulo_con_str_es_type_error() {
-        assert_error_with(
-            "let r = \"hola\" % 3",
-            &["%", "Int", "Str"],
-        );
+        assert_error_with("let r = \"hola\" % 3", &["%", "Int", "Str"]);
     }
 
     #[test]
@@ -7290,19 +7795,14 @@ mod tests {
         // así que un binding Bool falla — Bool no admite Int.
         // (Float SÍ admite Int por promoción Int→Float, por eso no
         // testeamos eso.)
-        assert_error_with(
-            "let r: Bool = 7 % 3",
-            &["Bool", "Int"],
-        );
+        assert_error_with("let r: Bool = 7 % 3", &["Bool", "Int"]);
     }
 
     // ---- R.1.3 — asignación a índice (mini-fase R) ----
 
     #[test]
     fn assign_index_list_int_int_es_ok() {
-        assert_ok(
-            "let xs: List<Int> = [1, 2, 3]\nxs[0] = 99",
-        );
+        assert_ok("let xs: List<Int> = [1, 2, 3]\nxs[0] = 99");
     }
 
     #[test]
@@ -7324,9 +7824,7 @@ mod tests {
 
     #[test]
     fn assign_index_map_correcto_es_ok() {
-        assert_ok(
-            "let m: Map<Str, Int> = {\"a\": 1}\nm[\"b\"] = 2",
-        );
+        assert_ok("let m: Map<Str, Int> = {\"a\": 1}\nm[\"b\"] = 2");
     }
 
     #[test]
@@ -7339,10 +7837,7 @@ mod tests {
 
     #[test]
     fn assign_index_sobre_no_collection_es_error() {
-        assert_error_with(
-            "let x = 5\nx[0] = 1",
-            &["List", "Map"],
-        );
+        assert_error_with("let x = 5\nx[0] = 1", &["List", "Map"]);
     }
 
     // ---- Range ----
@@ -7354,10 +7849,7 @@ mod tests {
 
     #[test]
     fn range_con_extremo_no_int_es_error() {
-        assert_error_with(
-            "let r = 0..\"diez\"",
-            &["rango", "Int", "Str"],
-        );
+        assert_error_with("let r = 0..\"diez\"", &["rango", "Int", "Str"]);
     }
 
     // ---- List / Map ----
@@ -7400,10 +7892,7 @@ mod tests {
 
     #[test]
     fn struct_lit_con_tipo_desconocido_es_error() {
-        assert_error_with(
-            "let u = Usuario { id: 1 }",
-            &["Usuario", "no existe"],
-        );
+        assert_error_with("let u = Usuario { id: 1 }", &["Usuario", "no existe"]);
     }
 
     #[test]
@@ -7455,10 +7944,7 @@ mod tests {
 
     #[test]
     fn assign_str_a_int_es_error() {
-        assert_error_with(
-            "let x: Int = \"hola\"",
-            &["x", "Int", "Str"],
-        );
+        assert_error_with("let x: Int = \"hola\"", &["x", "Int", "Str"]);
     }
 
     #[test]
@@ -7481,10 +7967,7 @@ mod tests {
 
     #[test]
     fn if_con_cond_no_bool_es_error() {
-        assert_error_with(
-            "if 1 { print(\"x\") }",
-            &["condición", "if", "Bool", "Int"],
-        );
+        assert_error_with("if 1 { print(\"x\") }", &["condición", "if", "Bool", "Int"]);
     }
 
     #[test]
@@ -7514,10 +7997,7 @@ mod tests {
 
     #[test]
     fn for_sobre_no_iterable_es_error() {
-        assert_error_with(
-            "for x in 42 { print(x) }",
-            &["for", "List", "Range", "Int"],
-        );
+        assert_error_with("for x in 42 { print(x) }", &["for", "List", "Range", "Int"]);
     }
 
     // ---- FnDef / params bindeados ----
@@ -7628,8 +8108,12 @@ mod tests {
              let b = 1 + \"y\"\n\
              let c = no_var",
         );
-        assert!(errors.len() >= 3, "esperaba 3+ errores, hubo {}: {:?}",
-            errors.len(), errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+        assert!(
+            errors.len() >= 3,
+            "esperaba 3+ errores, hubo {}: {:?}",
+            errors.len(),
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     // ---- 5.3.2: llamadas y return ----
@@ -7710,10 +8194,7 @@ mod tests {
     #[test]
     fn call_sobre_callee_no_funcion_es_error() {
         // `1(2)` no es una función llamable.
-        assert_error_with(
-            "let r = (1)(2)",
-            &["no es una función", "Int"],
-        );
+        assert_error_with("let r = (1)(2)", &["no es una función", "Int"]);
     }
 
     #[test]
@@ -7741,10 +8222,7 @@ mod tests {
 
     #[test]
     fn len_sin_args_es_error_de_aridad() {
-        assert_error_with(
-            "let n = len()",
-            &["len", "1 argumento", "recibió 0"],
-        );
+        assert_error_with("let n = len()", &["len", "1 argumento", "recibió 0"]);
     }
 
     #[test]
@@ -7765,9 +8243,7 @@ mod tests {
 
     #[test]
     fn return_tipo_compatible_pasa() {
-        assert_ok(
-            "fn double(n: Int) -> Int { return n * 2 }",
-        );
+        assert_ok("fn double(n: Int) -> Int { return n * 2 }");
     }
 
     #[test]
@@ -7828,7 +8304,9 @@ mod tests {
         // del checker. Antes pasaba al evaluator y se reportaba en
         // runtime; ahora lo cazamos antes.
         let (_, errors) = check_str("return 1");
-        assert!(errors.iter().any(|e| e.message.contains("return") && e.message.contains("función")));
+        assert!(errors
+            .iter()
+            .any(|e| e.message.contains("return") && e.message.contains("función")));
     }
 
     // ---- is_compatible recursivo en generics ----
@@ -7853,13 +8331,25 @@ mod tests {
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
         assert!(is_compatible(
-            &Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) },
-            &Type::Result { ok: Box::new(user.clone()), err: Box::new(Type::Str) },
+            &Type::Result {
+                ok: Box::new(Type::Any),
+                err: Box::new(Type::Str)
+            },
+            &Type::Result {
+                ok: Box::new(user.clone()),
+                err: Box::new(Type::Str)
+            },
         ));
         // Result<Int> no matchea Result<Str>.
         assert!(!is_compatible(
-            &Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) },
-            &Type::Result { ok: Box::new(Type::Str), err: Box::new(Type::Str) },
+            &Type::Result {
+                ok: Box::new(Type::Int),
+                err: Box::new(Type::Str)
+            },
+            &Type::Result {
+                ok: Box::new(Type::Str),
+                err: Box::new(Type::Str)
+            },
         ));
     }
 
@@ -8279,9 +8769,7 @@ mod tests {
 
     #[test]
     fn str_len_devuelve_int() {
-        assert_ok(
-            "let n: Int = \"hola\".len()",
-        );
+        assert_ok("let n: Int = \"hola\".len()");
     }
 
     #[test]
@@ -8297,9 +8785,7 @@ mod tests {
 
     #[test]
     fn str_contains_devuelve_bool() {
-        assert_ok(
-            "let b: Bool = \"hola\".contains(\"ol\")",
-        );
+        assert_ok("let b: Bool = \"hola\".contains(\"ol\")");
     }
 
     #[test]
@@ -8312,56 +8798,39 @@ mod tests {
 
     #[test]
     fn str_contains_con_arg_no_str_es_error() {
-        assert_error_with(
-            "let b = \"hola\".contains(1)",
-            &["contains", "Str"],
-        );
+        assert_error_with("let b = \"hola\".contains(1)", &["contains", "Str"]);
     }
 
     // ---- S.2: split/trim/replace/repeat ----
 
     #[test]
     fn str_split_devuelve_list_str() {
-        assert_ok(
-            "let xs: List<Str> = \"a,b,c\".split(\",\")",
-        );
+        assert_ok("let xs: List<Str> = \"a,b,c\".split(\",\")");
     }
 
     #[test]
     fn str_trim_devuelve_str() {
-        assert_ok(
-            "let s: Str = \"  hola  \".trim()",
-        );
+        assert_ok("let s: Str = \"  hola  \".trim()");
     }
 
     #[test]
     fn str_replace_devuelve_str() {
-        assert_ok(
-            "let s: Str = \"hola\".replace(\"o\", \"O\")",
-        );
+        assert_ok("let s: Str = \"hola\".replace(\"o\", \"O\")");
     }
 
     #[test]
     fn str_replace_con_int_es_error() {
-        assert_error_with(
-            "let s = \"hola\".replace(\"o\", 42)",
-            &["replace", "Str"],
-        );
+        assert_error_with("let s = \"hola\".replace(\"o\", 42)", &["replace", "Str"]);
     }
 
     #[test]
     fn str_repeat_con_int_devuelve_str() {
-        assert_ok(
-            "let s: Str = \"ab\".repeat(3)",
-        );
+        assert_ok("let s: Str = \"ab\".repeat(3)");
     }
 
     #[test]
     fn str_repeat_con_str_es_error() {
-        assert_error_with(
-            "let s = \"ab\".repeat(\"3\")",
-            &["repeat", "Int"],
-        );
+        assert_error_with("let s = \"ab\".repeat(\"3\")", &["repeat", "Int"]);
     }
 
     // ---- S.3: List.sort/reverse/contains ----
@@ -8464,10 +8933,7 @@ mod tests {
 
     #[test]
     fn mb2_str_pad_end_con_ch_no_str_es_error() {
-        assert_error_with(
-            "let r = \"42\".pad_end(5, 0)",
-            &["pad_end", "Str"],
-        );
+        assert_error_with("let r = \"42\".pad_end(5, 0)", &["pad_end", "Str"]);
     }
 
     #[test]
@@ -8480,17 +8946,12 @@ mod tests {
 
     #[test]
     fn rg_range_step_by_devuelve_list_int() {
-        assert_ok(
-            "let xs: List<Int> = (0..10).step_by(2)",
-        );
+        assert_ok("let xs: List<Int> = (0..10).step_by(2)");
     }
 
     #[test]
     fn rg_range_step_by_con_arg_no_int_es_error() {
-        assert_error_with(
-            "let xs = (0..10).step_by(\"x\")",
-            &["step_by", "Int"],
-        );
+        assert_error_with("let xs = (0..10).step_by(\"x\")", &["step_by", "Int"]);
     }
 
     // ---- Mini-tanda Mb3: reduce + product + chars + entries + to_map ----
@@ -8540,9 +9001,7 @@ mod tests {
 
     #[test]
     fn mb3_str_chars_devuelve_list_str() {
-        assert_ok(
-            "let cs: List<Str> = \"abc\".chars()",
-        );
+        assert_ok("let cs: List<Str> = \"abc\".chars()");
     }
 
     #[test]
@@ -8607,17 +9066,12 @@ mod tests {
 
     #[test]
     fn mb4_str_split_at_devuelve_tuple_str_str() {
-        assert_ok(
-            "let r: (Str, Str) = \"abc\".split_at(1)",
-        );
+        assert_ok("let r: (Str, Str) = \"abc\".split_at(1)");
     }
 
     #[test]
     fn mb4_str_split_at_con_arg_no_int_es_error() {
-        assert_error_with(
-            "let r = \"abc\".split_at(\"x\")",
-            &["split_at", "Int"],
-        );
+        assert_error_with("let r = \"abc\".split_at(\"x\")", &["split_at", "Int"]);
     }
 
     #[test]
@@ -8641,17 +9095,12 @@ mod tests {
 
     #[test]
     fn cmp_map_comp_tipa_como_map_k_v() {
-        assert_ok(
-            "let m: Map<Int, Int> = {n: n * n for n in 1..=3}",
-        );
+        assert_ok("let m: Map<Int, Int> = {n: n * n for n in 1..=3}");
     }
 
     #[test]
     fn cmp_map_comp_filter_no_bool_es_error() {
-        assert_error_with(
-            "let m = {n: n for n in 0..3 if n}",
-            &["filtro", "Bool"],
-        );
+        assert_error_with("let m = {n: n for n in 0..3 if n}", &["filtro", "Bool"]);
     }
 
     // ---- Mini-tanda Mb5 + Async-cl ----
@@ -8702,16 +9151,12 @@ mod tests {
 
     #[test]
     fn mb5_str_lines_devuelve_list_str() {
-        assert_ok(
-            "let r: List<Str> = \"a\\nb\".lines()",
-        );
+        assert_ok("let r: List<Str> = \"a\\nb\".lines()");
     }
 
     #[test]
     fn mb5_str_is_empty_devuelve_bool() {
-        assert_ok(
-            "let r: Bool = \"\".is_empty()",
-        );
+        assert_ok("let r: Bool = \"\".is_empty()");
     }
 
     #[test]
@@ -8826,9 +9271,7 @@ mod tests {
 
     #[test]
     fn mb8_str_center_devuelve_str() {
-        assert_ok(
-            "let c: Str = \"hi\".center(10, \"-\")",
-        );
+        assert_ok("let c: Str = \"hi\".center(10, \"-\")");
     }
 
     #[test]
@@ -8843,10 +9286,7 @@ mod tests {
 
     #[test]
     fn bits_extras_popcount_arg_no_int_es_error() {
-        assert_error_with(
-            "let r = popcount(\"oops\")",
-            &["popcount", "Int"],
-        );
+        assert_error_with("let r = popcount(\"oops\")", &["popcount", "Int"]);
     }
 
     // ---- Mini-tanda Mb7 ----
@@ -8905,9 +9345,7 @@ mod tests {
 
     #[test]
     fn mb7_str_repeat_with_devuelve_str() {
-        assert_ok(
-            "let r: Str = \"x\".repeat_with(3, \", \")",
-        );
+        assert_ok("let r: Str = \"x\".repeat_with(3, \", \")");
     }
 
     #[test]
@@ -9241,8 +9679,14 @@ mod tests {
         // lub(Result<User>, Result<Any>) → Result<User>.
         let env = env_with(&["User"]);
         let user = Type::Nominal(env.lookup("User").unwrap());
-        let a = Type::Result { ok: Box::new(user.clone()), err: Box::new(Type::Str) };
-        let b = Type::Result { ok: Box::new(Type::Any), err: Box::new(Type::Str) };
+        let a = Type::Result {
+            ok: Box::new(user.clone()),
+            err: Box::new(Type::Str),
+        };
+        let b = Type::Result {
+            ok: Box::new(Type::Any),
+            err: Box::new(Type::Str),
+        };
         assert_eq!(lub(&a, &b), a);
     }
 
@@ -9355,9 +9799,7 @@ mod tests {
     #[test]
     fn or_pattern_con_literales_int_no_dispara_exhaustividad() {
         // Scrutinee `Int`, no `Result`. `1 | 2 | 3` está OK con `_`.
-        assert_ok(
-            "let s = match 1 { 1 | 2 | 3 => \"chico\", _ => \"otro\" }",
-        );
+        assert_ok("let s = match 1 { 1 | 2 | 3 => \"chico\", _ => \"otro\" }");
     }
 
     #[test]
@@ -9383,9 +9825,7 @@ mod tests {
 
     #[test]
     fn guard_bool_es_valido() {
-        assert_ok(
-            "let s = match 5 { x if x > 0 => \"pos\", _ => \"neg\" }",
-        );
+        assert_ok("let s = match 5 { x if x > 0 => \"pos\", _ => \"neg\" }");
     }
 
     #[test]
@@ -9441,10 +9881,7 @@ mod tests {
 
     #[test]
     fn return_huerfano_top_level_es_error() {
-        assert_error_with(
-            "return 42",
-            &["return", "función"],
-        );
+        assert_error_with("return 42", &["return", "función"]);
     }
 
     #[test]
@@ -9457,18 +9894,12 @@ mod tests {
 
     #[test]
     fn break_huerfano_top_level_es_error() {
-        assert_error_with(
-            "break",
-            &["break", "loop"],
-        );
+        assert_error_with("break", &["break", "loop"]);
     }
 
     #[test]
     fn continue_huerfano_top_level_es_error() {
-        assert_error_with(
-            "continue",
-            &["continue", "loop"],
-        );
+        assert_error_with("continue", &["continue", "loop"]);
     }
 
     #[test]
@@ -9532,10 +9963,22 @@ mod tests {
     fn return_huerfano_y_break_huerfano_ambos_reportados() {
         // Ambos errores deberían aparecer en el mismo programa.
         let (_, errors) = check_str("return 42\nbreak");
-        let return_errs = errors.iter().filter(|e| e.message.contains("return")).count();
-        let break_errs = errors.iter().filter(|e| e.message.contains("break")).count();
-        assert!(return_errs >= 1, "esperaba al menos 1 error de return huérfano");
-        assert!(break_errs >= 1, "esperaba al menos 1 error de break huérfano");
+        let return_errs = errors
+            .iter()
+            .filter(|e| e.message.contains("return"))
+            .count();
+        let break_errs = errors
+            .iter()
+            .filter(|e| e.message.contains("break"))
+            .count();
+        assert!(
+            return_errs >= 1,
+            "esperaba al menos 1 error de return huérfano"
+        );
+        assert!(
+            break_errs >= 1,
+            "esperaba al menos 1 error de break huérfano"
+        );
     }
 
     // ---- R.3: métodos custom sobre type ----
@@ -9628,15 +10071,22 @@ mod tests {
             .iter()
             .filter(|e| e.message.contains("m") && e.message.contains("Str"))
             .count();
-        assert!(count_reassign >= 1, "esperaba error de reasignación, hubo: {:?}",
-            errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+        assert!(
+            count_reassign >= 1,
+            "esperaba error de reasignación, hubo: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
         // El uso posterior `m + 1` tipa OK (m sigue siendo Int).
         let count_plus = errors
             .iter()
             .filter(|e| e.message.contains("operador") && e.message.contains("+"))
             .count();
-        assert_eq!(count_plus, 0, "no esperaba error en `m + 1`, hubo: {:?}",
-            errors.iter().map(|e| &e.message).collect::<Vec<_>>());
+        assert_eq!(
+            count_plus,
+            0,
+            "no esperaba error en `m + 1`, hubo: {:?}",
+            errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+        );
     }
 
     // ---- Tipo función `Fn(...) -> U` (higher-order, F12) ----
@@ -9675,9 +10125,7 @@ mod tests {
     #[test]
     fn type_expr_function_higher_order_resuelve() {
         // Fn(Fn(Int) -> Int, Int) -> Int — param es a su vez función.
-        let (env, errors) = resolve_str(
-            "type Apply { f: Fn(Fn(Int) -> Int, Int) -> Int }",
-        );
+        let (env, errors) = resolve_str("type Apply { f: Fn(Fn(Int) -> Int, Int) -> Int }");
         assert!(errors.is_empty(), "errores: {:?}", errors);
         let id = env.lookup("Apply").unwrap();
         let fields = env.info(id).fields.as_ref().unwrap();
@@ -9706,9 +10154,7 @@ mod tests {
     fn anotacion_function_en_param_de_fndef_pasa_checker() {
         // fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }
         // El checker debe tipar la llamada `f(x)` contra la firma.
-        assert_ok(
-            "fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }",
-        );
+        assert_ok("fn apply(f: Fn(Int) -> Int, x: Int) -> Int { return f(x) }");
     }
 
     #[test]
@@ -9775,7 +10221,8 @@ mod tests {
         assert_eq!(e.column, 11);
         assert!(
             e.message.contains("argumento 1") && e.message.contains("Int"),
-            "msg: {}", e.message,
+            "msg: {}",
+            e.message,
         );
     }
 
@@ -9811,7 +10258,8 @@ mod tests {
         assert_eq!(e.column, 23);
         assert!(
             e.message.contains("no tiene un campo") && e.message.contains("`x`"),
-            "msg: {}", e.message,
+            "msg: {}",
+            e.message,
         );
     }
 
@@ -9960,9 +10408,7 @@ mod tests {
         // aplica a `from python import`. Validación: una llamada a
         // un módulo normal sigue siendo Any, así que un binding
         // tipado a Float pasa por gradual sin error.
-        let (_, errors) = check_str(
-            "import utils\nlet f: Float = utils.something(1)\n",
-        );
+        let (_, errors) = check_str("import utils\nlet f: Float = utils.something(1)\n");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
@@ -9972,11 +10418,11 @@ mod tests {
 
     #[test]
     fn vp_field_access_desde_afuera_es_error() {
-        let (_, errors) = check_str(
-            "type C { _x: Int = 0 }\nlet c = C {}\nprint(c._x)\n",
-        );
+        let (_, errors) = check_str("type C { _x: Int = 0 }\nlet c = C {}\nprint(c._x)\n");
         assert!(
-            errors.iter().any(|e| e.message.contains("privado") && e.message.contains("_x")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("privado") && e.message.contains("_x")),
             "esperaba error sobre `_x` privado, fue: {:?}",
             errors,
         );
@@ -10022,7 +10468,9 @@ mod tests {
              let c = C { name: \"x\", _balance: 100 }\n",
         );
         assert!(
-            errors.iter().any(|e| e.message.contains("privado") && e.message.contains("_balance")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("privado") && e.message.contains("_balance")),
             "esperaba error sobre struct lit con `_balance`, fue: {:?}",
             errors,
         );
@@ -10047,9 +10495,7 @@ mod tests {
 
     #[test]
     fn vp_field_assign_a_field_privado_desde_afuera_es_error() {
-        let (_, errors) = check_str(
-            "type C { _x: Int = 0 }\nlet c = C {}\nc._x = 5\n",
-        );
+        let (_, errors) = check_str("type C { _x: Int = 0 }\nlet c = C {}\nc._x = 5\n");
         assert!(
             errors.iter().any(|e| e.message.contains("privado")),
             "esperaba error de asignación a campo privado, fue: {:?}",
@@ -10069,7 +10515,9 @@ mod tests {
              let r = c._hidden()\n",
         );
         assert!(
-            errors.iter().any(|e| e.message.contains("privado") && e.message.contains("_hidden")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("privado") && e.message.contains("_hidden")),
             "esperaba error sobre `_hidden` privado, fue: {:?}",
             errors,
         );
@@ -10125,9 +10573,7 @@ mod tests {
     #[test]
     fn vp_field_publico_no_se_afecta_por_la_regla() {
         // Sanity: campos sin prefijo `_` siguen siendo públicos.
-        let (_, errors) = check_str(
-            "type C { x: Int = 0 }\nlet c = C { x: 5 }\nprint(c.x)\n",
-        );
+        let (_, errors) = check_str("type C { x: Int = 0 }\nlet c = C { x: 5 }\nprint(c.x)\n");
         assert!(errors.is_empty(), "errores inesperados: {:?}", errors);
     }
 
@@ -10231,7 +10677,7 @@ mod tests {
         // Caso: `let x: Int = <Expr::Error>` — anotación Int + valor
         // Any. La regla de gradual (`is_compatible(Any, _)` siempre
         // true) hace que no haya error de tipo.
-        use crate::ast::{AssignTarget, Span, Stmt, Expr as AstExpr};
+        use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let program = vec![Stmt::Assign {
             target: AssignTarget::Ident("x".into()),
             type_: Some(TypeExpr::Named("Int".into())),
@@ -10270,7 +10716,8 @@ mod tests {
     fn types_info_persiste_tipos_de_literales() {
         // Programa con un literal de cada primitivo. Cada uno debe
         // quedar en el side-table con el tipo correspondiente.
-        let info = types_of("let a = 1\nlet b = 1.5\nlet c = \"hola\"\nlet d = true\nlet e = null\n");
+        let info =
+            types_of("let a = 1\nlet b = 1.5\nlet c = \"hola\"\nlet d = true\nlet e = null\n");
         // El parser emite columnas 1-indexed; los RHS arrancan en la
         // columna del valor literal. No matcheamos columnas exactas
         // — buscamos por línea + tipo.
@@ -10284,23 +10731,28 @@ mod tests {
             });
         assert!(
             by_line[&1].iter().any(|t| matches!(t, Type::Int)),
-            "línea 1 debe tener Int: {:?}", by_line.get(&1)
+            "línea 1 debe tener Int: {:?}",
+            by_line.get(&1)
         );
         assert!(
             by_line[&2].iter().any(|t| matches!(t, Type::Float)),
-            "línea 2 debe tener Float: {:?}", by_line.get(&2)
+            "línea 2 debe tener Float: {:?}",
+            by_line.get(&2)
         );
         assert!(
             by_line[&3].iter().any(|t| matches!(t, Type::Str)),
-            "línea 3 debe tener Str: {:?}", by_line.get(&3)
+            "línea 3 debe tener Str: {:?}",
+            by_line.get(&3)
         );
         assert!(
             by_line[&4].iter().any(|t| matches!(t, Type::Bool)),
-            "línea 4 debe tener Bool: {:?}", by_line.get(&4)
+            "línea 4 debe tener Bool: {:?}",
+            by_line.get(&4)
         );
         assert!(
             by_line[&5].iter().any(|t| matches!(t, Type::Null)),
-            "línea 5 debe tener Null: {:?}", by_line.get(&5)
+            "línea 5 debe tener Null: {:?}",
+            by_line.get(&5)
         );
     }
 
@@ -10395,7 +10847,7 @@ let v = match r {
         // y validamos que NO aparezca en el side-table. La política
         // documentada en `TypeInfo::record` es omitir Span::ZERO para
         // evitar colisiones entre sintéticos.
-        use crate::ast::{AssignTarget, Span, Stmt, Expr as AstExpr};
+        use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let program = vec![Stmt::Assign {
             target: AssignTarget::Ident("x".into()),
             type_: None,
@@ -10422,7 +10874,7 @@ let v = match r {
         // su span sea known). Política documentada en `TypeInfo` —
         // uniforme con el comportamiento del checker (synthesize_expr
         // devuelve `Type::Any` para Error nodes).
-        use crate::ast::{AssignTarget, Span, Stmt, Expr as AstExpr};
+        use crate::ast::{AssignTarget, Expr as AstExpr, Span, Stmt};
         let span = Span::new(7, 11); // span arbitrario "known"
         let program = vec![Stmt::Assign {
             target: AssignTarget::Ident("x".into()),
@@ -10594,11 +11046,7 @@ print(total)
         // (el expr es Int, el iter es List<Int>).
         let src = "let r: List<Int> = [x * 2 for x in [1, 2, 3]]\n";
         let errors = check_recovering(src);
-        assert!(
-            errors.is_empty(),
-            "esperaba sin errores, dio {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
     #[test]
@@ -10607,11 +11055,7 @@ print(total)
         // Si el expr usa `var * 2`, el resultado es List<Int>.
         let src = "let r: List<Int> = [n * 2 for n in 0..10]\n";
         let errors = check_recovering(src);
-        assert!(
-            errors.is_empty(),
-            "esperaba sin errores, dio {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "esperaba sin errores, dio {:?}", errors);
     }
 
     #[test]
@@ -10620,7 +11064,9 @@ print(total)
         let src = "let r = [x for x in [1, 2, 3] if x]\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("filtro") || e.message.contains("Bool")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("filtro") || e.message.contains("Bool")),
             "esperaba error sobre el filtro: {:?}",
             errors
         );
@@ -10632,7 +11078,9 @@ print(total)
         let src = "let r = [x for x in 42]\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("iterable") || e.message.contains("List o Range")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("iterable") || e.message.contains("List o Range")),
             "esperaba error sobre el iter: {:?}",
             errors
         );
@@ -10675,8 +11123,9 @@ print(total)
         let src = "let s: Str = \"hola\"\nlet r = \"{s:.2f}\"\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("`f`")
-                && e.message.contains("Float o Int")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("`f`") && e.message.contains("Float o Int")),
             "esperaba error de compatibilidad: {:?}",
             errors
         );
@@ -10687,7 +11136,9 @@ print(total)
         let src = "let x: Float = 3.14\nlet r = \"{x:d}\"\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("`d`") && e.message.contains("Int")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("`d`") && e.message.contains("Int")),
             "esperaba error de compatibilidad: {:?}",
             errors
         );
@@ -10739,7 +11190,9 @@ print(total)
         let src = "for 42 in [1, 2] { print(\"x\") }\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("admitido") || e.message.contains("Ident")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("admitido") || e.message.contains("Ident")),
             "esperaba error sobre pattern no admitido: {:?}",
             errors
         );
@@ -10781,8 +11234,9 @@ print(total)
             "let xs: List<Int> = [1, 2]\nlet ys: List<Str> = [\"a\"]\nlet zs = xs.chain(ys)\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("chain")
-                && e.message.contains("List<Int>")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("chain") && e.message.contains("List<Int>")),
             "esperaba error sobre chain con tipos incompatibles: {:?}",
             errors
         );
@@ -10821,7 +11275,9 @@ print(total)
         let src = "let r: Result<Int, Str, Bool> = Ok(1)\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("Result") && e.message.contains("1 o 2")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("Result") && e.message.contains("1 o 2")),
             "esperaba error sobre aridad: {:?}",
             errors
         );
@@ -10831,8 +11287,14 @@ print(total)
     fn checker_re_plus_result_display_con_e_concreto() {
         use crate::types::Type;
         let env = TypeEnv::default();
-        let r1 = Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Str) };
-        let r2 = Type::Result { ok: Box::new(Type::Int), err: Box::new(Type::Int) };
+        let r1 = Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Str),
+        };
+        let r2 = Type::Result {
+            ok: Box::new(Type::Int),
+            err: Box::new(Type::Int),
+        };
         // E = Str (default) → omite E.
         assert_eq!(r1.display(&env), "Result<Int>");
         // E ≠ Str (Int) → forma completa.
@@ -10851,8 +11313,9 @@ print(total)
         let src = "let r = 3.14 & 2\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("bit-a-bit")
-                && e.message.contains("Float")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("bit-a-bit") && e.message.contains("Float")),
             "esperaba error sobre bit-a-bit con Float: {:?}",
             errors
         );
@@ -10863,8 +11326,9 @@ print(total)
         let src = "let r = true & false\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("bit-a-bit")
-                && e.message.contains("Bool")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("bit-a-bit") && e.message.contains("Bool")),
             "esperaba error sobre `&` con Bool: {:?}",
             errors
         );
@@ -10875,7 +11339,9 @@ print(total)
         let src = "let r = ~3.14\n";
         let errors = check_recovering(src);
         assert!(
-            errors.iter().any(|e| e.message.contains("`~`") && e.message.contains("Int")),
+            errors
+                .iter()
+                .any(|e| e.message.contains("`~`") && e.message.contains("Int")),
             "esperaba error sobre `~` con Float: {:?}",
             errors
         );
@@ -10960,10 +11426,7 @@ print(total)
 
     #[test]
     fn int_method_inexistente_es_error() {
-        assert_error_with(
-            "let n: Int = 5\nlet r = n.foobar()",
-            &["Int", "foobar"],
-        );
+        assert_error_with("let n: Int = 5\nlet r = n.foobar()", &["Int", "foobar"]);
     }
 
     #[test]
@@ -11044,20 +11507,14 @@ print(total)
     /// Helper: chequea que el programa pase sin errores.
     fn assert_auth_ok(src: &str) {
         let errors = errors_of(src);
-        assert!(
-            errors.is_empty(),
-            "esperaba sin errores, fue: {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "esperaba sin errores, fue: {:?}", errors);
     }
 
     /// Helper: chequea que el programa produzca al menos un error cuyo
     /// mensaje contenga el substring esperado.
     fn assert_auth_err(src: &str, expected_substr: &str) {
         let errors = errors_of(src);
-        let matched = errors
-            .iter()
-            .any(|e| e.message.contains(expected_substr));
+        let matched = errors.iter().any(|e| e.message.contains(expected_substr));
         assert!(
             matched,
             "esperaba error con substring '{}', errores fueron: {:?}",
@@ -11291,7 +11748,10 @@ print(total)
     #[test]
     fn wsconn_sin_argumento_es_error_de_aridad() {
         let env = TypeEnv::new();
-        let te = TypeExpr::Generic { name: "WsConn".into(), args: vec![] };
+        let te = TypeExpr::Generic {
+            name: "WsConn".into(),
+            args: vec![],
+        };
         let err = resolve_type_expr(&te, &env).expect_err("aridad 0");
         assert!(matches!(err.kind, ErrorKind::TypeError));
     }
@@ -11422,11 +11882,7 @@ print(total)
         let src = "@cron(\"0 0 * * *\")\n\
                    async fn cleanup() -> Null { return null }";
         let errors = errors_of(src);
-        assert!(
-            errors.is_empty(),
-            "esperaba 0 errores, fueron {:?}",
-            errors
-        );
+        assert!(errors.is_empty(), "esperaba 0 errores, fueron {:?}", errors);
     }
 
     #[test]
@@ -11458,9 +11914,7 @@ print(total)
         let src = "@cron(60)\nfn tick() -> Null { return null }";
         let errors = errors_of(src);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.message.contains("Str literal")),
+            errors.iter().any(|e| e.message.contains("Str literal")),
             "esperaba msg sobre Str literal: {:?}",
             errors
         );
@@ -11603,9 +12057,7 @@ print(total)
                    }";
         let errors = errors_of(src);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.message.contains("call literal")),
+            errors.iter().any(|e| e.message.contains("call literal")),
             "esperaba msg sobre call literal: {:?}",
             errors
         );
@@ -11620,9 +12072,7 @@ print(total)
                    }";
         let errors = errors_of(src);
         assert!(
-            errors
-                .iter()
-                .any(|e| e.message.contains("@background")),
+            errors.iter().any(|e| e.message.contains("@background")),
             "esperaba msg sobre @background: {:?}",
             errors
         );

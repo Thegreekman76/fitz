@@ -212,17 +212,15 @@ pub fn clone_or_use_cache(url: &str, gitref: &GitRef) -> Result<GitClonedRepo, G
 ///    queda como deuda.
 fn clone_fresh(url: &str, gitref: &GitRef, target: &Path) -> Result<(), GitDepError> {
     match gitref {
-        GitRef::Tag(tag) => {
-            run_git(&[
-                "clone",
-                "--depth",
-                "1",
-                "--branch",
-                tag,
-                url,
-                &target.to_string_lossy(),
-            ])
-        }
+        GitRef::Tag(tag) => run_git(&[
+            "clone",
+            "--depth",
+            "1",
+            "--branch",
+            tag,
+            url,
+            &target.to_string_lossy(),
+        ]),
         GitRef::Rev(rev) => {
             run_git(&["clone", url, &target.to_string_lossy()])?;
             run_git_in(&["checkout", "--quiet", rev], target)
@@ -291,7 +289,10 @@ mod tests {
 
     #[test]
     fn sanitize_url_strips_https_prefix() {
-        assert_eq!(sanitize_url("https://github.com/foo/bar"), "github.com_foo_bar");
+        assert_eq!(
+            sanitize_url("https://github.com/foo/bar"),
+            "github.com_foo_bar"
+        );
     }
 
     #[test]
@@ -359,7 +360,10 @@ mod tests {
             "https://github.com/foo/bar",
             "abc123def456789012345678901234567890abcd",
         );
-        assert_eq!(s, "git+https://github.com/foo/bar#abc123def456789012345678901234567890abcd");
+        assert_eq!(
+            s,
+            "git+https://github.com/foo/bar#abc123def456789012345678901234567890abcd"
+        );
     }
 
     // NOTA: los tests de clone_or_use_cache (que invocan git real

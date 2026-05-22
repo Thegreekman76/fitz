@@ -22,10 +22,27 @@
 
 use pyo3::prelude::*;
 use pyo3::types::{PyBool, PyDict, PyFloat, PyInt, PyList, PyString};
-use std::sync::OnceLock;
+use std::sync::{Once, OnceLock};
 
 use crate::error::{ErrorKind, FitzError, FitzResult};
 use crate::value::{FitzFuture, PyObjectHandle, ResultVariant, Value};
+
+/// Mini-tanda Cleanup-Residual+ (2026-05-22) — inicializa el
+/// intérprete Python una sola vez (idempotente). Llamado desde
+/// `import_module` antes del primer `Python::attach`. Reemplaza la
+/// feature `auto-initialize` de PyO3 que era incompatible con
+/// `abi3-py310` (auto-initialize linkeaba contra libpython
+/// específica del builder, perdiendo la portabilidad abi3).
+///
+/// El `Once` garantiza que `prepare_freethreaded_python()` corra
+/// exactamente una vez por proceso, sin importar cuántos imports
+/// haga el programa Fitz.
+fn ensure_python_initialized() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        Python::initialize();
+    });
+}
 
 /// Importa un módulo Python dado su path "punteado" (`"math"`,
 /// `"sqlalchemy.orm"`, etc.) y lo devuelve envuelto en `Value::PyObject`.
@@ -42,10 +59,17 @@ use crate::value::{FitzFuture, PyObjectHandle, ResultVariant, Value};
 /// `FitzError` con la línea/columna del caller (que se inyecta arriba)
 /// y mensaje "<ClassName>: <message>".
 pub fn import_module(dotted: &str) -> FitzResult<Value> {
+    // Mini-tanda Cleanup-Residual+ (2026-05-22) — sin feature
+    // `auto-initialize`, el primer `Python::attach` requiere que
+    // el intérprete Python esté inicializado. `prepare_freethreaded_python()`
+    // es idempotente, podemos llamarlo en cada import (caso common).
+    // Junto con `abi3-py310`, esto produce un binario realmente
+    // portable: un solo binario corre contra Python 3.10/3.11/3.12/
+    // 3.13/3.14 sin reconfigurar.
+    ensure_python_initialized();
     // `Python::attach` reemplazó a `Python::with_gil` en pyo3 0.23+;
-    // la API es idéntica en uso (closure recibe `Python<'_>`). Toma
-    // el GIL si la feature `auto-initialize` no lo hizo todavía;
-    // sobre runs subsiguientes es un fetch + lock.
+    // la API es idéntica en uso (closure recibe `Python<'_>`). Sobre
+    // runs subsiguientes es un fetch + lock.
     Python::attach(|py| match py.import(dotted) {
         Ok(module) => {
             // `module: Bound<'py, PyModule>`. Lo convertimos a
@@ -153,9 +177,7 @@ pub fn call(handle: &PyObjectHandle, args: &[Value]) -> FitzResult<Value> {
                         Ok(fut) => Ok(Value::Result(ResultVariant::Ok(Box::new(
                             Value::new_future(fut),
                         )))),
-                        Err(e) => Ok(err_value_from_message(
-                            py_err_to_fitz(py, e).message,
-                        )),
+                        Err(e) => Ok(err_value_from_message(py_err_to_fitz(py, e).message)),
                     };
                 }
                 match py_to_value(py, &ret) {
@@ -283,7 +305,8 @@ fn asyncio_worker_loop(rx: std::sync::mpsc::Receiver<AsyncioRequest>) {
                 Ok(value) => py_to_value(py, &value),
                 Err(e) => Err(FitzError::new(
                     ErrorKind::UndefinedVariable("PyError".to_string()),
-                    0, 0,
+                    0,
+                    0,
                     py_err_to_fitz(py, e).message,
                 )),
             }
@@ -337,7 +360,8 @@ fn py_coro_to_fitz_future(coro: &Bound<'_, PyAny>) -> PyResult<FitzFuture> {
             Ok(result) => result,
             Err(_) => Err(FitzError::new(
                 ErrorKind::UndefinedVariable("RuntimeError".to_string()),
-                0, 0,
+                0,
+                0,
                 "el thread asyncio no respondió a la corutina (loop cerrado?)".to_string(),
             )),
         }
@@ -382,18 +406,21 @@ fn err_value_from_message(msg: String) -> Value {
 /// va a Python se convierte en una `list` Python independiente; si
 /// la `list` Python se muta, la `List<T>` Fitz original no se entera.
 fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny>> {
-    use pyo3::IntoPyObject;
     use pyo3::types::{PyDict, PyList};
+    use pyo3::IntoPyObject;
     match value {
-        Value::Int(n) => Ok(n.into_pyobject(py)
+        Value::Int(n) => Ok(n
+            .into_pyobject(py)
             .map_err(|e| py_err_to_fitz(py, e.into()))?
             .into_any()
             .unbind()),
-        Value::Float(f) => Ok(f.into_pyobject(py)
+        Value::Float(f) => Ok(f
+            .into_pyobject(py)
             .map_err(|e| py_err_to_fitz(py, e.into()))?
             .into_any()
             .unbind()),
-        Value::Str(s) => Ok(s.into_pyobject(py)
+        Value::Str(s) => Ok(s
+            .into_pyobject(py)
             .map_err(|e| py_err_to_fitz(py, e.into()))?
             .into_any()
             .unbind()),
@@ -401,7 +428,8 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
             // `bool::into_pyobject` devuelve `Borrowed<'py, PyBool>` (no
             // un `Bound`), porque True/False son singletons compartidos.
             // Lo convertimos a `Py<PyAny>` via `.to_owned().into_any()`.
-            let bound = b.into_pyobject(py)
+            let bound = b
+                .into_pyobject(py)
                 .map_err(|e| py_err_to_fitz(py, e.into()))?;
             Ok(bound.to_owned().into_any().unbind())
         }
@@ -421,8 +449,7 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
                 let elem_path = format!("{}[{}]", path, i);
                 py_items.push(value_to_py(py, v, &elem_path)?);
             }
-            let list = PyList::new(py, py_items)
-                .map_err(|e| py_err_to_fitz(py, e))?;
+            let list = PyList::new(py, py_items).map_err(|e| py_err_to_fitz(py, e))?;
             Ok(list.into_any().unbind())
         }
         Value::Map(pairs) => {
@@ -471,7 +498,8 @@ fn value_to_py(py: Python<'_>, value: &Value, path: &str) -> FitzResult<Py<PyAny
                 expected: "primitivo, compuesto (List/Map/Instance) o PyObject".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
+            0,
+            0,
             format!(
                 "no se puede pasar un valor de tipo `{}` a Python (en `{}`); \
                  tipos no marshalleables: Range, Function, Type, Module, \
@@ -498,7 +526,8 @@ fn marshal_map_key(py: Python<'_>, k: &Value, path: &str) -> FitzResult<Py<PyAny
                 expected: "Int/Float/Str/Bool/Null (hashable en Python)".into(),
                 found: other.type_name().into(),
             },
-            0, 0,
+            0,
+            0,
             format!(
                 "key de Map no es hashable en Python (en `{}`): \
                  las keys de un dict Python deben ser primitivos \
@@ -546,11 +575,14 @@ fn py_to_value(py: Python<'_>, obj: &Bound<'_, PyAny>) -> FitzResult<Value> {
                     expected: "Int (i64)".into(),
                     found: "int Python fuera de rango i64".into(),
                 },
-                0, 0,
+                0,
+                0,
                 format!(
                     "el entero Python `{}` excede el rango de Int en Fitz (i64); \
                      bignum support llega en una fase posterior",
-                    obj.str().map(|s| s.to_string()).unwrap_or_else(|_| "<repr falló>".into()),
+                    obj.str()
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|_| "<repr falló>".into()),
                 ),
             )),
         };
@@ -1050,7 +1082,8 @@ mod tests {
             v,
             Value::Str(
                 "[{\"id\": 1, \"email\": \"a@x.com\"}, \
-                  {\"id\": 2, \"email\": \"b@x.com\"}]".into()
+                  {\"id\": 2, \"email\": \"b@x.com\"}]"
+                    .into()
             ),
         );
     }
@@ -1111,9 +1144,7 @@ mod tests {
     fn json_loads_de_objeto_devuelve_map_con_orden_de_insercion() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = ok_inner(
-            call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap()
-        );
+        let v = ok_inner(call(&loads, &[Value::Str("{\"a\": 1, \"b\": 2}".into())]).unwrap());
         // Python 3.7+ garantiza orden de inserción para dict;
         // verificamos que llega en el orden serializado del JSON.
         assert_eq!(
@@ -1129,9 +1160,7 @@ mod tests {
     fn json_loads_de_array_heterogeneo() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = ok_inner(
-            call(&loads, &[Value::Str("[1, \"dos\", true, null]".into())]).unwrap()
-        );
+        let v = ok_inner(call(&loads, &[Value::Str("[1, \"dos\", true, null]".into())]).unwrap());
         assert_eq!(
             v,
             Value::new_list(vec![
@@ -1147,9 +1176,7 @@ mod tests {
     fn json_loads_de_array_anidado() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = ok_inner(
-            call(&loads, &[Value::Str("[[1, 2], [3, 4]]".into())]).unwrap()
-        );
+        let v = ok_inner(call(&loads, &[Value::Str("[[1, 2], [3, 4]]".into())]).unwrap());
         assert_eq!(
             v,
             Value::new_list(vec![
@@ -1163,9 +1190,15 @@ mod tests {
     fn json_loads_de_dict_de_dict() {
         let json = handle_of(import_module("json").unwrap());
         let loads = handle_of(get_attr(&json, "loads").unwrap());
-        let v = ok_inner(call(&loads, &[Value::Str(
-            "{\"user\": {\"id\": 1, \"name\": \"x\"}}".into()
-        )]).unwrap());
+        let v = ok_inner(
+            call(
+                &loads,
+                &[Value::Str(
+                    "{\"user\": {\"id\": 1, \"name\": \"x\"}}".into(),
+                )],
+            )
+            .unwrap(),
+        );
         assert_eq!(
             v,
             Value::new_map(vec![(
@@ -1324,7 +1357,12 @@ mod tests {
         let msg = err_message(v);
         // Forma esperada: "ValueError: invalid literal for int() with base 10: 'zz'"
         let parts: Vec<&str> = msg.splitn(2, ": ").collect();
-        assert_eq!(parts.len(), 2, "esperaba `<ClassName>: <message>`, fue: {}", msg);
+        assert_eq!(
+            parts.len(),
+            2,
+            "esperaba `<ClassName>: <message>`, fue: {}",
+            msg
+        );
         assert_eq!(parts[0], "ValueError");
         assert!(!parts[1].is_empty(), "message body vacío");
     }

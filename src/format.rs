@@ -183,7 +183,11 @@ fn format_int_with_alternate(
         };
         (String::new(), s)
     };
-    let abs_str = if upper { abs_str.to_uppercase() } else { abs_str };
+    let abs_str = if upper {
+        abs_str.to_uppercase()
+    } else {
+        abs_str
+    };
     if alternate {
         format!("{}{}{}", sign_prefix, prefix, abs_str)
     } else {
@@ -214,7 +218,11 @@ fn general_format(f: f64, precision: usize, upper: bool) -> String {
         // Strip trailing zeros (Python lo hace).
         strip_trailing_zeros(s)
     };
-    if upper { result.to_uppercase() } else { result }
+    if upper {
+        result.to_uppercase()
+    } else {
+        result
+    }
 }
 
 fn strip_trailing_zeros(s: String) -> String {
@@ -338,8 +346,10 @@ fn apply_padding(body: &str, spec: &FormatSpec, is_numeric: bool) -> String {
                 format!("+{}{}", fill_str, rest)
             } else if let Some(rest) = body.strip_prefix(' ') {
                 format!(" {}{}", fill_str, rest)
-            } else if body.starts_with("0x") || body.starts_with("0X")
-                || body.starts_with("0b") || body.starts_with("0o")
+            } else if body.starts_with("0x")
+                || body.starts_with("0X")
+                || body.starts_with("0b")
+                || body.starts_with("0o")
             {
                 let (prefix, rest) = body.split_at(2);
                 format!("{}{}{}", prefix, fill_str, rest)
@@ -489,4 +499,3 @@ mod tests {
         assert!(err.contains("Float o Int"));
     }
 }
-

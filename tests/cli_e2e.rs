@@ -30,8 +30,7 @@ fn run_fitz(args: &[&str], cwd: &Path) -> (String, String, i32) {
 #[test]
 fn new_crea_estructura_completa_default_cli() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_stdout, stderr, code) =
-        run_fitz(&["new", "mi-app", "--no-git"], tmp.path());
+    let (_stdout, stderr, code) = run_fitz(&["new", "mi-app", "--no-git"], tmp.path());
     assert_eq!(code, 0, "stderr: {stderr}");
 
     let project = tmp.path().join("mi-app");
@@ -61,14 +60,11 @@ fn new_crea_estructura_completa_default_cli() {
 #[test]
 fn new_con_http_usa_template_http() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_stdout, stderr, code) =
-        run_fitz(&["new", "mi-http", "--http", "--no-git"], tmp.path());
+    let (_stdout, stderr, code) = run_fitz(&["new", "mi-http", "--http", "--no-git"], tmp.path());
     assert_eq!(code, 0, "stderr: {stderr}");
 
-    let main_text = std::fs::read_to_string(
-        tmp.path().join("mi-http").join("src").join("main.fitz"),
-    )
-    .unwrap();
+    let main_text =
+        std::fs::read_to_string(tmp.path().join("mi-http").join("src").join("main.fitz")).unwrap();
     assert!(main_text.contains("@get(\"/\")"));
     assert!(main_text.contains("@server(3000)"));
     assert!(main_text.contains("mi-http"));
@@ -100,8 +96,7 @@ fn new_con_no_git_no_inicializa_repo() {
 fn new_aborta_si_carpeta_ya_existe() {
     let tmp = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(tmp.path().join("existente")).unwrap();
-    let (_stdout, stderr, code) =
-        run_fitz(&["new", "existente", "--no-git"], tmp.path());
+    let (_stdout, stderr, code) = run_fitz(&["new", "existente", "--no-git"], tmp.path());
     assert_eq!(code, 1);
     assert!(stderr.contains("ya existe"), "stderr: {stderr}");
 }
@@ -112,7 +107,10 @@ fn new_aborta_con_nombre_invalido() {
     let (_stdout, stderr, code) = run_fitz(&["new", "Foo", "--no-git"], tmp.path());
     assert_eq!(code, 1);
     assert!(stderr.contains("nombre inválido"), "stderr: {stderr}");
-    assert!(stderr.contains("Foo"), "stderr no menciona el nombre: {stderr}");
+    assert!(
+        stderr.contains("Foo"),
+        "stderr no menciona el nombre: {stderr}"
+    );
 }
 
 #[test]
@@ -148,10 +146,7 @@ fn init_aborta_si_manifest_ya_existe() {
     std::fs::write(project.join("fitz.toml"), "[package]\nname = \"x\"\n").unwrap();
     let (_stdout, stderr, code) = run_fitz(&["init", "--no-git"], &project);
     assert_eq!(code, 1);
-    assert!(
-        stderr.contains("ya existe"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("ya existe"), "stderr: {stderr}");
 }
 
 #[test]
@@ -162,14 +157,16 @@ fn init_aborta_si_directorio_tiene_nombre_invalido_sin_override() {
     let (_stdout, stderr, code) = run_fitz(&["init", "--no-git"], &project);
     assert_eq!(code, 1);
     assert!(stderr.contains("nombre inválido"), "stderr: {stderr}");
-    assert!(stderr.contains("--name"), "stderr no sugiere --name: {stderr}");
+    assert!(
+        stderr.contains("--name"),
+        "stderr no sugiere --name: {stderr}"
+    );
 }
 
 #[test]
 fn programa_generado_por_new_corre_con_fitz_run() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_stdout, _stderr, code) =
-        run_fitz(&["new", "demo-app", "--no-git"], tmp.path());
+    let (_stdout, _stderr, code) = run_fitz(&["new", "demo-app", "--no-git"], tmp.path());
     assert_eq!(code, 0);
 
     let main_fitz = tmp.path().join("demo-app").join("src").join("main.fitz");
@@ -196,8 +193,7 @@ fn programa_generado_por_new_corre_con_fitz_run() {
 /// Helper: crea un proyecto con `fitz new <name> --no-git` adentro de
 /// `tmp` y devuelve el path del proyecto.
 fn create_project(tmp_root: &Path, name: &str) -> std::path::PathBuf {
-    let (_stdout, stderr, code) =
-        run_fitz(&["new", name, "--no-git"], tmp_root);
+    let (_stdout, stderr, code) = run_fitz(&["new", name, "--no-git"], tmp_root);
     assert_eq!(code, 0, "fitz new falló: {stderr}");
     tmp_root.join(name)
 }
@@ -254,12 +250,13 @@ fn run_con_archivo_explicito_ignora_manifest_y_corre_en_single_file_mode() {
         .current_dir(tmp.path().join("walk-test"))
         .output()
         .expect("fitz run");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
-    let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("single-file mode OK"),
-        "stdout: {stdout}"
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
     );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("single-file mode OK"), "stdout: {stdout}");
 }
 
 #[test]
@@ -405,7 +402,10 @@ fn lockfile_se_regenera_cuando_dep_cambia_version() {
     assert_eq!(code, 0);
     assert!(stdout.contains("actualizado"), "stdout: {stdout}");
     let lock_text = std::fs::read_to_string(app_dir.join("fitz.lock")).unwrap();
-    assert!(lock_text.contains("version = \"0.5.1\""), "lock: {lock_text}");
+    assert!(
+        lock_text.contains("version = \"0.5.1\""),
+        "lock: {lock_text}"
+    );
 }
 
 #[test]
@@ -450,7 +450,10 @@ fn git_dep_sin_tag_ni_rev_aborta_pidiendo_uno() {
     .unwrap();
     let (_stdout, stderr, code) = run_fitz(&["check"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("tag") && stderr.contains("rev"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("tag") && stderr.contains("rev"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("reproducibilidad"), "stderr: {stderr}");
 }
 
@@ -542,7 +545,10 @@ fn run_dep_no_referenciada_no_falla_si_no_se_importa() {
     let (stdout, _stderr, code) = run_fitz(&["run"], &app_dir);
     assert_eq!(code, 0);
     assert!(stdout.contains("sin imports"));
-    assert!(app_dir.join("fitz.lock").is_file(), "lockfile debió emitirse");
+    assert!(
+        app_dir.join("fitz.lock").is_file(),
+        "lockfile debió emitirse"
+    );
 }
 
 #[test]
@@ -683,11 +689,7 @@ fn setup_git_dep_project(
 /// Helper: corre fitz en `cwd` con `FITZ_CACHE_DIR` apuntando a
 /// `cache_dir`. Necesario para que git deps no toquen el cache global
 /// del usuario.
-fn run_fitz_with_cache(
-    args: &[&str],
-    cwd: &Path,
-    cache_dir: &Path,
-) -> (String, String, i32) {
+fn run_fitz_with_cache(args: &[&str], cwd: &Path, cache_dir: &Path) -> (String, String, i32) {
     let output = Command::new(fitz_bin())
         .args(args)
         .current_dir(cwd)
@@ -722,7 +724,11 @@ fn git_dep_clona_al_cache_y_emite_lockfile_con_commit() {
     let git_cache = cache_dir.join("git");
     assert!(git_cache.is_dir(), "cache/git no existe");
     let entries: Vec<_> = std::fs::read_dir(&git_cache).unwrap().collect();
-    assert_eq!(entries.len(), 1, "se esperaba un dir clonado, hay: {entries:?}");
+    assert_eq!(
+        entries.len(),
+        1,
+        "se esperaba un dir clonado, hay: {entries:?}"
+    );
 
     // Lockfile incluye source con el commit hash exacto.
     let lockfile = std::fs::read_to_string(app_dir.join("fitz.lock")).unwrap();
@@ -860,7 +866,11 @@ fn build_resuelve_from_dep_import_via_dep_registry() {
 
     let bin_name = if cfg!(windows) { "myapp.exe" } else { "myapp" };
     let bin_path = app_dir.join("target").join("release").join(bin_name);
-    assert!(bin_path.is_file(), "binario no existe en {}", bin_path.display());
+    assert!(
+        bin_path.is_file(),
+        "binario no existe en {}",
+        bin_path.display()
+    );
 
     let output = Command::new(&bin_path).output().expect("ejecutar binario");
     assert!(output.status.success());
@@ -880,10 +890,8 @@ fn add_path_dep_modifica_manifest_y_emite_lockfile() {
     let _ = run_fitz(&["new", "myapp", "--no-git"], tmp.path());
     let app_dir = tmp.path().join("myapp");
 
-    let (stdout, stderr, code) = run_fitz(
-        &["add", "utils-lib", "--path", "../utils-lib"],
-        &app_dir,
-    );
+    let (stdout, stderr, code) =
+        run_fitz(&["add", "utils-lib", "--path", "../utils-lib"], &app_dir);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("agregado"), "stdout: {stdout}");
 
@@ -893,7 +901,10 @@ fn add_path_dep_modifica_manifest_y_emite_lockfile() {
         "manifest:\n{manifest}"
     );
     let lockfile = std::fs::read_to_string(app_dir.join("fitz.lock")).unwrap();
-    assert!(lockfile.contains("name = \"utils-lib\""), "lockfile:\n{lockfile}");
+    assert!(
+        lockfile.contains("name = \"utils-lib\""),
+        "lockfile:\n{lockfile}"
+    );
 }
 
 #[test]
@@ -902,18 +913,26 @@ fn add_sin_flags_aborta_pidiendo_path_o_git() {
     let project = create_project(tmp.path(), "myapp");
     let (_stdout, stderr, code) = run_fitz(&["add", "foo"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("--path") && stderr.contains("--git"), "stderr: {stderr}");
-    assert!(stderr.contains("9.y.5"), "stderr debería mencionar el registry: {stderr}");
+    assert!(
+        stderr.contains("--path") && stderr.contains("--git"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("9.y.5"),
+        "stderr debería mencionar el registry: {stderr}"
+    );
 }
 
 #[test]
 fn add_git_sin_tag_ni_rev_aborta_pidiendo_uno() {
     let tmp = tempfile::tempdir().unwrap();
     let project = create_project(tmp.path(), "myapp");
-    let (_stdout, stderr, code) =
-        run_fitz(&["add", "foo", "--git", "https://x.com/r"], &project);
+    let (_stdout, stderr, code) = run_fitz(&["add", "foo", "--git", "https://x.com/r"], &project);
     assert_eq!(code, 1);
-    assert!(stderr.contains("tag") && stderr.contains("rev"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("tag") && stderr.contains("rev"),
+        "stderr: {stderr}"
+    );
     assert!(stderr.contains("reproducibilidad"), "stderr: {stderr}");
 }
 
@@ -932,8 +951,7 @@ fn add_path_y_git_juntos_aborta_clap_conflict() {
 #[test]
 fn add_fuera_de_proyecto_aborta_con_mensaje_claro() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_stdout, stderr, code) =
-        run_fitz(&["add", "foo", "--path", "../x"], tmp.path());
+    let (_stdout, stderr, code) = run_fitz(&["add", "foo", "--path", "../x"], tmp.path());
     assert_eq!(code, 1);
     assert!(stderr.contains("fitz.toml"), "stderr: {stderr}");
     assert!(stderr.contains("fitz new"), "stderr: {stderr}");
@@ -1012,10 +1030,7 @@ fn update_sin_git_deps_reporta_no_op() {
 
     let (stdout, _, code) = run_fitz(&["update"], &app_dir);
     assert_eq!(code, 0);
-    assert!(
-        stdout.contains("no había git deps"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("no había git deps"), "stdout: {stdout}");
 }
 
 #[test]
@@ -1060,7 +1075,11 @@ fn update_invalida_cache_de_git_dep_y_re_clona() {
 
     // El cache fue re-clonado: el marker NO debería existir más.
     let cache_entries_after: Vec<_> = std::fs::read_dir(&git_cache).unwrap().collect();
-    assert_eq!(cache_entries_after.len(), 1, "debió quedar exactamente un clone");
+    assert_eq!(
+        cache_entries_after.len(),
+        1,
+        "debió quedar exactamente un clone"
+    );
     let new_clone = cache_entries_after[0].as_ref().unwrap().path();
     assert!(
         !new_clone.join("FITZ_TEST_MARKER").exists(),
@@ -1104,7 +1123,11 @@ fn fmt_archivo_explicito_canonicaliza_indent_y_blocks() {
         .arg(&file)
         .output()
         .expect("fitz fmt");
-    assert!(output.status.success(), "stderr: {}", String::from_utf8_lossy(&output.stderr));
+    assert!(
+        output.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 
     let after = std::fs::read_to_string(&file).unwrap();
     assert!(
@@ -1207,9 +1230,15 @@ fn fmt_preserva_comments_y_blank_lines() {
     assert!(output.status.success());
 
     let after = std::fs::read_to_string(&file).unwrap();
-    assert!(after.contains("// header"), "comment header se borró: {after}");
+    assert!(
+        after.contains("// header"),
+        "comment header se borró: {after}"
+    );
     assert!(after.contains("// trailing"), "trailing se borró: {after}");
-    assert!(after.contains("// entre stmts"), "comment intermedio se borró: {after}");
+    assert!(
+        after.contains("// entre stmts"),
+        "comment intermedio se borró: {after}"
+    );
     // Blank line entre el header y `let x = 1` debe estar presente.
     assert!(
         after.contains("// header\n\nlet x"),
@@ -1356,15 +1385,9 @@ fn test_single_file_corre_tests_y_reporta_ok() {
     ";
     write_file(tmp.path(), "tests.fitz", src);
 
-    let (stdout, stderr, code) = run_fitz(
-        &["test", "--file", "tests.fitz"],
-        tmp.path(),
-    );
+    let (stdout, stderr, code) = run_fitz(&["test", "--file", "tests.fitz"], tmp.path());
     assert_eq!(code, 0, "stderr: {stderr}");
-    assert!(
-        stdout.contains("running 2 tests"),
-        "stdout: {stdout}"
-    );
+    assert!(stdout.contains("running 2 tests"), "stdout: {stdout}");
     assert!(stdout.contains("test suma_funciona ... ok"));
     assert!(stdout.contains("test resta_funciona ... ok"));
     assert!(stdout.contains("test result"));
@@ -1381,10 +1404,7 @@ fn test_falla_devuelve_exit_1_con_detalle_left_right() {
         "@test fn falla() { assert_eq(5, 10) }\n",
     );
 
-    let (stdout, _stderr, code) = run_fitz(
-        &["test", "--file", "t.fitz"],
-        tmp.path(),
-    );
+    let (stdout, _stderr, code) = run_fitz(&["test", "--file", "t.fitz"], tmp.path());
     assert_eq!(code, 1);
     assert!(stdout.contains("test falla ... FAILED"));
     assert!(stdout.contains("left:"));
@@ -1404,10 +1424,7 @@ fn test_filter_substring_matchea_solo_lo_que_contiene() {
          @test fn resta_basica() { assert_eq(3 - 1, 2) }\n",
     );
 
-    let (stdout, _stderr, code) = run_fitz(
-        &["test", "--file", "t.fitz", "suma"],
-        tmp.path(),
-    );
+    let (stdout, _stderr, code) = run_fitz(&["test", "--file", "t.fitz", "suma"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("running 2 tests (1 filtered out)"));
     assert!(stdout.contains("suma_basica"));
@@ -1424,10 +1441,8 @@ fn test_filter_sin_matches_devuelve_0_tests_pero_exit_0() {
         "@test fn algo() { assert_eq(1, 1) }\n",
     );
 
-    let (stdout, _stderr, code) = run_fitz(
-        &["test", "--file", "t.fitz", "inexistente"],
-        tmp.path(),
-    );
+    let (stdout, _stderr, code) =
+        run_fitz(&["test", "--file", "t.fitz", "inexistente"], tmp.path());
     // 0 matches con un test descubierto = 0 failures, exit 0.
     assert_eq!(code, 0);
     assert!(stdout.contains("0 tests"));
@@ -1446,10 +1461,7 @@ fn test_async_fn_funciona() {
          }\n",
     );
 
-    let (stdout, _stderr, code) = run_fitz(
-        &["test", "--file", "t.fitz"],
-        tmp.path(),
-    );
+    let (stdout, _stderr, code) = run_fitz(&["test", "--file", "t.fitz"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("test pausa ... ok"));
 }
@@ -1564,10 +1576,7 @@ fn test_assert_throws_pasa_cuando_callback_tira() {
         "t.fitz",
         "@test fn tira() { assert_throws(fn() => assert(false, \"intencional\")) }\n",
     );
-    let (stdout, _stderr, code) = run_fitz(
-        &["test", "--file", "t.fitz"],
-        tmp.path(),
-    );
+    let (stdout, _stderr, code) = run_fitz(&["test", "--file", "t.fitz"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("test tira ... ok"));
 }
@@ -1581,10 +1590,7 @@ fn test_archivo_con_error_de_tipos_aborta_antes_de_correr() {
         "t.fitz",
         "@test fn t() { let x: Int = \"no es int\" }\n",
     );
-    let (stdout, stderr, code) = run_fitz(
-        &["test", "--file", "t.fitz"],
-        tmp.path(),
-    );
+    let (stdout, stderr, code) = run_fitz(&["test", "--file", "t.fitz"], tmp.path());
     assert_eq!(code, 1, "stdout: {stdout}, stderr: {stderr}");
     // Mensaje del checker llega via stderr (formato del runner).
     assert!(
@@ -1605,8 +1611,7 @@ fn lint_detecta_unused_variable_y_unused_import() {
         "t.fitz",
         "import math\nlet x = 5\nprint(\"hola\")\n",
     );
-    let (stdout, _stderr, code) =
-        run_fitz(&["lint", "t.fitz"], tmp.path());
+    let (stdout, _stderr, code) = run_fitz(&["lint", "t.fitz"], tmp.path());
     assert_eq!(code, 0, "default lint exit 0 sobre warnings");
     assert!(stdout.contains("unused_import"));
     assert!(stdout.contains("unused_variable"));
@@ -1618,10 +1623,8 @@ fn lint_detecta_unused_variable_y_unused_import() {
 fn lint_deny_promueve_a_error_y_exit_1() {
     let tmp = tempfile::tempdir().unwrap();
     write_file(tmp.path(), "t.fitz", "let x = 5\nprint(\"hola\")\n");
-    let (stdout, _stderr, code) = run_fitz(
-        &["lint", "t.fitz", "--deny", "unused_variable"],
-        tmp.path(),
-    );
+    let (stdout, _stderr, code) =
+        run_fitz(&["lint", "t.fitz", "--deny", "unused_variable"], tmp.path());
     assert_eq!(code, 1);
     assert!(stdout.contains("error"));
     assert!(stdout.contains("unused_variable"));
@@ -1636,8 +1639,7 @@ fn lint_suppression_con_allow_silencia() {
         "t.fitz",
         "// @allow(unused_variable)\nlet x = 5\nprint(\"hola\")\n",
     );
-    let (stdout, _stderr, code) =
-        run_fitz(&["lint", "t.fitz"], tmp.path());
+    let (stdout, _stderr, code) = run_fitz(&["lint", "t.fitz"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("sin findings"), "stdout: {stdout}");
 }
@@ -1645,8 +1647,7 @@ fn lint_suppression_con_allow_silencia() {
 #[test]
 fn lint_archivo_inexistente_devuelve_exit_1() {
     let tmp = tempfile::tempdir().unwrap();
-    let (_stdout, stderr, code) =
-        run_fitz(&["lint", "no_existe.fitz"], tmp.path());
+    let (_stdout, stderr, code) = run_fitz(&["lint", "no_existe.fitz"], tmp.path());
     assert_eq!(code, 1);
     assert!(stderr.contains("no se pudo"));
 }
@@ -1654,13 +1655,8 @@ fn lint_archivo_inexistente_devuelve_exit_1() {
 #[test]
 fn lint_string_concat_detecta_literales() {
     let tmp = tempfile::tempdir().unwrap();
-    write_file(
-        tmp.path(),
-        "t.fitz",
-        "let m = \"a\" + \"b\"\nprint(m)\n",
-    );
-    let (stdout, _stderr, code) =
-        run_fitz(&["lint", "t.fitz"], tmp.path());
+    write_file(tmp.path(), "t.fitz", "let m = \"a\" + \"b\"\nprint(m)\n");
+    let (stdout, _stderr, code) = run_fitz(&["lint", "t.fitz"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("string_concat"));
 }
@@ -1673,8 +1669,7 @@ fn lint_codigo_limpio_no_emite_findings() {
         "t.fitz",
         "fn greet(name: Str) -> Str {\n    return \"Hola, {name}\"\n}\nprint(greet(\"Fitz\"))\n",
     );
-    let (stdout, stderr, code) =
-        run_fitz(&["lint", "t.fitz"], tmp.path());
+    let (stdout, stderr, code) = run_fitz(&["lint", "t.fitz"], tmp.path());
     assert_eq!(code, 0, "stderr: {stderr}, stdout: {stdout}");
     assert!(stdout.contains("sin findings"));
 }
@@ -1687,8 +1682,7 @@ fn lint_useless_match_un_solo_arm_catchall() {
         "t.fitz",
         "let y = 5\nmatch y { _ => print(y) }\n",
     );
-    let (stdout, _stderr, code) =
-        run_fitz(&["lint", "t.fitz"], tmp.path());
+    let (stdout, _stderr, code) = run_fitz(&["lint", "t.fitz"], tmp.path());
     assert_eq!(code, 0);
     assert!(stdout.contains("useless_match"));
 }
@@ -1750,7 +1744,10 @@ fn cap_16b_ejemplo_greeter_corre_y_genera_lockfile() {
     let lockfile = root.join("greeter").join("fitz.lock");
     assert!(lockfile.exists(), "fitz.lock no se generó");
     let lock_text = std::fs::read_to_string(&lockfile).expect("leer fitz.lock");
-    assert!(lock_text.contains("name = \"greetings\""), "lock: {lock_text}");
+    assert!(
+        lock_text.contains("name = \"greetings\""),
+        "lock: {lock_text}"
+    );
 }
 
 #[test]
@@ -1800,15 +1797,15 @@ fn cap_16b_fitz_build_compila_greeter_a_binario_nativo() {
         .join("target")
         .join("release")
         .join(bin_name);
-    assert!(bin_path.exists(), "binario no existe: {}", bin_path.display());
+    assert!(
+        bin_path.exists(),
+        "binario no existe: {}",
+        bin_path.display()
+    );
 
     // Ejecutar y comparar output.
     let output = Command::new(&bin_path).output().expect("ejecutar binario");
-    assert!(
-        output.status.success(),
-        "exit: {:?}",
-        output.status.code()
-    );
+    assert!(output.status.success(), "exit: {:?}", output.status.code());
     let bin_stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
         bin_stdout.contains("Hola, compilado!"),

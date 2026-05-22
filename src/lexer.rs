@@ -51,8 +51,8 @@ pub enum Token {
     Continue,
     And,
     Or,
-    Xor, // Mini-tanda Xor — `a xor b` lógico (Bool ^ Bool, paralelo a `or`/`and`)
-    Not, // R.1.1 — `not <expr>` negación lógica prefix
+    Xor,    // Mini-tanda Xor — `a xor b` lógico (Bool ^ Bool, paralelo a `or`/`and`)
+    Not,    // R.1.1 — `not <expr>` negación lógica prefix
     Static, // Mini-tanda St — `static fn ...` adentro de `type` body
 
     // Operadores
@@ -91,18 +91,18 @@ pub enum Token {
     At,       // @ — prefijo de decoradores: @get, @post, @server, ...
     Pipe,     // | — separador de or-patterns en `match` (R.2.1); OR bit-a-bit (mini-tanda Bits)
     // Operadores bit-a-bit (mini-tanda Bits).
-    Amp,      // & — AND bit-a-bit
-    Caret,    // ^ — XOR bit-a-bit
-    Shl,      // << — shift left
-    Shr,      // >> — shift right
-    Tilde,    // ~ — NOT bit-a-bit (unario)
+    Amp,   // & — AND bit-a-bit
+    Caret, // ^ — XOR bit-a-bit
+    Shl,   // << — shift left
+    Shr,   // >> — shift right
+    Tilde, // ~ — NOT bit-a-bit (unario)
     // Operadores bit-a-bit compuestos (mini-tanda Cmp).
-    AmpEq,    // &=
-    PipeEq,   // |=
-    CaretEq,  // ^=
-    ShlEq,    // <<=
-    ShrEq,    // >>=
-    Label(String),  // 'name — labels en break/continue (mini-tanda L)
+    AmpEq,         // &=
+    PipeEq,        // |=
+    CaretEq,       // ^=
+    ShlEq,         // <<=
+    ShrEq,         // >>=
+    Label(String), // 'name — labels en break/continue (mini-tanda L)
 
     // Especiales
     Newline,
@@ -119,7 +119,11 @@ pub struct TokenWithPos {
 
 impl TokenWithPos {
     fn new(token: Token, line: usize, column: usize) -> Self {
-        Self { token, line, column }
+        Self {
+            token,
+            line,
+            column,
+        }
     }
 }
 
@@ -230,10 +234,7 @@ impl Lexer {
         let c = self.peek()?;
         self.pos += 1;
         if c == '\n' {
-            if self.collect_trivia
-                && !self.line_had_code
-                && !self.line_had_comment
-            {
+            if self.collect_trivia && !self.line_had_code && !self.line_had_comment {
                 self.trivia.blank_lines.push(self.line);
             }
             self.line += 1;
@@ -267,8 +268,7 @@ impl Lexer {
                         self.advance();
                     }
                     if self.collect_trivia {
-                        let text: String =
-                            self.chars[text_start..self.pos].iter().collect();
+                        let text: String = self.chars[text_start..self.pos].iter().collect();
                         self.trivia.comments.push(Comment {
                             text,
                             line: start_line,
@@ -307,8 +307,7 @@ impl Lexer {
                         }
                     }
                     if self.collect_trivia {
-                        let text: String =
-                            self.chars[text_start..text_end].iter().collect();
+                        let text: String = self.chars[text_start..text_end].iter().collect();
                         self.trivia.comments.push(Comment {
                             text,
                             line: start_line,
@@ -459,7 +458,10 @@ impl Lexer {
                             ErrorKind::InvalidSyntax,
                             line,
                             col,
-                            format!("separador `_` en literal {} solo entre dígitos válidos", name),
+                            format!(
+                                "separador `_` en literal {} solo entre dígitos válidos",
+                                name
+                            ),
                         ));
                     }
                     self.advance();
@@ -482,10 +484,7 @@ impl Lexer {
                 ErrorKind::InvalidSyntax,
                 line,
                 col,
-                format!(
-                    "literal {} `{}` excede el rango de Int (i64)",
-                    name, clean
-                ),
+                format!("literal {} `{}` excede el rango de Int (i64)", name, clean),
             )
         })?;
         Ok(Token::Int(n))
@@ -772,11 +771,7 @@ impl Lexer {
     ///   `\"""`.
     /// - **Interpolación** `{expr}` sigue funcionando — el contenido
     ///   se pasa "crudo" al parser igual que en strings normales.
-    fn read_triple_string(
-        &mut self,
-        start_line: usize,
-        start_col: usize,
-    ) -> FitzResult<Token> {
+    fn read_triple_string(&mut self, start_line: usize, start_col: usize) -> FitzResult<Token> {
         let mut s = String::new();
         loop {
             // Detectar cierre `"""`: si el char actual y los dos
@@ -967,8 +962,8 @@ impl Lexer {
                                 )
                             })?;
                             self.advance();
-                            let byte = u8::from_str_radix(&format!("{}{}", h1, h2), 16)
-                                .map_err(|_| {
+                            let byte =
+                                u8::from_str_radix(&format!("{}{}", h1, h2), 16).map_err(|_| {
                                     FitzError::new(
                                         crate::error::ErrorKind::InvalidSyntax,
                                         self.line,
@@ -1382,7 +1377,12 @@ mod tests {
             ("static", Token::Static),
         ];
         for (src, expected) in cases {
-            assert_eq!(toks(src), vec![expected.clone(), Token::EOF], "src = {}", src);
+            assert_eq!(
+                toks(src),
+                vec![expected.clone(), Token::EOF],
+                "src = {}",
+                src
+            );
         }
     }
 
@@ -1403,14 +1403,8 @@ mod tests {
     #[test]
     fn f8_identifiers_griegos_y_simbolos_matematicos() {
         // `π`, `σ`, etc. — letras griegas. is_alphabetic devuelve true.
-        assert_eq!(
-            toks("π"),
-            vec![Token::Ident("π".into()), Token::EOF],
-        );
-        assert_eq!(
-            toks("σ"),
-            vec![Token::Ident("σ".into()), Token::EOF],
-        );
+        assert_eq!(toks("π"), vec![Token::Ident("π".into()), Token::EOF],);
+        assert_eq!(toks("σ"), vec![Token::Ident("σ".into()), Token::EOF],);
     }
 
     #[test]
@@ -1441,10 +1435,7 @@ mod tests {
 
     #[test]
     fn f8_identifiers_cyrillic() {
-        assert_eq!(
-            toks("имя"),
-            vec![Token::Ident("имя".into()), Token::EOF],
-        );
+        assert_eq!(toks("имя"), vec![Token::Ident("имя".into()), Token::EOF],);
     }
 
     #[test]
@@ -1491,10 +1482,7 @@ mod tests {
 
     #[test]
     fn bytes_literal_vacio() {
-        assert_eq!(
-            toks(r#"b"""#),
-            vec![Token::Bytes(vec![]), Token::EOF]
-        );
+        assert_eq!(toks(r#"b"""#), vec![Token::Bytes(vec![]), Token::EOF]);
     }
 
     #[test]
@@ -1585,7 +1573,10 @@ mod tests {
 
     #[test]
     fn strings_with_escape_sequences() {
-        assert_eq!(toks(r#""Hola""#), vec![Token::Str("Hola".into()), Token::EOF]);
+        assert_eq!(
+            toks(r#""Hola""#),
+            vec![Token::Str("Hola".into()), Token::EOF]
+        );
     }
 
     // ---- R.1.5 — strings multilínea `"""..."""` (mini-fase R) ----
@@ -1593,10 +1584,7 @@ mod tests {
     #[test]
     fn triple_string_simple() {
         let src = "\"\"\"hola\"\"\"";
-        assert_eq!(
-            toks(src),
-            vec![Token::Str("hola".into()), Token::EOF],
-        );
+        assert_eq!(toks(src), vec![Token::Str("hola".into()), Token::EOF],);
     }
 
     #[test]
@@ -1604,10 +1592,7 @@ mod tests {
         let src = "\"\"\"linea uno\nlinea dos\"\"\"";
         assert_eq!(
             toks(src),
-            vec![
-                Token::Str("linea uno\nlinea dos".into()),
-                Token::EOF
-            ],
+            vec![Token::Str("linea uno\nlinea dos".into()), Token::EOF],
         );
     }
 
@@ -1622,10 +1607,7 @@ mod tests {
         // `"""a "b" c"""` → contenido `a "b" c`. La comilla interna
         // sola no cierra; solo `"""` consecutivas cierran.
         let src = "\"\"\"a \"b\" c\"\"\"";
-        assert_eq!(
-            toks(src),
-            vec![Token::Str("a \"b\" c".into()), Token::EOF],
-        );
+        assert_eq!(toks(src), vec![Token::Str("a \"b\" c".into()), Token::EOF],);
     }
 
     #[test]
@@ -1774,10 +1756,7 @@ mod tests {
     fn f9_escapes_extendidos_funcionan_en_triple_string() {
         // Los mismos escapes (\u/\x/\0/\b) funcionan en `"""..."""`.
         let src = "\"\"\"\\u{00E9}-\\x41-\\0\"\"\"";
-        assert_eq!(
-            toks(src),
-            vec![Token::Str("é-A-\0".into()), Token::EOF]
-        );
+        assert_eq!(toks(src), vec![Token::Str("é-A-\0".into()), Token::EOF]);
     }
 
     #[test]
@@ -1844,7 +1823,10 @@ mod tests {
     fn unterminated_block_comment_errors() {
         let res = tokenize("/* sin cerrar");
         assert!(res.is_err());
-        assert!(matches!(res.unwrap_err().kind, ErrorKind::UnterminatedComment));
+        assert!(matches!(
+            res.unwrap_err().kind,
+            ErrorKind::UnterminatedComment
+        ));
     }
 
     #[test]
@@ -1916,8 +1898,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn tokenize_with_trivia_captura_comment_de_linea() {
-        let (_toks, trivia) =
-            tokenize_with_trivia("// hola\nlet x = 1\n").unwrap();
+        let (_toks, trivia) = tokenize_with_trivia("// hola\nlet x = 1\n").unwrap();
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
         assert_eq!(c.kind, CommentKind::Line);
@@ -1928,8 +1909,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn tokenize_with_trivia_captura_comment_trailing() {
-        let (_toks, trivia) =
-            tokenize_with_trivia("let x = 1 // explicación\n").unwrap();
+        let (_toks, trivia) = tokenize_with_trivia("let x = 1 // explicación\n").unwrap();
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
         assert_eq!(c.text, " explicación");
@@ -1940,8 +1920,7 @@ print("Hola, {name}!")"#;
 
     #[test]
     fn tokenize_with_trivia_captura_comment_de_bloque() {
-        let (_toks, trivia) =
-            tokenize_with_trivia("/* foo bar */\nlet x = 1\n").unwrap();
+        let (_toks, trivia) = tokenize_with_trivia("/* foo bar */\nlet x = 1\n").unwrap();
         assert_eq!(trivia.comments.len(), 1);
         let c = &trivia.comments[0];
         assert_eq!(c.kind, CommentKind::Block);
@@ -1961,7 +1940,11 @@ print("Hola, {name}!")"#;
     fn tokenize_with_trivia_no_cuenta_line_de_comment_como_blank() {
         let src = "let x = 1\n// solo comment\nlet y = 2\n";
         let (_toks, trivia) = tokenize_with_trivia(src).unwrap();
-        assert!(trivia.blank_lines.is_empty(), "blanks: {:?}", trivia.blank_lines);
+        assert!(
+            trivia.blank_lines.is_empty(),
+            "blanks: {:?}",
+            trivia.blank_lines
+        );
         assert_eq!(trivia.comments.len(), 1);
         assert_eq!(trivia.comments[0].line, 2);
     }
@@ -2060,7 +2043,11 @@ print("Hola, {name}!")"#;
         // sigue funcionando: la flag prev_was_dot fuerza Int en lugar
         // de Float.
         use Token::*;
-        let toks: Vec<Token> = tokenize("t.0.0").unwrap().into_iter().map(|t| t.token).collect();
+        let toks: Vec<Token> = tokenize("t.0.0")
+            .unwrap()
+            .into_iter()
+            .map(|t| t.token)
+            .collect();
         assert_eq!(toks[0], Ident("t".into()));
         assert_eq!(toks[1], Dot);
         assert_eq!(toks[2], Int(0));
@@ -2120,7 +2107,10 @@ print("Hola, {name}!")"#;
         // i64::MAX = 0x7FFF_FFFF_FFFF_FFFF (positivo). Un nibble más → overflow.
         assert!(tokenize("0xFFFFFFFFFFFFFFFF").is_err());
         // Binario equivalente.
-        assert!(tokenize("0b11111111111111111111111111111111111111111111111111111111111111111").is_err());
+        assert!(
+            tokenize("0b11111111111111111111111111111111111111111111111111111111111111111")
+                .is_err()
+        );
     }
 
     #[test]

@@ -34,9 +34,7 @@
 // dependen de información de tipos. Esto mantiene la separación
 // `check` (tipos) / `lint` (patrones).
 
-use crate::ast::{
-    AssignTarget, BinOpKind, Expr, MatchArm, Param, Pattern, Program, Stmt, StrPart,
-};
+use crate::ast::{AssignTarget, BinOpKind, Expr, MatchArm, Param, Pattern, Program, Stmt, StrPart};
 
 // ---------------------------------------------------------------------------
 // Tipos públicos
@@ -167,7 +165,9 @@ fn collect_uses_in_stmt(stmt: &Stmt, uses: &mut std::collections::HashSet<String
                 }
             }
         }
-        Stmt::While { condition, body, .. } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             collect_uses_in_expr(condition, uses);
             for s in body {
                 collect_uses_in_stmt(s, uses);
@@ -197,8 +197,13 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
         Expr::Ident(name, _) => {
             uses.insert(name.clone());
         }
-        Expr::Int(..) | Expr::Float(..) | Expr::Str(..) | Expr::Bool(..) | Expr::Null(_)
-        | Expr::Bytes(..) | Expr::Error(_) => {}
+        Expr::Int(..)
+        | Expr::Float(..)
+        | Expr::Str(..)
+        | Expr::Bool(..)
+        | Expr::Null(_)
+        | Expr::Bytes(..)
+        | Expr::Error(_) => {}
         Expr::StrInterp(parts, _) => {
             for p in parts {
                 if let StrPart::Expr(e, _) = p {
@@ -227,10 +232,16 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             collect_uses_in_expr(object, uses);
             collect_uses_in_expr(index, uses);
         }
-        Expr::Slice { object, start, end, .. } => {
+        Expr::Slice {
+            object, start, end, ..
+        } => {
             collect_uses_in_expr(object, uses);
-            if let Some(s) = start { collect_uses_in_expr(s, uses); }
-            if let Some(e) = end { collect_uses_in_expr(e, uses); }
+            if let Some(s) = start {
+                collect_uses_in_expr(s, uses);
+            }
+            if let Some(e) = end {
+                collect_uses_in_expr(e, uses);
+            }
         }
         Expr::Tuple(items, _) => {
             for i in items {
@@ -251,7 +262,13 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
         // Mini-tanda C + Cmp+ — list comprehension. Walkeamos iter
         // del primer clause + extras + filter + expr. Los `var`s se
         // BINDEAN adentro, no son usos.
-        Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+        Expr::ListComp {
+            expr,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             collect_uses_in_expr(iter, uses);
             for (_, it) in extra_clauses {
                 collect_uses_in_expr(it, uses);
@@ -262,7 +279,14 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             collect_uses_in_expr(expr, uses);
         }
         // Mini-tanda Cmp+ — map comprehension.
-        Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+        Expr::MapComp {
+            key,
+            value,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             collect_uses_in_expr(iter, uses);
             for (_, it) in extra_clauses {
                 collect_uses_in_expr(it, uses);
@@ -283,7 +307,12 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
             collect_uses_in_expr(start, uses);
             collect_uses_in_expr(end, uses);
         }
-        Expr::If { condition, then, else_, .. } => {
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             collect_uses_in_expr(condition, uses);
             for s in then {
                 collect_uses_in_stmt(s, uses);
@@ -307,8 +336,7 @@ fn collect_uses_in_expr(expr: &Expr, uses: &mut std::collections::HashSet<String
                 collect_uses_in_expr(e, uses);
             }
         }
-        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _)
-        | Expr::Await(inner, _) => {
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
             collect_uses_in_expr(inner, uses);
         }
         // Fp.3 — NamedArg passthrough al value.
@@ -359,10 +387,7 @@ fn check_unused_var_in_stmt(
         } if !name.starts_with('_') && !uses.contains(name) => {
             findings.push(LintFinding {
                 name: "unused_variable",
-                message: format!(
-                    "variable `{}` declarada pero no usada",
-                    name
-                ),
+                message: format!("variable `{}` declarada pero no usada", name),
                 line: span.line,
                 column: span.column,
                 hint: Some(format!(
@@ -411,10 +436,7 @@ fn lint_unused_imports(
                 if !binding.is_empty() && !uses.contains(&binding) {
                     findings.push(LintFinding {
                         name: "unused_import",
-                        message: format!(
-                            "import `{}` declarado pero no usado",
-                            binding
-                        ),
+                        message: format!("import `{}` declarado pero no usado", binding),
                         line: span.line,
                         column: span.column,
                         hint: Some(
@@ -432,10 +454,7 @@ fn lint_unused_imports(
                     if !uses.contains(&binding) {
                         findings.push(LintFinding {
                             name: "unused_import",
-                            message: format!(
-                                "import `{}` declarado pero no usado",
-                                binding
-                            ),
+                            message: format!("import `{}` declarado pero no usado", binding),
                             line: span.line,
                             column: span.column,
                             hint: Some(
@@ -474,9 +493,8 @@ fn lint_useless_match(program: &Program, findings: &mut Vec<LintFinding>) {
                     if is_catchall {
                         findings.push(LintFinding {
                             name: "useless_match",
-                            message:
-                                "`match` con un solo arm catch-all es equivalente a un `let`"
-                                    .into(),
+                            message: "`match` con un solo arm catch-all es equivalente a un `let`"
+                                .into(),
                             line: span.line,
                             column: span.column,
                             hint: Some(
@@ -513,11 +531,7 @@ fn lint_useless_match(program: &Program, findings: &mut Vec<LintFinding>) {
 /// workaround: leer el source y buscar el rango. Para el MVP de
 /// 9.z.5, **sin auto-fix** (lo difiero) — solo emitimos la
 /// advertencia con sugerencia textual.
-fn lint_string_concat(
-    _source: &str,
-    program: &Program,
-    findings: &mut Vec<LintFinding>,
-) {
+fn lint_string_concat(_source: &str, program: &Program, findings: &mut Vec<LintFinding>) {
     for stmt in program {
         walk_exprs_in_stmt(stmt, &mut |expr| {
             if let Expr::BinOp {
@@ -532,8 +546,7 @@ fn lint_string_concat(
                 {
                     findings.push(LintFinding {
                         name: "string_concat",
-                        message:
-                            "concatenación de strings literales — usá interpolación".into(),
+                        message: "concatenación de strings literales — usá interpolación".into(),
                         line: span.line,
                         column: span.column,
                         hint: Some(
@@ -580,7 +593,9 @@ fn walk_exprs_in_stmt(stmt: &Stmt, f: &mut impl FnMut(&Expr)) {
                 }
             }
         }
-        Stmt::While { condition, body, .. } => {
+        Stmt::While {
+            condition, body, ..
+        } => {
             walk_expr(condition, f);
             for s in body {
                 walk_exprs_in_stmt(s, f);
@@ -644,10 +659,16 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             walk_expr(object, f);
             walk_expr(index, f);
         }
-        Expr::Slice { object, start, end, .. } => {
+        Expr::Slice {
+            object, start, end, ..
+        } => {
             walk_expr(object, f);
-            if let Some(s) = start { walk_expr(s, f); }
-            if let Some(e) = end { walk_expr(e, f); }
+            if let Some(s) = start {
+                walk_expr(s, f);
+            }
+            if let Some(e) = end {
+                walk_expr(e, f);
+            }
         }
         Expr::Tuple(items, _) => {
             for i in items {
@@ -667,7 +688,13 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
         }
         // Mini-tanda C + Cmp+ — list comprehension. Walkeamos los
         // sub-Exprs de cada clause + filter + expr.
-        Expr::ListComp { expr, iter, extra_clauses, filter, .. } => {
+        Expr::ListComp {
+            expr,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             walk_expr(iter, f);
             for (_, it) in extra_clauses {
                 walk_expr(it, f);
@@ -678,7 +705,14 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             walk_expr(expr, f);
         }
         // Mini-tanda Cmp+ — map comprehension.
-        Expr::MapComp { key, value, iter, extra_clauses, filter, .. } => {
+        Expr::MapComp {
+            key,
+            value,
+            iter,
+            extra_clauses,
+            filter,
+            ..
+        } => {
             walk_expr(iter, f);
             for (_, it) in extra_clauses {
                 walk_expr(it, f);
@@ -699,7 +733,12 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
             walk_expr(start, f);
             walk_expr(end, f);
         }
-        Expr::If { condition, then, else_, .. } => {
+        Expr::If {
+            condition,
+            then,
+            else_,
+            ..
+        } => {
             walk_expr(condition, f);
             for s in then {
                 walk_exprs_in_stmt(s, f);
@@ -737,8 +776,9 @@ fn walk_expr(expr: &Expr, f: &mut impl FnMut(&Expr)) {
                 walk_expr(e, f);
             }
         }
-        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _)
-        | Expr::Await(inner, _) => walk_expr(inner, f),
+        Expr::Ok(inner, _) | Expr::Err(inner, _) | Expr::Try(inner, _) | Expr::Await(inner, _) => {
+            walk_expr(inner, f)
+        }
         // Fp.3 — NamedArg passthrough.
         Expr::NamedArg { value, .. } => walk_expr(value, f),
     }
@@ -863,8 +903,10 @@ mod tests {
     fn useless_match_wildcard_se_flaguea() {
         let src = "let x = 5\nmatch x { _ => print(\"hola\") }";
         let findings = lint(src);
-        let useless: Vec<&LintFinding> =
-            findings.iter().filter(|f| f.name == "useless_match").collect();
+        let useless: Vec<&LintFinding> = findings
+            .iter()
+            .filter(|f| f.name == "useless_match")
+            .collect();
         assert_eq!(useless.len(), 1);
     }
 
@@ -872,8 +914,10 @@ mod tests {
     fn useless_match_dos_arms_no_se_flaguea() {
         let src = "let x = 5\nmatch x {\n    0 => print(\"cero\"),\n    _ => print(\"otro\"),\n}";
         let findings = lint(src);
-        let useless: Vec<&LintFinding> =
-            findings.iter().filter(|f| f.name == "useless_match").collect();
+        let useless: Vec<&LintFinding> = findings
+            .iter()
+            .filter(|f| f.name == "useless_match")
+            .collect();
         assert!(useless.is_empty());
     }
 
@@ -881,8 +925,10 @@ mod tests {
     fn string_concat_literales_se_flaguea() {
         let src = "let x = \"a\" + \"b\"\nprint(x)";
         let findings = lint(src);
-        let sc: Vec<&LintFinding> =
-            findings.iter().filter(|f| f.name == "string_concat").collect();
+        let sc: Vec<&LintFinding> = findings
+            .iter()
+            .filter(|f| f.name == "string_concat")
+            .collect();
         assert_eq!(sc.len(), 1);
     }
 
@@ -891,14 +937,17 @@ mod tests {
         // Solo "ambos literales" dispara. Concat con var queda OK.
         let src = "let x = \"a\"\nlet y = x + \"b\"\nprint(y)";
         let findings = lint(src);
-        let sc: Vec<&LintFinding> =
-            findings.iter().filter(|f| f.name == "string_concat").collect();
+        let sc: Vec<&LintFinding> = findings
+            .iter()
+            .filter(|f| f.name == "string_concat")
+            .collect();
         assert!(sc.is_empty());
     }
 
     #[test]
     fn programa_limpio_no_emite_findings() {
-        let src = "fn greet(name: Str) -> Str {\n    return \"Hola, {name}\"\n}\nprint(greet(\"Fitz\"))";
+        let src =
+            "fn greet(name: Str) -> Str {\n    return \"Hola, {name}\"\n}\nprint(greet(\"Fitz\"))";
         let findings = lint(src);
         assert!(findings.is_empty(), "{:?}", findings);
     }

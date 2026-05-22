@@ -73,7 +73,11 @@ impl std::fmt::Display for FitzError {
         if self.line == 0 && self.column == 0 {
             write!(f, "Error — {}", self.message)?;
         } else {
-            write!(f, "Error en línea {}:{} — {}", self.line, self.column, self.message)?;
+            write!(
+                f,
+                "Error en línea {}:{} — {}",
+                self.line, self.column, self.message
+            )?;
         }
         if let Some(hint) = &self.hint {
             write!(f, "\n  Sugerencia: {}", hint)?;

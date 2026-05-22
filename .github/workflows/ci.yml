@@ -126,20 +126,31 @@ jobs:
   # el runner + variables de entorno). `continue-on-error` mientras
   # la interop madura — un test flaky de Python no debería bloquear
   # un PR que toca solo el checker.
+  #
+  # Mini-tanda Cleanup-Residual+ (2026-05-22) — matriz multi-Python.
+  # Después del fix de R.bug-pyo3-abi3-autoinit (quitamos
+  # `auto-initialize`, usamos `Python::initialize()` lazy), el
+  # binario es portable abi3-py310: corre contra cualquier Python
+  # 3.10+. Este job valida ese contrato compilando con cada versión
+  # y corriendo los tests. Si alguna falla, abrimos deuda.
   python:
-    name: Python interop
+    name: Python interop (${{ matrix.python-version }})
     needs: lint
     runs-on: ubuntu-latest
     continue-on-error: true
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - uses: Swatinem/rust-cache@v2
         with:
-          key: linux-python
+          key: linux-python-${{ matrix.python-version }}
       - name: "cargo build --features python"
         run: cargo build --release --features python
       - name: "cargo test --features python --lib py_interop"

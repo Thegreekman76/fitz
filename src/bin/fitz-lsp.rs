@@ -30,13 +30,12 @@ use tower_lsp::lsp_types::{
 };
 use tower_lsp::{Client, LanguageServer, LspService, Server};
 
+use fitz::ast::Program;
 use fitz::lsp::{
     check_source_with_types, completion_at_position, definition_for_position,
     fitz_errors_to_diagnostics_with_source, hover_for_position,
-    make_definition_location_with_source, make_hover_with_range,
-    resolve_cross_module_definition,
+    make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
 };
-use fitz::ast::Program;
 use fitz::types::{DefinitionInfo, TypeEnv, TypeInfo};
 
 /// Estado por documento abierto. Persiste el último texto recibido por
@@ -75,8 +74,7 @@ impl Backend {
     /// en `documents`, y publica los diagnósticos. Devuelve nada — la
     /// notificación es fire-and-forget.
     async fn check_and_publish(&self, uri: Url, text: String, version: Option<i32>) {
-        let (program, type_env, type_info, def_info, errors) =
-            check_source_with_types(&text);
+        let (program, type_env, type_info, def_info, errors) = check_source_with_types(&text);
         // LSPy — diagnostics con Range exacto del símbolo bajo el
         // cursor (no 1-char dummy). Requiere el source para extraer
         // el ident en cada posición.
@@ -201,8 +199,9 @@ impl LanguageServer for Backend {
         // LSPy — hover con Range del símbolo bajo el cursor para
         // que VSCode highlightee el token en lugar de solo mostrar
         // el tooltip aislado.
-        let hover = hover_for_position(&state.type_info, pos.line, pos.character)
-            .map(|ty| make_hover_with_range(ty, &state.type_env, &state.text, pos.line, pos.character));
+        let hover = hover_for_position(&state.type_info, pos.line, pos.character).map(|ty| {
+            make_hover_with_range(ty, &state.type_env, &state.text, pos.line, pos.character)
+        });
         Ok(hover)
     }
 
@@ -224,18 +223,18 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        let Some(def_span) =
-            definition_for_position(&state.def_info, pos.line, pos.character)
+        let Some(def_span) = definition_for_position(&state.def_info, pos.line, pos.character)
         else {
             return Ok(None);
         };
         // Intentar cross-module resolution si el def_span coincide con
         // un Stmt::Import / Stmt::FromImport del program. Extraemos el
         // nombre del ident bajo el cursor de la línea del documento.
-        let target_name = ident_under_cursor(&state.text, pos.line as usize, pos.character as usize);
-        let cross = target_name.as_deref().and_then(|name| {
-            resolve_cross_module_definition(&state.program, &uri, def_span, name)
-        });
+        let target_name =
+            ident_under_cursor(&state.text, pos.line as usize, pos.character as usize);
+        let cross = target_name
+            .as_deref()
+            .and_then(|name| resolve_cross_module_definition(&state.program, &uri, def_span, name));
         // LSPy — Location con Range exacto del ident en la línea
         // del def. Para defs locales, source = doc abierto; para
         // cross-module, source = archivo target (re-leemos del FS).
@@ -251,19 +250,12 @@ impl LanguageServer for Backend {
                     target_source.as_deref(),
                 )
             }
-            None => make_definition_location_with_source(
-                uri.clone(),
-                def_span,
-                Some(&state.text),
-            ),
+            None => make_definition_location_with_source(uri.clone(), def_span, Some(&state.text)),
         };
         Ok(Some(GotoDefinitionResponse::Scalar(location)))
     }
 
-    async fn completion(
-        &self,
-        params: CompletionParams,
-    ) -> LspResult<Option<CompletionResponse>> {
+    async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
         // Detección de contexto + lookup en TypeInfo/Program bajo el
         // lock. El helper `completion_at_position` es pure-function;
         // sin awaits dentro del lock.
