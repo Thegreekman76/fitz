@@ -4833,6 +4833,39 @@ where
                  ms.max(0) as u64)).await\n}\n\n",
             );
         }
+        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
+        // helpers para los 3 builtins `env`/`env_or`/`load_env`. Emitidos
+        // siempre (son fns pequeñas; Rust hace dead-code elim si no se
+        // usan). Paralelo bit-a-bit a la implementación del intérprete
+        // en `evaluator.rs::builtin_env`/`builtin_env_or`/`parse_env_file`.
+        self.emit(
+            "fn __fitz_env(key: &str) -> Result<String, String> {\n    \
+             match std::env::var(key) {\n        \
+             Ok(v) => Ok(v),\n        \
+             Err(_) => Err(format!(\"env var `{}` no definida\", key)),\n    \
+             }\n\
+             }\n\n\
+             fn __fitz_env_or(key: &str, default: String) -> String {\n    \
+             std::env::var(key).unwrap_or(default)\n\
+             }\n\n\
+             fn __fitz_load_env(path: &str) -> Result<(), String> {\n    \
+             let contents = std::fs::read_to_string(path)\n        \
+             .map_err(|e| format!(\"no se pudo leer `{}`: {}\", path, e))?;\n    \
+             for (line_no, raw_line) in contents.lines().enumerate() {\n        \
+             let line = raw_line.trim();\n        \
+             if line.is_empty() || line.starts_with('#') { continue; }\n        \
+             let eq_idx = line.find('=').ok_or_else(|| format!(\"{}:{}: línea sin `=` — formato esperado `KEY=VALUE`\", path, line_no + 1))?;\n        \
+             let key = line[..eq_idx].trim();\n        \
+             let mut value = line[eq_idx + 1..].trim().to_string();\n        \
+             if key.is_empty() { return Err(format!(\"{}:{}: key vacía antes del `=`\", path, line_no + 1)); }\n        \
+             if value.len() >= 2 && value.starts_with('\"') && value.ends_with('\"') {\n            \
+             value = value[1..value.len() - 1].to_string();\n        \
+             }\n        \
+             unsafe { std::env::set_var(key, value); }\n    \
+             }\n    \
+             Ok(())\n\
+             }\n\n",
+        );
     }
 
     fn gen_main(&mut self, stmts: &[&Stmt]) -> Result<(), FitzError> {
@@ -7873,6 +7906,61 @@ where
                     display_type(c, self.env),
                 ))),
             };
+        }
+        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
+        // los 3 builtins `env`/`env_or`/`load_env` se mapean a los
+        // helpers `__fitz_env*` emitidos siempre en el preludio.
+        // Política `fn_sigs` first: si el usuario definió una fn propia
+        // con ese nombre, su sig gana.
+        if name == "env" && !self.fn_sigs.contains_key(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`env(key)` espera 1 argumento, recibió {}",
+                    args.len()
+                )));
+            }
+            let (k_code, k_ty) = self.gen_expr(&args[0])?;
+            let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
+            return Ok((
+                format!("__fitz_env(&{})", k_coerced),
+                Type::Result {
+                    ok: Box::new(Type::Str),
+                    err: Box::new(Type::Str),
+                },
+            ));
+        }
+        if name == "env_or" && !self.fn_sigs.contains_key(name) {
+            if args.len() != 2 {
+                return Err(self.err_at(call_span, format!(
+                    "`env_or(key, default)` espera 2 argumentos, recibió {}",
+                    args.len()
+                )));
+            }
+            let (k_code, k_ty) = self.gen_expr(&args[0])?;
+            let (d_code, d_ty) = self.gen_expr(&args[1])?;
+            let k_coerced = coerce(&k_code, &k_ty, &Type::Str, self.env);
+            let d_coerced = coerce(&d_code, &d_ty, &Type::Str, self.env);
+            return Ok((
+                format!("__fitz_env_or(&{}, {})", k_coerced, d_coerced),
+                Type::Str,
+            ));
+        }
+        if name == "load_env" && !self.fn_sigs.contains_key(name) {
+            if args.len() != 1 {
+                return Err(self.err_at(call_span, format!(
+                    "`load_env(path)` espera 1 argumento, recibió {}",
+                    args.len()
+                )));
+            }
+            let (p_code, p_ty) = self.gen_expr(&args[0])?;
+            let p_coerced = coerce(&p_code, &p_ty, &Type::Str, self.env);
+            return Ok((
+                format!("__fitz_load_env(&{})", p_coerced),
+                Type::Result {
+                    ok: Box::new(Type::Null),
+                    err: Box::new(Type::Str),
+                },
+            ));
         }
         // Fase 6.6: builtin `sleep(ms: Int) -> Future<Null>`. Si el
         // usuario definió una fn `sleep` propia, `fn_sigs` la captura
@@ -21679,6 +21767,21 @@ mod tests {
 
     // ---- Mini-tanda El — Err(List<T>) / Err(Map<K,V>) en codegen ----
 
+    /// Helper de tests: extrae el body de la fn `fail` del output del
+    /// codegen para hacer assertions precisas. El output completo trae
+    /// preludio + helpers internos que pueden usar `Err(format!(...))`
+    /// legítimamente (ej. `__fitz_env`); las assertions sobre la fn
+    /// `fail` específica filtran ese ruido.
+    fn extract_fail_body(code: &str) -> String {
+        let idx = code.find("fn fail").expect("no encontré `fn fail` en el output");
+        // Tomamos hasta el siguiente `fn ` que no sea `fn fail`. Lean:
+        // alcanza con cortar en el siguiente "\nfn " que arrancaría una
+        // fn distinta.
+        let rest = &code[idx..];
+        let end = rest[5..].find("\nfn ").map(|p| p + 5).unwrap_or(rest.len());
+        rest[..end].to_string()
+    }
+
     #[test]
     fn el_err_list_se_emite_sin_coercion_a_string() {
         // Pre-El: `Err([1,2,3])` con `Result<Int, List<Int>>` se
@@ -21692,10 +21795,11 @@ mod tests {
              fail()",
         )
         .unwrap();
+        let fail_body = extract_fail_body(&code);
         assert!(
-            !code.contains("Err(format!"),
+            !fail_body.contains("Err(format!"),
             "esperaba que el List se emita directo, no via format!; got:\n{}",
-            code
+            fail_body
         );
         assert!(
             code.contains("Err(Arc::new(Mutex::new(vec!["),
@@ -21718,10 +21822,11 @@ mod tests {
              fail()",
         )
         .unwrap();
+        let fail_body = extract_fail_body(&code);
         assert!(
-            !code.contains("Err(format!"),
+            !fail_body.contains("Err(format!"),
             "Map no debería ir por format!; got:\n{}",
-            code
+            fail_body
         );
         assert!(
             code.contains("Result<i64, Arc<Mutex<Vec<(String, i64)>>>>"),

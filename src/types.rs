@@ -1270,6 +1270,54 @@ impl<'a> CheckCtx<'a> {
                 has_varargs: false,
             },
         );
+        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
+        // 3 builtins para leer variables de entorno desde Fitz.
+        // `env(key) -> Result<Str>` fuerza al usuario a manejar el caso
+        // missing con `?` o `match` (paralelo a `find`/`get`/`json.loads`).
+        self.scopes[0].insert(
+            "env".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str],
+                    ret: Box::new(Type::Result { ok: Box::new(Type::Str), err: Box::new(Type::Str) }),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // `env_or(key, default) -> Str` — nunca falla, devuelve default
+        // si la var no existe. Paralelo a `Option::unwrap_or` de Rust.
+        self.scopes[0].insert(
+            "env_or".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str, Type::Str],
+                    ret: Box::new(Type::Str),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
+        // `load_env(path) -> Result<Null>` — parser KEY=VALUE simple
+        // (sin variable expansion, sin multi-line). Setea vars via
+        // `std::env::set_var`. Sin auto-load por diseño.
+        self.scopes[0].insert(
+            "load_env".into(),
+            VarBinding {
+                ty: Type::Function {
+                    params: vec![Type::Str],
+                    ret: Box::new(Type::Result { ok: Box::new(Type::Null), err: Box::new(Type::Str) }),
+                },
+                annotated: false,
+                def_span: Span::ZERO,
+                defaults_count: 0,
+                has_varargs: false,
+            },
+        );
         self.scopes[0].insert(
             "assert_eq".into(),
             VarBinding {

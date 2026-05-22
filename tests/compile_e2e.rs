@@ -83,6 +83,45 @@ fn build_expect_fail(test_name: &str, src: &str) -> String {
     String::from_utf8_lossy(&output.stderr).into_owned()
 }
 
+/// Como `build_and_run` pero permite setear env vars sobre el child
+/// que ejecuta el binario. Útil para tests de la mini-fase env builtin
+/// — el binario hace `std::env::var(...)` y la var inyectada via
+/// `Command::env` queda visible. Mini-fase env builtin (2026-05-22).
+fn build_and_run_with_env(test_name: &str, src: &str, env_vars: &[(&str, &str)]) -> (String, i32) {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let mut cmd = Command::new(&bin);
+    for (k, v) in env_vars {
+        cmd.env(k, v);
+    }
+    let run = cmd.output().expect("invocar binario");
+    (
+        String::from_utf8_lossy(&run.stdout).into_owned(),
+        run.status.code().unwrap_or(-1),
+    )
+}
+
 fn assert_lines(stdout: &str, expected: &[&str]) {
     let lines: Vec<&str> = stdout.lines().collect();
     assert_eq!(
@@ -2751,6 +2790,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "28-auth.fitz",
     "29-ws.fitz",
     "30-cron-background.fitz",
+    "31-env.fitz",
 ];
 
 #[test]
@@ -6110,6 +6150,134 @@ fn fase_8_7_bis_build_pyany_a_list_de_instances() {
     assert!(
         stdout.contains("n=2 first=ada"),
         "esperaba `n=2 first=ada` en stdout, fue: {}",
+        stdout
+    );
+}
+
+// ----------------------------------------------------------------------
+// Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
+// `env(key)`, `env_or(key, default)`, `load_env(path)`. Tests E2E del
+// codegen: build a binario nativo + spawn con env var inyectada via
+// `Command::env(...)` → validar que el binario lee la var correctamente.
+// ----------------------------------------------------------------------
+
+#[test]
+fn env_builtin_lee_var_existente_y_propaga_con_try() {
+    let src = "\
+        fn read() -> Result<Str> {\n\
+            let s = env(\"FITZ_E2E_GREETING\")?\n\
+            return Ok(\"hola, {s}!\")\n\
+        }\n\
+        match read() {\n\
+          Ok(v) => print(v),\n\
+          Err(e) => print(\"err: {e}\")\n\
+        }\n";
+    let (stdout, exit) = build_and_run_with_env(
+        "env-builtin-exists",
+        src,
+        &[("FITZ_E2E_GREETING", "mundo")],
+    );
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "hola, mundo!");
+}
+
+#[test]
+fn env_builtin_var_missing_propaga_err() {
+    // No seteamos la var → env() devuelve Err, el `?` propaga, el
+    // match top-level imprime el msg de error.
+    let src = "\
+        fn read() -> Result<Str> {\n\
+            let s = env(\"FITZ_E2E_NUNCA_EXISTE_XYZ\")?\n\
+            return Ok(s)\n\
+        }\n\
+        match read() {\n\
+          Ok(v) => print(\"got: {v}\"),\n\
+          Err(e) => print(\"caught: {e}\")\n\
+        }\n";
+    let (stdout, exit) = build_and_run_with_env(
+        "env-builtin-missing",
+        src,
+        &[],
+    );
+    assert_eq!(exit, 0);
+    assert!(
+        stdout.contains("caught:") && stdout.contains("FITZ_E2E_NUNCA_EXISTE_XYZ"),
+        "esperaba caught con key, fue: {}",
+        stdout
+    );
+}
+
+#[test]
+fn env_or_builtin_devuelve_default_si_missing() {
+    let src = "\
+        let port = env_or(\"FITZ_E2E_NO_SET_PORT\", \"3000\")\n\
+        print(\"port={port}\")\n";
+    let (stdout, exit) = build_and_run_with_env(
+        "env-or-default",
+        src,
+        &[],
+    );
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "port=3000");
+}
+
+#[test]
+fn env_or_builtin_var_existente_ignora_default() {
+    let src = "\
+        let port = env_or(\"FITZ_E2E_PORT_REAL\", \"3000\")\n\
+        print(\"port={port}\")\n";
+    let (stdout, exit) = build_and_run_with_env(
+        "env-or-real",
+        src,
+        &[("FITZ_E2E_PORT_REAL", "8080")],
+    );
+    assert_eq!(exit, 0);
+    assert_eq!(stdout.trim(), "port=8080");
+}
+
+#[test]
+fn load_env_builtin_carga_archivo_y_lee_vars() {
+    // Escribimos un .env en un tempdir SEPARADO al del build (el build
+    // hace `remove_dir_all` adentro de `fitz-e2e-<test_name>`, no queremos
+    // que pise el env file). La fitz src lee `FITZ_E2E_LOAD_PATH` (env
+    // var del runtime) para saber dónde está el .env.
+    let envdir = std::env::temp_dir().join("fitz-e2e-load-env-FILES");
+    let _ = std::fs::remove_dir_all(&envdir);
+    std::fs::create_dir_all(&envdir).unwrap();
+    let env_file = envdir.join("config.env");
+    std::fs::write(
+        &env_file,
+        "# config para el test\nFITZ_E2E_LOAD_K1=valor1\nFITZ_E2E_LOAD_K2=\"con espacios\"\n",
+    )
+    .unwrap();
+
+    // Wrap todo el laburo en una fn que retorna Result<Null> para
+    // poder usar el patrón `?` y dejar el match top-level con un solo
+    // print por arm (limitación: print no es expresión en codegen).
+    let src = "\
+        fn boot_and_read() -> Result<Null> {\n\
+            let path = env(\"FITZ_E2E_LOAD_PATH\")?\n\
+            let _ = load_env(path)?\n\
+            let k1 = env_or(\"FITZ_E2E_LOAD_K1\", \"\")\n\
+            let k2 = env_or(\"FITZ_E2E_LOAD_K2\", \"\")\n\
+            print(\"k1={k1} k2={k2}\")\n\
+            return Ok(null)\n\
+        }\n\
+        match boot_and_read() {\n\
+          Ok(_) => print(\"done\"),\n\
+          Err(e) => print(\"err: {e}\")\n\
+        }\n";
+    let env_path = env_file.to_str().unwrap().to_string();
+    let (stdout, exit) = build_and_run_with_env(
+        "load-env-codegen",
+        src,
+        &[("FITZ_E2E_LOAD_PATH", env_path.as_str())],
+    );
+    let _ = std::fs::remove_file(&env_file);
+    assert_eq!(exit, 0, "stdout fue: {}", stdout);
+    assert!(
+        stdout.contains("k1=valor1 k2=con espacios"),
+        "esperaba k1+k2 cargados del archivo, fue: {}",
         stdout
     );
 }

@@ -1361,6 +1361,10 @@ fn scope_level_completions(
         ("floor", "fn(x: Int|Float) -> Int"),
         ("round", "fn(x: Int|Float) -> Int"),
         ("clamp", "fn(x, lo, hi) -> Int|Float  // mismo tipo"),
+        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates).
+        ("env", "fn(key: Str) -> Result<Str>  // env var, Err si missing"),
+        ("env_or", "fn(key: Str, default: Str) -> Str  // env var con default"),
+        ("load_env", "fn(path: Str) -> Result<Null>  // parse KEY=VALUE file"),
     ] {
         items.push(CompletionItem {
             label: name.into(),

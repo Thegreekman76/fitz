@@ -276,6 +276,10 @@ pub fn builtin_names() -> &'static [&'static str] {
         // El REPL los filtra con `:env`; el LSP los lista en completions.
         "jwt",
         "hash",
+        // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates).
+        "env",
+        "env_or",
+        "load_env",
     ]
 }
 
@@ -8596,6 +8600,29 @@ fn register_builtins(env: &EnvRef) {
             func: builtin_spawn_stub,
         },
     );
+    // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
+    // 3 builtins para leer variables de entorno desde Fitz.
+    env.lock().define(
+        "env",
+        Value::Builtin {
+            name: "env",
+            func: builtin_env,
+        },
+    );
+    env.lock().define(
+        "env_or",
+        Value::Builtin {
+            name: "env_or",
+            func: builtin_env_or,
+        },
+    );
+    env.lock().define(
+        "load_env",
+        Value::Builtin {
+            name: "load_env",
+            func: builtin_load_env,
+        },
+    );
     // Fase 9.z.2.a — assertion builtins. Siempre disponibles (igual
     // que `print`/`len`/`sleep`/`cors`); su semántica es la misma
     // dentro o fuera de `@test`. Una aserción fallida emite
@@ -9396,6 +9423,186 @@ fn builtin_bytes(args: &[Value]) -> FitzResult<Value> {
             ),
         )),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Mini-fase env builtin (2026-05-22) — Paso 3 del plan post-boilerplates.
+//
+// Tres builtins para leer variables de entorno desde Fitz:
+//   - `env(key: Str) -> Result<Str>`: lee `std::env::var`. Si la var
+//     existe → `Ok(value)`, si no → `Err("env var X no definida")`.
+//     Fuerza al usuario a manejar el caso missing con `?` o `match`.
+//   - `env_or(key: Str, default: Str) -> Str`: lo mismo pero con
+//     default. Nunca falla.
+//   - `load_env(path: Str) -> Result<Null>`: parser KEY=VALUE simple
+//     (sin variable expansion, sin multi-line). Setea cada var via
+//     `std::env::set_var`. Comments (#) y líneas vacías se ignoran.
+//     Sin auto-load: explícito por diseño (filosofía "explicit > magic").
+// ---------------------------------------------------------------------------
+
+fn builtin_env(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0, 0,
+            format!("`env(key)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!("`env(key)` espera Str, recibió `{}`", other.type_name()),
+            ));
+        }
+    };
+    match std::env::var(&key) {
+        Ok(value) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Str(value))))),
+        Err(_) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+            format!("env var `{}` no definida", key),
+        ))))),
+    }
+}
+
+fn builtin_env_or(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 2 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 2,
+                found: args.len(),
+            },
+            0, 0,
+            format!(
+                "`env_or(key, default)` espera 2 argumentos, recibió {}",
+                args.len()
+            ),
+        ));
+    }
+    let key = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!(
+                    "`env_or(key, default)` espera Str como primer arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let default = match &args[1] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!(
+                    "`env_or(key, default)` espera Str como segundo arg, recibió `{}`",
+                    other.type_name()
+                ),
+            ));
+        }
+    };
+    let value = std::env::var(&key).unwrap_or(default);
+    Ok(Value::Str(value))
+}
+
+fn builtin_load_env(args: &[Value]) -> FitzResult<Value> {
+    if args.len() != 1 {
+        return Err(FitzError::new(
+            ErrorKind::WrongArgCount {
+                expected: 1,
+                found: args.len(),
+            },
+            0, 0,
+            format!("`load_env(path)` espera 1 argumento, recibió {}", args.len()),
+        ));
+    }
+    let path = match &args[0] {
+        Value::Str(s) => s.clone(),
+        other => {
+            return Err(FitzError::new(
+                ErrorKind::TypeMismatch {
+                    expected: "Str".into(),
+                    found: other.type_name().into(),
+                },
+                0, 0,
+                format!("`load_env(path)` espera Str, recibió `{}`", other.type_name()),
+            ));
+        }
+    };
+    match parse_env_file(&path) {
+        Ok(()) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null)))),
+        Err(msg) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(msg))))),
+    }
+}
+
+/// Mini-fase env builtin — parser KEY=VALUE simple. Lee el archivo,
+/// itera líneas. Por cada línea:
+/// - Strip whitespace al inicio/fin.
+/// - Líneas vacías o que empiezan con `#` se ignoran (comments).
+/// - Resto: split por el PRIMER `=`. Lado izq es la key, lado der el value.
+/// - Strip comillas dobles del value si están al inicio y al fin.
+/// - `std::env::set_var(key, value)`.
+///
+/// Sin variable expansion (`$VAR`/`${VAR}`), sin multi-line, sin escape
+/// chars. Si entra demanda, mini-fase futura dedicada.
+fn parse_env_file(path: &str) -> Result<(), String> {
+    let contents = std::fs::read_to_string(path)
+        .map_err(|e| format!("no se pudo leer `{}`: {}", path, e))?;
+    for (line_no, raw_line) in contents.lines().enumerate() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let eq_idx = line.find('=').ok_or_else(|| {
+            format!(
+                "{}:{}: línea sin `=` — formato esperado `KEY=VALUE`",
+                path,
+                line_no + 1
+            )
+        })?;
+        let key = line[..eq_idx].trim();
+        let mut value = line[eq_idx + 1..].trim().to_string();
+        if key.is_empty() {
+            return Err(format!(
+                "{}:{}: key vacía antes del `=`",
+                path,
+                line_no + 1
+            ));
+        }
+        // Strip comillas dobles wrapping (si el valor abre y cierra con
+        // `"`). Útil para `KEY="value with spaces"`. Sin escape interno
+        // — `\"` queda literal, eso lo cubrirá la mini-fase de escapes
+        // si entra demanda.
+        if value.len() >= 2 && value.starts_with('"') && value.ends_with('"') {
+            value = value[1..value.len() - 1].to_string();
+        }
+        // SAFETY: std::env::set_var es unsafe en Rust 2024 — la doc
+        // advierte sobre concurrencia con threads. Como `load_env` se
+        // llama típicamente en el boot del programa (antes de spawnear
+        // workers), es seguro. Si el usuario lo llama desde un thread
+        // worker, es su responsabilidad serializar.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -16546,6 +16753,185 @@ let r = match n {
         // Sin coerción: users sigue siendo el Map original.
         let users = env.lock().get("users").unwrap();
         assert!(matches!(users, Value::Map(_)));
+    }
+
+    // -------------------------------------------------------------------
+    // Mini-fase env builtin (2026-05-22, Paso 3 post-boilerplates) —
+    // 3 builtins para leer variables de entorno desde Fitz:
+    // `env(key)`, `env_or(key, default)`, `load_env(path)`.
+    //
+    // Tests usan vars con prefijo `FITZ_TEST_ENV_*` para evitar
+    // colisiones con env vars reales del usuario. Cada test setea
+    // la var antes del eval y la limpia al final (defensivo —
+    // tokio test runtime usa current_thread por F17 así que cross-test
+    // contamination es improbable pero igual).
+    // -------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_builtin_lee_var_existente_como_ok() {
+        // SAFETY: tests serializados por #[test], cada test setea su
+        // propia var con prefijo único.
+        unsafe { std::env::set_var("FITZ_TEST_ENV_EXISTS", "hola"); }
+        let src = "let r = env(\"FITZ_TEST_ENV_EXISTS\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Str("hola".into()));
+            }
+            other => panic!("esperaba Ok(Str), fue {:?}", other),
+        }
+        unsafe { std::env::remove_var("FITZ_TEST_ENV_EXISTS"); }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_builtin_var_missing_devuelve_err() {
+        // Confirmamos que la var no existe antes.
+        unsafe { std::env::remove_var("FITZ_TEST_ENV_MISSING_XYZ"); }
+        let src = "let r = env(\"FITZ_TEST_ENV_MISSING_XYZ\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(msg)) => {
+                let s = match *msg {
+                    Value::Str(s) => s,
+                    other => panic!("esperaba Err(Str), fue Err({:?})", other),
+                };
+                assert!(
+                    s.contains("FITZ_TEST_ENV_MISSING_XYZ") && s.contains("no definida"),
+                    "msg no incluye key + 'no definida': {}",
+                    s
+                );
+            }
+            other => panic!("esperaba Err, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_builtin_var_vacia_es_ok_con_string_vacio() {
+        // Convención Unix: var vacía (`KEY=`) existe pero es "".
+        // env() la trata como Ok("") — el caller que quiera tratarla
+        // como missing usa `.is_empty()`.
+        unsafe { std::env::set_var("FITZ_TEST_ENV_EMPTY", ""); }
+        let src = "let r = env(\"FITZ_TEST_ENV_EMPTY\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Str("".into()));
+            }
+            other => panic!("esperaba Ok(empty Str), fue {:?}", other),
+        }
+        unsafe { std::env::remove_var("FITZ_TEST_ENV_EMPTY"); }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_or_builtin_var_existente_ignora_default() {
+        unsafe { std::env::set_var("FITZ_TEST_ENV_OR_EXISTS", "real"); }
+        let src = "let v = env_or(\"FITZ_TEST_ENV_OR_EXISTS\", \"fallback\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let v = env.lock().get("v").unwrap();
+        assert_eq!(v, Value::Str("real".into()));
+        unsafe { std::env::remove_var("FITZ_TEST_ENV_OR_EXISTS"); }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_or_builtin_var_missing_usa_default() {
+        unsafe { std::env::remove_var("FITZ_TEST_ENV_OR_MISSING_XYZ"); }
+        let src = "let v = env_or(\"FITZ_TEST_ENV_OR_MISSING_XYZ\", \"fallback\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let v = env.lock().get("v").unwrap();
+        assert_eq!(v, Value::Str("fallback".into()));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn env_builtin_propagable_con_operador_try() {
+        // Patrón canónico de uso: `fn get_secret() -> Result<Str> { let s = env("KEY")?; ... }`.
+        // El `?` desempaca el Result; si missing, propaga el Err.
+        unsafe { std::env::set_var("FITZ_TEST_ENV_TRY", "secret-value"); }
+        let src = "\
+            fn read_secret() -> Result<Str> {\n\
+                let s = env(\"FITZ_TEST_ENV_TRY\")?\n\
+                return Ok(\"got: {s}\")\n\
+            }\n\
+            let r = read_secret()\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Ok(inner)) => {
+                assert_eq!(*inner, Value::Str("got: secret-value".into()));
+            }
+            other => panic!("esperaba Ok, fue {:?}", other),
+        }
+        unsafe { std::env::remove_var("FITZ_TEST_ENV_TRY"); }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_env_builtin_carga_archivo_simple() {
+        // Crea un .env temporal, lo carga, valida que las vars quedan
+        // disponibles via env().
+        let tmpdir = std::env::temp_dir().join("fitz-test-load-env");
+        let _ = std::fs::create_dir_all(&tmpdir);
+        let env_file = tmpdir.join("test.env");
+        std::fs::write(
+            &env_file,
+            "# comentario\nFITZ_TEST_LOAD_A=alpha\nFITZ_TEST_LOAD_B=beta\n\n# blank arriba\nFITZ_TEST_LOAD_C=\"with spaces\"\n",
+        )
+        .unwrap();
+        let env_path = env_file.to_str().unwrap().replace('\\', "\\\\");
+        let src = format!(
+            "let r = load_env(\"{}\")\nlet a = env_or(\"FITZ_TEST_LOAD_A\", \"\")\nlet b = env_or(\"FITZ_TEST_LOAD_B\", \"\")\nlet c = env_or(\"FITZ_TEST_LOAD_C\", \"\")\n",
+            env_path
+        );
+        let (eval_env, res) = parse_eval_into_env(&src).await;
+        res.unwrap();
+        // load_env devolvió Ok(Null).
+        let r = eval_env.lock().get("r").unwrap();
+        assert!(matches!(
+            r,
+            Value::Result(ResultVariant::Ok(ref inner)) if matches!(**inner, Value::Null)
+        ));
+        // Variables seteadas.
+        assert_eq!(eval_env.lock().get("a").unwrap(), Value::Str("alpha".into()));
+        assert_eq!(eval_env.lock().get("b").unwrap(), Value::Str("beta".into()));
+        // Comillas dobles stripped.
+        assert_eq!(eval_env.lock().get("c").unwrap(), Value::Str("with spaces".into()));
+        // Cleanup
+        unsafe {
+            std::env::remove_var("FITZ_TEST_LOAD_A");
+            std::env::remove_var("FITZ_TEST_LOAD_B");
+            std::env::remove_var("FITZ_TEST_LOAD_C");
+        }
+        let _ = std::fs::remove_file(&env_file);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn load_env_builtin_archivo_inexistente_devuelve_err() {
+        let src = "let r = load_env(\"/tmp/fitz-no-existe-este-archivo-xyz123.env\")";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let r = env.lock().get("r").unwrap();
+        match r {
+            Value::Result(ResultVariant::Err(msg)) => {
+                let s = match *msg {
+                    Value::Str(s) => s,
+                    other => panic!("esperaba Err(Str), fue Err({:?})", other),
+                };
+                assert!(
+                    s.contains("no se pudo leer"),
+                    "msg no menciona 'no se pudo leer': {}",
+                    s
+                );
+            }
+            other => panic!("esperaba Err, fue {:?}", other),
+        }
     }
 
     // -------------------------------------------------------------------

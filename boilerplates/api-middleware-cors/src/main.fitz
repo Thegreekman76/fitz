@@ -29,11 +29,13 @@
 @server(3000, "0.0.0.0")
 fn main() => 0
 
-// JWT secret. **PRODUCCIÓN REAL**: debe venir de env var / secret
-// store; Fitz hoy no soporta `env("KEY")` builtin (deuda futura del
-// lenguaje). Mientras tanto, edita esto antes de deploy o cambia
-// el approach (e.g. read_file un secret file).
-let SECRET = "demo-secret-cambiame-antes-de-deploy-32-chars-min"
+// JWT secret leído de la env var `JWT_SECRET` con fallback a un
+// valor demo (32+ chars para HS256). Para producción real: setear
+// `JWT_SECRET` con un valor fuerte generado aleatoriamente — vía
+// docker-compose env, .env file con `load_env(...)`, secrets de
+// Kubernetes, etc. El builtin `env_or(key, default)` devuelve `Str`
+// directamente (mini-fase env builtin 2026-05-22).
+let SECRET = env_or("JWT_SECRET", "demo-secret-cambiame-antes-de-deploy-32-chars-min")
 
 type User { id: Int, email: Str, name: Str, role: Str }
 type Credentials { email: Str, password: Str }

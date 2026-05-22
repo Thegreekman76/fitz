@@ -72,9 +72,12 @@ abrí un issue.
 29. [WebSockets tipados](#29-websockets-tipados)
 30. [Jobs sin Celery](#30-jobs-sin-celery)
 
-**Parte 12 — Cerrando**
-31. [Plantillas y boilerplates](#31-plantillas-y-boilerplates)
-32. [Qué sigue](#32-qué-sigue)
+**Parte 12 — Operacional**
+31. [Variables de entorno](#31-variables-de-entorno)
+
+**Parte 13 — Cerrando**
+32. [Plantillas y boilerplates](#32-plantillas-y-boilerplates)
+33. [Qué sigue](#33-qué-sigue)
 
 ---
 
@@ -10251,7 +10254,133 @@ endurecimiento para servicios críticos".
 
 ---
 
-## 31. Plantillas y boilerplates
+## 31. Variables de entorno
+
+Para hablar con secrets, ports configurables y rutas dependientes del
+deploy, Fitz tiene 3 builtins dedicados desde la mini-fase env (2026-05-22):
+
+- **`env(key: Str) -> Result<Str>`** — lee una variable de entorno.
+  Si existe, devuelve `Ok(value)`; si no, `Err("env var X no
+  definida")`. Forzás manejo con `?` o `match` (paralelo a
+  `find`/`get`/`json.loads`).
+- **`env_or(key: Str, default: Str) -> Str`** — la misma operación
+  con valor por default. Nunca falla. Útil para config opcional
+  (`let port = env_or("PORT", "3000")`).
+- **`load_env(path: Str) -> Result<Null>`** — parser KEY=VALUE simple
+  que setea las vars vía `std::env::set_var`. Sin auto-load al boot
+  (por diseño: explicit > magic). Llamalo en el `main` antes de
+  arrancar el server.
+
+### Patrón canónico — secrets y config
+
+```fitz
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+// Cargar .env si está en el cwd, ignorar si falta (modo dev).
+match load_env(".env") {
+    Ok(_) => print("[boot] .env cargado"),
+    Err(_) => print("[boot] sin .env, leyendo del environment del proceso"),
+}
+
+let JWT_SECRET = env_or("JWT_SECRET", "demo-cambiame-en-prod")
+let DB_HOST    = env_or("DB_HOST", "localhost")
+let LOG_LEVEL  = env_or("LOG_LEVEL", "info")
+
+// Secret obligatorio sin default razonable — fail-fast al boot.
+fn load_session_key() -> Result<Str> {
+    let key = env("SESSION_KEY")?
+    return Ok(key)
+}
+```
+
+Nota: hoy el decorator `@server(port, host)` recibe `port` como
+literal `Int`. Si necesitás puerto configurable, parsealo en el
+boot via builtin externo o capturalo desde la guía de tu app. Una
+mini-fase futura podría sumar `env_int(key, default) -> Int` para
+zafar de la conversión manual.
+
+### Formato del archivo `.env`
+
+```
+# Comentarios con `#` ignorados
+APP_PORT=3000
+JWT_SECRET=super-secret-32-chars-min
+GREETING="con espacios entre comillas"
+
+# Líneas vacías ignoradas también
+DATABASE_URL=postgresql://user:pass@localhost:5432/db
+```
+
+Reglas del parser:
+- Líneas vacías y las que empiezan con `#` se ignoran.
+- Split por el PRIMER `=` (los `=` adicionales en el valor pasan
+  literal).
+- Comillas dobles wrapping (`KEY="value"`) se strippean.
+- Sin variable expansion (`$VAR`/`${VAR}`), sin multi-line, sin
+  escape chars. Si entra demanda, mini-fase futura dedicada.
+
+### Por qué `Result<Str>`, no `Str` con panic
+
+El modelo "sin excepciones" del lenguaje exige que cada operación
+que puede fallar lo declare en el tipo. `env("KEY")` puede fallar
+(la var no existe), entonces retorna `Result<Str>` — el caller
+**tiene** que manejar el caso, ya sea con `?` (propagar) o `match`
+(rama explícita). Esto evita el clásico bug de "olvidé exportar la
+variable y el server crashea con un mensaje opaco".
+
+Si querés el modelo "siempre devuelve algo", usá `env_or(key, default)`:
+
+```fitz
+// env_or nunca falla — perfecto para defaults razonables.
+let log_level = env_or("LOG_LEVEL", "info")
+```
+
+### `load_env` no auto-carga al boot
+
+A diferencia de Rails/FastAPI/Express, **Fitz NO carga `.env`
+automáticamente**. El usuario explícitamente llama
+`load_env(".env")?` (o el path que prefiera) al boot. Razón: el
+comportamiento implícito de auto-loading es la fuente típica de bugs
+"funciona en mi máquina y no en CI" (porque CI no tiene `.env`
+y producción tampoco). Hacerlo explícito hace visible qué se carga
+y desde dónde.
+
+Si querés el comportamiento auto-load, es 1 línea:
+
+```fitz
+let _ = load_env(".env")
+// Ignoramos el Result porque si no existe el .env tampoco es error
+// (las vars vienen del environment del proceso).
+```
+
+### Errores con mensajes claros
+
+Cuando `env(key)` falla, el mensaje cita la key:
+
+```
+env var `DATABASE_URL` no definida
+```
+
+Cuando `load_env(path)` falla, el mensaje cita el archivo + el
+problema específico:
+
+```
+no se pudo leer `/config/.env`: No such file or directory (os error 2)
+/config/.env:7: línea sin `=` — formato esperado `KEY=VALUE`
+/config/.env:12: key vacía antes del `=`
+```
+
+### Test de unit usando env vars
+
+Para escribir tests que dependan de env vars, setealas en el test
+mismo con `std::env::set_var` desde Rust (o desde el script que
+lanza el test runner). El builtin `env()` lee del environment del
+proceso, que es lo que cualquier herramienta de testing modifica.
+
+---
+
+## 32. Plantillas y boilerplates
 
 Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
 separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
@@ -10299,7 +10428,7 @@ escribir desde cero.
 
 ---
 
-## 32. Qué sigue
+## 33. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.

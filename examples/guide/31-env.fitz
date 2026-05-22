@@ -1,0 +1,38 @@
+// cap 31 — Variables de entorno.
+//
+// Tres builtins:
+//   - env(key) -> Result<Str>       — falla con Err si la var no existe
+//   - env_or(key, default) -> Str   — nunca falla, usa default si missing
+//   - load_env(path) -> Result<Null> — parsea KEY=VALUE de un archivo
+
+// 1) env_or — patrón canónico para config con default razonable.
+//    Funciona sin requerir que la var exista en el environment.
+let log_level = env_or("FITZ_GUIDE_LOG_LEVEL", "info")
+print("log_level: {log_level}")
+
+// 2) env — patrón canónico para secrets que DEBEN existir.
+//    Wrapped en fn que retorna Result<Str> para poder propagar con `?`.
+fn read_secret() -> Result<Str> {
+    let s = env("FITZ_GUIDE_SECRET")?
+    return Ok(s)
+}
+
+// El secret no está seteado en este ejemplo — esperamos Err.
+match read_secret() {
+    Ok(v) => print("secret leído: {v}"),
+    Err(e) => print("(secret sin definir, OK para el ejemplo) {e}"),
+}
+
+// 3) load_env — carga archivo .env explícito.
+//    Si el archivo no existe, devuelve Err sin abortar.
+match load_env(".env-ejemplo-no-existe") {
+    Ok(_) => print("(.env cargado)"),
+    Err(_) => print("(sin .env, OK — usamos defaults)"),
+}
+
+// La regla canónica para boot resiliente: cargar .env si está, sino
+// usar el environment del proceso. Idiomatic Fitz:
+//   match load_env(".env") {
+//       Ok(_) => print("[boot] .env cargado"),
+//       Err(_) => print("[boot] usando environment del proceso"),
+//   }

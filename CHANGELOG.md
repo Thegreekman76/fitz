@@ -61,6 +61,80 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.29] — 2026-05-22 — Feature: mini-fase env builtin — `env`/`env_or`/`load_env`
+
+Tercer paso del plan post-boilerplates. Tres builtins nuevos para
+leer variables de entorno desde Fitz, paridad bit-a-bit
+intérprete↔codegen. Cierra deuda documentada en
+`project_env_builtin.md` (memoria).
+
+Builtins agregados:
+
+- **`env(key: Str) -> Result<Str>`** — lee `std::env::var`. Si la
+  var existe → `Ok(value)`, si no → `Err("env var X no definida")`.
+  Fuerza al usuario a manejar el caso missing con `?` o `match`
+  (paralelo a `find`/`get`/`json.loads`). Modelo "sin excepciones"
+  del lenguaje respetado.
+- **`env_or(key: Str, default: Str) -> Str`** — mismo lookup pero
+  con default. Nunca falla. Paralelo a `Option::unwrap_or` de Rust.
+- **`load_env(path: Str) -> Result<Null>`** — parser KEY=VALUE
+  simple. Líneas vacías y `#` comments ignoradas, comillas dobles
+  wrapping strippeadas. Sin variable expansion (`$VAR`/`${VAR}`),
+  sin multi-line, sin escape chars. **Sin auto-load por diseño**:
+  el usuario explícitamente llama `load_env(".env")?` en el boot
+  ("explicit > magic").
+
+Cambios:
+
+- `src/evaluator.rs`: 3 builtins nuevos (`builtin_env`,
+  `builtin_env_or`, `builtin_load_env`) + helper `parse_env_file`
+  con parser KEY=VALUE simple. Registrados en `register_builtins`;
+  agregados a `builtin_names()` del REPL.
+- `src/types.rs::register_builtins`: 3 firmas nuevas registradas
+  en el checker (`env: Function([Str]) -> Result<Str>`,
+  `env_or: Function([Str, Str]) -> Str`,
+  `load_env: Function([Str]) -> Result<Null>`).
+- `src/codegen.rs`: 3 arms nuevos en `gen_call` que delegan a
+  helpers `__fitz_env`/`__fitz_env_or`/`__fitz_load_env` emitidos
+  siempre en el preludio (son fns chicas; Rust hace dead-code elim
+  si no se usan).
+- 8 unit tests verdes en `evaluator::tests::env_builtin_*`/
+  `env_or_builtin_*`/`load_env_builtin_*` cubriendo:
+  var existente como Ok, var missing como Err con mensaje
+  específico, var vacía como Ok(""), propagación con `?`,
+  env_or con default vs valor real, load_env de archivo con
+  comments + comillas + líneas vacías, load_env de archivo
+  inexistente como Err.
+- 5 tests E2E verdes en `compile_e2e::env_builtin_*`/`env_or_*`/
+  `load_env_*` con nuevo helper `build_and_run_with_env` que
+  inyecta env vars al child via `Command::env`. Confirma paridad
+  bit-a-bit `fitz run` ↔ `fitz build`.
+- VSCode extension actualizada:
+  - Grammar TextMate (`syntaxes/fitz.tmLanguage.json`): los 3
+    builtins sumados al pattern `support.function.builtin.fitz`.
+  - LSP autocomplete (`src/lsp.rs::scope_level_completions`):
+    los 3 builtins listados con sus firmas en el detail.
+- Cap nuevo 31 "Variables de entorno" en `docs/guide.md`
+  (renumeración 31→32 Plantillas, 32→33 Qué sigue). Cubre las 3
+  builtins con patrones canónicos, formato `.env`, razón del
+  `Result<Str>` en `env()`, política de no-auto-load.
+- Ejemplo runnable nuevo `examples/guide/31-env.fitz` agregado al
+  smoke `GUIDE_EXAMPLES_COMPILE` (verde).
+- Boilerplate `api-middleware-cors`: el `JWT_SECRET` hardcoded
+  reemplazado por `env_or("JWT_SECRET", "demo-cambiame-...")`.
+  README refrescado: la nota "env builtin es deuda futura"
+  reemplazada por ejemplo de uso real. Roadmap del boilerplate
+  marca esa deuda como ✓ CERRADA.
+
+Total al cierre: **2176 unit + 274 compile_e2e + 3 openapi**.
+Smoke `GUIDE_EXAMPLES_COMPILE` verde con el nuevo cap 31.
+
+**Próximo paso del plan post-boilerplates**: Paso 4 — Loader Fitz
+con imports absolutos desde manifest root (deuda
+R.bug-loader-relative-only — bloquea organización multi-archivo).
+
+---
+
 ## [v0.9.28] — 2026-05-22 — Patch: paridad codegen — coerción `PyAny → List<T>`/`Nominal`/`List<Nominal>` en `fitz build`
 
 Cierra la deuda **R.bug-8.7-coercion-list-codegen** documentada al

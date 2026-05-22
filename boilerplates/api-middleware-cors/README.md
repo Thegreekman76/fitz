@@ -89,17 +89,16 @@ cd boilerplates/api-middleware-cors
 cp .env.example .env
 ```
 
-**Nota honesta**: hoy el `.env` NO se usa todavía. Fitz no soporta
-`env("KEY")` builtin (deuda futura del lenguaje). El `JWT_SECRET`
-está hardcoded en `src/main.fitz` con un valor placeholder
-público:
+El `JWT_SECRET` se lee con `env_or` desde el environment del
+proceso (mini-fase env builtin del lenguaje, 2026-05-22):
 
 ```fitz
-let SECRET = "demo-secret-cambiame-antes-de-deploy-32-chars-min"
+let SECRET = env_or("JWT_SECRET", "demo-secret-cambiame-antes-de-deploy-32-chars-min")
 ```
 
-**Para producción real, editá esa línea en `src/main.fitz`** con un
-secret de 32+ chars aleatorio antes del `docker compose up --build`.
+**Para producción real**: setear `JWT_SECRET` con un valor fuerte
+generado aleatoriamente, vía `docker-compose env` o `.env` cargado
+con `load_env(".env")?` en el `main`.
 Cuando Fitz soporte env vars, el .env va a tener sentido sin
 editar código.
 
@@ -327,8 +326,7 @@ Multi-arch (linux/amd64 + linux/arm64) es deuda del `release.yml` de Fitz.
 
 ## Roadmap del boilerplate
 
-- **Env vars en Fitz**: cuando el lenguaje tenga `env("KEY")`
-  builtin, mover el `JWT_SECRET` a `.env`.
+- **Env vars en Fitz**: ✓ CERRADO 2026-05-22 — el `JWT_SECRET` ahora se lee con `env_or(...)`. Para producción, setearla vía `docker-compose env` o `load_env(".env")?` en el `main`.
 - **Refresh tokens**: hoy el JWT no expira (no tiene `exp` claim).
   Para producción real, agregar `exp` + endpoint `/refresh`.
 - **Sessions cookie-based** como alternativa a bearer (deuda Fase
