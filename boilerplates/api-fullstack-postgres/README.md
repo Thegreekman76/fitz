@@ -404,12 +404,20 @@ Fitz, incluyendo algunas deudas que viven en el lenguaje:
 ### `fitz run` en lugar de `fitz build`
 
 El container ejecuta `fitz run src/main.fitz` (el intérprete) en
-lugar de compilar a binario nativo con `fitz build`. Razón: la
-coerción `dict → Instance` Python en `fitz build` con features
-python sigue siendo deuda (deuda **R.bug-8.7-coercion-list-codegen**
-en `docs/deudas_lenguaje.md`). El intérprete sí la soporta
-(Fase 8.4.3). En producción, `fitz run` es ~20-30% más lento que
-un binario nativo pero perfectamente válido.
+lugar de compilar a binario nativo con `fitz build`. La razón es
+**performance del boot**: `fitz build` produce binario standalone
+pero el primer build adentro del container compila desde source
+(~8-12 min). `fitz run` arranca instantáneo y el intérprete
+ejecuta el código directamente. Para un boilerplate didáctico es
+preferible.
+
+> Nota técnica: la coerción `dict → Instance` y
+> `list[dict] → List<Instance>` Python ya funciona también en
+> `fitz build` desde la mini-fase 8.7.bis (deuda **R.bug-8.7-coercion-list-codegen**
+> cerrada el 2026-05-22). Si querés compilar el boilerplate a
+> binario nativo, cambiá el `CMD` del Dockerfile a
+> `["fitz", "build", "src/main.fitz"]` y referenciá el binario
+> emitido — funciona bit-a-bit como el intérprete.
 
 ### Sin async DB
 

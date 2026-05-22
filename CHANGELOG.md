@@ -61,6 +61,93 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.28] — 2026-05-22 — Patch: paridad codegen — coerción `PyAny → List<T>`/`Nominal`/`List<Nominal>` en `fitz build`
+
+Cierra la deuda **R.bug-8.7-coercion-list-codegen** documentada al
+cierre formal de Fase 8.7 (CHANGELOG v0.8.8 de 2026-05-15). Paso 2
+del plan post-boilerplates, paridad codegen del Paso 1 (v0.9.27)
+que cerró el equivalente runtime.
+
+Antes (en `fitz build`):
+
+```fitz
+type User { id: Int, name: Str }
+from python import json
+
+fn list_users(raw: Str) -> Result<List<User>> {
+    let users: List<User> = json.loads(raw)?
+    // ERROR Rust: expected Arc<Mutex<Vec<UserData>>>, found __FitzPyObject
+    return Ok(users)
+}
+```
+
+Ahora:
+
+```fitz
+fn list_users(raw: Str) -> Result<List<User>> {
+    let users: List<User> = json.loads(raw)?
+    // OK — compila a binario nativo, coerce el PyList item-por-item
+    // a `Arc<Mutex<Vec<Arc<Mutex<UserData>>>>>` bit-a-bit como el runtime.
+    return Ok(users)
+}
+```
+
+Cambios:
+
+- `src/codegen.rs::coerce(code, from, to, env)` ahora despacha:
+  - `(PyAny, List<Int>)` → `__fitz_py_to_list_i64(&{code})`
+  - `(PyAny, List<Float>)` → `__fitz_py_to_list_f64(&{code})`
+  - `(PyAny, List<Str>)` → `__fitz_py_to_list_string(&{code})`
+  - `(PyAny, List<Bool>)` → `__fitz_py_to_list_bool(&{code})` (helper nuevo)
+  - `(PyAny, Nominal(T))` → `__fitz_py_to_instance_<T>(&{code})` (helper per-tipo)
+  - `(PyAny, List<Nominal(T)>)` → `__fitz_py_to_list_<T>(&{code})` (helper per-tipo)
+  - Signatura cambió: añadido param `env: &TypeEnv` (89 call sites
+    actualizados via sed automático).
+- Nuevos métodos en `CodegenCtx`:
+  - `gen_fitz_py_to_instance_helper(name, sig)` — emite
+    `fn __fitz_py_to_instance_<Name>(obj: &__FitzPyObject) -> Arc<Mutex<<Name>Data>>`
+    con extracción field-por-field, defaults inline, manejo de
+    Nullable (`None` cuando dict missing o Python None), error
+    claro cuando field requerido falta. Llamado desde
+    `gen_type_def` cuando `uses_python = true`.
+  - `gen_fitz_py_to_list_helper(name)` — emite
+    `fn __fitz_py_to_list_<Name>(obj: &__FitzPyObject) -> Arc<Mutex<Vec<Arc<Mutex<<Name>Data>>>>>`
+    iterando un PyList y delegando al helper de instance.
+  - `py_field_extract_code` + `py_field_extract_arms` +
+    `py_inner_extract_for_nullable` — sub-helpers para emitir
+    el extract code por field según tipo (Int/Float/Str/Bool/
+    Nullable<primitive>/Nominal/List<primitive>).
+- 3 E2E tests verdes en `compile_e2e::fase_8_7_bis_*`:
+  - `pyany_a_list_int_via_anotacion` — patrón list primitivo.
+  - `pyany_a_instance_via_anotacion` — patrón single dict, con
+    default field aplicado cuando falta key.
+  - `pyany_a_list_de_instances` — patrón canónico del boilerplate
+    `api-postgres-python::list_users`.
+- READMEs de boilerplates 5/6 actualizados: la nota "deuda 8.7
+  bloquea `fitz build`" reemplazada por nota técnica que cita
+  el cierre 2026-05-22 (mini-fase 8.7.bis) y explica que `fitz
+  build` ahora soporta el patrón end-to-end. Dockerfiles
+  intencionalmente quedan con `fitz run` por boot rápido en
+  containers (build desde source toma 8-12 min); usuarios que
+  quieran binario standalone solo cambian `CMD`.
+- VSCode extension revisada: grammar + LSP autocomplete + walkers
+  + diagnostics SIN cambios (el fix es codegen puro, no toca
+  sintaxis ni types estáticos). Documento confirmado en cierre
+  formal.
+
+Total al cierre: **2168 unit + 269 compile_e2e + 3 openapi**.
+Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+
+**Deuda residual del scope acotado** (NO bloquea uso real):
+- `Map<K, V>` coerción desde PyDict no implementada (poco común
+  en práctica — `let m: Map<Str, V> = json.loads(s)?` es el caso
+  raro).
+- `List<List<T>>` o nominales anidados que contienen `List<Nominal>`
+  como field también pendientes (deuda menor — el subset cubierto
+  destraba el 90% del caso real).
+
+---
+
 ## [v0.9.27] — 2026-05-22 — Patch: coerción recursiva `Map → Instance` sobre `List<T>`/`Map<K,V>` en runtime
 
 Fix de la deuda **R.missing-recursive-instance-coercion** (descubierta

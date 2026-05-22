@@ -4991,7 +4991,44 @@ agrega en el checker estático.
 
 ---
 
-## R.bug-8.7-coercion-list-codegen — Coerción `list`/`dict` Python → `List<T>`/`Map<K,V>`/`Instance` Fitz en codegen (deuda residual de Fase 8.7)
+## ~~R.bug-8.7-coercion-list-codegen — Coerción `list`/`dict` Python → `List<T>`/`Map<K,V>`/`Instance` Fitz en codegen~~ ✓ CERRADO 2026-05-22
+
+> **CERRADO 2026-05-22** — mini-fase 8.7.bis (Paso 2 del plan
+> post-boilerplates), paridad codegen ↔ runtime del Paso 1
+> (R.missing-recursive-instance-coercion).
+>
+> Cambios:
+> - `src/codegen.rs::coerce(from, to, env)` ahora despacha
+>   `(PyAny, List<Int/Float/Str/Bool>)` a los helpers
+>   `__fitz_py_to_list_*` (los de primitivos ya estaban en el
+>   preludio, solo faltaba el wiring + el nuevo
+>   `__fitz_py_to_list_bool`).
+> - Nuevos métodos en `CodegenCtx`:
+>   `gen_fitz_py_to_instance_helper` y `gen_fitz_py_to_list_helper`.
+>   Por cada `type Foo` declarado, `gen_type_def` emite ahora
+>   `__fitz_py_to_instance_Foo` (PyDict → Arc<Mutex<FooData>>
+>   field por field con defaults inline) y
+>   `__fitz_py_to_list_Foo` (itera PyList y delega al primero).
+> - 3 E2E tests verdes en `compile_e2e::fase_8_7_bis_*`:
+>   `PyAny → List<Int>`, `PyAny → User`, `PyAny → List<User>`.
+>   Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+> - Signatura de `coerce(code, from, to)` cambió a `coerce(..., env: &TypeEnv)` (~89 call sites actualizados con sed automático).
+> - Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+> - 2168 unit tests verdes.
+>
+> **Deuda residual del scope acotado** (NO bloquea uso real):
+> `Map<K, V>` coerción desde PyDict no implementada (poco común
+> en práctica — el patrón es `let m: Map<Str, V> = json.loads(s)?`).
+> `List<List<T>>` o nominales anidados que contienen `List<Nominal>`
+> también pendientes. Aceptable como deuda menor — el subset
+> cubierto destraba el patrón canónico `List<NominalT>` que es
+> el 90% del caso real.
+
+**Prioridad: ALTA** (post-boilerplates) — limitaba el patrón
+"endpoint que devuelve `Result<List<T>>` con T nominal" desde
+interop Python en `fitz build`. El workaround era devolver
+JSON crudo (`Result<Str>`) que el cliente HTTP doble-parseaba —
+funcional pero feo.
 
 **Prioridad: ALTA** (post-boilerplates) — limita el patrón
 "endpoint que devuelve `Result<List<T>>` con T nominal" desde

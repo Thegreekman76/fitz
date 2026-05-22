@@ -6012,3 +6012,104 @@ fn r_bug_deadlock_str_interp_re_lock_mismo_arc_no_cuelga() {
         stdout
     );
 }
+
+// ----------------------------------------------------------------------
+// Mini-fase 8.7.bis — Coerción PyAny → List<T> / Nominal / List<Nominal>
+// en codegen, paridad con la coerción runtime cerrada en Paso 1 del
+// plan post-boilerplates.
+// ----------------------------------------------------------------------
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_bis_build_pyany_a_list_int_via_anotacion() {
+    // `json.loads("[1, 2, 3]")` devuelve un PyList opaco. La anotación
+    // `List<Int>` dispara `__fitz_py_to_list_i64` (ya emitido en el
+    // preludio) — antes de 8.7.bis el coerce caía al passthrough y el
+    // binario no compilaba con error de tipo Rust.
+    //
+    // Patrón: workaround para que match arms con varios stmts compilen:
+    // envolver el cuerpo en una fn que retorna `Result<Null>` y luego
+    // pattern-match al top level.
+    let src = "from python import json\n\
+               fn work() -> Result<Null> {\n\
+                   let raw = json.loads(\"[1, 2, 3]\")?\n\
+                   let xs: List<Int> = raw\n\
+                   let sum = xs.reduce(0, fn(a: Int, b: Int) => a + b)\n\
+                   print(\"len={xs.len()} sum={sum}\")\n\
+                   return Ok(null)\n\
+               }\n\
+               match work() {\n\
+                 Ok(_) => print(\"done\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_bis_list_int", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    assert!(
+        stdout.contains("len=3 sum=6"),
+        "esperaba `len=3 sum=6` en stdout, fue: {}",
+        stdout
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_bis_build_pyany_a_instance_via_anotacion() {
+    // `json.loads("{...}")` devuelve PyDict opaco. La anotación `User`
+    // (nominal) dispara `__fitz_py_to_instance_User` emitido por
+    // `gen_type_def` cuando uses_python=true.
+    //
+    // El `{` y `}` del JSON literal se escapan con `{{` y `}}` (regla
+    // estándar de interpolación de strings Fitz — sin escape Fitz los
+    // interpreta como start/end de interpolación).
+    // `\{` y `\}` escapan literal `{`/`}` adentro del string (sin escape
+    // se interpretan como inicio/fin de interpolación).
+    let src = "type User { id: Int, name: Str, email: Str = \"\" }\n\
+               from python import json\n\
+               fn work() -> Result<Null> {\n\
+                   let raw = json.loads(\"\\{\\\"id\\\": 7, \\\"name\\\": \\\"ada\\\"\\}\")?\n\
+                   let u: User = raw\n\
+                   print(\"id={u.id} name={u.name} email='{u.email}'\")\n\
+                   return Ok(null)\n\
+               }\n\
+               match work() {\n\
+                 Ok(_) => print(\"done\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_bis_instance", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    // El default `email = ""` se aplica porque el dict no trae la key.
+    assert!(
+        stdout.contains("id=7 name=ada email=''"),
+        "esperaba `id=7 name=ada email=''` en stdout, fue: {}",
+        stdout
+    );
+}
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_bis_build_pyany_a_list_de_instances() {
+    // Patrón canónico del boilerplate `api-postgres-python` /
+    // `api-fullstack-postgres`: `let users: List<User> = json.loads(s)?`.
+    // El codegen emite `__fitz_py_to_list_User` que itera el PyList y
+    // llama a `__fitz_py_to_instance_User` por item. Antes de 8.7.bis
+    // este código no compilaba con error de tipo Rust.
+    let src = "type User { id: Int, name: Str }\n\
+               from python import json\n\
+               fn work() -> Result<Null> {\n\
+                   let raw = json.loads(\"[\\{\\\"id\\\": 1, \\\"name\\\": \\\"ada\\\"\\}, \\{\\\"id\\\": 2, \\\"name\\\": \\\"luis\\\"\\}]\")?\n\
+                   let users: List<User> = raw\n\
+                   print(\"n={users.len()} first={users[0].name}\")\n\
+                   return Ok(null)\n\
+               }\n\
+               match work() {\n\
+                 Ok(_) => print(\"done\"),\n\
+                 Err(e) => print(\"err: {e}\")\n\
+               }\n";
+    let (stdout, exit) = build_and_run("fase_8_7_bis_list_instance", src);
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    assert!(
+        stdout.contains("n=2 first=ada"),
+        "esperaba `n=2 first=ada` en stdout, fue: {}",
+        stdout
+    );
+}

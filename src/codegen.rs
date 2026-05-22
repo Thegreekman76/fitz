@@ -4220,6 +4220,18 @@ impl<'a> CodegenCtx<'a> {
              }\n        \
              Arc::new(Mutex::new(out))\n    \
              })\n\
+             }\n\n\
+             fn __fitz_py_to_list_bool(obj: &__FitzPyObject) -> Arc<Mutex<Vec<bool>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Bool>\"));\n        \
+             let mut out: Vec<bool> = Vec::with_capacity(list.len());\n        \
+             for item in list.iter() {\n            \
+             if !item.is_instance_of::<PyBool>() { panic!(\"elemento de list Python no es bool — esperado para List<Bool>\"); }\n            \
+             out.push(item.extract::<bool>().unwrap_or(false));\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
              }\n\n",
         );
     }
@@ -5380,7 +5392,273 @@ where
                 data = data_name,
             )
             .unwrap();
+            // Mini-fase 8.7.bis (2026-05-22) — dirección inversa
+            // `Python → Fitz`: helpers `__fitz_py_to_instance_<Name>` y
+            // `__fitz_py_to_list_<Name>`. El primero coerce un PyDict a
+            // `Arc<Mutex<FooData>>` (field por field con defaults y
+            // nullable handling); el segundo itera un PyList y llama al
+            // primero por item. Wireados en `coerce(PyAny, Nominal)` y
+            // `coerce(PyAny, List(Nominal))`. Paralelo a la coerción
+            // runtime `Map → Instance` cerrada en Paso 1 de este plan.
+            self.gen_fitz_py_to_instance_helper(name, &sig)?;
+            self.gen_fitz_py_to_list_helper(name)?;
         }
+        Ok(())
+    }
+
+    /// Mini-fase 8.7.bis — emit `fn __fitz_py_to_instance_<Name>(obj:
+    /// &__FitzPyObject) -> Arc<Mutex<<Name>Data>>`. Por cada field del
+    /// tipo, extrae del PyDict con la función apropiada al tipo:
+    /// - Int → `extract::<i64>()`
+    /// - Float → `extract::<f64>()` (con promoción `int → float`)
+    /// - Str → `extract::<String>()`
+    /// - Bool → `extract::<bool>()`
+    /// - Nullable<T> → check `is_none()` primero, retorna `None` si sí
+    /// - Nominal → recursión: `__fitz_py_to_instance_<T>`
+    /// - List<T> → recursión: `__fitz_py_to_list_<T>`
+    ///
+    /// Si la key falta o es None y el field tiene default, usa el
+    /// default. Si falta y no es nullable ni tiene default → panic con
+    /// mensaje claro (mismo formato que la coerción runtime 8.4.3).
+    fn gen_fitz_py_to_instance_helper(
+        &mut self,
+        name: &str,
+        sig: &TypeSig,
+    ) -> Result<(), FitzError> {
+        let data_name = format!("{}Data", name);
+        writeln!(
+            &mut self.output,
+            "fn __fitz_py_to_instance_{}(obj: &__FitzPyObject) -> Arc<Mutex<{}>> {{",
+            name, data_name
+        )
+        .unwrap();
+        self.emit("    Python::attach(|py| {\n");
+        self.emit("        let bound = obj.0.bind(py);\n");
+        writeln!(
+            &mut self.output,
+            "        let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a `{}` (recibí otro tipo)\"));",
+            name
+        )
+        .unwrap();
+        for f in &sig.fields {
+            let field_extract = self.py_field_extract_code(name, f)?;
+            writeln!(
+                &mut self.output,
+                "        let __field_{} = {{ {} }};",
+                f.name, field_extract
+            )
+            .unwrap();
+        }
+        writeln!(
+            &mut self.output,
+            "        Arc::new(Mutex::new({} {{",
+            data_name
+        )
+        .unwrap();
+        for f in &sig.fields {
+            writeln!(
+                &mut self.output,
+                "            {}: __field_{},",
+                f.name, f.name
+            )
+            .unwrap();
+        }
+        self.emit("        }))\n");
+        self.emit("    })\n");
+        self.emit("}\n\n");
+        Ok(())
+    }
+
+    /// Emite código Rust que extrae un field del dict Python `dict` (en
+    /// scope) y produce su valor con el tipo Rust correspondiente. La
+    /// lógica replica `coerce_to_annotation` runtime:
+    /// 1. Si la key existe Y no es None → extract con función apropiada.
+    /// 2. Else si tiene default → evalúa el default (inline gen_expr).
+    /// 3. Else si el field es nullable → None.
+    /// 4. Else → panic con mensaje claro.
+    fn py_field_extract_code(
+        &mut self,
+        type_name: &str,
+        f: &TypeSigField,
+    ) -> Result<String, FitzError> {
+        let key_lit = rust_str_literal(&f.name);
+        let (extract_expr, fallback_expr) = self.py_field_extract_arms(type_name, f)?;
+        Ok(format!(
+            "match dict.get_item({key}).ok().flatten() {{ \
+             Some(__item) if !__item.is_none() => {{ {extract} }}, \
+             _ => {{ {fallback} }} \
+             }}",
+            key = key_lit,
+            extract = extract_expr,
+            fallback = fallback_expr,
+        ))
+    }
+
+    /// Devuelve (extract_expr, fallback_expr) para emitir adentro del
+    /// match arm. extract_expr usa la variable `__item` (PyAnyBound) en
+    /// scope. fallback_expr se ejecuta cuando la key falta o es None.
+    fn py_field_extract_arms(
+        &mut self,
+        type_name: &str,
+        f: &TypeSigField,
+    ) -> Result<(String, String), FitzError> {
+        let field_name = &f.name;
+        // Extract arm depende del tipo del field.
+        let extract = match &f.type_ {
+            Type::Int => format!(
+                "__item.extract::<i64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: int Python fuera de rango i64\"))",
+                f = field_name, t = type_name
+            ),
+            Type::Float => format!(
+                "if __item.is_instance_of::<PyInt>() {{ \
+                 __item.extract::<i64>().map(|n| n as f64).unwrap_or(0.0) \
+                 }} else {{ \
+                 __item.extract::<f64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es float Python\")) \
+                 }}",
+                f = field_name, t = type_name
+            ),
+            Type::Str => format!(
+                "__item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es str Python\"))",
+                f = field_name, t = type_name
+            ),
+            Type::Bool => format!(
+                "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}`: no es bool Python\"))",
+                f = field_name, t = type_name
+            ),
+            Type::Nullable(inner) => {
+                let inner_extract = self.py_inner_extract_for_nullable(inner, type_name, field_name)?;
+                format!("Some({})", inner_extract)
+            }
+            Type::Nominal(id) => {
+                // Recursión: el item PyAny se envuelve en __FitzPyObject
+                // y se delega al helper del tipo nominal del field.
+                let inner_name = self.env.info(*id).name.clone();
+                format!(
+                    "{{ let __obj = __FitzPyObject(std::sync::Arc::new(__item.clone().unbind())); __fitz_py_to_instance_{}(&__obj) }}",
+                    inner_name
+                )
+            }
+            Type::List(_) => {
+                // List<T> con T primitivo o nominal — delegamos a un
+                // método del trait que recibe el item PyAny adentro de
+                // attach. Por simplicidad usamos el dispatch directo de
+                // coerce sobre PyAny → tipo Rust.
+                //
+                // Sub-MVP: limitamos a List<primitivo> en fields. Para
+                // List<Nominal> en field requiere wiring extra que no
+                // urge para el patrón canónico de boilerplates.
+                let inner_ty = if let Type::List(i) = &f.type_ { i.as_ref() } else { unreachable!() };
+                match inner_ty {
+                    Type::Int => "{ let __obj = __FitzPyObject(std::sync::Arc::new(__item.clone().unbind())); __fitz_py_to_list_i64(&__obj) }".to_string(),
+                    Type::Float => "{ let __obj = __FitzPyObject(std::sync::Arc::new(__item.clone().unbind())); __fitz_py_to_list_f64(&__obj) }".to_string(),
+                    Type::Str => "{ let __obj = __FitzPyObject(std::sync::Arc::new(__item.clone().unbind())); __fitz_py_to_list_string(&__obj) }".to_string(),
+                    _ => {
+                        return Err(self.err(format!(
+                            "field `{}` de tipo `{}`: List<T> con T no primitivo no se soporta todavía adentro de un dict Python (deuda menor)",
+                            field_name, type_name
+                        )));
+                    }
+                }
+            }
+            other => {
+                return Err(self.err(format!(
+                    "field `{}` de tipo `{}`: type `{}` no soportado en coerción Python → Fitz",
+                    field_name, type_name, other.display(self.env)
+                )));
+            }
+        };
+        // Fallback arm: default → nullable → panic.
+        let fallback = if let Some(default_expr) = &f.default {
+            // Inline el default usando gen_expr. Reuse type-coerce porque
+            // el default_expr puede tener un tipo distinto que el field
+            // (ej. Int → Float).
+            let (code, ty) = self.gen_expr(default_expr)?;
+            coerce(&code, &ty, &f.type_, self.env)
+        } else if f.type_.is_nullable() {
+            "None".to_string()
+        } else {
+            format!(
+                "panic!(\"no se puede coercer a `{t}`: el dict no tiene el campo `{f}` (requerido por el tipo, no es nullable ni tiene default)\")",
+                t = type_name, f = field_name
+            )
+        };
+        Ok((extract, fallback))
+    }
+
+    /// Sub-helper para `Nullable<T>`: extract code que se usa adentro
+    /// de `Some(...)` cuando el item no es None.
+    fn py_inner_extract_for_nullable(
+        &mut self,
+        inner: &Type,
+        type_name: &str,
+        field_name: &str,
+    ) -> Result<String, FitzError> {
+        let arm = match inner {
+            Type::Int => format!(
+                "__item.extract::<i64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Int): int Python fuera de rango\"))",
+                f = field_name, t = type_name
+            ),
+            Type::Float => format!(
+                "if __item.is_instance_of::<PyInt>() {{ \
+                 __item.extract::<i64>().map(|n| n as f64).unwrap_or(0.0) \
+                 }} else {{ \
+                 __item.extract::<f64>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Float): no es float\")) \
+                 }}",
+                f = field_name, t = type_name
+            ),
+            Type::Str => format!(
+                "__item.extract::<String>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Str): no es str\"))",
+                f = field_name, t = type_name
+            ),
+            Type::Bool => format!(
+                "__item.extract::<bool>().unwrap_or_else(|_| panic!(\"field `{f}` de `{t}` (nullable Bool): no es bool\"))",
+                f = field_name, t = type_name
+            ),
+            _ => {
+                return Err(self.err(format!(
+                    "field `{}` de tipo `{}` (nullable): inner type compuesto no soportado todavía",
+                    field_name, type_name
+                )));
+            }
+        };
+        Ok(arm)
+    }
+
+    /// Mini-fase 8.7.bis — emit `fn __fitz_py_to_list_<Name>(obj:
+    /// &__FitzPyObject) -> Arc<Mutex<Vec<Arc<Mutex<<Name>Data>>>>>`.
+    /// Itera el PyList y coerce cada item a Instance usando el helper
+    /// `__fitz_py_to_instance_<Name>`.
+    fn gen_fitz_py_to_list_helper(&mut self, name: &str) -> Result<(), FitzError> {
+        let data_name = format!("{}Data", name);
+        writeln!(
+            &mut self.output,
+            "fn __fitz_py_to_list_{n}(obj: &__FitzPyObject) -> Arc<Mutex<Vec<Arc<Mutex<{d}>>>>> {{",
+            n = name, d = data_name
+        )
+        .unwrap();
+        self.emit("    Python::attach(|py| {\n");
+        self.emit("        let bound = obj.0.bind(py);\n");
+        writeln!(
+            &mut self.output,
+            "        let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<{}>\"));",
+            name
+        )
+        .unwrap();
+        self.emit("        let mut out: Vec<Arc<Mutex<");
+        self.emit(&data_name);
+        self.emit(">>> = Vec::with_capacity(list.len());\n");
+        self.emit("        for __it in list.iter() {\n");
+        self.emit("            let __obj = __FitzPyObject(std::sync::Arc::new(__it.unbind()));\n");
+        writeln!(
+            &mut self.output,
+            "            out.push(__fitz_py_to_instance_{}(&__obj));",
+            name
+        )
+        .unwrap();
+        self.emit("        }\n");
+        self.emit("        Arc::new(Mutex::new(out))\n");
+        self.emit("    })\n");
+        self.emit("}\n\n");
         Ok(())
     }
 
@@ -5405,7 +5683,7 @@ where
             let Some(default_expr) = &f.default else { continue };
             let rust_ty = rust_type_for(&f.type_, self.env)?;
             let (code, ty) = self.gen_expr(default_expr)?;
-            let coerced = coerce(&code, &ty, &f.type_);
+            let coerced = coerce(&code, &ty, &f.type_, self.env);
             writeln!(
                 &mut self.output,
                 "pub fn __default_{}_{}() -> {} {{ {} }}",
@@ -5889,7 +6167,7 @@ where
             None => rhs_ty.clone(),
         };
 
-        let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty);
+        let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
         self.emit_indent();
         // Si la var ya existe en algún scope visible (outer o
         // current), es reasignación: emitimos `name = ...`. Si no,
@@ -5990,13 +6268,13 @@ where
         if is_const_eval_expr(value) {
             match &declared_ty {
                 Type::Int => {
-                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int);
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int, self.env);
                     writeln!(&mut self.output, "const {}: i64 = {};\n", name, coerced).unwrap();
                     self.hoisted_main_lets.insert(name.clone(), declared_ty);
                     return Ok(());
                 }
                 Type::Float => {
-                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float);
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float, self.env);
                     writeln!(&mut self.output, "const {}: f64 = {};\n", name, coerced).unwrap();
                     self.hoisted_main_lets.insert(name.clone(), declared_ty);
                     return Ok(());
@@ -6067,7 +6345,7 @@ where
         if is_const_eval_expr(value) {
             match &declared_ty {
                 Type::Int => {
-                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int);
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Int, self.env);
                     writeln!(
                         &mut self.output,
                         "pub const {}: i64 = {};\n",
@@ -6077,7 +6355,7 @@ where
                     return Ok(());
                 }
                 Type::Float => {
-                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float);
+                    let coerced = coerce(&rhs_code, &rhs_ty, &Type::Float, self.env);
                     writeln!(
                         &mut self.output,
                         "pub const {}: f64 = {};\n",
@@ -6110,7 +6388,7 @@ where
                 display_type(&declared_ty, self.env)
             ))
         })?;
-        let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty);
+        let final_rhs = coerce(&rhs_code, &rhs_ty, &declared_ty, self.env);
         writeln!(
             &mut self.output,
             "pub fn {}() -> {} {{ {} }}\n",
@@ -6140,7 +6418,7 @@ where
 
         match &obj_ty {
             Type::List(item_ty) => {
-                let coerced = coerce(&rhs_code, &rhs_ty, item_ty);
+                let coerced = coerce(&rhs_code, &rhs_ty, item_ty, self.env);
                 // **Importante**: evaluar `__idx` y `__val` ANTES de
                 // tomar el lock outer. Si `<<RHS>>` o `<<index>>`
                 // contienen un access al mismo Mutex (ej. `nums[i] =
@@ -6169,7 +6447,7 @@ where
                 Ok(())
             }
             Type::Map(_k_ty, v_ty) => {
-                let coerced = coerce(&rhs_code, &rhs_ty, v_ty);
+                let coerced = coerce(&rhs_code, &rhs_ty, v_ty, self.env);
                 // Mismo patrón compute-first, lock-last que List.
                 self.emit_indent();
                 writeln!(
@@ -6227,7 +6505,7 @@ where
             )));
         };
         let (rhs_code, rhs_ty) = self.gen_expr(value)?;
-        let coerced = coerce(&rhs_code, &rhs_ty, &f.type_);
+        let coerced = coerce(&rhs_code, &rhs_ty, &f.type_, self.env);
         self.emit_indent();
         writeln!(
             &mut self.output,
@@ -6291,7 +6569,7 @@ where
             self.emit(" };\n");
             return Ok(());
         }
-        let coerced = coerce(&code, &ty, ret_expected);
+        let coerced = coerce(&code, &ty, ret_expected, self.env);
         self.emit("return ");
         self.emit(&coerced);
         self.emit(";\n");
@@ -7418,7 +7696,7 @@ where
                 )));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-            let coerced = coerce(&arg_code, &arg_ty, &Type::Int);
+            let coerced = coerce(&arg_code, &arg_ty, &Type::Int, self.env);
             let rust_method = match name.as_str() {
                 "popcount" => "count_ones",
                 "leading_zeros" => "leading_zeros",
@@ -7441,8 +7719,8 @@ where
             }
             let (n_code, n_ty) = self.gen_expr(&args[0])?;
             let (b_code, b_ty) = self.gen_expr(&args[1])?;
-            let n_c = coerce(&n_code, &n_ty, &Type::Int);
-            let b_c = coerce(&b_code, &b_ty, &Type::Int);
+            let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
+            let b_c = coerce(&b_code, &b_ty, &Type::Int, self.env);
             let rust_method = if name == "rotate_left" {
                 "rotate_left"
             } else {
@@ -7607,7 +7885,7 @@ where
                 )));
             }
             let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-            let coerced = coerce(&arg_code, &arg_ty, &Type::Int);
+            let coerced = coerce(&arg_code, &arg_ty, &Type::Int, self.env);
             return Ok((
                 format!("__fitz_sleep({})", coerced),
                 Type::Future(Box::new(Type::Null)),
@@ -7768,7 +8046,7 @@ where
         let mut args_code: Vec<String> = Vec::with_capacity(inner_args.len());
         for (i, arg) in inner_args.iter().enumerate() {
             let (code, ty) = self.gen_expr(arg)?;
-            let coerced = coerce(&code, &ty, &sig.params[i]);
+            let coerced = coerce(&code, &ty, &sig.params[i], self.env);
             args_code.push(coerced);
         }
         // El ret type del spawn es `Future<T>` con T = ret_type de la
@@ -7926,7 +8204,7 @@ where
         for (i, expected) in sig.params.iter().enumerate().take(positional_count) {
             if i < args.len() {
                 let (code, ty) = self.gen_expr(&args[i])?;
-                arg_codes.push(coerce(&code, &ty, expected));
+                arg_codes.push(coerce(&code, &ty, expected, self.env));
             } else {
                 // Fill con default.
                 let default_expr = sig.defaults[i].as_ref().ok_or_else(|| {
@@ -7936,7 +8214,7 @@ where
                     ))
                 })?;
                 let (code, ty) = self.gen_expr(default_expr)?;
-                arg_codes.push(coerce(&code, &ty, &sig.params[i]));
+                arg_codes.push(coerce(&code, &ty, &sig.params[i], self.env));
             }
         }
 
@@ -7948,7 +8226,7 @@ where
             let mut extras: Vec<String> = Vec::new();
             for arg in args.iter().skip(positional_count) {
                 let (code, ty) = self.gen_expr(arg)?;
-                extras.push(coerce(&code, &ty, elem_ty));
+                extras.push(coerce(&code, &ty, elem_ty, self.env));
             }
             // `Arc::new(Mutex::new(vec![...]))` — paralelo al codegen
             // estándar de literales de lista (`Expr::List`).
@@ -8007,10 +8285,10 @@ where
             )));
         }
         let (secret_code, secret_ty) = self.gen_expr(&args[1])?;
-        let secret_c = coerce(&secret_code, &secret_ty, &Type::Str);
+        let secret_c = coerce(&secret_code, &secret_ty, &Type::Str, self.env);
         let alg_code = if args.len() == 3 {
             let (a_code, a_ty) = self.gen_expr(&args[2])?;
-            let a_c = coerce(&a_code, &a_ty, &Type::Str);
+            let a_c = coerce(&a_code, &a_ty, &Type::Str, self.env);
             format!("Some({})", a_c)
         } else {
             "None".to_string()
@@ -8036,12 +8314,12 @@ where
             )));
         }
         let (token_code, token_ty) = self.gen_expr(&args[0])?;
-        let token_c = coerce(&token_code, &token_ty, &Type::Str);
+        let token_c = coerce(&token_code, &token_ty, &Type::Str, self.env);
         let (secret_code, secret_ty) = self.gen_expr(&args[1])?;
-        let secret_c = coerce(&secret_code, &secret_ty, &Type::Str);
+        let secret_c = coerce(&secret_code, &secret_ty, &Type::Str, self.env);
         let alg_code = if args.len() == 3 {
             let (a_code, a_ty) = self.gen_expr(&args[2])?;
-            let a_c = coerce(&a_code, &a_ty, &Type::Str);
+            let a_c = coerce(&a_code, &a_ty, &Type::Str, self.env);
             format!("Some({})", a_c)
         } else {
             "None".to_string()
@@ -8070,7 +8348,7 @@ where
             )));
         }
         let (code, ty) = self.gen_expr(&args[0])?;
-        let coerced = coerce(&code, &ty, &Type::Str);
+        let coerced = coerce(&code, &ty, &Type::Str, self.env);
         Ok((
             format!("__fitz_hash_password({})", coerced),
             Type::Str,
@@ -8089,9 +8367,9 @@ where
             )));
         }
         let (plain_code, plain_ty) = self.gen_expr(&args[0])?;
-        let plain_c = coerce(&plain_code, &plain_ty, &Type::Str);
+        let plain_c = coerce(&plain_code, &plain_ty, &Type::Str, self.env);
         let (hashed_code, hashed_ty) = self.gen_expr(&args[1])?;
-        let hashed_c = coerce(&hashed_code, &hashed_ty, &Type::Str);
+        let hashed_c = coerce(&hashed_code, &hashed_ty, &Type::Str, self.env);
         Ok((
             format!("__fitz_hash_verify({}, {})", plain_c, hashed_c),
             Type::Bool,
@@ -8137,7 +8415,7 @@ where
                             )));
                         }
                         let (msg_code, msg_ty) = self.gen_expr(&args[0])?;
-                        let coerced = coerce(&msg_code, &msg_ty, inner_t);
+                        let coerced = coerce(&msg_code, &msg_ty, inner_t, self.env);
                         return Ok((
                             format!("({}).{}({}).await", obj_code, method, coerced),
                             Type::Result {
@@ -8195,15 +8473,15 @@ where
                 check_method_arity(method, args, 1)?;
                 let (start_code, start_ty) = self.gen_expr(start)?;
                 let (end_code, end_ty) = self.gen_expr(end)?;
-                let start_c = coerce(&start_code, &start_ty, &Type::Int);
-                let end_c = coerce(&end_code, &end_ty, &Type::Int);
+                let start_c = coerce(&start_code, &start_ty, &Type::Int, self.env);
+                let end_c = coerce(&end_code, &end_ty, &Type::Int, self.env);
                 let end_final = if *inclusive {
                     format!("({}) + 1i64", end_c)
                 } else {
                     end_c
                 };
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
                     "{{ let __step: i64 = {n_c}; \
                        if __step <= 0 {{ panic!(\"`Range.step_by()` requiere n > 0, recibió {{}}\", __step); }} \
@@ -8222,8 +8500,8 @@ where
         let (obj_code, obj_ty) = if let Expr::Range { start, end, inclusive, .. } = object {
             let (start_code, start_ty) = self.gen_expr(start)?;
             let (end_code, end_ty) = self.gen_expr(end)?;
-            let start_c = coerce(&start_code, &start_ty, &Type::Int);
-            let end_c = coerce(&end_code, &end_ty, &Type::Int);
+            let start_c = coerce(&start_code, &start_ty, &Type::Int, self.env);
+            let end_c = coerce(&end_code, &end_ty, &Type::Int, self.env);
             // Inclusivo: sumamos 1 al end (paralelo a parser R.1.4 que
             // materializa el rango inclusivo así).
             let end_final = if *inclusive {
@@ -8374,19 +8652,19 @@ where
             (Type::Str, "contains") => {
                 check_method_arity(method, args, 1)?;
                 let (a_code, a_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let coerced = coerce(&a_code, &a_ty, &Type::Str, self.env);
                 Ok((format!("({}).contains({}.as_str())", obj_code, coerced), Type::Bool))
             }
             (Type::Str, "starts_with") => {
                 check_method_arity(method, args, 1)?;
                 let (a_code, a_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let coerced = coerce(&a_code, &a_ty, &Type::Str, self.env);
                 Ok((format!("({}).starts_with({}.as_str())", obj_code, coerced), Type::Bool))
             }
             (Type::Str, "ends_with") => {
                 check_method_arity(method, args, 1)?;
                 let (a_code, a_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let coerced = coerce(&a_code, &a_ty, &Type::Str, self.env);
                 Ok((format!("({}).ends_with({}.as_str())", obj_code, coerced), Type::Bool))
             }
             // Mini-tanda Mb3 — `chars()` devuelve `List<Str>` con
@@ -8422,7 +8700,7 @@ where
             (Type::Str, "split_at") => {
                 check_method_arity(method, args, 1)?;
                 let (i_code, i_ty) = self.gen_expr(&args[0])?;
-                let i_c = coerce(&i_code, &i_ty, &Type::Int);
+                let i_c = coerce(&i_code, &i_ty, &Type::Int, self.env);
                 let code = format!(
                     "{{ let __s: String = {obj_code}; \
                        let __idx: i64 = {i_c}; \
@@ -8441,7 +8719,7 @@ where
             (Type::Str, "split") => {
                 check_method_arity(method, args, 1)?;
                 let (a_code, a_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let coerced = coerce(&a_code, &a_ty, &Type::Str, self.env);
                 let code = format!(
                     "Arc::new(Mutex::new(({}).split({}.as_str()).map(String::from).collect::<Vec<_>>()))",
                     obj_code, coerced
@@ -8465,8 +8743,8 @@ where
                 check_method_arity(method, args, 2)?;
                 let (old_code, old_ty) = self.gen_expr(&args[0])?;
                 let (new_code, new_ty) = self.gen_expr(&args[1])?;
-                let old_c = coerce(&old_code, &old_ty, &Type::Str);
-                let new_c = coerce(&new_code, &new_ty, &Type::Str);
+                let old_c = coerce(&old_code, &old_ty, &Type::Str, self.env);
+                let new_c = coerce(&new_code, &new_ty, &Type::Str, self.env);
                 Ok((format!("({}).replace({}.as_str(), {}.as_str())", obj_code, old_c, new_c), Type::Str))
             }
             // S.2 — `s.repeat(n)`: Rust `str::repeat` toma `usize`. El
@@ -8477,7 +8755,7 @@ where
             (Type::Str, "repeat") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&n_code, &n_ty, &Type::Int);
+                let coerced = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
                     "({{ let __n: i64 = {}; if __n < 0 {{ panic!(\"`.repeat()` no acepta n negativo: recibió {{}}\", __n); }} ({}).repeat(__n as usize) }})",
                     coerced, obj_code
@@ -8491,7 +8769,7 @@ where
             (Type::Str, "find") | (Type::Str, "index_of") => {
                 check_method_arity(method, args, 1)?;
                 let (a_code, a_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let coerced = coerce(&a_code, &a_ty, &Type::Str, self.env);
                 let code = format!(
                     "{{ let __s: String = {}; let __needle: String = {}; \
                      match __s.find(__needle.as_str()) {{ \
@@ -8505,7 +8783,7 @@ where
             (Type::Str, "last_index_of") => {
                 check_method_arity(method, args, 1)?;
                 let (a_code, a_ty) = self.gen_expr(&args[0])?;
-                let coerced = coerce(&a_code, &a_ty, &Type::Str);
+                let coerced = coerce(&a_code, &a_ty, &Type::Str, self.env);
                 let code = format!(
                     "{{ let __s: String = {}; let __needle: String = {}; \
                      match __s.rfind(__needle.as_str()) {{ \
@@ -8525,8 +8803,8 @@ where
                 let at_start = method == "pad_start";
                 let (w_code, w_ty) = self.gen_expr(&args[0])?;
                 let (ch_code, ch_ty) = self.gen_expr(&args[1])?;
-                let w_c = coerce(&w_code, &w_ty, &Type::Int);
-                let ch_c = coerce(&ch_code, &ch_ty, &Type::Str);
+                let w_c = coerce(&w_code, &w_ty, &Type::Int, self.env);
+                let ch_c = coerce(&ch_code, &ch_ty, &Type::Str, self.env);
                 let pad_concat = if at_start {
                     "format!(\"{}{}\", __pad, __s)"
                 } else {
@@ -8600,7 +8878,7 @@ where
             (Type::Str, "left") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
                     "{{ let __s: String = {obj_code}; \
                        let __n: i64 = {n_c}; \
@@ -8612,7 +8890,7 @@ where
             (Type::Str, "right") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let code = format!(
                     "{{ let __s: String = {obj_code}; \
                        let __n: i64 = {n_c}; \
@@ -8628,8 +8906,8 @@ where
                 check_method_arity(method, args, 2)?;
                 let (w_code, w_ty) = self.gen_expr(&args[0])?;
                 let (ch_code, ch_ty) = self.gen_expr(&args[1])?;
-                let w_c = coerce(&w_code, &w_ty, &Type::Int);
-                let ch_c = coerce(&ch_code, &ch_ty, &Type::Str);
+                let w_c = coerce(&w_code, &w_ty, &Type::Int, self.env);
+                let ch_c = coerce(&ch_code, &ch_ty, &Type::Str, self.env);
                 let code = format!(
                     "{{ let __s: String = {obj_code}; \
                        let __width: i64 = {w_c}; \
@@ -8657,8 +8935,8 @@ where
                 check_method_arity(method, args, 2)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
                 let (sep_code, sep_ty) = self.gen_expr(&args[1])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
-                let sep_c = coerce(&sep_code, &sep_ty, &Type::Str);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
+                let sep_c = coerce(&sep_code, &sep_ty, &Type::Str, self.env);
                 let code = format!(
                     "{{ let __s: String = {obj_code}; \
                        let __n: i64 = {n_c}; \
@@ -9262,7 +9540,7 @@ where
             (Type::List(t), "windows") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __n: i64 = {n_c}; \
@@ -9288,7 +9566,7 @@ where
             (Type::List(t), "split_at") => {
                 check_method_arity(method, args, 1)?;
                 let (idx_code, idx_ty) = self.gen_expr(&args[0])?;
-                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int);
+                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
@@ -9343,8 +9621,8 @@ where
                 check_method_arity(method, args, 2)?;
                 let (idx_code, idx_ty) = self.gen_expr(&args[0])?;
                 let (v_code, v_ty) = self.gen_expr(&args[1])?;
-                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int);
-                let v_c = coerce(&v_code, &v_ty, t);
+                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int, self.env);
+                let v_c = coerce(&v_code, &v_ty, t, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __idx: i64 = {idx_c}; \
@@ -9364,7 +9642,7 @@ where
             (Type::List(t), "remove_at") => {
                 check_method_arity(method, args, 1)?;
                 let (idx_code, idx_ty) = self.gen_expr(&args[0])?;
-                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int);
+                let idx_c = coerce(&idx_code, &idx_ty, &Type::Int, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __idx: i64 = {idx_c}; \
@@ -9416,7 +9694,7 @@ where
             (Type::List(t), "take") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
@@ -9429,7 +9707,7 @@ where
             (Type::List(t), "drop") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
@@ -9464,7 +9742,7 @@ where
             (Type::List(t), "intersperse") => {
                 check_method_arity(method, args, 1)?;
                 let (sep_code, sep_ty) = self.gen_expr(&args[0])?;
-                let sep_c = coerce(&sep_code, &sep_ty, t);
+                let sep_c = coerce(&sep_code, &sep_ty, t, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
@@ -9481,7 +9759,7 @@ where
             (Type::List(t), "cycle") => {
                 check_method_arity(method, args, 1)?;
                 let (n_code, n_ty) = self.gen_expr(&args[0])?;
-                let n_c = coerce(&n_code, &n_ty, &Type::Int);
+                let n_c = coerce(&n_code, &n_ty, &Type::Int, self.env);
                 let t_rs = rust_type_for(t, self.env)?;
                 let code = format!(
                     "{{ let __snap: Vec<{t_rs}> = ({obj_code}).lock().unwrap().clone(); \
@@ -9565,7 +9843,7 @@ where
             (Type::Map(k, v), "update") => {
                 check_method_arity(method, args, 2)?;
                 let (key_code, key_ty) = self.gen_expr(&args[0])?;
-                let coerced_key = coerce(&key_code, &key_ty, k);
+                let coerced_key = coerce(&key_code, &key_ty, k, self.env);
                 let (cb_code, _) = self.gen_callback_inline(&args[1], v, Some(v), "update")?;
                 let k_rs = rust_type_for(k, self.env)?;
                 let v_rs = rust_type_for(v, self.env)?;
@@ -9708,7 +9986,7 @@ where
             (Type::Map(_, v), "has_value") => {
                 check_method_arity(method, args, 1)?;
                 let (val_code, val_ty) = self.gen_expr(&args[0])?;
-                let val_c = coerce(&val_code, &val_ty, v);
+                let val_c = coerce(&val_code, &val_ty, v, self.env);
                 let v_rs = rust_type_for(v, self.env)?;
                 let code = format!(
                     "{{ let __target: {v_rs} = {val_c}; \
@@ -9721,8 +9999,8 @@ where
                 check_method_arity(method, args, 2)?;
                 let (key_code, key_ty) = self.gen_expr(&args[0])?;
                 let (val_code, val_ty) = self.gen_expr(&args[1])?;
-                let key_c = coerce(&key_code, &key_ty, k);
-                let val_c = coerce(&val_code, &val_ty, v);
+                let key_c = coerce(&key_code, &key_ty, k, self.env);
+                let val_c = coerce(&val_code, &val_ty, v, self.env);
                 let k_rs = rust_type_for(k, self.env)?;
                 let v_rs = rust_type_for(v, self.env)?;
                 let code = format!(
@@ -9755,7 +10033,7 @@ where
             (Type::Int, "to_str_base") => {
                 check_method_arity(method, args, 1)?;
                 let (base_code, base_ty) = self.gen_expr(&args[0])?;
-                let base_c = coerce(&base_code, &base_ty, &Type::Int);
+                let base_c = coerce(&base_code, &base_ty, &Type::Int, self.env);
                 let code = format!(
                     "{{ let __n: i64 = {obj_code}; let __base: i64 = {base_c}; \
                        match __base {{ \
@@ -10035,7 +10313,7 @@ where
                 .as_ref()
                 .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
                 .unwrap_or(Type::Any);
-            arg_codes.push(coerce(&a_code, &a_ty, &target_ty));
+            arg_codes.push(coerce(&a_code, &a_ty, &target_ty, self.env));
         }
         // Fp — fill con defaults para los faltantes.
         for i in args.len()..method_def.params.len() {
@@ -10046,7 +10324,7 @@ where
                 .as_ref()
                 .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
                 .unwrap_or(Type::Any);
-            arg_codes.push(coerce(&d_code, &d_ty, &target_ty));
+            arg_codes.push(coerce(&d_code, &d_ty, &target_ty, self.env));
         }
 
         let ret_ty = method_def
@@ -10104,7 +10382,7 @@ where
                 .as_ref()
                 .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
                 .unwrap_or(Type::Any);
-            arg_codes.push(coerce(&a_code, &a_ty, &target_ty));
+            arg_codes.push(coerce(&a_code, &a_ty, &target_ty, self.env));
         }
         // Fp — fill con defaults para los params faltantes.
         for i in args.len()..method_def.params.len() {
@@ -10115,7 +10393,7 @@ where
                 .as_ref()
                 .and_then(|t| crate::types::resolve_type_expr(t, self.env).ok())
                 .unwrap_or(Type::Any);
-            arg_codes.push(coerce(&d_code, &d_ty, &target_ty));
+            arg_codes.push(coerce(&d_code, &d_ty, &target_ty, self.env));
         }
 
         let ret_ty = method_def
@@ -10169,7 +10447,7 @@ where
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("push", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-        let coerced = coerce(&arg_code, &arg_ty, elem_ty);
+        let coerced = coerce(&arg_code, &arg_ty, elem_ty, self.env);
         let code = format!("({}).lock().unwrap().push({})", obj_code, coerced);
         Ok((code, Type::Null))
     }
@@ -10318,7 +10596,7 @@ where
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("contains", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-        let coerced = coerce(&arg_code, &arg_ty, elem_ty);
+        let coerced = coerce(&arg_code, &arg_ty, elem_ty, self.env);
         let elem_rs = rust_type_for(elem_ty, self.env)?;
         let code = format!(
             "{{ let __needle: {} = {}; ({}).lock().unwrap().iter().any(|__v| __v == &__needle) }}",
@@ -10341,7 +10619,7 @@ where
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("get", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-        let coerced_key = coerce(&arg_code, &arg_ty, key_ty);
+        let coerced_key = coerce(&arg_code, &arg_ty, key_ty, self.env);
         // Para el mensaje de error, formateamos la clave con el mismo
         // estilo del intérprete (`Display` de Value, **sin** comillas
         // para Str: `clave no encontrada: z`, no `clave no encontrada:
@@ -10375,7 +10653,7 @@ where
     ) -> Result<(String, Type), FitzError> {
         check_method_arity("has", args, 1)?;
         let (arg_code, arg_ty) = self.gen_expr(&args[0])?;
-        let coerced = coerce(&arg_code, &arg_ty, key_ty);
+        let coerced = coerce(&arg_code, &arg_ty, key_ty, self.env);
         let code = format!(
             "{{ let __k = {}; ({}).lock().unwrap().iter().any(|(__k2, _)| __k2 == &__k) }}",
             coerced, obj_code
@@ -11438,7 +11716,7 @@ where
         }
         let coerced: Vec<String> = item_codes_tys
             .iter()
-            .map(|(c, t)| coerce(c, t, &common_ty))
+            .map(|(c, t)| coerce(c, t, &common_ty, self.env))
             .collect();
         let code = format!(
             "Arc::new(Mutex::new(vec![{}]))",
@@ -11729,8 +12007,8 @@ where
             .map(|((kc, kt), (vc, vt))| {
                 format!(
                     "({}, {})",
-                    coerce(kc, kt, &common_k),
-                    coerce(vc, vt, &common_v)
+                    coerce(kc, kt, &common_k, self.env),
+                    coerce(vc, vt, &common_v, self.env)
                 )
             })
             .collect();
@@ -11816,7 +12094,7 @@ where
                 Ok((code, Type::Str))
             }
             Type::Map(k_ty, v_ty) => {
-                let coerced_idx = coerce(&idx_code, &idx_ty, k_ty);
+                let coerced_idx = coerce(&idx_code, &idx_ty, k_ty, self.env);
                 // Búsqueda lineal por igualdad. `unwrap_or_else(panic)` con
                 // mensaje al estilo del intérprete. Ligamos el Rc a una
                 // var local antes de `.lock().unwrap()` para extender la vida
@@ -11866,7 +12144,7 @@ where
             None => "None".to_string(),
             Some(e) => {
                 let (c, t) = self.gen_expr(e)?;
-                let coerced = coerce(&c, &t, &Type::Int);
+                let coerced = coerce(&c, &t, &Type::Int, self.env);
                 format!("Some({})", coerced)
             }
         };
@@ -11874,7 +12152,7 @@ where
             None => "None".to_string(),
             Some(e) => {
                 let (c, t) = self.gen_expr(e)?;
-                let coerced = coerce(&c, &t, &Type::Int);
+                let coerced = coerce(&c, &t, &Type::Int, self.env);
                 format!("Some({})", coerced)
             }
         };
@@ -11991,7 +12269,7 @@ where
             let supplied = provided.iter().find(|(n, _)| n == &f.name);
             let value_code = if let Some((_, expr)) = supplied {
                 let (code, ty) = self.gen_expr(expr)?;
-                coerce(&code, &ty, &f.type_)
+                coerce(&code, &ty, &f.type_, self.env)
             } else if let Some(default_expr) = &f.default {
                 if let Some((mod_name, item)) = &imported_mod_and_item {
                     // Llamada a la helper fn del módulo de origen. Su
@@ -12002,7 +12280,7 @@ where
                     format!("{}{}::__default_{}_{}()", self.mod_path_prefix(), mod_name, item, f.name)
                 } else {
                     let (code, ty) = self.gen_expr(default_expr)?;
-                    coerce(&code, &ty, &f.type_)
+                    coerce(&code, &ty, &f.type_, self.env)
                 }
             } else if matches!(f.type_, Type::Nullable(_)) {
                 "None".to_string()
@@ -12055,7 +12333,7 @@ where
         // `obj.attr`). Emite `__fitz_py_get_attr_obj(&obj, "name")`
         // que devuelve un `__FitzPyObject` opaco. La auto-coerción a
         // tipos primitivos pasa después, en el sitio donde se usa el
-        // resultado (vía `coerce(..., PyAny → T)`).
+        // resultado (vía `coerce(..., PyAny → T, self.env)`).
         if matches!(obj_ty, Type::PyAny) {
             return Ok((
                 format!(
@@ -12161,8 +12439,8 @@ where
                     type_name(&else_tail_ty)
                 ))
             })?;
-            let then_tail_coerced = coerce(&then_tail_code, &then_tail_ty, &result_ty);
-            let else_tail_coerced = coerce(&else_tail_code, &else_tail_ty, &result_ty);
+            let then_tail_coerced = coerce(&then_tail_code, &then_tail_ty, &result_ty, self.env);
+            let else_tail_coerced = coerce(&else_tail_code, &else_tail_ty, &result_ty, self.env);
             let code = format!(
                 "(if {} {{\n{}{}{}\n{}}} else {{\n{}{}{}\n{}}})",
                 cond_code,
@@ -12364,7 +12642,7 @@ where
             // Default o nullable
             if let Some(default_expr) = &f.default {
                 let (code, ty) = self.gen_expr(default_expr)?;
-                let coerced = coerce(&code, &ty, &f.type_);
+                let coerced = coerce(&code, &ty, &f.type_, self.env);
                 writeln!(&mut self.output, "            None => {},", coerced).unwrap();
             } else if matches!(f.type_, Type::Nullable(_)) {
                 self.emit("            None => None,\n");
@@ -13818,7 +14096,7 @@ where
                         let static_name = state_var_static_name(name);
                         let rust_ty = rust_type_for(&ty, self.env)?;
                         let (init_code, init_ty) = self.gen_expr(value)?;
-                        let coerced = coerce(&init_code, &init_ty, &ty);
+                        let coerced = coerce(&init_code, &init_ty, &ty, self.env);
                         writeln!(
                             &mut self.output,
                             "static {}: std::sync::LazyLock<{}> = \
@@ -16569,24 +16847,52 @@ fn needs_clone(t: &Type) -> bool {
 ///   - `Int → Float`           → `(x as f64)`
 ///   - `T   → T?`               → `Some(x)` (con eventual clone de T)
 ///   - `Null → T?`              → `None`
-fn coerce(code: &str, from: &Type, to: &Type) -> String {
+fn coerce(code: &str, from: &Type, to: &Type, env: &TypeEnv) -> String {
     match (from, to) {
         (Type::Int, Type::Float) => format!("({} as f64)", code),
         (Type::Null, Type::Nullable(_)) => "None".to_string(),
         (from, Type::Nullable(inner)) if !matches!(from, Type::Nullable(_)) => {
-            let coerced = coerce(code, from, inner);
+            let coerced = coerce(code, from, inner, env);
             format!("Some({})", coerced)
         }
         // Fase 8.7.1: auto-coerción primitiva desde PyAny. Replica la
         // política `py_to_value` del intérprete (8.1.3): bool → bool,
         // int → i64 (con check de rango), float → f64, str → String.
-        // Para tipos no primitivos (List, Map, Nominal), el codegen
-        // deja la coerción para sub-pasos futuros (8.7.2 marshaling
-        // compuesto, 8.7.3 async).
         (Type::PyAny, Type::Int) => format!("__fitz_py_extract_i64(&{})", code),
         (Type::PyAny, Type::Float) => format!("__fitz_py_extract_f64(&{})", code),
         (Type::PyAny, Type::Str) => format!("__fitz_py_extract_string(&{})", code),
         (Type::PyAny, Type::Bool) => format!("__fitz_py_extract_bool(&{})", code),
+        // Mini-fase 8.7.bis (2026-05-22) — coerción compuesta desde
+        // PyAny. Paralelo a la recursión `Map → Instance` runtime
+        // (R.missing-recursive-instance-coercion) pero para el path
+        // Python: `PyAny → List<T>` itera el PyList y coerce cada
+        // item; `PyAny → Nominal` toma el PyDict y arma la Instance
+        // field por field; `PyAny → List<Nominal>` compone ambos.
+        //
+        // Los helpers `__fitz_py_to_list_*` para primitivos ya están
+        // emitidos en el preludio HTTP (Fase 8.7). Los nominales
+        // emiten su propio helper `__fitz_py_to_instance_<Name>` y
+        // `__fitz_py_to_list_<Name>` desde `gen_type_def` cuando
+        // `uses_python = true`.
+        (Type::PyAny, Type::List(inner)) => match inner.as_ref() {
+            Type::Int => format!("__fitz_py_to_list_i64(&{})", code),
+            Type::Float => format!("__fitz_py_to_list_f64(&{})", code),
+            Type::Str => format!("__fitz_py_to_list_string(&{})", code),
+            Type::Bool => format!("__fitz_py_to_list_bool(&{})", code),
+            Type::Nominal(id) => {
+                // Helper emitido por gen_type_def per-tipo.
+                let name = &env.info(*id).name;
+                format!("__fitz_py_to_list_{}(&{})", name, code)
+            }
+            // List<Nullable<T>>, List<List<...>>, List<Any>, etc.
+            // quedan como deuda menor — el caller mantiene gradual.
+            _ => code.to_string(),
+        },
+        (Type::PyAny, Type::Nominal(id)) => {
+            // Helper emitido por gen_type_def per-tipo.
+            let name = &env.info(*id).name;
+            format!("__fitz_py_to_instance_{}(&{})", name, code)
+        }
         _ => code.to_string(),
     }
 }
