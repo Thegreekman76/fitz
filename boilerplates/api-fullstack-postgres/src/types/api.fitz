@@ -1,0 +1,22 @@
+// types/api.fitz — tipos de I/O del API HTTP, separados de los
+// modelos DB (`types/task.fitz`).
+//
+// Por qué la separación:
+//   - `Task` refleja la tabla SQL (con id, created_at — read-only).
+//   - `NewTask` es lo que el cliente HTTP manda al POST (sin id,
+//     sin created_at — los asigna Postgres).
+//   - `UpdateTask` es el body del PUT (todos los fields editables;
+//     id viene del path param, no del body).
+
+type NewTask {
+    title: Str = "",
+    description: Str = "",
+    priority: Str = "med",
+}
+
+type UpdateTask {
+    title: Str = "",
+    description: Str = "",
+    priority: Str = "med",
+    done: Bool = false,
+}

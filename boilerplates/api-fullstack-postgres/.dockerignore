@@ -1,0 +1,15 @@
+target/
+*.exe
+*.pdb
+.vscode/
+.idea/
+*.swp
+.DS_Store
+.git/
+.gitignore
+.env
+README.md
+docker-compose.yml
+python/__pycache__/
+python/**/__pycache__/
+*.pyc

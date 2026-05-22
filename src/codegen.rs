@@ -2899,6 +2899,11 @@ fn emit_main_rs_body(
     }
 
     if has_http {
+        // Fix bug OPTIONS preflight duplicado (2026-05-22) — pre-scan
+        // de http_fns para mergear CorsConfig por path. ANTES de emitir
+        // wrappers, así `emit_cors_helpers` y el route loop en
+        // `gen_http_main` ya tienen los maps poblados.
+        ctx.precompute_cors_merge(&p.http_fns)?;
         // Emitir un wrapper `async fn __handler_<name>` por cada handler.
         for stmt in &p.http_fns {
             ctx.gen_http_handler_wrapper(stmt)?;
@@ -3202,6 +3207,22 @@ struct CodegenCtx<'a> {
     /// todos sus `let` top-level como consts/accessors, no hace
     /// falta el set extra).
     hoisted_main_lets: HashMap<String, Type>,
+    /// Fix bug OPTIONS preflight duplicado (2026-05-22) — config CORS
+    /// mergeado por path. Cuando varios handlers comparten path
+    /// (`/x` con `@get`+`@post`, `/x/{id}` con `@get`/`@put`/`@delete`),
+    /// cada uno trae su propio `@middleware(cors(...))` que típicamente
+    /// solo difiere en `allow_methods`. El OPTIONS preflight se registra
+    /// UNA vez por path; este map guarda el config emitido (unión de
+    /// methods/headers, max max_age, primer origin gana). Poblado por
+    /// `precompute_cors_merge`.
+    cors_merged_per_path: HashMap<String, BuildCorsConfig>,
+    /// Fix bug OPTIONS preflight duplicado (2026-05-22) — nombre del
+    /// PRIMER handler en `http_fns` para cada path con CORS. Es el
+    /// "owner" del preflight: solo este handler emite el
+    /// `__preflight_<NAME>` y solo este handler suma `.options(...)`
+    /// al `.route(...)`. Subsequent handlers en el mismo path skipean
+    /// ambos para evitar el "Overlapping method route" panic de axum.
+    cors_preflight_owner: HashMap<String, String>,
     /// Bindings de módulos importados: nombre visible (último segmento
     /// del path para `import foo`, o el identificador en `from foo
     /// import X`) → `ResolvedBinding` con el índice del módulo cargado.
@@ -3520,6 +3541,8 @@ impl<'a> CodegenCtx<'a> {
             pattern_slot_counter: 0,
             accessor_consts: std::collections::HashSet::new(),
             hoisted_main_lets: HashMap::new(),
+            cors_merged_per_path: HashMap::new(),
+            cors_preflight_owner: HashMap::new(),
         }
     }
 
@@ -12492,6 +12515,51 @@ where
         Ok((user_fns_pre, user_fns_post, cors))
     }
 
+    /// Fix bug OPTIONS preflight duplicado (2026-05-22) — pre-scan de
+    /// `http_fns` ANTES de emitir wrappers para computar el `CorsConfig`
+    /// merged por path y elegir el "owner" del preflight de cada path
+    /// (primer handler que aparece). Idempotente y cero side effects
+    /// fuera de los 2 maps en `self`.
+    ///
+    /// Llamado una sola vez en `generate_project` (entre el partition
+    /// de stmts y el loop de `gen_http_handler_wrapper`).
+    fn precompute_cors_merge(&mut self, http_fns: &[&Stmt]) -> Result<(), FitzError> {
+        for stmt in http_fns {
+            let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
+            // Path del primer decorator HTTP (`@get`/`@post`/`@put`/`@delete`).
+            let path = decorators.iter().find_map(|d| {
+                let m = matches!(d.name.as_str(), "get" | "post" | "put" | "delete");
+                if !m { return None; }
+                d.args.first()
+            });
+            let Some(path_arg) = path else { continue };
+            let (path, _q) = parse_http_path(path_arg)?;
+
+            // Config CORS adentro de `@middleware(cors(...))`. El check
+            // de "un solo cors por handler" lo hace `extract_middleware_specs`
+            // al emitir; acá tomamos el primero que aparezca (consistente
+            // con el orden de los decorators).
+            let cors_cfg = decorators.iter()
+                .filter(|d| d.name == "middleware")
+                .find_map(|d| {
+                    let arg = d.args.first()?;
+                    let Expr::Call { callee, args, .. } = arg else { return None };
+                    let is_cors = matches!(callee.as_ref(), Expr::Ident(n, _) if n == "cors");
+                    if !is_cors { return None; }
+                    parse_build_cors_args(args).ok()
+                });
+            let Some(cors_cfg) = cors_cfg else { continue };
+
+            if let Some(existing) = self.cors_merged_per_path.get_mut(&path) {
+                merge_build_cors_into(existing, &cors_cfg);
+            } else {
+                self.cors_merged_per_path.insert(path.clone(), cors_cfg);
+                self.cors_preflight_owner.insert(path, name.clone());
+            }
+        }
+        Ok(())
+    }
+
     /// Genera el wrapper `async fn __handler_<name>(...)` para un
     /// handler decorado con `@get/@post/@put/@delete`. Extrae path
     /// params + body (si corresponde), llama a la fn original, y
@@ -13180,10 +13248,11 @@ where
                 // Q.3: resolver headers CORS contra el Origin del
                 // request actual. `__cors_resolve_<NAME>(origin)`
                 // devuelve un Vec<(&'static str, String)>.
+                let resolve_fn = self.cors_resolve_fn_for(sig);
                 writeln!(
                     &mut self.output,
                     "            Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok()))),",
-                    cors_resolve_fn_name(&sig.name),
+                    resolve_fn,
                 )
                 .unwrap();
             } else {
@@ -13389,7 +13458,7 @@ where
         let cors_arg = if sig.has_cors {
             format!(
                 "Some({}(__hmap.get(\"origin\").and_then(|v| v.to_str().ok())))",
-                cors_resolve_fn_name(&sig.name)
+                self.cors_resolve_fn_for(sig)
             )
         } else {
             "None".to_string()
@@ -13568,8 +13637,40 @@ where
     /// de headers resuelto contra el Origin actual) y el handler
     /// `__preflight_<NAME>` que responde 204 + headers a la request
     /// OPTIONS automática. Sin CORS, no emite nada.
+    ///
+    /// Fix bug OPTIONS preflight duplicado (2026-05-22): cuando varios
+    /// handlers comparten path, solo el OWNER del path emite preflight
+    /// (consultando `cors_preflight_owner`). El config emitido es el
+    /// MERGED por path (`cors_merged_per_path`) — la unión de
+    /// `allow_methods`/`allow_headers` de todos los handlers de ese path.
+    /// Fix bug OPTIONS preflight duplicado (2026-05-22) — devuelve el
+    /// nombre Rust del `__cors_resolve_*` a usar en el wrapper de este
+    /// handler. Si el handler es el OWNER del path (primer @get/@post/...
+    /// con CORS en `http_fns`), usa su propio resolver
+    /// `__cors_resolve_<sig.name>`. Si no, comparte el del owner del
+    /// path — el codegen solo emite UN `__cors_resolve_<NAME>` por path
+    /// (para que el preflight handler y los wrappers de todos los métodos
+    /// del path resuelvan los mismos headers contra el mismo origin).
+    fn cors_resolve_fn_for(&self, sig: &HandlerSig) -> String {
+        let owner_name = self.cors_preflight_owner.get(&sig.path)
+            .cloned()
+            .unwrap_or_else(|| sig.name.clone());
+        cors_resolve_fn_name(&owner_name)
+    }
+
     fn emit_cors_helpers(&mut self, sig: &HandlerSig) {
-        let Some(cors) = &sig.mw_cors else { return };
+        if sig.mw_cors.is_none() { return };
+        // Solo el owner del path emite preflight. Non-owners skipean
+        // — su .route(...) tampoco va a llevar .options() en gen_http_main,
+        // y sus wrappers comparten el `__cors_resolve_<OWNER>` via
+        // `cors_resolve_fn_for(sig)`.
+        let is_owner = self.cors_preflight_owner.get(&sig.path)
+            .map(|n| n == &sig.name)
+            .unwrap_or(false);
+        if !is_owner { return };
+        let cors = self.cors_merged_per_path.get(&sig.path)
+            .expect("cors_merged_per_path debe tener entry si is_owner")
+            .clone();
         let resolve_fn = cors_resolve_fn_name(&sig.name);
         let methods = cors.methods_joined();
         let headers_csv = cors.headers_joined();
@@ -13858,20 +13959,6 @@ where
         self.emit("let __app = axum::Router::new()\n");
         for stmt in http_fns {
             let Stmt::FnDef { name, decorators, .. } = stmt else { continue };
-            // MW.3: detectar si esta ruta tiene cors → registrar
-            // OPTIONS al mismo path con el preflight handler.
-            let route_has_cors = decorators
-                .iter()
-                .filter(|d| d.name == "middleware")
-                .any(|d| {
-                    d.args.first().is_some_and(|a| {
-                        matches!(
-                            a,
-                            Expr::Call { callee, .. }
-                                if matches!(callee.as_ref(), Expr::Ident(n, _) if n == "cors")
-                        )
-                    })
-                });
             for d in decorators {
                 let method = match d.name.as_str() {
                     "get" => "get",
@@ -13885,8 +13972,19 @@ where
                     None => continue,
                 };
                 let (path, _q) = parse_http_path(path_arg)?;
+                // Fix bug OPTIONS preflight duplicado (2026-05-22):
+                // .options() solo cuando este handler es el OWNER del
+                // path (ie. el primero que aparece en http_fns con CORS).
+                // Subsequent handlers en el mismo path se mergean en el
+                // MethodRouter de axum (verbos distintos OK) y heredan el
+                // OPTIONS del owner. Sin esta lógica, axum panic con
+                // "Overlapping method route. Handler for `OPTIONS /x`
+                // already exists" al construir el Router.
+                let is_owner = self.cors_preflight_owner.get(&path)
+                    .map(|n| n == name)
+                    .unwrap_or(false);
                 self.emit_indent();
-                if route_has_cors {
+                if is_owner {
                     writeln!(
                         &mut self.output,
                         "    .route(\"{}\", axum::routing::{}(__handler_{}).options(__preflight_{}))",
@@ -14190,6 +14288,50 @@ impl BuildCorsConfig {
             .clone()
             .unwrap_or_else(|| BuildAllowOrigin::Literal("*".to_string()))
     }
+}
+
+/// Fix bug OPTIONS preflight duplicado (2026-05-22) — merge
+/// incremental de un `BuildCorsConfig` adicional sobre uno existente
+/// (paralelo a `merge_cors_into` del runtime en `http.rs`).
+///
+/// Política de merge:
+/// - `allow_methods` / `allow_headers`: union preservando orden de
+///   inserción (headers case-insensitive). Si CUALQUIER side trae
+///   `None`, el merged es `None` — `None` significa "usar defaults",
+///   que son más permisivos que cualquier lista explícita; perder esa
+///   intención implícita rompería el contrato.
+/// - `max_age`: máximo de los dos (None = sin opinión).
+/// - `allow_origin`: el primero gana (handlers de un mismo path
+///   típicamente declaran el mismo origin; si discrepan, NO inventamos
+///   política agregada).
+fn merge_build_cors_into(existing: &mut BuildCorsConfig, other: &BuildCorsConfig) {
+    existing.allow_methods = match (existing.allow_methods.take(), other.allow_methods.as_ref()) {
+        (Some(mut e), Some(o)) => {
+            for m in o {
+                if !e.iter().any(|x| x == m) {
+                    e.push(m.clone());
+                }
+            }
+            Some(e)
+        }
+        _ => None,
+    };
+    existing.allow_headers = match (existing.allow_headers.take(), other.allow_headers.as_ref()) {
+        (Some(mut e), Some(o)) => {
+            for h in o {
+                if !e.iter().any(|x| x.eq_ignore_ascii_case(h)) {
+                    e.push(h.clone());
+                }
+            }
+            Some(e)
+        }
+        _ => None,
+    };
+    existing.max_age = match (existing.max_age, other.max_age) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, x) => x,
+    };
 }
 
 /// Parsea los args de `cors(...)` en build-time. Soporta:

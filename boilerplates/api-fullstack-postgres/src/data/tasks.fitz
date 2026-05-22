@@ -1,0 +1,47 @@
+// data/tasks.fitz — wrapper Fitz "raw" sobre `python/db.py`.
+//
+// Devuelve `Result<Str>` (JSON crudo) por la limitación del loader
+// de módulos: no puede importar `types/task.fitz` desde acá porque
+// el path sería relativo a `src/data/` (loader busca
+// `src/data/types/task.fitz`, mal). Documentado en
+// `docs/deudas_lenguaje.md` → R.bug-loader-relative-only.
+//
+// El main.fitz hace la coerción `Map → Instance` con anotación
+// destino (8.4.3) — donde `Task` SÍ está en scope.
+
+from python import json
+from python import db
+
+// CRUD completo:
+
+fn create_raw(title: Str, description: Str, priority: Str) -> Result<Str> {
+    let raw = db.add_task(title, description, priority)?
+    return Ok(json.dumps(raw)?)
+}
+
+fn find_raw(id: Int) -> Result<Str> {
+    let raw = db.get_task(id)?
+    return Ok(json.dumps(raw)?)
+}
+
+fn list_raw(filter: Str) -> Result<Str> {
+    // filter: "all", "pending", "done". Pasado al SQL del lado Python.
+    let raw = db.list_tasks(filter)?
+    return Ok(json.dumps(raw)?)
+}
+
+fn update_raw(id: Int, title: Str, description: Str, priority: Str, done: Bool) -> Result<Str> {
+    let raw = db.update_task(id, title, description, priority, done)?
+    return Ok(json.dumps(raw)?)
+}
+
+fn delete_raw(id: Int) -> Result<Str> {
+    let raw = db.delete_task(id)?
+    return Ok(json.dumps(raw)?)
+}
+
+// Init de schema — idempotente.
+fn init_schema() -> Result<Null> {
+    let _ = db.init_db()?
+    return Ok(null)
+}

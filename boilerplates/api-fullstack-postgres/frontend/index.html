@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <title>Tasks — Fitz Fullstack Demo</title>
+    <style>
+        :root {
+            --bg: #0f1419;
+            --panel: #1a1f26;
+            --panel-2: #232932;
+            --border: #2d3540;
+            --text: #e6e9ec;
+            --muted: #8a93a0;
+            --accent: #ce412b;
+            --accent-hover: #e04a32;
+            --ok: #4ade80;
+            --warn: #fbbf24;
+            --danger: #f87171;
+            --info: #60a5fa;
+        }
+
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+            padding: 2rem 1rem;
+        }
+
+        .container {
+            max-width: 900px;
+            margin: 0 auto;
+        }
+
+        header {
+            margin-bottom: 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 1rem;
+        }
+
+        h1 {
+            font-size: 1.8rem;
+            color: var(--accent);
+        }
+
+        h1 .subtitle {
+            font-size: 0.85rem;
+            color: var(--muted);
+            font-weight: normal;
+            display: block;
+            margin-top: 0.2rem;
+        }
+
+        .counter {
+            display: flex;
+            gap: 1rem;
+            font-size: 0.9rem;
+        }
+
+        .counter span { color: var(--muted); }
+        .counter b { color: var(--text); font-size: 1rem; }
+
+        .panel {
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 1.5rem;
+            margin-bottom: 1.5rem;
+        }
+
+        .panel-title {
+            font-size: 0.9rem;
+            text-transform: uppercase;
+            letter-spacing: 0.05em;
+            color: var(--muted);
+            margin-bottom: 1rem;
+        }
+
+        form.create-form {
+            display: grid;
+            grid-template-columns: 1fr 1fr auto auto;
+            gap: 0.75rem;
+            align-items: end;
+        }
+
+        form.create-form .field-wide { grid-column: span 2; }
+
+        label {
+            font-size: 0.8rem;
+            color: var(--muted);
+            display: block;
+            margin-bottom: 0.3rem;
+        }
+
+        input[type="text"], select {
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+            border-radius: 4px;
+            padding: 0.5rem 0.75rem;
+            font-size: 0.95rem;
+            width: 100%;
+            font-family: inherit;
+        }
+
+        input[type="text"]:focus, select:focus {
+            outline: none;
+            border-color: var(--accent);
+        }
+
+        button {
+            background: var(--accent);
+            color: white;
+            border: none;
+            border-radius: 4px;
+            padding: 0.5rem 1.25rem;
+            font-size: 0.95rem;
+            cursor: pointer;
+            font-weight: 500;
+            font-family: inherit;
+        }
+
+        button:hover { background: var(--accent-hover); }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        button.secondary {
+            background: var(--panel-2);
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        button.secondary:hover { background: var(--border); }
+
+        button.danger {
+            background: transparent;
+            color: var(--danger);
+            border: 1px solid var(--danger);
+        }
+
+        button.danger:hover { background: var(--danger); color: var(--bg); }
+
+        button.icon {
+            padding: 0.3rem 0.6rem;
+            font-size: 0.85rem;
+        }
+
+        .filters {
+            display: flex;
+            gap: 0.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .filter-btn {
+            background: var(--panel-2);
+            color: var(--muted);
+            border: 1px solid var(--border);
+            padding: 0.4rem 1rem;
+            border-radius: 4px;
+            cursor: pointer;
+            font-family: inherit;
+            font-size: 0.9rem;
+        }
+
+        .filter-btn.active {
+            background: var(--accent);
+            color: white;
+            border-color: var(--accent);
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th, td {
+            text-align: left;
+            padding: 0.75rem 0.5rem;
+            border-bottom: 1px solid var(--border);
+            font-size: 0.9rem;
+        }
+
+        th {
+            color: var(--muted);
+            font-weight: 500;
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        tr.done td.title { text-decoration: line-through; color: var(--muted); }
+
+        .badge {
+            display: inline-block;
+            padding: 0.2rem 0.55rem;
+            border-radius: 999px;
+            font-size: 0.75rem;
+            font-weight: 500;
+            text-transform: uppercase;
+            letter-spacing: 0.03em;
+        }
+
+        .badge.low    { background: rgba(96, 165, 250, 0.15); color: var(--info); }
+        .badge.med    { background: rgba(251, 191, 36, 0.15); color: var(--warn); }
+        .badge.high   { background: rgba(248, 113, 113, 0.15); color: var(--danger); }
+
+        .actions {
+            display: flex;
+            gap: 0.4rem;
+        }
+
+        .checkbox-cell { width: 30px; }
+
+        input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            cursor: pointer;
+            accent-color: var(--accent);
+        }
+
+        .empty-state {
+            text-align: center;
+            padding: 3rem 1rem;
+            color: var(--muted);
+        }
+
+        .empty-state p:first-child {
+            font-size: 1.1rem;
+            margin-bottom: 0.5rem;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 2rem;
+            color: var(--muted);
+        }
+
+        .toast {
+            position: fixed;
+            top: 1rem;
+            right: 1rem;
+            background: var(--panel);
+            border: 1px solid var(--border);
+            border-left: 3px solid var(--accent);
+            padding: 0.8rem 1.2rem;
+            border-radius: 4px;
+            font-size: 0.9rem;
+            opacity: 0;
+            transform: translateX(20px);
+            transition: opacity 0.2s, transform 0.2s;
+            pointer-events: none;
+            z-index: 100;
+        }
+
+        .toast.show { opacity: 1; transform: translateX(0); }
+        .toast.error { border-left-color: var(--danger); }
+        .toast.success { border-left-color: var(--ok); }
+
+        footer {
+            margin-top: 2rem;
+            text-align: center;
+            color: var(--muted);
+            font-size: 0.85rem;
+        }
+
+        footer a { color: var(--accent); text-decoration: none; }
+        footer a:hover { text-decoration: underline; }
+
+        .edit-row td { padding: 1rem 0.5rem; background: var(--panel-2); }
+        .edit-row .edit-fields {
+            display: grid;
+            grid-template-columns: 1fr 1fr 100px;
+            gap: 0.5rem;
+            margin-bottom: 0.5rem;
+        }
+        .edit-row .edit-actions { display: flex; gap: 0.5rem; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>
+                ✓ Tasks
+                <span class="subtitle">Fullstack demo · Fitz + Postgres + Vanilla JS</span>
+            </h1>
+            <div class="counter">
+                <span>Pendientes: <b id="counter-pending">0</b></span>
+                <span>Completas: <b id="counter-done">0</b></span>
+            </div>
+        </header>
+
+        <!-- Create form -->
+        <div class="panel">
+            <div class="panel-title">Nueva task</div>
+            <form class="create-form" id="create-form">
+                <div class="field-wide">
+                    <label for="new-title">Título *</label>
+                    <input type="text" id="new-title" required placeholder="Comprar pan" maxlength="200">
+                </div>
+                <div>
+                    <label for="new-description">Descripción</label>
+                    <input type="text" id="new-description" placeholder="opcional" maxlength="1000">
+                </div>
+                <div>
+                    <label for="new-priority">Prioridad</label>
+                    <select id="new-priority">
+                        <option value="low">Baja</option>
+                        <option value="med" selected>Media</option>
+                        <option value="high">Alta</option>
+                    </select>
+                </div>
+                <button type="submit" id="create-btn">Agregar</button>
+            </form>
+        </div>
+
+        <!-- Filters + list -->
+        <div class="panel">
+            <div class="filters">
+                <button class="filter-btn active" data-filter="all">Todas</button>
+                <button class="filter-btn" data-filter="pending">Pendientes</button>
+                <button class="filter-btn" data-filter="done">Completas</button>
+            </div>
+
+            <div id="list-container">
+                <div class="loading">Cargando…</div>
+            </div>
+        </div>
+
+        <footer>
+            <p>
+                API: <a href="http://localhost:3000/docs" target="_blank">http://localhost:3000/docs</a> ·
+                Schema: <a href="http://localhost:3000/openapi.json" target="_blank">/openapi.json</a>
+            </p>
+        </footer>
+    </div>
+
+    <div class="toast" id="toast"></div>
+
+    <script>
+        // -------------------------------------------------------
+        // Config
+        // -------------------------------------------------------
+        const API_URL = 'http://localhost:3000';
+
+        // -------------------------------------------------------
+        // Estado
+        // -------------------------------------------------------
+        let tasks = [];
+        let filter = 'all';
+        let editingId = null;
+
+        // -------------------------------------------------------
+        // Utils
+        // -------------------------------------------------------
+        const $ = (id) => document.getElementById(id);
+        const esc = (s) => String(s ?? '')
+            .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+
+        function toast(msg, kind = 'info') {
+            const el = $('toast');
+            el.textContent = msg;
+            el.className = `toast show ${kind}`;
+            setTimeout(() => { el.className = `toast ${kind}`; }, 2500);
+        }
+
+        // -------------------------------------------------------
+        // API calls (fetch wrappers)
+        // -------------------------------------------------------
+        async function api(method, path, body) {
+            const opts = { method, headers: {} };
+            if (body !== undefined) {
+                opts.headers['Content-Type'] = 'application/json';
+                opts.body = JSON.stringify(body);
+            }
+            const res = await fetch(API_URL + path, opts);
+            const text = await res.text();
+            let data;
+            try { data = text ? JSON.parse(text) : null; } catch { data = text; }
+            if (!res.ok) {
+                const msg = data?.error || `HTTP ${res.status}`;
+                throw new Error(msg);
+            }
+            return data;
+        }
+
+        // -------------------------------------------------------
+        // Rendering
+        // -------------------------------------------------------
+        function visibleTasks() {
+            if (filter === 'pending') return tasks.filter(t => !t.done);
+            if (filter === 'done')    return tasks.filter(t =>  t.done);
+            return tasks;
+        }
+
+        function priorityLabel(p) {
+            return { low: 'Baja', med: 'Media', high: 'Alta' }[p] || p;
+        }
+
+        function render() {
+            const pending = tasks.filter(t => !t.done).length;
+            const done    = tasks.filter(t =>  t.done).length;
+            $('counter-pending').textContent = pending;
+            $('counter-done').textContent    = done;
+
+            const list = visibleTasks();
+            const container = $('list-container');
+
+            if (list.length === 0) {
+                container.innerHTML = `
+                    <div class="empty-state">
+                        <p>${filter === 'all' ? 'No hay tasks' : filter === 'pending' ? 'No hay pendientes' : 'No hay completas'}</p>
+                        <p style="font-size:0.85rem;">Agregá una desde el form de arriba.</p>
+                    </div>`;
+                return;
+            }
+
+            const rows = list.map(t => {
+                if (editingId === t.id) return renderEditRow(t);
+                return renderTaskRow(t);
+            }).join('');
+
+            container.innerHTML = `
+                <table>
+                    <thead>
+                        <tr>
+                            <th class="checkbox-cell"></th>
+                            <th>Título</th>
+                            <th>Descripción</th>
+                            <th>Prioridad</th>
+                            <th>Acciones</th>
+                        </tr>
+                    </thead>
+                    <tbody>${rows}</tbody>
+                </table>`;
+        }
+
+        function renderTaskRow(t) {
+            return `
+                <tr class="${t.done ? 'done' : ''}" data-id="${t.id}">
+                    <td class="checkbox-cell">
+                        <input type="checkbox" ${t.done ? 'checked' : ''}
+                               onchange="toggleDone(${t.id}, this.checked)">
+                    </td>
+                    <td class="title">${esc(t.title)}</td>
+                    <td style="color: var(--muted)">${esc(t.description) || '—'}</td>
+                    <td><span class="badge ${t.priority}">${priorityLabel(t.priority)}</span></td>
+                    <td>
+                        <div class="actions">
+                            <button class="secondary icon" onclick="startEdit(${t.id})">Editar</button>
+                            <button class="danger icon" onclick="askDelete(${t.id})">Borrar</button>
+                        </div>
+                    </td>
+                </tr>`;
+        }
+
+        function renderEditRow(t) {
+            return `
+                <tr class="edit-row" data-id="${t.id}">
+                    <td colspan="5">
+                        <div class="edit-fields">
+                            <input type="text" id="edit-title-${t.id}"
+                                   value="${esc(t.title)}" maxlength="200">
+                            <input type="text" id="edit-description-${t.id}"
+                                   value="${esc(t.description)}" maxlength="1000"
+                                   placeholder="opcional">
+                            <select id="edit-priority-${t.id}">
+                                <option value="low"  ${t.priority === 'low'  ? 'selected' : ''}>Baja</option>
+                                <option value="med"  ${t.priority === 'med'  ? 'selected' : ''}>Media</option>
+                                <option value="high" ${t.priority === 'high' ? 'selected' : ''}>Alta</option>
+                            </select>
+                        </div>
+                        <div class="edit-actions">
+                            <button onclick="saveEdit(${t.id})">Guardar</button>
+                            <button class="secondary" onclick="cancelEdit()">Cancelar</button>
+                        </div>
+                    </td>
+                </tr>`;
+        }
+
+        // -------------------------------------------------------
+        // Acciones
+        // -------------------------------------------------------
+        async function loadTasks() {
+            try {
+                tasks = await api('GET', `/tasks?filter=all`);
+                render();
+            } catch (e) {
+                $('list-container').innerHTML = `
+                    <div class="empty-state">
+                        <p style="color: var(--danger);">Error al cargar</p>
+                        <p style="font-size:0.85rem;">${esc(e.message)}</p>
+                        <p style="font-size:0.85rem; margin-top:1rem;">
+                            ¿La API está corriendo? <br>
+                            <code>docker compose up</code>
+                        </p>
+                    </div>`;
+            }
+        }
+
+        async function createTask(ev) {
+            ev.preventDefault();
+            const btn = $('create-btn');
+            btn.disabled = true;
+            try {
+                const body = {
+                    title: $('new-title').value.trim(),
+                    description: $('new-description').value.trim(),
+                    priority: $('new-priority').value,
+                };
+                if (!body.title) {
+                    toast('El título no puede estar vacío', 'error');
+                    return;
+                }
+                const created = await api('POST', '/tasks', body);
+                tasks.unshift(created);
+                $('new-title').value = '';
+                $('new-description').value = '';
+                $('new-priority').value = 'med';
+                render();
+                toast('Task creada', 'success');
+            } catch (e) {
+                toast(`Error: ${e.message}`, 'error');
+            } finally {
+                btn.disabled = false;
+            }
+        }
+
+        async function toggleDone(id, done) {
+            const t = tasks.find(t => t.id === id);
+            if (!t) return;
+            try {
+                const updated = await api('PUT', `/tasks/${id}`, {
+                    title: t.title,
+                    description: t.description,
+                    priority: t.priority,
+                    done: done,
+                });
+                Object.assign(t, updated);
+                render();
+            } catch (e) {
+                toast(`Error: ${e.message}`, 'error');
+                loadTasks();
+            }
+        }
+
+        function startEdit(id) {
+            editingId = id;
+            render();
+        }
+
+        function cancelEdit() {
+            editingId = null;
+            render();
+        }
+
+        async function saveEdit(id) {
+            const t = tasks.find(t => t.id === id);
+            if (!t) return;
+            const title       = $(`edit-title-${id}`).value.trim();
+            const description = $(`edit-description-${id}`).value.trim();
+            const priority    = $(`edit-priority-${id}`).value;
+            if (!title) {
+                toast('El título no puede estar vacío', 'error');
+                return;
+            }
+            try {
+                const updated = await api('PUT', `/tasks/${id}`, {
+                    title, description, priority, done: t.done,
+                });
+                Object.assign(t, updated);
+                editingId = null;
+                render();
+                toast('Guardado', 'success');
+            } catch (e) {
+                toast(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        async function askDelete(id) {
+            const t = tasks.find(t => t.id === id);
+            if (!t) return;
+            if (!confirm(`¿Borrar "${t.title}"?`)) return;
+            try {
+                await api('DELETE', `/tasks/${id}`);
+                tasks = tasks.filter(x => x.id !== id);
+                render();
+                toast('Eliminada', 'success');
+            } catch (e) {
+                toast(`Error: ${e.message}`, 'error');
+            }
+        }
+
+        // -------------------------------------------------------
+        // Wire up
+        // -------------------------------------------------------
+        $('create-form').addEventListener('submit', createTask);
+
+        document.querySelectorAll('.filter-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                filter = btn.dataset.filter;
+                render();
+            });
+        });
+
+        // Initial load
+        loadTasks();
+    </script>
+</body>
+</html>

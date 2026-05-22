@@ -723,6 +723,63 @@ fn list_items() -> Str => \"[]\"
 }
 
 #[test]
+fn r_bug_options_preflight_duplicado_en_fitz_build_paridad_con_fitz_run() {
+    // Regresión del bug "Overlapping method route. Handler for `OPTIONS
+    // /tasks` already exists" (2026-05-22). Cuando varios handlers
+    // comparten path con CORS, `fitz build` paniqueaba en boot del
+    // binario al construir el axum::Router (mismo bug que en `fitz run`,
+    // fixeado en codegen también).
+    //
+    // Caso del 6to boilerplate (api-fullstack-postgres): `/tasks` con
+    // @get + @post + `/tasks/{id}` con @get + @put + @delete, todos
+    // con CORS. Pre-fix el binario emitido salía con exit code 101.
+    let src = "\
+@server(43373)
+fn main() => 0
+
+@middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))
+@get(\"/tasks\")
+fn list_tasks() -> Str => \"[]\"
+
+@middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"POST\", \"OPTIONS\"]}))
+@post(\"/tasks\")
+fn create_task() -> Str => \"created\"
+
+@middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))
+@get(\"/tasks/{id}\")
+fn get_task(id: Int) -> Str => \"one\"
+
+@middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"PUT\", \"OPTIONS\"]}))
+@put(\"/tasks/{id}\")
+fn update_task(id: Int) -> Str => \"updated\"
+
+@middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"DELETE\", \"OPTIONS\"]}))
+@delete(\"/tasks/{id}\")
+fn delete_task(id: Int) -> Str => \"deleted\"
+";
+    // El binario debe arrancar y responder OPTIONS /tasks con 204 +
+    // headers Access-Control-Allow-* (merge: GET + POST + OPTIONS).
+    let (status, raw_headers) = build_spawn_request_raw(
+        "r-bug-options-preflight-duplicado",
+        src,
+        43373,
+        "OPTIONS",
+        "/tasks",
+    );
+    assert_eq!(status, 204, "headers: {}", raw_headers);
+    let h_lower = raw_headers.to_lowercase();
+    let methods_line = h_lower.lines()
+        .find(|l| l.starts_with("access-control-allow-methods:"))
+        .unwrap_or_else(|| panic!("falta Access-Control-Allow-Methods: {}", raw_headers))
+        .to_string();
+    assert!(
+        methods_line.contains("get") && methods_line.contains("post"),
+        "merged methods debe incluir GET y POST: {}",
+        methods_line
+    );
+}
+
+#[test]
 fn http_q3_cors_set_echo_origin_en_response_real() {
     // Q.3: cors({"allow_origin": [...]}) build-time. Una request con
     // Origin en la lista permitida → echo del origin en la response.

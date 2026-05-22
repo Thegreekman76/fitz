@@ -66,13 +66,36 @@ $ ./server
 ## Por dónde arrancar
 
 [Guía completa →](guide.md){ .md-button .md-button--primary }
+[Boilerplates →](https://github.com/Thegreekman76/fitz/tree/main/boilerplates){ .md-button }
 [Ver el roadmap →](roadmap.md){ .md-button }
 [GitHub →](https://github.com/Thegreekman76/fitz){ .md-button }
 
-La guía cubre 30 capítulos con ejemplos runnable en
+La guía cubre 32 capítulos con ejemplos runnable en
 [`examples/guide/`](https://github.com/Thegreekman76/fitz/tree/main/examples/guide):
 desde `print("hola")` hasta servidores HTTP con auth + WebSockets +
 cron jobs en menos de 100 líneas.
+
+Para ver el stack completo en acción, los **6 boilerplates
+Dockerizados** del repo cubren CLI puro, REST API, auth + frontend,
+WebSockets con chat, CRUD multi-archivo con SQLAlchemy + Postgres,
+y un showcase fullstack con frontend rico + Postgres en 3
+containers. Cada uno con README exhaustivo. Ver el
+[cap 31 de la guía](guide.md#31-plantillas-y-boilerplates).
+
+### Extensión VSCode
+
+La extensión con LSP (highlighting + diagnostics + hover +
+go-to-def + autocomplete) viene en `.vsix` per-plataforma como
+asset de cada [release](https://github.com/Thegreekman76/fitz/releases/latest).
+Bajá el de tu OS/arquitectura (`fitz-language-<plataforma>-X.Y.Z.vsix`)
+e instalá desde VSCode: `Ctrl+Shift+P` → "Extensions: Install from
+VSIX...". El binario `fitz-lsp` viene bundleado adentro — no
+necesitás compilar nada local.
+
+Cuando la cuenta de publisher en el VSCode Marketplace esté lista,
+la extensión va a estar instalable en un clic desde la UI de
+Extensions. Detalle en
+[cap 22 de la guía](guide.md#22-soporte-para-editores).
 
 ---
 

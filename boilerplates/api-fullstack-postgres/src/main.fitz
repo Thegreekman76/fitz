@@ -1,0 +1,103 @@
+// main.fitz — entry point del boilerplate api-fullstack-postgres.
+//
+// CRUD completo de "tasks" (todos / pendientes) consumido por un
+// frontend HTML+JS vanilla en otro container (nginx alpine en
+// :8080). El stack completo del docker-compose:
+//
+//   ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+//   │ frontend     │ <───> │ api (Fitz)   │ <───> │ db (Postgres)│
+//   │  :8080       │       │  :3000       │       │  :5432       │
+//   │  nginx       │       │  fitz + py   │       │  postgres:16 │
+//   └──────────────┘       └──────────────┘       └──────────────┘
+//
+// Endpoints (todos con CORS para el frontend en :8080):
+//   - GET    /tasks?filter=all|pending|done  — list (default all).
+//   - POST   /tasks                          — create.
+//   - GET    /tasks/{id}                     — get one.
+//   - PUT    /tasks/{id}                     — update (full).
+//   - DELETE /tasks/{id}                     — delete.
+//   - GET    /openapi.json + /docs           — auto-generados.
+//
+// Estructura multi-archivo (módulos Fitz):
+//   src/
+//   ├── main.fitz          ← (este archivo) handlers HTTP
+//   ├── types/
+//   │   ├── task.fitz      ← `type Task`
+//   │   └── api.fitz       ← `type NewTask`, `UpdateTask`
+//   └── data/
+//       └── tasks.fitz     ← wrapper raw Python (Str JSON)
+
+from python import json
+from types.task import Task
+from types.api import NewTask, UpdateTask
+from data.tasks import create_raw, find_raw, list_raw, update_raw, delete_raw, init_schema
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+// Init de schema en boot.
+match init_schema() {
+    Ok(_)  => print("[boot] DB conectada y schema inicializado"),
+    Err(e) => print("[boot] ERROR conectando a la DB — {e}"),
+}
+
+// CORS config — repetido en cada handler porque el built-in
+// `cors(...)` toma un Map literal y no acepta variables (limitación
+// del parser actual). Cuando esa deuda cierre, esto va a una sola
+// `let CORS = cors({...})` arriba.
+
+// GET /tasks — list con filter opcional via query param.
+//
+// Hoy el query param `filter` se valida con default "all" si falta.
+// La query string viene en el path template (`?filter={filter}` —
+// sintaxis estándar de Fase 7).
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["GET", "OPTIONS"], "allow_headers": ["Content-Type"]}))
+@get("/tasks?filter={filter}")
+fn list_tasks(filter: Str) -> Result<Str> {
+    return list_raw(filter)
+}
+
+// POST /tasks — crear task. Body deserializado a `NewTask`.
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["POST", "OPTIONS"], "allow_headers": ["Content-Type"]}))
+@post("/tasks")
+fn create_task(body: NewTask) -> Result<Task> {
+    let raw = create_raw(body.title, body.description, body.priority)?
+    let t: Task = json.loads(raw)?
+    return Ok(t)
+}
+
+// GET /tasks/{id} — get by id.
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["GET", "OPTIONS"]}))
+@get("/tasks/{id}")
+fn get_task(id: Int) -> Result<Task> {
+    let raw = find_raw(id)?
+    let t: Task = json.loads(raw)?
+    return Ok(t)
+}
+
+// PUT /tasks/{id} — update full. El body trae todos los fields
+// editables.
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["PUT", "OPTIONS"], "allow_headers": ["Content-Type"]}))
+@put("/tasks/{id}")
+fn update_task(id: Int, body: UpdateTask) -> Result<Task> {
+    let raw = update_raw(id, body.title, body.description, body.priority, body.done)?
+    let t: Task = json.loads(raw)?
+    return Ok(t)
+}
+
+// DELETE /tasks/{id} — borrar.
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["DELETE", "OPTIONS"]}))
+@delete("/tasks/{id}")
+fn delete_task(id: Int) -> Result<Str> {
+    let raw = delete_raw(id)?
+    return Ok(raw)
+}
+
+print("[ready] Server arrancando en :3000")
+print("[ready] CRUD endpoints:")
+print("[ready]   GET    /tasks?filter=all|pending|done")
+print("[ready]   POST   /tasks")
+print("[ready]   GET    /tasks/<id>")
+print("[ready]   PUT    /tasks/<id>")
+print("[ready]   DELETE /tasks/<id>")
+print("[ready] Frontend: http://localhost:8080")

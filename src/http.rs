@@ -1620,41 +1620,56 @@ pub fn build_router_with_asyncapi(
     asyncapi_schema: Option<serde_json::Value>,
 ) -> Router {
     let mut router = Router::new();
-    // Agrupar rutas por path para sumar el `OPTIONS` de preflight al
-    // mismo MethodRouter en caso de que varios verbos del mismo path
-    // tengan CORS. Hoy `@get`/`@post`/... por path son únicos (no
-    // soportamos múltiples handlers por (path, method)), pero pueden
-    // existir handlers distintos con métodos distintos sobre el mismo
-    // path. axum permite encadenar `.get(...).post(...)` en un mismo
-    // MethodRouter, lo cual chocaría con `router.route` dos veces. Por
-    // ahora cada (path, method) registra su MethodRouter directo —
-    // si hay dos métodos sobre el mismo path con CORS, el preflight
-    // termina sumado a la segunda ruta. Aceptable para MW.2; revisitable.
+    // Pre-compute merged CorsConfig por path. Cuando varios handlers
+    // comparten un path (típico: `/tasks` con `@get` + `@post` o
+    // `/tasks/{id}` con `@get`/`@put`/`@delete`), cada uno trae su
+    // propio `@middleware(cors(...))` que normalmente difiere solo en
+    // `allow_methods` (cada uno declara su verbo). axum permite
+    // encadenar verbos distintos en un mismo path via `router.route`,
+    // pero el `OPTIONS` del preflight CORS se duplicaría — axum hace
+    // panic con "Overlapping method route". Solución: mergeamos
+    // todos los CorsConfig por path (unión de methods + headers, max
+    // de max_age, primer allow_origin gana) y attachamos el preflight
+    // UNA sola vez por path al primer handler que aparezca.
+    let mut merged_cors_per_path: std::collections::HashMap<String, CorsConfig> =
+        std::collections::HashMap::new();
+    for meta in metas.iter() {
+        if let Some(cors) = &meta.cors {
+            merged_cors_per_path
+                .entry(meta.path.clone())
+                .and_modify(|existing| merge_cors_into(existing, cors))
+                .or_insert_with(|| (**cors).clone());
+        }
+    }
+    let mut preflight_attached: std::collections::HashSet<String> =
+        std::collections::HashSet::new();
     for (idx, meta) in metas.iter().enumerate() {
         // Fase 9.w.2 — WebSocket routes se manejan distinto: el
         // dispatch es GET HTTP que retorna `WebSocketUpgrade::on_upgrade`,
         // no el dispatcher HTTP normal. CORS aplica al handshake; auth
         // también (corre pre-upgrade).
-        if meta.is_ws {
-            let route_handler = build_ws_method_router(idx, registry.clone());
-            let route_handler = match &meta.cors {
-                Some(cors) => attach_preflight(route_handler, cors.clone()),
-                None => route_handler,
-            };
-            router = router.route(&meta.path, route_handler);
-            continue;
-        }
-        let route_handler = build_method_router(
-            meta.method,
-            idx,
-            registry.clone(),
-            meta.has_path_params,
-            meta.has_query_params,
-            meta.expects_body,
-        );
-        let route_handler = match &meta.cors {
-            Some(cors) => attach_preflight(route_handler, cors.clone()),
-            None => route_handler,
+        let route_handler = if meta.is_ws {
+            build_ws_method_router(idx, registry.clone())
+        } else {
+            build_method_router(
+                meta.method,
+                idx,
+                registry.clone(),
+                meta.has_path_params,
+                meta.has_query_params,
+                meta.expects_body,
+            )
+        };
+        let route_handler = if meta.cors.is_some()
+            && !preflight_attached.contains(&meta.path)
+        {
+            preflight_attached.insert(meta.path.clone());
+            let merged = std::sync::Arc::new(
+                merged_cors_per_path[&meta.path].clone(),
+            );
+            attach_preflight(route_handler, merged)
+        } else {
+            route_handler
         };
         router = router.route(&meta.path, route_handler);
     }
@@ -2135,6 +2150,41 @@ fn build_ws_method_router(
             .into_response()
         }
     })
+}
+
+/// Merge incremental de un `CorsConfig` adicional sobre uno existente
+/// — usado por `build_router_with_asyncapi` cuando varios handlers
+/// comparten path. Cada handler trae su propio `@middleware(cors(...))`
+/// con su `allow_methods` específico; la unión de todos define el
+/// preflight que el browser ve.
+///
+/// Política de merge:
+/// - `allow_methods`: unión preservando orden de inserción.
+/// - `allow_headers`: unión case-insensitive (HTTP header names lo son).
+/// - `max_age`: el mayor de los dos (None es "no opinión").
+/// - `allow_origin`: el primero gana — handlers de un mismo path
+///   normalmente deberían declarar el mismo origin; si discrepan, es
+///   un error del usuario y preferimos no inventar política agregada.
+fn merge_cors_into(existing: &mut CorsConfig, other: &CorsConfig) {
+    for m in &other.allow_methods {
+        if !existing.allow_methods.iter().any(|e| e == m) {
+            existing.allow_methods.push(m.clone());
+        }
+    }
+    for h in &other.allow_headers {
+        if !existing
+            .allow_headers
+            .iter()
+            .any(|e| e.eq_ignore_ascii_case(h))
+        {
+            existing.allow_headers.push(h.clone());
+        }
+    }
+    existing.max_age = match (existing.max_age, other.max_age) {
+        (Some(a), Some(b)) => Some(a.max(b)),
+        (Some(a), None) => Some(a),
+        (None, x) => x,
+    };
 }
 
 fn attach_preflight(
@@ -5209,6 +5259,123 @@ mod tests {
             .find(|(n, _)| n == "access-control-max-age")
             .map(|(_, v)| v.clone());
         assert_eq!(max_age, Some("3600".to_string()));
+    }
+
+    // ---- Regresión bug OPTIONS preflight duplicado (2026-05-22) ----
+    //
+    // Cuando varios handlers comparten path (típico CRUD: `/tasks` con
+    // `@get` + `@post`), cada uno trae su propio `@middleware(cors(...))`
+    // con su `allow_methods`. Pre-fix, ambos intentaban registrar
+    // `OPTIONS /tasks` y axum hacía panic con "Overlapping method route.
+    // Handler for `OPTIONS /tasks` already exists" al construir el Router.
+    // Fix: pre-computar el merge de CorsConfig por path; preflight se
+    // registra UNA vez con methods unificados.
+
+    #[tokio::test]
+    async fn bug_options_preflight_duplicado_no_panicea_en_build_router() {
+        // Dos handlers en `/tasks` con CORS — pre-fix esto hacía panic.
+        // Hoy build_router termina sin error.
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))\n\
+            @get(\"/tasks\")\n\
+            fn list() => \"ok\"\n\
+            @middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"POST\", \"OPTIONS\"]}))\n\
+            @post(\"/tasks\")\n\
+            fn create() => \"created\"\n\
+        ";
+        // run_oneshot ya construye el router internamente — si paniqueara,
+        // el test colgaría con un panic visible. Lo dejamos como smoke
+        // de "no panic" además de validar que el GET sigue funcionando.
+        let (status, body) =
+            run_oneshot(src, axum::http::Method::GET, "/tasks").await;
+        assert_eq!(status, 200);
+        assert_eq!(body, "\"ok\"");
+    }
+
+    #[tokio::test]
+    async fn bug_options_preflight_duplicado_merged_methods_en_preflight_response() {
+        // Despues del fix, el preflight unificado advertise GET + POST.
+        // Sin merge, advertise solo del primero (GET) → browser rechaza
+        // POST en CORS check.
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))\n\
+            @get(\"/tasks\")\n\
+            fn list() => \"ok\"\n\
+            @middleware(cors({\"allow_origin\": \"http://localhost:8080\", \"allow_methods\": [\"POST\", \"OPTIONS\"]}))\n\
+            @post(\"/tasks\")\n\
+            fn create() => \"created\"\n\
+        ";
+        let (status, headers, _) =
+            run_oneshot_full(src, axum::http::Method::OPTIONS, "/tasks").await;
+        assert_eq!(status, 204);
+        let methods = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-methods")
+            .map(|(_, v)| v.clone())
+            .expect("preflight debe traer Access-Control-Allow-Methods");
+        // Orden de insertion: GET aparece primero (es el owner), POST
+        // se mergea después. OPTIONS aparece una sola vez (dedup).
+        assert!(methods.contains("GET"), "merged methods debe incluir GET: {}", methods);
+        assert!(methods.contains("POST"), "merged methods debe incluir POST: {}", methods);
+        assert!(methods.contains("OPTIONS"), "merged methods debe incluir OPTIONS: {}", methods);
+    }
+
+    #[tokio::test]
+    async fn bug_options_preflight_duplicado_tres_handlers_con_path_id() {
+        // Caso del 6to boilerplate (api-fullstack-postgres):
+        // `/tasks/{id}` con GET + PUT + DELETE, cada uno con su CORS.
+        // Pre-fix paniqueaba al segundo handler.
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"*\", \"allow_methods\": [\"GET\", \"OPTIONS\"]}))\n\
+            @get(\"/tasks/{id}\")\n\
+            fn get_one(id: Int) => id\n\
+            @middleware(cors({\"allow_origin\": \"*\", \"allow_methods\": [\"PUT\", \"OPTIONS\"]}))\n\
+            @put(\"/tasks/{id}\")\n\
+            fn update(id: Int) => id\n\
+            @middleware(cors({\"allow_origin\": \"*\", \"allow_methods\": [\"DELETE\", \"OPTIONS\"]}))\n\
+            @delete(\"/tasks/{id}\")\n\
+            fn del(id: Int) => id\n\
+        ";
+        let (status, headers, _) =
+            run_oneshot_full(src, axum::http::Method::OPTIONS, "/tasks/42").await;
+        assert_eq!(status, 204);
+        let methods = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-methods")
+            .map(|(_, v)| v.clone())
+            .expect("preflight debe traer Access-Control-Allow-Methods");
+        assert!(methods.contains("GET"));
+        assert!(methods.contains("PUT"));
+        assert!(methods.contains("DELETE"));
+    }
+
+    #[tokio::test]
+    async fn bug_options_preflight_duplicado_merge_de_headers_case_insensitive() {
+        // Dos handlers con headers que difieren solo en case — al
+        // mergear, no se duplican.
+        let src = "\
+            @middleware(cors({\"allow_origin\": \"*\", \"allow_headers\": [\"Content-Type\"]}))\n\
+            @get(\"/x\")\n\
+            fn h1() => \"a\"\n\
+            @middleware(cors({\"allow_origin\": \"*\", \"allow_headers\": [\"content-type\", \"Authorization\"]}))\n\
+            @post(\"/x\")\n\
+            fn h2() => \"b\"\n\
+        ";
+        let (status, headers, _) =
+            run_oneshot_full(src, axum::http::Method::OPTIONS, "/x").await;
+        assert_eq!(status, 204);
+        let allowed_headers = headers
+            .iter()
+            .find(|(n, _)| n == "access-control-allow-headers")
+            .map(|(_, v)| v.clone())
+            .expect("preflight debe traer Access-Control-Allow-Headers");
+        // Content-Type del primer handler se preserva con su casing
+        // original. Authorization se suma del segundo. "content-type"
+        // del segundo NO se duplica (case-insensitive match).
+        let comma_count = allowed_headers.matches(',').count();
+        assert_eq!(comma_count, 1, "esperaba 2 headers (1 coma), got: {}", allowed_headers);
+        assert!(allowed_headers.to_lowercase().contains("content-type"));
+        assert!(allowed_headers.to_lowercase().contains("authorization"));
     }
 
     #[tokio::test]

@@ -4730,6 +4730,235 @@ no está aplicado.
 
 ---
 
+## ~~R.bug-options-preflight-shared-path — OPTIONS preflight duplicado cuando varios handlers comparten path~~ ✓ CERRADO 2026-05-22
+
+> **CERRADO el mismo día del descubrimiento (2026-05-22)** — el fix
+> aterrizó en `src/http.rs::build_router_with_asyncapi` (intérprete)
+> y `src/codegen.rs` (codegen, paridad). Los 4 tests de regresión
+> viven en `src/http.rs::tests::bug_options_preflight_duplicado_*` y
+> el E2E del codegen en
+> `tests/compile_e2e.rs::r_bug_options_preflight_duplicado_en_fitz_build_paridad_con_fitz_run`.
+>
+> El 6to boilerplate (`api-fullstack-postgres`) destrabó la
+> validación end-to-end y motivó el descubrimiento.
+
+**Prioridad: ALTA** — produce panic visible en boot con mensaje
+oscuro ("Overlapping method route. Handler for `OPTIONS /tasks`
+already exists") que confunde al usuario porque `fitz check` y la
+build pasan limpio.
+
+### Descripción
+
+Cuando dos o más handlers HTTP comparten el mismo path con CORS
+declarado en cada uno (caso típico CRUD: `/tasks` con `@get` +
+`@post`, o `/tasks/{id}` con `@get` + `@put` + `@delete`), cada
+handler intentaba registrar su propio OPTIONS preflight para el
+path. axum hace panic al construir el `Router` con:
+
+```
+Overlapping method route. Handler for `OPTIONS /tasks` already exists
+```
+
+El bug se manifestaba tanto en `fitz run` (al construir el Router
+en `build_router_with_asyncapi`) como en `fitz build` (el binario
+emitido también paniqueaba en boot).
+
+### Repro mínimo
+
+```fitz
+@server(3000) fn main() => 0
+
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["GET", "OPTIONS"]}))
+@get("/tasks")
+fn list_tasks() -> Str => "[]"
+
+@middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["POST", "OPTIONS"]}))
+@post("/tasks")
+fn create_task() -> Str => "created"
+```
+
+Pre-fix: el server panic al arrancar con el mensaje arriba (ambos
+en `fitz run` y `fitz build`). Post-fix: arranca limpio, el
+preflight unificado advierte `GET, POST, OPTIONS` en
+`Access-Control-Allow-Methods`.
+
+### Causa raíz
+
+El comment original en `build_router` decía explícitamente:
+
+> Por ahora cada (path, method) registra su MethodRouter directo —
+> si hay dos métodos sobre el mismo path con CORS, el preflight
+> termina sumado a la segunda ruta. Aceptable para MW.2; revisitable.
+
+Pero el comportamiento real era: el segundo `router.route(path, ...)`
+con `.options(preflight)` colisionaba con el OPTIONS ya registrado
+por el primer handler → panic en el merge.
+
+### Fix aplicado
+
+**Intérprete (`src/http.rs::build_router_with_asyncapi`)**:
+
+1. Pre-cómputo de `merged_cors_per_path: HashMap<String, CorsConfig>`:
+   recorre las metas, mergea las `CorsConfig` de handlers que
+   comparten path (unión de `allow_methods` preservando orden, unión
+   de `allow_headers` case-insensitive, max de `max_age`, primer
+   `allow_origin` gana).
+2. `preflight_attached: HashSet<String>` tracking — primer handler
+   con CORS de cada path emite el `attach_preflight` con el config
+   MERGED; subsequent skipean.
+3. Helper nuevo `fn merge_cors_into(existing: &mut CorsConfig, other: &CorsConfig)`.
+
+**Codegen (`src/codegen.rs`)**:
+
+1. Nuevos campos en `CodegenCtx`: `cors_merged_per_path` +
+   `cors_preflight_owner` (primer handler de cada path con CORS).
+2. Pre-scan `precompute_cors_merge(http_fns)` corrido ANTES del loop
+   de wrappers en `generate_project`.
+3. `emit_cors_helpers(sig)` solo emite `__cors_resolve_<NAME>` +
+   `__preflight_<NAME>` para el OWNER del path.
+4. Nuevo método `cors_resolve_fn_for(sig)` que devuelve el nombre
+   del resolver del owner — los wrappers de los non-owners
+   referencian el resolver compartido.
+5. Route loop en `gen_http_main` solo añade `.options(__preflight_<OWNER>)`
+   al `.route(...)` del owner; non-owners hacen `.route(...)` sin
+   `.options(...)`. axum mergea verbos por path naturalmente.
+6. Helper free `merge_build_cors_into` paralelo a `merge_cors_into`
+   del runtime.
+
+### Tests de regresión
+
+- **`src/http.rs::tests::bug_options_preflight_duplicado_no_panicea_en_build_router`** — smoke: build_router no panic con 2 handlers compartiendo `/tasks`.
+- **`bug_options_preflight_duplicado_merged_methods_en_preflight_response`** — `Access-Control-Allow-Methods` incluye GET + POST + OPTIONS al consultar OPTIONS /tasks.
+- **`bug_options_preflight_duplicado_tres_handlers_con_path_id`** — caso del 6to boilerplate con `/tasks/{id}` + GET/PUT/DELETE.
+- **`bug_options_preflight_duplicado_merge_de_headers_case_insensitive`** — dedup case-insensitive de allow_headers (`Content-Type` vs `content-type`).
+- **`tests/compile_e2e.rs::r_bug_options_preflight_duplicado_en_fitz_build_paridad_con_fitz_run`** — E2E que buildea el binario, lo spawnea, hace OPTIONS /tasks vía raw TCP y valida que el preflight responde 204 + methods merged.
+
+### Lo que el lenguaje aprende del bug
+
+Política de merge documentada como contrato del lenguaje: handlers
+que comparten path con CORS deberían declarar el mismo `allow_origin`
+(si discrepan, el primero gana sin warning); los `allow_methods` y
+`allow_headers` se unen. Si en el futuro queremos un warning de
+"discrepancia de allow_origin entre handlers del mismo path", se
+agrega en el checker estático.
+
+---
+
+## R.bug-8.7-coercion-list-codegen — Coerción `list`/`dict` Python → `List<T>`/`Map<K,V>`/`Instance` Fitz en codegen (deuda residual de Fase 8.7)
+
+**Prioridad: ALTA** (post-boilerplates) — limita el patrón
+"endpoint que devuelve `Result<List<T>>` con T nominal" desde
+interop Python en `fitz build`. Hoy el workaround es devolver
+JSON crudo (`Result<Str>`) que el cliente HTTP doble-parsea —
+funcional pero feo.
+
+### Estado actual
+
+Cierre formal de Fase 8.7 (CHANGELOG v0.8.8) marca como deuda
+residual:
+
+> Coerción Python `list/dict` → Fitz `List<T>`/`Map<K,V>`/`Instance`
+> en `fitz build` (helpers `__fitz_py_to_list_*` ya emitidos, falta
+> wiring en `coerce`); `.await` con binding intermedio split;
+> trait `__FitzFromPy` simétrico.
+
+Los helpers `__fitz_py_to_list_int`, `__fitz_py_to_list_string`,
+etc. **ya están emitidos** en el preludio HTTP del codegen
+(`src/codegen.rs` líneas ~3960-3982). Falta el wiring en `coerce`
+y la versión para `List<NominalT>` (que requiere también coerción
+recursiva `dict` → `Instance` por field).
+
+En el **intérprete (`fitz run`)** la coerción 8.4.3 (`Map` →
+`Instance` con anotación nominal) ya funciona para items
+individuales. Lo que falta:
+- Iterar un `list` Python y coercear cada item a `Instance` Fitz.
+- Empaquetar el resultado como `List<T>` Fitz nativa (no opaca).
+
+### Repro
+
+```fitz
+type User { id: Int, name: Str, email: Str }
+from python import db   // db.list_users() devuelve list[dict]
+
+// Esto FALLA en codegen (deuda 8.7) y en intérprete (no hay
+// coerción recursiva todavía):
+@get("/users")
+fn list_users() -> Result<List<User>> {
+    let users: List<User> = db.list_users()?   // ← deuda
+    return Ok(users)
+}
+
+// Workaround actual (api-postgres-python):
+@get("/users")
+fn list_users() -> Result<Str> {
+    let raw = db.list_users()?
+    return Ok(json.dumps(raw)?)   // string-doble-escapeado al cliente
+}
+```
+
+Output del workaround:
+```bash
+$ curl localhost:3000/users
+"[{\"id\":1,\"name\":\"Ada\",...}]"     # quotes + escapes
+```
+
+Lo esperado (cuando 8.7 cierre):
+```bash
+$ curl localhost:3000/users
+[{"id":1,"name":"Ada",...}]              # JSON object limpio
+```
+
+### Fix proposed
+
+**Sub-paso 8.7.bis — coerción list/dict completa**:
+
+1. **Wiring de `coerce(PyAny → List<T>)` en codegen**: cuando
+   el destino es `List<T>` con T primitivo, usar los helpers
+   `__fitz_py_to_list_<T>` que ya existen. ~30 LoC en
+   `src/codegen.rs::coerce`.
+
+2. **Coerción recursiva `dict` → `Instance` en codegen** (para
+   T nominal): emit un helper que itera los fields del `type
+   <T>` y extrae cada uno del dict Python via `.get_item(key)`.
+   Reusa `__FitzFromPy` (deuda hermana) si se implementa
+   simétrico a `__FitzToPy`.
+
+3. **Coerción `dict` → `Map<K,V>`** (cuando V es primitivo y K
+   es Str): paralelo a (1) pero para Map.
+
+4. **Soporte en intérprete**: `eval_coerce_to_annotation`
+   (post-8.4.3) extiende para casos `List<T>` y `Map<K,V>` con
+   item Python opaco. Iterar + coercer item por item.
+
+5. **Tests**: round-trip Python `list[dict]` → Fitz `List<User>`
+   tipada → JSON limpio al cliente HTTP. E2E del boilerplate
+   `api-postgres-python` con el handler `list_users` retornando
+   `Result<List<User>>` sin workaround.
+
+### Tests de regresión cuando se cierre
+
+- Repro arriba debe compilar y correr en `fitz run` Y `fitz build`.
+- Boilerplate `api-postgres-python` refactorizado a usar
+  `Result<List<User>>` directo en `list_users` sin workaround.
+- `examples/python-interop-8.7.fitz` actualizado con el caso
+  list/dict.
+- Smoke `GUIDE_EXAMPLES_COMPILE` verde.
+
+### Items vinculados
+
+- `boilerplates/api-postgres-python/src/main.fitz` — `list_users`
+  devuelve `Result<Str>` por workaround. Cuando 8.7.bis cierre,
+  cambiar a `Result<List<User>>`.
+- `boilerplates/api-fullstack-postgres` (6to boilerplate) — el
+  endpoint `GET /tasks` tiene el mismo problema; probable que
+  use mismo workaround o que se intente la iteración manual
+  con json.loads + map + anotación nominal en callback (que
+  parece funcionar en intérprete según 8.4.3, no validado E2E).
+- `.await` con binding intermedio split (deuda hermana 8.7).
+- Trait `__FitzFromPy` simétrico (deuda hermana 8.7).
+
+---
+
 ## R.bug-loader-relative-only — Loader Fitz resuelve `from sub.foo` solo relativo al importer, no al root (descubierto 2026-05-22)
 
 **Prioridad: MEDIA** — limita la organización de proyectos

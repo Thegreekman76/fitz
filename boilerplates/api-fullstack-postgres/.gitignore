@@ -1,0 +1,20 @@
+# Build outputs de Fitz
+target/
+
+# Binarios
+*.exe
+*.pdb
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor / OS
+.DS_Store
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+
+# Secrets nunca al repo
+.env

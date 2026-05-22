@@ -1,0 +1,82 @@
+# docker-compose para api-fullstack-postgres.
+#
+# Tres servicios montan el stack entero:
+#   ┌──────────────┐       ┌──────────────┐       ┌──────────────┐
+#   │ frontend     │ <───> │ api (Fitz)   │ <───> │ db (Postgres)│
+#   │  :8080       │       │  :3000       │       │  :5432       │
+#   │  nginx:alpine│       │  fitz + py   │       │  postgres:16 │
+#   └──────────────┘       └──────────────┘       └──────────────┘
+#
+# Por qué frontend en container separado y no servido por la API:
+# para demostrar CORS REAL. El browser carga el HTML desde
+# localhost:8080 (origin A) y hace fetch a localhost:3000 (origin B)
+# → preflight OPTIONS antes de POST/PUT/DELETE. La API responde con
+# headers Access-Control-Allow-* declarados via `@middleware(cors(...))`.
+#
+# Setup (una vez):
+#   cp .env.example .env
+#   # editar .env con credenciales propias
+#
+# Uso:
+#   docker compose up --build
+#   # esperar "[boot] DB conectada y schema inicializado" en logs
+#
+# Después:
+#   - Frontend en http://localhost:8080
+#   - API directa en http://localhost:3000/tasks
+#   - OpenAPI/Scalar UI en http://localhost:3000/docs
+#
+# Tear down (data persiste):
+#   docker compose down
+#
+# Tear down + borrar data:
+#   docker compose down -v
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fitz-fullstack-pg
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-fitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitz}
+      POSTGRES_DB: ${POSTGRES_DB:-fitz}
+    volumes:
+      # Volume nombrado — la data persiste entre `down`/`up`. Para
+      # reset completo: `docker compose down -v`.
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Expuesto al host para conexión desde psql/DBeaver/etc.
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitz} -d ${POSTGRES_DB:-fitz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: fitz-fullstack-api
+    environment:
+      # Connection string consumido por `python/db.py` via
+      # `os.environ.get("DATABASE_URL")`. Host `db` = service name
+      # de Postgres en la network de Compose.
+      DATABASE_URL: "postgresql+psycopg2://${POSTGRES_USER:-fitz}:${POSTGRES_PASSWORD:-fitz}@db:5432/${POSTGRES_DB:-fitz}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    image: nginx:alpine
+    container_name: fitz-fullstack-frontend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api
+
+volumes:
+  pgdata:

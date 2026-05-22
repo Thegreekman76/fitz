@@ -115,6 +115,27 @@ fitz run hola.fitz
 
 **3. Seguir aprendiendo.** La [**guía del lenguaje**](https://thegreekman76.github.io/fitz/guide/) cubre todo lo implementado en español, con ejemplos ejecutables. Empezá por el [cap 2 — Tu primer programa](https://thegreekman76.github.io/fitz/guide/#2-tu-primer-programa). Para la especificación completa (incluye features futuras), ver [docs/syntax-spec.md](docs/syntax-spec.md).
 
+## Boilerplates
+
+Plantillas Dockerizadas listas para arrancar proyectos reales. Cada una tiene README exhaustivo con paso a paso, troubleshooting y plan de producción. Detalle completo en [`boilerplates/README.md`](boilerplates/README.md).
+
+| Boilerplate | Qué demuestra |
+|-------------|---------------|
+| [`cli-tool`](boilerplates/cli-tool/)                           | CLI puro — sales report con métodos funcionales. Binario nativo distroless ~30 MB.                          |
+| [`api-simple`](boilerplates/api-simple/)                       | REST API tipada + OpenAPI 3.1 + UI Scalar autogenerados.                                                    |
+| [`api-middleware-cors`](boilerplates/api-middleware-cors/)     | Auth nativa JWT + Argon2 + middleware encadenado + CORS cross-origin + frontend vanilla.                    |
+| [`api-websocket`](boilerplates/api-websocket/)                 | WebSockets tipados (`WsConn<T>`) con broadcast + heartbeat + frontend chat vanilla.                         |
+| [`api-postgres-python`](boilerplates/api-postgres-python/)     | CRUD multi-archivo con SQLAlchemy + Postgres (compose 2 servicios).                                         |
+| [`api-fullstack-postgres`](boilerplates/api-fullstack-postgres/) | **Showcase fullstack** — API + frontend rico (tabla, edit inline, filtros) + Postgres (compose 3 servicios). |
+
+Quickstart genérico:
+
+```bash
+cd boilerplates/<nombre>
+cp .env.example .env   # si existe
+docker compose up --build   # o `docker build .`
+```
+
 ## CLI
 
 Verificá la instalación con `fitz --version` y `fitz --help`.
@@ -154,7 +175,34 @@ Verificá la instalación con `fitz --version` y `fitz --help`.
 | ----------------------------- | ------------------------------------------------------------------------------ |
 | `fitz py-types <archivo.py>`  | Genera `type` Fitz desde modelos SQLAlchemy. Output a stdout o `--out`.        |
 
-Editor support: extensión VSCode con LSP (highlighting, diagnostics, hover, go-to-definition, autocomplete contextual). Build local con `npm run build:vsix` desde [`editors/vscode/`](editors/vscode/). Detalle en [cap 22 de la guía](https://thegreekman76.github.io/fitz/guide/#22-soporte-para-editores).
+## Extensión VSCode
+
+Highlighting + LSP (diagnostics, hover, go-to-definition, autocomplete contextual) con el binario `fitz-lsp` bundleado en cada `.vsix` por plataforma.
+
+**Instalar desde releases (recomendado)**:
+
+1. Bajá el `.vsix` correspondiente a tu OS/arquitectura de [releases](https://github.com/Thegreekman76/fitz/releases/latest):
+   - **Windows x64**: `fitz-language-win32-x64-X.Y.Z.vsix`
+   - **Windows ARM64**: `fitz-language-win32-arm64-X.Y.Z.vsix`
+   - **Linux x64**: `fitz-language-linux-x64-X.Y.Z.vsix`
+   - **Linux ARM64**: `fitz-language-linux-arm64-X.Y.Z.vsix`
+   - **macOS Apple Silicon (M1/M2/M3)**: `fitz-language-darwin-arm64-X.Y.Z.vsix`
+2. En VSCode: `Ctrl+Shift+P` → "Extensions: Install from VSIX..." → seleccioná el archivo bajado.
+3. Listo — abrí cualquier `.fitz` y vas a tener errores subrayados al tipear, hover con tipos, F12 para go-to-definition, y autocomplete contextual.
+
+> Nota: macOS Intel (`darwin-x64`) no está en la matriz de release por escasez crónica de runners macos-13 en GitHub Actions. Si lo necesitás, build local (próxima sección) funciona idéntico.
+>
+> Cuando se cree la cuenta de publisher en el VSCode Marketplace, la extensión va a estar instalable en un clic desde la UI de Extensions buscando `fitz`. Por ahora releases en GitHub es el camino canónico.
+
+**Build local** (alternativa, si querés trackear `main` o no encontrás tu plataforma en releases):
+
+```bash
+cd editors/vscode
+npm install
+npm run build:vsix     # produce un `.vsix` para tu plataforma actual
+```
+
+Detalle completo en [cap 22 de la guía](https://thegreekman76.github.io/fitz/guide/#22-soporte-para-editores).
 
 ## Nombre
 

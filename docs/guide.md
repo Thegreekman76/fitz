@@ -67,8 +67,14 @@ abrí un issue.
 26. [`fitz repl` — REPL interactivo](#26-fitz-repl--repl-interactivo)
 27. [`fitz lint` — linter de patrones](#27-fitz-lint--linter-de-patrones)
 
-**Parte 11 — Cerrando**
-28. [Qué sigue](#28-qué-sigue)
+**Parte 11 — Web first-class**
+28. [Auth nativa](#28-auth-nativa)
+29. [WebSockets tipados](#29-websockets-tipados)
+30. [Jobs sin Celery](#30-jobs-sin-celery)
+
+**Parte 12 — Cerrando**
+31. [Plantillas y boilerplates](#31-plantillas-y-boilerplates)
+32. [Qué sigue](#32-qué-sigue)
 
 ---
 
@@ -8566,13 +8572,56 @@ post-MVP (sin sub-fase asignada todavía):
 
 ### Cómo lo instalo
 
-Hay dos modalidades:
+Hay tres modalidades, ordenadas de menor a mayor esfuerzo:
 
-#### A) Bundled (recomendado) — el `.vsix` trae el binario adentro
+#### A) Bajar el `.vsix` de releases (recomendado para uso normal)
 
-Un solo comando genera un `.vsix` per-plataforma con `fitz-lsp`
-bundleado en `server/`. No necesitás configurar nada después de
-instalar.
+Cada tag `vX.Y.Z` publica los `.vsix` per-plataforma como assets
+del release en GitHub. Sin compilar nada local.
+
+1. Andá a [releases](https://github.com/Thegreekman76/fitz/releases/latest)
+   y bajá el `.vsix` correspondiente a tu sistema:
+
+   | Plataforma                        | Archivo                                      |
+   |-----------------------------------|----------------------------------------------|
+   | Windows x64                       | `fitz-language-win32-x64-X.Y.Z.vsix`         |
+   | Windows ARM64                     | `fitz-language-win32-arm64-X.Y.Z.vsix`       |
+   | Linux x64                         | `fitz-language-linux-x64-X.Y.Z.vsix`         |
+   | Linux ARM64                       | `fitz-language-linux-arm64-X.Y.Z.vsix`       |
+   | macOS Apple Silicon (M1/M2/M3)    | `fitz-language-darwin-arm64-X.Y.Z.vsix`      |
+
+   Cada `.vsix` trae el `fitz-lsp` ya compilado adentro
+   (`server/fitz-lsp[.exe]`). No necesitás Rust ni Node.
+
+2. Instalalo en VSCode. Dos opciones equivalentes:
+
+   **Desde la UI**:
+   - `Ctrl+Shift+P` (o `Cmd+Shift+P` en macOS) → "Extensions: Install from VSIX..."
+   - Seleccioná el archivo bajado.
+
+   **Desde la terminal**:
+   ```bash
+   code --install-extension fitz-language-<plataforma>-X.Y.Z.vsix --force
+   ```
+
+3. Abrí cualquier `.fitz` y vas a ver highlighting + diagnostics +
+   hover + go-to-def + autocomplete funcionando. Cero settings extra.
+
+> **macOS Intel (`darwin-x64`)** no está en la matriz de release
+> por escasez crónica de runners macos-13 en GitHub Actions. Si lo
+> necesitás, build local (sección B) funciona idéntico.
+>
+> **¿Por qué no desde el VSCode Marketplace?** Publicar al
+> Marketplace requiere cuenta de publisher de Microsoft (vía Azure
+> DevOps con PAT) — todavía no está creada. Cuando se cree, la
+> instalación se va a hacer en un clic desde la UI de Extensions de
+> VSCode buscando `fitz` (la sección A se reemplazará por ese
+> camino; releases en GitHub van a quedar como backup para air-gapped
+> / corporate networks que bloquean el Marketplace).
+
+#### B) Build local — `.vsix` para tu plataforma actual
+
+Si querés trackear `main` o no encontrás tu plataforma en releases:
 
 ```bash
 cd editors/vscode
@@ -8588,14 +8637,11 @@ Esto produce `editors/vscode/fitz-language-X.Y.Z-<platform>-<arch>.vsix`
 3. `tsc` compila la extensión.
 4. `vsce package --target <platform>` empaqueta todo.
 
-Después lo instalás en VSCode:
+Después lo instalás como en (A):
 
 ```bash
 code --install-extension editors/vscode/fitz-language-*.vsix --force
 ```
-
-Abrí cualquier `.fitz` y deberías ver highlighting + diagnostics +
-hover + go-to-def + autocomplete funcionando. Cero settings extra.
 
 Para empaquetar para **otra plataforma** (cross-compile, requiere
 `rustup target add <triple>` previo):
@@ -8607,7 +8653,7 @@ node scripts/build-vsix.mjs --target darwin-arm64
 # linux-arm64, darwin-x64, darwin-arm64
 ```
 
-#### B) Manual (alfa / desarrollo) — `fitz-lsp` en PATH o setting
+#### C) Manual (alfa / desarrollo) — `fitz-lsp` en PATH o setting
 
 Si querés iterar sobre el LSP sin re-empaquetar cada vez:
 
@@ -10198,7 +10244,55 @@ endurecimiento para servicios críticos".
 
 ---
 
-## 31. Qué sigue
+## 31. Plantillas y boilerplates
+
+Si llegaste hasta acá leyendo, ya viste cada feature de Fitz por
+separado: HTTP nativo, auth, WebSockets, jobs, interop Python,
+package manager, compilación a binario. Lo que sigue es **verlas
+funcionando juntas** en proyectos reales.
+
+El repo trae **6 boilerplates Dockerizados** en `boilerplates/`,
+cada uno con README exhaustivo (paso a paso, troubleshooting,
+plan de producción):
+
+| Boilerplate                                                              | Qué demuestra                                                                                            | Setup    |
+|--------------------------------------------------------------------------|----------------------------------------------------------------------------------------------------------|----------|
+| [`cli-tool`](../boilerplates/cli-tool/)                                   | CLI puro — sales report con `.reduce/.filter/.map`. Binario nativo distroless ~30 MB.                    | `docker build .` |
+| [`api-simple`](../boilerplates/api-simple/)                               | REST API tipada con OpenAPI 3.1 + UI Scalar autogenerados. Distroless ~40 MB.                            | `docker build .` |
+| [`api-middleware-cors`](../boilerplates/api-middleware-cors/)             | Auth nativa JWT + Argon2id + middleware encadenado + CORS cross-origin + frontend vanilla.               | compose 2 svcs   |
+| [`api-websocket`](../boilerplates/api-websocket/)                         | WebSockets tipados (`WsConn<T>`) con broadcast + heartbeat + auth + frontend chat vanilla.               | compose 2 svcs   |
+| [`api-postgres-python`](../boilerplates/api-postgres-python/)             | CRUD multi-archivo con SQLAlchemy + Postgres (módulos `types/` + `data/`, ejercitable con curl).         | compose 2 svcs   |
+| [`api-fullstack-postgres`](../boilerplates/api-fullstack-postgres/)       | **Showcase fullstack** — API + frontend rico (tabla, edit inline, filtros, badges) + Postgres en compose. | compose 3 svcs   |
+
+### Quickstart genérico
+
+```bash
+cd boilerplates/<nombre>
+cp .env.example .env       # si existe
+docker compose up --build  # o `docker build .` si no hay compose
+```
+
+Cada README dice qué URL abrir y cómo probar con curl.
+
+### Cómo elegir
+
+- **Aprendiendo Fitz** → arrancá por `cli-tool`: binario standalone,
+  sin HTTP ni DB, muestra types + listas + funcional puro en <100 LoC.
+- **REST API mínima** → `api-simple`: GET/POST tipados + OpenAPI auto.
+- **Auth + frontend** → `api-middleware-cors`: stack stateless más
+  rico, con CORS preflight automático y JWT/Argon2 nativos.
+- **Real-time** → `api-websocket`: chat broadcast con heartbeat
+  built-in y AsyncAPI 3.0 auto-generado.
+- **Necesitás DB persistente** → `api-postgres-python` para el patrón
+  API + DB, o `api-fullstack-postgres` para el stack web completo.
+
+Las plantillas son la forma más rápida de ver Fitz "en escala real",
+y también el mejor punto de partida si querés extender en lugar de
+escribir desde cero.
+
+---
+
+## 32. Qué sigue
 
 Si llegaste hasta acá: gracias. Esta es una versión temprana de la
 guía y vos sos parte muy temprana del proyecto.

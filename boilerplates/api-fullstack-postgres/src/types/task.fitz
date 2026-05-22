@@ -1,0 +1,19 @@
+// types/task.fitz — type `Task` que refleja el modelo SQLAlchemy
+// del lado Python (`python/models.py`).
+//
+// 5 fields:
+//   - id: auto-asignado por Postgres.
+//   - title: texto principal.
+//   - description: detalle opcional.
+//   - priority: enum-like "low" | "med" | "high".
+//   - done: bool — toggle de la UI.
+//   - created_at: timestamp del insert, ISO 8601.
+
+type Task {
+    id: Int = 0,
+    title: Str = "",
+    description: Str = "",
+    priority: Str = "med",
+    done: Bool = false,
+    created_at: Str = "",
+}
