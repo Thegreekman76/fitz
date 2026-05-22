@@ -1,0 +1,69 @@
+// main.fitz — entry point del boilerplate api-postgres-python.
+//
+// Estructura del proyecto (módulos Fitz):
+//   src/
+//   ├── main.fitz                ← (este archivo) handlers HTTP
+//   ├── types/
+//   │   ├── user.fitz            ← `type User` (mirror SQLAlchemy)
+//   │   └── api.fitz             ← `type NewUser` (body POST)
+//   └── data/
+//       └── users.fitz           ← wrapper Fitz de db.py (tipo `User`)
+//
+// El loader de módulos de Fitz resuelve `from types.user import ...`
+// a `src/types/user.fitz` (lookup relativo al main). Eso permite
+// separar tipos (types/) de lógica de datos (data/) sin que el main
+// vea `from python import` directo — el wrapper de data/users.fitz
+// encapsula la interop.
+//
+// Stack runtime:
+//   - Fitz binario con `--features python` (PyO3 linkado).
+//   - python:3.12-slim con SQLAlchemy + psycopg2-binary.
+//   - Postgres en otro container del docker-compose.
+
+from types.user import User
+from types.api import NewUser
+from data.users import create, find, list_all, init_schema
+
+@server(3000, "0.0.0.0")
+fn main() => 0
+
+// Init de la DB en boot — crea tablas si no existen. Si falla
+// (Postgres no levantó aún, credenciales mal, etc.), printeamos
+// el error y seguimos arrancando — el primer request al API va
+// a fallar con detalle del error de SQLAlchemy. Eso es preferible
+// a un boot que cuelga indefinidamente esperando la DB.
+match init_schema() {
+    Ok(_)  => print("[boot] DB conectada y schema inicializado"),
+    Err(e) => print("[boot] ERROR conectando a la DB — {e}"),
+}
+
+// POST /users — crear un user nuevo. El body se deserializa
+// automático a `NewUser` (Fitz valida el shape). El `?` propaga
+// errores SQLAlchemy (commit, conexión, etc.) → 500 con
+// `{"error": "..."}`.
+@post("/users")
+fn create_user(body: NewUser) -> Result<User> {
+    return create(body.name, body.email)
+}
+
+// GET /users/{id} — buscar por id. Si no existe, propaga el
+// NoResultFound de SQLAlchemy como `Err`.
+@get("/users/{id}")
+fn get_user(id: Int) -> Result<User> {
+    return find(id)
+}
+
+// GET /users — listar todos. Devuelve JSON crudo (el data/users
+// module no convierte a `List<User>` Fitz nativa por deuda
+// residual de la coerción Python→Fitz de listas opacas).
+@get("/users")
+fn list_users() -> Result<Str> {
+    return list_all()
+}
+
+print("[ready] Server arrancando en :3000")
+print("[ready] Endpoints:")
+print("[ready]   POST /users       — crear (body JSON: name, email)")
+print("[ready]   GET  /users       — listar (JSON crudo)")
+print("[ready]   GET  /users/<id>  — buscar por id (User tipado)")
+print("[ready]   GET  /docs        — UI Scalar (OpenAPI 3.1)")

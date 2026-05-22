@@ -1,0 +1,11 @@
+// types/api.fitz — tipos de I/O del API HTTP. Mantenidos separados
+// de los modelos DB (`types/user.fitz`) para que ambos puedan
+// evolucionar independiente:
+//   - `User` refleja la tabla SQL (con id, timestamps, etc.).
+//   - `NewUser` es lo que el cliente HTTP manda al POST — solo los
+//     campos editables.
+
+type NewUser {
+    name: Str = "",
+    email: Str = "",
+}

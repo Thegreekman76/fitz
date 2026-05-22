@@ -1,0 +1,16 @@
+// types/user.fitz — type `User` que refleja el modelo SQLAlchemy
+// del lado Python (`python/models.py`). Hoy lo mantenemos a mano
+// para que el boilerplate funcione sin pre-paso de generación;
+// en proyectos reales usá:
+//
+//   fitz py-types python/models.py --out src/types/user.fitz
+//
+// Eso introspecciona el modelo SQLAlchemy y emite el `type` Fitz
+// con los fields tipados.
+
+type User {
+    id: Int = 0,
+    name: Str = "",
+    email: Str = "",
+    created_at: Str = "",
+}

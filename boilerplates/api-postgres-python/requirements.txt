@@ -1,0 +1,13 @@
+# Dependencies del lado Python del boilerplate.
+#
+# SQLAlchemy: ORM. Versión 2.x con la API nueva (typed,
+# declarative_base, sessionmaker(future=True)).
+sqlalchemy>=2.0,<3
+
+# psycopg2-binary: driver sync de Postgres (sin compilar C
+# headers). La `-binary` viene con wheels precompilados para
+# todos los OS comunes — ideal para Docker base python:slim.
+# Para producción con muchas conexiones concurrentes, mirar
+# `asyncpg` + SQLAlchemy 2.x async (deuda futura — requiere
+# integrar el bridge tokio↔asyncio de Fase 8.6).
+psycopg2-binary>=2.9,<3

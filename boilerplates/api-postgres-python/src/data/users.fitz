@@ -1,0 +1,62 @@
+// data/users.fitz — wrapper Fitz sobre los helpers Python en
+// `python/db.py`. Cada fn de este módulo tipa el retorno con tipos
+// Fitz nativos (`User`, `Result<User>`), de modo que `main.fitz`
+// solo importa fns tipadas y NO ve `from python import` directo.
+//
+// Beneficio del wrapper:
+//   - El `main.fitz` (capa HTTP) no depende de PyO3 ni del shape
+//     exacto de Python. Si cambiamos de SQLAlchemy a otro ORM,
+//     solo este archivo se toca.
+//   - Tests E2E del API se enfocan en el comportamiento HTTP, no
+//     en el marshaling Python.
+//
+// Patrón "round-trip por JSON":
+//   El call `db.add_user(...)` devuelve un `dict` Python (PyAny
+//   opaco desde Fitz). La coerción directa `dict → Instance` es
+//   deuda residual del intérprete sobre datos PyAny; mientras
+//   tanto, el patrón canónico es `json.dumps` + `json.loads` con
+//   anotación destino `let u: User = ...` que dispara la coerción
+//   `Map → Instance` (heredada de Fase 8.4.3). El round-trip pasa
+//   por una serialización JSON intermedia — costo trivial en
+//   request HTTP típico.
+
+from python import json
+from python import db
+from types.user import User
+
+// Helper privado del módulo — convierte un dict Python opaco a un
+// `User` Fitz nativo via round-trip JSON. NO se exporta al main
+// (los handlers HTTP nunca lo necesitan directo).
+fn from_py(raw) -> Result<User> {
+    let s = json.dumps(raw)?
+    let u: User = json.loads(s)?
+    return Ok(u)
+}
+
+// Crear un user nuevo. Postgres asigna `id` y `created_at`.
+fn create(name: Str, email: Str) -> Result<User> {
+    let raw = db.add_user(name, email)?
+    return from_py(raw)
+}
+
+// Buscar por id. Si no existe, propaga el `Err` del lado Python
+// (SQLAlchemy lanza una excepción → wrap automático en `Err`).
+fn find(id: Int) -> Result<User> {
+    let raw = db.get_user(id)?
+    return from_py(raw)
+}
+
+// Listar todos los users. Devuelve el JSON crudo (Str) — iterar
+// el list Python con coerción `Instance` por item requiere
+// anotación recursiva sobre `List<Any>` opaca, deuda residual.
+// El handler HTTP devuelve este Str directo al cliente.
+fn list_all() -> Result<Str> {
+    let raw = db.list_users()?
+    return Ok(json.dumps(raw)?)
+}
+
+// Init de schema (idempotente). Llamado por main al boot.
+fn init_schema() -> Result<Null> {
+    let _ = db.init_db()?
+    return Ok(null)
+}

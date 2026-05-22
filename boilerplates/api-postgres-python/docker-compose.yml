@@ -1,0 +1,67 @@
+# docker-compose para api-postgres-python.
+#
+# Dos servicios:
+#   - `db`: Postgres 16 alpine. Persiste data en volume nombrado
+#     (`pgdata`) que sobrevive `docker compose down`.
+#   - `api`: Fitz + Python con SQLAlchemy + psycopg2-binary.
+#     Buildea desde Dockerfile local; el primer build tarda
+#     8-12 min (compila fitz con --features python desde source).
+#
+# Setup (una vez):
+#   cp .env.example .env
+#   # editar .env con credenciales propias
+#
+# Uso:
+#   docker compose up --build
+#   # esperar "DB conectada y schema inicializado" en logs del api
+#
+# Test con curl en otra terminal:
+#   curl -X POST localhost:3000/users \
+#        -H 'Content-Type: application/json' \
+#        -d '{"name":"Ada","email":"ada@example.com"}'
+#   curl localhost:3000/users
+#   curl localhost:3000/users/1
+
+services:
+  db:
+    image: postgres:16-alpine
+    container_name: fitz-pg
+    environment:
+      # Credenciales vienen del `.env` (mismo dir que este yml).
+      POSTGRES_USER: ${POSTGRES_USER:-fitz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-fitz}
+      POSTGRES_DB: ${POSTGRES_DB:-fitz}
+    volumes:
+      # Volume nombrado — la data persiste entre `docker compose
+      # down` y `up`. Para borrar TODO: `docker compose down -v`.
+      - pgdata:/var/lib/postgresql/data
+    ports:
+      # Expuesto al host para conexión desde herramientas (psql,
+      # DBeaver, etc.). Quitar en producción si no es necesario.
+      - "5432:5432"
+    healthcheck:
+      # El api espera que Postgres esté listo antes de arrancar
+      # (depends_on con condition).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-fitz} -d ${POSTGRES_DB:-fitz}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    container_name: fitz-api-postgres
+    environment:
+      # Connection string consumido por `python/db.py` via
+      # `os.environ.get("DATABASE_URL")`. El host es `db` (service
+      # name de Postgres en esta misma compose network).
+      DATABASE_URL: "postgresql+psycopg2://${POSTGRES_USER:-fitz}:${POSTGRES_PASSWORD:-fitz}@db:5432/${POSTGRES_DB:-fitz}"
+    ports:
+      - "3000:3000"
+    depends_on:
+      db:
+        # Espera al healthcheck OK de Postgres antes de arrancar
+        # el api — evita "Connection refused" en boot.
+        condition: service_healthy
+
+volumes:
+  pgdata:
