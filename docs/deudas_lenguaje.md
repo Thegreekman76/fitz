@@ -5377,33 +5377,80 @@ specific a `[target.x86_64-pc-windows-msvc]`. Sin tocar código.
 
 ---
 
-## ~~R.bug-pyo3-abi3-autoinit — `abi3-py310` + `auto-initialize` incompatibles en Cargo.toml~~ ✓ CERRADO 2026-05-22
+## ~~R.bug-pyo3-abi3-autoinit — `abi3-py310` + `auto-initialize` incompatibles en Cargo.toml~~ ✓ PARCIALMENTE CERRADO 2026-05-22
 
-> **CERRADO 2026-05-22** — mini-tanda Cleanup-Residual+ Sub-tanda D.
+> **PARCIAL 2026-05-22** — mini-tanda Cleanup-Residual+ Sub-tanda D.
 >
-> Fix:
+> Lo que cerró:
 > 1. `Cargo.toml`: removido `auto-initialize` del feature set de PyO3.
->    Solo `abi3-py310` queda activo → binario portable contra
->    cualquier Python 3.10+.
 > 2. `src/py_interop.rs`: nuevo helper `ensure_python_initialized()`
 >    que llama `Python::initialize()` adentro de un `std::sync::Once`.
->    Lazy init en el primer `import_module` (típico:
->    `from python import math`). Idempotente.
+>    Lazy init en el primer `import_module`. Idempotente.
 > 3. `.github/workflows/ci.yml`: job `python` ahora corre con
->    matriz `python-version: [3.10, 3.11, 3.12, 3.13]`. Si alguna
->    versión falla, abrimos deuda específica.
-> 4. `boilerplates/api-postgres-python/Dockerfile` y
->    `boilerplates/api-fullstack-postgres/Dockerfile` simplificados
->    a `FROM rust:slim AS builder` (Rust pre-instalado, ~2-3 min de
->    ahorro por build) + `FROM python:3.12-slim` como runtime.
->    Builder + runtime ya NO necesitan match de Python version.
+>    matriz `python-version: [3.10, 3.11, 3.12, 3.13]`.
 >
-> Tests: 46 py_interop tests pasan localmente con feature python.
-> CI multi-Python validará 3.10/3.11/3.12/3.13 en el próximo
-> release.
+> Lo que NO cerró (deuda nueva derivada — ver
+> `R.bug-pyo3-abi3-portable-link` más abajo):
+> - El binario producido sigue linkeando contra `libpython3.X.so.1.0`
+>   específica del builder, no contra `libpython3.so` (stable ABI).
+>   Validado empíricamente: builder con Python 3.13 produce binario
+>   que falla en runtime Python 3.12 con
+>   `libpython3.13.so.1.0: cannot open shared object file`.
+> - Los Dockerfiles de boilerplates 5/6 vuelven al patrón
+>   "match builder = runtime" (`FROM python:3.12-slim` en ambos
+>   stages) hasta cerrar `R.bug-pyo3-abi3-portable-link`.
+>
+> 46 py_interop tests verdes localmente. CI multi-Python validará
+> que el binario abi3 corre correctamente CUANDO build & runtime
+> usan la misma versión Python (lo cual matchea el flow actual).
 >
 > El binario default sin feature python sigue funcionando idéntico
 > — no toca su path de compilación.
+
+## R.bug-pyo3-abi3-portable-link — binario `--features python` linkea contra libpython específica, no stable ABI (descubierto 2026-05-22)
+
+**Prioridad: MEDIA** — el binario `fitz` compilado con `--features
+python` y `abi3-py310` debería linkear contra `libpython3.so`
+(stable ABI) para correr contra cualquier Python 3.10+. En vez de
+eso, PyO3 0.28 lo linkea contra la versión específica del builder
+(`libpython3.13.so.1.0` si el builder es Debian Trixie, etc.).
+
+Detectado al validar boilerplate `api-postgres-python` con
+Dockerfile `rust:slim` (Python 3.13) → `python:3.12-slim`:
+
+```
+fitz: error while loading shared libraries:
+libpython3.13.so.1.0: cannot open shared object file
+```
+
+### Workaround actual
+
+Boilerplates 5 y 6: match Python version en builder y runtime
+(ambos `FROM python:3.12-slim`). Add ~2-3 min al build (apt-get
+install build-essential + curl rustup) y "Mac M-series users
+with Python 3.11 can't use the runtime stage with 3.12" pero
+funcional.
+
+### Fix planificado
+
+Investigar variables PyO3 que fuerzan el link a stable ABI:
+- `PYO3_USE_ABI3_FORWARD_COMPATIBILITY=1` — permite usar Python
+  newer que el target abi3 sin recompilar.
+- `PYO3_NO_PYTHON=1` — skip Python detection at build, link
+  directo a stable ABI lib.
+- Otros approach: instalar el package que provee `libpython3.so`
+  symlink (no version-specific) y configurar PyO3 para usarlo.
+
+Validar el fix con docker build cross-Python (build con 3.13 +
+run con 3.10/3.11/3.12).
+
+### Items vinculados
+
+- `boilerplates/api-postgres-python/Dockerfile` workaround
+  documentado.
+- `boilerplates/api-fullstack-postgres/Dockerfile` idem.
+- `R.bug-pyo3-abi3-autoinit` parcialmente cerrada (componente
+  auto-initialize cerrado, portable-link pendiente).
 
 **Prioridad: MEDIA** — produce binarios `--features python`
 acoplados a versión específica de libpython del builder, en lugar
