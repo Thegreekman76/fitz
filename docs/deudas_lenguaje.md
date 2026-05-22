@@ -4730,6 +4730,216 @@ no está aplicado.
 
 ---
 
+## R.bug-loader-relative-only — Loader Fitz resuelve `from sub.foo` solo relativo al importer, no al root (descubierto 2026-05-22)
+
+**Prioridad: MEDIA** — limita la organización de proyectos
+multi-archivo cuando un módulo en subcarpeta necesita importar
+tipos definidos en otra subcarpeta hermana.
+
+### Descripción
+
+El loader de módulos de Fitz (`resolve_module_path` en
+`src/evaluator.rs`) resuelve `from sub.foo import X` relativo al
+**archivo importer**, NO al root del proyecto. Ejemplo:
+
+```
+src/
+├── main.fitz           # from types.user import User → src/types/user.fitz ✓
+├── types/
+│   └── user.fitz
+└── data/
+    └── users.fitz      # from types.user import User → src/data/types/user.fitz ✗
+                         # (busca relativo al importer)
+```
+
+Si `data/users.fitz` quiere importar `User` definido en
+`types/user.fitz`, el loader busca en `src/data/types/user.fitz`
+(que no existe) en lugar de `src/types/user.fitz`. Fail:
+
+```
+Error — no se encontró el módulo `types.user` (buscado en
+`/app/src/data/types/user.fitz`)
+```
+
+### Semántica actual
+
+```rust
+// src/evaluator.rs::resolve_module_path
+fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
+    let base = LOADER.with(|cell| {
+        cell.borrow().as_ref().map(|l| l.base_dir.clone())
+    });
+    // base_dir = dir del archivo importer
+    let mut path = base.unwrap_or_else(...);
+    for (i, seg) in segments.iter().enumerate() {
+        if i + 1 == n { path.push(format!("{}.fitz", seg)); }
+        else { path.push(seg); }
+    }
+    Ok(path)
+}
+```
+
+`base_dir` se setea al directorio del archivo que invocó el
+import (relative). No hay concepto de "project root" que sirva
+como base alternativa para imports absolutos.
+
+### Workaround actual (a nivel boilerplate)
+
+`boilerplates/api-postgres-python/`: el módulo `src/data/users.fitz`
+NO importa tipos. Devuelve `Result<Str>` (JSON crudo) y el
+`src/main.fitz` hace la coerción a `User` con `let u: User =
+json.loads(s)?` (porque main vive en `src/` y SÍ puede importar
+`from types.user import User` correctamente).
+
+Trade-off: la responsabilidad de "saber qué shape devuelve la DB"
+queda en main en lugar de en el data layer. Aceptable como
+patrón mientras el loader no soporte imports absolutos.
+
+### Fix proposed en el loader
+
+Opciones evaluadas:
+
+**A — Soporte imports absolutos relativos al project root**:
+detectar `fitz.toml` walk-up desde el archivo importer (Cargo
+style) y usar el dir del manifest como root. `from types.user`
+resuelve a `<project_root>/src/types/user.fitz` siempre,
+independiente del importer. Requiere bandera explícita en el
+import (¿prefix?) o detección heurística.
+
+**B — Imports relativos Python-style**: `from ..types.user import
+User` (dos puntos = subir un nivel). Requiere cambio del parser
+(tokenize `..` adentro de `from ... import`) y semántica del
+loader.
+
+**C — Convención + path en `fitz.toml`**: el manifest declara
+`[paths]` con un alias `src = "src"` y el user usa `from src.types.user
+import User`. Más explícito pero verboso.
+
+Lean: **A** combinado con la convención actual. El loader detecta
+si la primera segment matchea un directorio adentro del manifest
+root → usa root. Si no, fallback a path relativo del importer.
+Mantiene backward compat con código existente que usa imports
+relativos al importer (cap 16 de la guía).
+
+### Tests de regresión cuando se cierre
+
+- `src/data/users.fitz` con `from types.user import User` debe
+  resolver a `src/types/user.fitz` (no `src/data/types/user.fitz`).
+- Programas con imports relativos al importer existentes (cap 16
+  de la guía + `examples/guide/16-modulos.fitz`) siguen verdes.
+- `examples/guide/16c-modulos-transitivos.fitz` con sub-carpetas
+  sigue verde.
+- Boilerplate `api-postgres-python` refactorizado a usar el
+  patrón absoluto sin workaround.
+
+### Items vinculados
+
+- `boilerplates/api-postgres-python/src/data/users.fitz` usa
+  workaround (devolver Str crudo, coerce en main). Cuando este
+  fix cierre, refactorizar para que `data/users.fitz` devuelva
+  `Result<User>` tipado y la coerción quede en data layer.
+
+---
+
+## R.bug-pyo3-abi3-autoinit — `abi3-py310` + `auto-initialize` incompatibles en Cargo.toml (descubierto 2026-05-22)
+
+**Prioridad: MEDIA** — produce binarios `--features python`
+acoplados a versión específica de libpython del builder, en lugar
+del binario portable que `abi3-py310` promete. Bloquea el flow
+"buildear en cualquier máquina, correr en cualquier Python 3.10+"
+que el feature documenta.
+
+### Descripción
+
+El `Cargo.toml` del proyecto Fitz declara:
+
+```toml
+pyo3 = { version = "0.28", features = ["abi3-py310", "auto-initialize"], optional = true }
+```
+
+Según [docs de pyo3](https://pyo3.rs/), `auto-initialize` y `abi3`
+son **mutuamente excluyentes**:
+
+- `abi3-py310`: linkea contra `libpython3.so` (stable ABI),
+  binario corre en cualquier Python 3.10+.
+- `auto-initialize`: pyo3 spawnea el intérprete embedded al boot,
+  requiere link contra una versión específica de libpython.
+
+Cuando ambos features están activos, **`auto-initialize` gana** y
+el binario producido linkea contra `libpython3.<X>.so.1.0`
+específica de la versión detectada en el builder. El compromiso de
+`abi3-py310` (binario portable) se pierde silenciosamente.
+
+### Síntoma observado
+
+Al buildear `boilerplates/api-postgres-python/` con la imagen
+`rust:slim` (que trae Python 3.13 en Debian Trixie) y runtime
+`python:3.12-slim`, el container falla al boot con:
+
+```
+fitz: error while loading shared libraries: libpython3.13.so.1.0:
+cannot open shared object file: No such file or directory
+```
+
+Lo esperado con `abi3-py310` puro: el binario linkea contra
+`libpython3.so` (stable ABI) y corre en Python 3.10/3.11/3.12/
+3.13/3.14 indistintamente.
+
+### Workaround actual (a nivel boilerplate)
+
+`boilerplates/api-postgres-python/Dockerfile` usa la **misma
+imagen Python** (`python:3.12-slim`) en builder y runtime. Builder
+agrega Rust con `rustup`; runtime descarta Rust. Match garantizado
+de libpython entre stages.
+
+Trade-off: el builder ya no es la imagen oficial `rust:slim`
+optimizada para builds Rust — el `apt-get install build-essential
++ rustup` lleva ~30s extras al build inicial. Aceptable.
+
+### Fix proposed en el Cargo.toml de Fitz
+
+Opciones evaluadas:
+
+**A — Quitar `auto-initialize`**: el usuario llama a
+`Python::initialize()` explícito antes del primer call PyO3. Más
+boilerplate del lado Fitz pero recupera `abi3` real. Patrón usado
+por el bin `fitz-lsp` (que no usa PyO3) y otros proyectos PyO3.
+
+**B — Separar en dos features**: `python` (sin `auto-initialize`,
+abi3 puro) + `python-embedded` (con `auto-initialize`, no abi3).
+El user elige según deploy target. Más flexible pero duplica la
+feature matrix.
+
+**C — Mantener `auto-initialize` y aceptar deuda**: documentar
+que `--features python` produce binarios acoplados a la versión
+del builder. Match builder/runtime es responsabilidad del user
+(como hace el boilerplate hoy).
+
+Lean: **A**. El boot manual es 1 línea de Fitz al inicio del
+programa (o transparente — el evaluator puede invocar
+`Python::initialize` lazy al primer `from python import` sin
+exponer al usuario). Recupera la promesa "un solo binario corre
+contra cualquier Python 3.10+" que el feature publicita.
+
+### Tests de regresión cuando se cierre
+
+- Binario compilado en builder con Python 3.13 + corrido en
+  runtime con Python 3.12 → arranca sin error.
+- Mismo binario corrido en 3.10, 3.11, 3.14 → funciona.
+- `examples/python-interop-8.1.fitz` + `examples/python-interop-8.6.fitz`
+  + `examples/guide/21-python-crud/app.fitz` siguen verdes.
+
+### Items vinculados
+
+- `boilerplates/api-postgres-python/Dockerfile` usa workaround
+  (match builder/runtime Python). Cuando este fix cierre,
+  simplificar a `FROM rust:slim AS builder` (más rápido) +
+  cualquier `python:3.X-slim` como runtime.
+- Documentar en `docs/guide.md` cap 21 ("Interop Python") la
+  decisión final sobre auto-initialize vs manual init.
+
+---
+
 ## R.bug-result-status — Handler con return type `Result<T>` + `return <status> { ... }` mezclados (descubierto 2026-05-21)
 
 **Prioridad: MEDIA** — produce serialización incorrecta del

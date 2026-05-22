@@ -7,22 +7,26 @@
 //   │   ├── user.fitz            ← `type User` (mirror SQLAlchemy)
 //   │   └── api.fitz             ← `type NewUser` (body POST)
 //   └── data/
-//       └── users.fitz           ← wrapper Fitz de db.py (tipo `User`)
+//       └── users.fitz           ← wrapper "raw" Python (Str JSON)
 //
 // El loader de módulos de Fitz resuelve `from types.user import ...`
-// a `src/types/user.fitz` (lookup relativo al main). Eso permite
-// separar tipos (types/) de lógica de datos (data/) sin que el main
-// vea `from python import` directo — el wrapper de data/users.fitz
-// encapsula la interop.
+// relativo a ESTE archivo (`src/main.fitz`) → busca en
+// `src/types/user.fitz`. Eso funciona porque main vive en `src/`.
 //
-// Stack runtime:
-//   - Fitz binario con `--features python` (PyO3 linkado).
-//   - python:3.12-slim con SQLAlchemy + psycopg2-binary.
-//   - Postgres en otro container del docker-compose.
+// **Por qué la coerción `dict → User` ocurre acá y no en data/**:
+// el loader Fitz hoy resuelve imports relativos al archivo
+// importer. Si `data/users.fitz` importara `from types.user import
+// User`, buscaría en `src/data/types/user.fitz` (mal). Workaround
+// documentado: `data/users.fitz` devuelve JSON strings opacos;
+// este archivo (main) tiene `User` en scope y hace la coerción
+// final con `let u: User = json.loads(s)?` (8.4.3). Limitación
+// del loader documentada en docs/deudas_lenguaje.md →
+// R.bug-loader-relative-only.
 
+from python import json
 from types.user import User
 from types.api import NewUser
-from data.users import create, find, list_all, init_schema
+from data.users import create_raw, find_raw, list_raw, init_schema
 
 @server(3000, "0.0.0.0")
 fn main() => 0
@@ -43,22 +47,27 @@ match init_schema() {
 // `{"error": "..."}`.
 @post("/users")
 fn create_user(body: NewUser) -> Result<User> {
-    return create(body.name, body.email)
+    let raw = create_raw(body.name, body.email)?
+    let u: User = json.loads(raw)?
+    return Ok(u)
 }
 
 // GET /users/{id} — buscar por id. Si no existe, propaga el
 // NoResultFound de SQLAlchemy como `Err`.
 @get("/users/{id}")
 fn get_user(id: Int) -> Result<User> {
-    return find(id)
+    let raw = find_raw(id)?
+    let u: User = json.loads(raw)?
+    return Ok(u)
 }
 
-// GET /users — listar todos. Devuelve JSON crudo (el data/users
-// module no convierte a `List<User>` Fitz nativa por deuda
-// residual de la coerción Python→Fitz de listas opacas).
+// GET /users — listar todos. Devuelve JSON crudo (List<User>
+// Fitz nativa requeriría iterar el list opaco Python con
+// anotación recursiva — deuda residual de coerción 8.4.3 sobre
+// listas).
 @get("/users")
 fn list_users() -> Result<Str> {
-    return list_all()
+    return list_raw()
 }
 
 print("[ready] Server arrancando en :3000")
