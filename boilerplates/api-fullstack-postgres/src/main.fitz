@@ -29,7 +29,7 @@
 
 from python import json
 from types.task import Task
-from types.api import NewTask, UpdateTask
+from types.api import NewTask, UpdateTask, DeleteResult
 from data.tasks import create_raw, find_raw, list_raw, update_raw, delete_raw, init_schema
 
 @server(3000, "0.0.0.0")
@@ -51,10 +51,28 @@ match init_schema() {
 // Hoy el query param `filter` se valida con default "all" si falta.
 // La query string viene en el path template (`?filter={filter}` —
 // sintaxis estándar de Fase 7).
+//
+// IMPORTANTE — por qué el loop manual de coerción:
+//   `json.loads(raw)` devuelve `List<Map>` (cada item es un dict
+//   Python coercionado a Map Fitz). La coerción runtime 8.4.3
+//   `Map → Instance` solo dispara en bindings simples con anotación
+//   nominal (`let t: Task = m`), NO recursivamente sobre `List<T>`.
+//   Workaround: iterar y coercer item por item.
+//   Si retornáramos `Result<Str>` con el JSON crudo, Fitz lo
+//   wrappearía OTRA VEZ con `json.dumps` al serializar la response
+//   → doble encoding que rompe `tasks.filter`/`tasks.map` en el
+//   frontend JS.
 @middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["GET", "OPTIONS"], "allow_headers": ["Content-Type"]}))
 @get("/tasks?filter={filter}")
-fn list_tasks(filter: Str) -> Result<Str> {
-    return list_raw(filter)
+fn list_tasks(filter: Str) -> Result<List<Task>> {
+    let raw = list_raw(filter)?
+    let maps: List<Any> = json.loads(raw)?
+    let tasks: List<Task> = []
+    for m in maps {
+        let t: Task = m
+        tasks.push(t)
+    }
+    return Ok(tasks)
 }
 
 // POST /tasks — crear task. Body deserializado a `NewTask`.
@@ -86,11 +104,15 @@ fn update_task(id: Int, body: UpdateTask) -> Result<Task> {
 }
 
 // DELETE /tasks/{id} — borrar.
+// Devuelve `{"deleted": true, "id": <id>}` para confirmar al frontend.
+// Mismo razonamiento que list_tasks: tipo concreto, no `Str` con JSON
+// crudo (que daría doble encoding).
 @middleware(cors({"allow_origin": "http://localhost:8080", "allow_methods": ["DELETE", "OPTIONS"]}))
 @delete("/tasks/{id}")
-fn delete_task(id: Int) -> Result<Str> {
+fn delete_task(id: Int) -> Result<DeleteResult> {
     let raw = delete_raw(id)?
-    return Ok(raw)
+    let r: DeleteResult = json.loads(raw)?
+    return Ok(r)
 }
 
 print("[ready] Server arrancando en :3000")

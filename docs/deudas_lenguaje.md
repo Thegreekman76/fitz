@@ -4730,6 +4730,131 @@ no está aplicado.
 
 ---
 
+## R.missing-recursive-instance-coercion — Coerción `Map → Instance` no es recursiva sobre `List<T>`/`Map<K, V>` (descubierto 2026-05-22)
+
+**Prioridad: MEDIA** — no rompe runtime, pero fuerza al usuario a
+escribir boilerplate (loop manual) cada vez que recibe una colección
+de dicts desde Python (`json.loads` de un array JSON, queries
+SQLAlchemy que devuelven `List[dict]`, etc.).
+
+### Descripción
+
+La coerción runtime introducida en Fase 8.4.3 (`coerce_to_annotation`)
+convierte un `Value::Map` en `Value::Instance` cuando el binding
+tiene anotación nominal:
+
+```fitz
+let raw = db.get_user(42)?            // raw: Map<Str, Any>
+let u: User = json.loads(raw_json)?   // ✓ coerce Map → Instance User
+```
+
+Pero la coerción **NO es recursiva**: si el value es `List<Map>` y
+la anotación es `List<User>`, los items adentro NO se coercen
+automáticamente.
+
+```fitz
+let raw = db.list_users()?            // raw: Str (JSON array)
+let users: List<User> = json.loads(raw)?   // ✗ users es List<Map>,
+                                            //   NO List<User>
+```
+
+El binding pasa el type check (porque `List<Map>` es compatible con
+`List<User>` vía `Any`), pero los items SIGUEN siendo Maps en
+runtime. Si después hacés `users.find(fn(u) => u.name == "x")`,
+el callback recibe un Map y `u.name` falla con "Map no tiene field
+name" o similar.
+
+Lo mismo aplica a `Map<K, V>` cuando los values son Maps que
+deberían coercerse a Instance.
+
+### Workaround actual (loop manual)
+
+Iterar la colección y coercer item por item con un binding
+intermedio que sí dispare 8.4.3:
+
+```fitz
+let raw = db.list_users()?
+let maps: List<Any> = json.loads(raw)?
+let users: List<User> = []
+for m in maps {
+    let u: User = m       // ← acá dispara la coerción Map → User
+    users.push(u)
+}
+```
+
+Aplicado en el 6to boilerplate (`api-fullstack-postgres/src/main.fitz`)
+en `list_tasks`. Sin este loop, el frontend recibía una colección
+de Maps en lugar de Tasks tipados, y `tasks.filter`/`tasks.map`
+fallaban porque el JSON output era double-encoded (devolver
+`Result<Str>` con JSON crudo lo wrappea otra vez al serializar
+la response HTTP).
+
+### Fix propuesto
+
+Extender `coerce_to_annotation` para que, cuando la anotación
+destino es `List<T>` con `T = Named(N)` y el value es
+`Value::List(items)`, recurse sobre cada `item` con anotación `T`.
+Idem para `Map<K, V>` cuando el value es `Value::Map`.
+
+Esquema en el evaluator:
+
+```rust
+fn coerce_to_annotation(annot: &TypeExpr, value: Value, ...) -> Value {
+    match annot {
+        // Caso ya implementado (8.4.3):
+        TypeExpr::Named(t) if is_nominal(t) => coerce_map_to_instance(value, t),
+
+        // NUEVO: recursión sobre List<T>.
+        TypeExpr::Generic("List", [inner]) if is_nominal_or_nullable_nominal(inner) => {
+            if let Value::List(items) = value {
+                let coerced: Vec<_> = items.into_iter()
+                    .map(|item| coerce_to_annotation(inner, item, ...))
+                    .collect();
+                Value::List(coerced)
+            } else {
+                value
+            }
+        }
+
+        // NUEVO: recursión sobre Map<K, V> con V nominal.
+        TypeExpr::Generic("Map", [_, value_ty]) if is_nominal(value_ty) => { ... }
+
+        _ => value,
+    }
+}
+```
+
+### Impacto sobre 8.7 (codegen)
+
+Cualquier fix del runtime necesita su contraparte en `fitz build`
+(deuda **R.bug-8.7-coercion-list-codegen**, ya documentada).
+El helper `__fitz_py_to_list_*` emitido por el preludio Python
+codegen existe pero todavía no wirea con `coerce(PyAny → List<T>)`.
+Fix coordinado: cerrar primero esta deuda en el intérprete (más
+chico), después cerrar 8.7 en codegen referenciando la lógica del
+runtime.
+
+### Por qué no es bug crítico
+
+- El type check estático NO atrapa el problema (es compatible con
+  `List<Any>`), por eso "no rompe la build". Pero el runtime falla
+  más tarde con error confuso (`Map has no field 'name'` en lugar
+  de un mensaje claro de "no se pudo coercer").
+- El workaround es bien claro (loop manual) y compacto (~5 LoC).
+- Aparece solo en proyectos con interop Python que devuelven
+  colecciones. Para handlers HTTP típicos que reciben body
+  deserializado (no Python interop) no aplica.
+
+### Tracking
+
+Sin sub-fase asignada hoy. Cuando aparezca presión real (más
+proyectos con SQLAlchemy/Pandas que devuelvan colecciones), se
+asigna a una sub-fase. Por ahora documentado como
+**R.missing-recursive-instance-coercion** y se aplica el
+workaround.
+
+---
+
 ## ~~R.bug-options-preflight-shared-path — OPTIONS preflight duplicado cuando varios handlers comparten path~~ ✓ CERRADO 2026-05-22
 
 > **CERRADO el mismo día del descubrimiento (2026-05-22)** — el fix

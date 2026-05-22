@@ -20,3 +20,9 @@ type UpdateTask {
     priority: Str = "med",
     done: Bool = false,
 }
+
+// Response del DELETE — confirma al frontend qué se borró.
+type DeleteResult {
+    deleted: Bool = true,
+    id: Int = 0,
+}
