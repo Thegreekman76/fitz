@@ -13,6 +13,9 @@
 # Build local:
 #   docker build -t fitz-cli-tool .
 #
+# Build pineando versión de Fitz (recomendado para reproducibilidad):
+#   docker build --build-arg FITZ_TAG=v0.9.33 -t fitz-cli-tool .
+#
 # Correr:
 #   docker run --rm fitz-cli-tool
 #
@@ -20,7 +23,8 @@
 # expone puertos ni queda en background.
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM ghcr.io/thegreekman76/fitz:latest AS builder
+ARG FITZ_TAG=latest
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
 
 WORKDIR /app
 

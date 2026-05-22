@@ -18,9 +18,13 @@
 # Probar (en otra terminal):
 #   curl localhost:3000/items
 #   open http://localhost:3000/docs   # UI Scalar interactiva
+#
+# Build pineando versión de Fitz (recomendado para reproducibilidad):
+#   docker build --build-arg FITZ_TAG=v0.9.33 -t fitz-api-simple .
 
 # ---- Stage 1: builder ----------------------------------------------
-FROM ghcr.io/thegreekman76/fitz:latest AS builder
+ARG FITZ_TAG=latest
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
 
 WORKDIR /app
 

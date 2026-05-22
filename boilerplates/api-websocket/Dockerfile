@@ -1,7 +1,11 @@
 # Dockerfile multi-stage para el API Fitz del boilerplate
 # api-websocket. Patrón idéntico a api-simple/api-middleware-cors.
+#
+# Build pineando versión de Fitz (recomendado):
+#   docker compose build --build-arg FITZ_TAG=v0.9.33
 
-FROM ghcr.io/thegreekman76/fitz:latest AS builder
+ARG FITZ_TAG=latest
+FROM ghcr.io/thegreekman76/fitz:${FITZ_TAG} AS builder
 
 WORKDIR /app
 
