@@ -1563,6 +1563,20 @@ fn register_ws_route(
 
 struct Loader {
     base_dir: PathBuf,
+    /// Mini-fase loader-absoluto (2026-05-22, Paso 4 post-boilerplates) —
+    /// "import root" estable a lo largo de toda la vida del loader,
+    /// fijado al `base_dir` inicial (parent del entry file pasado a
+    /// `eval_with_base`). Mientras `base_dir` cambia adentro de cada
+    /// nested module load para preservar imports relativos al importer
+    /// (cap 16 de la guía), `import_root` queda fijo y sirve como
+    /// fallback cuando la resolución relativa no encuentra el archivo.
+    ///
+    /// Caso típico: `data/users.fitz` hace `from types.user import User`.
+    /// `base_dir` adentro de ese load es `<root>/src/data/`. La
+    /// resolución relativa da `<root>/src/data/types/user.fitz` que no
+    /// existe. El fallback prueba `<root>/src/types/user.fitz` (relativo
+    /// a `import_root = <root>/src/`) y ese sí existe.
+    import_root: PathBuf,
     loading: Vec<PathBuf>,
     cache: HashMap<PathBuf, Value>,
     /// Fase 9.y.3.b — registry de deps del proyecto raíz (`fitz.toml`
@@ -1580,8 +1594,13 @@ thread_local! {
 
 fn install_loader(base_dir: PathBuf, dep_registry: crate::manifest::DepRegistry) {
     LOADER.with(|cell| {
+        // Mini-fase loader-absoluto (Paso 4 post-boilerplates) — el
+        // `import_root` se fija al `base_dir` inicial (parent del entry
+        // file) y NO se modifica en nested loads. Sirve como fallback
+        // para imports que no resuelven relativos al importer.
         *cell.borrow_mut() = Some(Loader {
-            base_dir,
+            base_dir: base_dir.clone(),
+            import_root: base_dir,
             loading: Vec::new(),
             cache: HashMap::new(),
             dep_registry,
@@ -1621,8 +1640,8 @@ impl Drop for LoaderGuard {
 ///
 /// No verifica existencia — el caller hace `canonicalize`, que falla
 /// con un mensaje útil si el archivo no está.
-fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
-    // Step 1 — dep registry shortcut (Fase 9.y.3.b).
+fn resolve_module_path(segments: &[String]) -> EvalResult<Vec<PathBuf>> {
+    // Step 1 — dep registry shortcut (Fase 9.y.3.b). Una sola entrada.
     let dep_hit = LOADER.with(|cell| {
         let borrow = cell.borrow();
         let loader = borrow.as_ref()?;
@@ -1632,14 +1651,21 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
         loader.dep_registry.get(&segments[0]).cloned()
     });
     if let Some(lib_entry) = dep_hit {
-        return Ok(lib_entry);
+        return Ok(vec![lib_entry]);
     }
 
-    // Step 2 — path relativo (comportamiento pre-9.y.3.b).
-    let base = LOADER.with(|cell| {
-        cell.borrow().as_ref().map(|l| l.base_dir.clone())
-    });
-    let mut path = base.ok_or_else(|| {
+    // Step 2 — candidatos por orden de prioridad: relativo al
+    // `base_dir` (importer actual) y, si no existe, relativo al
+    // `import_root` (parent del entry file, estable durante toda la
+    // vida del loader). Mini-fase loader-absoluto (Paso 4):
+    // backward-compat preservado — el path relativo se intenta PRIMERO,
+    // así proyectos que ya funcionan con imports relativos siguen igual.
+    // El fallback `import_root` cubre el caso típico de `data/foo.fitz`
+    // que importa `from types.bar` esperando resolver al hermano.
+    let (base_dir, import_root) = LOADER.with(|cell| {
+        let borrow = cell.borrow();
+        borrow.as_ref().map(|l| (l.base_dir.clone(), l.import_root.clone()))
+    }).ok_or_else(|| {
         EvalSignal::Error(FitzError::new(
             ErrorKind::InvalidSyntax,
             0, 0,
@@ -1648,14 +1674,28 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
         ))
     })?;
     let n = segments.len();
-    for (i, seg) in segments.iter().enumerate() {
-        if i + 1 == n {
-            path.push(format!("{}.fitz", seg));
-        } else {
-            path.push(seg);
+    let build_path = |base: &PathBuf| -> PathBuf {
+        let mut path = base.clone();
+        for (i, seg) in segments.iter().enumerate() {
+            if i + 1 == n {
+                path.push(format!("{}.fitz", seg));
+            } else {
+                path.push(seg);
+            }
         }
+        path
+    };
+    let mut candidates = Vec::with_capacity(2);
+    let relative = build_path(&base_dir);
+    candidates.push(relative);
+    // Solo agregamos el fallback `import_root` si es distinto al
+    // base_dir actual (top-level imports desde el entry file ya
+    // tienen base_dir == import_root, no duplicamos).
+    if base_dir != import_root {
+        let absolute = build_path(&import_root);
+        candidates.push(absolute);
     }
-    Ok(path)
+    Ok(candidates)
 }
 
 /// Carga un módulo: resuelve el path, chequea cache y ciclos, lee, parsea
@@ -1669,20 +1709,30 @@ fn resolve_module_path(segments: &[String]) -> EvalResult<PathBuf> {
 /// que termina antes de la recursión.
 #[async_recursion]
 async fn load_module(segments: &[String]) -> EvalResult<Value> {
-    let resolved = resolve_module_path(segments)?;
+    let candidates = resolve_module_path(segments)?;
 
-    // `canonicalize` requiere que el archivo exista. Si falla, el módulo
-    // no se encontró.
-    let canonical = match fs::canonicalize(&resolved) {
-        Ok(p) => p,
-        Err(_) => {
+    // Mini-fase loader-absoluto (Paso 4 post-boilerplates): probar cada
+    // candidato en orden (relativo al importer primero, después
+    // relativo al import_root). El primero que canonicalize OK gana.
+    // Si todos fallan, error citando el path relativo (primer
+    // candidato) para preservar el mensaje histórico.
+    let mut canonical_opt: Option<PathBuf> = None;
+    for cand in &candidates {
+        if let Ok(p) = fs::canonicalize(cand) {
+            canonical_opt = Some(p);
+            break;
+        }
+    }
+    let canonical = match canonical_opt {
+        Some(p) => p,
+        None => {
             return Err(EvalSignal::Error(FitzError::new(
                 ErrorKind::InvalidSyntax,
                 0, 0,
                 format!(
                     "no se encontró el módulo `{}` (buscado en `{}`)",
                     segments.join("."),
-                    resolved.display(),
+                    candidates[0].display(),
                 ),
             )));
         }
@@ -15585,6 +15635,71 @@ let r = match n {
         ], main).await;
         res.unwrap();
         assert_eq!(env.lock().get("r"), Some(Value::Str("desde bar".into())));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loader_absoluto_data_sibling_import_resuelve_via_import_root() {
+        // Mini-fase loader-absoluto (Paso 4 post-boilerplates) — caso
+        // canónico: `data/users.fitz` hace `from types.user import User`.
+        // Antes el loader buscaba `<base_dir>/types/user.fitz` con
+        // base_dir = data/ → fail. Ahora, si la búsqueda relativa falla,
+        // intenta también el `import_root` (entry file's dir).
+        let user = "type User { id: Int, name: Str }\n";
+        let users_data = "\
+            from types.user import User\n\
+            fn make() -> User => User { id: 1, name: \"ada\" }\n\
+        ";
+        let main = "\
+            from data.users import make\n\
+            let u = make()\n\
+        ";
+        let (env, res) = eval_with_modules(&[
+            ("types/user.fitz", user),
+            ("data/users.fitz", users_data),
+        ], main).await;
+        res.unwrap();
+        // Si el loader-absoluto funciona, `u` es una Instance de User
+        // con id=1 y name="ada". Sin el fix, el module load fallaría
+        // con "no se encontró el módulo `types.user`".
+        let u = env.lock().get("u").unwrap();
+        match u {
+            Value::Instance { type_name, fields } => {
+                assert_eq!(type_name, "User");
+                let f = fields.lock().clone();
+                assert_eq!(f, vec![
+                    ("id".to_string(), Value::Int(1)),
+                    ("name".to_string(), Value::Str("ada".into())),
+                ]);
+            }
+            other => panic!("esperaba Instance User, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn loader_absoluto_no_rompe_imports_relativos_legacy() {
+        // El fix loader-absoluto mantiene backward-compat: si la
+        // búsqueda relativa SÍ encuentra el archivo, gana sobre el
+        // fallback import_root. Test: `sub/foo.fitz` importa `bar`,
+        // existen DOS archivos `bar.fitz` (uno en sub/, otro en root).
+        // El de sub/ debe ganar (resolución relativa).
+        let bar_root = "fn inner() => \"desde-root\"\n";
+        let bar_sub = "fn inner() => \"desde-sub\"\n";
+        let foo = "\
+            import bar\n\
+            fn outer() => bar.inner()\n\
+        ";
+        let main = "\
+            import sub.foo\n\
+            let r = foo.outer()\n\
+        ";
+        let (env, res) = eval_with_modules(&[
+            ("bar.fitz", bar_root),
+            ("sub/foo.fitz", foo),
+            ("sub/bar.fitz", bar_sub),
+        ], main).await;
+        res.unwrap();
+        // Resolución relativa: sub/bar.fitz (mismo dir que foo) gana.
+        assert_eq!(env.lock().get("r"), Some(Value::Str("desde-sub".into())));
     }
 
     #[tokio::test(flavor = "current_thread")]

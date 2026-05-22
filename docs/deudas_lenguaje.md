@@ -5143,9 +5143,44 @@ $ curl localhost:3000/users
 
 ---
 
-## R.bug-loader-relative-only — Loader Fitz resuelve `from sub.foo` solo relativo al importer, no al root (descubierto 2026-05-22)
+## ~~R.bug-loader-relative-only — Loader Fitz resuelve `from sub.foo` solo relativo al importer, no al root~~ ✓ CERRADO 2026-05-22
 
-**Prioridad: MEDIA** — limita la organización de proyectos
+> **CERRADO el mismo día del descubrimiento (2026-05-22)** —
+> mini-fase loader-absoluto (Paso 4 del plan post-boilerplates).
+>
+> Fix en intérprete (`src/evaluator.rs`):
+> - `Loader` struct suma `import_root: PathBuf` (estable durante
+>   toda la vida del loader, fijado al `base_dir` inicial = parent
+>   del entry file).
+> - `resolve_module_path` devuelve `Vec<PathBuf>` con candidatos
+>   en orden: relativo al `base_dir` actual (importer), después
+>   relativo al `import_root` si difiere.
+> - `load_module` itera candidatos; el primero que canonicalize OK
+>   gana. Backward-compat preservada porque relativo se prueba
+>   primero (proyectos existentes siguen igual).
+>
+> Fix en codegen (`src/codegen.rs`):
+> - `mod_qualifier_of(rel_path)` nuevo helper: convierte
+>   `types/user.rs` → `types::user`. `LoadedModuleSigs` suma
+>   `mod_qualifier` field (computed at construction).
+> - `emit_use_decls`, `emit_module_use_decls`, `resolve_namespace_field`,
+>   `resolve_namespace_call`, y el imported-default-helper-call en
+>   `gen_struct_lit` ahora usan `mod_qualifier` (path completo)
+>   en lugar de `mod_name` (último segmento). Antes el codegen
+>   emitía `use crate::user::User` para `from types.user import
+>   User` y rustc fallaba con "unresolved import".
+>
+> Tests:
+> - 2 unit verdes en `evaluator::tests::loader_absoluto_*`
+>   (`data_sibling_import_resuelve_via_import_root` +
+>   `no_rompe_imports_relativos_legacy`).
+> - 1 E2E codegen verde en `compile_e2e::loader_absoluto_data_sibling_import_compila_en_fitz_build`.
+> - Boilerplate `api-postgres-python` refactorizado:
+>   `data/users.fitz` ahora hace `from types.user import User` y
+>   devuelve `Result<User>` / `Result<List<User>>` tipado.
+>   `main.fitz` simplificado a delegar (sin coerción intermedia).
+
+**Prioridad: MEDIA** — limitaba la organización de proyectos
 multi-archivo cuando un módulo en subcarpeta necesita importar
 tipos definidos en otra subcarpeta hermana.
 
@@ -5251,6 +5286,87 @@ relativos al importer (cap 16 de la guía).
   workaround (devolver Str crudo, coerce en main). Cuando este
   fix cierre, refactorizar para que `data/users.fitz` devuelva
   `Result<User>` tipado y la coerción quede en data layer.
+
+---
+
+## R.bug-13i-stack-overflow-debug — `13i-campos-privados.fitz` desborda stack en `fitz build` debug en Windows (descubierto 2026-05-22)
+
+**Prioridad: BAJA** — el binario `fitz` en release mode compila el
+ejemplo correctamente. Solo afecta el debug build (1 MB stack por
+default en Windows) usado por `cargo test` para el smoke
+`GUIDE_EXAMPLES_COMPILE`. Detectado al validar Paso 4
+post-boilerplates; verificación con `git stash` confirmó que el
+overflow ocurre incluso sin cambios recientes — es pre-existente
+y no fue gatillado por la mini-fase loader-absoluto.
+
+### Descripción
+
+`fitz build examples/guide/13i-campos-privados.fitz` con el
+binario `target/debug/fitz.exe` falla con:
+
+```
+thread 'main' has overflowed its stack
+exit code: 0xc00000fd (STATUS_STACK_OVERFLOW)
+```
+
+El mismo build con `target/release/fitz.exe` (compilado con
+optimizaciones, inlining, frames más chicos) compila sin problema.
+El binario emitido por release mode es correcto y funcional.
+
+### Por qué probablemente solo en debug
+
+- Windows: main thread tiene 1 MB de stack por default. Linux/Mac
+  típicamente 8 MB.
+- Rust debug build: zero inlining, frames grandes con debug info,
+  ningún tail call optimization.
+- El ejemplo 13i tiene ~10 métodos custom + struct lits anidados +
+  field privates checks → probablemente el codegen recursa
+  profundo en `gen_expr`/`gen_method_call`/`gen_struct_lit` y
+  cada call gasta frames grandes en debug.
+
+### Repro
+
+```bash
+cd D:/fitz
+cargo run --bin fitz -- build examples/guide/13i-campos-privados.fitz
+# stack overflow
+
+cargo run --release --bin fitz -- build examples/guide/13i-campos-privados.fitz
+# OK
+```
+
+### Workarounds
+
+- **Para uso normal**: usar `fitz build` release (lo que el `fitz
+  build` del CLI hace cuando se invoca con un fitz instalado).
+- **Para el smoke `GUIDE_EXAMPLES_COMPILE`**: los tests usan
+  `target/debug/fitz` vía `CARGO_BIN_EXE_fitz`. Flake intermitente
+  según condiciones del runner. Hoy 13i puede fallar el smoke;
+  re-runs intermitentes en ocasiones pasan.
+
+### Fix propuesto
+
+Opciones evaluadas (sin presión real, ninguno urge):
+
+1. **Spawn main en un thread con stack grande**: en `main.rs`,
+   envolver el body en
+   `std::thread::Builder::new().stack_size(8 * 1024 * 1024).spawn(...)`.
+   Funciona pero refactor del entry.
+2. **Linker flag para stack size en Windows**:
+   `-C link-arg=/STACK:8388608` en `.cargo/config.toml`. Más
+   limpio, solo afecta Windows.
+3. **Refactor codegen para reducir profundidad de recursión**:
+   convertir `gen_expr` recursivo a iterativo con stack
+   explícita. Invasivo, alto riesgo.
+
+Lean: **opción 2** — un solo cambio en `.cargo/config.toml`
+specific a `[target.x86_64-pc-windows-msvc]`. Sin tocar código.
+
+### Items vinculados
+
+- Smoke test `tests/compile_e2e.rs::smoke_ejemplos_guia_compilables_compilan`
+  puede fallar intermitente cuando se ejecuta en runner con stack
+  reducido.
 
 ---
 

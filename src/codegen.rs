@@ -1607,6 +1607,9 @@ fn cargo_toml_for(
 struct LoadedModule {
     /// Nombre Rust del módulo (= último segmento del path Fitz =
     /// nombre visible en el binding). Ej: `import sub.utils` → `utils`.
+    /// Para uso en código emitido que necesita el path completo Rust
+    /// (`use crate::types::user::User`), usar `mod_qualifier()` que
+    /// deriva el path "types::user" de `rel_path`.
     mod_name: String,
     /// Ruta del archivo Rust generado, relativa a `src/` del crate.
     /// Ej: `utils.rs` para `import utils`; `sub/utils.rs` para
@@ -2001,7 +2004,11 @@ impl ModuleLoader {
                 kind,
             } = binding
             {
-                let mod_name = &self.modules[*module_index].mod_name;
+                // Mini-fase loader-absoluto (Paso 4): para módulos en
+                // subdirectorios el path Rust completo es
+                // `types::user`, no solo `user` (que sería el mod_name).
+                // `mod_qualifier_of(rel_path)` calcula el path correcto.
+                let qualifier = mod_qualifier_of(&self.modules[*module_index].rel_path);
                 // PreF8.4: si el local (key del HashMap) difiere del
                 // item (nombre dentro del módulo), emitimos `as` para
                 // que el Rust generado pueda referenciar el local
@@ -2013,14 +2020,14 @@ impl ModuleLoader {
                         if needs_alias {
                             output.push_str(&format!(
                                 "use {mod}::{{{item} as {local}, {item}Data as {local}Data}};\n",
-                                mod = mod_name,
+                                mod = qualifier,
                                 item = item,
                                 local = local,
                             ));
                         } else {
                             output.push_str(&format!(
                                 "use {mod}::{{{item}, {item}Data}};\n",
-                                mod = mod_name,
+                                mod = qualifier,
                                 item = item,
                             ));
                         }
@@ -2029,12 +2036,12 @@ impl ModuleLoader {
                         if needs_alias {
                             output.push_str(&format!(
                                 "use {}::{} as {};\n",
-                                mod_name, item, local
+                                qualifier, item, local
                             ));
                         } else {
                             output.push_str(&format!(
                                 "use {}::{};\n",
-                                mod_name, item
+                                qualifier, item
                             ));
                         }
                     }
@@ -2120,6 +2127,29 @@ fn root_segment_of(rel_path: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// Mini-fase loader-absoluto (Paso 4 post-boilerplates) — para módulos
+/// nested (`types/user.rs`, `data/users.rs`), el codegen necesita
+/// referenciarlos en código emitido como `types::user`/`data::users`
+/// (no solo `user`/`users`, que es el "mod_name" = último segmento).
+///
+/// Esta fn convierte `rel_path` "types/user.rs" → "types::user" para
+/// usar en `use crate::types::user::User` y dispatch `data::users::fn()`.
+/// Para módulos flat sin subdirs, coincide con `mod_name`.
+fn mod_qualifier_of(rel_path: &Path) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    let n = rel_path.components().count();
+    for (i, comp) in rel_path.components().enumerate() {
+        let s = comp.as_os_str().to_str().unwrap_or_default();
+        if i + 1 == n {
+            // Último componente: strip `.rs`.
+            parts.push(s.trim_end_matches(".rs").to_string());
+        } else {
+            parts.push(s.to_string());
+        }
+    }
+    parts.join("::")
+}
+
 /// Genera `src/<mod>.rs` para un módulo importado. Modo: `Module`
 /// (todo `pub`, sin `fn main()`, top-level `let X = literal` →
 /// `pub const`/`pub static`).
@@ -2151,6 +2181,7 @@ fn generate_module_rs_with_bindings(
     for m in loaded_modules {
         ctx.loaded_modules.push(LoadedModuleSigs {
             mod_name: m.mod_name.clone(),
+            mod_qualifier: mod_qualifier_of(&m.rel_path),
             type_sigs: m.type_sigs.clone(),
             fn_sigs: m.fn_sigs.clone(),
             const_sigs: m.const_sigs.clone(),
@@ -3145,6 +3176,12 @@ enum GenMode {
 #[derive(Debug, Clone)]
 struct LoadedModuleSigs {
     mod_name: String,
+    /// Mini-fase loader-absoluto (Paso 4) — path Rust completo
+    /// "types::user" para módulos nested (vs `mod_name = "user"` que
+    /// es solo el último segmento). Usar este field cuando se emite
+    /// código Rust que necesita el path completo (use, dispatch
+    /// cross-module). Para módulos flat coincide con `mod_name`.
+    mod_qualifier: String,
     type_sigs: HashMap<String, TypeSig>,
     fn_sigs: HashMap<String, FnSig>,
     const_sigs: HashMap<String, Type>,
@@ -3581,6 +3618,7 @@ impl<'a> CodegenCtx<'a> {
         for m in &loader.modules {
             self.loaded_modules.push(LoadedModuleSigs {
                 mod_name: m.mod_name.clone(),
+                mod_qualifier: mod_qualifier_of(&m.rel_path),
                 type_sigs: m.type_sigs.clone(),
                 fn_sigs: m.fn_sigs.clone(),
                 const_sigs: m.const_sigs.clone(),
@@ -3610,21 +3648,24 @@ impl<'a> CodegenCtx<'a> {
         let mut emitted_any = false;
         for (local, binding) in entries {
             if let ResolvedBinding::Named { module_index, item, kind } = binding {
-                let mod_name = &loaded_modules[*module_index].mod_name;
+                // Mini-fase loader-absoluto (Paso 4): path Rust completo
+                // del módulo cargado (ej: "types::user" para nested,
+                // "utils" para flat).
+                let qualifier = mod_qualifier_of(&loaded_modules[*module_index].rel_path);
                 let needs_alias = local != item;
                 match kind {
                     NamedKind::Type => {
                         if needs_alias {
                             self.output.push_str(&format!(
                                 "use crate::{mod}::{{{item} as {local}, {item}Data as {local}Data}};\n",
-                                mod = mod_name,
+                                mod = qualifier,
                                 item = item,
                                 local = local,
                             ));
                         } else {
                             self.output.push_str(&format!(
                                 "use crate::{mod}::{{{item}, {item}Data}};\n",
-                                mod = mod_name,
+                                mod = qualifier,
                                 item = item,
                             ));
                         }
@@ -3633,12 +3674,12 @@ impl<'a> CodegenCtx<'a> {
                         if needs_alias {
                             self.output.push_str(&format!(
                                 "use crate::{}::{} as {};\n",
-                                mod_name, item, local
+                                qualifier, item, local
                             ));
                         } else {
                             self.output.push_str(&format!(
                                 "use crate::{}::{};\n",
-                                mod_name, item
+                                qualifier, item
                             ));
                         }
                     }
@@ -3663,7 +3704,7 @@ impl<'a> CodegenCtx<'a> {
         let prefix = self.mod_path_prefix();
         if let Some(sig) = m.fn_sigs.get(field) {
             Some((
-                format!("{}{}::{}", prefix, m.mod_name, field),
+                format!("{}{}::{}", prefix, m.mod_qualifier, field),
                 Type::Function {
                     params: sig.params.clone(),
                     ret: Box::new(sig.ret.clone()),
@@ -3675,9 +3716,9 @@ impl<'a> CodegenCtx<'a> {
                 // call site (`mod::X()`). Para `pub const`/`pub static`
                 // emitimos `mod::X` directo.
                 let code = if m.accessor_consts.contains(field) {
-                    format!("{}{}::{}()", prefix, m.mod_name, field)
+                    format!("{}{}::{}()", prefix, m.mod_qualifier, field)
                 } else {
-                    format!("{}{}::{}", prefix, m.mod_name, field)
+                    format!("{}{}::{}", prefix, m.mod_qualifier, field)
                 };
                 (code, ty.clone())
             })
@@ -3695,7 +3736,7 @@ impl<'a> CodegenCtx<'a> {
         let prefix = self.mod_path_prefix();
         m.fn_sigs
             .get(fn_name)
-            .map(|sig| (format!("{}{}::{}", prefix, m.mod_name, fn_name), sig.clone()))
+            .map(|sig| (format!("{}{}::{}", prefix, m.mod_qualifier, fn_name), sig.clone()))
     }
 
     // --- emit helpers -----------------------------------------------------
@@ -12343,7 +12384,7 @@ where
                 item,
                 kind: NamedKind::Type,
             }) => Some((
-                self.loaded_modules[*module_index].mod_name.clone(),
+                self.loaded_modules[*module_index].mod_qualifier.clone(),
                 item.clone(),
             )),
             _ => None,

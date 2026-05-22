@@ -1,46 +1,41 @@
-// data/users.fitz — wrapper Fitz "raw" sobre los helpers Python
-// en `python/db.py`.
+// data/users.fitz — wrapper Fitz sobre los helpers Python en
+// `python/db.py`. Encapsula la coerción `dict → User` adentro del
+// data layer, así el `main.fitz` solo recibe tipos Fitz limpios.
 //
-// **Por qué este módulo devuelve `Result<Str>` (JSON crudo) en
-// lugar de `Result<User>` tipado**:
-//
-// El loader de módulos Fitz hoy resuelve `from sub.foo import` de
-// forma relativa al ARCHIVO importer, no al root del proyecto.
-// Eso significa que si este archivo (`src/data/users.fitz`)
-// importara `from types.user import User`, el loader buscaría en
-// `src/data/types/user.fitz` (mal) en lugar de `src/types/user.fitz`
-// (bien). Limitación documentada en `docs/deudas_lenguaje.md` →
-// R.bug-loader-relative-only.
-//
-// **Workaround**: este módulo NO importa `User` ni `NewUser` — solo
-// Python + json. Devuelve JSON strings que el main coerce a `User`
-// con anotación destino (`let u: User = json.loads(s)?`, patrón
-// canónico 8.4.3). La responsabilidad de "saber qué shape devuelve
-// la DB" queda en el main, que es el único archivo que ya tiene
-// `User` en scope. Trade-off aceptable mientras la deuda del
-// loader no cierre.
+// El import `from types.user import User` resuelve via el
+// import_root del loader (parent del entry file `src/main.fitz`)
+// porque la búsqueda relativa desde `src/data/` no encuentra el
+// archivo. Habilitado por la mini-fase loader-absoluto del
+// lenguaje (2026-05-22).
 
 from python import json
 from python import db
+from types.user import User
+from types.api import NewUser
 
 // Crear un user nuevo. Postgres asigna `id` y `created_at`.
-// Devuelve el JSON crudo del dict Python serializado.
-fn create_raw(name: Str, email: Str) -> Result<Str> {
+fn create(name: Str, email: Str) -> Result<User> {
     let raw = db.add_user(name, email)?
-    return Ok(json.dumps(raw)?)
+    let u: User = json.loads(json.dumps(raw)?)?
+    return Ok(u)
 }
 
 // Buscar por id. Si no existe, propaga el NoResultFound de
 // SQLAlchemy como `Err`.
-fn find_raw(id: Int) -> Result<Str> {
+fn find(id: Int) -> Result<User> {
     let raw = db.get_user(id)?
-    return Ok(json.dumps(raw)?)
+    let u: User = json.loads(json.dumps(raw)?)?
+    return Ok(u)
 }
 
-// Listar todos. Orden por id ASC del lado SQLAlchemy.
-fn list_raw() -> Result<Str> {
+// Listar todos. Devuelve `List<User>` tipado — la coerción
+// recursiva runtime (R.missing-recursive-instance-coercion,
+// CERRADO 2026-05-22) hace que `let users: List<User> = ...`
+// coerce cada dict a Instance automáticamente.
+fn list_all() -> Result<List<User>> {
     let raw = db.list_users()?
-    return Ok(json.dumps(raw)?)
+    let users: List<User> = json.loads(json.dumps(raw)?)?
+    return Ok(users)
 }
 
 // Init de schema (idempotente). Llamado por main al boot.

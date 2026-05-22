@@ -61,6 +61,105 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.30] — 2026-05-22 — Feature: mini-fase loader-absoluto — imports nested cross-folder
+
+Cuarto y último paso del plan post-boilerplates. Cierra deuda
+**R.bug-loader-relative-only** (descubierta 2026-05-22 al armar
+el 6to boilerplate, documentada en `docs/deudas_lenguaje.md`).
+
+El loader de módulos ahora resuelve imports en DOS estrategias
+encadenadas:
+
+1. **Relativo al importer** (comportamiento previo). Si el archivo
+   buscado existe en `<importer_dir>/<segments>`, se usa.
+2. **Relativo al import_root** (nuevo). Si el archivo NO existe
+   relativo al importer, se prueba relativo al "import root" =
+   parent del entry file (estable durante toda la vida del loader).
+
+Caso canónico que ahora funciona — proyecto con módulos en
+subcarpetas hermanas:
+
+```
+src/
+├── main.fitz          → from data.users import create
+├── types/
+│   └── user.fitz      → type User { ... }
+└── data/
+    └── users.fitz     → from types.user import User
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+                        // Antes: buscaba `src/data/types/user.fitz` y fallaba.
+                        // Ahora: relativo falla → fallback a `src/types/user.fitz`. ✓
+```
+
+Backward compat preservada: el patrón `import bar` desde un módulo
+nested que resuelve a un sibling (`sub/bar.fitz`) sigue ganando vía
+la búsqueda relativa, sin pasar por el fallback.
+
+Cambios:
+
+- `src/evaluator.rs`:
+  - `Loader` suma `import_root: PathBuf` (estable durante toda la
+    vida del loader, fijado al `base_dir` inicial = parent del
+    entry file).
+  - `resolve_module_path` devuelve `Vec<PathBuf>` con candidatos
+    ordenados (relativo primero, después import_root si difiere).
+  - `load_module` itera los candidatos; el primero que
+    canonicalize OK gana.
+- `src/codegen.rs`:
+  - Nuevo helper `mod_qualifier_of(rel_path)` que convierte
+    `types/user.rs` → `types::user`. `LoadedModuleSigs` suma
+    field `mod_qualifier` (computed at construction).
+  - `emit_use_decls`, `emit_module_use_decls`,
+    `resolve_namespace_field`, `resolve_namespace_call`, y el
+    `imported_mod_and_item` en `gen_struct_lit` ahora usan
+    `mod_qualifier` (path completo) en lugar de `mod_name`
+    (último segmento). Antes el codegen emitía
+    `use crate::user::User` para `from types.user import User`
+    y rustc fallaba con "unresolved import `crate::user`".
+- 2 unit tests verdes en `evaluator::tests::loader_absoluto_*`:
+  - `data_sibling_import_resuelve_via_import_root` — caso canónico.
+  - `no_rompe_imports_relativos_legacy` — backward compat.
+- 1 E2E codegen verde en
+  `compile_e2e::loader_absoluto_data_sibling_import_compila_en_fitz_build`
+  — proyecto con `src/main.fitz` + `src/types/user.fitz` +
+  `src/data/users.fitz` compila a binario y corre OK.
+- Boilerplate `api-postgres-python` refactorizado a usar el
+  patrón limpio:
+  - `data/users.fitz` ahora hace `from types.user import User` +
+    `from types.api import NewUser` y devuelve `Result<User>` /
+    `Result<List<User>>` tipado (no más JSON crudo).
+  - `main.fitz` simplificado a delegar a `data.users::create`/
+    `find`/`list_all` directo (sin coerción intermedia).
+- VSCode extension: SIN cambios necesarios (fix es runtime/codegen
+  puro, no toca grammar/sintaxis/types/LSP). Documentado en cierre
+  formal.
+
+Bug residual detectado durante la validación (NO regresión, NO
+bloquea):
+
+- **R.bug-13i-stack-overflow-debug**: `13i-campos-privados.fitz`
+  desborda el stack en `fitz build` debug-mode en Windows
+  (1 MB stack). Verificado con `git stash` que el overflow es
+  pre-existente, NO disparado por esta mini-fase. Release build
+  compila el ejemplo sin problema. Fix lean propuesto en
+  `docs/deudas_lenguaje.md`: linker flag `/STACK:8388608` en
+  `.cargo/config.toml` para Windows target. Sin presión real.
+
+Total al cierre: **2178 unit + 275 compile_e2e + 3 openapi**.
+Smoke `GUIDE_EXAMPLES_COMPILE` con asterisco — 13i flake (deuda
+ya documentada).
+
+**CIERRE FORMAL DEL PLAN POST-BOILERPLATES**: los 4 pasos
+(coerción recursiva runtime + 8.7 codegen + env builtin +
+loader-absoluto) cerrados entre el 2026-05-22 y el 2026-05-22.
+Ningún paso requirió cambios al checker estático (la mayoría
+extensiones al evaluator y codegen). Boilerplates simplificados
+gracias a los fixes. Próximo norte: definir el siguiente bloque
+con el autor (probablemente algo del backlog "deudas residuales
+sin presión real" o una mini-fase de features nuevas).
+
+---
+
 ## [v0.9.29] — 2026-05-22 — Feature: mini-fase env builtin — `env`/`env_or`/`load_env`
 
 Tercer paso del plan post-boilerplates. Tres builtins nuevos para

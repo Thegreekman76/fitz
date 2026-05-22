@@ -6281,3 +6281,76 @@ fn load_env_builtin_carga_archivo_y_lee_vars() {
         stdout
     );
 }
+
+// ----------------------------------------------------------------------
+// Mini-fase loader-absoluto (2026-05-22, Paso 4 post-boilerplates) —
+// `from sub.foo` desde un módulo en subcarpeta debe resolver al
+// import_root (parent del entry file) cuando la resolución relativa
+// falla. Caso canónico del boilerplate api-postgres-python.
+// ----------------------------------------------------------------------
+
+#[test]
+fn loader_absoluto_data_sibling_import_compila_en_fitz_build() {
+    // Setup multi-archivo:
+    //   src/main.fitz       — usa data/users (que importa types/user)
+    //   src/types/user.fitz — define type User
+    //   src/data/users.fitz — `from types.user import User` (resuelve via import_root)
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join("fitz-e2e-loader-absoluto");
+    let _ = std::fs::remove_dir_all(&dir);
+    let src = dir.join("src");
+    std::fs::create_dir_all(src.join("types")).unwrap();
+    std::fs::create_dir_all(src.join("data")).unwrap();
+
+    std::fs::write(
+        src.join("types").join("user.fitz"),
+        "type User { id: Int, name: Str }\n",
+    )
+    .unwrap();
+    // data/users.fitz importa `User` desde el módulo hermano types/.
+    // El test clave: ese `from types.user import User` resuelve via
+    // import_root (parent del main.fitz), no via la búsqueda relativa
+    // que daría `src/data/types/user.fitz` (mal).
+    //
+    // Sólo testeamos que el import RESUELVA (build success); cómo
+    // usamos el tipo después está fuera del scope de este test.
+    std::fs::write(
+        src.join("data").join("users.fitz"),
+        "from types.user import User\n\
+         fn make_name(u: User) -> Str => u.name\n",
+    )
+    .unwrap();
+    std::fs::write(
+        src.join("main.fitz"),
+        "from data.users import make_name\n\
+         from types.user import User\n\
+         let u = User { id: 7, name: \"ada\" }\n\
+         print(\"hello {make_name(u)}\")\n",
+    )
+    .unwrap();
+
+    // Build el main.fitz directamente.
+    let main_fitz = src.join("main.fitz");
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&main_fitz)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "main.exe" } else { "main" };
+    let bin = src.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    let run = Command::new(&bin).output().expect("invocar binario");
+    let stdout = String::from_utf8_lossy(&run.stdout);
+    assert_eq!(run.status.code().unwrap_or(-1), 0, "stdout: {}", stdout);
+    assert_eq!(stdout.trim(), "hello ada");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
