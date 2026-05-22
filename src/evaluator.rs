@@ -8321,6 +8321,53 @@ async fn coerce_to_annotation(
     value: Value,
     env: EnvRef,
 ) -> EvalResult<Value> {
+    // Mini-fase R.missing-recursive-instance-coercion (2026-05-22) —
+    // recursión sobre `List<T>` y `Map<K, V>` cuando el inner es
+    // nominal o `Nullable(nominal)`. Para el caso typical
+    // `let users: List<User> = json.loads(raw)?` el value es
+    // `Value::List(Vec<Value::Map>)` y queremos
+    // `Value::List(Vec<Value::Instance>)`. Iteramos items y recursamos
+    // sobre cada uno; el caso base (Map → Instance) lo cubre el código
+    // de abajo.
+    //
+    // Solo recursamos cuando el inner es nominal (o `T?` nominal).
+    // Si es primitivo (`List<Int>`), `Any` (`List<Any>`) o estructural
+    // (`List<List<X>>`, `List<Map<...>>` con value primitivo) → no
+    // tocamos. La regla: la coerción dispara únicamente para crear
+    // Instances; las colecciones son contenedores transparentes.
+    if let TypeExpr::Generic { name, args } = annot {
+        if name == "List" && args.len() == 1 && is_nominal_target(&args[0], &env) {
+            if let Value::List(items_ref) = &value {
+                let snapshot: Vec<Value> = items_ref.lock().clone();
+                let mut coerced: Vec<Value> = Vec::with_capacity(snapshot.len());
+                for item in snapshot {
+                    let c = coerce_to_annotation(&args[0], item, env.clone()).await?;
+                    coerced.push(c);
+                }
+                return Ok(Value::new_list(coerced));
+            }
+            return Ok(value);
+        }
+        if name == "Map" && args.len() == 2 && is_nominal_target(&args[1], &env) {
+            if let Value::Map(pairs_ref) = &value {
+                let snapshot: Vec<(Value, Value)> = pairs_ref.lock().clone();
+                let mut coerced: Vec<(Value, Value)> = Vec::with_capacity(snapshot.len());
+                for (k, v) in snapshot {
+                    let cv = coerce_to_annotation(&args[1], v, env.clone()).await?;
+                    coerced.push((k, cv));
+                }
+                return Ok(Value::new_map(coerced));
+            }
+            return Ok(value);
+        }
+        // Otros generics (Result<T>, Future<T>, etc.) → passthrough.
+        // Los Result son enums Ok/Err: coercer adentro requeriría
+        // semántica distinta (cómo coercer el T del Ok). Por ahora
+        // el usuario tiene que desempacar con `?` o `match` y aplicar
+        // la anotación sobre el inner. Reabrible si entra demanda.
+        return Ok(value);
+    }
+
     // Resolver: nombre del tipo + si la anotación tolera Null.
     let (type_name, allows_null) = match annot {
         TypeExpr::Named(name) => (name.clone(), false),
@@ -8394,6 +8441,28 @@ async fn coerce_to_annotation(
     }
 
     Ok(Value::new_instance(declared_type_name, instance_fields))
+}
+
+/// Mini-fase R.missing-recursive-instance-coercion — helper que
+/// devuelve `true` si la `TypeExpr` apunta a un tipo nominal del
+/// programa (`type Foo { ... }`), incluyendo la variante nullable
+/// `T?`. Filtra primitivos (`Int`, `Str`, etc.) y tipos no nominales
+/// (`Any`, generics, tuplas) porque no se construyen desde dicts.
+///
+/// Si el ident no resuelve a un `Value::Type` en el env, devuelve
+/// `false` — el caller decide qué hacer (típicamente passthrough sin
+/// coercer; el checker se encarga del error estático si la anotación
+/// no existe).
+fn is_nominal_target(ty: &TypeExpr, env: &EnvRef) -> bool {
+    let name = match ty {
+        TypeExpr::Named(n) => n,
+        TypeExpr::Nullable(inner) => match inner.as_ref() {
+            TypeExpr::Named(n) => n,
+            _ => return false,
+        },
+        _ => return false,
+    };
+    matches!(env.lock().get(name), Some(Value::Type { .. }))
 }
 
 // ---------------------------------------------------------------------------
@@ -16289,6 +16358,194 @@ let r = match n {
             }
             other => panic!("esperaba Instance, fue {:?}", other),
         }
+    }
+
+    // -------------------------------------------------------------------
+    // Mini-fase R.missing-recursive-instance-coercion (2026-05-22) —
+    // la coerción `Map → Instance` (8.4.3) ahora recursa sobre
+    // `List<T>` y `Map<K, V>` cuando T/V es nominal o `Nullable(nominal)`.
+    // -------------------------------------------------------------------
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_lista_de_maps_a_lista_de_instances() {
+        // Caso canónico: `let users: List<User> = [...]` con items que
+        // son Map literals → cada Map se coerce a Instance.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let raw = [{\"id\": 1, \"name\": \"ada\"}, {\"id\": 2, \"name\": \"luis\"}]\n\
+            let users: List<User> = raw\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let users = env.lock().get("users").unwrap();
+        let items = match users {
+            Value::List(items_ref) => items_ref.lock().clone(),
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        assert_eq!(items.len(), 2);
+        for (i, item) in items.iter().enumerate() {
+            match item {
+                Value::Instance { type_name, fields } => {
+                    assert_eq!(type_name, "User", "item {} no es Instance User", i);
+                    let f = fields.lock().clone();
+                    assert_eq!(f.len(), 2);
+                    assert_eq!(f[0].0, "id");
+                    assert_eq!(f[1].0, "name");
+                }
+                other => panic!("item {} no es Instance, es {:?}", i, other),
+            }
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_lista_vacia_pasa_sin_problema() {
+        // Edge case: lista vacía con anotación `List<T>` nominal —
+        // produce una List<Instance> vacía sin error.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let raw: List<Any> = []\n\
+            let users: List<User> = raw\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let users = env.lock().get("users").unwrap();
+        match users {
+            Value::List(items_ref) => assert!(items_ref.lock().is_empty()),
+            other => panic!("esperaba List vacía, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_lista_de_primitivos_no_dispara() {
+        // `List<Int>` con items Int — no toca la coerción (passthrough).
+        let src = "\
+            let xs: List<Int> = [1, 2, 3]\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let xs = env.lock().get("xs").unwrap();
+        match xs {
+            Value::List(items_ref) => {
+                let items = items_ref.lock().clone();
+                assert_eq!(items, vec![Value::Int(1), Value::Int(2), Value::Int(3)]);
+            }
+            other => panic!("esperaba List<Int>, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_lista_con_nullable_nominal() {
+        // `List<User?>` — items pueden ser Null o Map → Null pasa,
+        // Map se coerce a Instance.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let raw = [{\"id\": 1, \"name\": \"ada\"}, null, {\"id\": 2, \"name\": \"luis\"}]\n\
+            let users: List<User?> = raw\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let users = env.lock().get("users").unwrap();
+        let items = match users {
+            Value::List(items_ref) => items_ref.lock().clone(),
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        assert_eq!(items.len(), 3);
+        assert!(matches!(items[0], Value::Instance { .. }));
+        assert!(matches!(items[1], Value::Null));
+        assert!(matches!(items[2], Value::Instance { .. }));
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_map_de_string_a_instance() {
+        // `Map<Str, User>` con values Map → cada value se coerce a
+        // Instance, las keys se preservan tal cual.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let raw = {\"a\": {\"id\": 1, \"name\": \"ada\"}, \"b\": {\"id\": 2, \"name\": \"luis\"}}\n\
+            let users: Map<Str, User> = raw\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let users = env.lock().get("users").unwrap();
+        let pairs = match users {
+            Value::Map(pairs_ref) => pairs_ref.lock().clone(),
+            other => panic!("esperaba Map, fue {:?}", other),
+        };
+        assert_eq!(pairs.len(), 2);
+        // Key preservada como Str, value coercido a Instance.
+        match &pairs[0] {
+            (Value::Str(k), Value::Instance { type_name, .. }) => {
+                assert_eq!(k, "a");
+                assert_eq!(type_name, "User");
+            }
+            other => panic!("primer par no encaja: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_lista_de_maps_falta_campo_requerido_error_claro() {
+        // Si un Map adentro de la List no tiene un field requerido,
+        // el error apunta al campo y al tipo (no al índice del item —
+        // el caller ve "no se puede coercer a User: falta campo X").
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let raw = [{\"id\": 1, \"name\": \"ada\"}, {\"id\": 2}]\n\
+            let users: List<User> = raw\n\
+        ";
+        let (_env, res) = parse_eval_into_env(src).await;
+        let err = res.expect_err("esperaba error por campo faltante");
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("name") && msg.contains("User"),
+            "mensaje no menciona campo `name` ni tipo `User`: {}",
+            msg
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_lista_de_maps_con_default_aplica() {
+        // Si un Map no tiene un field con default declarado, la
+        // coerción aplica el default (no falla).
+        let src = "\
+            type User { id: Int, name: Str = \"anon\" }\n\
+            let raw = [{\"id\": 1, \"name\": \"ada\"}, {\"id\": 2}]\n\
+            let users: List<User> = raw\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        let users = env.lock().get("users").unwrap();
+        let items = match users {
+            Value::List(items_ref) => items_ref.lock().clone(),
+            other => panic!("esperaba List, fue {:?}", other),
+        };
+        assert_eq!(items.len(), 2);
+        // Segundo item: name debe ser "anon" del default.
+        match &items[1] {
+            Value::Instance { fields, .. } => {
+                let f = fields.lock().clone();
+                let name = f.iter().find(|(n, _)| n == "name").unwrap();
+                assert_eq!(name.1, Value::Str("anon".into()));
+            }
+            other => panic!("segundo item no es Instance: {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn coerce_recursive_passthrough_si_value_no_es_list() {
+        // Si la anotación es `List<User>` pero el value es algo que
+        // no es una List (ej. un Map suelto), no tocamos — el
+        // checker se encarga de rechazarlo o el siguiente uso falla
+        // claro.
+        let src = "\
+            type User { id: Int, name: Str }\n\
+            let raw = {\"id\": 1, \"name\": \"ada\"}\n\
+            let users: List<User> = raw\n\
+        ";
+        let (env, res) = parse_eval_into_env(src).await;
+        res.unwrap();
+        // Sin coerción: users sigue siendo el Map original.
+        let users = env.lock().get("users").unwrap();
+        assert!(matches!(users, Value::Map(_)));
     }
 
     // -------------------------------------------------------------------

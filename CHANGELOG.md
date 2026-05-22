@@ -61,6 +61,119 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.27] — 2026-05-22 — Patch: coerción recursiva `Map → Instance` sobre `List<T>`/`Map<K,V>` en runtime
+
+Fix de la deuda **R.missing-recursive-instance-coercion** (descubierta
+el 2026-05-22 al armar el 6to boilerplate `api-fullstack-postgres`).
+La coerción 8.4.3 (`Map → Instance`) ahora recursa sobre `List<T>` y
+`Map<K, V>` cuando el inner es nominal o `Nullable(nominal)`.
+
+Antes:
+
+```fitz
+let users: List<User> = json.loads(raw)?
+// users es List<Map>, NO List<User>. El binding pasa el checker
+// gradual pero `users.find(fn(u) => u.name == "x")` falla con
+// "Map no tiene field name".
+```
+
+Workaround anterior (loop manual):
+
+```fitz
+let maps: List<Any> = json.loads(raw)?
+let users: List<User> = []
+for m in maps {
+    let u: User = m   // ← acá disparaba la coerción Map → User
+    users.push(u)
+}
+```
+
+Ahora:
+
+```fitz
+let users: List<User> = json.loads(raw)?
+// users es List<User> directamente, cada item coercionado item-por-item.
+```
+
+Cambios:
+
+- `src/evaluator.rs::coerce_to_annotation` con dos casos recursivos
+  nuevos al inicio (List + Map). Solo dispara si el inner es nominal
+  (filtra `List<Int>`, `List<Any>`, etc. — passthrough).
+- Helper `is_nominal_target(ty, env)` chequea contra el env si el
+  ident apunta a un `Value::Type`.
+- 8 unit tests verdes en `evaluator::tests::coerce_recursive_*`
+  cubriendo: caso canónico, lista vacía, lista de primitivos no
+  dispara, Nullable nominal con `Null` pasando, `Map<Str, User>`,
+  error claro con field requerido faltante, default aplicado,
+  passthrough sin coerción si value no es List.
+- 2 boilerplates simplificados:
+  - `api-fullstack-postgres::list_tasks` de loop manual a 1 línea.
+  - `api-postgres-python::list_users` de `Result<Str>` con JSON
+    crudo a `Result<List<User>>` tipado.
+
+Total al cierre: **2168 unit + 257 compile_e2e + 3 openapi**. Smoke
+`GUIDE_EXAMPLES_COMPILE` verde.
+
+**Deuda derivada que sigue abierta**: 8.7 (codegen) — `fitz build`
+todavía necesita wiring de `coerce(PyAny → List<T>)` para paridad
+bit-a-bit. Es el siguiente paso del plan post-boilerplates.
+
+---
+
+## [v0.9.26] — 2026-05-22 — Patch: fix OPTIONS preflight duplicado al compartir path con CORS
+
+Fix de la deuda **R.bug-options-preflight-shared-path** (descubierta
+el 2026-05-22 al validar el 6to boilerplate end-to-end con frontend).
+
+Cuando dos o más handlers HTTP compartían el mismo path con
+`@middleware(cors(...))` declarado en cada uno (caso típico CRUD:
+`/tasks` con `@get` + `@post`, o `/tasks/{id}` con
+`@get`/`@put`/`@delete`), axum hacía panic al construir el `Router`:
+
+```
+Overlapping method route. Handler for `OPTIONS /tasks` already exists
+```
+
+Cada handler intentaba registrar su propio OPTIONS preflight para
+el mismo path. Fix coordinado runtime + codegen:
+
+- **Intérprete (`src/http.rs::build_router_with_asyncapi`)**:
+  pre-cómputo de `CorsConfig` merged por path (unión de
+  `allow_methods` preservando orden, `allow_headers` case-insensitive,
+  max `max_age`, primer `allow_origin` gana). Solo el OWNER del
+  path emite el preflight con la config merged.
+- **Codegen (`src/codegen.rs`)**: mismo patrón. Nuevos campos en
+  `CodegenCtx`: `cors_merged_per_path` + `cors_preflight_owner`.
+  Pre-scan `precompute_cors_merge(http_fns)` corre antes del loop de
+  wrappers. `emit_cors_helpers` solo emite el preflight para el
+  owner; nuevo método `cors_resolve_fn_for(sig)` para que los
+  wrappers no-owner referencien el resolver compartido del owner.
+- 4 unit tests verdes en
+  `http::tests::bug_options_preflight_duplicado_*` (no-panic,
+  methods merged, 3 verbos con `{id}`, headers case-insensitive
+  dedup).
+- 1 E2E verde en
+  `compile_e2e::r_bug_options_preflight_duplicado_en_fitz_build_paridad_con_fitz_run`.
+
+Acompañado por:
+
+- **6 boilerplates Dockerizados** live en `boilerplates/` con README
+  general comparativo (`cli-tool`, `api-simple`,
+  `api-middleware-cors`, `api-websocket`, `api-postgres-python`,
+  `api-fullstack-postgres`). El 6to es el showcase fullstack —
+  frontend rico vanilla + API Fitz + Postgres en 3 containers.
+- Mención de boilerplates en README + cap 31 nuevo de
+  `docs/guide.md` (renumeración 31→32 Qué sigue) + `docs/index.md`.
+- Naming real de `.vsix` corregido en docs
+  (`fitz-lang-<plataforma>.vsix`, 4 plataformas: Win x64, Linux
+  x64/ARM, macOS Apple Silicon).
+- Multiplataforma resaltado como diferencial en README + index +
+  cap 1 de la guía.
+- Bug entry como CERRADO en `docs/deudas_lenguaje.md`.
+
+---
+
 ## [v0.9.25] — 2026-05-21 — Patch: fix codegen deadlock en string interp con re-locks
 
 **Bug fix crítico** descubierto al validar el primer boilerplate

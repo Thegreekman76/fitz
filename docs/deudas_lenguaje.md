@@ -4730,10 +4730,32 @@ no está aplicado.
 
 ---
 
-## R.missing-recursive-instance-coercion — Coerción `Map → Instance` no es recursiva sobre `List<T>`/`Map<K, V>` (descubierto 2026-05-22)
+## ~~R.missing-recursive-instance-coercion — Coerción `Map → Instance` no es recursiva sobre `List<T>`/`Map<K, V>`~~ ✓ CERRADO 2026-05-22
 
-**Prioridad: MEDIA** — no rompe runtime, pero fuerza al usuario a
-escribir boilerplate (loop manual) cada vez que recibe una colección
+> **CERRADO el mismo día del descubrimiento (2026-05-22)** — el fix
+> aterrizó en `src/evaluator.rs::coerce_to_annotation` con dos casos
+> recursivos nuevos (List<T> y Map<K,V> cuando el inner es nominal o
+> Nullable-nominal). Helper privado `is_nominal_target` chequea contra
+> el env si el tipo es `Value::Type`. 8 unit tests verdes en
+> `evaluator::tests::coerce_recursive_*` cubriendo: caso canónico
+> List<User> con maps, lista vacía, lista de primitivos no dispara,
+> Nullable nominal con Null pasando, Map<Str,User>, error claro con
+> field requerido faltante, default aplicado, passthrough sin coerción
+> si value no es List.
+>
+> Refactor del 6to boilerplate (`api-fullstack-postgres::list_tasks`)
+> de loop manual a `let tasks: List<Task> = json.loads(raw)?` en 1
+> línea. Refactor también de `api-postgres-python::list_users` que
+> tenía el mismo workaround citado en su comentario. Smoke
+> `GUIDE_EXAMPLES_COMPILE` verde, 2168 unit tests verdes total.
+>
+> Deuda 8.7 (codegen) queda **abierta**: el `fitz build` todavía
+> requiere wiring de `coerce(PyAny → List<T>)` para paridad
+> bit-a-bit. Esta deuda fue siempre primero el runtime y luego
+> codegen; el runtime ya replica el patrón.
+
+**Prioridad: MEDIA** — no rompía runtime, pero forzaba al usuario a
+escribir boilerplate (loop manual) cada vez que recibía una colección
 de dicts desde Python (`json.loads` de un array JSON, queries
 SQLAlchemy que devuelven `List[dict]`, etc.).
 

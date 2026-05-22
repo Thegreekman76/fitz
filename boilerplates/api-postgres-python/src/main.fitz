@@ -61,18 +61,20 @@ fn get_user(id: Int) -> Result<User> {
     return Ok(u)
 }
 
-// GET /users — listar todos. Devuelve JSON crudo (List<User>
-// Fitz nativa requeriría iterar el list opaco Python con
-// anotación recursiva — deuda residual de coerción 8.4.3 sobre
-// listas).
+// GET /users — listar todos. La anotación `List<User>` dispara
+// coerción recursiva del JSON crudo a una List<User> Fitz tipada
+// (mini-fase R.missing-recursive-instance-coercion, cierra la
+// deuda residual de 8.4.3 sobre colecciones).
 @get("/users")
-fn list_users() -> Result<Str> {
-    return list_raw()
+fn list_users() -> Result<List<User>> {
+    let raw = list_raw()?
+    let users: List<User> = json.loads(raw)?
+    return Ok(users)
 }
 
 print("[ready] Server arrancando en :3000")
 print("[ready] Endpoints:")
 print("[ready]   POST /users       — crear (body JSON: name, email)")
-print("[ready]   GET  /users       — listar (JSON crudo)")
+print("[ready]   GET  /users       — listar (List<User> tipado)")
 print("[ready]   GET  /users/<id>  — buscar por id (User tipado)")
 print("[ready]   GET  /docs        — UI Scalar (OpenAPI 3.1)")
