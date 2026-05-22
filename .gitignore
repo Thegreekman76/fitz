@@ -27,3 +27,10 @@ examples/guide/21-python-crud/crud.db
 # MkDocs Material — sitio generado por `mkdocs build`. Lo construye
 # el workflow `docs.yml` y se publica a GitHub Pages; no se versiona.
 /site/
+
+# Copia local de `examples/` adentro de `docs/` — el workflow
+# `docs.yml` la genera con `cp -r examples docs/examples` antes de
+# `mkdocs build` para que los links `../examples/guide/X.fitz` de la
+# guía resuelvan en el sitio publicado. Si corrés `mkdocs serve`
+# local, hacé el mismo `cp` a mano.
+/docs/examples/

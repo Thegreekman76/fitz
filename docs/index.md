@@ -111,6 +111,4 @@ Mientras tanto, interop Python con SQLAlchemy cubre el gap
 ## Nombre
 
 Por el [Monte Fitz Roy](https://en.wikipedia.org/wiki/Fitz_Roy)
-en El Chaltén, Patagonia, Argentina.
-
-[![Fitz Roy](https://upload.wikimedia.org/wikipedia/commons/thumb/7/79/Cerro_Torre_y_Cerro_Fitz_Roy_o_Chaltén.jpg/640px-Cerro_Torre_y_Cerro_Fitz_Roy_o_Chaltén.jpg)](https://en.wikipedia.org/wiki/Fitz_Roy)
+en El Chaltén, Patagonia, Argentina. Un nombre que no se olvida.

@@ -13,6 +13,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'examples/guide/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
       - '.github/workflows/docs.yml'
@@ -20,6 +21,7 @@ on:
     branches: [main]
     paths:
       - 'docs/**'
+      - 'examples/guide/**'
       - 'mkdocs.yml'
       - 'requirements-docs.txt'
   workflow_dispatch:
@@ -60,13 +62,24 @@ jobs:
       - name: Install MkDocs deps
         run: pip install -r requirements-docs.txt
 
+      # MkDocs solo expone archivos adentro de `docs_dir` (`docs/`).
+      # La guía linkea ~100 veces a `../examples/guide/X.fitz` (links
+      # relativos que funcionan en GitHub salen de `docs/` y entran a
+      # `examples/`, pero en el sitio publicado dan 404). Solución:
+      # copiar `examples/` a `docs/examples/` ANTES del build, así los
+      # paths `../examples/guide/X.fitz` desde `docs/guide.md` resuelven
+      # a `/examples/guide/X.fitz` en el sitio. `docs/examples/` está
+      # en `.gitignore` (no se versiona — se regenera en cada build).
+      - name: Copy examples into docs tree
+        run: cp -r examples docs/examples
+
       - name: Build site
         run: mkdocs build
-        # Sin `--strict` por ahora: la guía tiene links relativos a
-        # archivos fuera de `docs/` (a `src/`, `examples/guide/`,
-        # etc.) que MkDocs reporta como broken pero en GitHub
-        # funcionan. Refinable cuando reescribamos todos esos links
-        # con URLs absolutas a github.com.
+        # Sin `--strict` por ahora: la guía aún tiene algunos links
+        # relativos a archivos fuera de `docs/` (`src/`, etc.) que
+        # MkDocs reporta como broken pero en GitHub funcionan.
+        # Refinable a futuro reescribiendo esos links con URLs
+        # absolutas a github.com.
 
       - name: Upload artifact
         if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
