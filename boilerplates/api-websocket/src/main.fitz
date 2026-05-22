@@ -1,0 +1,68 @@
+// api-websocket boilerplate — chat broadcast tipado con `@ws` +
+// `WsConn<T>` + AsyncAPI 3.0 auto-generado.
+//
+// Demuestra (Fase 9.w.2):
+//   - `@ws("/chat")` sobre `async fn` con `WsConn<ChatMsg>`.
+//   - Marshaling JSON automático de cada frame text al `type
+//     ChatMsg`.
+//   - `conn.recv() -> Result<ChatMsg>` + `conn.broadcast(msg)` +
+//     `conn.send(msg)` + `conn.close()`.
+//   - `@server(port, host, ws_heartbeat_secs=N)`: ping/pong
+//     automático cada N segundos para pasar de largo proxies
+//     idle-killers (Nginx 60s, Cloudflare ~100s, ALB 60s).
+//   - AsyncAPI 3.0 auto-generado en `/asyncapi.json` (la spec
+//     hermana de OpenAPI 3.1 para event-driven APIs).
+//   - JSON marshaling del runtime HTTP también cubre el frame text.
+//
+// Sobre auth en WebSocket:
+//   El browser WebSocket API NO soporta headers custom en el
+//   constructor (`new WebSocket(url)`), entonces
+//   `@authenticated @ws("/chat")` con bearer JWT solo funciona
+//   desde CLI (wscat -H "Authorization: Bearer ..."). El frontend
+//   HTML+JS de este boilerplate usa el chat público; para el flow
+//   con auth, ver cap 29 de la guía + `examples/guide/29-ws.fitz`.
+
+@server(43929, "0.0.0.0", ws_heartbeat_secs=30)
+fn main() => 0
+
+// Tipo del frame del chat — viaja por el WS serializado/
+// deserializado automático a JSON. Cada frame text se valida
+// contra este shape al hacer `conn.recv()`.
+type ChatMsg {
+    user: Str,
+    text: Str,
+}
+
+// Endpoint WS. `@ws` exige `async fn` con primer param
+// `WsConn<T>`. El runtime hace upgrade HTTP→WS, instancia el
+// `conn`, y llama esta fn. `conn.broadcast(msg)` envía a TODOS
+// los clientes conectados (incluido el sender — convención
+// Socket.IO/Phoenix).
+@ws("/chat")
+async fn chat(conn: WsConn<ChatMsg>) -> Null {
+    // Mensaje de bienvenida solo al sender (no broadcast).
+    let welcome = ChatMsg { user: "system", text: "bienvenido al chat" }
+    let _ = conn.send(welcome)
+
+    // Loop principal: recv → broadcast con echo del payload.
+    loop {
+        match conn.recv() {
+            Ok(msg) => {
+                let _ = conn.broadcast(msg)
+            }
+            Err(_) => {
+                // Conn cerrada o frame inválido (no parsea contra
+                // ChatMsg) → salida limpia. El runtime cierra el
+                // socket al retornar.
+                return null
+            }
+        }
+    }
+    return null
+}
+
+// Endpoint HTTP público para que el frontend sepa que el server
+// está vivo. El frontend tiene un health check antes de intentar
+// el WS handshake.
+@get("/health")
+fn health() -> Str => "ok"

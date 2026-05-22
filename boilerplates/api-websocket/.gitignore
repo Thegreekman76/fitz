@@ -1,0 +1,8 @@
+target/
+*.exe
+*.pdb
+.DS_Store
+.vscode/
+.idea/
+*.swp
+Thumbs.db

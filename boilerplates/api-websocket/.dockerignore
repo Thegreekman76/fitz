@@ -1,0 +1,12 @@
+target/
+*.exe
+*.pdb
+.vscode/
+.idea/
+*.swp
+.DS_Store
+.git/
+.gitignore
+README.md
+docker-compose.yml
+frontend/

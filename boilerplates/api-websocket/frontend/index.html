@@ -1,0 +1,210 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <title>Fitz WebSocket Chat — demo</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            max-width: 720px;
+            margin: 2rem auto;
+            padding: 0 1rem;
+            background: #1a1a1a;
+            color: #e6e6e6;
+            line-height: 1.5;
+        }
+        h1 { color: #ff6b35; }
+        .note {
+            background: #2a2a2a;
+            border-left: 3px solid #ff6b35;
+            padding: 0.75rem 1rem;
+            margin: 1rem 0;
+            font-size: 0.9rem;
+        }
+        .status {
+            display: inline-block;
+            padding: 0.25rem 0.75rem;
+            border-radius: 4px;
+            font-size: 0.85rem;
+            margin: 0.5rem 0;
+        }
+        .status.connected { background: #1a4d2e; color: #6fdc8c; }
+        .status.disconnected { background: #4d1a1a; color: #fa4d56; }
+        .status.connecting { background: #4d3d1a; color: #ffc857; }
+        label { display: block; margin-top: 0.5rem; font-size: 0.9rem; }
+        input {
+            width: 100%;
+            padding: 0.5rem;
+            box-sizing: border-box;
+            background: #2a2a2a;
+            border: 1px solid #444;
+            color: #e6e6e6;
+            border-radius: 4px;
+            font-size: 1rem;
+        }
+        button {
+            background: #ff6b35;
+            color: white;
+            border: none;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: 600;
+        }
+        button:hover:not(:disabled) { background: #e55a25; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        .messages {
+            background: #0d0d0d;
+            border: 1px solid #333;
+            padding: 0.75rem;
+            border-radius: 4px;
+            height: 320px;
+            overflow-y: auto;
+            margin: 1rem 0;
+            font-family: ui-monospace, monospace;
+            font-size: 0.9rem;
+        }
+        .msg { margin: 0.25rem 0; }
+        .msg .user { color: #ff6b35; font-weight: 600; }
+        .msg.system .user { color: #6fdc8c; }
+        .msg.self .user { color: #5fa9ff; }
+        .send-row { display: flex; gap: 0.5rem; }
+        .send-row input { flex: 1; }
+        .send-row button { white-space: nowrap; }
+    </style>
+</head>
+<body>
+
+<h1>💬 Fitz WebSocket Chat</h1>
+
+<div class="note">
+    Cliente WebSocket vanilla conectado a <code>ws://localhost:43929/chat</code>.
+    El server Fitz (binario nativo distroless) hace broadcast de cada
+    mensaje a TODOS los clientes conectados. Abrí esta página en
+    múltiples tabs para verlo en acción.
+</div>
+
+<div>
+    Status: <span id="status" class="status disconnected">disconnected</span>
+</div>
+
+<label>Tu nombre:</label>
+<input id="user-input" placeholder="ada" value="ada" />
+
+<div class="messages" id="messages"></div>
+
+<div class="send-row">
+    <input id="msg-input" placeholder="escribí un mensaje y enter..." disabled />
+    <button id="send-btn" disabled>Enviar</button>
+</div>
+
+<button id="connect-btn">Conectar</button>
+<button id="disconnect-btn" disabled>Desconectar</button>
+
+<script>
+const WS_URL = "ws://localhost:43929/chat";
+const HEALTH_URL = "http://localhost:43929/health";
+
+const statusEl = document.getElementById("status");
+const messagesEl = document.getElementById("messages");
+const userInput = document.getElementById("user-input");
+const msgInput = document.getElementById("msg-input");
+const sendBtn = document.getElementById("send-btn");
+const connectBtn = document.getElementById("connect-btn");
+const disconnectBtn = document.getElementById("disconnect-btn");
+
+let ws = null;
+
+function setStatus(state) {
+    statusEl.className = `status ${state}`;
+    statusEl.textContent = state;
+}
+
+function appendMsg(user, text, cssClass) {
+    const div = document.createElement("div");
+    div.className = `msg ${cssClass || ''}`;
+    div.innerHTML = `<span class="user">${user}:</span> ${text}`;
+    messagesEl.appendChild(div);
+    messagesEl.scrollTop = messagesEl.scrollHeight;
+}
+
+async function checkHealth() {
+    try {
+        const resp = await fetch(HEALTH_URL);
+        return resp.ok;
+    } catch (e) {
+        return false;
+    }
+}
+
+async function connect() {
+    setStatus("connecting");
+    const healthy = await checkHealth();
+    if (!healthy) {
+        appendMsg("[error]", "El server no responde en localhost:43929. ¿Arrancaste docker compose up?", "system");
+        setStatus("disconnected");
+        return;
+    }
+
+    ws = new WebSocket(WS_URL);
+
+    ws.onopen = () => {
+        setStatus("connected");
+        connectBtn.disabled = true;
+        disconnectBtn.disabled = false;
+        msgInput.disabled = false;
+        sendBtn.disabled = false;
+        userInput.disabled = true;
+    };
+
+    ws.onmessage = (event) => {
+        try {
+            const msg = JSON.parse(event.data);
+            const cssClass = msg.user === "system" ? "system" :
+                             msg.user === userInput.value ? "self" : "";
+            appendMsg(msg.user, msg.text, cssClass);
+        } catch (e) {
+            appendMsg("[parse error]", event.data, "system");
+        }
+    };
+
+    ws.onclose = () => {
+        setStatus("disconnected");
+        connectBtn.disabled = false;
+        disconnectBtn.disabled = true;
+        msgInput.disabled = true;
+        sendBtn.disabled = true;
+        userInput.disabled = false;
+    };
+
+    ws.onerror = (err) => {
+        appendMsg("[ws error]", "ver consola del browser", "system");
+        console.error("WebSocket error:", err);
+    };
+}
+
+function disconnect() {
+    if (ws) {
+        ws.close();
+        ws = null;
+    }
+}
+
+function send() {
+    const text = msgInput.value.trim();
+    if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+    const payload = { user: userInput.value || "anon", text: text };
+    ws.send(JSON.stringify(payload));
+    msgInput.value = "";
+}
+
+connectBtn.addEventListener("click", connect);
+disconnectBtn.addEventListener("click", disconnect);
+sendBtn.addEventListener("click", send);
+msgInput.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") send();
+});
+</script>
+
+</body>
+</html>

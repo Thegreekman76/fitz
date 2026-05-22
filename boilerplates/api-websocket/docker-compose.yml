@@ -1,0 +1,29 @@
+# docker-compose para el boilerplate api-websocket.
+#
+# Dos servicios:
+#   - `api`: WS server Fitz en :43929 (binario distroless ~12 MB).
+#   - `frontend`: nginx alpine en :8080 sirviendo el chat HTML
+#     que conecta vía `new WebSocket("ws://localhost:43929/chat")`.
+#
+# Uso:
+#   docker compose up --build
+#   # luego abrí http://localhost:8080 en el browser.
+#   # Abrí múltiples tabs para ver el broadcast en acción.
+
+services:
+  api:
+    build: .
+    container_name: fitz-api-websocket
+    ports:
+      - "43929:43929"
+
+  frontend:
+    image: nginx:alpine
+    container_name: fitz-ws-frontend
+    ports:
+      - "8080:80"
+    volumes:
+      - ./frontend/index.html:/usr/share/nginx/html/index.html:ro
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    depends_on:
+      - api

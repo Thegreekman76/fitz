@@ -1,0 +1,8 @@
+[package]
+name = "fitz-api-websocket"
+version = "0.1.0"
+edition = "2026"
+description = "WebSocket API boilerplate — chat broadcast tipado con WsConn<T> + AsyncAPI 3.0 auto"
+
+[bin]
+main = "src/main.fitz"
