@@ -4147,12 +4147,28 @@ requests
 
 **Deuda residual de Fase 8.c** (NO bloquea uso real):
 
-- **Smoke real Docker de boilerplates 5/6 con --bundle-pip**:
-  hoy validado solo en Windows con programa simple (requests).
-  La combinación `--bundle-pip sqlalchemy + psycopg2-binary`
-  adentro de un Dockerfile Linux multi-stage es deuda derivada.
-  El primer user que pruebe el plan documentado en los READMEs
-  confirma.
+- ~~**Smoke real Docker de boilerplates 5/6 con --bundle-pip**~~
+  ✓ **CERRADO 2026-05-23 (v0.9.42)** — smoke alternativo en
+  workspace temp con programa flat (`from python import` solo
+  en main, sin módulos transitivos) corrió end-to-end VERDE:
+  binario 37.4 MB con CPython 3.14.5 + `requests` embebido,
+  ejecutado adentro de container `debian:bookworm-slim`, GET
+  `/version` devuelve `"2.34.2"` (versión de `requests`) sin
+  Python en el runtime. **3 blockers descubiertos** en el path
+  de los boilerplates originales (5/6) que bloquean su
+  simplificación directa: (a) **deuda del codegen Fase 8.7.1**
+  rechaza `from python import` en módulos transitivos —
+  boilerplates usan `from python import db` en
+  `src/data/*.fitz` y abortan con error claro; (b) **GLIBC
+  mismatch** entre `python:3.14-slim` (trixie 2.39) y
+  `debian:bookworm-slim` (2.36) → fix pinear builder a
+  `python:3.14-slim-bookworm`; (c) **beneficio real ~10-20 MB
+  de imagen** (no 50-70 MB del plan original) — binario
+  embedded con CPython pesa ~37 MB que compensa el ahorro de
+  no tener Python en runtime. Dockerfiles de boilerplates 5/6
+  NO simplificados — quedan con `python:3.12-slim` + `fitz
+  run`. READMEs actualizados con los 3 blockers y plan
+  concreto para cuando cierren.
 - **Constraint Linux/macOS heredado**: builder requiere Python
   3.14.x (R.bug-pyo3-abi3-portable-link componente Linux/macOS
   pendiente). Cuando cierre, `--bundle-pip` es independiente
@@ -4171,9 +4187,37 @@ requests
   `--hash`, etc.). Validación temprana fail-fast antes de tocar
   PBS/pip. 3 E2E tests nuevos (total 7/7 del bundling). Cap
   21.12 actualizado con sub-bloque dedicado.
-- **Cache key por lista de paquetes**: hoy el pip_packages dir
-  se borra antes de cada build (rm -rf + mkdir). Optimizable
-  con hash de la lista de pkgs como cache key.
+- ~~**Cache key por lista de paquetes**~~ ✓ **CERRADO
+  2026-05-23 (v0.9.42, deuda D)** — helper
+  `pip_inputs_hash(bundle_pip, requirements_contents) ->
+  String` con FNV-1a 64-bit sobre positionals ordenados +
+  bytes de los requirements files (separador `\n---\n` entre
+  las dos secciones). Sidecar `<bin>_pip_packages.inputs_hash`
+  adyacente al tarball. Cache hit reusa el tarball sin re-
+  correr pip install + tar (builds subsiguientes sin cambios
+  pasan a ~instantáneo). 8 unit tests verdes del helper:
+  determinismo, insensibilidad al orden de positionals,
+  sensibilidad al cambio de contenido del requirements, no
+  colisión entre positionals y requirements vía separador,
+  shape de 16 chars hex. Sensibilidad al **orden** de
+  requirements files preservada (pip los procesa en orden con
+  potenciales conflicts/overrides — conservadora).
+- **Distroless runtime requiere `tar` embebido en Rust** —
+  nueva deuda derivada del smoke real Docker. El launcher de
+  `--bundle-python` invoca `Command::new("tar")` subprocess
+  para extraer el PBS embedded al primer run (decisión de
+  diseño consciente: "cero deps Rust en el launcher").
+  `gcr.io/distroless/cc-debian12` NO trae tar → bloquea esta
+  opción de runtime. `debian:bookworm-slim` (~85 MB base con
+  tar) es el runtime mínimo viable hoy. Mover a distroless
+  requiere un crate de tar inline (sub-paso futuro de la deuda
+  menor del launcher).
+- **Drift extensión VSCode (audit 2026-05-23, v0.9.42)** ✓
+  CERRADO — grammar TextMate faltaba 15 builtins (`spawn` +
+  5 Bits-extras + 9 Math), LSP scope_level_completions
+  faltaba 5 Bits-extras. Fixeado en ambos. Extensión bumpeada
+  a 0.9.3, `.vsix` re-construido. Próximo workflow_release del
+  CI publicará binarios alineados.
 
 ### Decisiones cross-cutting
 

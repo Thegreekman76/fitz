@@ -61,7 +61,28 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
-## [v0.9.42] — 2026-05-23 — Cosecha 8.c: `--bundle-pip-requirements` (requirements.txt embebido)
+## [v0.9.42] — 2026-05-23 — Cosecha 8.c + cache key del pip_packages tarball + smoke real Docker + VSCode drift audit
+
+Release consolida cuatro piezas trabajadas en sesiones
+consecutivas:
+
+1. **Cosecha 8.c**: nuevo flag CLI `--bundle-pip-requirements
+   <FILE>` (la sub-tanda original cerrada el mismo día con
+   v0.9.42 commit).
+2. **Cache key del pip_packages tarball** (deuda D documentada
+   en el roadmap como menor de Fase 8.c): hash determinístico
+   sobre los inputs del pip install (`--bundle-pip` positionals
+   ordenados + bytes de los requirements files). Cache hit reusa
+   el tarball existente sin re-correr pip install + tar — builds
+   subsiguientes sin cambios en paquetes pasan de ~10-30s a
+   ~instantáneo. Sidecar `<bin>_pip_packages.inputs_hash`
+   adyacente al tarball.
+3. **Smoke real Docker end-to-end** del flow `--bundle-pip-
+   requirements` + Docker multi-stage + runtime debian-slim
+   (cerrado VERDE con smoke alternativo flat).
+4. **Audit de la extensión VSCode** vs el lenguaje actual: 15
+   builtins faltaban en grammar TextMate, 5 en LSP completion.
+   `.vsix` re-construido a 0.9.3.
 
 Quick win continuando 8.c en la misma sesión. Nuevo flag
 `--bundle-pip-requirements <FILE>` repetible que lee paquetes
@@ -130,20 +151,118 @@ requirements.txt embebido) sigue siendo validación manual
 porque requiere PBS tarball + red + tar + Python 3.14.x
 en el builder (constraint heredado de 8.b en Linux/macOS).
 
+### Cache key del pip_packages tarball (deuda D de Fase 8.c)
+
+Antes: cada `fitz build --bundle-pip` o `--bundle-pip-
+requirements` re-corría `pip install --target` + `tar -czf`
+desde cero, aunque la lista de paquetes no hubiera cambiado.
+Costo: 10-30s por build, peor en Docker layer rebuilds.
+
+Ahora: helper `pip_inputs_hash(bundle_pip, requirements_
+contents) -> String` computa hash determinístico FNV-1a 64-bit
+sobre:
+- Positionals `--bundle-pip` ordenados alfabéticamente
+  (reordenar args NO invalida cache).
+- Bytes de cada requirements file en orden CLI (reordenar
+  archivos SÍ invalida — pip los procesa en orden con
+  potenciales conflicts/overrides).
+- Separador `\n---\n` entre las dos secciones.
+
+Sidecar `<bin>_pip_packages.inputs_hash` adyacente al tarball.
+En la próxima corrida, si tarball + sidecar existen y el
+hash matchea el nuevo, se reusa todo (skip de PBS extract +
+pip install + tar). Mensaje informativo: `→ pip cache hit
+({N} paquete(s), hash {8 chars}…) — reusando tarball`.
+
+### Smoke real Docker (findings)
+
+Smoke alternativo en workspace temp con programa flat (`from
+python import` solo en main, sin módulos transitivos):
+binario standalone de 37.4 MB con CPython 3.14.5 + `requests`
+embebido, ejecutado adentro de container `debian:bookworm-
+slim`, GET `/version` devuelve `"2.34.2"` (versión de
+`requests`) end-to-end. Cadena `--bundle-pip-requirements` +
+Docker multi-stage + runtime debian-slim **VERDE**.
+
+3 blockers descubiertos en el path original (boilerplates
+5/6 con módulos transitivos):
+
+1. **Deuda del codegen Fase 8.7.1**: `from python import` en
+   módulos transitivos NO soportado. Boilerplates
+   `api-postgres-python` y `api-fullstack-postgres` usan
+   `from python import db` adentro de `src/data/*.fitz`
+   (transitivos del main). Workaround del codegen actual:
+   "poné el `from python import` en el main" — implica
+   refactor invasivo del boilerplate (rompe separation of
+   concerns del data layer wrapper Python).
+2. **GLIBC mismatch**: `python:3.14-slim` (Debian trixie,
+   GLIBC 2.39) ↔ `debian:bookworm-slim` (GLIBC 2.36) →
+   binario linkea contra GLIBC del builder y crashea en
+   runtime con "version 'GLIBC_2.39' not found". Fix:
+   pinear builder a `python:3.14-slim-bookworm`. Documentado
+   en los READMEs de los boilerplates afectados.
+3. **Beneficio de imagen menor del esperado**: ~10-20 MB
+   real (no 50-70 MB que prometía el plan original). El
+   binario standalone con CPython embebido pesa ~37 MB que
+   compensa el ahorro de no tener Python en runtime. El
+   argumento se vuelve "simplificación de runtime" (sin pip,
+   sin Python, sin libpq instalados) más que "ahorro de
+   deploy size".
+
+Dockerfiles de los boilerplates 5/6 NO simplificados —
+mantienen su approach actual con `python:3.12-slim` + `fitz
+run`. READMEs actualizados con los 3 blockers documentados +
+plan concreto del Dockerfile para cuando cierren.
+
+### Audit de la extensión VSCode
+
+Drift detectado vs el lenguaje actual al revisar grammar
+TextMate y LSP completion contra la lista canónica de
+builtins del evaluator (`builtin_names()`):
+
+**Faltaban en grammar TextMate** (15):
+- `spawn` (Fase 9.w.3 — fire-and-forget de fns `@background`)
+- 5 ops de Bits-extras: `popcount`, `leading_zeros`,
+  `trailing_zeros`, `rotate_left`, `rotate_right`
+- 9 Math: `abs`, `min`, `max`, `pow`, `sqrt`, `ceil`,
+  `floor`, `round`, `clamp`
+
+**Faltaban en LSP scope_level_completions** (5): los mismos
+Bits-extras (los Math + spawn ya estaban).
+
+Ambos fixeados. Extensión bumpeada a 0.9.3 y `.vsix` re-
+construido. Próximo workflow_release del CI multi-platform
+publicará binarios alineados.
+
 ### Docs
 
 - **cap 21.12 de `docs/guide.md`** suma sub-bloque dedicado
   al flag con ejemplo combinado y nota sobre que la sintaxis
   del file es la nativa de pip.
-- **`CHANGELOG.md`** v0.9.42.
-- **`CLAUDE.md`** sección Fase 8.c menciona el flag nuevo
-  como cosecha de la misma fase.
+- **READMEs de `boilerplates/api-postgres-python/` y
+  `boilerplates/api-fullstack-postgres/`** actualizados con
+  los 3 blockers del smoke real Docker (codegen Fase 8.7.1,
+  GLIBC mismatch fix, beneficio realista de imagen).
+- **`CHANGELOG.md`** v0.9.42 expandido con las 4 piezas.
+- **`CLAUDE.md`** sección Fase 8.c actualizada.
+- **`docs/roadmap.md`** Fase 8.c sección final actualizada.
 
 ### Deuda residual derivada
 
-Ninguna nueva. La deuda existente de 8.b/8.c sigue idéntica
-(smoke real Docker boilerplates 5/6, C extensions
-cross-platform, R.bug-pyo3-abi3-portable-link en Linux/macOS).
+- **Codegen `from python import` en módulos transitivos
+  (Fase 8.7.1)** — pasó de deuda menor genérica a blocker
+  explícito de los boilerplates 5/6. Cerrarla destraba la
+  simplificación de los Dockerfiles a `--bundle-pip-
+  requirements` + binario standalone.
+- **GLIBC mismatch fix** — el plan de simplificación tiene
+  que pinear `python:3.14-slim-bookworm` (no `python:3.14-
+  slim` que es trixie). Documentado.
+- **Distroless requiere `tar` embebido en Rust** — el
+  launcher de `--bundle-python` invoca `Command::new("tar")`
+  para extraer el PBS. `gcr.io/distroless/cc-debian12` NO
+  trae tar → forzados a `debian:bookworm-slim` como runtime.
+  Mover a distroless requiere un crate de tar inline (sub-
+  paso futuro de la deuda menor del launcher).
 
 ## [v0.9.41] — 2026-05-23 — Fase 8.c: `fitz build --bundle-pip` (paquetes pip embebidos)
 

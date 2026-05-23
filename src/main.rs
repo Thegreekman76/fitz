@@ -1037,6 +1037,40 @@ fn build_file(
 }
 
 /// Fase 8.b — Variante de `build_file` que produce un binario standalone
+/// Hash determinístico de los inputs del pip install (positionals
+/// `--bundle-pip` + bytes de los `--bundle-pip-requirements`).
+///
+/// Usado como cache key del pip_packages tarball para evitar re-correr
+/// pip install en cada `fitz build` cuando los paquetes no cambiaron.
+///
+/// El sidecar `<bin>_pip_packages.inputs_hash` adyacente al tarball
+/// guarda el resultado; en el próximo build, si matchea el hash actual,
+/// se reusa el tarball existente.
+///
+/// Reglas del hash:
+/// - Positionals de `--bundle-pip` se ordenan alfabéticamente
+///   (reordenar args no debe invalidar cache).
+/// - Bytes de cada requirements file en orden CLI (reordenar archivos
+///   sí invalida; pip los procesa en orden y puede dar resultados
+///   diferentes con el mismo set de paquetes).
+/// - Separador `\n---\n` entre las dos secciones para que
+///   `["foo", "bar"]` positionals ≠ `"foo\nbar"` en requirements.
+fn pip_inputs_hash(bundle_pip: &[String], requirements_contents: &[Vec<u8>]) -> String {
+    let mut sorted_pkgs: Vec<&str> = bundle_pip.iter().map(|s| s.as_str()).collect();
+    sorted_pkgs.sort();
+    let mut buf: Vec<u8> = Vec::new();
+    for p in &sorted_pkgs {
+        buf.extend_from_slice(p.as_bytes());
+        buf.push(b'\n');
+    }
+    buf.extend_from_slice(b"---\n");
+    for content in requirements_contents {
+        buf.extend_from_slice(content);
+        buf.push(b'\n');
+    }
+    launcher_template::tarball_hash_short(&buf)
+}
+
 /// con CPython embebido. El output es UN solo archivo que internamente
 /// lleva: tarball PBS (install_only_stripped 3.14.x) + real binary +
 /// launcher Rust standalone. Primer run extrae a `$TMPDIR/fitz-py-<hash>/`,
@@ -1304,142 +1338,206 @@ fn build_file_with_bundle(
     let pip_tarball_abs: Option<PathBuf> = if !bundle_pip.is_empty()
         || !requirements_abs_paths.is_empty()
     {
-        println!(
-            "→ extrayendo PBS al cache local para correr pip ({} paquete(s))…",
-            pip_total_count
-        );
-        let pbs_extract_dir = PathBuf::from("target")
+        // --- Cache key del pip_packages tarball ---
+        //
+        // Helper `pip_inputs_hash` calcula el hash determinístico sobre
+        // los inputs del pip install (positionals --bundle-pip ordenados
+        // + bytes de los requirements files). Sidecar vive adentro de
+        // `target/fitz-build/<bin>_*` → scoped por proyecto.
+        let mut requirements_contents: Vec<Vec<u8>> =
+            Vec::with_capacity(requirements_abs_paths.len());
+        for req_path in &requirements_abs_paths {
+            let content = match fs::read(req_path) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!(
+                        "✗ no se pudo releer requirements file `{}` para cache key: {}",
+                        req_path.display(),
+                        e
+                    );
+                    std::process::exit(1);
+                }
+            };
+            requirements_contents.push(content);
+        }
+        let pip_inputs_hash = pip_inputs_hash(&bundle_pip, &requirements_contents);
+
+        let pip_tarball_path = PathBuf::from("target")
             .join("fitz-build")
-            .join(format!("{}_pbs_extract", project.bin_name));
-        if !pbs_extract_dir.join("python").exists() {
-            if let Err(e) = fs::create_dir_all(&pbs_extract_dir) {
-                eprintln!("Error creando {}: {}", pbs_extract_dir.display(), e);
+            .join(format!("{}_pip_packages.tar.gz", project.bin_name));
+        let pip_hash_sidecar = PathBuf::from("target")
+            .join("fitz-build")
+            .join(format!("{}_pip_packages.inputs_hash", project.bin_name));
+
+        // Cache hit: tarball + sidecar existen y el hash matchea.
+        // Saltamos extracción del PBS, pip install y tar.
+        let cache_hit = pip_tarball_path.exists()
+            && pip_hash_sidecar
+                .exists()
+                .then(|| fs::read_to_string(&pip_hash_sidecar).ok())
+                .flatten()
+                .map(|s| s.trim() == pip_inputs_hash)
+                .unwrap_or(false);
+
+        if cache_hit {
+            println!(
+                "→ pip cache hit ({} paquete(s), hash {}…) — reusando tarball",
+                pip_total_count,
+                &pip_inputs_hash[..8]
+            );
+            match pip_tarball_path.canonicalize() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("✗ canonicalize del pip tarball cacheado falló: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        } else {
+            println!(
+                "→ extrayendo PBS al cache local para correr pip ({} paquete(s))…",
+                pip_total_count
+            );
+            let pbs_extract_dir = PathBuf::from("target")
+                .join("fitz-build")
+                .join(format!("{}_pbs_extract", project.bin_name));
+            if !pbs_extract_dir.join("python").exists() {
+                if let Err(e) = fs::create_dir_all(&pbs_extract_dir) {
+                    eprintln!("Error creando {}: {}", pbs_extract_dir.display(), e);
+                    std::process::exit(1);
+                }
+                // Extraer PBS tarball usando `tar -xzf` (mismo subprocess que
+                // usa el launcher en runtime).
+                let tar_status = std::process::Command::new("tar")
+                    .args([
+                        "-xzf",
+                        &tarball_abs.to_string_lossy(),
+                        "-C",
+                        &pbs_extract_dir.to_string_lossy(),
+                    ])
+                    .status();
+                match tar_status {
+                    Ok(s) if s.success() => {}
+                    Ok(s) => {
+                        eprintln!(
+                            "✗ tar -xzf del PBS tarball falló (exit code: {:?})",
+                            s.code()
+                        );
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("✗ no se pudo invocar `tar` para extraer PBS: {}", e);
+                        eprintln!(
+                            "  Necesitás `tar` en el PATH (bsdtar en Win11/macOS, GNU tar en Linux)."
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            // Path del ejecutable Python adentro del PBS extract.
+            let python_exe = if cfg!(windows) {
+                pbs_extract_dir.join("python").join("python.exe")
+            } else {
+                pbs_extract_dir.join("python").join("bin").join("python3")
+            };
+            if !python_exe.exists() {
+                eprintln!("✗ no se encontró python en el PBS extract: {}", python_exe.display());
                 std::process::exit(1);
             }
-            // Extraer PBS tarball usando `tar -xzf` (mismo subprocess que
-            // usa el launcher en runtime).
+
+            // Dir del pip install. Limpiar previo si existe para builds
+            // reproducibles (pip install --target es additive, sin clean
+            // los paquetes acumulan entre builds).
+            let pip_install_dir = PathBuf::from("target")
+                .join("fitz-build")
+                .join(format!("{}_pip_packages", project.bin_name));
+            if pip_install_dir.exists() {
+                let _ = fs::remove_dir_all(&pip_install_dir);
+            }
+            if let Err(e) = fs::create_dir_all(&pip_install_dir) {
+                eprintln!("Error creando {}: {}", pip_install_dir.display(), e);
+                std::process::exit(1);
+            }
+
+            println!("→ pip install --target ({} paquete(s))…", pip_total_count);
+            let mut pip_args = vec![
+                "-m".to_string(),
+                "pip".to_string(),
+                "install".to_string(),
+                "--target".to_string(),
+                pip_install_dir.to_string_lossy().to_string(),
+                "--no-warn-script-location".to_string(),
+                // Quiet para evitar ruido en CI; los errores siguen
+                // visibles en stderr.
+                "--quiet".to_string(),
+            ];
+            // `-r <file>` por cada requirements file. pip los acumula con
+            // los positionals que vienen después; toda la sintaxis nativa
+            // del archivo (comments, includes, version pins, --hash) la
+            // procesa pip directamente, sin parsing del lado de Fitz.
+            for req_path in &requirements_abs_paths {
+                pip_args.push("-r".to_string());
+                pip_args.push(req_path.to_string_lossy().into_owned());
+            }
+            pip_args.extend(bundle_pip.iter().cloned());
+            let pip_out = std::process::Command::new(&python_exe).args(&pip_args).output();
+            let pip_out = match pip_out {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("✗ no se pudo invocar pip: {}", e);
+                    std::process::exit(1);
+                }
+            };
+            if !pip_out.status.success() {
+                eprintln!("✗ pip install falló:");
+                eprintln!("--- stderr ---");
+                eprintln!("{}", String::from_utf8_lossy(&pip_out.stderr));
+                std::process::exit(1);
+            }
+
+            // Crear tarball secundario desde el pip_install_dir. Usamos
+            // `tar -czf` con `-C <dir>` para que las paths internas sean
+            // relativas (sin el prefijo del cwd).
+            println!("→ empacando pip_packages.tar.gz…");
             let tar_status = std::process::Command::new("tar")
                 .args([
-                    "-xzf",
-                    &tarball_abs.to_string_lossy(),
+                    "-czf",
+                    &pip_tarball_path.to_string_lossy(),
                     "-C",
-                    &pbs_extract_dir.to_string_lossy(),
+                    &pip_install_dir.to_string_lossy(),
+                    ".",
                 ])
                 .status();
             match tar_status {
                 Ok(s) if s.success() => {}
                 Ok(s) => {
                     eprintln!(
-                        "✗ tar -xzf del PBS tarball falló (exit code: {:?})",
+                        "✗ tar -czf del pip_packages tarball falló (exit code: {:?})",
                         s.code()
                     );
                     std::process::exit(1);
                 }
                 Err(e) => {
-                    eprintln!("✗ no se pudo invocar `tar` para extraer PBS: {}", e);
-                    eprintln!(
-                        "  Necesitás `tar` en el PATH (bsdtar en Win11/macOS, GNU tar en Linux)."
-                    );
+                    eprintln!("✗ no se pudo invocar `tar` para empacar pip: {}", e);
                     std::process::exit(1);
                 }
             }
-        }
-        // Path del ejecutable Python adentro del PBS extract.
-        let python_exe = if cfg!(windows) {
-            pbs_extract_dir.join("python").join("python.exe")
-        } else {
-            pbs_extract_dir.join("python").join("bin").join("python3")
-        };
-        if !python_exe.exists() {
-            eprintln!("✗ no se encontró python en el PBS extract: {}", python_exe.display());
-            std::process::exit(1);
-        }
-
-        // Dir del pip install. Limpiar previo si existe para builds
-        // reproducibles (pip install --target es additive, sin clean
-        // los paquetes acumulan entre builds).
-        let pip_install_dir = PathBuf::from("target")
-            .join("fitz-build")
-            .join(format!("{}_pip_packages", project.bin_name));
-        if pip_install_dir.exists() {
-            let _ = fs::remove_dir_all(&pip_install_dir);
-        }
-        if let Err(e) = fs::create_dir_all(&pip_install_dir) {
-            eprintln!("Error creando {}: {}", pip_install_dir.display(), e);
-            std::process::exit(1);
-        }
-
-        println!("→ pip install --target ({} paquete(s))…", pip_total_count);
-        let mut pip_args = vec![
-            "-m".to_string(),
-            "pip".to_string(),
-            "install".to_string(),
-            "--target".to_string(),
-            pip_install_dir.to_string_lossy().to_string(),
-            "--no-warn-script-location".to_string(),
-            // Quiet para evitar ruido en CI; los errores siguen
-            // visibles en stderr.
-            "--quiet".to_string(),
-        ];
-        // `-r <file>` por cada requirements file. pip los acumula con
-        // los positionals que vienen después; toda la sintaxis nativa
-        // del archivo (comments, includes, version pins, --hash) la
-        // procesa pip directamente, sin parsing del lado de Fitz.
-        for req_path in &requirements_abs_paths {
-            pip_args.push("-r".to_string());
-            pip_args.push(req_path.to_string_lossy().into_owned());
-        }
-        pip_args.extend(bundle_pip.iter().cloned());
-        let pip_out = std::process::Command::new(&python_exe).args(&pip_args).output();
-        let pip_out = match pip_out {
-            Ok(o) => o,
-            Err(e) => {
-                eprintln!("✗ no se pudo invocar pip: {}", e);
-                std::process::exit(1);
-            }
-        };
-        if !pip_out.status.success() {
-            eprintln!("✗ pip install falló:");
-            eprintln!("--- stderr ---");
-            eprintln!("{}", String::from_utf8_lossy(&pip_out.stderr));
-            std::process::exit(1);
-        }
-
-        // Crear tarball secundario desde el pip_install_dir. Usamos
-        // `tar -czf` con `-C <dir>` para que las paths internas sean
-        // relativas (sin el prefijo del cwd).
-        let pip_tarball_path = PathBuf::from("target")
-            .join("fitz-build")
-            .join(format!("{}_pip_packages.tar.gz", project.bin_name));
-        println!("→ empacando pip_packages.tar.gz…");
-        let tar_status = std::process::Command::new("tar")
-            .args([
-                "-czf",
-                &pip_tarball_path.to_string_lossy(),
-                "-C",
-                &pip_install_dir.to_string_lossy(),
-                ".",
-            ])
-            .status();
-        match tar_status {
-            Ok(s) if s.success() => {}
-            Ok(s) => {
+            // Write sidecar con el hash de los inputs. El sidecar vive
+            // adyacente al tarball para que `rm target/fitz-build/<bin>_*`
+            // limpie todo junto. Si la escritura falla no abortamos el
+            // build — el cache simplemente no funcionará la próxima vez.
+            if let Err(e) = fs::write(&pip_hash_sidecar, &pip_inputs_hash) {
                 eprintln!(
-                    "✗ tar -czf del pip_packages tarball falló (exit code: {:?})",
-                    s.code()
+                    "Warning: no se pudo escribir cache sidecar `{}`: {}",
+                    pip_hash_sidecar.display(),
+                    e
                 );
-                std::process::exit(1);
             }
-            Err(e) => {
-                eprintln!("✗ no se pudo invocar `tar` para empacar pip: {}", e);
-                std::process::exit(1);
-            }
-        }
-        match pip_tarball_path.canonicalize() {
-            Ok(p) => Some(p),
-            Err(e) => {
-                eprintln!("✗ canonicalize del pip tarball falló: {}", e);
-                std::process::exit(1);
+            match pip_tarball_path.canonicalize() {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    eprintln!("✗ canonicalize del pip tarball falló: {}", e);
+                    std::process::exit(1);
+                }
             }
         }
     } else {
@@ -3636,4 +3734,97 @@ fn clear_screen_and_banner(target: &DevTarget, run_count: u32) {
     }
     eprintln!("▶ fitz dev (run #{}) — {}", run_count, target.display);
     eprintln!();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pip_inputs_hash_es_deterministico() {
+        let h1 = pip_inputs_hash(&["requests".to_string()], &[b"foo\n".to_vec()]);
+        let h2 = pip_inputs_hash(&["requests".to_string()], &[b"foo\n".to_vec()]);
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn pip_inputs_hash_es_insensible_al_orden_de_positionals() {
+        // Reordenar `--bundle-pip` args NO debe invalidar cache:
+        // `--bundle-pip a --bundle-pip b` y `--bundle-pip b --bundle-pip a`
+        // instalan el mismo set de paquetes.
+        let h1 = pip_inputs_hash(
+            &["sqlalchemy".to_string(), "psycopg2-binary".to_string()],
+            &[],
+        );
+        let h2 = pip_inputs_hash(
+            &["psycopg2-binary".to_string(), "sqlalchemy".to_string()],
+            &[],
+        );
+        assert_eq!(h1, h2);
+    }
+
+    #[test]
+    fn pip_inputs_hash_cambia_si_agregas_un_paquete() {
+        let h1 = pip_inputs_hash(&["requests".to_string()], &[]);
+        let h2 = pip_inputs_hash(
+            &["requests".to_string(), "httpx".to_string()],
+            &[],
+        );
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn pip_inputs_hash_cambia_si_cambia_el_contenido_del_requirements() {
+        let h1 = pip_inputs_hash(&[], &[b"requests>=2.0\n".to_vec()]);
+        let h2 = pip_inputs_hash(&[], &[b"requests>=3.0\n".to_vec()]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn pip_inputs_hash_positionals_vs_requirements_son_distintos() {
+        // El separador `\n---\n` garantiza que ["foo", "bar"] como
+        // positionals dé hash distinto que el mismo texto en un
+        // requirements file. Sin el separador, ambos producirían
+        // los mismos bytes y colisionarían.
+        let h1 = pip_inputs_hash(&["foo".to_string(), "bar".to_string()], &[]);
+        let h2 = pip_inputs_hash(&[], &[b"bar\nfoo\n".to_vec()]);
+        assert_ne!(h1, h2);
+    }
+
+    #[test]
+    fn pip_inputs_hash_es_16_chars_hex() {
+        // Heredado de tarball_hash_short (FNV-1a 64-bit).
+        let h = pip_inputs_hash(&["requests".to_string()], &[]);
+        assert_eq!(h.len(), 16);
+        assert!(h.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn pip_inputs_hash_vacio_devuelve_hash_estable() {
+        // Sin paquetes ni requirements (caso degenerado — no debería
+        // dispararse en runtime porque el bloque pip arranca solo si
+        // hay algo que instalar, pero el helper sigue siendo bien
+        // definido).
+        let h1 = pip_inputs_hash(&[], &[]);
+        let h2 = pip_inputs_hash(&[], &[]);
+        assert_eq!(h1, h2);
+        assert_eq!(h1.len(), 16);
+    }
+
+    #[test]
+    fn pip_inputs_hash_orden_de_requirements_si_invalida_cache() {
+        // Reordenar requirements files SÍ invalida cache. Razón: pip
+        // los procesa en orden y dos archivos con conflicts/overrides
+        // pueden producir distintos paquetes resueltos según el orden.
+        // Tratamos cada permutación como input distinto, conservadora.
+        let h1 = pip_inputs_hash(
+            &[],
+            &[b"requests\n".to_vec(), b"httpx\n".to_vec()],
+        );
+        let h2 = pip_inputs_hash(
+            &[],
+            &[b"httpx\n".to_vec(), b"requests\n".to_vec()],
+        );
+        assert_ne!(h1, h2);
+    }
 }

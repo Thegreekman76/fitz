@@ -192,7 +192,7 @@
     },
     "builtins": {
       "name": "support.function.builtin.fitz",
-      "match": "\\b(print|len|sleep|cors|bytes|assert|assert_eq|assert_ne|assert_throws|env|env_or|load_env)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|sleep|cors|bytes|spawn|assert|assert_eq|assert_ne|assert_throws|popcount|leading_zeros|trailing_zeros|rotate_left|rotate_right|abs|min|max|pow|sqrt|ceil|floor|round|clamp|env|env_or|load_env)\\b(?=\\s*\\()"
     },
     "labels": {
       "comment": "Labels de loops (mini-tanda L): `'outer:` en sitio de declaración y `'outer` en break/continue. El `:` opcional al final NO se consume — lo agarra el resto del parser.",

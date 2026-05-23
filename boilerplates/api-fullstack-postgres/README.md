@@ -495,24 +495,31 @@ del proyecto Fitz.
 ## Roadmap del boilerplate
 
 - **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)** +
-  **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)**:
-  el segundo flag empaqueta paquetes pip junto al CPython base.
-  Este boilerplate puede simplificarse adoptándolo (mismo plan
-  que el boilerplate hermano `api-postgres-python`). Plan
-  concreto en el README de ese boilerplate; aplica idéntico acá.
+  **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)** +
+  **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
+  el flag empaqueta paquetes pip junto al CPython base. Este
+  boilerplate **comparte los mismos 3 blockers identificados en
+  el smoke real Docker** que el hermano `api-postgres-python`
+  (detalle completo en su README):
 
-  **Beneficios** sobre este boilerplate (3 servicios):
-  - Container `api`: de imagen ~150 MB (python:3.12-slim +
-    SQLAlchemy + psycopg2 + libpq) a ~80-100 MB (distroless +
-    binary con CPython embebido).
-  - El frontend nginx y el Postgres siguen igual (no afecta).
-  - Cero `requirements.txt` en runtime.
-  - Cero `pip install` en runtime.
-  - Constraint heredado: builder Linux/macOS requiere Python 3.14.x.
+  1. Deuda del codegen Fase 8.7.1 — `from python import` en
+     módulos transitivos NO soportado. Este boilerplate también
+     usa `from python import db` en `src/data/tasks.fitz`.
+  2. GLIBC mismatch builder/runtime — fix con
+     `python:3.14-slim-bookworm`.
+  3. Beneficio real ~10-20 MB (no 50-70 MB) — argumento queda
+     como simplificación de runtime, no como ahorro de deploy size.
 
-  **Smoke real Docker pendiente**: validar end-to-end con
-  docker compose up + ejercicio del frontend. Deuda nueva
-  derivada de v0.9.41.
+  Cuando esos 3 blockers cierren + se refactorize este boilerplate,
+  el plan concreto del Dockerfile está documentado en el README
+  del boilerplate hermano y aplica idéntico acá (cambia solo el
+  nombre del binario: `fitz-api-fullstack-postgres`).
+
+  **El smoke alternativo en v0.9.42 con un programa flat** (solo
+  `from python import` en main, sin módulos transitivos) corrió
+  end-to-end OK — el flow está validado para programas con
+  estructura simple. Este boilerplate (multi-archivo con data
+  layer separado) NO se puede adoptar hoy.
 - **DB nativa Fitz (Fase 10)**: reemplazo de la layer Python
   cuando llegue. Mismo API HTTP + mismo frontend, sin interop
   ni `requirements.txt`.

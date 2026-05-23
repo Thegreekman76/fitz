@@ -1098,6 +1098,50 @@
 > reproducibles. La calidad del código real (clippy `--lib`)
 > sigue siendo strict.
 
+> **Nota (2026-05-23) — Cierre v0.9.42**: la cosecha de 8.c
+> (`--bundle-pip-requirements`), la deuda D (cache key del
+> pip_packages tarball), el smoke real Docker end-to-end y el
+> audit del drift en la extensión VSCode se consolidaron en el
+> release v0.9.42 (3 sesiones consecutivas). Detalle completo
+> en `CHANGELOG.md → v0.9.42` y `docs/roadmap.md → Fase 8.c`.
+>
+> **Highlights de deuda residual derivada del smoke real
+> Docker** (NO bloquea uso real del lenguaje; ver detalle en
+> CHANGELOG):
+>
+> - **Codegen Fase 8.7.1 — `from python import` en módulos
+>   transitivos**: pasó de deuda menor genérica a blocker
+>   explícito de los boilerplates 5/6. Bloquea su
+>   simplificación a `--bundle-pip-requirements` + binario
+>   standalone. Workaround del codegen: poner el `from python
+>   import` en el main (implica refactor invasivo del
+>   boilerplate). Cuando cierre + se refactorize, los
+>   Dockerfiles 5/6 pueden adoptar el flow.
+> - **GLIBC mismatch builder/runtime**: fix con
+>   `python:3.14-slim-bookworm` (Debian bookworm-aligned).
+>   Documentado en los READMEs.
+> - **Distroless requiere tar embebido en Rust**: el launcher
+>   de `--bundle-python` invoca `Command::new("tar")` subprocess
+>   → `gcr.io/distroless/cc-debian12` NO trae tar.
+>   `debian:bookworm-slim` (~85 MB base con tar) es el runtime
+>   mínimo viable hoy. Sub-paso futuro de la deuda menor del
+>   launcher: usar un crate de tar inline (`tar` + `flate2`)
+>   para destrabar distroless.
+> - **Beneficio real de imagen ~10-20 MB**: no 50-70 MB que
+>   prometía el plan original. Argumento del approach se mueve
+>   de "ahorro de deploy size" a "simplificación de runtime".
+>   Plan original recalibrado en los READMEs.
+>
+> **Cache key del pip_packages** (deuda D CERRADA): builds
+> subsiguientes sin cambios en requirements pasan de ~10-30s
+> a ~instantáneo. Sin sub-pasos pendientes derivados.
+>
+> **Audit extensión VSCode** (CERRADO): grammar TextMate +15
+> builtins (`spawn` + 5 Bits-extras + 9 Math), LSP scope_level_
+> completions +5 Bits-extras. Extensión bumpeada a 0.9.3 con
+> `.vsix` re-construido. Próximo workflow_release del CI
+> publicará binarios alineados.
+
 ## Resumen ejecutivo
 
 Auditoría exhaustiva sobre los 6 módulos del compilador + tests + docs.

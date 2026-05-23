@@ -1571,6 +1571,12 @@ fn scope_level_completions(
         ("assert_eq", "fn(a, b) -> Null"),
         ("assert_ne", "fn(a, b) -> Null"),
         ("assert_throws", "fn(callback: fn() -> Any) -> Null"),
+        // Mini-tanda Bits-extras — ops sobre Int como builtins globales.
+        ("popcount", "fn(n: Int) -> Int  // population count (bits=1)"),
+        ("leading_zeros", "fn(n: Int) -> Int  // count leading 0-bits"),
+        ("trailing_zeros", "fn(n: Int) -> Int  // count trailing 0-bits"),
+        ("rotate_left", "fn(n: Int, k: Int) -> Int  // rotate bits izq"),
+        ("rotate_right", "fn(n: Int, k: Int) -> Int  // rotate bits der"),
         // Mini-tanda Math — builtins numéricos polimórficos.
         ("abs", "fn(n: Int|Float) -> Int|Float"),
         ("min", "fn(a, b) -> Int|Float  // mismo tipo"),

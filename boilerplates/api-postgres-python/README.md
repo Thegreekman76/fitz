@@ -371,68 +371,89 @@ service `api` del compose.
   ghcr.io/.../fitz:latest-python AS builder` y el build inicial
   baja a ~3 min (en lugar de 8-12).
 - **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)** +
-  **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)**:
-  el segundo flag empaqueta paquetes pip junto al CPython base.
-  Este boilerplate puede simplificarse adoptándolo. El plan
-  concreto (smoke local en Linux pendiente):
+  **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)** +
+  **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
+  el flag empaqueta paquetes pip junto al CPython base en un
+  binario standalone. **Smoke real Docker corrido en v0.9.42 reveló
+  3 blockers que bloquean simplificar ESTE boilerplate adoptándolo**:
 
-  Reemplazar el Dockerfile actual por algo así:
+  1. **Deuda del codegen Fase 8.7.1 — `from python import` en
+     módulos transitivos NO soportado**. Este boilerplate usa
+     `from python import db` adentro de `src/data/users.fitz`
+     (módulo transitivo del main). El codegen aborta con error
+     claro: `el módulo "data.users" usa "from python import ...":
+     imports Python dentro de módulos transitivos no se soportan
+     todavía`. Workaround documentado: poner el `from python
+     import` en el main. Refactorear el boilerplate para satisfacer
+     ese constraint es invasivo (rompe la separation of concerns
+     donde el data layer encapsula el wrapper Python). Esta deuda
+     del codegen tiene que cerrar primero.
+  2. **GLIBC mismatch entre `python:3.14-slim` (trixie, GLIBC
+     2.39) y `debian:bookworm-slim` (GLIBC 2.36)**. El binario
+     linkea contra GLIBC del builder y crashea en runtime con
+     "version 'GLIBC_2.39' not found". Fix: pinear builder a
+     `python:3.14-slim-bookworm` para alinear con bookworm
+     runtime. Este fix se aplicará al adoptar el flow.
+  3. **Beneficio de tamaño menor del esperado** (~10-20 MB vs
+     ~50-70 MB que prometía el plan original). El binario
+     standalone con CPython embebido pesa ~37 MB (mide ~50 MB
+     con sqlalchemy + psycopg2-binary). El ahorro neto vs
+     `python:3.12-slim` (130 MB base + pip install) es ~10-20 MB
+     reales. El argumento de "imagen más chica" pierde fuerza —
+     queda como **simplificación de runtime** (sin pip, sin
+     Python, sin libpq instalados) más que como argumento de
+     deploy size.
+
+  Cuando los 3 blockers cierren, el reemplazo del Dockerfile
+  sería más o menos:
 
   ```dockerfile
-  # Stage 1: builder con Python 3.14 (constraint del builder en
-  # Linux por R.bug-pyo3-abi3-portable-link).
-  FROM python:3.14-slim AS builder
+  # Stage 1: builder. Pin a -bookworm para alinear GLIBC con runtime.
+  FROM python:3.14-slim-bookworm AS builder
   RUN apt-get update && apt-get install -y --no-install-recommends \
         curl ca-certificates git tar \
-        python3-dev pkg-config libssl-dev build-essential && \
+        python3-dev pkg-config libssl-dev libpq-dev build-essential && \
       rm -rf /var/lib/apt/lists/*
   RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
       sh -s -- -y --default-toolchain 1.95.0 --profile minimal
   ENV PATH="/root/.cargo/bin:${PATH}"
   RUN cargo install --git https://github.com/Thegreekman76/fitz \
-      --tag v0.9.41 --features python --bin fitz --locked
+      --tag v0.9.42 --features python --bin fitz --locked
   WORKDIR /app
-  COPY fitz.toml ./
+  COPY fitz.toml requirements.txt ./
   COPY src/ ./src/
   COPY python/ ./python/
-  COPY requirements.txt ./
-  # Equivalente a --bundle-pip sqlalchemy --bundle-pip psycopg2-binary
-  # pero leyendo del requirements.txt que ya existe en este
-  # boilerplate (sigue siendo el mismo archivo que usa `pip install`
-  # en el approach actual con `python:3.X-slim`). Cosecha de 8.c
-  # cerrada en v0.9.42.
-  RUN fitz build \
-      --bundle-pip-requirements requirements.txt \
-      src/main.fitz
+  # Requiere: refactor de data/users.fitz subiendo `from python
+  # import db` al main (deuda del codegen Fase 8.7.1).
+  RUN fitz build --bundle-pip-requirements requirements.txt
 
-  # Stage 2: runtime sin Python ni libpq ni pip.
-  FROM gcr.io/distroless/cc-debian12
-  COPY --from=builder /app/main /usr/local/bin/app
+  # Stage 2: runtime debian-slim (NO distroless: el launcher de
+  # --bundle-python invoca `tar` subprocess para extraer el PBS
+  # embedded al primer run; distroless/cc no trae tar).
+  FROM debian:bookworm-slim
+  RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates && rm -rf /var/lib/apt/lists/*
+  COPY --from=builder /app/target/release/fitz-api-postgres-python /usr/local/bin/app
+  COPY --from=builder /app/python /app/python
+  WORKDIR /app
   ENV PYTHONPATH=/app/python
   EXPOSE 3000
-  CMD ["/usr/local/bin/app"]
+  CMD ["app"]
   ```
 
-  **Beneficios**:
-  - Imagen final: ~80-100 MB (CPython 30 MB + sqlalchemy +
-    psycopg2-binary + binary) vs ~150 MB hoy con `python:3.12-slim`.
-  - Sin `requirements.txt` en el runtime.
-  - Sin `apt-get install libpq5` en el runtime (libpq viene
-    adentro del wheel `psycopg2-binary`).
-  - Sin `pip install` en el runtime.
-  - Deploy con la imagen base más chica de la industria.
+  **Beneficios reales** (post-blockers):
+  - Imagen final: ~145 MB (vs ~155 MB hoy con `python:3.12-slim`
+    — diferencia menor a lo prometido en v0.9.41).
+  - Sin `requirements.txt` ni `pip install` en runtime.
+  - Sin `apt-get install libpq5` en runtime (libpq viene en
+    el wheel `psycopg2-binary` embebido).
 
-  **Constraint que sigue (heredado de `--bundle-python`)**: el
-  builder en Linux/macOS requiere Python 3.14.x para que el
-  linking de PyO3 coincida con el bundle PBS 3.14.5
-  (R.bug-pyo3-abi3-portable-link componente Linux/macOS pendiente).
-  En Windows el shim `python3.dll` evita este constraint.
-
-  **Smoke real Docker pendiente**: el approach está validado en
-  Windows con programas simples (`requests`). La validación
-  end-to-end de `--bundle-pip sqlalchemy + psycopg2-binary`
-  adentro de un Dockerfile multi-stage Linux es deuda nueva
-  derivada de v0.9.41 — el primer user que lo pruebe confirma.
+  **El smoke alternativo en v0.9.42 con un programa flat (solo
+  `from python import` en main, sin módulos transitivos) corrió
+  end-to-end OK** — el flow `--bundle-pip-requirements` está
+  validado para programas con estructura simple. Cuando cierre
+  la deuda del codegen + se refactorize este boilerplate, está
+  listo para adoptarlo.
 - **Auto-generar `types/user.fitz` con `fitz py-types`**: hoy
   está hardcoded. Sumar un step `fitz py-types python/models.py
   --out src/types/user.fitz` en el Dockerfile para regenerarlo
