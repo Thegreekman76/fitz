@@ -10096,6 +10096,65 @@ no-browser que sí pueden setear headers.
 
 Paridad bit-a-bit `fitz run` ↔ `fitz build`.
 
+### Canales asimétricos con `WsConn<In, Out>`
+
+Para canales donde el cliente envía un tipo y el server emite otro
+distinto (e.g. cliente manda comandos `Str`, server emite eventos
+`ChatMsg` estructurados), declarás `WsConn<In, Out>` con dos
+type params en lugar del simétrico `WsConn<T>`:
+
+```fitz
+type ChatMsg { user: Str, text: Str }
+
+@ws("/cmd")
+async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null {
+    let welcome = ChatMsg { user: "system", text: "conectado" }
+    let _ = conn.send(welcome)
+
+    loop {
+        match conn.recv() {
+            Ok(input) => {
+                // input: Str (el `In` del WsConn<In, Out>)
+                let reply = ChatMsg { user: "system", text: "got:{input}" }
+                let _ = conn.send(reply)   // espera ChatMsg (el `Out`)
+            }
+            Err(_) => return null
+        }
+    }
+    return null
+}
+```
+
+`conn.recv()` devuelve `Result<In>`; `conn.send(msg)` y
+`conn.broadcast(msg)` aceptan `Out`. El checker valida los tipos
+por dirección, así que `conn.send("hola")` sobre `WsConn<Str, ChatMsg>`
+falla en compile-time con mensaje claro: el `send` espera `ChatMsg`,
+no `Str`.
+
+**Compat hacia atrás**: `WsConn<T>` (aridad 1) es equivalente a
+`WsConn<T, T>` y todos los handlers existentes siguen funcionando
+idéntico.
+
+**AsyncAPI asimétrico**: cuando `In != Out`, el schema autogenerado
+emite **dos messages distintos**: `msg_in` (referenciado por la
+operation `receive`, payload schema de `In`) y `msg_out` (referenciado
+por la operation `send`, payload schema de `Out`). Generadores de
+clientes AsyncAPI producen interfaces tipadas separadas para entrada
+y salida, paralelo al modelo de gRPC Server-Streaming.
+
+**Restricción binary mixto**: si `In` o `Out` es `Bytes` pero el
+otro no, el codegen rechaza con error explícito (canal mixto
+binary/text es deuda residual). `WsConn<Bytes, Bytes>` y
+`WsConn<Bytes>` simétrico funcionan; `WsConn<Bytes, Str>` no.
+
+Paridad bit-a-bit `fitz run` ↔ `fitz build` (el preludio Rust usa
+`__FitzWsConn<RECV, SEND>` con 2 type params; monomorfismo hace
+que canales simétricos `WsConn<T>` produzcan binarios idénticos al
+pre-bidir).
+
+Ejemplo runnable completo:
+[`examples/guide/29c-ws-bidir.fitz`](../examples/guide/29c-ws-bidir.fitz).
+
 ### Frames binarios con `WsConn<Bytes>`
 
 Cuando el wire es binario raw — protocolos custom (gRPC-Web,
@@ -10169,10 +10228,6 @@ Ejemplo runnable completo: [`examples/guide/29b-ws-binary.fitz`](../examples/gui
 
 Estos items están comprometidos como deuda explícita:
 
-- **Tipado bidireccional separado** — hoy `WsConn<T>` usa el
-  mismo `T` para recv y send. Para canales con tipos distintos
-  en cada dirección (`WsConn<In, Out>`) hace falta una
-  generalización del tipo; deuda residual.
 - **Reconnect con state replay** — si el cliente se reconecta,
   el server hoy no replica los frames perdidos. Pattern típico
   de chat con history; requiere persistencia (Fase 10).

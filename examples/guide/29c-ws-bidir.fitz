@@ -1,0 +1,89 @@
+// Cap 29 — WebSockets bidireccionales con `WsConn<In, Out>`.
+//
+// Variante asimétrica del cap 29 para canales donde el cliente envía
+// un tipo (e.g. comandos como Str) y el server emite otro tipo (e.g.
+// eventos estructurados ChatMsg). Útil para:
+//   - APIs de chat con comandos del cliente y eventos del server.
+//   - Dashboards en tiempo real (cliente envía queries, server stream
+//     de updates tipados).
+//   - Protocolos custom client-driven (request/response asimétrico).
+//
+// `WsConn<In, Out>` separa los tipos por dirección:
+//   - `conn.recv()` devuelve `Result<In>` (lo que el cliente envía).
+//   - `conn.send(msg)` y `conn.broadcast(msg)` aceptan `Out`.
+//
+// El checker valida los tipos por dirección; el runtime marshalleea
+// cada uno con su schema JSON. AsyncAPI 3.0 auto-generado emite
+// `msg_in` y `msg_out` separados con sus payloads (útil para
+// generadores de clientes que produzcan tipos asimétricos).
+//
+// Probar:
+//
+//   1. fitz run examples/guide/29c-ws-bidir.fitz     # o fitz build
+//
+//   2. # Conectar un cliente WS (websocat / wscat):
+//      websocat ws://localhost:43931/cmd
+//      # Enviar comandos como JSON-encoded Str:
+//      "stats"
+//      "ping"
+//      # Server responde con ChatMsg estructurado.
+//
+//   3. # Schema AsyncAPI muestra recv/send tipados distintos:
+//      curl localhost:43931/asyncapi.json
+//      # → channels./cmd.messages.msg_in.payload = string (Str)
+//      #   channels./cmd.messages.msg_out.payload = ChatMsg schema
+
+@server(43931)
+fn main() => 0
+
+// Mensaje OUT del server. El cliente recibe ChatMsg estructurado.
+type ChatMsg { user: Str, text: Str }
+
+// Canal bidireccional: cliente envía Str (IN), server emite ChatMsg (OUT).
+//
+// `recv() → Result<Str>` desempaca el frame text del cliente como Str.
+// `send(msg: ChatMsg)` marshallea el ChatMsg a JSON y lo emite text.
+@ws("/cmd")
+async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null {
+    // Mensaje de bienvenida al conectar.
+    let welcome = ChatMsg { user: "system", text: "conectado — enviá comandos" }
+    let _ = conn.send(welcome)
+
+    // Loop: recv comando Str, responde con ChatMsg.
+    loop {
+        match conn.recv() {
+            Ok(input) => {
+                let reply = if (input == "stats") {
+                    ChatMsg { user: "system", text: "stats: 0 errors, 100% uptime" }
+                } else {
+                    ChatMsg { user: "system", text: "comando: {input}" }
+                }
+                let _ = conn.send(reply)
+            }
+            Err(_) => {
+                // Conn cerrada o frame inválido.
+                return null
+            }
+        }
+    }
+    return null
+}
+
+// Cómo funciona end-to-end:
+//
+//   - Cliente conecta a /cmd.
+//   - Server emite ChatMsg de bienvenida (frame text con JSON).
+//   - Cliente envía un Str cualquiera (frame text JSON-encoded).
+//   - `conn.recv()` lo deserializa como Str (el In type).
+//   - Server arma ChatMsg en respuesta.
+//   - `conn.send(reply)` marshallea ChatMsg a JSON y emite text.
+//
+// Diferenciales sobre `WsConn<T>` simétrico:
+//
+//   - Tipos asimétricos explícitos en el contrato. El checker valida
+//     que `conn.send(<Str>)` falle (porque send espera ChatMsg, no Str).
+//   - Generadores de clientes AsyncAPI producen interfaces tipadas
+//     distintas para input y output. Más cerca del modelo de gRPC
+//     Server-Streaming RPC.
+//   - Documentación más clara — el reader del schema ve "cliente envía
+//     X, server emite Y" sin tener que inferir del shape del JSON.

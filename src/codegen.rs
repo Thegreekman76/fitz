@@ -9003,8 +9003,9 @@ where
         // (`let r = conn.recv()`) se traduzca a Rust válido. `close`
         // es sync. El checker (9.w.2.a) ya validó aridad y tipos de
         // args; acá nos limitamos a emitir el Rust.
-        if let Ok((obj_code, Type::WsConn(inner_t_box))) = self.gen_expr(object) {
-            let inner_t: &Type = &inner_t_box;
+        if let Ok((obj_code, Type::WsConn { recv: recv_box, send: send_box })) = self.gen_expr(object) {
+            let recv_t: &Type = &recv_box;
+            let send_t: &Type = &send_box;
             {
                 match method {
                     "recv" => {
@@ -9017,7 +9018,7 @@ where
                         return Ok((
                             format!("({}).recv().await", obj_code),
                             Type::Result {
-                                ok: Box::new(inner_t.clone()),
+                                ok: Box::new(recv_t.clone()),
                                 err: Box::new(Type::Str),
                             },
                         ));
@@ -9034,7 +9035,10 @@ where
                             ));
                         }
                         let (msg_code, msg_ty) = self.gen_expr(&args[0])?;
-                        let coerced = coerce(&msg_code, &msg_ty, inner_t, self.env);
+                        // 9.w.2-wsconn-bidir: send/broadcast usan el
+                        // tipo `send` (que puede diferir de `recv` en
+                        // canales asimétricos).
+                        let coerced = coerce(&msg_code, &msg_ty, send_t, self.env);
                         return Ok((
                             format!("({}).{}({}).await", obj_code, method, coerced),
                             Type::Result {
@@ -13744,7 +13748,7 @@ where
                     format!("@ws fn `{}`: param `{}`: {}", name, p.name, e.message),
                 )
             })?;
-            if matches!(ty, Type::WsConn(_)) {
+            if matches!(ty, Type::WsConn { .. }) {
                 ws_conn_param = Some((p.name.clone(), ty));
             } else if auth != crate::http::AuthSpec::None && user_param.is_none() {
                 user_param = Some((p.name.clone(), ty));
@@ -13863,10 +13867,29 @@ where
         // `__fitz_ws_setup_bytes` que produce un `__FitzWsConnBytes` y
         // un writer task que sabe drenar `Binary(Vec<u8>)` además de
         // Text. Para T ≠ Bytes mantenemos el setup genérico.
-        let is_bytes_mode = match &conn_ty {
-            Type::WsConn(inner) => matches!(inner.as_ref(), Type::Bytes),
+        //
+        // 9.w.2-wsconn-bidir: cuando `recv` y `send` son AMBOS Bytes
+        // (caso simétrico), usamos el helper `_bytes`. Si SOLO uno es
+        // Bytes (canal mixto binario/text), rechazamos con error
+        // explícito — la combinación requiere un setup helper nuevo
+        // que queda como deuda residual.
+        let (recv_is_bytes, send_is_bytes) = match &conn_ty {
+            Type::WsConn { recv, send } => (
+                matches!(recv.as_ref(), Type::Bytes),
+                matches!(send.as_ref(), Type::Bytes),
+            ),
             _ => unreachable!("conn_ty siempre es WsConn por construcción"),
         };
+        if recv_is_bytes != send_is_bytes {
+            return Err(self.err_at(
+                stmt.span(),
+                format!(
+                    "@ws fn `{}`: canal MIXTO binary/text (recv Bytes y send no-Bytes, o viceversa) no soportado todavía. Workaround: declarar AMBOS Bytes o NINGUNO en `WsConn<In, Out>`.",
+                    name
+                ),
+            ));
+        }
+        let is_bytes_mode = recv_is_bytes && send_is_bytes;
         if is_bytes_mode {
             writeln!(
                 &mut self.output,
@@ -13875,14 +13898,21 @@ where
             )
             .unwrap();
         } else {
-            let t_rs = match &conn_ty {
-                Type::WsConn(inner) => rust_type_for(inner, self.env)?,
+            // 9.w.2-wsconn-bidir: emitir AMBOS type params (RECV, SEND).
+            // Para `WsConn<T>` simétrico, recv == send así el binario
+            // resultante es idéntico al pre-bidir (monomorfismo).
+            let (recv_rs, send_rs) = match &conn_ty {
+                Type::WsConn { recv, send } => (
+                    rust_type_for(recv, self.env)?,
+                    rust_type_for(send, self.env)?,
+                ),
                 _ => unreachable!("conn_ty siempre es WsConn por construcción"),
             };
             writeln!(
                 &mut self.output,
-                "        let (__conn, __writer) = __fitz_ws_setup::<{}>(__socket, __endpoint.clone(), {}u64);",
-                t_rs,
+                "        let (__conn, __writer) = __fitz_ws_setup::<{}, {}>(__socket, __endpoint.clone(), {}u64);",
+                recv_rs,
+                send_rs,
                 self.ws_heartbeat_secs,
             )
             .unwrap();
@@ -16445,9 +16475,14 @@ where
 }
 
 /// WebSocket conn tipado. El runtime construye uno por upgrade y lo
-/// pasa al handler como argumento `conn: WsConn<T>`. Métodos espejo
-/// del intérprete (9.w.2.b): `recv/send/broadcast/close`.
-struct __FitzWsConn<T: __FitzWsMessage> {
+/// pasa al handler como argumento `conn: WsConn<T>` o `WsConn<In, Out>`.
+/// Métodos espejo del intérprete (9.w.2.b): `recv/send/broadcast/close`.
+///
+/// 9.w.2-wsconn-bidir (v0.9.38): dos type params, `RECV` para
+/// recv() y `SEND` para send/broadcast. Cuando son el mismo
+/// (`WsConn<T>` simétrico), el monomorfismo de Rust produce un
+/// binario idéntico al pre-bidir.
+struct __FitzWsConn<RECV: __FitzWsMessage, SEND: __FitzWsMessage> {
     endpoint: String,
     conn_id: u64,
     rx: std::sync::Arc<
@@ -16457,16 +16492,13 @@ struct __FitzWsConn<T: __FitzWsMessage> {
     >,
     outbox_tx: tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>,
     closed: std::sync::Arc<AtomicBool>,
-    _phantom: std::marker::PhantomData<T>,
+    _phantom: std::marker::PhantomData<(RECV, SEND)>,
 }
 
 // Clone manual sin bound `T: Clone`: el conn solo carga Arcs/atomics/
-// strings/ids, todos clone-ables independientemente de T. PhantomData<T>
-// clona libremente sin tocar T. Esto permite que el codegen Fitz haga
-// `let x = conn.clone()` natural cuando el handler usa `conn` varias
-// veces (cada uso necesita un clone porque needs_clone() devuelve true
-// para tipos opacos).
-impl<T: __FitzWsMessage> Clone for __FitzWsConn<T> {
+// strings/ids, todos clone-ables independientemente de los type params.
+// PhantomData clona libremente.
+impl<RECV: __FitzWsMessage, SEND: __FitzWsMessage> Clone for __FitzWsConn<RECV, SEND> {
     fn clone(&self) -> Self {
         Self {
             endpoint: self.endpoint.clone(),
@@ -16479,10 +16511,10 @@ impl<T: __FitzWsMessage> Clone for __FitzWsConn<T> {
     }
 }
 
-impl<T: __FitzWsMessage> __FitzWsConn<T> {
-    /// Lee el próximo frame text y lo deserializa a T. `Err` para
+impl<RECV: __FitzWsMessage, SEND: __FitzWsMessage> __FitzWsConn<RECV, SEND> {
+    /// Lee el próximo frame text y lo deserializa a RECV. `Err` para
     /// conn cerrada, frame binario, o JSON inválido.
-    async fn recv(&self) -> Result<T, String> {
+    async fn recv(&self) -> Result<RECV, String> {
         use futures_util::StreamExt;
         if self.closed.load(__FitzOrdering::Relaxed) {
             return Err("WsConn cerrada".to_string());
@@ -16494,7 +16526,7 @@ impl<T: __FitzWsMessage> __FitzWsConn<T> {
             };
             match next {
                 Some(Ok(axum::extract::ws::Message::Text(t))) => {
-                    return T::__ws_from_payload(t.as_str())
+                    return RECV::__ws_from_payload(t.as_str())
                         .map_err(|e| format!("WsConn.recv(): {}", e));
                 }
                 Some(Ok(axum::extract::ws::Message::Binary(_))) => {
@@ -16511,7 +16543,7 @@ impl<T: __FitzWsMessage> __FitzWsConn<T> {
         }
     }
 
-    async fn send(&self, msg: T) -> Result<(), String> {
+    async fn send(&self, msg: SEND) -> Result<(), String> {
         if self.closed.load(__FitzOrdering::Relaxed) {
             return Err("WsConn cerrada".to_string());
         }
@@ -16524,7 +16556,7 @@ impl<T: __FitzWsMessage> __FitzWsConn<T> {
             })
     }
 
-    async fn broadcast(&self, msg: T) -> Result<(), String> {
+    async fn broadcast(&self, msg: SEND) -> Result<(), String> {
         let payload = msg.__ws_to_payload()?;
         __fitz_ws_broadcast_payload(&self.endpoint, payload);
         Ok(())
@@ -16539,14 +16571,14 @@ impl<T: __FitzWsMessage> __FitzWsConn<T> {
     }
 }
 
-/// Construye un `__FitzWsConn<T>` a partir del axum WebSocket + el
-/// endpoint, y lanza el writer task + heartbeat task (este último
+/// Construye un `__FitzWsConn<RECV, SEND>` a partir del axum WebSocket
+/// + el endpoint, y lanza el writer task + heartbeat task (este último
 /// gated por `heartbeat_secs > 0`).
-fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
+fn __fitz_ws_setup<RECV: __FitzWsMessage + Send + 'static, SEND: __FitzWsMessage + Send + 'static>(
     socket: axum::extract::ws::WebSocket,
     endpoint: String,
     heartbeat_secs: u64,
-) -> (__FitzWsConn<T>, tokio::task::JoinHandle<()>) {
+) -> (__FitzWsConn<RECV, SEND>, tokio::task::JoinHandle<()>) {
     use futures_util::{SinkExt, StreamExt};
     let (mut sink, stream) = socket.split();
     let (outbox_tx, mut outbox_rx) = tokio::sync::mpsc::unbounded_channel();
@@ -17655,7 +17687,7 @@ fn field_eq_expr(ty: &Type, lhs: &str, rhs: &str, _env: &TypeEnv) -> Result<Stri
         // Fase 9.w.2: `WsConn<T>` tampoco es comparable — el conn lleva
         // handles a streams Mutex<>'eados, dos conns distintos jamás
         // son "iguales" estructuralmente.
-        Type::Function { .. } | Type::Future(_) | Type::WsConn(_) | Type::Any | Type::PyAny => {
+        Type::Function { .. } | Type::Future(_) | Type::WsConn { .. } | Type::Any | Type::PyAny => {
             Ok("false".to_string())
         }
         // Tuples (mini-tanda T): comparación element-wise. Rust ya
@@ -17925,18 +17957,33 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // handler `@ws`, nunca cruza el sitio donde haría falta clone.
         //
         // 9.w.2-binary-frames — `WsConn<Bytes>` se mapea a un struct
-        // separado `__FitzWsConnBytes` (no genérico) que opera con
-        // `Vec<u8>` raw y `Message::Binary` en el wire — el blanket
-        // impl del trait `__FitzWsMessage` cubriría `Vec<u8>` como
-        // List<Int> JSON, lo cual es justo lo opuesto a lo que
-        // queremos. Specialization sería la forma idiomática pero no
-        // está estable; dos structs dedicados son más simples.
-        Type::WsConn(inner) => {
-            if matches!(inner.as_ref(), Type::Bytes) {
+        // separado `__FitzWsConnBytes` (no genérico).
+        //
+        // 9.w.2-wsconn-bidir: `WsConn<In, Out>` (asimétrico) se mapea
+        // a `__FitzWsConn<In, Out>` Rust con dos type params. Cuando
+        // el usuario declara `WsConn<T>` (simétrico), recv == send,
+        // así que emitimos `__FitzWsConn<T, T>` (mismo tipo en ambos
+        // params). Monomorfismo de Rust hace que el binario quede
+        // idéntico al pre-bidir.
+        Type::WsConn { recv, send } => {
+            let recv_is_bytes = matches!(recv.as_ref(), Type::Bytes);
+            let send_is_bytes = matches!(send.as_ref(), Type::Bytes);
+            if recv_is_bytes && send_is_bytes {
                 Ok("__FitzWsConnBytes".to_string())
+            } else if recv_is_bytes || send_is_bytes {
+                // Canal mixto binary/text — el wrapper del handler
+                // ya lo rechazó con error claro. Acá emitimos un placeholder
+                // para que el match siga cubriendo (defensa de profundidad).
+                Err(FitzError::new(
+                    ErrorKind::InvalidSyntax,
+                    0,
+                    0,
+                    "WsConn mixto binary/text no soportado todavía (recv y send deben ser AMBOS Bytes o NINGUNO)".to_string(),
+                ))
             } else {
-                let inner_rs = rust_type_for(inner, env)?;
-                Ok(format!("__FitzWsConn<{}>", inner_rs))
+                let recv_rs = rust_type_for(recv, env)?;
+                let send_rs = rust_type_for(send, env)?;
+                Ok(format!("__FitzWsConn<{}, {}>", recv_rs, send_rs))
             }
         }
         // Tuples (mini-tanda T) → Rust tuple type nativo.
@@ -17982,7 +18029,7 @@ fn type_name(t: &Type) -> &'static str {
         Type::Map(_, _) => "Map<...>",
         Type::Result { .. } => "Result<...>",
         Type::Future(_) => "Future<...>",
-        Type::WsConn(_) => "WsConn<...>",
+        Type::WsConn { .. } => "WsConn<...>",
         Type::Nullable(_) => "T?",
         Type::Nominal(_) => "<nominal>",
         Type::Function { .. } => "fn(...)",
@@ -18008,7 +18055,17 @@ fn display_type(t: &Type, env: &TypeEnv) -> String {
         Type::Map(k, v) => format!("Map<{}, {}>", display_type(k, env), display_type(v, env)),
         Type::Result { ok: inner, err: _ } => format!("Result<{}>", display_type(inner, env)),
         Type::Future(inner) => format!("Future<{}>", display_type(inner, env)),
-        Type::WsConn(inner) => format!("WsConn<{}>", display_type(inner, env)),
+        Type::WsConn { recv, send } => {
+            if recv == send {
+                format!("WsConn<{}>", display_type(recv, env))
+            } else {
+                format!(
+                    "WsConn<{}, {}>",
+                    display_type(recv, env),
+                    display_type(send, env)
+                )
+            }
+        }
         Type::Nullable(inner) => format!("{}?", display_type(inner, env)),
         Type::Nominal(id) => env.info(*id).name.clone(),
         Type::Function { params, ret } => {

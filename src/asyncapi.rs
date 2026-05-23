@@ -65,10 +65,16 @@ pub struct AsyncApiChannelInfo {
     /// Nombre del handler Fitz — sirve como base para los IDs de
     /// operations (`receive<Handler>` / `send<Handler>`).
     pub handler_name: String,
-    /// `TypeExpr` del `T` en `WsConn<T>`. Su schema JSON va al
-    /// `messages.<name>.payload`. `None` solo en builds malformados
-    /// donde el evaluator no pudo identificar el T.
+    /// `TypeExpr` del `T` en `WsConn<T>` (o `In` en `WsConn<In, Out>`).
+    /// Schema usado para la operation `receive` (cliente → server).
+    /// `None` solo en builds malformados donde el evaluator no pudo
+    /// identificar el T.
     pub msg_type: Option<TypeExpr>,
+    /// 9.w.2-wsconn-bidir (v0.9.38): `TypeExpr` del `Out` en
+    /// `WsConn<In, Out>`. Schema usado para la operation `send`
+    /// (server → cliente). Para `WsConn<T>` simétrico, es el mismo
+    /// que `msg_type`.
+    pub send_type: Option<TypeExpr>,
     /// Política de auth de la ruta. `Authenticated`/`Admin` →
     /// security requirement con bearer en el channel.
     pub auth: AuthSpec,
@@ -90,6 +96,7 @@ fn channel_info_from_spec(s: &RouteSpec) -> AsyncApiChannelInfo {
         path: s.path.clone(),
         handler_name: s.handler_name.clone(),
         msg_type: s.ws_msg_type.clone(),
+        send_type: s.ws_send_type.clone(),
         auth: s.auth,
     }
 }
@@ -123,13 +130,25 @@ pub fn pseudo_channels_from_ast(
                 Expr::Str(s, _) => s.clone(),
                 _ => continue, // checker ya rechazó esto
             };
-            // Detectar el WsConn<T> param para extraer T.
-            let msg_type = params.iter().find_map(|p| match &p.type_ {
-                Some(TypeExpr::Generic { name: n, args }) if n == "WsConn" && args.len() == 1 => {
-                    Some(args[0].clone())
-                }
-                _ => None,
-            });
+            // Detectar el WsConn<T> o WsConn<In, Out> param para
+            // extraer recv (msg_type) y send (send_type).
+            let (msg_type, send_type) = params
+                .iter()
+                .find_map(|p| match &p.type_ {
+                    Some(TypeExpr::Generic { name: n, args })
+                        if n == "WsConn" && (args.len() == 1 || args.len() == 2) =>
+                    {
+                        let recv = args[0].clone();
+                        let send = if args.len() == 2 {
+                            args[1].clone()
+                        } else {
+                            recv.clone()
+                        };
+                        Some((Some(recv), Some(send)))
+                    }
+                    _ => None,
+                })
+                .unwrap_or((None, None));
             // Auth desde decorators.
             let mut auth = AuthSpec::None;
             for dd in decorators {
@@ -145,11 +164,11 @@ pub fn pseudo_channels_from_ast(
             // declaran `@header` sobre handlers WS); mantenemos el
             // helper de openapi disponible por consistencia futura.
             let _ = headers_from_decorators(decorators, params);
-            let _ = msg_type.clone();
             out.push(AsyncApiChannelInfo {
                 path,
                 handler_name: name.clone(),
                 msg_type,
+                send_type,
                 auth,
             });
         }
@@ -207,48 +226,99 @@ pub fn generate_asyncapi_with_version(
     }
 
     for (path, ch) in &sorted {
-        let msg_schema = ch
+        // 9.w.2-wsconn-bidir: cuando recv != send, emitimos DOS
+        // messages (`msg_in` para receive, `msg_out` para send) con
+        // sus respectivos schemas. Cuando son iguales (símétrico o
+        // canal con un solo tipo), un solo message `msg`.
+        let symmetric = match (&ch.msg_type, &ch.send_type) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        };
+
+        let recv_schema = ch
             .msg_type
             .as_ref()
             .map(type_expr_to_schema)
             .unwrap_or_else(|| json!({}));
-        let msg_name = ch
+        let recv_name = ch
             .msg_type
             .as_ref()
             .map(|t| t.display_name())
             .unwrap_or_else(|| "AnyMessage".to_string());
-        // 9.w.2-binary-frames — `WsConn<Bytes>` opera con `Message::Binary`
-        // raw en el wire (no JSON-marshalled text). Reflejamos eso en el
-        // schema con `contentType: application/octet-stream` y un summary
-        // específico. El resto sigue como text JSON.
-        let is_bytes = matches!(
+        let recv_is_bytes = matches!(
             ch.msg_type.as_ref(),
             Some(TypeExpr::Named(n)) if n == "Bytes"
         );
-
-        // Channel entry.
-        let mut messages = Map::new();
-        let (content_type, msg_summary) = if is_bytes {
-            (
-                "application/octet-stream",
-                "Frame binario raw ↔ Fitz `Bytes`".to_string(),
-            )
+        let recv_content_type = if recv_is_bytes {
+            "application/octet-stream"
         } else {
-            (
-                "application/json",
-                format!("Frame text JSON ↔ Fitz `{}`", msg_name),
-            )
+            "application/json"
         };
-        messages.insert(
-            "msg".into(),
-            json!({
-                "name": msg_name,
-                "title": format!("Mensaje de `{}`", ch.handler_name),
-                "summary": msg_summary,
-                "contentType": content_type,
-                "payload": msg_schema,
-            }),
-        );
+        let recv_summary = if recv_is_bytes {
+            "Frame binario raw ↔ Fitz `Bytes`".to_string()
+        } else {
+            format!("Frame text JSON ↔ Fitz `{}`", recv_name)
+        };
+
+        let mut messages = Map::new();
+        if symmetric {
+            messages.insert(
+                "msg".into(),
+                json!({
+                    "name": recv_name,
+                    "title": format!("Mensaje de `{}`", ch.handler_name),
+                    "summary": recv_summary,
+                    "contentType": recv_content_type,
+                    "payload": recv_schema,
+                }),
+            );
+        } else {
+            // recv != send — dos messages distintos.
+            let send_schema = ch
+                .send_type
+                .as_ref()
+                .map(type_expr_to_schema)
+                .unwrap_or_else(|| json!({}));
+            let send_name = ch
+                .send_type
+                .as_ref()
+                .map(|t| t.display_name())
+                .unwrap_or_else(|| "AnyMessage".to_string());
+            let send_is_bytes = matches!(
+                ch.send_type.as_ref(),
+                Some(TypeExpr::Named(n)) if n == "Bytes"
+            );
+            let send_content_type = if send_is_bytes {
+                "application/octet-stream"
+            } else {
+                "application/json"
+            };
+            let send_summary = if send_is_bytes {
+                "Frame binario raw ↔ Fitz `Bytes`".to_string()
+            } else {
+                format!("Frame text JSON ↔ Fitz `{}`", send_name)
+            };
+            messages.insert(
+                "msg_in".into(),
+                json!({
+                    "name": recv_name,
+                    "title": format!("Mensaje IN (cliente → server) de `{}`", ch.handler_name),
+                    "summary": recv_summary,
+                    "contentType": recv_content_type,
+                    "payload": recv_schema,
+                }),
+            );
+            messages.insert(
+                "msg_out".into(),
+                json!({
+                    "name": send_name,
+                    "title": format!("Mensaje OUT (server → cliente) de `{}`", ch.handler_name),
+                    "summary": send_summary,
+                    "contentType": send_content_type,
+                    "payload": send_schema,
+                }),
+            );
+        }
         channels_obj.insert(
             (*path).to_string(),
             json!({
@@ -269,12 +339,21 @@ pub fn generate_asyncapi_with_version(
         // `~`, pero el `/` inicial sí necesita el escape.
         let path_ref = path.replace('~', "~0").replace('/', "~1");
         let channel_ref = format!("#/channels/{}", path_ref);
-        let msg_ref = format!("#/channels/{}/messages/msg", path_ref);
+        let recv_msg_ref = if symmetric {
+            format!("#/channels/{}/messages/msg", path_ref)
+        } else {
+            format!("#/channels/{}/messages/msg_in", path_ref)
+        };
+        let send_msg_ref = if symmetric {
+            format!("#/channels/{}/messages/msg", path_ref)
+        } else {
+            format!("#/channels/{}/messages/msg_out", path_ref)
+        };
 
         let mut receive_op = Map::new();
         receive_op.insert("action".into(), json!("receive"));
         receive_op.insert("channel".into(), json!({"$ref": channel_ref}));
-        receive_op.insert("messages".into(), json!([{"$ref": msg_ref}]));
+        receive_op.insert("messages".into(), json!([{"$ref": recv_msg_ref}]));
         receive_op.insert(
             "summary".into(),
             json!(format!(
@@ -293,7 +372,7 @@ pub fn generate_asyncapi_with_version(
         let mut send_op = Map::new();
         send_op.insert("action".into(), json!("send"));
         send_op.insert("channel".into(), json!({"$ref": channel_ref}));
-        send_op.insert("messages".into(), json!([{"$ref": msg_ref}]));
+        send_op.insert("messages".into(), json!([{"$ref": send_msg_ref}]));
         send_op.insert(
             "summary".into(),
             json!(format!(
@@ -467,6 +546,62 @@ mod tests {
         // Sin auth, components puede no estar.
         let comp = s.get("components");
         assert!(comp.is_none() || comp.unwrap().get("securitySchemes").is_none());
+    }
+
+    // ---- 9.w.2-wsconn-bidir — `WsConn<In, Out>` AsyncAPI ----
+
+    #[test]
+    fn asyncapi_wsconn_bidir_emite_dos_messages_distintos() {
+        // 9.w.2-wsconn-bidir — canal asimétrico genera `msg_in`
+        // (receive) y `msg_out` (send) en lugar del único `msg`.
+        let src = "type ChatMsg { user: Str, text: Str }\n\
+                   @ws(\"/cmd\")\n\
+                   async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null { return null }";
+        let s = schema_for(src);
+        let messages = &s["channels"]["/cmd"]["messages"];
+        // Dos messages: msg_in y msg_out, sin `msg` único.
+        assert!(messages["msg_in"].is_object());
+        assert!(messages["msg_out"].is_object());
+        assert!(messages["msg"].is_null(), "no debería existir `msg` único en bidir asimétrico");
+        // msg_in payload es Str (recv).
+        assert_eq!(messages["msg_in"]["payload"]["type"], json!("string"));
+        // msg_out payload es ChatMsg (send, nominal $ref).
+        assert!(messages["msg_out"]["payload"]["$ref"].is_string());
+    }
+
+    #[test]
+    fn asyncapi_wsconn_bidir_operations_apuntan_a_messages_distintos() {
+        let src = "type ChatMsg { user: Str, text: Str }\n\
+                   @ws(\"/cmd\")\n\
+                   async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null { return null }";
+        let s = schema_for(src);
+        let receive = &s["operations"]["receiveCmd"];
+        let send = &s["operations"]["sendCmd"];
+        let recv_msg_ref = receive["messages"][0]["$ref"].as_str().unwrap();
+        let send_msg_ref = send["messages"][0]["$ref"].as_str().unwrap();
+        assert!(
+            recv_msg_ref.ends_with("/messages/msg_in"),
+            "receive debería apuntar a msg_in, fue: {}",
+            recv_msg_ref
+        );
+        assert!(
+            send_msg_ref.ends_with("/messages/msg_out"),
+            "send debería apuntar a msg_out, fue: {}",
+            send_msg_ref
+        );
+    }
+
+    #[test]
+    fn asyncapi_wsconn_simetrico_sigue_emitiendo_msg_unico() {
+        // Compat: `WsConn<T>` (simétrico) sigue emitiendo `msg`
+        // único (no rompe consumers existentes).
+        let src = "@ws(\"/c\")\n\
+                   async fn c(conn: WsConn<Str>) -> Null { return null }";
+        let s = schema_for(src);
+        let messages = &s["channels"]["/c"]["messages"];
+        assert!(messages["msg"].is_object());
+        assert!(messages["msg_in"].is_null());
+        assert!(messages["msg_out"].is_null());
     }
 
     // ---- 9.w.2-binary-frames — `WsConn<Bytes>` AsyncAPI ----

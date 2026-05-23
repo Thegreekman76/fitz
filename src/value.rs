@@ -141,7 +141,15 @@ pub struct WsConnHandle {
     /// para coercer `Map` recibidos a `Instance` cuando T es nominal
     /// (paralelo a la coerción 8.4.3 sobre `Stmt::Assign`). `None`
     /// para conns construidos en tests sin contexto de tipo.
+    ///
+    /// 9.w.2-wsconn-bidir (v0.9.38): `recv_type` y `send_type` pueden
+    /// diferir para canales asimétricos (`WsConn<In, Out>`). `recv()`
+    /// usa `recv_type` para deserializar/coercer; `send()`/`broadcast()`
+    /// usan `send_type` para detectar modo binary vs text JSON. Para
+    /// `WsConn<T>` simétrico, los dos son `Some(T)` con el mismo
+    /// TypeExpr.
     pub msg_type: Option<crate::ast::TypeExpr>,
+    pub send_type: Option<crate::ast::TypeExpr>,
     /// Fase 9.w.2 — EnvRef del scope donde se declaró el handler.
     /// Necesario para resolver `msg_type` cuando `T` es nominal (el
     /// `Value::Type` del nominal vive en el env). `Arc<Mutex<>>`

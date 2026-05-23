@@ -61,6 +61,80 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.38] — 2026-05-23 — 9.w.2-wsconn-bidir: `WsConn<In, Out>` con tipos asimétricos
+
+Cierra la deuda residual del MVP 9.w.2 (WebSockets) sobre tipos
+bidireccionales separados. Habilita canales asimétricos donde el
+cliente envía un tipo (e.g. comandos `Str`) y el server emite otro
+(e.g. eventos `ChatMsg` estructurados). Backward-compat con todo el
+código pre-bidir.
+
+### Cambios
+
+- **AST + type system**: `Type::WsConn(Box<Type>)` →
+  `Type::WsConn { recv: Box<Type>, send: Box<Type> }`. Cuando el
+  usuario declara `WsConn<T>` (aridad 1), `recv == send == T`
+  (simétrico, identical to pre-bidir). Cuando declara
+  `WsConn<In, Out>` (aridad 2), `recv = In`, `send = Out` difieren.
+  `Type::WsConn::display` emite `WsConn<T>` para simétricos,
+  `WsConn<In, Out>` para asimétricos.
+- **Checker**: `infer_wsconn_method` recibe `recv_ty` y `send_ty`
+  separados. `recv() → Result<RECV>`, `send/broadcast(msg: SEND) →
+  Result<Null>`. Mensajes de error con tipo correcto en cada
+  dirección.
+- **Runtime intérprete**: `WsConnHandle` gana `send_type` (paralelo
+  a `msg_type` que ahora documenta explícitamente "recv type").
+  `ws_conn_send`/`ws_conn_broadcast` usan `send_type` para
+  decidir modo binary vs text JSON. `ws_conn_recv` sigue con
+  `msg_type` (recv). `build_ws_conn` toma `send_type` como
+  parámetro adicional.
+- **RouteSpec**: nuevo campo `ws_send_type: Option<TypeExpr>`. El
+  evaluator lo popula al registrar el handler `@ws`.
+- **Codegen `fitz build`**: preludio refactored —
+  `struct __FitzWsConn<RECV: __FitzWsMessage, SEND: __FitzWsMessage>`
+  con dos type params; `recv` usa `RECV`, `send/broadcast` usan
+  `SEND`. `__fitz_ws_setup<RECV, SEND>` también con dos params. El
+  wrapper del handler emite el setup con ambos tipos resueltos.
+  Monomorfismo garantiza que `WsConn<T>` simétrico produzca un
+  binario idéntico al pre-bidir.
+- **AsyncAPI 3.0**: cuando `recv != send`, el schema emite **dos
+  messages distintos** — `msg_in` (referenciado por la operation
+  `receive`) y `msg_out` (referenciado por la operation `send`).
+  Cuando son iguales, sigue emitiendo el único `msg` (sin romper
+  consumers existentes del schema simétrico).
+- **LSP**: el `detail` del completion sobre `WsConn<In, Out>` ahora
+  muestra `recv() -> Result<In>` y `send(msg: Out)` con tipos
+  correctos.
+
+### Restricción binary mixto
+
+Si `recv` o `send` es `Bytes` pero el otro no (`WsConn<Bytes, Str>`),
+el codegen rechaza con error explícito. El wrapper del handler
+detecta `recv_is_bytes != send_is_bytes` y aborta antes de emitir
+el setup. Soporte de canales binary-mixed queda como deuda
+residual menor.
+
+### Tests
+
+- 3 unit tests del checker (aridad 2 resuelve recv/send distintos,
+  display asimétrico, aridad >2 es error).
+- 1 E2E intérprete (`WsConn<Str, ChatMsg>`: cliente envía Str,
+  server emite ChatMsg JSON-marshalled).
+- 3 unit tests AsyncAPI (asimétrico emite dos messages, operations
+  apuntan a messages distintos, simétrico sigue con `msg` único).
+- 1 unit test LSP (detail correcto para `WsConn<Str, ChatMsg>`).
+
+Total: +8 unit tests. 2215 → ~2223 verdes.
+
+### Ejemplo + docs
+
+- `examples/guide/29c-ws-bidir.fitz`: canal `WsConn<Str, ChatMsg>`
+  con welcome message + loop recv/send.
+- Cap 29 de la guía: sección "Canales asimétricos con `WsConn<In, Out>`"
+  con explicación del modelo, AsyncAPI asimétrico, restricción
+  binary mixto, paridad bit-a-bit.
+- Smoke `GUIDE_EXAMPLES_COMPILE` suma `29c-ws-bidir.fitz`.
+
 ## [v0.9.36] — 2026-05-23 — Bloque C: imagen `:latest-python` + auth WS desde browsers
 
 Segundo bloque de quick wins del día. Dos features autocontenidas

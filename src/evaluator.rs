@@ -1372,6 +1372,7 @@ fn register_http_route(
         is_ws: false,
         ws_conn_param_name: None,
         ws_msg_type: None,
+        ws_send_type: None,
     });
 
     Ok(())
@@ -1453,14 +1454,17 @@ fn register_ws_route(
         )));
     }
 
-    // Identificar el param `WsConn<T>` por shape del TypeExpr. El
-    // checker (9.w.2.a) ya validó que exista exactamente uno; acá
-    // lo localizamos por nombre para guardarlo en `RouteSpec`.
+    // Identificar el param `WsConn<T>` o `WsConn<In, Out>` por shape
+    // del TypeExpr. El checker (9.w.2.a) ya validó que exista
+    // exactamente uno; acá lo localizamos por nombre para guardarlo
+    // en `RouteSpec`. 9.w.2-wsconn-bidir: aceptamos aridad 1 (simétrico,
+    // recv == send) y aridad 2 (asimétrico, recv = In, send = Out).
     let mut ws_conn_param_name: Option<String> = None;
     let mut ws_msg_type: Option<TypeExpr> = None;
+    let mut ws_send_type: Option<TypeExpr> = None;
     for p in params {
         if let Some(TypeExpr::Generic { name, args }) = &p.type_ {
-            if name == "WsConn" && args.len() == 1 {
+            if name == "WsConn" && (args.len() == 1 || args.len() == 2) {
                 if ws_conn_param_name.is_some() {
                     return Err(err(format!(
                         "@ws sobre fn '{}': el handler tiene más de un param `WsConn<T>` (debe ser exactamente uno)",
@@ -1469,6 +1473,11 @@ fn register_ws_route(
                 }
                 ws_conn_param_name = Some(p.name.clone());
                 ws_msg_type = Some(args[0].clone());
+                ws_send_type = if args.len() == 2 {
+                    Some(args[1].clone())
+                } else {
+                    Some(args[0].clone())
+                };
             }
         }
     }
@@ -1543,6 +1552,7 @@ fn register_ws_route(
         is_ws: true,
         ws_conn_param_name,
         ws_msg_type,
+        ws_send_type,
     });
 
     Ok(())
@@ -4987,16 +4997,18 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             "WsConn cerrada".to_string(),
         )))));
     }
-    // 9.w.2-binary-frames — branch por T.
-    let out_msg = if ws_msg_is_bytes(&handle.msg_type) {
-        // T = Bytes: el arg debe ser Value::Bytes; el checker ya lo
+    // 9.w.2-binary-frames + wsconn-bidir — branch por SEND type
+    // (para `WsConn<In, Out>` asimétrico, send/broadcast usan `Out`,
+    // no `In`).
+    let out_msg = if ws_msg_is_bytes(&handle.send_type) {
+        // SEND = Bytes: el arg debe ser Value::Bytes; el checker ya lo
         // validó estáticamente, pero defendemos el runtime path.
         match &args[0] {
             Value::Bytes(bs) => crate::value::WsOutMessage::Binary(bs.clone()),
             other => {
                 return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
                     format!(
-                        "WsConn.send(): T = Bytes pero el argumento es `{}`",
+                        "WsConn.send(): SEND = Bytes pero el argumento es `{}`",
                         other.type_name()
                     ),
                 )))));
@@ -5057,14 +5069,15 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
     // puede haberlo cerrado pero los demás conns del endpoint siguen
     // recibiendo. Si el sender está cerrado, igual se intenta el
     // broadcast (decisión: useful para "despedida" antes de cerrar).
-    if ws_msg_is_bytes(&handle.msg_type) {
-        // T = Bytes: broadcast raw binary.
+    // wsconn-bidir: broadcast usa SEND type (paralelo a send).
+    if ws_msg_is_bytes(&handle.send_type) {
+        // SEND = Bytes: broadcast raw binary.
         let bs = match &args[0] {
             Value::Bytes(bs) => bs.clone(),
             other => {
                 return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
                     format!(
-                        "WsConn.broadcast(): T = Bytes pero el argumento es `{}`",
+                        "WsConn.broadcast(): SEND = Bytes pero el argumento es `{}`",
                         other.type_name()
                     ),
                 )))));

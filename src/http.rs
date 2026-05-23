@@ -179,7 +179,18 @@ pub struct RouteSpec {
     /// consume el generador AsyncAPI (9.w.2.d) para emitir el schema
     /// del mensaje del canal. Coincide con `param_type_exprs[idx]` —
     /// se aloja aparte porque es información esencial del WS endpoint.
+    ///
+    /// 9.w.2-wsconn-bidir (v0.9.38): este campo corresponde al `recv`
+    /// (lo que se desempaqueta del frame). Para `WsConn<T>` simétrico,
+    /// es el mismo `T` que `ws_send_type`. Para `WsConn<In, Out>`
+    /// asimétrico, `ws_msg_type = In` y `ws_send_type = Out` difieren.
     pub ws_msg_type: Option<TypeExpr>,
+    /// 9.w.2-wsconn-bidir (v0.9.38): `TypeExpr` del Out en
+    /// `WsConn<In, Out>`. Para canales simétricos es igual a
+    /// `ws_msg_type`. `send/broadcast` lo usan para decidir el modo
+    /// binary vs text JSON al serializar el value que viene del
+    /// handler.
+    pub ws_send_type: Option<TypeExpr>,
 }
 
 /// Una entrada del stack de middlewares de una ruta (mini-fase MW.1).
@@ -2116,6 +2127,7 @@ fn build_ws_method_router(
             let auth_user_param_name = route.auth_user_param_name.clone();
             let ws_conn_param_name = route.ws_conn_param_name.clone();
             let ws_msg_type = route.ws_msg_type.clone();
+            let ws_send_type = route.ws_send_type.clone();
             // Env del handler — Value::Function lo carry como `closure`.
             // recv() lo usa para resolver T nominal y coercer Map →
             // Instance.
@@ -2153,6 +2165,7 @@ fn build_ws_method_router(
                     endpoint.clone(),
                     broadcaster.clone(),
                     ws_msg_type,
+                    ws_send_type,
                     handler_env,
                     heartbeat_secs,
                 );
@@ -3646,6 +3659,7 @@ pub fn build_ws_conn(
     endpoint: String,
     broadcaster: std::sync::Arc<WsBroadcaster>,
     msg_type: Option<crate::ast::TypeExpr>,
+    send_type: Option<crate::ast::TypeExpr>,
     env: crate::env::EnvRef,
     heartbeat_secs: u64,
 ) -> (Value, u64, tokio::task::JoinHandle<()>) {
@@ -3733,6 +3747,7 @@ pub fn build_ws_conn(
         closed,
         broadcaster: broadcaster as std::sync::Arc<dyn WsBroadcasterTrait + Send + Sync>,
         msg_type,
+        send_type,
         env,
     };
     let value = Value::WsConn(std::sync::Arc::new(handle));
@@ -6159,6 +6174,7 @@ mod tests {
                 is_ws: false,
                 ws_conn_param_name: None,
                 ws_msg_type: None,
+                ws_send_type: None,
             });
         });
         assert_eq!(reg.routes.len(), 1);
@@ -6253,6 +6269,7 @@ mod tests {
             is_ws: false,
             ws_conn_param_name: None,
             ws_msg_type: None,
+                ws_send_type: None,
         });
         std::sync::Arc::new(reg)
     }
@@ -7194,6 +7211,45 @@ fn me(user: User) -> Str => \"x\"\n\
             r.is_err(),
             "esperaba fallo de handshake (401), pero conectó OK",
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_bidir_recv_y_send_tipos_distintos() {
+        // 9.w.2-wsconn-bidir — canal asimétrico: cliente envía Str
+        // (comando), server emite ChatMsg (evento estructurado).
+        let src = "type ChatMsg { user: Str, text: Str }\n\
+                   @ws(\"/cmd\")\n\
+                   async fn cmd(conn: WsConn<Str, ChatMsg>) -> Null {\n\
+                       match conn.recv() {\n\
+                           Ok(input) => {\n\
+                               let reply = ChatMsg { user: \"system\", text: \"got:{input}\" }\n\
+                               let _ = conn.send(reply)\n\
+                               return null\n\
+                           }\n\
+                           Err(_) => return null\n\
+                       }\n\
+                   }";
+        let (addr, _h) = spawn_ws_server(src).await;
+        let mut ws = ws_connect(addr, "/cmd").await;
+
+        use futures_util::{SinkExt, StreamExt};
+        ws.send(tungstenite::Message::text("\"hola\""))
+            .await
+            .expect("send");
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        match resp {
+            tungstenite::Message::Text(t) => {
+                let v: serde_json::Value =
+                    serde_json::from_str(t.as_str()).expect("JSON valid");
+                assert_eq!(v["user"], serde_json::json!("system"));
+                assert_eq!(v["text"], serde_json::json!("got:hola"));
+            }
+            other => panic!("esperaba text, fue {:?}", other),
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

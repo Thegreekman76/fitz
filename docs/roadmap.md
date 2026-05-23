@@ -7004,8 +7004,12 @@ auth integrada en el handshake, codegen con paridad bit-a-bit.
   `@asyncapi/react-component` (CDN). Paridad runtime ↔ codegen,
   opt-out con `@server(docs=false)`, override por handler user
   paralelo a `/docs`. Detalle en `CHANGELOG.md` v0.9.35.
-- **Tipado bidireccional separado** (`WsConn<In, Out>`). Hoy
-  `T` único para recv y send.
+- ~~**Tipado bidireccional separado** (`WsConn<In, Out>`).~~ ✓ CERRADO 2026-05-23
+  (v0.9.38) — `Type::WsConn { recv, send }` con dos type params.
+  `WsConn<T>` (aridad 1) sigue funcionando como antes (compat).
+  Checker valida tipos por dirección; AsyncAPI emite messages
+  separados (msg_in/msg_out) cuando son asimétricos. Detalle en
+  `CHANGELOG.md` v0.9.38.
 - **Reconnect con state replay** del lado del server. Hoy si el
   cliente se reconecta, no replicamos los frames perdidos.
   Requiere persistencia (Fase 10).

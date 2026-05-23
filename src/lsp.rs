@@ -1262,25 +1262,31 @@ fn after_dot_completions(
             ("type_name", "fn() -> Str".into()),
         ]),
         // 9.w.2 — WebSockets tipados. `WsConn<T>` expone 4 métodos:
-        // recv/send/broadcast (parametrizados sobre T) + close.
+        // recv/send/broadcast (parametrizados sobre recv/send) + close.
         //
-        // 9.w.2-binary-frames: si T = Bytes, recv/send/broadcast
+        // 9.w.2-binary-frames: si el tipo = Bytes, recv/send/broadcast
         // operan con frames `Message::Binary` raw (no JSON-marshalled);
         // el detail lo aclara para que el dev no se confunda.
-        Type::WsConn(t) => {
-            let is_bytes = matches!(t.as_ref(), Type::Bytes);
-            let t_disp = t.display(type_env);
-            let recv_note = if is_bytes {
+        //
+        // 9.w.2-wsconn-bidir (v0.9.38): `recv` y `send` pueden ser
+        // tipos distintos para `WsConn<In, Out>`. El detail toma
+        // cada uno por separado.
+        Type::WsConn { recv, send } => {
+            let recv_is_bytes = matches!(recv.as_ref(), Type::Bytes);
+            let send_is_bytes = matches!(send.as_ref(), Type::Bytes);
+            let recv_disp = recv.display(type_env);
+            let send_disp = send.display(type_env);
+            let recv_note = if recv_is_bytes {
                 "  // espera Message::Binary del cliente"
             } else {
-                "  // text frame JSON-marshalled desde T"
+                "  // text frame JSON-marshalled del cliente"
             };
-            let send_note = if is_bytes {
+            let send_note = if send_is_bytes {
                 "  // emite Message::Binary raw"
             } else {
                 ""
             };
-            let bcast_note = if is_bytes {
+            let bcast_note = if send_is_bytes {
                 "  // broadcast binario a TODOS los clientes del endpoint"
             } else {
                 "  // a TODOS los clientes del endpoint"
@@ -1288,17 +1294,17 @@ fn after_dot_completions(
             method_items(&[
                 (
                     "recv",
-                    format!("fn() -> Result<{}>{}", t_disp, recv_note),
+                    format!("fn() -> Result<{}>{}", recv_disp, recv_note),
                 ),
                 (
                     "send",
-                    format!("fn(msg: {}) -> Result<Null>{}", t_disp, send_note),
+                    format!("fn(msg: {}) -> Result<Null>{}", send_disp, send_note),
                 ),
                 (
                     "broadcast",
                     format!(
                         "fn(msg: {}) -> Result<Null>{}",
-                        t_disp, bcast_note,
+                        send_disp, bcast_note,
                     ),
                 ),
                 ("close", "fn() -> Result<Null>".into()),
@@ -2180,6 +2186,35 @@ mod tests {
         let send_detail = send.detail.as_deref().unwrap_or("");
         assert!(send_detail.contains("msg: Bytes"));
         assert!(send_detail.contains("Binary"));
+    }
+
+    #[test]
+    fn after_dot_sobre_wsconn_bidir_recv_send_tipos_distintos() {
+        // 9.w.2-wsconn-bidir — `WsConn<Str, ChatMsg>`: recv tipa
+        // `Result<Str>`, send espera `msg: ChatMsg`.
+        let src = "type ChatMsg { user: Str, text: Str }\n\
+                   @ws(\"/c\")\n\
+                   async fn c(conn: WsConn<Str, ChatMsg>) -> Null {\n\
+                   let r = conn.recv()\n\
+                   return null\n\
+                   }";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 3, 13);
+        let recv = items
+            .iter()
+            .find(|i| i.label == "recv")
+            .expect("recv item");
+        let recv_detail = recv.detail.as_deref().unwrap_or("");
+        assert!(
+            recv_detail.contains("Result<Str>"),
+            "recv detail debería tipar Result<Str> (recv=Str), fue: {recv_detail}"
+        );
+        let send = items.iter().find(|i| i.label == "send").unwrap();
+        let send_detail = send.detail.as_deref().unwrap_or("");
+        assert!(
+            send_detail.contains("msg: ChatMsg"),
+            "send detail debería pedir ChatMsg (send), fue: {send_detail}"
+        );
     }
 
     #[test]

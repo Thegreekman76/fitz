@@ -80,10 +80,20 @@ pub enum Type {
     /// (paralelo a Future/Result/List). Sólo aparece como param de
     /// handlers `@ws("/path")` — el runtime construye el `Value::WsConn`
     /// tras el upgrade HTTP→WS y lo inyecta. Métodos paramétricos:
-    /// `recv: () -> Result<T>`, `send: (T) -> Result<Null>`,
-    /// `broadcast: (T) -> Result<Null>` (a todos los conn del endpoint,
+    /// `recv: () -> Result<RECV>`, `send: (SEND) -> Result<Null>`,
+    /// `broadcast: (SEND) -> Result<Null>` (a todos los conn del endpoint,
     /// incluyendo el sender), `close: () -> Null`.
-    WsConn(Box<Type>),
+    ///
+    /// 9.w.2-wsconn-bidir (v0.9.38): cuando el usuario declara
+    /// `WsConn<T>` (aridad 1), ambos `recv` y `send` apuntan al mismo
+    /// `T` (backward-compat con todo el código pre-bidir). Cuando
+    /// declara `WsConn<In, Out>` (aridad 2), `recv = In` y `send = Out`
+    /// pueden diferir — habilita canales asimétricos (e.g. cliente
+    /// envía comandos, server emite eventos de distinto shape).
+    WsConn {
+        recv: Box<Type>,
+        send: Box<Type>,
+    },
 
     /// Tipo declarado por el usuario (`type User { ... }`) o
     /// importado. La identidad va por `TypeId`.
@@ -170,7 +180,17 @@ impl Type {
                 _ => format!("Result<{}, {}>", t.display(env), e.display(env)),
             },
             Type::Future(t) => format!("Future<{}>", t.display(env)),
-            Type::WsConn(t) => format!("WsConn<{}>", t.display(env)),
+            // 9.w.2-wsconn-bidir — Display compacto:
+            //   `WsConn<T>` cuando recv == send (caso simétrico,
+            //   default histórico).
+            //   `WsConn<In, Out>` cuando difieren.
+            Type::WsConn { recv, send } => {
+                if recv == send {
+                    format!("WsConn<{}>", recv.display(env))
+                } else {
+                    format!("WsConn<{}, {}>", recv.display(env), send.display(env))
+                }
+            }
             Type::Nominal(id) => env.info(*id).name.clone(),
             Type::Nullable(t) => format!("{}?", t.display(env)),
             Type::Function { params, ret } => {
@@ -569,10 +589,32 @@ fn resolve_named(name: &str, args: &[TypeExpr], env: &TypeEnv) -> Result<Type, F
             Ok(Type::Future(Box::new(inner)))
         }
         "WsConn" => {
-            // Fase 9.w.2 — `WsConn<T>` con aridad fija 1.
-            expect_arity(name, 1, args)?;
-            let inner = resolve_type_expr(&args[0], env)?;
-            Ok(Type::WsConn(Box::new(inner)))
+            // 9.w.2-wsconn-bidir (v0.9.38) — `WsConn` acepta 1 o 2
+            // argumentos:
+            //   `WsConn<T>` (aridad 1, simétrico) — recv == send == T.
+            //   `WsConn<In, Out>` (aridad 2, asimétrico) — recv = In,
+            //     send = Out.
+            if args.is_empty() || args.len() > 2 {
+                return Err(FitzError::new(
+                    ErrorKind::TypeError,
+                    0,
+                    0,
+                    format!(
+                        "el tipo `WsConn` espera 1 o 2 argumentos (`WsConn<T>` para canal simétrico, `WsConn<In, Out>` para canal asimétrico), recibió {}",
+                        args.len()
+                    ),
+                ));
+            }
+            let recv = resolve_type_expr(&args[0], env)?;
+            let send = if args.len() == 2 {
+                resolve_type_expr(&args[1], env)?
+            } else {
+                recv.clone()
+            };
+            Ok(Type::WsConn {
+                recv: Box::new(recv),
+                send: Box::new(send),
+            })
         }
         _ => {
             // Nominal declarado por el usuario.
@@ -2893,15 +2935,17 @@ fn infer_method_call(
         // de iteradores que tiene sentido (enumerate/zip/chain) + `len`.
         // El evaluator materializa el Range a List<Int> y delega.
         Type::Range => Some(infer_range_method(ctx, method, args_ty, span)),
-        // Fase 9.w.2 — `WsConn<T>`. Métodos paramétricos:
-        // `recv() -> Result<T>` (Err si conn cerrada),
-        // `send(msg: T) -> Result<Null>` (Err si send falló),
-        // `broadcast(msg: T) -> Result<Null>` (a todos los conn del
+        // Fase 9.w.2 + 9.w.2-wsconn-bidir — `WsConn<T>` o
+        // `WsConn<In, Out>`. Métodos paramétricos:
+        // `recv() -> Result<RECV>` (Err si conn cerrada),
+        // `send(msg: SEND) -> Result<Null>` (Err si send falló),
+        // `broadcast(msg: SEND) -> Result<Null>` (a todos los conn del
         // endpoint, incluyendo el sender),
         // `close() -> Null` (cierra la conn).
-        Type::WsConn(t) => {
-            let t = (**t).clone();
-            Some(infer_wsconn_method(ctx, &t, method, args_ty, span))
+        Type::WsConn { recv, send } => {
+            let recv = (**recv).clone();
+            let send = (**send).clone();
+            Some(infer_wsconn_method(ctx, &recv, &send, method, args_ty, span))
         }
         // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
         Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
@@ -4250,17 +4294,19 @@ fn check_binary_callback(
     }
 }
 
-/// Fase 9.w.2 — métodos sobre `WsConn<T>`. Paramétricos sobre `T`:
-/// el tipo de mensaje del WebSocket. `T` se serializa a JSON
-/// automático en el wire.
+/// Fase 9.w.2 + 9.w.2-wsconn-bidir — métodos sobre `WsConn`.
+/// Paramétricos sobre `recv` y `send` (que pueden ser el mismo
+/// tipo para `WsConn<T>` simétrico, o distintos para `WsConn<In,
+/// Out>` asimétrico). Ambos viajan por el wire como JSON
+/// automático (o binary raw cuando T = Bytes).
 ///
 /// Métodos:
-///   - `recv() -> Result<T>` — bloquea (async) hasta que llegue un
+///   - `recv() -> Result<RECV>` — bloquea (async) hasta que llegue un
 ///     frame. `Err(Str)` si la conn se cerró o el frame no parsea
-///     contra `T`.
-///   - `send(msg: T) -> Result<Null>` — envía un frame text con
-///     `T` serializado. `Err` si la conn está cerrada.
-///   - `broadcast(msg: T) -> Result<Null>` — envía a TODOS los
+///     contra `RECV`.
+///   - `send(msg: SEND) -> Result<Null>` — envía un frame con
+///     `SEND` serializado. `Err` si la conn está cerrada.
+///   - `broadcast(msg: SEND) -> Result<Null>` — envía a TODOS los
 ///     conns vivos del endpoint, **incluyendo** el sender
 ///     (convención Socket.IO/Phoenix). `Err` si serialización
 ///     falla; conns individuales caídos se ignoran silenciosamente.
@@ -4270,27 +4316,39 @@ fn check_binary_callback(
 /// path significativo: si ya está cerrada, no pasa nada).
 fn infer_wsconn_method(
     ctx: &mut CheckCtx,
-    t: &Type,
+    recv_ty: &Type,
+    send_ty: &Type,
     method: &str,
     args_ty: &[Type],
     span: Span,
 ) -> Type {
+    // Para los mensajes de error, formateamos el tipo del WsConn
+    // completo (`WsConn<T>` simétrico o `WsConn<In, Out>` asimétrico).
+    let conn_disp = if recv_ty == send_ty {
+        format!("WsConn<{}>", recv_ty.display(ctx.types))
+    } else {
+        format!(
+            "WsConn<{}, {}>",
+            recv_ty.display(ctx.types),
+            send_ty.display(ctx.types)
+        )
+    };
     match method {
         "recv" => {
             check_method_arity(ctx, "recv", args_ty, 0, span);
             Type::Result {
-                ok: Box::new(t.clone()),
+                ok: Box::new(recv_ty.clone()),
                 err: Box::new(Type::Str),
             }
         }
         "send" => {
             check_method_arity(ctx, "send", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
-                if !is_compatible(arg, t) {
+                if !is_compatible(arg, send_ty) {
                     ctx.error_at(span, format!(
-                        "el método `WsConn<{}>.send(msg)` espera un argumento de tipo `{}`, recibió `{}`",
-                        t.display(ctx.types),
-                        t.display(ctx.types),
+                        "el método `{}.send(msg)` espera un argumento de tipo `{}`, recibió `{}`",
+                        conn_disp,
+                        send_ty.display(ctx.types),
                         arg.display(ctx.types),
                     ));
                 }
@@ -4303,11 +4361,11 @@ fn infer_wsconn_method(
         "broadcast" => {
             check_method_arity(ctx, "broadcast", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
-                if !is_compatible(arg, t) {
+                if !is_compatible(arg, send_ty) {
                     ctx.error_at(span, format!(
-                        "el método `WsConn<{}>.broadcast(msg)` espera un argumento de tipo `{}`, recibió `{}`",
-                        t.display(ctx.types),
-                        t.display(ctx.types),
+                        "el método `{}.broadcast(msg)` espera un argumento de tipo `{}`, recibió `{}`",
+                        conn_disp,
+                        send_ty.display(ctx.types),
                         arg.display(ctx.types),
                     ));
                 }
@@ -4323,8 +4381,8 @@ fn infer_wsconn_method(
         }
         _ => {
             ctx.error_at(span, format!(
-                "el tipo `WsConn<{}>` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
-                t.display(ctx.types),
+                "el tipo `{}` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
+                conn_disp,
                 method,
             ));
             Type::Any
@@ -6277,9 +6335,12 @@ fn check_ws_handler(
     let mut wsconn_params = 0;
     for p in params {
         let pty = ann_to_type(p.type_.as_ref(), ctx.types);
-        if let Type::WsConn(inner) = &pty {
+        if let Type::WsConn { recv, send } = &pty {
             wsconn_params += 1;
-            if matches!(inner.as_ref(), Type::Any) {
+            // 9.w.2-wsconn-bidir: ambos recv y send deben ser
+            // concretos. Si alguno es Any, error (paralelo al check
+            // simétrico pre-bidir).
+            if matches!(recv.as_ref(), Type::Any) || matches!(send.as_ref(), Type::Any) {
                 ctx.errors.push(FitzError::new(
                     ErrorKind::TypeError,
                     fn_span.line,
@@ -11742,7 +11803,15 @@ print(total)
             args: vec![TypeExpr::Named("Str".into())],
         };
         let ty = resolve_type_expr(&te, &env).expect("WsConn<Str>");
-        assert_eq!(ty, Type::WsConn(Box::new(Type::Str)));
+        // 9.w.2-wsconn-bidir: `WsConn<T>` (aridad 1) = simétrico,
+        // recv == send == T.
+        assert_eq!(
+            ty,
+            Type::WsConn {
+                recv: Box::new(Type::Str),
+                send: Box::new(Type::Str),
+            }
+        );
     }
 
     #[test]
@@ -11759,8 +11828,57 @@ print(total)
     #[test]
     fn wsconn_display_muestra_inner() {
         let env = TypeEnv::new();
-        let ty = Type::WsConn(Box::new(Type::Int));
+        let ty = Type::WsConn {
+            recv: Box::new(Type::Int),
+            send: Box::new(Type::Int),
+        };
         assert_eq!(ty.display(&env), "WsConn<Int>");
+    }
+
+    #[test]
+    fn wsconn_bidir_aridad_2_resuelve_recv_send_distintos() {
+        // 9.w.2-wsconn-bidir — `WsConn<Int, Str>` recv=Int send=Str.
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic {
+            name: "WsConn".into(),
+            args: vec![
+                TypeExpr::Named("Int".into()),
+                TypeExpr::Named("Str".into()),
+            ],
+        };
+        let ty = resolve_type_expr(&te, &env).expect("WsConn<Int, Str>");
+        assert_eq!(
+            ty,
+            Type::WsConn {
+                recv: Box::new(Type::Int),
+                send: Box::new(Type::Str),
+            }
+        );
+    }
+
+    #[test]
+    fn wsconn_bidir_display_asimetrico_muestra_in_out() {
+        let env = TypeEnv::new();
+        let ty = Type::WsConn {
+            recv: Box::new(Type::Int),
+            send: Box::new(Type::Str),
+        };
+        assert_eq!(ty.display(&env), "WsConn<Int, Str>");
+    }
+
+    #[test]
+    fn wsconn_bidir_aridad_mayor_a_2_es_error() {
+        let env = TypeEnv::new();
+        let te = TypeExpr::Generic {
+            name: "WsConn".into(),
+            args: vec![
+                TypeExpr::Named("Int".into()),
+                TypeExpr::Named("Str".into()),
+                TypeExpr::Named("Bool".into()),
+            ],
+        };
+        let err = resolve_type_expr(&te, &env).expect_err("aridad 3 debería fallar");
+        assert!(matches!(err.kind, ErrorKind::TypeError));
     }
 
     #[test]

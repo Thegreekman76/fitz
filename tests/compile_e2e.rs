@@ -2683,6 +2683,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "28-auth.fitz",
     "29-ws.fitz",
     "29b-ws-binary.fitz",
+    "29c-ws-bidir.fitz",
     "30-cron-background.fitz",
     "31-env.fitz",
 ];
