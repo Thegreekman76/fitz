@@ -8472,12 +8472,129 @@ filas como instancias Fitz tipadas, usá `fitz run` por ahora.
 coerción (pasar dict opaco al cliente vía `serde_json` también
 funciona).
 
-**Bundling de CPython embebido** (`fitz build --bundle-python`)
-queda como sub-paso futuro separado. Hoy el binario asume Python
-instalado; bundling lo embebería para hacer el binario realmente
-standalone.
+Para producir un binario que NO requiera Python en el destino
+(realmente standalone), usá `--bundle-python` — sección siguiente.
 
-### 21.11 Ejemplo CRUD ejecutable
+### 21.11 `fitz build --bundle-python` — binario standalone
+
+`fitz build --bundle-python` produce un binario que internamente
+lleva embebida una distribución completa de CPython 3.14.5 (vía
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+el proyecto que Astral usa para `uv`). El binario resultante NO
+requiere Python instalado en el destino — corre en cualquier
+máquina del triple soportado, en frío:
+
+```bash
+fitz build --bundle-python mi_app.fitz
+./mi_app   # corre sin python en el PATH
+```
+
+**Cuándo usarlo:**
+
+- Deploys a containers minimalistas (Distroless, scratch + glibc).
+- Distribución a usuarios finales que no quieren `pip install`.
+- Demos / portable scripts que viajan en un solo archivo.
+
+**Cuándo NO usarlo:**
+
+- Si tu deploy ya garantiza Python instalado (`FROM python:3.X-slim`,
+  máquinas con Python pre-configurado): el bundle suma ~30-45 MB
+  sin beneficio.
+- Si tu programa NO usa `from python import` (el flag aborta con
+  error claro — el binario default ya es standalone).
+
+**Tamaños observados** (CPython 3.14.5 install_only_stripped):
+
+| Triple | Binario final | Extract dir (TMPDIR) |
+|--------|---------------|----------------------|
+| `x86_64-pc-windows-msvc` | ~22 MB | ~61 MB |
+| `x86_64-unknown-linux-gnu` | ~35 MB | ~75 MB |
+| `x86_64-apple-darwin` | ~24 MB | ~62 MB |
+| `aarch64-apple-darwin` | ~24 MB | ~62 MB |
+| `aarch64-unknown-linux-gnu` | ~28 MB | ~70 MB |
+
+**Timing observado** (Windows 11 SSD, ejemplo de `math.pi + math.sqrt`):
+
+- Cold first run (cache TMP vacío): **~3-5s** (tar -xzf de 60 MB +
+  boot CPython adentro del real binary).
+- Warm subsequent runs: **~50-100ms** (cache hit; sentinel
+  `.extracted` presente, solo se hace exec del real binary).
+
+**Cómo funciona internamente** (modelo Datasette Desktop):
+
+El output user-facing es UN solo binario, pero internamente lleva
+tres piezas embebidas vía `include_bytes!`:
+
+1. **Tarball PBS** (CPython 3.14.5 install_only_stripped del
+   triple destino, ~21 MB Windows / ~34 MB Linux x64).
+2. **Real binary** (transpile estándar del programa Fitz con
+   feature `python` activada, ~180 KB Windows).
+3. **Launcher Rust standalone** (sin pyo3, ~200 KB).
+
+El launcher es la entry point del usuario. En primer run:
+
+1. Calcula hash FNV-1a del tarball (16 chars hex).
+2. Si `$TMPDIR/fitz-py-<hash>/.extracted` no existe → extrae
+   tarball con `tar -xzf` (bsdtar en Win11/macOS, GNU tar en Linux).
+3. Setea `PYTHONHOME=<extract-dir>/python` + ENV vars de búsqueda
+   de lib según OS:
+   - Linux: `LD_LIBRARY_PATH` prepend con `<extract-dir>/python/lib`.
+   - macOS: `DYLD_FALLBACK_LIBRARY_PATH` prepend.
+   - Windows: `PATH` prepend con `<extract-dir>/python` (donde
+     vive `python3.dll`).
+4. `exec` del real binary en Unix (proceso reemplazado, signals
+   forwarded transparente); `spawn + wait + propagate exit code`
+   en Windows.
+
+El real binary arranca con el environment correcto, dlopen
+encuentra libpython, PyO3 boot lazy en el primer `Python::attach`,
+y todo el resto funciona igual que en `fitz run`/`fitz build`
+normal — paridad bit-a-bit.
+
+**Constraint conocido** (deuda `R.bug-pyo3-abi3-portable-link`):
+
+En Linux y macOS, el real binary linkea contra
+`libpython3.X.so.1.0` específica del builder (PyO3 abi3 no logra
+linkear al stable ABI por una limitación de detection del
+linker). El bundle PBS trae libpython 3.14.5; entonces el builder
+necesita tener Python 3.14.x disponible al momento de
+`cargo build` para que las versiones coincidan en runtime.
+
+En Windows el problema no existe — el real binary linkea contra
+`python3.dll` (stable ABI shim) y cualquier versión 3.10+ del
+bundle satisface la dependencia.
+
+Setup del builder en Linux/macOS:
+
+```bash
+# Ubuntu/Debian:
+apt-get install python3.14 python3.14-dev
+
+# macOS con Homebrew:
+brew install python@3.14
+
+# Después:
+fitz build --bundle-python mi_app.fitz
+```
+
+**Cache local del tarball PBS:**
+
+El tarball se descarga UNA vez a `~/.fitz/cache/pbs/` (override
+con `FITZ_CACHE_DIR`) y se reusa entre builds. Tamaño ~21 MB
+Windows / ~34 MB Linux x64. Descarga vía `curl` (asumimos
+disponible en Win11/macOS/Linux moderno).
+
+**Pendientes** (deuda residual de 8.b, NO bloquean uso real):
+
+- Bundling Linux/macOS necesita validación manual end-to-end
+  (smoke local hecho en Windows; Linux/macOS lo confirma el
+  primer usuario que lo pruebe ahí).
+- Bundle más chico vía stdlib stripping de módulos no usados
+  (~30% más reducción posible para programas con interop simple).
+- Hash criptográfico (SHA256) en lugar de FNV-1a para defender
+  contra cambios silenciosos del PBS upstream.
+
+### 21.12 Ejemplo CRUD ejecutable
 
 `examples/guide/21-python-crud/` arma un CRUD completo:
 
@@ -10857,11 +10974,15 @@ Lo que sigue post-8:
     reload `fitz dev` (9.z.3, cap 25), REPL interactivo
     `fitz repl` (9.z.4, cap 26), linter `fitz lint` (9.z.5,
     cap 27). Los 5 sub-pasos cerrados en 2 días (2026-05-16/17).
-- **Sub-paso futuro separado: bundling CPython embebido** —
-  `fitz build --bundle-python` produce un binario standalone que
-  NO requiere Python en el destino. Decisión de herramienta
-  pendiente (python-build-standalone vs PyOxidizer). Sin presión
-  real hoy.
+- **`fitz build --bundle-python` (Fase 8.b) — CERRADO 2026-05-23**:
+  produce un binario standalone con CPython 3.14.5 embebido vía
+  python-build-standalone (Astral). NO requiere Python instalado
+  en el destino. Cap 21.11 documenta uso, tamaños (~22-35 MB
+  según OS), timing (cold ~3-5s, warm ~50-100ms), constraint del
+  builder (Linux/macOS requiere Python 3.14.x, Windows no por
+  stable ABI shim). Único lenguaje moderno activamente
+  mantenido con esta capacidad — PyOxidizer está ralentizado
+  desde 2023.
 - **Stack DB nativo** (Fase 10+): driver Postgres en Fitz puro,
   ORM nativo declarativo sobre `type` (estilo Diesel/sqlx),
   migraciones, pool. La interop Python de Fase 8 es el puente

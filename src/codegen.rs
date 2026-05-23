@@ -1629,6 +1629,15 @@ fn cargo_toml_for(
     // CPython en el primer `Python::attach`). Sin feature gate
     // condicional — si el programa usa interop, pyo3 es dep no-opcional
     // del binario generado.
+    //
+    // Fase 8.b (bundling): el output de este codegen ES el "real binary"
+    // que `fitz build --bundle-python` embebe adentro del launcher. En
+    // Windows linkea contra `python3.dll` (stable ABI shim, ~180 KB
+    // binario) — cualquier libpython 3.10+ del PBS bundle satisface la
+    // dependencia. En Linux/macOS la deuda R.bug-pyo3-abi3-portable-link
+    // hace que linkee contra `libpython3.X.so.1.0` específica del
+    // builder; el bundle PBS debe traer EXACTAMENTE esa versión (el
+    // builder define la versión bundleable).
     let pyo3_line = if uses_python {
         "pyo3 = { version = \"0.28\", features = [\"abi3-py310\", \"auto-initialize\"] }\n"
     } else {

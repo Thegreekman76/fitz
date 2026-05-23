@@ -12,6 +12,13 @@
 //! subsecuentes reusan el dir extraído (sentinel `.extracted` marca
 //! completitud).
 //!
+//! **Timing observado en Windows 11 SSD** (CPython 3.14.5 install_only_stripped,
+//! 21 MB comprimido → 61 MB extraído, bsdtar nativo):
+//!  - Cold first run (cache TMP vacío): ~3-5s (extracción tar +
+//!    boot de CPython adentro del real binary).
+//!  - Warm subsequent runs: ~50-100ms (cache hit, sentinel `.extracted`
+//!    presente, solo se hace exec/spawn del real binary).
+//!
 //! **Patrón validado en producción**: Datasette Desktop (Simon
 //! Willison, 2021) ships así con bsdtar + PBS. Es el modelo
 //! recomendado por la investigación del 2026-05-23 después de

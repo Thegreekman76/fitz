@@ -9,11 +9,13 @@
 //!
 //! - **Release pinned** (constante `PBS_RELEASE`): builds reproducibles.
 //!   Bump manual c/3-6 meses. Misma política que `Cargo.lock`.
-//! - **CPython 3.13.x**: versión más reciente estable. PyO3 con
-//!   `abi3-py310` linkea dinámico contra libpython específica del
-//!   builder; bundlear PBS 3.13 exige builder con Python 3.13.x.
-//!   Cuando cierre `R.bug-pyo3-abi3-portable-link`, el constraint
-//!   desaparece (linkea contra `libpython3.so` stable ABI).
+//! - **CPython 3.14.x**: versión más reciente estable disponible en
+//!   PBS y dentro del rango `abi3-py310` (3.10-3.14+). PyO3 con
+//!   `abi3-py310` + `auto-initialize` linkea dinámico contra
+//!   libpython específica del builder; bundlear PBS 3.14 exige
+//!   builder con Python 3.14.x. Cuando cierre
+//!   `R.bug-pyo3-abi3-portable-link`, el constraint desaparece
+//!   (linkea contra `libpython3.so` stable ABI).
 //! - **Sabor `install_only_stripped`**: drop-in Python directory
 //!   portable (extrae a temp dir + corre `python.exe` directo), sin
 //!   debug symbols. ~70% más chico que `install_only` (Linux x64: 33
@@ -37,7 +39,7 @@ use std::process::Command;
 pub const PBS_RELEASE: &str = "20260510";
 
 /// Versión de CPython embebida (debe estar disponible en `PBS_RELEASE`).
-pub const PYTHON_VERSION: &str = "3.13.13";
+pub const PYTHON_VERSION: &str = "3.14.5";
 
 /// Sabor del tarball. `install_only_stripped` tiene los mismos archivos
 /// que `install_only` pero sin debug symbols.
@@ -278,9 +280,10 @@ mod tests {
     }
 
     #[test]
-    fn python_version_es_3_13_x() {
-        // Sanity check: estamos pineados a CPython 3.13.x.
-        assert!(PYTHON_VERSION.starts_with("3.13."));
+    fn python_version_es_3_14_x() {
+        // Sanity check: estamos pineados a CPython 3.14.x (último
+        // stable dentro del rango `abi3-py310` que PyO3 soporta).
+        assert!(PYTHON_VERSION.starts_with("3.14."));
     }
 
     #[test]

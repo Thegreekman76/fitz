@@ -5,8 +5,8 @@
 // duplicada). Acá solo importamos lo que el CLI consume.
 
 use fitz::{
-    codegen, cron_jobs, evaluator, fmt, http, lexer, lint, lockfile, manifest, openapi, parser,
-    testing, types,
+    codegen, cron_jobs, evaluator, fmt, http, launcher_template, lexer, lint, lockfile, manifest,
+    openapi, parser, pbs, testing, types,
 };
 
 // Sub-comando `fitz py-types` (Fase 8.5) — solo con la feature `python`.
@@ -49,6 +49,14 @@ enum Commands {
         /// compila su `[bin].main` con output en
         /// `<manifest_dir>/target/release/<pkg-name>`.
         file: Option<PathBuf>,
+        /// Fase 8.b — Bundlear CPython embebido en el binario final.
+        /// El output es un binario standalone que NO requiere Python
+        /// instalado en el destino. Internamente: launcher Datasette-
+        /// style + tarball PBS + real binary, todos embebidos.
+        /// Requiere que el programa use `from python import ...`.
+        /// Suma ~30 MB (Windows) / ~45 MB (Linux x64) al binario.
+        #[arg(long = "bundle-python")]
+        bundle_python: bool,
     },
     /// Verificar tipos y sintaxis. Sin archivo, lee el manifest
     /// (Fase 9.y.2) y chequea el `[bin].main`.
@@ -245,7 +253,10 @@ fn main() {
             let dep_registry = dep_registry_from(&resolved);
             run_file(&resolved.entry, no_typecheck, dep_registry);
         }
-        Commands::Build { file } => {
+        Commands::Build {
+            file,
+            bundle_python,
+        } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
             // En manifest mode, output a `<manifest_dir>/target/release/
@@ -263,7 +274,15 @@ fn main() {
                     .join(filename)
             });
             let dep_registry = dep_registry_from(&resolved);
-            build_file(&resolved.entry, override_dest.as_deref(), dep_registry);
+            if bundle_python {
+                build_file_with_bundle(
+                    &resolved.entry,
+                    override_dest.as_deref(),
+                    dep_registry,
+                );
+            } else {
+                build_file(&resolved.entry, override_dest.as_deref(), dep_registry);
+            }
         }
         Commands::Check { file } => {
             let resolved = resolve_entry(file);
@@ -987,6 +1006,346 @@ fn build_file(
     }
 
     println!("✓ binario: {}", bin_out.display());
+}
+
+/// Fase 8.b — Variante de `build_file` que produce un binario standalone
+/// con CPython embebido. El output es UN solo archivo que internamente
+/// lleva: tarball PBS (install_only_stripped 3.14.x) + real binary +
+/// launcher Rust standalone. Primer run extrae a `$TMPDIR/fitz-py-<hash>/`,
+/// setea PYTHONHOME + LD_LIBRARY_PATH/DYLD/PATH según OS, exec del real
+/// binary. Subsecuentes runs son instantáneos (cache TMP).
+///
+/// Validaciones tempranas: host triple soportado por PBS, programa usa
+/// `from python import` (sin interop no tiene sentido bundlear).
+///
+/// Constraint conocido del Linux (deuda R.bug-pyo3-abi3-portable-link):
+/// el real binary linkea contra `libpython3.X.so.1.0` específica del
+/// builder, no contra `libpython3.so` stable ABI. PBS 3.14.5 exige que
+/// el builder tenga Python 3.14.x disponible al momento de `cargo build`
+/// para que la versión del symlink linkeado coincida con la libpython
+/// del bundle. En Windows este problema no existe (linkea contra
+/// `python3.dll` stable ABI shim).
+fn build_file_with_bundle(
+    path: &PathBuf,
+    override_dest: Option<&std::path::Path>,
+    dep_registry: manifest::DepRegistry,
+) {
+    // --- Validación temprana: host triple soportado ---
+    let triple = match pbs::host_triple() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("✗ {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    // --- Lex + parse para detectar from python import ---
+    let source = fs::read_to_string(path).unwrap_or_else(|e| {
+        eprintln!("Error leyendo {}: {}", path.display(), e);
+        std::process::exit(1);
+    });
+
+    let tokens = match lexer::tokenize(&source) {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+    let mut program = match parser::parse(tokens) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{}", e);
+            std::process::exit(1);
+        }
+    };
+
+    if !program_uses_from_python_import(&program) {
+        eprintln!(
+            "✗ `--bundle-python` solo aplica a programas que usan `from python import ...`."
+        );
+        eprintln!(
+            "  Si tu programa no usa interop Python, usá `fitz build` sin el flag — el binario \
+             resultante ya es standalone (no requiere ningún runtime externo)."
+        );
+        std::process::exit(1);
+    }
+
+    // --- Checker strict (sin `--no-typecheck` en build) ---
+    let (env, types, _defs, type_errors) = types::check_program(&program);
+    if !type_errors.is_empty() {
+        eprintln!(
+            "✗ {} — {} error(es) de tipo:",
+            path.display(),
+            type_errors.len()
+        );
+        for e in &type_errors {
+            eprintln!("  {}", e);
+        }
+        eprintln!("   Usá `fitz check` para revisar antes de buildear.");
+        std::process::exit(1);
+    }
+
+    let (env, types) = if codegen::has_unannotated_fn_params(&program) {
+        codegen::fill_inferred_param_types(&mut program, &types, &env);
+        let (env2, types2, _defs2, errs2) = types::check_program(&program);
+        if !errs2.is_empty() {
+            eprintln!(
+                "✗ {} — {} error(es) de tipo tras inferencia de params:",
+                path.display(),
+                errs2.len()
+            );
+            for e in &errs2 {
+                eprintln!("  {}", e);
+            }
+            std::process::exit(1);
+        }
+        (env2, types2)
+    } else {
+        (env, types)
+    };
+
+    // --- Codegen + escribir Cargo project del real binary ---
+    let project = match codegen::generate_project(path, &program, &env, &types, dep_registry) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ codegen: {}", e);
+            std::process::exit(1);
+        }
+    };
+
+    let build_dir = PathBuf::from("target")
+        .join("fitz-build")
+        .join(&project.bin_name);
+    let src_dir = build_dir.join("src");
+    if let Err(e) = fs::create_dir_all(&src_dir) {
+        eprintln!("Error creando {}: {}", src_dir.display(), e);
+        std::process::exit(1);
+    }
+
+    let cargo_toml_path = build_dir.join("Cargo.toml");
+    if let Err(e) = fs::write(&cargo_toml_path, &project.cargo_toml) {
+        eprintln!("Error escribiendo {}: {}", cargo_toml_path.display(), e);
+        std::process::exit(1);
+    }
+    let main_rs_path = src_dir.join("main.rs");
+    if let Err(e) = fs::write(&main_rs_path, &project.main_rs) {
+        eprintln!("Error escribiendo {}: {}", main_rs_path.display(), e);
+        std::process::exit(1);
+    }
+    for mod_file in &project.mod_files {
+        let dest = src_dir.join(&mod_file.rel_path);
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Error creando {}: {}", parent.display(), e);
+                std::process::exit(1);
+            }
+        }
+        if let Err(e) = fs::write(&dest, &mod_file.content) {
+            eprintln!("Error escribiendo {}: {}", dest.display(), e);
+            std::process::exit(1);
+        }
+    }
+
+    // --- Build del real binary ---
+    println!("→ compilando real binary…");
+    let output = std::process::Command::new("cargo")
+        .args(["build", "--release", "--manifest-path"])
+        .arg(&cargo_toml_path)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("Error invocando cargo (real binary): {}", e);
+            std::process::exit(1);
+        }
+    };
+    if !output.status.success() {
+        eprintln!("✗ cargo build del real binary falló:");
+        eprintln!("--- stderr ---");
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    let real_bin_filename = if cfg!(windows) {
+        format!("{}.exe", project.bin_name)
+    } else {
+        project.bin_name.clone()
+    };
+    let real_bin_path = build_dir
+        .join("target")
+        .join("release")
+        .join(&real_bin_filename);
+    let real_bin_abs = match real_bin_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!(
+                "✗ no se encontró el real binary tras cargo build ({}): {}",
+                real_bin_path.display(),
+                e
+            );
+            std::process::exit(1);
+        }
+    };
+
+    // --- PBS tarball + hash ---
+    println!(
+        "→ asegurando PBS tarball (cpython {} / {})…",
+        pbs::PYTHON_VERSION,
+        triple
+    );
+    let tarball_path = match pbs::ensure_tarball(triple) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ {}", e);
+            std::process::exit(1);
+        }
+    };
+    let tarball_abs = match tarball_path.canonicalize() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("✗ canonicalize del tarball PBS falló: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let tarball_bytes = match fs::read(&tarball_abs) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("✗ leer tarball PBS para hash: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let tarball_hash = launcher_template::tarball_hash_short(&tarball_bytes);
+
+    // --- Generar + buildear launcher ---
+    println!("→ compilando launcher…");
+    let launcher_bin_name = format!("{}_launcher", project.bin_name);
+    let launcher_dir = PathBuf::from("target")
+        .join("fitz-build")
+        .join(&launcher_bin_name);
+    let launcher_src = launcher_dir.join("src");
+    if let Err(e) = fs::create_dir_all(&launcher_src) {
+        eprintln!("Error creando {}: {}", launcher_src.display(), e);
+        std::process::exit(1);
+    }
+
+    let launcher_main_rs = launcher_template::gen_launcher_main_rs(
+        &tarball_abs.to_string_lossy(),
+        &real_bin_abs.to_string_lossy(),
+        &tarball_hash,
+    );
+    let launcher_cargo_toml = launcher_template::gen_launcher_cargo_toml(&launcher_bin_name);
+
+    let launcher_cargo_toml_path = launcher_dir.join("Cargo.toml");
+    if let Err(e) = fs::write(&launcher_cargo_toml_path, &launcher_cargo_toml) {
+        eprintln!(
+            "Error escribiendo {}: {}",
+            launcher_cargo_toml_path.display(),
+            e
+        );
+        std::process::exit(1);
+    }
+    let launcher_main_rs_path = launcher_src.join("main.rs");
+    if let Err(e) = fs::write(&launcher_main_rs_path, &launcher_main_rs) {
+        eprintln!(
+            "Error escribiendo {}: {}",
+            launcher_main_rs_path.display(),
+            e
+        );
+        std::process::exit(1);
+    }
+
+    let output = std::process::Command::new("cargo")
+        .args(["build", "--release", "--manifest-path"])
+        .arg(&launcher_cargo_toml_path)
+        .output();
+    let output = match output {
+        Ok(o) => o,
+        Err(e) => {
+            eprintln!("Error invocando cargo (launcher): {}", e);
+            std::process::exit(1);
+        }
+    };
+    if !output.status.success() {
+        eprintln!("✗ cargo build del launcher falló:");
+        eprintln!(
+            "   (revisá {} para ver el código generado.)",
+            launcher_src.display()
+        );
+        eprintln!("--- stderr ---");
+        eprintln!("{}", String::from_utf8_lossy(&output.stderr));
+        std::process::exit(1);
+    }
+
+    // --- Copiar launcher al destino del usuario ---
+    let launcher_release_filename = if cfg!(windows) {
+        format!("{}.exe", launcher_bin_name)
+    } else {
+        launcher_bin_name.clone()
+    };
+    let output_filename = if cfg!(windows) {
+        format!("{}.exe", project.output_basename)
+    } else {
+        project.output_basename.clone()
+    };
+    let launcher_release_path = launcher_dir
+        .join("target")
+        .join("release")
+        .join(&launcher_release_filename);
+
+    let bin_out = match override_dest {
+        Some(p) => p.to_path_buf(),
+        None => path
+            .parent()
+            .map(|p| p.join(&output_filename))
+            .unwrap_or_else(|| PathBuf::from(&output_filename)),
+    };
+    if let Some(parent) = bin_out.parent() {
+        if !parent.as_os_str().is_empty() {
+            if let Err(e) = fs::create_dir_all(parent) {
+                eprintln!("Error creando {}: {}", parent.display(), e);
+                std::process::exit(1);
+            }
+        }
+    }
+    if let Err(e) = fs::copy(&launcher_release_path, &bin_out) {
+        eprintln!(
+            "Error copiando {} a {}: {}",
+            launcher_release_path.display(),
+            bin_out.display(),
+            e
+        );
+        std::process::exit(1);
+    }
+
+    let bin_size_mb = fs::metadata(&bin_out)
+        .map(|m| m.len() as f64 / 1024.0 / 1024.0)
+        .unwrap_or(0.0);
+    println!(
+        "✓ binario standalone (CPython {} embebido): {} ({:.1} MB)",
+        pbs::PYTHON_VERSION,
+        bin_out.display(),
+        bin_size_mb
+    );
+    println!(
+        "  Primer arranque en el destino extrae a $TMPDIR/fitz-py-{}/ \
+         (~3-5s sobre SSD, depende del OS). Runs subsecuentes ~50-100ms (cache TMP).",
+        &tarball_hash[..8]
+    );
+}
+
+/// Detecta `from python import X` en el AST. Devuelve true si al menos
+/// un `Stmt::FromImport` tiene `path[0] == "python"`. Usado por
+/// `build_file_with_bundle` para validar el uso de `--bundle-python`.
+fn program_uses_from_python_import(program: &fitz::ast::Program) -> bool {
+    use fitz::ast::Stmt;
+    program.iter().any(|s| {
+        matches!(
+            s,
+            Stmt::FromImport { path, .. }
+                if path.first().map(|s| s.as_str()) == Some("python")
+        )
+    })
 }
 
 fn run_file(path: &PathBuf, no_typecheck: bool, dep_registry: manifest::DepRegistry) {

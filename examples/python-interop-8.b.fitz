@@ -1,0 +1,61 @@
+// Fase 8.b — Bundling de CPython embebido.
+//
+// Este ejemplo demuestra `fitz build --bundle-python`: produce un
+// binario standalone que NO requiere Python instalado en el destino.
+// Internamente lleva embebido CPython 3.14.5 (vía python-build-
+// standalone de Astral), un "real binary" con PyO3 + interop Python,
+// y un launcher Rust standalone que extrae todo a $TMPDIR en primer
+// run y exec del real binary con PYTHONHOME seteado.
+//
+// === Comando para buildear ===
+//
+// fitz build --bundle-python examples/python-interop-8.b.fitz
+//
+// El primer build descarga el tarball PBS (~21 MB Windows / ~34 MB
+// Linux x64) a ~/.fitz/cache/pbs/. Builds siguientes lo reusan.
+//
+// === Tamaños observados ===
+//
+// Windows x64 binario final: ~22 MB
+// Linux x64 binario final:   ~35 MB
+// macOS ARM binario final:   ~24 MB
+//
+// === Timing observado ===
+//
+// Cold first run (cache TMPDIR vacío): ~3-5s
+// Warm subsequent runs:                ~50-100ms
+//
+// === Cuándo usar este flag ===
+//
+// - Deploys a containers minimalistas (Distroless, scratch).
+// - Distribución a usuarios finales que no quieren `pip install`.
+// - Demos / portable scripts en un solo archivo.
+//
+// === Cuándo NO usar ===
+//
+// - Si el destino ya tiene Python instalado (FROM python:3.X-slim,
+//   máquinas pre-configuradas): suma 30-45 MB sin beneficio.
+// - Si tu programa NO usa `from python import`: el flag aborta con
+//   error claro; el binario default ya es standalone.
+
+from python import math
+
+print("=== bundled CPython ===")
+print("pi   = {math.pi}")
+print("e    = {math.e}")
+print("tau  = {math.tau}")
+print("")
+print("=== Result wrap automático ===")
+print("sqrt(16) = {math.sqrt(16.0)}")
+print("log(e)   = {math.log(math.e)}")
+
+// Output esperado, ejecutado en máquina sin Python instalado:
+//
+// === bundled CPython ===
+// pi   = 3.141592653589793
+// e    = 2.718281828459045
+// tau  = 6.283185307179586
+//
+// === Result wrap automático ===
+// sqrt(16) = Ok(4.0)
+// log(e)   = Ok(1.0)

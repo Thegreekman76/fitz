@@ -3910,13 +3910,14 @@ Roadmap original cumplido al 100%:
 1295 unit + 88 E2E + 3 openapi con `--features python`. Clippy
 `-D warnings` limpio en ambos modos.
 
-**Sub-paso separado pendiente** (NO parte del roadmap original
-de Fase 8): bundling CPython embebido (`fitz build
---bundle-python`). Decisión python-build-standalone (mantenido
-activamente por Astral para `uv`, recomendado) vs PyOxidizer
-(ralentizado 2024-2025) pendiente. Sin presión real al cierre —
-el binario actual asume Python instalado, funcional para
-deploys con Docker base Python.
+**Sub-paso separado CERRADO 2026-05-23**: bundling CPython
+embebido (`fitz build --bundle-python`) — ver
+**Fase 8.b** abajo. Decisión python-build-standalone (Astral,
+mantenido activamente) vs PyOxidizer (ralentizado 2024-2025):
+**PBS ganó sin discusión** después de investigación. Modelo
+launcher pattern (Datasette Desktop) elegido tras descartar
+extract-on-first-run naive, linking estático con PBS full
+(PyOxidizer-style), y delay-load/dlopen manual.
 
 **Próximo norte**: **Fase 9 — Ecosistema** (package manager,
 LSP con autocomplete + hover + go-to-def, formatter, linter).
@@ -3933,6 +3934,120 @@ Pre-reqs habilitantes ya identificados en deudas-post-5b: F15
 - Stubs `.pyi` parseados (pospuesto a Fase 9+)
 - KeyboardInterrupt/SystemExit estructurados como tipos
   específicos (hoy bajan como Err genérico)
+
+### Fase 8.b — `fitz build --bundle-python` (CPython embebido) — CERRADA (2026-05-23)
+
+Sub-paso separado de Fase 8 entera. Habilita producción de
+binarios standalone con CPython 3.14.5 embebido vía
+[python-build-standalone (PBS)](https://github.com/astral-sh/python-build-standalone)
+de Astral. El binario resultante **NO requiere Python instalado
+en el destino** — corre en cualquier máquina del triple soportado,
+en frío. Único lenguaje moderno activamente mantenido con esta
+capacidad (PyOxidizer hizo algo parecido pero está ralentizado
+desde 2023).
+
+**Sub-pasos cerrados** (8 commits en una sesión):
+
+- ✅ **8.b.1** — Cache + descarga PBS (`src/pbs.rs`). Release
+  pinned `20260510` con CPython `3.14.5`,
+  `install_only_stripped`. Cache en `~/.fitz/cache/pbs/` paralelo
+  a `git_dep`. Subprocess `curl`. 10 unit tests.
+- ✅ **8.b.2** — Real binary codegen validado sin cambios
+  funcionales. El output de `fitz build --features python` es
+  exactamente el "real binary" que el launcher embebe. Smoke
+  Windows: 180 KB binario, depende dinámicamente de `python3.dll`
+  stable ABI shim.
+- ✅ **8.b.3** — Launcher binary template (`src/launcher_template.rs`).
+  Datasette Desktop-style: extrae tarball + real binary a
+  `$TMPDIR/fitz-py-<hash>/`, setea PYTHONHOME + ENV de lib según
+  OS, exec/spawn del real binary. Subprocess `tar -xzf` (bsdtar
+  Win11/macOS, GNU tar Linux). Cero deps Rust en el launcher.
+  Hash FNV-1a 16-char. 11 unit + 2 E2E.
+- ✅ **8.b.4 + 8.b.5** (combinados) — Flag CLI `--bundle-python`
+  + función nueva `main::build_file_with_bundle()` que orquesta
+  el pipeline. Validaciones tempranas (host triple, programa usa
+  `from python import`). Validado end-to-end manual: 21.8 MB
+  binario Windows que corre sin Python en PATH.
+- ✅ **8.b.6** — Tests E2E del error path (`tests/bundle_python_e2e.rs`).
+  2 tests verdes sin red ni Python. El happy path no se testea
+  en CI por costo (~10s download tarball + Python 3.14 requerido
+  en builder).
+- ✅ **8.b.7** — Cap 21.11 nuevo "`fitz build --bundle-python` —
+  binario standalone" en `docs/guide.md` (renumeración
+  21.11→21.12, 21.12→21.13). Ejemplo `examples/python-interop-8.b.fitz`
+  runnable. README footnote § actualizado con emphasis del
+  diferencial.
+- ✅ **8.b.8** — Cierre formal: CHANGELOG v0.9.40, esta sección,
+  deudas, smoke GUIDE_EXAMPLES_COMPILE verde (sin regresión del
+  codegen normal).
+
+**Decisiones técnicas tomadas al arrancar**:
+
+- **Versión Python embebida**: CPython 3.14.5 (último stable en
+  el rango `abi3-py310` que PyO3 soporta). Decisión confirmada
+  con el autor al ver que la máquina del autor tiene 3.14.2
+  instalado (no 3.13) — switch de 3.13.x → 3.14.5 alinea con
+  el host actual sin pedir instalar versión extra.
+- **Sabor del tarball**: `install_only_stripped` (~70% más chico
+  que `install_only` por eliminación de debug symbols).
+- **Modelo de bundling**: launcher pattern (Datasette-style).
+  Descartamos: extract-on-first-run naive (no funciona — el OS
+  resuelve libpython ANTES de `main()` en las 3 plataformas);
+  linking estático con PBS full (PyOxidizer-style,
+  "multi-month rabbit hole"); delay-load/dlopen manual (sin
+  soporte en PyO3, brittle entre versiones).
+- **Cache TMP extract**: `$TMPDIR/fitz-py-<hash>/` con sentinel
+  `.extracted`. Rename atómico para evitar races concurrentes.
+  Hash determinístico (FNV-1a) → cada versión bundleada tiene
+  su propio dir; cambio del bundle = re-extract automático.
+- **Tar subprocess** (no `flate2 + tar` crates Rust): bsdtar
+  está nativo en Windows 11 (`C:\WINDOWS\system32\tar.exe`),
+  macOS, y todo Linux moderno. Cero deps en el launcher.
+- **Curl subprocess** para descarga (no `ureq`/`reqwest`):
+  garantizado en Win11/macOS/Linux moderno. Cero deps Rust
+  nuevas.
+
+**Cierre parcial de `R.bug-pyo3-abi3-portable-link`**:
+
+El launcher pattern bypasea el bug en Windows completamente: el
+real binary linkea contra `python3.dll` (stable ABI shim) y
+cualquier libpython 3.10+ del bundle satisface la dependencia.
+En Linux/macOS el constraint sigue: PyO3 emite `-lpython3.X`
+versionada en lugar de `-lpython3` por la limitación documentada
+en la deuda — bundle PBS 3.14.5 exige builder con Python 3.14.x.
+Cuando cierre la deuda completa, `--bundle-python` será
+independiente de la versión Python del builder en las 3
+plataformas.
+
+**Tests al cierre**:
+
+- **25 tests nuevos** específicos de Fase 8.b: 10 unit (pbs) +
+  11 unit + 2 E2E (launcher_template) + 2 E2E (bundle_python).
+- **Smoke `GUIDE_EXAMPLES_COMPILE`** sigue verde (sin regresión
+  del codegen normal).
+- **Smoke manual end-to-end Windows**: validated
+  bit-a-bit con programa interop simple (math.pi + math.sqrt)
+  ejecutado SIN Python en PATH.
+
+**Deuda residual de Fase 8.b** (NO bloquea uso real, abre items
+para iteración 2 si aparece presión):
+
+- **Bundling de pip packages** (sub-paso futuro 8.b.x).
+  Hoy `--bundle-python` embebe CPython base + stdlib. Programas
+  con SQLAlchemy/numpy/etc. necesitan `pip install` en el
+  destino. Flag futuro `--bundle-pip <pkg>` empaquetaría
+  paquetes pip junto al CPython base.
+- **Boilerplates 5/6 simplificación**: con `--bundle-pip` los
+  Dockerfiles podrían `FROM scratch` o `FROM distroless` en
+  lugar de `FROM python:3.X-slim`. Ahorro imagen ~150 MB → ~40
+  MB.
+- **Linux/macOS smoke end-to-end**: solo validado en Windows
+  hoy. Los primeros usuarios en Linux/macOS confirmarán el
+  flow ahí.
+- **Bundle más chico vía stdlib stripping**: ~30% reducción
+  posible eliminando módulos no usados.
+- **Hash SHA256** en lugar de FNV-1a (mayor defensa contra
+  cambios silenciosos del PBS upstream).
 
 ### Decisiones cross-cutting
 

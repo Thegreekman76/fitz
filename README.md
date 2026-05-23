@@ -75,7 +75,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 ♠ **Jobs sin Celery** con `@cron("expr")` + `@background` + `spawn(fn_call)`. Sin broker externo (Redis/RabbitMQ no son requisito). Cron-only mode systemd-friendly. → [cap 30](https://thegreekman76.github.io/fitz/guide/#30-jobs-sin-celery).
 
-§ **Interop Python via PyO3**. Marshaling bidireccional `List`/`Map`/`Instance` ↔ `list`/`dict`, excepciones Python → `Result<T>`, bridge async tokio ↔ asyncio, `fitz py-types` auto-mapeo SQLAlchemy. Opt-in con feature `python`. → [cap 21](https://thegreekman76.github.io/fitz/guide/#21-interop-python).
+§ **Interop Python via PyO3**. Marshaling bidireccional `List`/`Map`/`Instance` ↔ `list`/`dict`, excepciones Python → `Result<T>`, bridge async tokio ↔ asyncio, `fitz py-types` auto-mapeo SQLAlchemy. Opt-in con feature `python`. **`fitz build --bundle-python` produce un binario standalone con CPython 3.14.5 embebido** (~22-35 MB según OS) — corre en cualquier máquina del triple destino sin Python instalado, sin `pip install`, sin runtime externo. **El único lenguaje del cuadro que hace esto** (Python necesita Python, FastAPI necesita uvicorn, Spring necesita JVM, Express necesita Node). PyOxidizer hizo algo parecido para Python puro pero está ralentizado desde 2023; Fitz reimplementa el patrón sobre [python-build-standalone de Astral](https://github.com/astral-sh/python-build-standalone). → [cap 21](https://thegreekman76.github.io/fitz/guide/#21-interop-python).
 
 ## Estabilidad
 

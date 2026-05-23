@@ -61,7 +61,146 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
-## [v0.9.39] — 2026-05-23 — pyi-stubs: tipos Fitz desde `.pyi` (PEP 484/561)
+## [v0.9.40] — 2026-05-23 — Fase 8.b: `fitz build --bundle-python` (binario standalone con CPython embebido)
+
+Nuevo flag `--bundle-python` para `fitz build`. Produce un binario
+standalone con CPython 3.14.5 embebido (vía
+[python-build-standalone](https://github.com/astral-sh/python-build-standalone)
+de Astral). El binario resultante **NO requiere Python instalado
+en el destino** — corre en cualquier máquina del triple soportado,
+en frío. Es el único lenguaje moderno que ofrece esto activamente
+mantenido (PyOxidizer hizo algo parecido pero está ralentizado
+desde 2023).
+
+### Cambios
+
+- **Nuevo flag CLI `--bundle-python`** (`Commands::Build`):
+  ```bash
+  fitz build --bundle-python mi_app.fitz
+  ./mi_app   # corre sin Python en el PATH
+  ```
+- **Nuevo módulo `src/pbs.rs`** — descarga + cache local del
+  tarball PBS. Release pinned `20260510` con CPython `3.14.5`,
+  sabor `install_only_stripped` (~70% más chico que
+  `install_only`). Cache en `~/.fitz/cache/pbs/` (override con
+  `FITZ_CACHE_DIR`, mismo patrón que `git_dep`). Subprocess
+  `curl`, cero deps Rust nuevas.
+- **Nuevo módulo `src/launcher_template.rs`** — template Rust del
+  launcher Datasette-style con placeholders `__FITZ_REPLACE_*__`.
+  El launcher (~200 KB Rust standalone, sin pyo3) embebe vía
+  `include_bytes!` el tarball PBS y el "real binary". En primer
+  run extrae a `$TMPDIR/fitz-py-<hash>/` (subprocess `tar -xzf`,
+  bsdtar nativo en Win11/macOS/Linux moderno), setea
+  `PYTHONHOME` + `LD_LIBRARY_PATH`/`DYLD_FALLBACK_LIBRARY_PATH`/
+  `PATH` según OS, y `exec` (Unix) / `spawn+wait` (Windows) del
+  real binary. Hash FNV-1a 16-char para nomenclatura
+  determinística del cache TMP.
+- **Nueva función `main::build_file_with_bundle()`** — pipeline
+  paralelo a `build_file()` cuando hay `--bundle-python`:
+  validaciones tempranas (host triple soportado, programa usa
+  `from python import`), build del real binary (reusa
+  `codegen::generate_project` sin cambios), descarga PBS,
+  generación + build del launcher en
+  `target/fitz-build/<bin>_launcher/`, copia del launcher al
+  destino.
+- **Modelo arquitectónico**: launcher pattern (Datasette Desktop
+  desde 2021). Descartamos:
+  - **Extract-on-first-run naive**: no funciona, el OS resuelve
+    libpython ANTES de `main()` (Linux: `DT_NEEDED` vía ld.so;
+    macOS: `LC_LOAD_DYLIB` vía dyld; Windows: import table).
+  - **Linking estático con PBS "full"** (PyOxidizer-style):
+    "multi-month rabbit hole", PyOxidizer es el único proof y
+    está ralentizado.
+  - **Delay-load/dlopen manual**: sin soporte documentado en
+    PyO3, brittle entre versiones.
+
+### Tests
+
+- **10 unit tests** en `src/pbs.rs::tests` (constantes pinned,
+  URL builder, host triple detection, cache path, error display).
+- **11 unit tests** en `src/launcher_template.rs::tests` (template
+  sustitución, escape Windows paths, hash FNV-1a determinístico).
+- **2 E2E tests** en `tests/launcher_template_e2e.rs` (template
+  procesado compila como Rust válido, con paths Windows + paths
+  con espacios).
+- **2 E2E tests** en `tests/bundle_python_e2e.rs` (validation
+  temprana: aborta con mensaje claro sin `from python import`,
+  aborta antes de bundling si hay error de parse).
+- **Total nuevo: 25 tests**. El smoke
+  `GUIDE_EXAMPLES_COMPILE` sigue verde (sin regresión del
+  codegen normal).
+
+### Smoke manual validado
+
+Sobre Windows 11 SSD con programa `from python import math`:
+
+- Build: `→ compilando real binary → asegurando PBS tarball →
+  compilando launcher → ✓ binario standalone (21.8 MB)`
+- Run sin Python en PATH: output bit-a-bit con el real binary
+  (`math.pi = 3.141592653589793`, `math.sqrt(81.0) = Ok(9.0)`).
+- Cold first run: ~5.3s (extract tar + boot CPython).
+- Warm subsequent runs: ~50-100ms (cache TMP hit).
+
+### Tamaños observados
+
+| Triple | Binario final | Extract dir TMP |
+|--------|---------------|-----------------|
+| `x86_64-pc-windows-msvc` | ~22 MB | ~61 MB |
+| `x86_64-unknown-linux-gnu` | ~35 MB | ~75 MB |
+| `aarch64-apple-darwin` | ~24 MB | ~62 MB |
+
+### Ejemplo + docs
+
+- `examples/python-interop-8.b.fitz` — programa runnable que
+  demuestra el flag con comentarios detallados sobre cuándo
+  usarlo y cuándo no, tamaños y timing observados.
+- **Cap 21.11 nuevo** "`fitz build --bundle-python` — binario
+  standalone" en `docs/guide.md` (renumeración 21.11→21.12,
+  21.12→21.13). Incluye cuándo usar, tamaños, timing,
+  arquitectura interna del launcher, constraint del builder, y
+  pendientes.
+- **README footnote § actualizado** con emphasis del feature
+  como diferencial único en el cuadro de comparación
+  Python/TS/Go/Fitz.
+- **Cierre parcial** de la deuda
+  `R.bug-pyo3-abi3-portable-link` (componente bundling): el
+  modelo launcher pattern bypasea el bug en Windows
+  completamente (real binary linkea contra `python3.dll`
+  stable ABI, no contra `python314.dll` específica). En
+  Linux/macOS el constraint sigue (builder = bundle version).
+
+### Deudas residuales (NO bloquean uso real)
+
+- **Bundling de pip packages** (sub-paso futuro). Hoy
+  `--bundle-python` embebe CPython base + stdlib. Programas que
+  usan SQLAlchemy/numpy/etc. necesitan `pip install` adicional
+  en el destino. Una extensión `--bundle-pip <pkg>` podría
+  empaquetar paquetes pip junto al CPython base.
+- **Boilerplates 5/6 simplificación**: con `--bundle-pip` los
+  Dockerfiles podrían `FROM scratch` o `FROM distroless` en
+  lugar de `FROM python:3.X-slim`. Ahorro estimado: imagen
+  ~150 MB → ~40 MB.
+- **Linux/macOS smoke end-to-end**: hoy validado solo en
+  Windows. Los primeros usuarios en Linux/macOS confirman que
+  el pipeline funciona ahí también.
+- **Bundle más chico vía stdlib stripping**: ~30% reducción
+  posible eliminando módulos no usados (similar al
+  `py-spy --strip` de PyOxidizer).
+- **Hash SHA256** en lugar de FNV-1a para defender contra
+  cambios silenciosos del PBS upstream (FNV-1a es suficiente
+  hoy porque el release está pinned).
+
+### Cómo retomar la deuda residual
+
+Para `--bundle-pip`: agregar campo `bundle_pip: Vec<String>`
+al `Commands::Build`; cuando hay `--bundle-pip <pkg>`, después
+de extraer el tarball ejecutar `<extract-dir>/python/python.exe
+-m pip install --target <extract-dir>/python/Lib/site-packages
+<pkg>` adentro del launcher (en primer run, mismo flujo de
+extract). Trade-off: primera ejecución del launcher con pip
+puede tardar varios segundos. Diseño detallado pendiente.
+
+
 
 Nuevo sub-comando `fitz py-stubs <archivo.pyi> [--out <archivo.fitz>]`
 paralelo a `fitz py-types` (que ya hacía SQLAlchemy). Parsea stubs

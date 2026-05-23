@@ -5496,6 +5496,34 @@ no reinventar la rueda.
 **Dockerfiles experimentales** descartados en `d:\tmp\fitz-pyo3-test\`
 (no van al repo). Si se retoma, recrear con el plan documentado.
 
+### Cierre parcial Windows — 2026-05-23 (Fase 8.b cerrada)
+
+El sub-paso `fitz build --bundle-python` (Fase 8.b, CHANGELOG
+v0.9.40) **bypasea este bug completamente en Windows** mediante
+el launcher pattern Datasette-style:
+
+- El "real binary" linkea contra `python3.dll` (stable ABI shim
+  de PyO3 abi3), no contra `python314.dll` específica. Cualquier
+  libpython 3.10+ del bundle PBS satisface la dependencia.
+- Verificado empíricamente: real binary 180 KB Windows, depende
+  dinámicamente de `python3.dll` puro (sin referencia a
+  `python314.dll`).
+- El bundle PBS trae `python3.dll` como shim oficial de CPython
+  3.14.5, que en runtime delega a `python314.dll` adentro del
+  mismo `python/` extraído. Combinación funcional.
+
+En **Linux/macOS el bug sigue abierto**: PyO3 emite `-lpython3.X`
+versionada en lugar de `-lpython3` por la limitación
+documentada arriba (Debian/Ubuntu/Homebrew no proveen el symlink
+unversioned por default). Para `--bundle-python` en esas
+plataformas, el constraint "builder = bundle version" sigue
+vivo: PBS 3.14.5 → builder con Python 3.14.x.
+
+**Cuando se cierre el bug en Linux/macOS**, `--bundle-python`
+podrá usar cualquier Python al build (no solo 3.14.x) — el
+bundle decide la versión efectiva. Hasta entonces, el constraint
+está documentado en `docs/guide.md` cap 21.11.
+
 ### Items vinculados
 
 - `boilerplates/api-postgres-python/Dockerfile` workaround
