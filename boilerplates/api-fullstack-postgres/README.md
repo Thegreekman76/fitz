@@ -491,3 +491,24 @@ Si querés extender este boilerplate:
 
 Para más, leé la **[guía del lenguaje](https://github.com/Thegreekman76/fitz/blob/main/docs/guide.md)**
 del proyecto Fitz.
+
+## Roadmap del boilerplate
+
+- **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)**:
+  hoy el feature empaqueta CPython base + stdlib adentro del
+  binario, sin paquetes pip. Para este boilerplate aún no aplica
+  directamente — `psycopg2-binary` + `sqlalchemy` viven en
+  `requirements.txt`. Cuando el sub-paso futuro `--bundle-pip`
+  aterrice, este Dockerfile podrá:
+  - Pasar de `FROM python:3.12-slim` (runtime) a `FROM
+    gcr.io/distroless/cc-debian12` o `FROM scratch`.
+  - Eliminar la sección `pip install -r requirements.txt` y el
+    `apt-get install libpq5`.
+  - Imagen final: ~80-100 MB (CPython 30 MB + psycopg2 + sqlalchemy
+    + real binary) en vez de ~150 MB hoy.
+  - **Deploy independiente de la versión Python del runtime**: hoy
+    el match builder/runtime es obligatorio (R.bug-pyo3-abi3-portable-link),
+    con bundle desaparece.
+- **DB nativa Fitz (Fase 10)**: reemplazo de la layer Python
+  cuando llegue. Mismo API HTTP + mismo frontend, sin interop
+  ni `requirements.txt`.

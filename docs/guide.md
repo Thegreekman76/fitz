@@ -8086,6 +8086,14 @@ El binario es ~5 MB y arranca instantáneo. No necesita ni Fitz
 ni Rust instalados en la máquina destino: es un ejecutable
 nativo standalone.
 
+> **Programas con interop Python (`from python import`)**:
+> el `fitz build` default produce un binario que linkea contra
+> libpython, así que necesita Python instalado en el destino. El
+> flag `fitz build --bundle-python` empaqueta CPython embebido
+> adentro del binario — el resultado corre standalone sin Python
+> en el destino. Tamaño +25-30 MB, pero el deploy se simplifica
+> dramáticamente. Detalle en [cap 21.11](#2111-fitz-build---bundle-python--binario-standalone).
+
 ### Cuándo usar `fitz run` y cuándo `fitz build`
 
 - **Iterando**: `fitz run`. Cambios en el `.fitz` se reflejan
@@ -10804,6 +10812,21 @@ Cada README dice qué URL abrir y cómo probar con curl.
 Las plantillas son la forma más rápida de ver Fitz "en escala real",
 y también el mejor punto de partida si querés extender en lugar de
 escribir desde cero.
+
+> **Nota sobre `--bundle-python`**: los boilerplates 5 y 6
+> (`api-postgres-python`, `api-fullstack-postgres`) usan
+> `pip install sqlalchemy psycopg2` adentro del runtime — la imagen
+> Docker base sigue siendo `python:3.X-slim` porque el flag actual
+> `fitz build --bundle-python` empaqueta CPython base + stdlib
+> pero NO paquetes pip. Cuando el sub-paso futuro `--bundle-pip`
+> aterrice, esos Dockerfiles podrán pasar a `FROM scratch` o
+> `FROM gcr.io/distroless/cc-debian12` con un binario único de
+> ~80-100 MB (CPython + paquetes pip + el real binary). Hasta
+> entonces, el modelo "match builder/runtime Python" sigue siendo
+> el correcto. Para programas Fitz que **solo usan Python stdlib**
+> (sin pip packages), `--bundle-python` hoy ya produce binarios
+> standalone listos para `FROM scratch` — ver
+> `examples/python-interop-8.b.fitz` y [cap 21.11](#2111-fitz-build---bundle-python--binario-standalone).
 
 ---
 
