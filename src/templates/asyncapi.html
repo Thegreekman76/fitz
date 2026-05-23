@@ -1,0 +1,28 @@
+<!doctype html>
+<html>
+<head>
+  <title>Fitz API — AsyncAPI</title>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <link rel="stylesheet" href="https://unpkg.com/@asyncapi/react-component@2.6.5/styles/default.min.css">
+  <style>body { margin: 0; }</style>
+</head>
+<body>
+  <div id="asyncapi"></div>
+  <script src="https://unpkg.com/@asyncapi/react-component@2.6.5/browser/standalone/index.js"></script>
+  <script>
+    fetch('/asyncapi.json')
+      .then(r => r.text())
+      .then(yaml => {
+        AsyncApiStandalone.render({
+          schema: { content: yaml },
+          config: { show: { sidebar: true } }
+        }, document.getElementById('asyncapi'));
+      })
+      .catch(err => {
+        document.getElementById('asyncapi').innerHTML =
+          '<pre style="padding:1rem;color:#a00">Error cargando /asyncapi.json: ' + err + '</pre>';
+      });
+  </script>
+</body>
+</html>

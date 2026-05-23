@@ -1696,6 +1696,11 @@ pub fn build_router_with_asyncapi(
     // Fase 9.w.2.d — auto-register de /asyncapi.json cuando hay
     // handlers @ws. Mismo patrón que /openapi.json: si el user declaró
     // un handler con el mismo path, su handler gana.
+    //
+    // 9.w.2-asyncapi-ui — además del JSON crudo, registramos /asyncapi
+    // con la UI embebida (paralelo a /docs de OpenAPI). El bundle
+    // `@asyncapi/react-component` se carga desde CDN (estructura
+    // idéntica al patrón Scalar).
     if let Some(schema) = asyncapi_schema {
         if !metas.iter().any(|m| m.path == "/asyncapi.json") {
             let schema = std::sync::Arc::new(schema);
@@ -1704,6 +1709,14 @@ pub fn build_router_with_asyncapi(
                 axum::routing::get(move || {
                     let schema = schema.clone();
                     async move { axum::Json((*schema).clone()) }
+                }),
+            );
+        }
+        if !metas.iter().any(|m| m.path == "/asyncapi") {
+            router = router.route(
+                "/asyncapi",
+                axum::routing::get(|| async {
+                    axum::response::Html(crate::asyncapi::ASYNCAPI_HTML)
                 }),
             );
         }
@@ -3352,6 +3365,9 @@ pub fn serve(
                 eprintln!("   GET /asyncapi.json (canales WebSocket)");
             }
             eprintln!("   GET /docs          (UI Scalar)");
+            if has_asyncapi {
+                eprintln!("   GET /asyncapi      (UI AsyncAPI)");
+            }
         } else {
             eprintln!("   (docs apagadas por @server(docs=false))");
         }
@@ -5884,6 +5900,106 @@ mod tests {
         // Body del usuario, no el HTML de Scalar.
         assert_eq!(body, "\"docs-personalizada\"");
         assert!(!body.contains("@scalar/api-reference"));
+    }
+
+    // ---- 9.w.2-asyncapi-ui — UI HTML embebida para `/asyncapi` ----
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_con_asyncapi_schema_registra_asyncapi_ui() {
+        // Cuando hay asyncapi_schema (porque hay handlers @ws), GET
+        // /asyncapi devuelve el HTML embebido (paralelo a /docs del
+        // OpenAPI). El body referencia /asyncapi.json para cargar el
+        // schema y carga el bundle @asyncapi/react-component.
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let asyncapi_schema = serde_json::json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "Test", "version": "0.1.0" },
+            "channels": {},
+            "operations": {},
+        });
+        let metas: Vec<RouteMeta> = Vec::new();
+        let router = build_router_with_asyncapi(
+            &metas,
+            std::sync::Arc::new(HttpRegistry::new()),
+            None,
+            Some(asyncapi_schema),
+        );
+
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/asyncapi")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        assert!(
+            body.contains("/asyncapi.json"),
+            "esperaba referencia a /asyncapi.json (el fetch del schema), body fue: {}",
+            &body[..body.len().min(400)]
+        );
+        assert!(
+            body.contains("@asyncapi/react-component"),
+            "esperaba carga del bundle @asyncapi/react-component, body fue: {}",
+            &body[..body.len().min(400)]
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_sin_asyncapi_schema_no_registra_asyncapi_ui() {
+        // Sin asyncapi_schema (programa HTTP-only), /asyncapi devuelve 404.
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let metas: Vec<RouteMeta> = Vec::new();
+        let router = build_router_with_asyncapi(
+            &metas,
+            std::sync::Arc::new(HttpRegistry::new()),
+            None,
+            None,
+        );
+
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/asyncapi")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 404);
+        let _ = resp.into_body().collect().await.unwrap();
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn build_router_asyncapi_json_sigue_disponible() {
+        // Sanity: el endpoint JSON sigue funcionando independiente de la UI.
+        use http_body_util::BodyExt;
+        use tower::ServiceExt;
+
+        let schema = serde_json::json!({
+            "asyncapi": "3.0.0",
+            "info": { "title": "Test", "version": "0.1.0" },
+        });
+        let metas: Vec<RouteMeta> = Vec::new();
+        let router = build_router_with_asyncapi(
+            &metas,
+            std::sync::Arc::new(HttpRegistry::new()),
+            None,
+            Some(schema.clone()),
+        );
+
+        let req = axum::http::Request::builder()
+            .method(axum::http::Method::GET)
+            .uri("/asyncapi.json")
+            .body(Body::empty())
+            .unwrap();
+        let resp = router.oneshot(req).await.unwrap();
+        assert_eq!(resp.status().as_u16(), 200);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(body["asyncapi"], serde_json::json!("3.0.0"));
     }
 
     #[tokio::test(flavor = "current_thread")]

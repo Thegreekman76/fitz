@@ -699,7 +699,7 @@ fn build_file(
     // el checker para refinar TypeInfo. Cost extra: ~1 check pass para
     // programas con unannotated fns; gratis para programas anotados.
     let (env, types) = if codegen::has_unannotated_fn_params(&program) {
-        codegen::fill_inferred_param_types(&mut program, &types);
+        codegen::fill_inferred_param_types(&mut program, &types, &env);
         let (env2, types2, _defs2, errs2) = types::check_program(&program);
         if !errs2.is_empty() {
             // Si el re-check genera nuevos errores con los tipos

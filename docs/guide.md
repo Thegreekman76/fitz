@@ -3477,12 +3477,14 @@ print(abs(-5))
 ```
 
 > **Sobre las anotaciones**: con `fitz run` son opcionales — el
-> intérprete infiere desde el body. Con `fitz build` el subset
-> compilable las exige en params y retorno (deuda 5b.1). El
-> ejemplo lleva anotaciones para que compile a binario igual de
-> bit-a-bit con `fitz build` que con `fitz run`. El tipo `Fn(Int)
-> -> Int` describe una función que toma un `Int` y devuelve un
-> `Int` — es el tipo que tienen `square`, `make_adder(5)`, etc.
+> intérprete infiere desde el body. Con `fitz build` el codegen
+> infiere param + return desde call sites + body (v0.9.35 cierra
+> la deuda 5b.1 — cubre Int/Float/Str/Bool/Bytes/Nominal/List/
+> Map/Result/Nullable). El ejemplo lleva anotaciones porque hacen
+> el contrato explícito (mejor doc + diagnostics). El tipo
+> `Fn(Int) -> Int` describe una función que toma un `Int` y
+> devuelve un `Int` — es el tipo que tienen `square`,
+> `make_adder(5)`, etc.
 
 Salida:
 
@@ -7114,10 +7116,12 @@ fn create_user(body: UserInput) -> User {
 }
 ```
 
-Las anotaciones de return (`-> Str`, `-> Result<User>`, etc.) son
-necesarias si vas a compilar el programa con `fitz build`. El
-intérprete las infiere igual y funciona sin ellas; el codegen es
-más estricto (deuda 5b.1).
+Las anotaciones de return ayudan a hacer el contrato del API
+explícito, pero **no son obligatorias**: tanto el intérprete como
+el compilador (`fitz build`) las infieren desde call sites + body
+si están ausentes. La diferencia es estilo — anotaciones siguen
+siendo recomendadas para fns públicas (mejor doc + diagnostics
+más claros).
 
 Levantalo con `fitz run` (sin compilar):
 
@@ -7937,14 +7941,16 @@ misma instancia.
 
 Cosas que sí corren con `fitz run` pero todavía no compilan:
 
-- **Funciones sin anotar params (con limitaciones)** — `fn greet(name)`
-  corre en el intérprete (el tipo se infiere desde el body). El
-  compilador desde mini-tanda 5b.1 también infiere `name` desde
-  call sites (`greet("Fitz")` → `name: Str`). **Limitación**: si
-  TANTO param COMO return type están sin anotar Y el return depende
-  del param (`fn double(n) { return n * 2 }`), el codegen falla.
-  Workaround: anotar al menos el return type (`fn double(n) -> Int { ... }`),
-  o anotar el param (`fn double(n: Int) { ... }`).
+- ~~**Funciones sin anotar params (con limitaciones)**~~ — actualizado
+  v0.9.35: `fn greet(name)` y `fn double(n) { return n * 2 }`
+  ahora compilan sin anotaciones. El codegen infiere desde el primer
+  call site (`greet("Fitz")` → `name: Str`; `double(21)` → `n: Int`)
+  y deriva el return type de los `return`/tail-expr del body. Cubre
+  Int/Float/Str/Bool/Null/Bytes/Nullable/List/Map/Result + Nominal
+  (con el nombre canónico del `TypeEnv`). Casos sin cubrir (raros):
+  fns sin call site, Function/Range/Future como tipo de param.
+  Cuando la inferencia falla, el codegen lo dice claro con
+  sugerencia de anotar.
 - **Heterogéneos con Functions/Tuples** — F13 SPIKE + F13.A + F13.B
   + F13.C + F13.D + F13.E cubren primitivos, Bytes, Nominales,
   listas/mapas anidados con mix interno, HTTP body heterogéneo
@@ -8367,6 +8373,28 @@ el `Result` del call (el wrap automático del cap 21.4); el `.await`
 ejecuta la corutina. Excepciones asyncio aparecen como `Err`,
 igual que con calls sync.
 
+**Binding intermedio** (paridad bit-a-bit `fitz run` ↔ `fitz build`
+desde v0.9.35): también funciona separar el call y el await en dos
+statements, lo cual es útil cuando hay lógica entre los dos
+(logging, agregar metadata al future, decidir si esperarlo o no):
+
+```fitz
+from python import asyncio
+
+async fn run() -> Result<Null> {
+    let fut = asyncio.sleep(0.5)?     // fut: PyAny — coroutine ya construido
+    print("sleep arrancado, esperando...")
+    let _ = fut.await                  // await sobre la var
+    return Ok(null)
+}
+```
+
+Antes de v0.9.35, `fitz build` con este patrón fallaba con un
+error de Rust ("`__FitzPyObject` is not a future"). Ahora el
+codegen detecta `inner_ty == PyAny` en el `.await` y despacha al
+helper dedicado `__fitz_py_await_obj` (paralelo al
+`__fitz_py_invoke_await` del patrón inmediato).
+
 **Implementación**: el bridge usa `tokio::task::spawn_blocking` +
 `asyncio.run_until_complete()` adentro del worker. Funcional para
 APIs DB-bound (queries SQLAlchemy/asyncpg cortas). El GIL serializa
@@ -8391,9 +8419,6 @@ Bit-a-bit con `fitz run` para los patrones cubiertos. Lo que
 - Coerción Python `list` → Fitz `List<T>`, `dict` → `Map<K,V>`,
   `dict` → `Instance` (con anotaciones del 21.7). En `fitz build`
   estos casos siguen quedando como `PyObject` opaco.
-- `.await` con binding intermedio split (`let fut = py_call()?;
-  fut.await` con el future ligado a una var antes del await). El
-  patrón inmediato `<py_call>?.await` sí anda.
 
 Para el caso canónico de CRUD con SQLAlchemy + recuperación de
 filas como instancias Fitz tipadas, usá `fitz run` por ahora.
@@ -9955,6 +9980,21 @@ generadores de clientes para JS/TS/Python/Java) consume este
 schema directo — escribís `type ChatMsg { ... }` una vez y los
 clientes en otros lenguajes se generan solos.
 
+**UI embebida en `/asyncapi`** (desde v0.9.35) — paralelo al
+`/docs` del OpenAPI/Scalar. Cuando hay handlers `@ws`, el server
+autoregistra dos rutas:
+
+- `GET /asyncapi.json` — schema crudo.
+- `GET /asyncapi` — UI HTML embebida usando
+  `@asyncapi/react-component` (cargado vía CDN). Renderiza
+  channels, operations, mensajes con sus schemas, security
+  requirements. Útil para devs que consumen el spec o testean
+  endpoints WS.
+
+Igual que el `/docs` del OpenAPI: si el usuario declara su propio
+`@get("/asyncapi")`, el auto-register cede al handler del user.
+Opt-out global de ambas UIs con `@server(docs=false)`.
+
 ### Por qué Fitz hace esto distinto
 
 Cinco diferenciales que vuelven a Fitz único en el espacio de
@@ -10071,9 +10111,6 @@ Ejemplo runnable completo: [`examples/guide/29b-ws-binary.fitz`](../examples/gui
 
 Estos items están comprometidos como deuda explícita:
 
-- **AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).
-  Hoy se sirve solo el JSON; consumirlo es por AsyncAPI Studio
-  externo. Bundle de UI integrada es deuda menor.
 - **Tipado bidireccional separado** — hoy `WsConn<T>` usa el
   mismo `T` para recv y send. Para canales con tipos distintos
   en cada dirección (`WsConn<In, Out>`) hace falta una
@@ -10676,11 +10713,6 @@ Lo que sigue post-8:
     `__fitz_py_to_list_*` ya están emitidos en el preludio, falta
     el wiring en `coerce(PyAny → List<T>)` y equivalentes. En el
     intérprete ya funciona (Fase 8.4).
-  - **`.await` con binding intermedio** (`let fut = py_call()?;
-    fut.await`): hoy solo el patrón `<py_call>?.await` inmediato.
-  - **Inferencia de tipos de params y returns** en fns sin anotar
-    — `fn greet(name)` corre en el intérprete pero `fitz build`
-    exige anotación.
   - **Listas/mapas heterogéneos compilados** (`[1, "dos"]`): el
     intérprete los acepta, el compilador necesita un `FitzValue`
     tagged en runtime.

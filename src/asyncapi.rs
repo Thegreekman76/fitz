@@ -49,6 +49,13 @@ use crate::ast::{Decorator, Expr, Program, Stmt, TypeExpr};
 use crate::http::{AuthSpec, HttpRegistry, RouteSpec};
 use crate::openapi::{headers_from_decorators, type_expr_to_schema};
 
+/// 9.w.2-asyncapi-ui — UI embebida estilo Scalar para el schema
+/// AsyncAPI 3.0. Carga el bundle `@asyncapi/react-component` via CDN
+/// y lo apunta a `/asyncapi.json`. Mismo modelo que `SCALAR_HTML` del
+/// openapi (carga liviana, primera vez requiere red; el navegador
+/// cachea el bundle después).
+pub const ASYNCAPI_HTML: &str = include_str!("templates/asyncapi.html");
+
 /// Vista liviana de un endpoint `@ws("/path")` para el generador
 /// AsyncAPI. Paralelo a `OpenApiRouteInfo` pero solo para campos WS.
 #[derive(Debug, Clone)]

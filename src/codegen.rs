@@ -4391,6 +4391,54 @@ impl<'a> CodegenCtx<'a> {
                  }\n\
                  }\n\n",
             );
+            // 8.7-await-binding-split: helper paralelo a `__fitz_py_invoke_await`
+            // pero recibe el coroutine YA construido (no un callable). Soporta
+            // el patrón split:
+            //   let fut = py_async_fn(arg)?    // fut: PyAny — el coroutine
+            //   let v: Float = fut.await        // await sobre la var
+            // El intérprete ya lo soporta (envuelve el coroutine en
+            // `Value::Future` en `py_interop::call`). En codegen necesitamos
+            // un helper dedicado porque `__FitzPyObject` no implementa
+            // `IntoFuture` — el `.await` Rust nativo falla.
+            self.emit(
+                "/// 8.7-await-binding-split — versión sin invoke previo. Recibe\n\
+                 /// directamente el coroutine y lo ejecuta via spawn_blocking +\n\
+                 /// asyncio.run_until_complete. Si el objeto no es awaitable\n\
+                 /// (caso típico: el call retornó valor sync, no coroutine),\n\
+                 /// devuelve el objeto sin tocar — paralelo al fallback de\n\
+                 /// `__fitz_py_invoke_await`.\n\
+                 async fn __fitz_py_await_obj(coro: &__FitzPyObject) -> Result<__FitzPyObject, String> {\n    \
+                 let is_coro = Python::attach(|py| {\n        \
+                 let bound = coro.0.bind(py);\n        \
+                 let inspect = match py.import(\"inspect\") {\n            \
+                 Ok(m) => m,\n            \
+                 Err(_) => return false,\n        \
+                 };\n        \
+                 inspect.call_method1(\"isawaitable\", (bound,)).and_then(|v| v.extract::<bool>()).unwrap_or(false)\n    \
+                 });\n    \
+                 if !is_coro {\n        \
+                 return Ok(__FitzPyObject(Arc::clone(&coro.0)));\n    \
+                 }\n    \
+                 let coro_owned: pyo3::Py<pyo3::PyAny> = Python::attach(|py| coro.0.clone_ref(py));\n    \
+                 let join_result = tokio::task::spawn_blocking(move || -> Result<__FitzPyObject, String> {\n        \
+                 Python::attach(|py| {\n            \
+                 let bound = coro_owned.bind(py);\n            \
+                 let asyncio = py.import(\"asyncio\").map_err(|e| __fitz_py_err_to_string(py, e))?;\n            \
+                 let event_loop = asyncio.call_method0(\"new_event_loop\").map_err(|e| __fitz_py_err_to_string(py, e))?;\n            \
+                 let r = event_loop.call_method1(\"run_until_complete\", (bound,));\n            \
+                 let _ = event_loop.call_method0(\"close\");\n            \
+                 match r {\n                \
+                 Ok(v) => Ok(__FitzPyObject(Arc::new(v.unbind()))),\n                \
+                 Err(e) => Err(__fitz_py_err_to_string(py, e)),\n            \
+                 }\n        \
+                 })\n    \
+                 }).await;\n    \
+                 match join_result {\n        \
+                 Ok(inner) => inner,\n        \
+                 Err(join_err) => Err(format!(\"error del blocking pool al ejecutar corutina Python: {}\", join_err)),\n    \
+                 }\n\
+                 }\n\n",
+            );
         }
         self.emit(
             "/// 8.7.2 — `python_list → List<T>`. Convierte un PyList a un `Vec<T>` ya\n    \
@@ -7559,12 +7607,29 @@ where
             // detección de awaitable + ejecución vía `spawn_blocking` +
             // `asyncio.run_until_complete`. Paralelo a la detección
             // automática del intérprete 8.6.1 en `py_interop::call`.
+            //
+            // 8.7-await-binding-split: si el inner es una expresión de
+            // tipo `PyAny` que NO es `Try(Call PyAny)` directo (caso
+            // típico: variable bindeada por `let fut = py_call()?`),
+            // despachamos al helper `__fitz_py_await_obj` que solo
+            // ejecuta la corutina ya construida. Antes esto fallaba con
+            // un error de Rust ("`__FitzPyObject` is not a future") y
+            // forzaba al usuario a escribir todo inline.
             Expr::Await(inner, await_span) => {
                 if let Some((code, ty)) = self.try_gen_python_await(inner)? {
                     return Ok((code, ty));
                 }
                 let _ = await_span;
                 let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                if matches!(inner_ty, Type::PyAny) {
+                    // Binding intermedio: el coroutine ya está
+                    // construido, sólo hay que awaitarlo. Helper
+                    // emitido en el preludio async cuando `uses_async`.
+                    return Ok((
+                        format!("__fitz_py_await_obj(&{}).await?", inner_code),
+                        Type::PyAny,
+                    ));
+                }
                 let result_ty = match inner_ty {
                     Type::Future(t) => *t,
                     _ => Type::Any,
@@ -15011,6 +15076,15 @@ where
             self.emit("        __FITZ_ASYNCAPI_SCHEMA,\n");
             self.emit("    ).into_response()\n");
             self.emit("}\n\n");
+            // 9.w.2-asyncapi-ui — UI HTML estática (paralelo a /docs
+            // del OpenAPI). Carga `@asyncapi/react-component` via CDN.
+            self.emit("/// UI AsyncAPI embebida (9.w.2-asyncapi-ui).\n");
+            self.emit("static __FITZ_ASYNCAPI_HTML: &str = r###\"");
+            self.emit(crate::asyncapi::ASYNCAPI_HTML);
+            self.emit("\"###;\n\n");
+            self.emit("async fn __serve_asyncapi() -> axum::response::Html<&'static str> {\n");
+            self.emit("    axum::response::Html(__FITZ_ASYNCAPI_HTML)\n");
+            self.emit("}\n\n");
         }
 
         // F17.4b: tokio default (multi-thread). N workers según cores,
@@ -15128,6 +15202,13 @@ where
             self.emit(
                 "    .route(\"/asyncapi.json\", axum::routing::get(__serve_asyncapi_json))\n",
             );
+            // 9.w.2-asyncapi-ui — UI HTML autoregistrada cuando hay
+            // handlers @ws, paralelo al /docs de OpenAPI. Si el user
+            // declaró un handler con path /asyncapi, gana el suyo.
+            if !user_paths.contains("/asyncapi") {
+                self.emit_indent();
+                self.emit("    .route(\"/asyncapi\", axum::routing::get(__serve_asyncapi))\n");
+            }
         }
         if auto_docs {
             self.emit_indent();
@@ -17050,7 +17131,19 @@ pub fn has_unannotated_fn_params(program: &Program) -> bool {
 /// `Param.type_` con un TypeExpr sintetizado desde el Type resuelto.
 /// Si la inferencia falla, deja el Param como estaba — el codegen
 /// reportará error con sugerencia (resolve_param_type fallback).
-pub fn fill_inferred_param_types(program: &mut Program, type_info: &crate::types::TypeInfo) {
+///
+/// Quick win inference-params-no-anotar (2026-05-23): suma soporte
+/// para `Nominal` en `type_to_type_expr` pasando el `TypeEnv` para
+/// resolver el nombre canónico. Antes, params como `fn greet(u)` con
+/// `u: User` se inferían a nivel del codegen (path #2 en
+/// `resolve_param_type`) pero NO en el path #1 (este), lo cual
+/// duplicaba trabajo y dejaba el re-check del checker sin anotación
+/// real.
+pub fn fill_inferred_param_types(
+    program: &mut Program,
+    type_info: &crate::types::TypeInfo,
+    env: &TypeEnv,
+) {
     // Iterar sobre una copia de los fn names porque vamos a mutar el
     // program y necesitamos buscar call sites sobre el program ORIGINAL.
     let inferences: Vec<(String, usize, Type)> = {
@@ -17072,7 +17165,7 @@ pub fn fill_inferred_param_types(program: &mut Program, type_info: &crate::types
     };
     // Aplicar las inferencias.
     for (fn_name, param_idx, ty) in inferences {
-        if let Some(type_expr) = type_to_type_expr(&ty) {
+        if let Some(type_expr) = type_to_type_expr(&ty, env) {
             for stmt in program.iter_mut() {
                 if let Stmt::FnDef { name, params, .. } = stmt {
                     if name == &fn_name && param_idx < params.len() {
@@ -17090,48 +17183,47 @@ pub fn fill_inferred_param_types(program: &mut Program, type_info: &crate::types
 /// por nombre. Para tipos no representables sintácticamente (Function,
 /// Any, Range, etc.) devuelve None — el caller deja el param sin anotar
 /// y el codegen falla con su error histórico.
-fn type_to_type_expr(ty: &Type) -> Option<TypeExpr> {
+///
+/// Quick win inference-params-no-anotar — `Nominal(id)` ahora se
+/// resuelve a `TypeExpr::Named(name)` consultando el `TypeEnv` para
+/// obtener el nombre canónico del tipo.
+fn type_to_type_expr(ty: &Type, env: &TypeEnv) -> Option<TypeExpr> {
     Some(match ty {
         Type::Int => TypeExpr::named("Int"),
         Type::Float => TypeExpr::named("Float"),
         Type::Str => TypeExpr::named("Str"),
         Type::Bool => TypeExpr::named("Bool"),
         Type::Null => TypeExpr::named("Null"),
+        Type::Bytes => TypeExpr::named("Bytes"),
         Type::Nominal(id) => {
-            // El TypeEnv no se expone acá; usamos el TypeId como
-            // sentinel. En la práctica, el codegen consulta TypeEnv
-            // via su propio `env`. Para el nombre, dependemos de que
-            // el id se traduzca al nombre canónico via Type::display.
-            // Aproximación: usar el formato "NominalN" no funcionaría
-            // — necesitamos el nombre real. Skip Nominal por ahora;
-            // el caller falla y el user anota a mano.
-            let _ = id;
-            return None;
+            // Resolver el nombre canónico del tipo desde el TypeEnv.
+            let name = env.info(*id).name.clone();
+            TypeExpr::Named(name)
         }
         Type::List(inner) => {
-            let inner_te = type_to_type_expr(inner)?;
+            let inner_te = type_to_type_expr(inner, env)?;
             TypeExpr::Generic {
                 name: "List".into(),
                 args: vec![inner_te],
             }
         }
         Type::Map(k, v) => {
-            let k_te = type_to_type_expr(k)?;
-            let v_te = type_to_type_expr(v)?;
+            let k_te = type_to_type_expr(k, env)?;
+            let v_te = type_to_type_expr(v, env)?;
             TypeExpr::Generic {
                 name: "Map".into(),
                 args: vec![k_te, v_te],
             }
         }
         Type::Result { ok, .. } => {
-            let ok_te = type_to_type_expr(ok)?;
+            let ok_te = type_to_type_expr(ok, env)?;
             TypeExpr::Generic {
                 name: "Result".into(),
                 args: vec![ok_te],
             }
         }
         Type::Nullable(inner) => {
-            let inner_te = type_to_type_expr(inner)?;
+            let inner_te = type_to_type_expr(inner, env)?;
             TypeExpr::Nullable(Box::new(inner_te))
         }
         _ => return None,
@@ -23279,5 +23371,257 @@ mod tests {
             code.contains("fn send"),
             "esperaba la fn definida igual que sin decorator"
         );
+    }
+
+    // ---------------------------------------------------------------
+    // 8.7-await-binding-split — binding intermedio entre call y await
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn py_await_split_emite_fitz_py_await_obj() {
+        // Patrón split: la coroutine se bindea, después se awaitea.
+        //   let fut = asyncio.sleep(1)?    // fut: PyAny (el coro)
+        //   let _ = fut.await              // `__fitz_py_await_obj` aplica
+        //
+        // Antes del fix, el codegen emitía `(fut).await` que rompía Rust
+        // porque `__FitzPyObject` no impl `IntoFuture`. Ahora detecta
+        // `inner_ty == PyAny` y despacha al helper dedicado.
+        let src = "from python import asyncio\n\
+                   async fn run() -> Result<Null> {\n\
+                       let fut = asyncio.sleep(1)?\n\
+                       let _ = fut.await\n\
+                       return Ok(null)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El helper se emite cuando uses_async + uses_python.
+        assert!(
+            code.contains("async fn __fitz_py_await_obj"),
+            "esperaba helper `__fitz_py_await_obj` en el preludio"
+        );
+        // El call site usa el helper.
+        assert!(
+            code.contains("__fitz_py_await_obj(&"),
+            "esperaba `__fitz_py_await_obj(&fut).await?` en el body de run, output: ...{}...",
+            &code[code.len().saturating_sub(2000)..]
+        );
+    }
+
+    #[test]
+    fn py_await_inline_sigue_usando_invoke_await() {
+        // Sanity: el patrón inline `py_call()?.await` sigue emitiendo
+        // `__fitz_py_invoke_await(...)` (helper combinado original) y
+        // NO se contamina con `__fitz_py_await_obj`.
+        let src = "from python import asyncio\n\
+                   async fn run() -> Result<Null> {\n\
+                       let _ = asyncio.sleep(1)?.await\n\
+                       return Ok(null)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // Helper combinado inline.
+        assert!(
+            code.contains("__fitz_py_invoke_await("),
+            "esperaba `__fitz_py_invoke_await` en el body (path inline)"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // 9.w.2-asyncapi-ui — UI HTML autoregistrada cuando hay handlers @ws
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn ws_codegen_emite_asyncapi_ui_handler_y_route() {
+        let src = "@server(43978)\n\
+                   fn main() => 0\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<Str>) -> Null { return null }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // Handler de la UI definido.
+        assert!(
+            code.contains("async fn __serve_asyncapi("),
+            "esperaba `async fn __serve_asyncapi()` en el output"
+        );
+        // El static con el HTML embebido.
+        assert!(
+            code.contains("__FITZ_ASYNCAPI_HTML"),
+            "esperaba `__FITZ_ASYNCAPI_HTML` static embebido"
+        );
+        // Route auto-registrada en el router.
+        assert!(
+            code.contains(".route(\"/asyncapi\", axum::routing::get(__serve_asyncapi))"),
+            "esperaba route `/asyncapi` en el router del codegen output"
+        );
+        // El HTML embebido referencia el endpoint del schema.
+        assert!(
+            code.contains("/asyncapi.json"),
+            "esperaba que el HTML embebido referencie /asyncapi.json"
+        );
+    }
+
+    #[test]
+    fn ws_codegen_asyncapi_ui_cede_si_user_declara_handler() {
+        // Si el user declaró su propio `@get("/asyncapi")`, el
+        // auto-register cede (gana el del user).
+        let src = "@server(43979)\n\
+                   fn main() => 0\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<Str>) -> Null { return null }\n\
+                   @get(\"/asyncapi\")\n\
+                   fn custom() -> Str => \"mi-ui-custom\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El handler del user está.
+        assert!(code.contains("async fn __handler_custom"));
+        // El handler de auto-register también está emitido (no
+        // condicionamos su emisión sobre user_paths, sólo la registración),
+        // pero la route `.route("/asyncapi", ...)` con `__serve_asyncapi`
+        // NO debe aparecer (porque el user gana).
+        assert!(
+            !code.contains(".route(\"/asyncapi\", axum::routing::get(__serve_asyncapi))"),
+            "auto-register de /asyncapi no debería estar cuando el user lo declara"
+        );
+    }
+
+    #[test]
+    fn ws_codegen_sin_ws_no_emite_asyncapi_ui() {
+        // Programa HTTP-only (sin handlers @ws) no debe generar el
+        // handler de la UI AsyncAPI.
+        let src = "@server(43980)\n\
+                   fn main() => 0\n\
+                   @get(\"/hi\")\n\
+                   fn hi() -> Str => \"hola\"";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            !code.contains("__serve_asyncapi"),
+            "no se esperaba `__serve_asyncapi` sin handlers @ws"
+        );
+        assert!(
+            !code.contains("__FITZ_ASYNCAPI_HTML"),
+            "no se esperaba static `__FITZ_ASYNCAPI_HTML` sin handlers @ws"
+        );
+    }
+
+    #[test]
+    fn py_await_obj_helper_no_emitido_sin_async() {
+        // Programa sin async: ni `__fitz_py_await_obj` ni
+        // `__fitz_py_invoke_await` se emiten. Programas Python sync no
+        // pagan el costo de tokio + asyncio bridge.
+        let src = "from python import math\n\
+                   fn run() -> Result<Float> {\n\
+                       let r: Float = math.sqrt(4.0)?\n\
+                       return Ok(r)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // Cuidado: el preludio emite un docstring que menciona ambos
+        // helpers por nombre; chequeamos la fn DEFINIDA (no el texto
+        // del comment).
+        assert!(
+            !code.contains("async fn __fitz_py_await_obj"),
+            "no se esperaba la fn `__fitz_py_await_obj` sin async"
+        );
+        assert!(
+            !code.contains("async fn __fitz_py_invoke_await"),
+            "no se esperaba la fn `__fitz_py_invoke_await` sin async"
+        );
+    }
+
+    // ---------------------------------------------------------------
+    // inference-params-no-anotar (2026-05-23) — sub-paso "deuda 5b.1"
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn infer_param_int_desde_call_site() {
+        // `fn double(n) => n * 2` + `double(21)` → `n: Int` inferido.
+        let src = "fn double(n) => n * 2\nprint(double(21))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El signature Rust de `double` debe tipar `n: i64`.
+        assert!(
+            code.contains("fn double(n: i64)") || code.contains("fn double(mut n: i64)"),
+            "esperaba `fn double(n: i64)` en el output (inferencia desde call site Int)"
+        );
+    }
+
+    #[test]
+    fn infer_param_nominal_desde_call_site() {
+        // `fn greet(u) => "hola {u.name}"` + call con User concreto
+        // ahora se infiere como `u: User` y emite la signature Rust
+        // correcta. Antes este caso solo funcionaba en el path #2 del
+        // codegen (resolve_param_type fallback); ahora también el
+        // path #1 (fill_inferred_param_types) lo cubre, porque
+        // `type_to_type_expr` resuelve `Nominal(id)` via TypeEnv.
+        let src = "type User { id: Int, name: Str }\n\
+                   fn greet(u) -> Str {\n\
+                       return \"hola {u.name}\"\n\
+                   }\n\
+                   let ada = User { id: 1, name: \"Ada\" }\n\
+                   print(greet(ada))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // Signature Rust con el tipo nominal (alias `User`).
+        assert!(
+            code.contains("fn greet(u: User)") || code.contains("fn greet(mut u: User)"),
+            "esperaba `fn greet(u: User)` con tipo Nominal inferido"
+        );
+    }
+
+    #[test]
+    fn infer_param_multiple_call_sites() {
+        // Múltiples llamadas con el mismo tipo: el primer call site
+        // gana, el resto debe ser compatible (sino el checker falla).
+        let src = "fn cuadrado(n) => n * n\n\
+                   print(cuadrado(3))\n\
+                   print(cuadrado(7))\n\
+                   print(cuadrado(12))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(code.contains("fn cuadrado(n: i64)") || code.contains("fn cuadrado(mut n: i64)"));
+    }
+
+    #[test]
+    fn infer_param_str_desde_call_site() {
+        // Caso Str — `fn shout(s) => s.upper()` + call con literal Str.
+        let src = "fn shout(s) -> Str {\n\
+                       return s.upper()\n\
+                   }\n\
+                   print(shout(\"hola\"))";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // Str → String en Rust.
+        assert!(
+            code.contains("fn shout(s: String)") || code.contains("fn shout(mut s: String)"),
+            "esperaba `fn shout(s: String)` con tipo Str inferido"
+        );
+    }
+
+    #[test]
+    fn fill_inferred_param_types_resuelve_nominal_via_typeenv() {
+        // Path #1 — `fill_inferred_param_types` ahora resuelve
+        // `Type::Nominal(id)` a `TypeExpr::Named(canon_name)` usando
+        // el `TypeEnv`. Antes devolvía None y el path #1 dejaba el
+        // param sin anotar (el path #2 del codegen igualmente lo
+        // resolvía, pero el re-check del checker quedaba sin
+        // anotación real).
+        use crate::lexer::tokenize;
+        use crate::parser::parse;
+        let src = "type User { id: Int, name: Str }\n\
+                   fn greet(u) -> Str { return \"hola {u.name}\" }\n\
+                   let ada = User { id: 1, name: \"Ada\" }\n\
+                   print(greet(ada))";
+        let tokens = tokenize(src).unwrap();
+        let mut program = parse(tokens).unwrap();
+        let (env, type_info, _defs, errs) = crate::types::check_program(&program);
+        assert!(errs.is_empty(), "esperaba 0 errores del checker, fueron {:?}", errs);
+        fill_inferred_param_types(&mut program, &type_info, &env);
+        // El param `u` de `greet` ahora tiene anotación TypeExpr::Named("User").
+        let greet = program
+            .iter()
+            .find_map(|s| match s {
+                Stmt::FnDef { name, params, .. } if name == "greet" => Some(params),
+                _ => None,
+            })
+            .expect("fn greet en el program");
+        let u_param = &greet[0];
+        assert_eq!(u_param.name, "u");
+        let te = u_param.type_.as_ref().expect("type_ debería estar populado tras fill_inferred");
+        // Path #1 ahora cubre Nominal: el TypeExpr es Named("User").
+        match te {
+            TypeExpr::Named(n) => assert_eq!(n, "User"),
+            other => panic!("esperaba TypeExpr::Named(\"User\"), fue {:?}", other),
+        }
     }
 }

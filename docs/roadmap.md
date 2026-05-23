@@ -6999,9 +6999,11 @@ auth integrada en el handshake, codegen con paridad bit-a-bit.
   `payload: { type: "string", format: "binary" }`. Detalle en
   `CHANGELOG.md` v0.9.34. Endpoints mixtos (texto + binary en el
   mismo socket) quedan como sub-paso futuro si aparece presión.
-- **AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).
-  Hoy se sirve solo el JSON; consumirlo es por AsyncAPI Studio
-  externo. Bundle de UI integrada es deuda menor.
+- ~~**AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).~~ ✓ CERRADO 2026-05-23
+  (v0.9.35) — `GET /asyncapi` sirve HTML embebido con
+  `@asyncapi/react-component` (CDN). Paridad runtime ↔ codegen,
+  opt-out con `@server(docs=false)`, override por handler user
+  paralelo a `/docs`. Detalle en `CHANGELOG.md` v0.9.35.
 - **Tipado bidireccional separado** (`WsConn<In, Out>`). Hoy
   `T` único para recv y send.
 - **Reconnect con state replay** del lado del server. Hoy si el

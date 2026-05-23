@@ -61,6 +61,98 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.35] — 2026-05-23 — Bloque triple de quick wins: split await + AsyncAPI UI + inferencia params
+
+Bloque coordinado de tres quick wins del backlog post-v0.9.34, en
+una sola tanda. Sin breaking changes — sólo features nuevas y
+mejor inferencia.
+
+### Quick win #1 — `let fut = py_call()?; fut.await` (8.7-await-binding-split)
+
+`fitz build` ahora compila el patrón "split" del await Python:
+binding intermedio del coroutine y `.await` después.
+
+Antes solo aceptaba `<py_call>?.await` inline (`Await(Try(Call PyAny))`
+en el AST). Con un binding intermedio, el inner del await era un
+`Expr::Ident` con tipo `PyAny`, y el codegen emitía `.await` directo
+sobre `__FitzPyObject` — Rust fallaba con "is not a future".
+
+Fix: nuevo helper Rust `__fitz_py_await_obj(coro: &__FitzPyObject)`
+emitido al preludio cuando `uses_async + uses_python`. Cuando
+`Expr::Await(inner)` tiene `inner_ty == Type::PyAny` y NO matchea
+el patrón inline, el codegen despacha al helper dedicado. El
+intérprete ya lo soportaba (envuelve el coroutine en `Value::Future`
+en `py_interop::call`) — ahora el codegen tiene paridad.
+
+3 unit tests del codegen. Cap 21 de la guía actualizado con el
+nuevo patrón documentado.
+
+### Quick win #2 — UI HTML para AsyncAPI 3.0 (9.w.2-asyncapi-ui)
+
+Cuando hay handlers `@ws`, además de `/asyncapi.json`, el server
+auto-registra `/asyncapi` con una UI HTML embebida que renderea
+channels + operations + messages + securitySchemes. Mismo patrón
+que `/docs` para OpenAPI/Scalar.
+
+Bundle: `@asyncapi/react-component@2.6.5` vía CDN (unpkg). Carga
+liviana (~liviana después de cache del navegador).
+
+- `src/templates/asyncapi.html`: HTML wrapper que hace fetch del
+  schema y lo pasa a `AsyncApiStandalone.render(...)`.
+- `src/asyncapi.rs`: `pub const ASYNCAPI_HTML` con `include_str!`.
+- Runtime (`build_router_with_asyncapi` en `src/http.rs`):
+  auto-registra `/asyncapi` cuando hay schema, cede si el user
+  declaró `@get("/asyncapi")` propio.
+- Codegen (`src/codegen.rs`): emite `static __FITZ_ASYNCAPI_HTML`
+  + `async fn __serve_asyncapi()` + `.route("/asyncapi", ...)` en
+  el router builder. Mismo cede-si-user-gana.
+- Opt-out global: `@server(docs=false)` apaga AMBAS (OpenAPI +
+  AsyncAPI UI/JSON).
+- `eprintln!` del banner del runtime suma "GET /asyncapi (UI AsyncAPI)".
+
+3 unit tests del runtime (HTML correcto, 404 sin schema, JSON sigue
+funcionando) + 3 unit tests del codegen (handler/route emitidos,
+cede sobre user, no se emite sin @ws). Cap 29 de la guía
+actualizado.
+
+### Quick win #3 — Inferencia de params/return sin anotar (cierre 5b.1)
+
+La deuda 5b.1 (inferencia de tipos de params en fns sin anotación)
+ya tenía implementación parcial (`fill_inferred_param_types` en
+codegen) pero `type_to_type_expr` saltaba el caso `Nominal` con
+un comentario "Skip Nominal por ahora — necesitamos el nombre real".
+
+Fix: `type_to_type_expr` ahora recibe el `TypeEnv` y resuelve
+`Nominal(id)` consultando `env.info(*id).name` para obtener el
+nombre canónico. También suma `Type::Bytes`. Cubre:
+Int/Float/Str/Bool/Null/Bytes/Nullable/List/Map/Result/Nominal.
+
+Casos confirmados que ahora compilan sin anotaciones:
+- `fn double(n) { return n * 2 }` (Int inferido).
+- `fn greet(u) { return "hola {u.name}" }` con `User` (Nominal inferido).
+- `fn shout(s) { return s.upper() }` con `"hola"` (Str inferido).
+- Funciones recursivas con anotación de return + param sin anotar.
+- Múltiples call sites del mismo fn.
+
+5 unit tests del codegen (4 path #2 `resolve_param_type` + 1 path
+#1 `fill_inferred_param_types` validando que Nominal se resuelve
+a `TypeExpr::Named("User")`). Cap 11, cap 14 y cap 18 de la guía
+actualizados — anotaciones siguen recomendadas pero NO obligatorias.
+
+### Acumulado al cierre
+
++11 unit tests (3 await + 6 asyncapi + 5 infer). Clippy
+`-D warnings` limpio. Smoke `GUIDE_EXAMPLES_COMPILE` verde. Sin
+breaking changes — programas existentes compilan idéntico.
+
+Boilerplates revisados — ninguno toca los paths cambiados (todos
+usan anotaciones explícitas + handlers @ws con marshaling text +
+sin call patterns split de Python). Sin necesidad de update.
+
+Próximo norte: Fase 10 (Stack DB nativo) o seguir vaciando el
+backlog (`9.w.2-wsconn-bidir`, `fitz-python-image`, `8-pyi-stubs`,
+`8-bundling-cpython`).
+
 ## [v0.9.34] — 2026-05-23 — Quick win: 9.w.2-binary-frames — `WsConn<Bytes>` end-to-end
 
 Cierra la deuda más visible del MVP de WebSockets (9.w.2): el
