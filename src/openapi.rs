@@ -872,6 +872,13 @@ fn named_to_schema(name: &str) -> Value {
         "Str" => json!({ "type": "string" }),
         "Bool" => json!({ "type": "boolean" }),
         "Null" => json!({ "type": "null" }),
+        // 9.w.2-binary-frames — `Bytes` se mapea a `string` con
+        // `format: binary` (estándar OpenAPI 3.x / AsyncAPI 3.0 para
+        // raw bytes en el wire — el frame WS o el body HTTP es opaque
+        // octet-stream, no JSON base64-encoded). Tools como Scalar/
+        // AsyncAPI Studio lo renderean como "binary upload"/"binary
+        // payload".
+        "Bytes" => json!({ "type": "string", "format": "binary" }),
         // Nominal: ref a components.schemas. Si el tipo no fue declarado
         // en este programa, la ref queda dangling — el ajuste lo hace
         // la herramienta consumidora del schema (Scalar, generador de

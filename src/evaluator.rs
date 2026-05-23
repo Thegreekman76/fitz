@@ -4840,6 +4840,22 @@ async fn dispatch_method(
 // `send`/`broadcast` serializan el `Value` a JSON y mandan text frame.
 // El error de transporte va por el `Result::Err` de Fitz.
 
+/// 9.w.2-binary-frames — discriminador del modo del `WsConn`. Cuando
+/// `msg_type` es `TypeExpr::Named { name: "Bytes", .. }`, el conn opera
+/// en modo binary: `recv()` espera `Message::Binary` raw → `Value::Bytes`,
+/// y `send`/`broadcast` aceptan `Value::Bytes` exclusivamente y emiten
+/// `WsOutMessage::Binary`. Cualquier otro T (Str / nominal / etc.) sigue
+/// con el modelo JSON-marshalled text frame.
+///
+/// `None` (conns sin contexto de tipo — tests) cae al modo text para
+/// preservar backward-compat.
+fn ws_msg_is_bytes(msg_type: &Option<crate::ast::TypeExpr>) -> bool {
+    matches!(
+        msg_type.as_ref(),
+        Some(crate::ast::TypeExpr::Named(name)) if name == "Bytes"
+    )
+}
+
 async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResult<Value> {
     if !args.is_empty() {
         return Err(EvalSignal::Error(FitzError::new(
@@ -4864,6 +4880,7 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             "WsConn cerrada".to_string(),
         )))));
     }
+    let is_bytes_mode = ws_msg_is_bytes(&handle.msg_type);
     // Loop locking: cada iteración locka el rx, awaita el próximo
     // frame, suelta el lock al volver. Diseñado para que send/broadcast
     // concurrentes no se bloqueen (sink half tiene su propio Mutex
@@ -4876,41 +4893,60 @@ async fn ws_conn_recv(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
     // recv()).
     let next_frame = {
         let mut guard = rx.lock().await;
-        guard.next_text_frame().await
+        guard.next_frame().await
     };
     match next_frame {
-        Ok(Some(text)) => {
-            // Parsear como JSON y convertir a Value. Para tipos T
-            // nominales, aplicamos la coerción `Map → Instance`
-            // paralela a 8.4.3 (anotaciones runtime). Esto hace que
-            // `WsConn<ChatMsg>` reciba un `Instance` directo en
-            // `Ok(msg)`, permitiendo `msg.user` etc.
-            match serde_json::from_str::<serde_json::Value>(&text) {
-                Ok(j) => {
-                    let raw = crate::http::json_to_value(&j);
-                    let coerced = match &handle.msg_type {
-                        Some(annot) => {
-                            match coerce_to_annotation(annot, raw, handle.env.clone()).await {
-                                Ok(v) => v,
-                                Err(EvalSignal::Error(e)) => {
-                                    return Ok(Value::Result(ResultVariant::Err(Box::new(
-                                        Value::Str(format!(
-                                            "WsConn.recv(): coerción al tipo `{}` falló: {}",
-                                            annot.display_name(),
-                                            e.message,
-                                        )),
-                                    ))));
-                                }
-                                Err(other) => return Err(other),
-                            }
-                        }
-                        None => raw,
-                    };
-                    Ok(Value::Result(ResultVariant::Ok(Box::new(coerced))))
+        Ok(Some(frame)) => {
+            match (is_bytes_mode, frame) {
+                // T = Bytes + frame binario → match nativo.
+                (true, crate::value::IncomingFrame::Binary(bs)) => {
+                    Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Bytes(bs)))))
                 }
-                Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                    format!("WsConn.recv(): frame JSON inválido: {}", e),
-                ))))),
+                // T = Bytes + frame text → mismatch claro.
+                (true, crate::value::IncomingFrame::Text(_)) => {
+                    Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                        "WsConn.recv(): se esperaba frame binario (T = Bytes), llegó text"
+                            .to_string(),
+                    )))))
+                }
+                // T ≠ Bytes + frame binario → mismatch claro.
+                (false, crate::value::IncomingFrame::Binary(_)) => {
+                    Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                        "WsConn.recv(): se esperaba frame text JSON, llegó binary (usá WsConn<Bytes> para frames binarios)"
+                            .to_string(),
+                    )))))
+                }
+                // T ≠ Bytes + frame text → JSON parse + coerce
+                // `Map → Instance` paralelo a 8.4.3 (anotaciones runtime).
+                (false, crate::value::IncomingFrame::Text(text)) => {
+                    match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(j) => {
+                            let raw = crate::http::json_to_value(&j);
+                            let coerced = match &handle.msg_type {
+                                Some(annot) => {
+                                    match coerce_to_annotation(annot, raw, handle.env.clone()).await {
+                                        Ok(v) => v,
+                                        Err(EvalSignal::Error(e)) => {
+                                            return Ok(Value::Result(ResultVariant::Err(Box::new(
+                                                Value::Str(format!(
+                                                    "WsConn.recv(): coerción al tipo `{}` falló: {}",
+                                                    annot.display_name(),
+                                                    e.message,
+                                                )),
+                                            ))));
+                                        }
+                                        Err(other) => return Err(other),
+                                    }
+                                }
+                                None => raw,
+                            };
+                            Ok(Value::Result(ResultVariant::Ok(Box::new(coerced))))
+                        }
+                        Err(e) => Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                            format!("WsConn.recv(): frame JSON inválido: {}", e),
+                        ))))),
+                    }
+                }
             }
         }
         Ok(None) => {
@@ -4951,25 +4987,41 @@ async fn ws_conn_send(receiver: Value, args: Vec<Value>, span: Span) -> EvalResu
             "WsConn cerrada".to_string(),
         )))));
     }
-    let payload = match crate::http::value_to_json(&args[0]) {
-        Ok(j) => match serde_json::to_string(&j) {
-            Ok(s) => s,
-            Err(e) => {
+    // 9.w.2-binary-frames — branch por T.
+    let out_msg = if ws_msg_is_bytes(&handle.msg_type) {
+        // T = Bytes: el arg debe ser Value::Bytes; el checker ya lo
+        // validó estáticamente, pero defendemos el runtime path.
+        match &args[0] {
+            Value::Bytes(bs) => crate::value::WsOutMessage::Binary(bs.clone()),
+            other => {
                 return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                    format!("WsConn.send(): no serializable: {}", e),
+                    format!(
+                        "WsConn.send(): T = Bytes pero el argumento es `{}`",
+                        other.type_name()
+                    ),
                 )))));
             }
-        },
-        Err(msg) => {
-            return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                format!("WsConn.send(): {}", msg),
-            )))));
         }
+    } else {
+        // T ≠ Bytes: JSON-marshalled text frame, como antes.
+        let payload = match crate::http::value_to_json(&args[0]) {
+            Ok(j) => match serde_json::to_string(&j) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                        format!("WsConn.send(): no serializable: {}", e),
+                    )))));
+                }
+            },
+            Err(msg) => {
+                return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                    format!("WsConn.send(): {}", msg),
+                )))));
+            }
+        };
+        crate::value::WsOutMessage::Text(payload)
     };
-    match handle
-        .outbox_tx
-        .send(crate::value::WsOutMessage::Text(payload))
-    {
+    match handle.outbox_tx.send(out_msg) {
         Ok(()) => Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null)))),
         Err(_) => {
             handle
@@ -5005,22 +5057,41 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
     // puede haberlo cerrado pero los demás conns del endpoint siguen
     // recibiendo. Si el sender está cerrado, igual se intenta el
     // broadcast (decisión: useful para "despedida" antes de cerrar).
-    let payload = match crate::http::value_to_json(&args[0]) {
-        Ok(j) => match serde_json::to_string(&j) {
-            Ok(s) => s,
-            Err(e) => {
+    if ws_msg_is_bytes(&handle.msg_type) {
+        // T = Bytes: broadcast raw binary.
+        let bs = match &args[0] {
+            Value::Bytes(bs) => bs.clone(),
+            other => {
                 return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                    format!("WsConn.broadcast(): no serializable: {}", e),
+                    format!(
+                        "WsConn.broadcast(): T = Bytes pero el argumento es `{}`",
+                        other.type_name()
+                    ),
                 )))));
             }
-        },
-        Err(msg) => {
-            return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
-                format!("WsConn.broadcast(): {}", msg),
-            )))));
-        }
-    };
-    handle.broadcaster.broadcast(&handle.endpoint, payload);
+        };
+        handle.broadcaster.broadcast_binary(&handle.endpoint, bs);
+    } else {
+        // T ≠ Bytes: JSON-marshalled text broadcast (camino histórico).
+        let payload = match crate::http::value_to_json(&args[0]) {
+            Ok(j) => match serde_json::to_string(&j) {
+                Ok(s) => s,
+                Err(e) => {
+                    return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                        format!("WsConn.broadcast(): no serializable: {}", e),
+                    )))));
+                }
+            },
+            Err(msg) => {
+                return Ok(Value::Result(ResultVariant::Err(Box::new(Value::Str(
+                    format!("WsConn.broadcast(): {}", msg),
+                )))));
+            }
+        };
+        handle
+            .broadcaster
+            .broadcast_text(&handle.endpoint, payload);
+    }
     Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null))))
 }
 

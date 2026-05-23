@@ -13764,19 +13764,38 @@ where
         )
         .unwrap();
         // `T` para el setup viene del WsConn<T> del param: rust_type_for
-        // ya devuelve `__FitzWsConn<T_rust>`. Necesitamos extraer T para
-        // pasarlo al setup. Lo extraemos del TypeExpr resuelto.
-        let t_rs = match &conn_ty {
-            Type::WsConn(inner) => rust_type_for(inner, self.env)?,
+        // ya devuelve `__FitzWsConn<T_rust>` (o `__FitzWsConnBytes`).
+        // Necesitamos extraer T del TypeExpr resuelto para elegir el
+        // helper de setup apropiado.
+        //
+        // 9.w.2-binary-frames — `WsConn<Bytes>` usa el setup dedicado
+        // `__fitz_ws_setup_bytes` que produce un `__FitzWsConnBytes` y
+        // un writer task que sabe drenar `Binary(Vec<u8>)` además de
+        // Text. Para T ≠ Bytes mantenemos el setup genérico.
+        let is_bytes_mode = match &conn_ty {
+            Type::WsConn(inner) => matches!(inner.as_ref(), Type::Bytes),
             _ => unreachable!("conn_ty siempre es WsConn por construcción"),
         };
-        writeln!(
-            &mut self.output,
-            "        let (__conn, __writer) = __fitz_ws_setup::<{}>(__socket, __endpoint.clone(), {}u64);",
-            t_rs,
-            self.ws_heartbeat_secs,
-        )
-        .unwrap();
+        if is_bytes_mode {
+            writeln!(
+                &mut self.output,
+                "        let (__conn, __writer) = __fitz_ws_setup_bytes(__socket, __endpoint.clone(), {}u64);",
+                self.ws_heartbeat_secs,
+            )
+            .unwrap();
+        } else {
+            let t_rs = match &conn_ty {
+                Type::WsConn(inner) => rust_type_for(inner, self.env)?,
+                _ => unreachable!("conn_ty siempre es WsConn por construcción"),
+            };
+            writeln!(
+                &mut self.output,
+                "        let (__conn, __writer) = __fitz_ws_setup::<{}>(__socket, __endpoint.clone(), {}u64);",
+                t_rs,
+                self.ws_heartbeat_secs,
+            )
+            .unwrap();
+        }
         self.emit("        let __conn_id = __conn.conn_id;\n");
         // Llamar al handler. Si hay user, pasarlo además del conn.
         let _ = conn_name;
@@ -16197,6 +16216,10 @@ use std::sync::atomic::{AtomicU64, AtomicBool, Ordering as __FitzOrdering};
 #[derive(Clone, Debug)]
 enum __FitzWsOutMsg {
     Text(String),
+    /// 9.w.2-binary-frames — frame binario raw. Lo emite
+    /// `__FitzWsConnBytes::send/broadcast`. El writer task lo traduce a
+    /// `axum::extract::ws::Message::Binary(...)`.
+    Binary(Vec<u8>),
     Close,
     /// Fase 9.w.2.e — heartbeat. El writer task lo traduce a un
     /// frame `axum::extract::ws::Message::Ping(vec![])`. Si el sink
@@ -16251,6 +16274,20 @@ fn __fitz_ws_broadcast_payload(endpoint: &str, payload: String) {
     let mut conns = b.lock().unwrap();
     if let Some(list) = conns.get_mut(endpoint) {
         list.retain(|(_, tx)| tx.send(__FitzWsOutMsg::Text(payload.clone())).is_ok());
+        if list.is_empty() {
+            conns.remove(endpoint);
+        }
+    }
+}
+
+/// 9.w.2-binary-frames — broadcaster variante binaria. Mismo modelo
+/// "broadcast a todos del endpoint incluyendo sender" que
+/// `__fitz_ws_broadcast_payload` pero empuja `Binary(Vec<u8>)`.
+fn __fitz_ws_broadcast_binary(endpoint: &str, payload: Vec<u8>) {
+    let b = __fitz_ws_broadcaster();
+    let mut conns = b.lock().unwrap();
+    if let Some(list) = conns.get_mut(endpoint) {
+        list.retain(|(_, tx)| tx.send(__FitzWsOutMsg::Binary(payload.clone())).is_ok());
         if list.is_empty() {
             conns.remove(endpoint);
         }
@@ -16334,7 +16371,7 @@ impl<T: __FitzWsMessage> __FitzWsConn<T> {
                         .map_err(|e| format!("WsConn.recv(): {}", e));
                 }
                 Some(Ok(axum::extract::ws::Message::Binary(_))) => {
-                    return Err("WsConn.recv(): frame binario no soportado en MVP".to_string());
+                    return Err("WsConn.recv(): se esperaba frame text JSON, llegó binary (usá WsConn<Bytes> para frames binarios)".to_string());
                 }
                 Some(Ok(axum::extract::ws::Message::Ping(_)))
                 | Some(Ok(axum::extract::ws::Message::Pong(_))) => continue,
@@ -16401,6 +16438,19 @@ fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
                         break;
                     }
                 }
+                __FitzWsOutMsg::Binary(bs) => {
+                    // 9.w.2-binary-frames — el writer task soporta
+                    // ambos modos en el mismo enum del outbox; el
+                    // `__FitzWsConnBytes` empuja `Binary`, el
+                    // `__FitzWsConn<T>` (text) nunca lo hace.
+                    if sink
+                        .send(axum::extract::ws::Message::Binary(bs.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
                 __FitzWsOutMsg::Ping => {
                     if sink
                         .send(axum::extract::ws::Message::Ping(Vec::new().into()))
@@ -16447,6 +16497,178 @@ fn __fitz_ws_setup<T: __FitzWsMessage + Send + 'static>(
         outbox_tx,
         closed,
         _phantom: std::marker::PhantomData,
+    };
+    (conn, writer)
+}
+
+// --- 9.w.2-binary-frames: WsConn<Bytes> dedicado (no genérico) ---
+//
+// Specialization sobre `__FitzWsConn<Vec<u8>>` no funciona (el blanket
+// impl del trait `__FitzWsMessage` cubriría `Vec<u8>` como List<Int>
+// JSON, que es exactamente lo opuesto a "raw bytes en el wire"). El
+// camino simple: un struct dedicado que opera con `Vec<u8>` directo y
+// emite `Message::Binary` en el sink.
+struct __FitzWsConnBytes {
+    endpoint: String,
+    conn_id: u64,
+    rx: std::sync::Arc<
+        tokio::sync::Mutex<
+            futures_util::stream::SplitStream<axum::extract::ws::WebSocket>,
+        >,
+    >,
+    outbox_tx: tokio::sync::mpsc::UnboundedSender<__FitzWsOutMsg>,
+    closed: std::sync::Arc<AtomicBool>,
+}
+
+impl Clone for __FitzWsConnBytes {
+    fn clone(&self) -> Self {
+        Self {
+            endpoint: self.endpoint.clone(),
+            conn_id: self.conn_id,
+            rx: std::sync::Arc::clone(&self.rx),
+            outbox_tx: self.outbox_tx.clone(),
+            closed: std::sync::Arc::clone(&self.closed),
+        }
+    }
+}
+
+impl __FitzWsConnBytes {
+    /// Lee el próximo frame binario raw. `Err` para conn cerrada,
+    /// frame text (mismatch — el handler declaró Bytes), o transporte.
+    async fn recv(&self) -> Result<Vec<u8>, String> {
+        use futures_util::StreamExt;
+        if self.closed.load(__FitzOrdering::Relaxed) {
+            return Err("WsConn cerrada".to_string());
+        }
+        loop {
+            let next = {
+                let mut g = self.rx.lock().await;
+                g.next().await
+            };
+            match next {
+                Some(Ok(axum::extract::ws::Message::Binary(bs))) => {
+                    return Ok(bs.to_vec());
+                }
+                Some(Ok(axum::extract::ws::Message::Text(_))) => {
+                    return Err(
+                        "WsConn.recv(): se esperaba frame binario (T = Bytes), llegó text"
+                            .to_string(),
+                    );
+                }
+                Some(Ok(axum::extract::ws::Message::Ping(_)))
+                | Some(Ok(axum::extract::ws::Message::Pong(_))) => continue,
+                Some(Ok(axum::extract::ws::Message::Close(_))) | None => {
+                    self.closed.store(true, __FitzOrdering::Relaxed);
+                    return Err("WsConn cerrada por el peer".to_string());
+                }
+                Some(Err(e)) => return Err(format!("WsConn.recv(): {}", e)),
+            }
+        }
+    }
+
+    async fn send(&self, msg: Vec<u8>) -> Result<(), String> {
+        if self.closed.load(__FitzOrdering::Relaxed) {
+            return Err("WsConn cerrada".to_string());
+        }
+        self.outbox_tx
+            .send(__FitzWsOutMsg::Binary(msg))
+            .map_err(|_| {
+                self.closed.store(true, __FitzOrdering::Relaxed);
+                "WsConn.send(): outbox cerrado (conn caída)".to_string()
+            })
+    }
+
+    async fn broadcast(&self, msg: Vec<u8>) -> Result<(), String> {
+        __fitz_ws_broadcast_binary(&self.endpoint, msg);
+        Ok(())
+    }
+
+    fn close(&self) {
+        if self.closed.load(__FitzOrdering::Relaxed) {
+            return;
+        }
+        let _ = self.outbox_tx.send(__FitzWsOutMsg::Close);
+        self.closed.store(true, __FitzOrdering::Relaxed);
+    }
+}
+
+/// 9.w.2-binary-frames — variante de `__fitz_ws_setup` para
+/// `__FitzWsConnBytes`. Mismo writer task + heartbeat que el genérico
+/// (el writer task ya sabe drenar `Binary` además de `Text`); cambia
+/// solo el tipo del conn devuelto.
+fn __fitz_ws_setup_bytes(
+    socket: axum::extract::ws::WebSocket,
+    endpoint: String,
+    heartbeat_secs: u64,
+) -> (__FitzWsConnBytes, tokio::task::JoinHandle<()>) {
+    use futures_util::{SinkExt, StreamExt};
+    let (mut sink, stream) = socket.split();
+    let (outbox_tx, mut outbox_rx) = tokio::sync::mpsc::unbounded_channel();
+    let conn_id = __fitz_ws_register(endpoint.clone(), outbox_tx.clone());
+    let closed = std::sync::Arc::new(AtomicBool::new(false));
+    let closed_w = closed.clone();
+    let writer = tokio::spawn(async move {
+        while let Some(m) = outbox_rx.recv().await {
+            match m {
+                __FitzWsOutMsg::Text(t) => {
+                    if sink
+                        .send(axum::extract::ws::Message::Text(t.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                __FitzWsOutMsg::Binary(bs) => {
+                    if sink
+                        .send(axum::extract::ws::Message::Binary(bs.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                __FitzWsOutMsg::Ping => {
+                    if sink
+                        .send(axum::extract::ws::Message::Ping(Vec::new().into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                __FitzWsOutMsg::Close => {
+                    let _ = sink.close().await;
+                    break;
+                }
+            }
+        }
+        closed_w.store(true, __FitzOrdering::Relaxed);
+    });
+    if heartbeat_secs > 0 {
+        let hb_tx = outbox_tx.clone();
+        let hb_closed = closed.clone();
+        let interval = std::time::Duration::from_secs(heartbeat_secs);
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(interval);
+            ticker.tick().await;
+            loop {
+                ticker.tick().await;
+                if hb_closed.load(__FitzOrdering::Relaxed) {
+                    return;
+                }
+                if hb_tx.send(__FitzWsOutMsg::Ping).is_err() {
+                    return;
+                }
+            }
+        });
+    }
+    let conn = __FitzWsConnBytes {
+        endpoint,
+        conn_id,
+        rx: std::sync::Arc::new(tokio::sync::Mutex::new(stream)),
+        outbox_tx,
+        closed,
     };
     (conn, writer)
 }
@@ -17563,9 +17785,21 @@ fn rust_type_for(t: &Type, env: &TypeEnv) -> Result<String, FitzError> {
         // `uses_ws = true`. El handler recibe `__FitzWsConn<T>` por
         // valor (move), pero como solo aparece como param de un
         // handler `@ws`, nunca cruza el sitio donde haría falta clone.
+        //
+        // 9.w.2-binary-frames — `WsConn<Bytes>` se mapea a un struct
+        // separado `__FitzWsConnBytes` (no genérico) que opera con
+        // `Vec<u8>` raw y `Message::Binary` en el wire — el blanket
+        // impl del trait `__FitzWsMessage` cubriría `Vec<u8>` como
+        // List<Int> JSON, lo cual es justo lo opuesto a lo que
+        // queremos. Specialization sería la forma idiomática pero no
+        // está estable; dos structs dedicados son más simples.
         Type::WsConn(inner) => {
-            let inner_rs = rust_type_for(inner, env)?;
-            Ok(format!("__FitzWsConn<{}>", inner_rs))
+            if matches!(inner.as_ref(), Type::Bytes) {
+                Ok("__FitzWsConnBytes".to_string())
+            } else {
+                let inner_rs = rust_type_for(inner, env)?;
+                Ok(format!("__FitzWsConn<{}>", inner_rs))
+            }
         }
         // Tuples (mini-tanda T) → Rust tuple type nativo.
         // `()` (vacía) → `()` (unit). `(T,)` (un slot) → `(T,)`.

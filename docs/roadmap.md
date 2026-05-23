@@ -6991,9 +6991,14 @@ auth integrada en el handshake, codegen con paridad bit-a-bit.
 
 **Deuda residual derivada de 9.w.2** (no bloquea uso real):
 
-- **Binary frames** (`Vec<u8>` como payload). Hoy solo text
-  frames. Requiere tipo `Bytes` en Fitz (ya cerrado en bundle
-  post-8) integrado con `WsConn<Bytes>`. Deuda residual.
+- ~~**Binary frames** (`Vec<u8>` como payload).~~ ✓ CERRADO 2026-05-23
+  (v0.9.34) — `WsConn<Bytes>` con paridad bit-a-bit `fitz run` ↔
+  `fitz build`. Un endpoint es text-only XOR binary-only según el
+  T declarado; mismatch entre frame y T → `Err` con mensaje claro.
+  AsyncAPI 3.0 emite `contentType: application/octet-stream` +
+  `payload: { type: "string", format: "binary" }`. Detalle en
+  `CHANGELOG.md` v0.9.34. Endpoints mixtos (texto + binary en el
+  mismo socket) quedan como sub-paso futuro si aparece presión.
 - **AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).
   Hoy se sirve solo el JSON; consumirlo es por AsyncAPI Studio
   externo. Bundle de UI integrada es deuda menor.

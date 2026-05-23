@@ -1,0 +1,78 @@
+// Cap 29 — WebSockets binarios con `WsConn<Bytes>`.
+//
+// Variante del cap 29 para casos donde el wire es binario raw — no
+// JSON-marshalled. Útil para protocolos custom (gRPC-Web, protobuf,
+// MessagePack, CBOR), streaming de audio/video frames, file transfer
+// chunk-a-chunk, o cualquier payload que no es texto.
+//
+// `WsConn<Bytes>` opera con `Value::Bytes` en ambas direcciones:
+//   - `conn.recv()` → `Result<Bytes>` (el cliente debe enviar
+//     `Message::Binary`, no `Message::Text`).
+//   - `conn.send(buf)` y `conn.broadcast(buf)` → emiten
+//     `Message::Binary` raw, sin re-encoding a JSON ni base64.
+//
+// Diferenciales:
+//   - Paridad bit-a-bit `fitz run` ↔ `fitz build` (mismo handler).
+//   - AsyncAPI 3.0 auto-generado emite `contentType:
+//     application/octet-stream` + `payload: { type: "string",
+//     format: "binary" }` — tooling como AsyncAPI Studio lo reconoce.
+//   - Heartbeat ping/pong sigue funcionando igual que en modo text.
+//   - Auth integrada (`@authenticated`/`@admin`) idem.
+//
+// Probar:
+//
+//   1. fitz run examples/guide/29b-ws-binary.fitz     # o fitz build
+//
+//   2. # Conectar un cliente WS y enviar bytes raw. Con websocat:
+//      websocat -b ws://localhost:43930/raw
+//      # (modo binary). Pegar cualquier bytes; el server los devuelve
+//      # como echo binario exacto.
+//
+//   3. # AsyncAPI con format=binary:
+//      curl localhost:43930/asyncapi.json
+//      # → channels./raw.messages.msg.payload = { "type": "string",
+//      #   "format": "binary" }; contentType = application/octet-stream.
+
+@server(43930)
+fn main() => 0
+
+// Echo binario: recibe bytes raw, los manda de vuelta sin tocar.
+// `Bytes` viaja como `Vec<u8>` en runtime; el wire es opaco para
+// Fitz. `buf.len()`/`buf.is_empty()`/`buf.to_str()` están disponibles
+// si el handler necesita inspeccionar el contenido.
+@ws("/raw")
+async fn raw(conn: WsConn<Bytes>) -> Null {
+    loop {
+        match conn.recv() {
+            Ok(buf) => {
+                let _ = conn.send(buf)
+            }
+            Err(_) => {
+                // Conn cerrada o cliente envió frame text en lugar de
+                // binary — salida limpia.
+                return null
+            }
+        }
+    }
+    return null
+}
+
+// Cómo funciona end-to-end:
+//
+//   - El cliente envía `Message::Binary` con bytes arbitrarios.
+//   - El intérprete (o el binario `fitz build`) lo lee como
+//     `Value::Bytes(...)` adentro del `Ok(buf)`.
+//   - `conn.send(buf)` empuja `Message::Binary` raw al wire — sin
+//     JSON, sin base64.
+//   - Si el cliente manda Text en lugar de Binary, `recv()` devuelve
+//     `Err("se esperaba frame binario (T = Bytes), llegó text")` y el
+//     handler sale del loop limpio.
+//
+// Trade-offs:
+//
+//   - `WsConn<Bytes>` es text-only XOR binary-only por endpoint —
+//     no mezclás los dos. Si necesitás un canal mixto, hacé dos
+//     endpoints separados (`@ws("/raw")` y `@ws("/json")`).
+//   - El schema AsyncAPI emite `format: binary` opaco; no documenta
+//     la estructura interna de los bytes (eso es responsabilidad del
+//     protocolo que estés tunelando).

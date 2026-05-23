@@ -9998,13 +9998,79 @@ SignalR te da proxies tipados solo en C# y solo en `.NET`. Fitz
 los junta en un lenguaje nuevo, con un binario standalone, con
 auth nativa.
 
+### Frames binarios con `WsConn<Bytes>`
+
+Cuando el wire es binario raw — protocolos custom (gRPC-Web,
+protobuf, MessagePack, CBOR), streaming de audio/video, file
+transfer chunk-a-chunk — `WsConn<Bytes>` opera con `Vec<u8>` en
+ambas direcciones, sin re-encoding a JSON ni base64:
+
+```fitz
+@server(43930)
+fn main() => 0
+
+@ws("/raw")
+async fn raw(conn: WsConn<Bytes>) -> Null {
+    loop {
+        match conn.recv() {
+            Ok(buf) => {
+                let _ = conn.send(buf)   // echo binario puro
+            }
+            Err(_) => return null
+        }
+    }
+    return null
+}
+```
+
+`conn.recv()` espera `Message::Binary` (no `Message::Text`) y lo
+devuelve como `Result<Bytes>`. `conn.send(buf)` y
+`conn.broadcast(buf)` emiten `Message::Binary` raw. Mismatch
+entre frame type esperado y recibido → `Err` con mensaje claro
+(usá `WsConn<Bytes>` para binary; `WsConn<Str>` o nominal para
+text).
+
+El schema AsyncAPI 3.0 auto-generado refleja el modo binario:
+
+```json
+{
+  "channels": {
+    "/raw": {
+      "messages": {
+        "msg": {
+          "contentType": "application/octet-stream",
+          "payload": { "type": "string", "format": "binary" }
+        }
+      }
+    }
+  }
+}
+```
+
+Tools como AsyncAPI Studio o generadores de clientes binarios lo
+reconocen y renderean el endpoint como "binary upload" en vez de
+schema JSON convencional.
+
+Paridad bit-a-bit `fitz run` ↔ `fitz build`: el binario nativo
+producido por `fitz build` tiene un struct dedicado
+`__FitzWsConnBytes` (no genérico) y un setup helper aparte —
+specialization sobre `__FitzWsConn<Vec<u8>>` no funciona porque el
+blanket impl del trait interno trataría `Vec<u8>` como
+`List<Int>` JSON. Dos structs dedicados son la solución más
+simple y explícita.
+
+Trade-off del modelo: un endpoint es text-only XOR binary-only.
+Para canales mixtos (texto + bytes en el mismo socket), declarás
+dos endpoints separados (`@ws("/raw")` para bytes, `@ws("/json")`
+para text). Si aparece presión real por mixto en el mismo
+endpoint, queda como sub-paso futuro.
+
+Ejemplo runnable completo: [`examples/guide/29b-ws-binary.fitz`](../examples/guide/29b-ws-binary.fitz).
+
 ### Qué no está en el MVP
 
 Estos items están comprometidos como deuda explícita:
 
-- **Binary frames** (`Vec<u8>` como payload). Hoy solo text
-  frames. Audio/video streaming, protocolos binarios custom
-  requieren un tipo `Bytes` en Fitz; deuda residual.
 - **AsyncAPI UI** equivalente al `/docs` de OpenAPI (Scalar).
   Hoy se sirve solo el JSON; consumirlo es por AsyncAPI Studio
   externo. Bundle de UI integrada es deuda menor.

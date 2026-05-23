@@ -172,30 +172,56 @@ impl std::fmt::Debug for WsConnHandle {
 /// http.rs. Esto evita que `value.rs` dependa de `axum` directo.
 pub type WsReadStream = Box<dyn WsReadStreamTrait + Send + Unpin>;
 
+/// Frame entrante leído por el read half. Distingue text (modo
+/// JSON-marshalled, default para `WsConn<T>` con T ≠ Bytes) de
+/// binary (modo raw, exclusivo de `WsConn<Bytes>` — 9.w.2-binary-frames).
+///
+/// El read stream NUNCA filtra entre text y binary: ambos se exponen
+/// al evaluator/codegen, que discrimina según el T declarado en el
+/// `WsConn<T>` del handler. Mismatch (T=Str pero llega Binary, o T=Bytes
+/// pero llega Text) → `Err` claro desde el método del conn (`recv()`).
+///
+/// Ping/Pong/Close los maneja la stack axum/tungstenite por debajo;
+/// nunca se exponen acá.
+#[derive(Debug, Clone)]
+pub enum IncomingFrame {
+    /// Text frame UTF-8. `recv()` con T ≠ Bytes lo parsea como JSON y
+    /// coerce al T declarado.
+    Text(String),
+    /// Binary frame raw. `recv()` con T = Bytes lo expone como
+    /// `Value::Bytes(...)`.
+    Binary(Vec<u8>),
+}
+
 /// Trait del read half — abstracción para no leakear axum tipos.
-/// Define solo lo que necesita `recv()`: leer un frame text o
-/// detectar close.
+/// Define solo lo que necesita `recv()`: leer un frame (text o binary)
+/// o detectar close.
 pub trait WsReadStreamTrait {
     /// Lee el próximo frame. Devuelve:
-    ///   - `Ok(Some(text))` — text frame válido.
+    ///   - `Ok(Some(IncomingFrame::Text(s)))` — text frame.
+    ///   - `Ok(Some(IncomingFrame::Binary(bs)))` — binary frame.
     ///   - `Ok(None)` — close frame; el conn cerró ordenadamente.
-    ///   - `Err(msg)` — error de transporte o frame inesperado.
+    ///   - `Err(msg)` — error de transporte.
     ///
-    /// Frames binarios / ping / pong: el impl los maneja internamente
-    /// (ping → pong automático; binary → error; close → Ok(None)).
-    fn next_text_frame<'a>(
+    /// Ping/Pong: el impl los maneja internamente (axum auto-replies;
+    /// los descartamos en el loop interno).
+    fn next_frame<'a>(
         &'a mut self,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = Result<Option<IncomingFrame>, String>> + Send + 'a>,
     >;
 }
 
-/// Mensaje "outbox" — texto a enviar o señal de cierre. El writer
-/// task del conn lo consume.
+/// Mensaje "outbox" — texto, bytes o señal de cierre. El writer task
+/// del conn lo consume y lo traduce al frame axum correspondiente.
 #[derive(Debug, Clone)]
 pub enum WsOutMessage {
-    /// Frame text con `payload` (JSON serialization del T).
+    /// Frame text con `payload` (JSON serialization del T cuando T ≠ Bytes).
     Text(String),
+    /// 9.w.2-binary-frames — frame binario raw. Construido por
+    /// `WsConn<Bytes>.send(...)` / `.broadcast(...)`. El writer task lo
+    /// traduce a `axum::extract::ws::Message::Binary(...)`.
+    Binary(Vec<u8>),
     /// Pedido de cierre. El writer task lo procesa y termina.
     Close,
     /// Fase 9.w.2.e — heartbeat ping. El writer task lo traduce a
@@ -207,18 +233,23 @@ pub enum WsOutMessage {
 
 /// Trait del broadcaster — abstracción que `WsConnHandle.broadcaster`
 /// implementa. Para evitar que `value.rs` dependa de `http.rs` (que
-/// es donde vive el broadcaster concreto), exponemos solo el método
-/// `broadcast(endpoint, msg)`.
+/// es donde vive el broadcaster concreto), exponemos los métodos
+/// `broadcast_text` y `broadcast_binary` (9.w.2-binary-frames separó
+/// los dos para mantener tipo y evitar un enum extra en la API).
 ///
 /// El runtime construye un broadcaster compartido por `HttpRegistry`
 /// (`Arc<WsBroadcaster>`), lo registra en cada `WsConnHandle`, y
-/// `broadcast(msg)` del lado del usuario delega acá.
+/// `broadcast(msg)` del lado del usuario delega al método que
+/// corresponda según el T del `WsConn`.
 pub trait WsBroadcasterTrait {
     /// Envía `payload` (text frame) al outbox de TODOS los conns
     /// vivos en `endpoint`, incluyendo el conn que invocó (convención
     /// Socket.IO/Phoenix). Conns con outbox cerrado se ignoran
     /// silenciosamente (cleanup lazy).
-    fn broadcast(&self, endpoint: &str, payload: String);
+    fn broadcast_text(&self, endpoint: &str, payload: String);
+    /// 9.w.2-binary-frames — variante binaria. Mismo modelo "broadcast
+    /// a todos del endpoint incluyendo sender" que `broadcast_text`.
+    fn broadcast_binary(&self, endpoint: &str, payload: Vec<u8>);
 }
 
 impl Clone for FutureCell {

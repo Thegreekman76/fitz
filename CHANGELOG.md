@@ -61,6 +61,65 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.34] — 2026-05-23 — Quick win: 9.w.2-binary-frames — `WsConn<Bytes>` end-to-end
+
+Cierra la deuda más visible del MVP de WebSockets (9.w.2): el
+soporte para frames binarios raw vía `WsConn<Bytes>`. Hoy el wire
+de un `WsConn` puede ser **text JSON-marshalled** (T = Str /
+nominal / etc.) o **binary opaco** (T = Bytes); el modo lo elige
+el T declarado y el lenguaje rechaza el mismatch con mensaje
+claro. Cero deps nuevas, paridad bit-a-bit `fitz run` ↔ `fitz
+build`.
+
+**Lo que entra**:
+
+- **Checker** — `WsConn<Bytes>` aceptado en `@ws` handlers como
+  cualquier otro T concreto; `recv()` tipa `Result<Bytes>`,
+  `send/broadcast` exigen arg `Bytes`. 4 unit tests blindean el
+  contrato.
+- **Runtime intérprete** — `Value::WsOutMessage::Binary(Vec<u8>)`,
+  `IncomingFrame::{Text, Binary}` enum reemplaza el filtro
+  text-only del read stream, `WsBroadcasterTrait::broadcast_binary`
+  paralelo a `broadcast_text`. El evaluator discrimina por
+  `ws_msg_is_bytes(msg_type)` en `recv/send/broadcast`. 3 E2E con
+  tokio-tungstenite: echo round-trip, broadcast multi-cliente,
+  mismatch (cliente manda text con T=Bytes → Err).
+- **Runtime HTTP** (`src/http.rs`) — `WsReadStreamImpl::next_frame`
+  expone Binary en lugar de rechazarlo; writer task gana rama
+  `Binary(bs)` → `Message::Binary(bs.into())`.
+- **AsyncAPI 3.0** — payload schema cuando T=Bytes emite
+  `{"type":"string","format":"binary"}` + `contentType:
+  application/octet-stream`. 3 tests del schema.
+- **Codegen `fitz build`** — struct dedicado `__FitzWsConnBytes`
+  (no genérico — specialization sobre `Vec<u8>` chocaría con el
+  blanket impl del trait interno que lo trataría como
+  `List<Int>` JSON); helper `__fitz_ws_setup_bytes`; writer
+  task del preludio drena Binary también; ramaje en
+  `gen_ws_handler_wrapper`. 1 E2E del codegen con cliente
+  binary verificado bit-a-bit.
+- **Guía cap 29** — sub-sección nueva "Frames binarios con
+  `WsConn<Bytes>`" con ejemplo runnable + AsyncAPI schema
+  emitido + trade-off documentado (text XOR binary por
+  endpoint). Ejemplo `examples/guide/29b-ws-binary.fitz`
+  agregado al smoke `GUIDE_EXAMPLES_COMPILE`.
+
+**Decisión de diseño**: opción A — un endpoint es text-only XOR
+binary-only, según el T declarado. Más simple que un canal mixto
+y alineado con el modelo "T determina el frame type" que ya
+tiene el lenguaje. Si aparece presión por endpoints mixtos,
+queda como sub-paso futuro.
+
+**Acumulado al cierre**: +10 unit (4 checker + 3 AsyncAPI + 3
+E2E intérprete = todos via `cargo test --lib`) + 1 E2E codegen
+(`cargo test --test compile_e2e`). Clippy `-D warnings` limpio.
+Sin breaking changes — handlers `WsConn<Str>` / `WsConn<Nominal>`
+existentes siguen funcionando idéntico.
+
+Próximo norte (mismo bloque de quick wins post-boilerplates):
+investigación + cierre de `R.bug-pyo3-abi3-portable-link` —
+binarios Linux con `--features python` corren en cualquier
+Python 3.10+ del runtime sin rebuild.
+
 ## [v0.9.32] — 2026-05-22 — Patch: mini-tanda Cleanup-Residual+ — limpiezas mecánicas + pyo3-abi3 cerrado + multi-arch Docker
 
 Bloque grande de cleanup post-Cleanup-Residual. 4 sub-tandas

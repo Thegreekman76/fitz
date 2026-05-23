@@ -71,7 +71,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 ♦ **Auth nativa** con `@auth_provider`/`@authenticated`/`@admin` + built-ins `jwt` (HS256/384/512) y `hash` (Argon2id). Validación en compile-time, 401/403 automáticos en OpenAPI. Cero deps externas. → [cap 28](https://thegreekman76.github.io/fitz/guide/#28-auth-nativa).
 
-♣ **WebSockets tipados** con `@ws("/path")` + `WsConn<T>`. Marshaling JSON automático, AsyncAPI 3.0 auto-generado en `/asyncapi.json`, heartbeat built-in, auth integrada en el handshake. → [cap 29](https://thegreekman76.github.io/fitz/guide/#29-websockets-tipados).
+♣ **WebSockets tipados** con `@ws("/path")` + `WsConn<T>`. Marshaling JSON automático para T text (Str / nominal / etc.), frames binarios raw con `WsConn<Bytes>` (sin re-encoding ni base64), AsyncAPI 3.0 auto-generado en `/asyncapi.json` (incluye `contentType: application/octet-stream` cuando T=Bytes), heartbeat built-in, auth integrada en el handshake. → [cap 29](https://thegreekman76.github.io/fitz/guide/#29-websockets-tipados).
 
 ♠ **Jobs sin Celery** con `@cron("expr")` + `@background` + `spawn(fn_call)`. Sin broker externo (Redis/RabbitMQ no son requisito). Cron-only mode systemd-friendly. → [cap 30](https://thegreekman76.github.io/fitz/guide/#30-jobs-sin-celery).
 

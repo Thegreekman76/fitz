@@ -2682,6 +2682,7 @@ const GUIDE_EXAMPLES_COMPILE: &[&str] = &[
     "24-tests.fitz",
     "28-auth.fitz",
     "29-ws.fitz",
+    "29b-ws-binary.fitz",
     "30-cron-background.fitz",
     "31-env.fitz",
 ];
@@ -5870,6 +5871,127 @@ fn ws_codegen_tipo_custom_marshaling_json() {
     let v: serde_json::Value = serde_json::from_str(&resp).expect("JSON válido");
     assert_eq!(v["user"], serde_json::json!("ada"));
     assert_eq!(v["text"], serde_json::json!("re:hi"));
+}
+
+// ---------------------------------------------------------------------------
+// 9.w.2-binary-frames — `WsConn<Bytes>` end-to-end con codegen
+// ---------------------------------------------------------------------------
+
+/// Variante binaria de `ws_build_send_recv`. Conecta vía WS, envía un
+/// frame Binary, recibe el response también como Binary. Garantía:
+/// bytes pasan bit-a-bit por el wire.
+#[allow(clippy::await_holding_lock)]
+async fn ws_build_send_recv_binary(
+    test_name: &str,
+    src: &str,
+    port: u16,
+    path: &str,
+    payload: Vec<u8>,
+) -> Vec<u8> {
+    let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+    let dir = std::env::temp_dir().join(format!("fitz-e2e-{}", test_name));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build"])
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build");
+    assert!(
+        output.status.success(),
+        "fitz build WS<Bytes> falló:\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+    let bin = dir.join(bin_name);
+    assert!(bin.exists(), "binario {} no existe", bin.display());
+
+    use std::process::{Child, Stdio};
+    let mut child: Child = Command::new(&bin)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn server");
+    std::thread::sleep(std::time::Duration::from_millis(500));
+
+    let addr = format!("127.0.0.1:{}", port);
+    let start = std::time::Instant::now();
+    let mut connected = false;
+    while start.elapsed() < std::time::Duration::from_secs(3) {
+        if std::net::TcpStream::connect(&addr).is_ok() {
+            connected = true;
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    if !connected {
+        let _ = child.kill();
+        panic!("server WS<Bytes> no abrió el puerto {} en 3s", port);
+    }
+
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message;
+    let url = format!("ws://{}{}", addr, path);
+    let (mut ws, _) = tokio_tungstenite::connect_async(&url)
+        .await
+        .expect("WS connect");
+    ws.send(Message::binary(payload))
+        .await
+        .expect("send binary");
+    let frame = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+        .await
+        .expect("timeout")
+        .expect("frame")
+        .expect("ok");
+    let bs = match frame {
+        Message::Binary(b) => b.to_vec(),
+        other => panic!("esperaba binary, fue {:?}", other),
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    bs
+}
+
+#[test]
+fn ws_codegen_binary_echo_compila_y_responde() {
+    // `WsConn<Bytes>` round-trip end-to-end. El binario nativo debería
+    // aceptar frames binarios raw (no JSON-marshalled), procesarlos como
+    // `Value::Bytes` y devolverlos sin tocar — paridad bit-a-bit con el
+    // intérprete (`ws_echo_binary_round_trip` en src/http.rs).
+    let src = "@server(43973)\n\
+               fn main() => 0\n\
+               @ws(\"/raw\")\n\
+               async fn raw(conn: WsConn<Bytes>) -> Null {\n\
+                   match conn.recv() {\n\
+                       Ok(buf) => match conn.send(buf) {\n\
+                           Ok(_) => return null,\n\
+                           Err(_) => return null,\n\
+                       },\n\
+                       Err(_) => return null,\n\
+                   }\n\
+               }";
+    let payload: Vec<u8> = vec![0x00, 0x01, 0x10, 0x80, 0xff, 0x7e];
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let resp = rt.block_on(async {
+        ws_build_send_recv_binary(
+            "ws_codegen_binary",
+            src,
+            43973,
+            "/raw",
+            payload.clone(),
+        )
+        .await
+    });
+    assert_eq!(resp, payload);
 }
 
 // ---------------------------------------------------------------------------

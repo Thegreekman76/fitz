@@ -11872,6 +11872,62 @@ print(total)
         assert_auth_err(src, "T` concreto");
     }
 
+    // ---- 9.w.2-binary-frames — `WsConn<Bytes>` ----
+    //
+    // El checker es paramétrico sobre T en `infer_wsconn_method` y trata
+    // `Bytes` como cualquier otro tipo concreto. Estos tests blindean
+    // el contrato: `WsConn<Bytes>` se acepta, `recv()` tipa
+    // `Result<Bytes>`, `send`/`broadcast` aceptan `Bytes` y rechazan
+    // tipos incompatibles. La discriminación binary-vs-text vive en
+    // runtime (evaluator + http.rs) y codegen.
+
+    #[test]
+    fn ws_handler_wsconn_bytes_compila() {
+        let src = "@ws(\"/raw\")\n\
+                   async fn raw(conn: WsConn<Bytes>) -> Null {\n\
+                       match conn.recv() {\n\
+                           Ok(buf) => match conn.send(buf) {\n\
+                               Ok(_) => return null,\n\
+                               Err(_) => return null,\n\
+                           },\n\
+                           Err(_) => return null,\n\
+                       }\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_method_recv_bytes_devuelve_result_bytes() {
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Bytes>) -> Null {\n\
+                       let r: Result<Bytes> = conn.recv()\n\
+                       return null\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_method_send_bytes_acepta_bytes_literal() {
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Bytes>) -> Null {\n\
+                       let _r = conn.send(b\"hola\")\n\
+                       return null\n\
+                   }";
+        assert_auth_ok(src);
+    }
+
+    #[test]
+    fn ws_method_send_bytes_rechaza_str() {
+        // `conn.send("hola")` sobre `WsConn<Bytes>` da error: el arg
+        // es `Str`, el método espera `Bytes`.
+        let src = "@ws(\"/c\")\n\
+                   async fn h(conn: WsConn<Bytes>) -> Null {\n\
+                       let _r = conn.send(\"hola\")\n\
+                       return null\n\
+                   }";
+        assert_auth_err(src, "WsConn<Bytes>.send");
+    }
+
     // ---- Fase 9.w.3 — checker @cron + @background + spawn ----
 
     #[test]

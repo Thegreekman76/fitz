@@ -210,16 +210,35 @@ pub fn generate_asyncapi_with_version(
             .as_ref()
             .map(|t| t.display_name())
             .unwrap_or_else(|| "AnyMessage".to_string());
+        // 9.w.2-binary-frames — `WsConn<Bytes>` opera con `Message::Binary`
+        // raw en el wire (no JSON-marshalled text). Reflejamos eso en el
+        // schema con `contentType: application/octet-stream` y un summary
+        // específico. El resto sigue como text JSON.
+        let is_bytes = matches!(
+            ch.msg_type.as_ref(),
+            Some(TypeExpr::Named(n)) if n == "Bytes"
+        );
 
         // Channel entry.
         let mut messages = Map::new();
+        let (content_type, msg_summary) = if is_bytes {
+            (
+                "application/octet-stream",
+                "Frame binario raw ↔ Fitz `Bytes`".to_string(),
+            )
+        } else {
+            (
+                "application/json",
+                format!("Frame text JSON ↔ Fitz `{}`", msg_name),
+            )
+        };
         messages.insert(
             "msg".into(),
             json!({
                 "name": msg_name,
                 "title": format!("Mensaje de `{}`", ch.handler_name),
-                "summary": format!("Frame text JSON ↔ Fitz `{}`", msg_name),
-                "contentType": "application/json",
+                "summary": msg_summary,
+                "contentType": content_type,
                 "payload": msg_schema,
             }),
         );
@@ -441,6 +460,48 @@ mod tests {
         // Sin auth, components puede no estar.
         let comp = s.get("components");
         assert!(comp.is_none() || comp.unwrap().get("securitySchemes").is_none());
+    }
+
+    // ---- 9.w.2-binary-frames — `WsConn<Bytes>` AsyncAPI ----
+
+    #[test]
+    fn asyncapi_wsconn_bytes_emite_payload_binary() {
+        let src = "@ws(\"/raw\")\n\
+                   async fn raw(conn: WsConn<Bytes>) -> Null { return null }";
+        let s = schema_for(src);
+        let msg = &s["channels"]["/raw"]["messages"]["msg"];
+        assert_eq!(msg["contentType"], json!("application/octet-stream"));
+        let payload = &msg["payload"];
+        assert_eq!(payload["type"], json!("string"));
+        assert_eq!(payload["format"], json!("binary"));
+    }
+
+    #[test]
+    fn asyncapi_wsconn_bytes_summary_dice_binario() {
+        let src = "@ws(\"/raw\")\n\
+                   async fn raw(conn: WsConn<Bytes>) -> Null { return null }";
+        let s = schema_for(src);
+        let summary = s["channels"]["/raw"]["messages"]["msg"]["summary"]
+            .as_str()
+            .expect("summary string");
+        assert!(
+            summary.contains("binario") || summary.contains("Bytes"),
+            "summary debería mencionar binario o Bytes, fue: {}",
+            summary
+        );
+    }
+
+    #[test]
+    fn asyncapi_wsconn_str_no_se_pisa_con_bytes() {
+        // Sanity: T = Str sigue emitiendo `application/json`, no se
+        // contamina con el ajuste de Bytes.
+        let src = "@ws(\"/c\")\n\
+                   async fn c(conn: WsConn<Str>) -> Null { return null }";
+        let s = schema_for(src);
+        let msg = &s["channels"]["/c"]["messages"]["msg"];
+        assert_eq!(msg["contentType"], json!("application/json"));
+        assert_eq!(msg["payload"]["type"], json!("string"));
+        assert!(msg["payload"]["format"].is_null());
     }
 
     #[test]

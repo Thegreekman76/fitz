@@ -462,6 +462,19 @@ async fn chat_handler(conn: WsConn<ChatMsg>) {
     }
 }
 
+// frames binarios raw — `WsConn<Bytes>` cambia el wire de
+// text JSON a `Message::Binary` opaco. Útil para protocolos
+// custom (protobuf, MessagePack), streaming audio/video, etc.
+@ws("/raw")
+async fn raw(conn: WsConn<Bytes>) {
+    loop {
+        match conn.recv().await {
+            Ok(buf) => conn.send(buf).await,
+            Err(_) => break,
+        }
+    }
+}
+
 // cron jobs
 @cron("0 0 * * *")  // cada medianoche
 async fn cleanup_sessions() { ... }

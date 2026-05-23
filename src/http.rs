@@ -3475,7 +3475,7 @@ impl WsBroadcaster {
 }
 
 impl WsBroadcasterTrait for WsBroadcaster {
-    fn broadcast(&self, endpoint: &str, payload: String) {
+    fn broadcast_text(&self, endpoint: &str, payload: String) {
         // Strategy: lock corto, retain elimina los txs cerrados
         // lazy. Cada outbox_tx.send() es non-blocking (mpsc unbounded).
         let mut conns = self.conns.lock();
@@ -3486,15 +3486,31 @@ impl WsBroadcasterTrait for WsBroadcaster {
             }
         }
     }
+
+    fn broadcast_binary(&self, endpoint: &str, payload: Vec<u8>) {
+        // 9.w.2-binary-frames — mismo modelo que `broadcast_text` pero
+        // empuja `WsOutMessage::Binary(...)`. El writer task de cada
+        // conn lo traduce a `Message::Binary` axum.
+        let mut conns = self.conns.lock();
+        if let Some(list) = conns.get_mut(endpoint) {
+            list.retain(|(_, tx)| tx.send(WsOutMessage::Binary(payload.clone())).is_ok());
+            if list.is_empty() {
+                conns.remove(endpoint);
+            }
+        }
+    }
 }
 
 /// Wrapper sobre el read half del WebSocket axum que implementa el
-/// trait que `WsConnHandle.rx` espera. Filtra frames no-text:
-///   - text → Ok(Some(payload)).
-///   - close → Ok(None) (conn cerrada ordenadamente).
-///   - binary → Err (MVP no soporta).
-///   - ping/pong → axum auto-replies pings; los descartamos en el
-///     loop y seguimos esperando un text frame.
+/// trait que `WsConnHandle.rx` espera. 9.w.2-binary-frames: expone
+/// AMBOS text y binary; el evaluator/codegen discrimina según el T
+/// declarado del `WsConn<T>`.
+///
+///   - text   → `Ok(Some(IncomingFrame::Text(s)))`.
+///   - binary → `Ok(Some(IncomingFrame::Binary(bs)))`.
+///   - close  → `Ok(None)` (conn cerrada ordenadamente).
+///   - ping/pong → axum auto-replies pings desde el server side;
+///     los descartamos en el loop interno.
 ///
 /// `Ping/Pong/Close` los maneja la stack axum/tungstenite por
 /// debajo (al iterar el stream); acá solo decidimos qué exponer al
@@ -3504,10 +3520,10 @@ struct WsReadStreamImpl {
 }
 
 impl WsReadStreamTrait for WsReadStreamImpl {
-    fn next_text_frame<'a>(
+    fn next_frame<'a>(
         &'a mut self,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Option<String>, String>> + Send + 'a>,
+        Box<dyn std::future::Future<Output = Result<Option<crate::value::IncomingFrame>, String>> + Send + 'a>,
     > {
         use futures_util::StreamExt;
         Box::pin(async move {
@@ -3515,18 +3531,16 @@ impl WsReadStreamTrait for WsReadStreamImpl {
                 let next = self.inner.next().await;
                 match next {
                     Some(Ok(axum::extract::ws::Message::Text(t))) => {
-                        return Ok(Some(t.to_string()));
+                        return Ok(Some(crate::value::IncomingFrame::Text(t.to_string())));
                     }
-                    Some(Ok(axum::extract::ws::Message::Binary(_))) => {
-                        return Err(
-                            "WebSocket: frame binario no soportado en MVP — usá frames text con JSON"
-                                .to_string(),
-                        );
+                    Some(Ok(axum::extract::ws::Message::Binary(bs))) => {
+                        return Ok(Some(crate::value::IncomingFrame::Binary(bs.to_vec())));
                     }
                     Some(Ok(axum::extract::ws::Message::Ping(_)))
                     | Some(Ok(axum::extract::ws::Message::Pong(_))) => {
                         // axum auto-replies pings desde el server side;
-                        // descartamos para que el handler vea solo text.
+                        // descartamos para que el handler vea solo
+                        // text/binary.
                         continue;
                     }
                     Some(Ok(axum::extract::ws::Message::Close(_))) => {
@@ -3576,6 +3590,16 @@ pub fn build_ws_conn(
                 WsOutMessage::Text(t) => {
                     if sink
                         .send(axum::extract::ws::Message::Text(t.into()))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+                WsOutMessage::Binary(bs) => {
+                    // 9.w.2-binary-frames — frame raw binario.
+                    if sink
+                        .send(axum::extract::ws::Message::Binary(bs.into()))
                         .await
                         .is_err()
                     {
@@ -7043,5 +7067,132 @@ fn me(user: User) -> Str => \"x\"\n\
         // termina sin leaks).
         // (Test placeholder; deja documentado la deuda de exposición
         // del broadcaster para inspección.)
+    }
+
+    // ---- 9.w.2-binary-frames — `WsConn<Bytes>` end-to-end ----
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_echo_binary_round_trip() {
+        // Handler echo binario: recibe `Bytes`, los manda de vuelta sin
+        // tocar. El cliente envía `Message::Binary`, el server lo recibe
+        // como `Value::Bytes` (via `recv()` con T = Bytes), lo reenvía
+        // con `send(buf)` que emite `Message::Binary` (no Text con JSON).
+        let src = "@ws(\"/raw\")\n\
+                   async fn raw(conn: WsConn<Bytes>) -> Null {\n\
+                       match conn.recv() {\n\
+                           Ok(buf) => match conn.send(buf) {\n\
+                               Ok(_) => return null,\n\
+                               Err(_) => return null,\n\
+                           },\n\
+                           Err(_) => return null,\n\
+                       }\n\
+                   }";
+        let (addr, _h) = spawn_ws_server(src).await;
+        let mut ws = ws_connect(addr, "/raw").await;
+
+        use futures_util::{SinkExt, StreamExt};
+        // Bytes arbitrarios — incluyen 0x00 y 0xff para forzar que el
+        // path no esté re-encodeando a UTF-8.
+        let payload: Vec<u8> = vec![0x00, 0x01, 0x10, 0x80, 0xff, 0x7e];
+        ws.send(tungstenite::Message::binary(payload.clone()))
+            .await
+            .expect("send binary");
+
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        match resp {
+            tungstenite::Message::Binary(bs) => {
+                assert_eq!(bs.as_ref(), payload.as_slice());
+            }
+            other => panic!("esperaba binary, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_broadcast_binary_multi_cliente() {
+        // Dos clientes conectados; uno envía binary, ambos reciben el
+        // broadcast (sender incluido — convención Socket.IO/Phoenix).
+        let src = "@ws(\"/room\")\n\
+                   async fn room(conn: WsConn<Bytes>) -> Null {\n\
+                       loop {\n\
+                           match conn.recv() {\n\
+                               Ok(buf) => {\n\
+                                   let _ = conn.broadcast(buf)\n\
+                               }\n\
+                               Err(_) => return null\n\
+                           }\n\
+                       }\n\
+                       return null\n\
+                   }";
+        let (addr, _h) = spawn_ws_server(src).await;
+        let mut a = ws_connect(addr, "/room").await;
+        let mut b = ws_connect(addr, "/room").await;
+
+        use futures_util::{SinkExt, StreamExt};
+        // Damos un instante para que el server registre ambos conns.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let payload: Vec<u8> = vec![0xde, 0xad, 0xbe, 0xef, 0x00, 0xff];
+        a.send(tungstenite::Message::binary(payload.clone()))
+            .await
+            .expect("send");
+
+        let ra = tokio::time::timeout(std::time::Duration::from_secs(2), a.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        let rb = tokio::time::timeout(std::time::Duration::from_secs(2), b.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        match (ra, rb) {
+            (tungstenite::Message::Binary(ba), tungstenite::Message::Binary(bb)) => {
+                assert_eq!(ba.as_ref(), payload.as_slice());
+                assert_eq!(bb.as_ref(), payload.as_slice());
+            }
+            other => panic!("esperaba (binary, binary), fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_recv_bytes_mismatch_si_cliente_envia_text() {
+        // Si el handler declara `WsConn<Bytes>` y el cliente manda un
+        // text frame, `recv()` devuelve `Err`. El handler responde con
+        // un literal binario sentinela (`b"mismatch"`) — el test confirma
+        // que el path del Err se ejecuta y el cliente recibe el frame.
+        let src = "@ws(\"/raw\")\n\
+                   async fn raw(conn: WsConn<Bytes>) -> Null {\n\
+                       match conn.recv() {\n\
+                           Ok(_) => return null,\n\
+                           Err(_) => {\n\
+                               let _ = conn.send(b\"mismatch\")\n\
+                               return null\n\
+                           }\n\
+                       }\n\
+                   }";
+        let (addr, _h) = spawn_ws_server(src).await;
+        let mut ws = ws_connect(addr, "/raw").await;
+
+        use futures_util::{SinkExt, StreamExt};
+        ws.send(tungstenite::Message::text("hola"))
+            .await
+            .expect("send text");
+
+        let resp = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        match resp {
+            tungstenite::Message::Binary(bs) => {
+                assert_eq!(bs.as_ref(), b"mismatch");
+            }
+            other => panic!("esperaba binary `mismatch`, fue {:?}", other),
+        }
     }
 }
