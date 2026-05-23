@@ -7457,6 +7457,55 @@ solo web.
 
 ---
 
+## Iniciativas paralelas — Curso `Fitz de 0 a experto` 📚
+
+**Estado**: planificada, sin arrancar. Plan detallado en
+[`docs/curso-plan.md`](curso-plan.md).
+
+**Resumen**: 7 módulos / 36 capítulos, español, progresivo desde
+instalación + `fitz new` + "hola mundo" en VSCode hasta capstone
+con SQLAlchemy + Postgres + Docker + CI. Cada capítulo con código
+commiteable bajo `examples/curso/cXX-*/` que entra al smoke
+`GUIDE_EXAMPLES_COMPILE`.
+
+**Diferencial vs `guide.md`**: la guía es referencia
+feature-por-feature; el curso es narrativo con un proyecto que
+crece. Se complementan, no se solapan. Cross-link explícito al
+inicio de ambos.
+
+**Requisito explícito**: VSCode + extensión Fitz instalada (el
+curso muestra el LSP en funcionamiento desde C3 — hover,
+autocomplete, go-to-def, diagnostics live).
+
+**Hilo conductor pedagógico**: organización de proyectos con
+buenas prácticas de carpetas (`src/models/` + `src/services/` +
+`src/handlers/` + `src/db/` + `tests/`) y "namespaces" via
+módulos Fitz (`from src.models.user import User`).
+
+**Decisiones tomadas (2026-05-23)**:
+1. Idioma español.
+2. Ubicación `docs/curso/`.
+3. Screenshots solo para 3 hitos visuales (M1 install, M4
+   Scalar UI, M6 hot reload); resto descripciones ASCII.
+4. M7 (producción + CI) incluido como parte mandatoria (no
+   opcional).
+5. Smoke `GUIDE_EXAMPLES_COMPILE` cubre los ejemplos del curso.
+
+**Pre-reqs**: ninguno técnico. Puede arrancar en paralelo con
+cualquier fase del lenguaje cuando el autor decida.
+
+**Orden propuesto al arrancar**: M1 entero → release público →
+ver tracción → iterar M2-M7. Cada módulo es unidad releasable
+independiente.
+
+**Por qué importa**: hoy la guía es la única puerta de entrada
+y asume cierta intención técnica. El curso ocupa el espacio de
+"alguien cae al sitio, lee la lista de features, y necesita
+verlo construirse paso a paso desde cero". También es marketing
+implícito de la extensión VSCode.
+
+---
+
 ## Hitos clave
 
 | Hito | Descripción |
