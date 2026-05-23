@@ -5444,6 +5444,58 @@ Investigar variables PyO3 que fuerzan el link a stable ABI:
 Validar el fix con docker build cross-Python (build con 3.13 +
 run con 3.10/3.11/3.12).
 
+### Investigación empírica — 2026-05-23
+
+Bloque de 4 experimentos Docker (rust:slim Debian Trixie / Python
+3.13 → python:3.12-slim). **El bug es más estructural de lo que
+sugieren las env vars solas**. Resumen del aprendizaje:
+
+| Approach | Resultado | Por qué |
+|---|---|---|
+| `PYO3_NO_PYTHON=1` solo | ❌ build error | `config does not contain lib_name` |
+| `PYO3_CONFIG_FILE` con `lib_name=python3` solo | ❌ build error | `rust-lld: unable to find library -lpython3` (Debian no provee `libpython3.so` symlink unversioned) |
+| `PYO3_CONFIG_FILE` + symlink en builder, sin `NO_PYTHON` | ❌ binary mal linkeado | PyO3 detecta el Python del builder y emite `-lpython3.13` específico, ignorando el config file |
+| `PYO3_NO_PYTHON=1` + `PYO3_CONFIG_FILE` + symlink | 🟡 no validado | Bug intermitente del buildkit (`snapshot does not exist`) interrumpió el experimento; el approach es viable conceptualmente |
+
+**Hallazgos colaterales**:
+
+1. **`rust:slim` (Debian)** NO incluye `libpython3.so` symlink
+   unversioned con `libpython3-dev` — sólo versionado
+   (`libpython3.13.so`). Para usar `-lpython3` con el linker hay
+   que crear el symlink manualmente:
+   ```bash
+   ln -sf /usr/lib/x86_64-linux-gnu/libpython3.X.so \
+          /usr/lib/x86_64-linux-gnu/libpython3.so
+   ```
+
+2. **`python:3.X-slim` SÍ incluye `/usr/local/lib/libpython3.so`**
+   symlink unversioned (porque el container build de Python desde
+   source lo crea con `./configure --enable-shared`). Por eso un
+   experimento parcial pareció "funcionar" (el binary linkeado a
+   `libpython3.13.so.1.0` corría en runtime python:3.12-slim
+   porque `libpython3-dev` también instaló libpython3.13 ahí — no
+   era cross-Python real).
+
+3. **Combinación correcta del fix** (sin validar empíricamente):
+   - Builder: env vars `PYO3_NO_PYTHON=1` + `PYO3_CONFIG_FILE` con
+     `lib_name=python3` + crear symlink `libpython3.so → libpython3.X.so`.
+   - Runtime: usar `python:3.X-slim` (ya tiene el symlink) o
+     crear el symlink local en distros que no lo provean.
+
+**Por qué no se cerró 2026-05-23**:
+
+Validar el approach completo requiere ~2-3 hs adicionales de
+Docker builds + tracear con `LD_DEBUG=libs`. Además, propagar el
+fix a CI workflows + Dockerfiles + documentar la convención del
+symlink en runtime es invasivo. **Sin presión real (el workaround
+match-builder-runtime funciona, el release Linux no distribuye
+binario con `--features python`)**, mejor dejarlo y retomar cuando
+aparezca demanda concreta. Los hallazgos quedan documentados para
+no reinventar la rueda.
+
+**Dockerfiles experimentales** descartados en `d:\tmp\fitz-pyo3-test\`
+(no van al repo). Si se retoma, recrear con el plan documentado.
+
 ### Items vinculados
 
 - `boilerplates/api-postgres-python/Dockerfile` workaround
