@@ -10038,6 +10038,64 @@ SignalR te da proxies tipados solo en C# y solo en `.NET`. Fitz
 los junta en un lenguaje nuevo, con un binario standalone, con
 auth nativa.
 
+### Auth WS desde browsers — subprotocol `bearer.<token>`
+
+`new WebSocket(url)` del browser **no permite setear headers HTTP**
+arbitrarios. El segundo argumento del constructor SÍ acepta una
+lista de subprotocols. La convención estándar (Socket.IO, Phoenix,
+varios proyectos Node) es pasar el token via subprotocol con
+formato `bearer.<token>`.
+
+Desde v0.9.36, Fitz lo soporta sin cambios del lado user — el
+runtime y el codegen extraen el token del header
+`Sec-WebSocket-Protocol` y lo inyectan como
+`authorization: Bearer <token>` al map de headers que ve el
+`@auth_provider`. El mismo provider funciona para HTTP y WS.
+
+Cliente browser:
+
+```javascript
+const token = "eyJhbGc..."; // JWT obtenido vía POST /login
+const ws = new WebSocket("ws://localhost:43929/chat", `bearer.${token}`);
+ws.onmessage = (ev) => console.log("got:", ev.data);
+ws.onopen = () => ws.send(JSON.stringify({user: "Ada", text: "hola"}));
+```
+
+Server Fitz — sin cambios respecto al cap 28:
+
+```fitz
+@auth_provider
+fn check_token(headers: Map<Str, Str>) -> Result<User> {
+    let auth = match headers.get("authorization") {
+        Ok(v) => v,
+        Err(_) => return Err("falta Authorization"),
+    }
+    // auth = "Bearer eyJhbGc..." (inyectado por el runtime desde
+    // el subprotocol, sin que el handler lo sepa).
+    let token = auth.replace("Bearer ", "")
+    let claims = jwt.decode(token, SECRET)?
+    return find_user(claims["email"])
+}
+
+@authenticated
+@ws("/chat")
+async fn chat(conn: WsConn<ChatMsg>, user: User) -> Null { /*...*/ }
+```
+
+**Echo del subprotocol**: RFC 6455 §4.1 exige que el server
+confirme el subprotocol elegido en la response del handshake. Sin
+echo, el browser rechaza el upgrade. Fitz lo hace automático —
+si el cliente envió `bearer.<token>`, el server responde con el
+mismo subprotocol en el handshake.
+
+**Compatibilidad con header**: si el cliente envía AMBOS
+(`Authorization: Bearer ...` y `Sec-WebSocket-Protocol: bearer.<token>`),
+el header gana — el subprotocol solo inyecta cuando no hay
+`Authorization` previo. Esto preserva el caso wscat/curl/clientes
+no-browser que sí pueden setear headers.
+
+Paridad bit-a-bit `fitz run` ↔ `fitz build`.
+
 ### Frames binarios con `WsConn<Bytes>`
 
 Cuando el wire es binario raw — protocolos custom (gRPC-Web,

@@ -4,6 +4,16 @@
 # Builds subsiguientes: ~30s si solo cambia src/ o python/ (cache
 # buildkit reusa la capa de cargo install).
 #
+# Alternativa rápida (desde v0.9.36): si querés evitar los ~5-8 min
+# de build inicial, usá la imagen pre-buildeada `:latest-python`:
+#
+#   FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
+#   # ... resto sin cambios
+#
+# Trade-off: tag floating; mejor pin a `v0.9.X-python` para
+# reproducibilidad. El Dockerfile actual sigue clonando desde source
+# para que el build sea independiente del tag de la imagen.
+#
 # IMPORTANTE — match Python entre builder y runtime: aunque
 # `auto-initialize` ya no está en el Cargo.toml de Fitz (mini-tanda
 # Cleanup-Residual+ 2026-05-22), el binario sigue linkeando contra

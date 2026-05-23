@@ -13768,6 +13768,14 @@ where
         self.emit(") -> axum::response::Response {\n");
         self.emit("    use axum::response::IntoResponse;\n");
 
+        // 9.w.2-ws-auth-browser — extraer subprotocol `bearer.<token>`
+        // (si presente) ANTES del auth pre-upgrade. La extracción
+        // se hace siempre (independiente de si hay auth o no) para
+        // que el echo del subprotocol en el handshake response funcione.
+        // Si no hay match, `__ws_bearer` queda None y el flow original
+        // se preserva.
+        self.emit("    let __ws_bearer = __fitz_ws_extract_bearer_subprotocol(&__hmap);\n");
+
         // Auth pre-upgrade. Paralelo a `emit_auth_check` pero adaptado
         // para el contexto WS (return Response directo si falla).
         if auth != crate::http::AuthSpec::None {
@@ -13783,10 +13791,19 @@ where
                 ""
             };
             self.emit("    let __auth_headers: std::sync::Arc<std::sync::Mutex<Vec<(String, String)>>> = {\n");
-            self.emit("        let mut __pairs: Vec<(String, String)> = Vec::with_capacity(__hmap.len());\n");
+            self.emit("        let mut __pairs: Vec<(String, String)> = Vec::with_capacity(__hmap.len() + 1);\n");
             self.emit("        for (k, v) in __hmap.iter() {\n");
             self.emit("            if let Ok(vs) = v.to_str() {\n");
             self.emit("                __pairs.push((k.as_str().to_string(), vs.to_string()));\n");
+            self.emit("            }\n");
+            self.emit("        }\n");
+            // 9.w.2-ws-auth-browser — inyectar `authorization: Bearer <token>`
+            // al map del provider cuando el cliente envió bearer via
+            // subprotocol y no hay ya un Authorization header. Paralelo
+            // al runtime (build_ws_method_router).
+            self.emit("        if let Some((_, ref __tok)) = __ws_bearer {\n");
+            self.emit("            if !__pairs.iter().any(|(k, _)| k.eq_ignore_ascii_case(\"authorization\")) {\n");
+            self.emit("                __pairs.push((\"authorization\".to_string(), format!(\"Bearer {}\", __tok)));\n");
             self.emit("            }\n");
             self.emit("        }\n");
             self.emit("        std::sync::Arc::new(std::sync::Mutex::new(__pairs))\n");
@@ -13814,6 +13831,15 @@ where
                 self.emit("        }\n    }\n");
             }
         }
+
+        // 9.w.2-ws-auth-browser — echo del subprotocol seleccionado
+        // en el handshake response (RFC 6455 §4.1). Sin esto, browsers
+        // que ofrecieron un subprotocol rechazan el upgrade aunque
+        // axum hubiera dejado pasar la conn.
+        self.emit("    let ws = match &__ws_bearer {\n");
+        self.emit("        Some((proto, _)) => ws.protocols([proto.clone()]),\n");
+        self.emit("        None => ws,\n");
+        self.emit("    };\n");
 
         // Upgrade closure.
         // El `move` captura `__user` si aplica.
@@ -16373,6 +16399,26 @@ fn __fitz_ws_broadcast_binary(endpoint: &str, payload: Vec<u8>) {
             conns.remove(endpoint);
         }
     }
+}
+
+/// 9.w.2-ws-auth-browser — extrae bearer token del header
+/// `Sec-WebSocket-Protocol` del handshake WS. Paralelo al runtime
+/// (`extract_ws_bearer_subprotocol` en src/http.rs).
+fn __fitz_ws_extract_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
+    let raw = headers
+        .get("sec-websocket-protocol")
+        .or_else(|| headers.get("Sec-WebSocket-Protocol"))?
+        .to_str()
+        .ok()?;
+    for piece in raw.split(',') {
+        let proto = piece.trim();
+        if let Some(token) = proto.strip_prefix("bearer.") {
+            if !token.is_empty() {
+                return Some((proto.to_string(), token.to_string()));
+            }
+        }
+    }
+    None
 }
 
 /// Trait que cualquier `T` debe satisfacer para viajar por un
@@ -23477,6 +23523,53 @@ mod tests {
         assert!(
             !code.contains(".route(\"/asyncapi\", axum::routing::get(__serve_asyncapi))"),
             "auto-register de /asyncapi no debería estar cuando el user lo declara"
+        );
+    }
+
+    #[test]
+    fn ws_codegen_emite_helper_bearer_subprotocol() {
+        // 9.w.2-ws-auth-browser — cuando hay handlers @ws, el preludio
+        // emite el helper `__fitz_ws_extract_bearer_subprotocol`.
+        let src = "@server(43989)\n\
+                   fn main() => 0\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<Str>) -> Null { return null }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("fn __fitz_ws_extract_bearer_subprotocol"),
+            "esperaba helper de extracción de bearer subprotocol en preludio"
+        );
+        assert!(
+            code.contains("__ws_bearer = __fitz_ws_extract_bearer_subprotocol(&__hmap)"),
+            "esperaba uso del helper en el wrapper de WS"
+        );
+        // Echo del subprotocol con .protocols(...).
+        assert!(
+            code.contains("ws.protocols([proto.clone()])"),
+            "esperaba echo del subprotocol seleccionado via .protocols(...)"
+        );
+    }
+
+    #[test]
+    fn ws_codegen_auth_handler_inyecta_authorization_desde_bearer_subproto() {
+        // Wrapper con @authenticated debería inyectar
+        // `authorization: Bearer <token>` al map del provider cuando
+        // el cliente envía el token via subprotocol.
+        let src = "type User { id: Int, name: Str, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(h: Map<Str, Str>) -> Result<User> { return Err(\"x\") }\n\
+                   @authenticated\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<Str>, user: User) -> Null { return null }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El bloque del provider debe contener la lógica de inyección.
+        assert!(
+            code.contains("if let Some((_, ref __tok)) = __ws_bearer"),
+            "esperaba branch de inyección Bearer en el wrapper auth"
+        );
+        assert!(
+            code.contains("format!(\"Bearer {}\", __tok)"),
+            "esperaba format!(`Bearer {{}}`, token) para el header authorization"
         );
     }
 

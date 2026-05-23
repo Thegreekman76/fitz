@@ -4,6 +4,18 @@
 # Patrón distinto a los otros 4 boilerplates: en lugar de buildear
 # a binario standalone distroless, mantenemos Python en el runtime.
 #
+# Alternativa rápida (desde v0.9.36): si querés evitar los ~5-8 min
+# del primer build (cargo install fitz --features python), usá la
+# imagen pre-buildeada como base:
+#
+#   FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
+#   # ... resto sin cambios
+#
+# Trade-off: tag floating (mejor pin a `v0.9.X-python` para
+# reproducibilidad). El Dockerfile actual sigue clonando + buildeando
+# desde source para que el build sea independiente del tag de la
+# imagen.
+#
 # IMPORTANTE — match Python entre builder y runtime:
 # Aunque el Cargo.toml de Fitz ya NO tiene `auto-initialize`
 # (mini-tanda Cleanup-Residual+ 2026-05-22 removió ese feature

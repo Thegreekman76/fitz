@@ -63,7 +63,7 @@ Los lenguajes actuales te obligan a elegir entre ergonomía y performance:
 
 † **Compilado nativo via transpile-a-Rust + Cargo**. Binario standalone ~5 MB, sin runtime de Fitz en el destino. Cross-compile gratis vía targets de rustc. → [cap 20](https://thegreekman76.github.io/fitz/guide/#20-fitz-build--compilar-a-binario-nativo).
 
-✱ **Multiplataforma de verdad**. Cada release publica binarios + extensión VSCode + imagen Docker para **4 plataformas** (Windows x64, Linux x64, Linux ARM64, macOS Apple Silicon). El mismo programa Fitz corre en cualquiera de las cuatro — y compilás desde una a las otras sin instalar toolchains extras (cross-compile gratis vía rustc targets). Imagen Docker `ghcr.io/thegreekman76/fitz:latest` lista para `FROM` en boilerplates Dockerizados.
+✱ **Multiplataforma de verdad**. Cada release publica binarios + extensión VSCode + imagen Docker para **4 plataformas** (Windows x64, Linux x64, Linux ARM64, macOS Apple Silicon). El mismo programa Fitz corre en cualquiera de las cuatro — y compilás desde una a las otras sin instalar toolchains extras (cross-compile gratis vía rustc targets). Imagen Docker `ghcr.io/thegreekman76/fitz:latest` lista para `FROM` en boilerplates Dockerizados. Variante `ghcr.io/thegreekman76/fitz:latest-python` (desde v0.9.36) con `--features python` activo, ahorra a los boilerplates 5/6 ~5-8 min de build inicial.
 
 ‡ **Async nativo + paralelismo HTTP real**. `async fn` y `.await` postfix, `Future<T>` built-in, evaluator async sobre tokio multi-thread. 5 requests concurrentes en ~1.2s en vez de ~5s en serie. → [cap 19](https://thegreekman76.github.io/fitz/guide/#19-async-y-concurrencia).
 

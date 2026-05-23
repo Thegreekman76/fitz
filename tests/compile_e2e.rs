@@ -5995,6 +5995,126 @@ fn ws_codegen_binary_echo_compila_y_responde() {
 }
 
 // ---------------------------------------------------------------------------
+// 9.w.2-ws-auth-browser — auth WS via subprotocol `bearer.<token>`
+// ---------------------------------------------------------------------------
+
+/// E2E del codegen `fitz build` con auth via subprotocol. El cliente
+/// envía `bearer.<token>` como subprotocol; el server lo extrae,
+/// valida con el @auth_provider, hace echo del subprotocol en el
+/// handshake, y el handler corre con el `user` inyectado.
+#[allow(clippy::await_holding_lock)]
+#[test]
+fn ws_codegen_auth_via_subprotocol_acepta_token() {
+    let src = "@server(43990)\n\
+               fn main() => 0\n\
+               type User { id: Int, name: Str, role: Str }\n\
+               @auth_provider\n\
+               fn check(h: Map<Str, Str>) -> Result<User> {\n\
+                   let v: Str = match h.get(\"authorization\") {\n\
+                       Ok(s) => s,\n\
+                       Err(_) => return Err(\"falta authorization\")\n\
+                   }\n\
+                   if (v == \"Bearer secret-tok\") {\n\
+                       return Ok(User { id: 1, name: \"Ada\", role: \"user\" })\n\
+                   }\n\
+                   return Err(\"token inválido\")\n\
+               }\n\
+               @authenticated\n\
+               @ws(\"/chat\")\n\
+               async fn chat(conn: WsConn<Str>, user: User) -> Null {\n\
+                   match conn.recv() {\n\
+                       Ok(_) => {\n\
+                           let _ = conn.send(\"hola {user.name}\")\n\
+                           return null\n\
+                       }\n\
+                       Err(_) => return null\n\
+                   }\n\
+               }";
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .unwrap();
+    let (status_proto_echoed, msg) = rt.block_on(async move {
+        let _guard = SERIAL.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join("fitz-e2e-ws-auth-subproto");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("crear tempdir");
+        let fitz_src = dir.join("prog.fitz");
+        std::fs::write(&fitz_src, src).expect("escribir .fitz");
+
+        let output = Command::new(fitz_bin())
+            .args(["build"])
+            .arg(&fitz_src)
+            .output()
+            .expect("invocar fitz build");
+        assert!(
+            output.status.success(),
+            "fitz build falló:\nstdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr),
+        );
+        let bin_name = if cfg!(windows) { "prog.exe" } else { "prog" };
+        let bin = dir.join(bin_name);
+        use std::process::{Child, Stdio};
+        let mut child: Child = Command::new(&bin)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn server");
+        std::thread::sleep(std::time::Duration::from_millis(500));
+        let addr = "127.0.0.1:43990";
+        let start = std::time::Instant::now();
+        let mut connected = false;
+        while start.elapsed() < std::time::Duration::from_secs(3) {
+            if std::net::TcpStream::connect(addr).is_ok() {
+                connected = true;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        if !connected {
+            let _ = child.kill();
+            panic!("server WS no abrió el puerto en 3s");
+        }
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!("ws://{}/chat", addr);
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            "bearer.secret-tok".parse().unwrap(),
+        );
+        let (mut ws, resp) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("handshake debería pasar con bearer.secret-tok");
+        let echoed = resp
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+        ws.send(tokio_tungstenite::tungstenite::Message::text("\"hola\""))
+            .await
+            .expect("send");
+        let frame = tokio::time::timeout(std::time::Duration::from_secs(3), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        let msg = match frame {
+            tokio_tungstenite::tungstenite::Message::Text(t) => t.to_string(),
+            other => panic!("esperaba text, fue {:?}", other),
+        };
+        let _ = child.kill();
+        let _ = child.wait();
+        (echoed, msg)
+    });
+    assert_eq!(status_proto_echoed, "bearer.secret-tok");
+    assert_eq!(msg, "\"hola Ada\"");
+}
+
+// ---------------------------------------------------------------------------
 // R.bug-deadlock — regression test (2026-05-21)
 // ---------------------------------------------------------------------------
 

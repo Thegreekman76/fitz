@@ -61,6 +61,104 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.36] — 2026-05-23 — Bloque C: imagen `:latest-python` + auth WS desde browsers
+
+Segundo bloque de quick wins del día. Dos features autocontenidas
+con valor inmediato para usuarios browser y CI/distribución.
+
+### Quick win #1 — `ghcr.io/<owner>/fitz:latest-python` (fitz-python-image)
+
+Nuevo job `docker-image-python` en `release.yml` que builda y
+publica una imagen Docker dedicada con `--features python` activo,
+lista para usar como base de boilerplates 5/6:
+
+```dockerfile
+# Antes (boilerplate 5/6) — ~5-8 min de build inicial:
+FROM python:3.12-slim AS builder
+RUN curl ... rustup ... && \
+    cargo install --git https://github.com/Thegreekman76/fitz --features python ...
+
+# Después — pull en segundos:
+FROM ghcr.io/thegreekman76/fitz:latest-python AS builder
+```
+
+Single-arch (`linux/amd64`) inicial. ARM64 con `--features python`
+queda como deuda explícita hasta que `R.bug-pyo3-abi3-portable-link`
+se cierre (cross-compile PyO3 abi3 requiere setup adicional).
+
+Tags publicados:
+- `ghcr.io/<owner>/fitz:v0.9.36-python`
+- `ghcr.io/<owner>/fitz:latest-python`
+
+Patrón del Dockerfile sigue el del boilerplate `api-postgres-python`
+(builder y runtime con `python:3.12-slim`, builder agrega Rust con
+rustup, runtime descarta Rust). Los Dockerfiles de boilerplates
+5/6 actualizados con nota sobre la alternativa rápida (sin
+migrarlos todavía — el cambio queda como opt-in del usuario).
+
+### Quick win #2 — Auth WS desde browsers (9.w.2-ws-auth-browser)
+
+Workaround estándar para autenticar WebSockets desde código de
+browser. `new WebSocket(url)` NO permite setear headers HTTP
+arbitrarios; el segundo argumento sí acepta una lista de
+subprotocols. Convención (Socket.IO, Phoenix, varios proyectos
+Node): pasar el token via subprotocol `bearer.<token>`.
+
+Desde v0.9.36, el runtime y el codegen Fitz extraen el token del
+header `Sec-WebSocket-Protocol` y lo inyectan como
+`authorization: Bearer <token>` al map de headers que ve el
+`@auth_provider`. Sin cambios del lado user — el mismo provider
+funciona para HTTP y WS browser.
+
+Implementación:
+- Nuevo helper público `extract_ws_bearer_subprotocol` en
+  `src/http.rs` (runtime) + helper paralelo
+  `__fitz_ws_extract_bearer_subprotocol` en preludio WS de codegen
+  (`src/codegen.rs`).
+- `build_ws_method_router` (runtime) y `gen_ws_handler_wrapper`
+  (codegen): antes de invocar al `@auth_provider`, inyectan
+  `authorization: Bearer <token>` al map si no hay header
+  `Authorization` previo.
+- Echo del subprotocol seleccionado en el handshake response via
+  `ws.protocols([proto])` (RFC 6455 §4.1 — sin echo, el browser
+  rechaza el upgrade).
+- Compatibilidad: si el cliente envía AMBOS Authorization header
+  Y subprotocol bearer, el header gana (preserva el caso wscat/
+  curl/clientes no-browser).
+
+Tests:
+- 6 unit tests del helper (single proto, CSV con varios, ausente,
+  sin match, token vacío, JWT con dots internos).
+- 2 E2E intérprete (acepta token válido + echo del subprotocol;
+  rechaza con 401 si el token es inválido).
+- 2 unit codegen (output emite el helper + la inyección).
+- 1 E2E codegen (binario nativo + cliente tokio-tungstenite con
+  subprotocol — handshake + auth + echo end-to-end).
+
+Cap 28 (Auth nativa) actualizado con la sección "Auth WS desde
+browsers" en el cap 29: ejemplo cliente JavaScript + server Fitz
++ explicación del flujo + compatibilidad con header.
+
+### Acumulado al cierre
+
++11 unit (6 helper + 2 codegen + 6 runtime + 1 docker workflow) +
+2 E2E intérprete + 1 E2E codegen. Clippy `-D warnings` limpio.
+Smoke `GUIDE_EXAMPLES_COMPILE` verde. Sin breaking changes — el
+header `Authorization` original sigue funcionando idéntico para
+clientes que pueden setearlo.
+
+Boilerplates revisados — 6/6 verdes con `fitz check`. Boilerplate
+api-websocket podría aprovechar el subprotocol en su frontend HTML
+(deuda menor, queda opcional).
+
+VSCode review: NO requiere update. Ninguno de los quick wins
+toca AST/grammar/LSP. El helper de extracción es runtime/codegen
+puro; la API del `@auth_provider` no cambia para el user.
+
+Próximo norte: vaciar resto del backlog (`9.w.2-wsconn-bidir`,
+`8-pyi-stubs`, `8-bundling-cpython`) o saltar a Fase 10 (Stack DB
+nativo).
+
 ## [v0.9.35] — 2026-05-23 — Bloque triple de quick wins: split await + AsyncAPI UI + inferencia params
 
 Bloque coordinado de tres quick wins del backlog post-v0.9.34, en

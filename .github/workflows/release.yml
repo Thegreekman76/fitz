@@ -13,9 +13,14 @@ name: Release
 #     `fitz-lsp` del `.vsix` v0.9.X salen del MISMO build. Imposible
 #     que diverjan.
 #   - Default sin `--features python` (Fase 5b promete binario
-#     standalone). Variante `fitz-python` queda como deuda futura.
+#     standalone).
 #   - Imagen Docker `ghcr.io/<owner>/fitz:vX.Y.Z` + `:latest` con el
 #     binario standalone — base para los boilerplates Dockerizados.
+#   - Imagen `ghcr.io/<owner>/fitz:vX.Y.Z-python` + `:latest-python`
+#     (desde v0.9.36, fitz-python-image) con el feature `python`
+#     activo — base para boilerplates 5/6 que usan `from python
+#     import ...`. Single-arch (`linux/amd64`) inicial hasta cerrar
+#     R.bug-pyo3-abi3-portable-link.
 #
 # Tagging: `git tag v0.9.24 && git push --tags` dispara el workflow.
 # El workflow del release infiere la versión del tag (`v0.9.24` →
@@ -334,6 +339,111 @@ jobs:
             ghcr.io/${{ steps.image.outputs.owner }}/fitz:v${{ steps.version.outputs.version }}
             ghcr.io/${{ steps.image.outputs.owner }}/fitz:latest
 
+  # --- Job 3b: imagen Docker con --features python ----------------
+  #
+  # `fitz-python-image` — variante de la imagen `fitz` con el feature
+  # `python` activo, lista para usar como base de boilerplates que
+  # hacen `from python import ...`. Reemplaza el workaround de los
+  # boilerplates 5/6 (clonar fitz + cargo install en cada build).
+  #
+  # Tags publicados:
+  #   - `ghcr.io/<owner>/fitz:v<X.Y.Z>-python`
+  #   - `ghcr.io/<owner>/fitz:latest-python`
+  #
+  # Single-arch (`linux/amd64`) inicial — ARM64 con `--features python`
+  # requiere cross-compile setup adicional (PyO3 detecta libpython del
+  # host; cross-build necesita PYO3_CROSS_LIB_DIR etc.) Queda como
+  # deuda explícita.
+  #
+  # Pattern del Dockerfile: builder Y runtime usan `python:3.12-slim`
+  # (paralelo al patrón del boilerplate 5/6 hasta cerrar
+  # R.bug-pyo3-abi3-portable-link). Builder agrega Rust con rustup,
+  # buildea fitz con `--features python` desde el source del checkout,
+  # runtime descarta Rust y mantiene Python + el binario.
+  docker-image-python:
+    name: Docker image -python (ghcr.io)
+    runs-on: ubuntu-latest
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Derive version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF_NAME#v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Write Dockerfile (-python variant)
+        run: |
+          mkdir -p docker-stage-python
+          # Copiamos los archivos necesarios para el cargo install
+          # local (Cargo.toml + src/ + Cargo.lock). El COPY adentro
+          # del builder stage los usa.
+          cp -r src docker-stage-python/src
+          cp Cargo.toml Cargo.lock docker-stage-python/
+
+          cat > docker-stage-python/Dockerfile <<'EOF'
+          # Variante `-python` del image `fitz` — con feature `python`
+          # activo. Builder y runtime usan la MISMA imagen Python
+          # (workaround hasta cerrar R.bug-pyo3-abi3-portable-link).
+          FROM python:3.12-slim AS builder
+          RUN apt-get update && \
+              apt-get install -y --no-install-recommends \
+                curl ca-certificates git \
+                python3-dev pkg-config libssl-dev build-essential && \
+              rm -rf /var/lib/apt/lists/*
+          RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+              sh -s -- -y --default-toolchain 1.95.0 --profile minimal
+          ENV PATH="/root/.cargo/bin:${PATH}"
+          WORKDIR /build
+          COPY Cargo.toml Cargo.lock /build/
+          COPY src /build/src
+          # `cargo install --path .` compila el binario `fitz` con el
+          # feature `python` activo y lo deja en /root/.cargo/bin/.
+          # `--locked` exige Cargo.lock checkeado al repo.
+          RUN cargo install --path . --features python --bin fitz --locked
+
+          # ---- Runtime stage ----
+          FROM python:3.12-slim
+          RUN apt-get update && \
+              apt-get install -y --no-install-recommends \
+                ca-certificates && \
+              rm -rf /var/lib/apt/lists/*
+          COPY --from=builder /root/.cargo/bin/fitz /usr/local/bin/fitz
+          WORKDIR /app
+          EOF
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to ghcr.io
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Lowercase image owner
+        id: image
+        run: |
+          OWNER=$(echo "${{ github.repository_owner }}" | tr '[:upper:]' '[:lower:]')
+          echo "owner=$OWNER" >> $GITHUB_OUTPUT
+
+      - name: Build and push (linux/amd64)
+        uses: docker/build-push-action@v6
+        with:
+          context: docker-stage-python
+          push: true
+          platforms: linux/amd64
+          tags: |
+            ghcr.io/${{ steps.image.outputs.owner }}/fitz:v${{ steps.version.outputs.version }}-python
+            ghcr.io/${{ steps.image.outputs.owner }}/fitz:latest-python
+
   # --- Job 4: release final con todos los assets -------------------
   #
   # Junta los artifacts de `build` y `package-vsix`, los empaqueta
@@ -342,7 +452,7 @@ jobs:
   # automático desde los commits desde el tag anterior.
   release:
     name: GitHub Release
-    needs: [build, package-vsix, docker-image]
+    needs: [build, package-vsix, docker-image, docker-image-python]
     runs-on: ubuntu-latest
     permissions:
       contents: write

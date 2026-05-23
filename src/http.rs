@@ -1740,6 +1740,42 @@ fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
     out
 }
 
+/// 9.w.2-ws-auth-browser: extrae un bearer token del header
+/// `Sec-WebSocket-Protocol` del handshake WS. Workaround estándar
+/// para autenticar WS desde browsers — la API `new WebSocket(url,
+/// protocols)` NO permite setear headers HTTP arbitrarios, pero
+/// SÍ acepta una lista de subprotocols como segundo argumento.
+///
+/// Convención: el cliente envía un subprotocol con el formato
+/// `bearer.<token>` (donde `<token>` es JWT u opaque). El server
+/// extrae el token, lo inyecta como `authorization: Bearer <token>`
+/// en el map de headers que ve el `@auth_provider`, y hace echo
+/// del subprotocol seleccionado en el handshake response (RFC 6455
+/// §4.1 — sin echo, el browser rechaza el upgrade).
+///
+/// Devuelve `Some((subprotocol_completo, token))` si encontró un
+/// subprotocol que matchea `bearer.*`, `None` si no.
+pub fn extract_ws_bearer_subprotocol(
+    headers: &axum::http::HeaderMap,
+) -> Option<(String, String)> {
+    let raw = headers
+        .get("sec-websocket-protocol")
+        .or_else(|| headers.get("Sec-WebSocket-Protocol"))?
+        .to_str()
+        .ok()?;
+    // RFC 6455: el header puede ser CSV (comma-separated) con
+    // múltiples subprotocols ofrecidos. El server elige uno.
+    for piece in raw.split(',') {
+        let proto = piece.trim();
+        if let Some(token) = proto.strip_prefix("bearer.") {
+            if !token.is_empty() {
+                return Some((proto.to_string(), token.to_string()));
+            }
+        }
+    }
+    None
+}
+
 /// Construye un `MethodRouter` con el handler async correspondiente
 /// al verbo. Las ocho combinaciones (path_params × query × body)
 /// viven en closures distintos porque los extractors de axum aparecen
@@ -1922,7 +1958,28 @@ fn build_ws_method_router(
                         .into_response();
                 }
             };
-            let raw_headers = headers_to_map(&headers);
+            let mut raw_headers = headers_to_map(&headers);
+            // 9.w.2-ws-auth-browser: extraer bearer token del header
+            // `Sec-WebSocket-Protocol` cuando el cliente envió un
+            // subprotocol con formato `bearer.<token>`. Es el workaround
+            // estándar para que browsers (que NO pueden setear
+            // `Authorization` header en `new WebSocket(url)`) pasen
+            // tokens al handshake. El runtime inyecta
+            // `authorization: Bearer <token>` al map de headers que ve
+            // el `@auth_provider`, paralelo al flujo HTTP. El server
+            // también hace echo del subprotocol elegido para que el
+            // browser no rechace el upgrade (RFC 6455 §4.1).
+            let bearer_subproto = extract_ws_bearer_subprotocol(&headers);
+            if let Some((selected_proto, token)) = &bearer_subproto {
+                raw_headers
+                    .entry("authorization".to_string())
+                    .or_insert_with(|| format!("Bearer {}", token));
+                let _ = selected_proto;
+            }
+            let ws = match &bearer_subproto {
+                Some((selected_proto, _)) => ws.protocols([selected_proto.clone()]),
+                None => ws,
+            };
 
             // Auth pre-upgrade (paralelo al wrapper HTTP 9.w.1.c). El
             // checker garantiza que si `route.auth != None`, existe un
@@ -5763,6 +5820,77 @@ mod tests {
         assert_eq!(parsed["openapi"], serde_json::json!("3.1.0"));
     }
 
+    // ---- 9.w.2-ws-auth-browser — helper extract_ws_bearer_subprotocol ----
+
+    #[test]
+    fn ws_bearer_subprotocol_single_proto() {
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "sec-websocket-protocol",
+            "bearer.abc123".parse().unwrap(),
+        );
+        let r = extract_ws_bearer_subprotocol(&h);
+        assert_eq!(r, Some(("bearer.abc123".to_string(), "abc123".to_string())));
+    }
+
+    #[test]
+    fn ws_bearer_subprotocol_entre_varios_csv() {
+        // El cliente puede ofrecer múltiples subprotocols (RFC 6455 §4.1).
+        // Tomamos el primero que matchee `bearer.*`.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "sec-websocket-protocol",
+            "some.other, bearer.tok-xyz, third.proto".parse().unwrap(),
+        );
+        let r = extract_ws_bearer_subprotocol(&h);
+        assert_eq!(r, Some(("bearer.tok-xyz".to_string(), "tok-xyz".to_string())));
+    }
+
+    #[test]
+    fn ws_bearer_subprotocol_ausente() {
+        // Sin header `sec-websocket-protocol`, devuelve None.
+        let h = axum::http::HeaderMap::new();
+        assert_eq!(extract_ws_bearer_subprotocol(&h), None);
+    }
+
+    #[test]
+    fn ws_bearer_subprotocol_sin_match() {
+        // Header presente pero ningún subprotocol matchea `bearer.*`.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "sec-websocket-protocol",
+            "chat.v1, app.v2".parse().unwrap(),
+        );
+        assert_eq!(extract_ws_bearer_subprotocol(&h), None);
+    }
+
+    #[test]
+    fn ws_bearer_subprotocol_token_vacio_es_none() {
+        // `bearer.` sin token detrás no cuenta.
+        let mut h = axum::http::HeaderMap::new();
+        h.insert("sec-websocket-protocol", "bearer.".parse().unwrap());
+        assert_eq!(extract_ws_bearer_subprotocol(&h), None);
+    }
+
+    #[test]
+    fn ws_bearer_subprotocol_token_con_dots_internos() {
+        // JWTs llevan dots internos (`header.payload.signature`).
+        // El strip_prefix de `bearer.` consume solo el primer `.`,
+        // el token sigue siendo todo lo que vino después.
+        let jwt = "eyJhbGciOi.eyJzdWI.SflKxw";
+        let mut h = axum::http::HeaderMap::new();
+        h.insert(
+            "sec-websocket-protocol",
+            format!("bearer.{}", jwt).parse().unwrap(),
+        );
+        let r = extract_ws_bearer_subprotocol(&h);
+        assert_eq!(
+            r,
+            Some((format!("bearer.{}", jwt), jwt.to_string())),
+            "el token debería preservar dots internos típicos de JWT"
+        );
+    }
+
     #[tokio::test(flavor = "current_thread")]
     async fn build_router_con_schema_none_no_registra_openapi_json() {
         let (status, _body) = oneshot_get_openapi(HttpRegistry::new(), None).await;
@@ -7065,6 +7193,113 @@ fn me(user: User) -> Str => \"x\"\n\
         assert!(
             r.is_err(),
             "esperaba fallo de handshake (401), pero conectó OK",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_auth_via_subprotocol_acepta_token() {
+        // 9.w.2-ws-auth-browser — el cliente envía el token via
+        // subprotocol (`bearer.<token>`) en lugar del header
+        // `Authorization`. El runtime lo extrae y lo inyecta como
+        // `authorization: Bearer <token>` al map que ve el
+        // @auth_provider. Sin cambios del lado user — el mismo
+        // provider funciona para HTTP y WS browser.
+        let src = "type User { id: Int, name: Str, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(h: Map<Str, Str>) -> Result<User> {\n\
+                       let v: Str = match h.get(\"authorization\") {\n\
+                           Ok(s) => s,\n\
+                           Err(_) => return Err(\"falta authorization\")\n\
+                       }\n\
+                       if (v == \"Bearer secret-tok\") {\n\
+                           return Ok(User { id: 1, name: \"Ada\", role: \"user\" })\n\
+                       }\n\
+                       return Err(\"token inválido\")\n\
+                   }\n\
+                   @authenticated\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<Str>, user: User) -> Null {\n\
+                       match conn.recv() {\n\
+                           Ok(_) => {\n\
+                               let _ = conn.send(\"hola {user.name}\")\n\
+                               return null\n\
+                           }\n\
+                           Err(_) => return null\n\
+                       }\n\
+                   }";
+        let (addr, _h) = spawn_ws_server(src).await;
+        // Armar request HTTP con subprotocol `bearer.secret-tok`.
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!("ws://{}/chat", addr);
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            "bearer.secret-tok".parse().unwrap(),
+        );
+        let (mut ws, resp) = tokio_tungstenite::connect_async(req)
+            .await
+            .expect("handshake debería pasar con bearer.secret-tok");
+        // Verificar que el server echo el subprotocol seleccionado
+        // (RFC 6455 §4.1 — sin echo, el browser rechazaría el upgrade).
+        let echoed = resp
+            .headers()
+            .get("sec-websocket-protocol")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert_eq!(
+            echoed, "bearer.secret-tok",
+            "esperaba echo del subprotocol seleccionado en el handshake"
+        );
+
+        use futures_util::{SinkExt, StreamExt};
+        ws.send(tungstenite::Message::text("\"hola\""))
+            .await
+            .expect("send");
+        let resp_frame = tokio::time::timeout(std::time::Duration::from_secs(2), ws.next())
+            .await
+            .expect("timeout")
+            .expect("frame")
+            .expect("ok");
+        match resp_frame {
+            tungstenite::Message::Text(t) => {
+                assert_eq!(t.as_str(), "\"hola Ada\"");
+            }
+            other => panic!("esperaba text, fue {:?}", other),
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ws_auth_via_subprotocol_token_invalido_rechaza() {
+        // Mismo @auth_provider que el test anterior, pero el cliente
+        // envía un token inválido via subprotocol → handshake falla
+        // con 401 ANTES del upgrade.
+        let src = "type User { id: Int, name: Str, role: Str }\n\
+                   @auth_provider\n\
+                   fn check(h: Map<Str, Str>) -> Result<User> {\n\
+                       let v: Str = match h.get(\"authorization\") {\n\
+                           Ok(s) => s,\n\
+                           Err(_) => return Err(\"falta authorization\")\n\
+                       }\n\
+                       if (v == \"Bearer secret-tok\") {\n\
+                           return Ok(User { id: 1, name: \"Ada\", role: \"user\" })\n\
+                       }\n\
+                       return Err(\"token inválido\")\n\
+                   }\n\
+                   @authenticated\n\
+                   @ws(\"/chat\")\n\
+                   async fn chat(conn: WsConn<Str>, user: User) -> Null { return null }";
+        let (addr, _h) = spawn_ws_server(src).await;
+        use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+        let url = format!("ws://{}/chat", addr);
+        let mut req = url.as_str().into_client_request().unwrap();
+        req.headers_mut().insert(
+            "sec-websocket-protocol",
+            "bearer.malformed".parse().unwrap(),
+        );
+        let r = tokio_tungstenite::connect_async(req).await;
+        assert!(
+            r.is_err(),
+            "esperaba 401 con token inválido, pero conectó OK",
         );
     }
 
