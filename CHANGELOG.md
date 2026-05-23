@@ -61,6 +61,70 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.39] — 2026-05-23 — pyi-stubs: tipos Fitz desde `.pyi` (PEP 484/561)
+
+Nuevo sub-comando `fitz py-stubs <archivo.pyi> [--out <archivo.fitz>]`
+paralelo a `fitz py-types` (que ya hacía SQLAlchemy). Parsea stubs
+Python PEP 484/561 y emite los `type` Fitz equivalentes para cada
+`class` top-level. Cierra parcialmente la deuda `8-pyi-stubs`.
+
+### Cambios
+
+- **Nuevo módulo `src/pyi_stub.rs`** — parser .pyi ad-hoc (no
+  parser Python completo). Tokenizer line-based, recursive descent
+  sobre subset PEP 484:
+  - Top-level `def name(args) -> ret: ...` (parsed pero no
+    emitido al output — deuda menor).
+  - Top-level `class Name: ...` con fields anotados.
+  - Top-level `name: type = default` (parsed pero no emitido).
+  - Type exprs: primitivos, `list[T]`, `dict[K, V]`,
+    `Optional[T]`, `T | None` (PEP 604), forward refs string
+    `"Foo"`, dotted names `module.Name` (toma el último segmento).
+- **Mapper StubType → Fitz Type** (`stub_type_to_fitz_type`):
+  - `int/float/str/bool/None/bytes` → primitivos Fitz.
+  - `list[T]/dict[K,V]/Optional[T]` → `List<T>/Map<K,V>/T?`.
+  - `T | None` (Union[T, None]) → `T?` (caso típico nullable).
+  - Union no-null → `Any` (Fitz no tiene unions arbitrarias).
+  - Nominal desconocido → registrado en TypeEnv.
+- **CLI `Commands::PyStubs { source, out }`** — disponible **sin
+  feature `python`** (el parser .pyi no usa PyO3). Sigue el mismo
+  patrón del `py-types`: lee el .pyi, parsea, emite `.fitz` por
+  stdout o archivo.
+- **Renderer `render_stub_items_as_fitz`** (`src/main.rs`) — sólo
+  emite `class` → `type` (def/var top-level se ignoran porque el
+  evaluator runtime los maneja via `PyAny` opaco).
+
+### Tests
+
+- 21 unit tests en `pyi_stub::tests` (parser + mapper exhaustivo).
+- 5 cli_e2e tests del comando `fitz py-stubs` (class básica, tipos
+  compuestos + Optional, output a archivo, archivo inexistente,
+  skip fns/vars).
+
+### Ejemplo + docs
+
+- `examples/guide/21b-pyi-stubs.fitz` con dos types generados +
+  programa que los usa (paralelo al ejemplo de cap 21.7).
+- Cap 21.8b nuevo en `docs/guide.md` con workflow, sub-set
+  cubierto, restricciones, y nota sobre integración automática
+  como deuda residual.
+- Smoke `GUIDE_EXAMPLES_COMPILE` suma `21b-pyi-stubs.fitz`.
+
+### Deuda residual (documentada)
+
+- **Integración automática con el checker** — cuando `from python
+  import foo` y `<base>/foo.pyi` existe, hidratar el TypeEnv
+  directamente. Requiere `Type::PyModule` + refactor signature
+  de `check_program(base_dir: Option<&Path>)`. Sin presión real
+  hoy — el flow `fitz py-stubs --out` cubre el 80% del valor.
+- **`def` top-level del stub al `.fitz`** — hoy se ignoran porque
+  el runtime las trata como PyAny. Materializar las signatures
+  como Fitz fns que tipan los calls Python al .py real es
+  refactor mayor.
+- **Métodos de class** — solo fields hoy. Materializar métodos
+  custom requiere registro `type Foo { ... } fn Foo.method(...)`
+  + decisiones sobre `self`.
+
 ## [v0.9.38] — 2026-05-23 — 9.w.2-wsconn-bidir: `WsConn<In, Out>` con tipos asimétricos
 
 Cierra la deuda residual del MVP 9.w.2 (WebSockets) sobre tipos

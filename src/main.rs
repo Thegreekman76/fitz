@@ -75,6 +75,19 @@ enum Commands {
         #[arg(long)]
         out: Option<PathBuf>,
     },
+    /// pyi-stubs (v0.9.39) — Genera `type` Fitz a partir de un
+    /// archivo `.pyi` (stubs Python PEP 484/561). Parsea las
+    /// `class` top-level y emite los `type` Fitz equivalentes,
+    /// listos para `import`. NO requiere feature `python` — el
+    /// parser .pyi vive en el binario default. Útil para integrar
+    /// libs Python tipadas con stubs (e.g. `requests.pyi`).
+    PyStubs {
+        /// Archivo `.pyi` a parsear
+        source: PathBuf,
+        /// Archivo destino. Si se omite, escribe a stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+    },
     /// Fase 9.y.1 — Crea un proyecto Fitz nuevo en una carpeta.
     ///
     /// Genera `<name>/fitz.toml`, `<name>/src/main.fitz`, `<name>/.gitignore`,
@@ -268,6 +281,9 @@ fn main() {
         }
         Commands::PyTypes { source, out } => {
             py_types_file(&source, out.as_deref());
+        }
+        Commands::PyStubs { source, out } => {
+            py_stubs_file(&source, out.as_deref());
         }
         Commands::New { name, http, no_git } => {
             new_project(&name, http, no_git);
@@ -517,6 +533,129 @@ fn py_types_file(_source: &std::path::Path, _out: Option<&std::path::Path>) {
          `cargo build --features python`)."
     );
     std::process::exit(1);
+}
+
+/// `fitz py-stubs <archivo.pyi> [--out <archivo.fitz>]` — pyi-stubs
+/// (v0.9.39). Parsea un archivo `.pyi` (PEP 484/561) y emite los
+/// `type` Fitz equivalentes para cada `class` top-level del stub.
+/// Disponible sin feature `python` (el parser es ad-hoc, no usa PyO3).
+///
+/// Output: archivo Fitz commiteable que el user puede importar normal
+/// (`from <archivo> import User`). El checker entonces ve tipos
+/// reales, no `PyAny` opaco. Trade-off: pierde sincronía automática
+/// con el .pyi (regenerar si el stub cambia).
+fn py_stubs_file(source: &std::path::Path, out: Option<&std::path::Path>) {
+    let raw = match fs::read_to_string(source) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("✗ py-stubs: no se pudo leer `{}`: {}", source.display(), e);
+            std::process::exit(1);
+        }
+    };
+    let items = match fitz::pyi_stub::parse_stub(&raw) {
+        Ok(items) => items,
+        Err(e) => {
+            eprintln!("✗ py-stubs: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let output = render_stub_items_as_fitz(&items, source);
+    match out {
+        Some(path) => match fs::write(path, &output) {
+            Ok(_) => println!("✓ types Fitz emitidos a {}", path.display()),
+            Err(e) => {
+                eprintln!(
+                    "✗ py-stubs: no se pudo escribir `{}`: {}",
+                    path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        },
+        None => print!("{}", output),
+    }
+}
+
+/// Convierte los items del stub a código Fitz commiteable. Por ahora
+/// emite solo `class` → `type` (fns/vars top-level del stub quedan
+/// como deuda menor — el `.py` real expone esas vías field access
+/// con `PyAny` opaco hoy y eso ya funciona).
+fn render_stub_items_as_fitz(
+    items: &[fitz::pyi_stub::StubItem],
+    source: &std::path::Path,
+) -> String {
+    use fitz::pyi_stub::StubItem;
+    let mut out = String::new();
+    out.push_str(&format!(
+        "// Generado por `fitz py-stubs` desde `{}`.\n",
+        source.display()
+    ));
+    out.push_str("// No editar a mano — regenerar si el stub cambia.\n\n");
+    for item in items {
+        if let StubItem::Class(cls) = item {
+            if cls.fields.is_empty() {
+                // class sin fields → no aporta info útil al checker.
+                continue;
+            }
+            out.push_str(&format!("type {} {{\n", cls.name));
+            for (i, f) in cls.fields.iter().enumerate() {
+                let fitz_ty = render_stub_type_as_fitz(&f.ty);
+                let comma = if i + 1 < cls.fields.len() { "," } else { "" };
+                out.push_str(&format!("    {}: {}{}\n", f.name, fitz_ty, comma));
+            }
+            out.push_str("}\n\n");
+        }
+    }
+    out
+}
+
+fn render_stub_type_as_fitz(ty: &fitz::pyi_stub::StubType) -> String {
+    use fitz::pyi_stub::StubType;
+    match ty {
+        StubType::Named(name) => match name.as_str() {
+            "int" => "Int".into(),
+            "float" => "Float".into(),
+            "str" => "Str".into(),
+            "bool" => "Bool".into(),
+            "None" | "NoneType" => "Null".into(),
+            "bytes" | "bytearray" => "Bytes".into(),
+            "Any" | "object" => "Any".into(),
+            // Custom name — el user debería tener el tipo declarado
+            // adyacente o lo importará separado.
+            other => other.to_string(),
+        },
+        StubType::Generic(name, args) => match (name.as_str(), args.len()) {
+            ("list" | "List", 1) => {
+                format!("List<{}>", render_stub_type_as_fitz(&args[0]))
+            }
+            ("dict" | "Dict", 2) => format!(
+                "Map<{}, {}>",
+                render_stub_type_as_fitz(&args[0]),
+                render_stub_type_as_fitz(&args[1])
+            ),
+            ("Optional", 1) => format!("{}?", render_stub_type_as_fitz(&args[0])),
+            _ => "Any".into(),
+        },
+        StubType::Union(alts) => {
+            // `T | None` → `T?`. Resto → `Any`.
+            let mut non_null = Vec::new();
+            let mut has_null = false;
+            for alt in alts {
+                match alt {
+                    StubType::Named(n) if n == "None" || n == "NoneType" => has_null = true,
+                    _ => non_null.push(alt),
+                }
+            }
+            if non_null.len() == 1 && has_null {
+                format!("{}?", render_stub_type_as_fitz(non_null[0]))
+            } else if non_null.len() == 1 {
+                render_stub_type_as_fitz(non_null[0])
+            } else {
+                "Any".into()
+            }
+        }
+        StubType::Any => "Any".into(),
+    }
 }
 
 /// `fitz openapi <archivo>` — Fase 7.1. Lex + parse + check + eval

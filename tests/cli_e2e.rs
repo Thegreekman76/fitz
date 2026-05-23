@@ -1812,3 +1812,106 @@ fn cap_16b_fitz_build_compila_greeter_a_binario_nativo() {
         "stdout binario: {bin_stdout}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// pyi-stubs (v0.9.39) — `fitz py-stubs <archivo.pyi>`
+// ---------------------------------------------------------------------------
+
+#[test]
+fn py_stubs_class_basica_emite_type_fitz() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let stub_path = tmpdir.path().join("user.pyi");
+    std::fs::write(
+        &stub_path,
+        "class ApiUser:\n    id: int\n    name: str\n    active: bool\n",
+    )
+    .unwrap();
+
+    let (stdout, _stderr, code) =
+        run_fitz(&["py-stubs", stub_path.to_str().unwrap()], tmpdir.path());
+    assert_eq!(code, 0, "exit: {}", code);
+    assert!(stdout.contains("type ApiUser {"));
+    assert!(stdout.contains("id: Int"));
+    assert!(stdout.contains("name: Str"));
+    assert!(stdout.contains("active: Bool"));
+}
+
+#[test]
+fn py_stubs_tipos_compuestos_y_optional_se_mapean() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let stub_path = tmpdir.path().join("data.pyi");
+    std::fs::write(
+        &stub_path,
+        "from typing import Optional\n\
+         class ApiData:\n    \
+             tags: list[str]\n    \
+             counts: dict[str, int]\n    \
+             nickname: Optional[str]\n    \
+             flags: list[bool] | None\n",
+    )
+    .unwrap();
+
+    let (stdout, _stderr, code) =
+        run_fitz(&["py-stubs", stub_path.to_str().unwrap()], tmpdir.path());
+    assert_eq!(code, 0);
+    assert!(stdout.contains("tags: List<Str>"));
+    assert!(stdout.contains("counts: Map<Str, Int>"));
+    assert!(stdout.contains("nickname: Str?"));
+    assert!(stdout.contains("flags: List<Bool>?"));
+}
+
+#[test]
+fn py_stubs_out_a_archivo() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let stub_path = tmpdir.path().join("models.pyi");
+    let out_path = tmpdir.path().join("models.fitz");
+    std::fs::write(&stub_path, "class Item:\n    sku: str\n    price: float\n").unwrap();
+
+    let (_stdout, _stderr, code) = run_fitz(
+        &[
+            "py-stubs",
+            stub_path.to_str().unwrap(),
+            "--out",
+            out_path.to_str().unwrap(),
+        ],
+        tmpdir.path(),
+    );
+    assert_eq!(code, 0);
+    let written = std::fs::read_to_string(&out_path).unwrap();
+    assert!(written.contains("type Item {"));
+    assert!(written.contains("sku: Str"));
+    assert!(written.contains("price: Float"));
+}
+
+#[test]
+fn py_stubs_archivo_inexistente_es_error() {
+    let tmpdir = tempfile::tempdir().unwrap();
+    let bogus = tmpdir.path().join("nope.pyi");
+    let (_stdout, stderr, code) =
+        run_fitz(&["py-stubs", bogus.to_str().unwrap()], tmpdir.path());
+    assert_ne!(code, 0);
+    assert!(stderr.contains("py-stubs") || stderr.contains("no se pudo"));
+}
+
+#[test]
+fn py_stubs_skip_fns_y_vars_solo_classes() {
+    // Top-level def y var del stub se SKIPEAN (los conserva PyAny en
+    // runtime). Solo las clases se materializan como `type` Fitz.
+    let tmpdir = tempfile::tempdir().unwrap();
+    let stub_path = tmpdir.path().join("mix.pyi");
+    std::fs::write(
+        &stub_path,
+        "def helper(x: int) -> str: ...\n\
+         VERSION: str\n\
+         class Widget:\n    label: str\n",
+    )
+    .unwrap();
+
+    let (stdout, _stderr, code) =
+        run_fitz(&["py-stubs", stub_path.to_str().unwrap()], tmpdir.path());
+    assert_eq!(code, 0);
+    assert!(stdout.contains("type Widget"));
+    // helper/VERSION no se materializan (deuda menor documentada).
+    assert!(!stdout.contains("fn helper"));
+    assert!(!stdout.contains("VERSION"));
+}

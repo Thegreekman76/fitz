@@ -1,0 +1,103 @@
+// Cap 21 — `fitz py-stubs`: tipos Fitz desde stubs `.pyi`.
+//
+// Variante del cap 21 para integrar librerías Python tipadas via
+// stubs PEP 484/561 (`.pyi`). El sub-comando `fitz py-stubs` parsea
+// un `.pyi` y emite los `type` Fitz equivalentes para cada `class`
+// top-level, listo para `import` y usar con anotaciones.
+//
+// Workflow típico:
+//
+//   1. Bajar el `.pyi` de la lib Python (e.g. via `pip show` o
+//      `types-<package>` del PyPI typeshed).
+//   2. `fitz py-stubs lib.pyi --out lib_types.fitz`.
+//   3. Commitear el `.fitz` generado.
+//   4. En tu programa: `from lib_types import Foo` + anotar
+//      `let r: Foo = py_call(...)?` (coerción 8.4.3 del runtime).
+//
+// Trade-off: el `.fitz` generado pierde sync automático con el
+// stub. Regenerar si el upstream cambia. Integración auto del
+// checker con `.pyi` adyacente al import queda como deuda residual.
+//
+// Este ejemplo: simulamos el output de `fitz py-stubs` declarando
+// directamente los `type` que el generator habría producido para
+// un stub hipotético.
+
+// --- Output del hipotético `fitz py-stubs http_client.pyi` ---
+//
+// Stub original (hipotético):
+//   from typing import Optional
+//   class ApiResponse:
+//       status: int
+//       body: str
+//       headers: dict[str, str]
+//       cookies: Optional[dict[str, str]]
+//   class ApiSession:
+//       base_url: str
+//       timeout: float
+//       verify_ssl: bool
+
+type ApiResponse {
+    status: Int,
+    body: Str,
+    headers: Map<Str, Str>,
+    cookies: Map<Str, Str>?
+}
+
+type ApiSession {
+    base_url: Str,
+    timeout: Float,
+    verify_ssl: Bool
+}
+
+// --- Programa Fitz que usa los types stub-derivados ---
+//
+// Los tipos vienen del stub via py-stubs; los podemos usar con la
+// misma ergonomía que cualquier tipo Fitz nativo. `let r: ApiResponse`
+// dispara coerción Map → Instance si el value es un dict Python
+// (paralelo a 8.4.3 con SQLAlchemy).
+
+fn build_session() -> ApiSession {
+    return ApiSession {
+        base_url: "https://api.example.com",
+        timeout: 30.0,
+        verify_ssl: true,
+    }
+}
+
+fn fake_get_response() -> ApiResponse {
+    // Simula lo que devolvería un call Python real (e.g.
+    // `requests.get(...)?` con stub).
+    return ApiResponse {
+        status: 200,
+        body: "ok body content",
+        headers: {"content-type": "application/json"},
+        cookies: null,
+    }
+}
+
+let session = build_session()
+print("session @ {session.base_url} (timeout={session.timeout}s)")
+
+let resp = fake_get_response()
+print("response status: {resp.status}")
+print("response body: {resp.body}")
+
+match resp.cookies {
+    null => print("(sin cookies)"),
+    cs => print("cookies: {cs}"),
+}
+
+// Notas finales:
+//
+//   - Para stubs reales (e.g. `requests.pyi` del typeshed), el
+//     generator MVP ignora `def`/`var` top-level (siguen como
+//     PyAny via field access del module). Las clases sí se
+//     materializan a `type` Fitz, lo cual cubre el 80% del valor
+//     en interop.
+//   - Conflictos con tipos built-in de Fitz (`Request`, `Response`,
+//     `File`, etc.) requieren renombrar manualmente el output del
+//     generator (e.g. `Response` → `ApiResponse` como acá).
+//   - Integración auto: cuando el checker vea `from python import
+//     foo` y exista `foo.pyi` adyacente, se podría hidratar el env
+//     automáticamente. Refactor del `Type::PyModule` + signature
+//     de `check_program` pendiente.

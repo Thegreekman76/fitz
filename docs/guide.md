@@ -8349,6 +8349,52 @@ Después de generar, podés usar `from models import User, Order`
 en tus archivos Fitz y los tipos están listos para combinar con
 el patrón `let row: User = py_call(...)?` del cap 21.7.
 
+### 21.8b `fitz py-stubs` — tipos Fitz desde `.pyi` (PEP 484/561)
+
+Variante de `py-types` para librerías Python con stubs `.pyi`
+(typeshed, paquetes `types-<package>` del PyPI, stubs adjuntos
+al proyecto). Útil para integrar libs comunes (`requests`,
+`numpy`, etc.) sin escribir `type` Fitz a mano.
+
+```bash
+fitz py-stubs http_client.pyi --out http_types.fitz
+```
+
+Parsea el `.pyi`, mapea las `class` top-level a `type` Fitz, y
+emite el archivo `.fitz` listo para commitear. Sub-set cubierto:
+
+- **`class Foo: ...`** con fields anotados → `type Foo { ... }`.
+- **Tipos primitivos**: `int`, `float`, `str`, `bool`, `bytes`,
+  `None` → `Int`, `Float`, `Str`, `Bool`, `Bytes`, `Null`.
+- **Generics**: `list[T]`, `dict[K, V]` → `List<T>`, `Map<K, V>`.
+- **Nullable**: `Optional[T]` y PEP 604 `T | None` → `T?`.
+- **Forward refs**: `"Foo"` (string) → `Foo` nominal.
+
+Restricciones del MVP (deuda menor):
+
+- **`def` top-level y `var` top-level del stub se ignoran** — el
+  evaluator runtime los expone via `module.fn(args)` con `PyAny`
+  opaco. Las clases sí se materializan porque son lo que necesita
+  el patrón `let row: ClassName = py_call(...)?` de coerción
+  `Map → Instance` (8.4.3).
+- **Métodos de class se ignoran**. Hoy solo fields. Métodos
+  custom de tipos importados quedan PyAny.
+- **Sin sync automático**: regenerar el `.fitz` si el `.pyi`
+  upstream cambia.
+- **Built-ins de Fitz colisionan** (`Response`, `Request`,
+  `File`, etc.). Si el stub tiene un class con esos nombres,
+  renombrar manualmente el `.fitz` generado (ej. `Response` →
+  `ApiResponse`).
+
+**Integración automática del checker** (deuda residual): cuando el
+checker vea `from python import foo` y exista `<base>/foo.pyi`
+adyacente, podría hidratar el TypeEnv con los stubs sin pasar por
+el `.fitz` intermedio. Requiere agregar `Type::PyModule` + refactor
+de la signature de `check_program`. Sin presión real hoy — el
+`.fitz` generado funciona bien con el checker existente.
+
+Ejemplo runnable: [`examples/guide/21b-pyi-stubs.fitz`](../examples/guide/21b-pyi-stubs.fitz).
+
 ### 21.9 Async — `await` sobre corutinas Python
 
 Cuando una fn Python es `async def` (devuelve una corutina), el
