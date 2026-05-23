@@ -1,7 +1,11 @@
 /target
-Cargo.lock
 *.fitz.compiled
 .DS_Store
+
+# Cargo.lock SE VERSIONA — Fitz es binario (no library puro), así
+# que necesitamos builds reproducibles en CI/CD. Además el workflow
+# del release usa `cargo install --locked` que exige Cargo.lock
+# presente. Convención Rust estándar para proyectos con [[bin]].
 
 # Binarios y símbolos generados por `fitz build` (Fase 5b).
 # Quedan adyacentes al `.fitz` fuente; no se versionan.
