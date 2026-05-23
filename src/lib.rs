@@ -26,7 +26,9 @@ pub mod lint;
 pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
 pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
+pub mod launcher_template; // Fase 8.b.3 — template del launcher para `--bundle-python`
 pub mod parser; // Fase 2.3 — construcción del AST
+pub mod pbs; // Fase 8.b.1 — python-build-standalone download + cache para `--bundle-python`
 pub mod pyi_stub; // pyi-stubs (v0.9.39) — parser .pyi (subset PEP 484/561)
 pub mod testing; // Fase 9.z.2 — testing built-in (registry + @test + asserts)
 pub mod types; // Fase 5.2 — sistema de tipos resuelto + checker base
