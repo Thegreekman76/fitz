@@ -4161,9 +4161,16 @@ requests
   baja wheels específicos del triple del builder. Buildear
   Linux desde Windows requiere `cross` o Docker (igual que
   todo cross-compile Rust).
-- **`--bundle-pip-requirements <file>`** (sub-paso futuro): hoy
-  hay que listar paquetes uno por uno. Leer requirements.txt
-  automático sería ergonomía pura.
+- ~~**`--bundle-pip-requirements <file>`**~~ ✓ **CERRADO
+  2026-05-23 (cosecha 8.c v0.9.42)** — flag repetible que lee
+  paquetes desde un `requirements.txt` estándar. Implica
+  `--bundle-python` igual que `--bundle-pip` y es combinable
+  con éste (pip acumula). Sin parsing del lado de Fitz: el
+  archivo se pasa directo a `pip install -r <file>`, toda la
+  sintaxis nativa funciona (comments, includes, version pins,
+  `--hash`, etc.). Validación temprana fail-fast antes de tocar
+  PBS/pip. 3 E2E tests nuevos (total 7/7 del bundling). Cap
+  21.12 actualizado con sub-bloque dedicado.
 - **Cache key por lista de paquetes**: hoy el pip_packages dir
   se borra antes de cada build (rm -rf + mkdir). Optimizable
   con hash de la lista de pkgs como cache key.

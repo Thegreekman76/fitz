@@ -144,6 +144,125 @@ fn bundle_pip_repetible_acepta_varios_paquetes() {
 }
 
 #[test]
+fn bundle_pip_requirements_implica_bundle_python_y_aborta_sin_from_python_import() {
+    // Cosecha de 8.c: `--bundle-pip-requirements <file>` implica
+    // `--bundle-python` (igual que `--bundle-pip`). Sin `from python
+    // import` en el código, debe abortar con el mismo mensaje.
+    let dir = std::env::temp_dir().join("fitz-bundle-pip-req-no-python");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let req_file = dir.join("requirements.txt");
+    std::fs::write(&req_file, "requests\nsqlalchemy==2.0.0\n").expect("escribir requirements.txt");
+
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build", "--bundle-pip-requirements"])
+        .arg(&req_file)
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build --bundle-pip-requirements");
+
+    assert!(
+        !output.status.success(),
+        "esperaba que abortara: el programa no usa `from python import`"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--bundle-python") && stderr.contains("from python import"),
+        "mensaje debe explicar el constraint del flag. Got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn bundle_pip_requirements_archivo_inexistente_aborta_con_mensaje_claro() {
+    // El usuario pasa un path inválido; debe fail-fast con mensaje
+    // claro del lado de Fitz (no llegar a pip).
+    let dir = std::env::temp_dir().join("fitz-bundle-pip-req-missing");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(
+        &fitz_src,
+        "from python import math\nprint(math.pi)\n",
+    )
+    .expect("escribir .fitz");
+
+    let missing = dir.join("no-existe.txt");
+
+    let output = Command::new(fitz_bin())
+        .args(["build", "--bundle-pip-requirements"])
+        .arg(&missing)
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build con requirements inexistente");
+
+    assert!(
+        !output.status.success(),
+        "esperaba que abortara: archivo de requirements no existe"
+    );
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("requirements file") && stderr.contains("no-existe"),
+        "mensaje debe citar el archivo no encontrado. Got stderr:\n{}",
+        stderr
+    );
+    // El pipeline NO debe haber arrancado (sin lex/PBS).
+    assert!(
+        !stderr.contains("→ compilando real binary")
+            && !stderr.contains("→ asegurando PBS tarball"),
+        "validación temprana — no se debe llegar al pipeline. Got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
+fn bundle_pip_requirements_combinable_con_bundle_pip() {
+    // Ambos flags conviven: positionals + requirements files. La
+    // validación tardía sigue siendo la de `from python import`.
+    let dir = std::env::temp_dir().join("fitz-bundle-pip-req-combined");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("crear tempdir");
+
+    let req_file = dir.join("requirements.txt");
+    std::fs::write(&req_file, "# comentario\nrequests\n\nsqlalchemy\n")
+        .expect("escribir requirements.txt");
+
+    let fitz_src = dir.join("prog.fitz");
+    std::fs::write(&fitz_src, "print(\"sin python\")\n").expect("escribir .fitz");
+
+    let output = Command::new(fitz_bin())
+        .args(["build", "--bundle-pip", "psycopg2-binary"])
+        .arg("--bundle-pip-requirements")
+        .arg(&req_file)
+        .arg(&fitz_src)
+        .output()
+        .expect("invocar fitz build con ambos flags");
+
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    // Sin error de CLI parsing — clap aceptó ambos.
+    assert!(
+        !stderr.contains("error: invalid value")
+            && !stderr.contains("error: the argument"),
+        "clap NO debería rechazar la combinación. Got stderr:\n{}",
+        stderr
+    );
+    // La validación tardía (sin from python import) sí.
+    assert!(
+        stderr.contains("from python import"),
+        "debe llegar a la validación tardía. Got stderr:\n{}",
+        stderr
+    );
+}
+
+#[test]
 fn bundle_python_con_error_de_sintaxis_aborta_antes_de_bundling() {
     let dir = std::env::temp_dir().join("fitz-bundle-validation-syntax-err");
     let _ = std::fs::remove_dir_all(&dir);

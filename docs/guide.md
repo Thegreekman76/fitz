@@ -8634,10 +8634,29 @@ fitz build \
   --bundle-pip "redis==5.0.0" \
   mi_app.fitz
 
+# Desde un requirements.txt (cosecha de 8.c, equivalente al
+# anterior pero leyendo del archivo):
+fitz build --bundle-pip-requirements requirements.txt mi_app.fitz
+
+# Combinable: pip acumula los positionals + el contenido del file
+fitz build \
+  --bundle-pip-requirements requirements.txt \
+  --bundle-pip "psycopg2-binary==2.9.10" \
+  mi_app.fitz
+
 # El binario corre sin Python instalado, sin `pip install`,
 # sin requirements.txt en el destino.
 ./mi_app
 ```
+
+> **`--bundle-pip-requirements <FILE>` es repetible** (acepta
+> varios archivos: `requirements.txt` + `requirements-prod.txt`).
+> El archivo se pasa directo a `pip install -r <file>`, así que
+> toda la sintaxis nativa de pip funciona sin cambios: comentarios
+> con `#`, includes `-r other.txt`, version pins, `--hash`,
+> índices alternos con `--index-url`, etc. Validación temprana:
+> si el archivo no existe o no se puede leer, `fitz build`
+> aborta antes de tocar PBS o pip.
 
 **Cómo funciona internamente:**
 

@@ -61,6 +61,90 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.42] — 2026-05-23 — Cosecha 8.c: `--bundle-pip-requirements` (requirements.txt embebido)
+
+Quick win continuando 8.c en la misma sesión. Nuevo flag
+`--bundle-pip-requirements <FILE>` repetible que lee paquetes
+desde un `requirements.txt` estándar en lugar de listarlos uno
+por uno con `--bundle-pip`. Implica `--bundle-python` igual que
+el flag hermano y es combinable con `--bundle-pip` (pip acumula
+positionals + contenido del file).
+
+Sin parsing del lado de Fitz: el archivo se pasa directo a
+`pip install -r <file>`, así que toda la sintaxis nativa
+funciona sin cambios — comentarios con `#`, includes
+`-r other.txt`, version pins, `--hash`, índices alternos, etc.
+
+### Cambios
+
+- **Nuevo flag CLI `--bundle-pip-requirements <FILE>`**
+  repetible en `Commands::Build`:
+  ```bash
+  # Equivalente a --bundle-pip sqlalchemy --bundle-pip ...
+  fitz build --bundle-pip-requirements requirements.txt mi_app.fitz
+
+  # Combinable con --bundle-pip
+  fitz build \
+    --bundle-pip-requirements requirements.txt \
+    --bundle-pip "psycopg2-binary==2.9.10" \
+    mi_app.fitz
+
+  # Repetible (caso multi-stage típico)
+  fitz build \
+    --bundle-pip-requirements requirements.txt \
+    --bundle-pip-requirements requirements-prod.txt \
+    mi_app.fitz
+  ```
+
+- **Validación temprana**: cada path se canonicaliza y se lee
+  antes de tocar lex/parse/PBS. Si el archivo no existe o no es
+  legible, `fitz build` aborta con mensaje claro citando el
+  path inválido. Cero overhead en el pipeline real.
+
+- **Conteo combinado** para el log: `pip_total_count =
+  bundle_pip.len() + líneas no-blank/no-comment del file`.
+  El summary `pip install --target ({} paquete(s))…` y el
+  banner final reflejan el total.
+
+- **`pip_args` extendido**: por cada requirements file, se
+  agregan `["-r", "<abs_path>"]` antes de los positionals.
+  Pip los acumula naturalmente; no hay parsing del lado de
+  Fitz (toda la sintaxis del archivo la maneja pip).
+
+- **Hash combinado preservado**: si hay pip packages
+  (de cualquier fuente — positionals o requirements files),
+  el hash del extract TMP incluye los bytes del pip tarball
+  resultante. Dos proyectos con distintos paquetes siguen
+  teniendo distintos extract dirs (sin colisión).
+
+### Tests
+
+- **3 E2E tests nuevos** en `bundle_python_e2e.rs`:
+  - `bundle_pip_requirements_implica_bundle_python_y_aborta_sin_from_python_import`
+  - `bundle_pip_requirements_archivo_inexistente_aborta_con_mensaje_claro`
+  - `bundle_pip_requirements_combinable_con_bundle_pip`
+
+Tests E2E del bundling: 7/7 (4 previos + 3 nuevos). El happy
+path real (build + run del binario standalone con
+requirements.txt embebido) sigue siendo validación manual
+porque requiere PBS tarball + red + tar + Python 3.14.x
+en el builder (constraint heredado de 8.b en Linux/macOS).
+
+### Docs
+
+- **cap 21.12 de `docs/guide.md`** suma sub-bloque dedicado
+  al flag con ejemplo combinado y nota sobre que la sintaxis
+  del file es la nativa de pip.
+- **`CHANGELOG.md`** v0.9.42.
+- **`CLAUDE.md`** sección Fase 8.c menciona el flag nuevo
+  como cosecha de la misma fase.
+
+### Deuda residual derivada
+
+Ninguna nueva. La deuda existente de 8.b/8.c sigue idéntica
+(smoke real Docker boilerplates 5/6, C extensions
+cross-platform, R.bug-pyo3-abi3-portable-link en Linux/macOS).
+
 ## [v0.9.41] — 2026-05-23 — Fase 8.c: `fitz build --bundle-pip` (paquetes pip embebidos)
 
 Nuevo flag `--bundle-pip <paquete>` repetible para `fitz build`.

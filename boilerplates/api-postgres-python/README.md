@@ -395,9 +395,14 @@ service `api` del compose.
   COPY fitz.toml ./
   COPY src/ ./src/
   COPY python/ ./python/
+  COPY requirements.txt ./
+  # Equivalente a --bundle-pip sqlalchemy --bundle-pip psycopg2-binary
+  # pero leyendo del requirements.txt que ya existe en este
+  # boilerplate (sigue siendo el mismo archivo que usa `pip install`
+  # en el approach actual con `python:3.X-slim`). Cosecha de 8.c
+  # cerrada en v0.9.42.
   RUN fitz build \
-      --bundle-pip sqlalchemy \
-      --bundle-pip psycopg2-binary \
+      --bundle-pip-requirements requirements.txt \
       src/main.fitz
 
   # Stage 2: runtime sin Python ni libpq ni pip.

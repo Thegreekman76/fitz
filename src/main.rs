@@ -68,6 +68,16 @@ enum Commands {
         /// site-packages/` (Windows) o equivalente Unix.
         #[arg(long = "bundle-pip", value_name = "PACKAGE")]
         bundle_pip: Vec<String>,
+        /// Bundlear paquetes pip leídos desde un `requirements.txt`.
+        /// Flag repetible: `--bundle-pip-requirements requirements.txt
+        /// --bundle-pip-requirements requirements-dev.txt`. Implica
+        /// `--bundle-python` automáticamente. El archivo se pasa
+        /// directo a `pip install -r <file>`, así que toda la sintaxis
+        /// nativa de pip (comentarios `#`, `-r other.txt` includes,
+        /// version pins, `--hash`, etc.) funciona sin cambios.
+        /// Combinable con `--bundle-pip <pkg>`: pip los acumula.
+        #[arg(long = "bundle-pip-requirements", value_name = "FILE")]
+        bundle_pip_requirements: Vec<PathBuf>,
     },
     /// Verificar tipos y sintaxis. Sin archivo, lee el manifest
     /// (Fase 9.y.2) y chequea el `[bin].main`.
@@ -268,6 +278,7 @@ fn main() {
             file,
             bundle_python,
             bundle_pip,
+            bundle_pip_requirements,
         } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
@@ -287,13 +298,15 @@ fn main() {
             });
             let dep_registry = dep_registry_from(&resolved);
             // Fase 8.c: --bundle-pip implica --bundle-python.
-            // Cualquiera de los dos rutea al pipeline de bundling.
-            if bundle_python || !bundle_pip.is_empty() {
+            // Fase 8.c (cosecha): --bundle-pip-requirements también.
+            // Cualquiera de los tres rutea al pipeline de bundling.
+            if bundle_python || !bundle_pip.is_empty() || !bundle_pip_requirements.is_empty() {
                 build_file_with_bundle(
                     &resolved.entry,
                     override_dest.as_deref(),
                     dep_registry,
                     bundle_pip,
+                    bundle_pip_requirements,
                 );
             } else {
                 build_file(&resolved.entry, override_dest.as_deref(), dep_registry);
@@ -1045,6 +1058,7 @@ fn build_file_with_bundle(
     override_dest: Option<&std::path::Path>,
     dep_registry: manifest::DepRegistry,
     bundle_pip: Vec<String>,
+    bundle_pip_requirements: Vec<PathBuf>,
 ) {
     // --- Validación temprana: host triple soportado ---
     let triple = match pbs::host_triple() {
@@ -1054,6 +1068,46 @@ fn build_file_with_bundle(
             std::process::exit(1);
         }
     };
+
+    // --- Validación temprana: requirements files existen y son legibles ---
+    //
+    // Lo hacemos ANTES de tocar lex/parse/PBS para fail-fast sobre el
+    // input del usuario (caso típico: typo en el path del archivo).
+    let mut requirements_abs_paths: Vec<PathBuf> = Vec::new();
+    let mut requirements_pkg_count: usize = 0;
+    for req_path in &bundle_pip_requirements {
+        let abs = match req_path.canonicalize() {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!(
+                    "✗ no se pudo leer requirements file `{}`: {}",
+                    req_path.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        };
+        let content = match fs::read_to_string(&abs) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!(
+                    "✗ no se pudo leer requirements file `{}`: {}",
+                    abs.display(),
+                    e
+                );
+                std::process::exit(1);
+            }
+        };
+        // Conteo aproximado solo para el summary: líneas no-blank que no
+        // empiezan con `#`. pip se encarga del parsing real (includes
+        // `-r other.txt`, opciones como `--hash`, etc.).
+        requirements_pkg_count += content
+            .lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .count();
+        requirements_abs_paths.push(abs);
+    }
 
     // --- Lex + parse para detectar from python import ---
     let source = fs::read_to_string(path).unwrap_or_else(|e| {
@@ -1246,10 +1300,13 @@ fn build_file_with_bundle(
     // Para correr `pip install` necesitamos un Python ejecutable; usamos
     // el python embebido del PBS tarball, extraído al cache local del
     // proyecto. El extract es ~60 MB pero se reusa entre builds.
-    let pip_tarball_abs: Option<PathBuf> = if !bundle_pip.is_empty() {
+    let pip_total_count = bundle_pip.len() + requirements_pkg_count;
+    let pip_tarball_abs: Option<PathBuf> = if !bundle_pip.is_empty()
+        || !requirements_abs_paths.is_empty()
+    {
         println!(
             "→ extrayendo PBS al cache local para correr pip ({} paquete(s))…",
-            bundle_pip.len()
+            pip_total_count
         );
         let pbs_extract_dir = PathBuf::from("target")
             .join("fitz-build")
@@ -1312,7 +1369,7 @@ fn build_file_with_bundle(
             std::process::exit(1);
         }
 
-        println!("→ pip install --target ({} paquete(s))…", bundle_pip.len());
+        println!("→ pip install --target ({} paquete(s))…", pip_total_count);
         let mut pip_args = vec![
             "-m".to_string(),
             "pip".to_string(),
@@ -1324,6 +1381,14 @@ fn build_file_with_bundle(
             // visibles en stderr.
             "--quiet".to_string(),
         ];
+        // `-r <file>` por cada requirements file. pip los acumula con
+        // los positionals que vienen después; toda la sintaxis nativa
+        // del archivo (comments, includes, version pins, --hash) la
+        // procesa pip directamente, sin parsing del lado de Fitz.
+        for req_path in &requirements_abs_paths {
+            pip_args.push("-r".to_string());
+            pip_args.push(req_path.to_string_lossy().into_owned());
+        }
         pip_args.extend(bundle_pip.iter().cloned());
         let pip_out = std::process::Command::new(&python_exe).args(&pip_args).output();
         let pip_out = match pip_out {
@@ -1505,13 +1570,13 @@ fn build_file_with_bundle(
     let bin_size_mb = fs::metadata(&bin_out)
         .map(|m| m.len() as f64 / 1024.0 / 1024.0)
         .unwrap_or(0.0);
-    let bundle_summary = if bundle_pip.is_empty() {
+    let bundle_summary = if pip_total_count == 0 {
         format!("CPython {} embebido", pbs::PYTHON_VERSION)
     } else {
         format!(
             "CPython {} + {} pip pkg(s) embebidos",
             pbs::PYTHON_VERSION,
-            bundle_pip.len()
+            pip_total_count
         )
     };
     println!(
