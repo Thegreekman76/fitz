@@ -1263,21 +1263,47 @@ fn after_dot_completions(
         ]),
         // 9.w.2 — WebSockets tipados. `WsConn<T>` expone 4 métodos:
         // recv/send/broadcast (parametrizados sobre T) + close.
-        Type::WsConn(t) => method_items(&[
-            ("recv", format!("fn() -> Result<{}>", t.display(type_env))),
-            (
-                "send",
-                format!("fn(msg: {}) -> Result<Null>", t.display(type_env)),
-            ),
-            (
-                "broadcast",
-                format!(
-                    "fn(msg: {}) -> Result<Null>  // a TODOS los clientes del endpoint",
-                    t.display(type_env)
+        //
+        // 9.w.2-binary-frames: si T = Bytes, recv/send/broadcast
+        // operan con frames `Message::Binary` raw (no JSON-marshalled);
+        // el detail lo aclara para que el dev no se confunda.
+        Type::WsConn(t) => {
+            let is_bytes = matches!(t.as_ref(), Type::Bytes);
+            let t_disp = t.display(type_env);
+            let recv_note = if is_bytes {
+                "  // espera Message::Binary del cliente"
+            } else {
+                "  // text frame JSON-marshalled desde T"
+            };
+            let send_note = if is_bytes {
+                "  // emite Message::Binary raw"
+            } else {
+                ""
+            };
+            let bcast_note = if is_bytes {
+                "  // broadcast binario a TODOS los clientes del endpoint"
+            } else {
+                "  // a TODOS los clientes del endpoint"
+            };
+            method_items(&[
+                (
+                    "recv",
+                    format!("fn() -> Result<{}>{}", t_disp, recv_note),
                 ),
-            ),
-            ("close", "fn() -> Result<Null>".into()),
-        ]),
+                (
+                    "send",
+                    format!("fn(msg: {}) -> Result<Null>{}", t_disp, send_note),
+                ),
+                (
+                    "broadcast",
+                    format!(
+                        "fn(msg: {}) -> Result<Null>{}",
+                        t_disp, bcast_note,
+                    ),
+                ),
+                ("close", "fn() -> Result<Null>".into()),
+            ])
+        }
         // PyAny y resto: sin info para sugerir.
         _ => Vec::new(),
     }
@@ -1591,7 +1617,7 @@ fn scope_level_completions(
     // Tipos built-in: visibles como nombres en posición de anotación.
     for name in [
         "Int", "Float", "Str", "Bool", "Null", "Bytes", "Range", "Any", "List", "Map", "Result",
-        "Future", "Request", "Response", "File", "PyAny",
+        "Future", "Request", "Response", "File", "PyAny", "WsConn",
     ] {
         items.push(CompletionItem {
             label: name.into(),
@@ -2038,6 +2064,14 @@ mod tests {
         // Tipos built-in.
         assert!(labels.contains(&"Int"));
         assert!(labels.contains(&"List"));
+        // 9.w.2-binary-frames — `WsConn` ahora aparece en scope-level
+        // completions (junto a List/Map/Result/Future/etc.) para que el
+        // dev pueda autocompletarlo al escribir handlers `@ws`.
+        assert!(
+            labels.contains(&"WsConn"),
+            "falta tipo built-in `WsConn` en scope-level: {labels:?}"
+        );
+        assert!(labels.contains(&"Bytes"));
         // Keywords.
         assert!(labels.contains(&"let"));
         assert!(labels.contains(&"match"));
@@ -2098,6 +2132,78 @@ mod tests {
         assert!(labels.contains(&"len"));
         // Sin métodos de List.
         assert!(!labels.contains(&"push"));
+    }
+
+    // 9.w.2-binary-frames — completions sobre `WsConn<Bytes>`.
+    // El path después de `conn.` lista los 4 métodos paramétricos
+    // sobre T = Bytes (recv/send/broadcast/close) con detail que
+    // aclara el modo binary (vs text JSON-marshalled).
+
+    #[test]
+    fn after_dot_sobre_wsconn_bytes_lista_4_metodos_modo_binary() {
+        // Nota: el `\` al final strippea leading whitespace, así que la
+        // línea 2 del src real es `let r = conn.recv()`. Usamos un call
+        // válido (no `conn.` huérfano) para que el parser no abandone
+        // el body y `Expr::Ident(conn)` quede registrado en TypeInfo.
+        // Cursor en col 13 cae entre `.` y `recv`, disparando AfterDot.
+        let src = "@ws(\"/raw\")\n\
+                   async fn raw(conn: WsConn<Bytes>) -> Null {\n\
+                   let r = conn.recv()\n\
+                   return null\n\
+                   }";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 2, 13);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        for expected in ["recv", "send", "broadcast", "close"] {
+            assert!(
+                labels.contains(&expected),
+                "falta método `{expected}` de WsConn<Bytes>: {labels:?}"
+            );
+        }
+        // `recv` detail debe tipear `Result<Bytes>` y mencionar el
+        // modo binary.
+        let recv = items
+            .iter()
+            .find(|i| i.label == "recv")
+            .expect("recv item");
+        let detail = recv.detail.as_deref().unwrap_or("");
+        assert!(
+            detail.contains("Result<Bytes>"),
+            "recv detail debería tipar Result<Bytes>, fue: {detail}"
+        );
+        assert!(
+            detail.contains("Binary"),
+            "recv detail debería mencionar Binary cuando T=Bytes, fue: {detail}"
+        );
+        // `send` detail debe pedir arg Bytes y mencionar binary raw.
+        let send = items.iter().find(|i| i.label == "send").unwrap();
+        let send_detail = send.detail.as_deref().unwrap_or("");
+        assert!(send_detail.contains("msg: Bytes"));
+        assert!(send_detail.contains("Binary"));
+    }
+
+    #[test]
+    fn after_dot_sobre_wsconn_str_mantiene_detalle_text() {
+        // Sanity: `WsConn<Str>` (camino histórico) no se contamina con
+        // el detail de binary. Mismo shape que el test de Bytes — call
+        // válido + cursor entre `.` y `recv`.
+        let src = "@ws(\"/c\")\n\
+                   async fn c(conn: WsConn<Str>) -> Null {\n\
+                   let r = conn.recv()\n\
+                   return null\n\
+                   }";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 2, 13);
+        let recv = items
+            .iter()
+            .find(|i| i.label == "recv")
+            .expect("recv item");
+        let detail = recv.detail.as_deref().unwrap_or("");
+        assert!(detail.contains("Result<Str>"));
+        assert!(
+            !detail.contains("Message::Binary"),
+            "WsConn<Str>.recv no debería mencionar Binary, fue: {detail}"
+        );
     }
 
     #[test]
