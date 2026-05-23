@@ -4032,11 +4032,9 @@ plataformas.
 **Deuda residual de Fase 8.b** (NO bloquea uso real, abre items
 para iteración 2 si aparece presión):
 
-- **Bundling de pip packages** (sub-paso futuro 8.b.x).
-  Hoy `--bundle-python` embebe CPython base + stdlib. Programas
-  con SQLAlchemy/numpy/etc. necesitan `pip install` en el
-  destino. Flag futuro `--bundle-pip <pkg>` empaquetaría
-  paquetes pip junto al CPython base.
+- ~~**Bundling de pip packages**~~ ✓ **CERRADO 2026-05-23 (Fase 8.c
+  v0.9.41)**. `--bundle-pip <pkg>` repetible empaqueta paquetes
+  pip junto al CPython base. Ver "Fase 8.c" abajo.
 - **Boilerplates 5/6 simplificación**: con `--bundle-pip` los
   Dockerfiles podrían `FROM scratch` o `FROM distroless` en
   lugar de `FROM python:3.X-slim`. Ahorro imagen ~150 MB → ~40
@@ -4048,6 +4046,127 @@ para iteración 2 si aparece presión):
   posible eliminando módulos no usados.
 - **Hash SHA256** en lugar de FNV-1a (mayor defensa contra
   cambios silenciosos del PBS upstream).
+
+### Fase 8.c — `fitz build --bundle-pip` (paquetes pip embebidos) — CERRADA (2026-05-23)
+
+Continuación natural de Fase 8.b en la misma sesión. Habilita
+`--bundle-pip <PACKAGE>` repetible para empaquetar paquetes pip
+junto al CPython base. Implica `--bundle-python` automáticamente.
+El binario resultante embebe CPython 3.14.5 + paquetes pip + el
+real binary, todo en un solo archivo standalone.
+
+**Decisiones técnicas tomadas al arrancar** (confirmadas con el
+autor):
+
+- **Modelo de embedding**: tarball secundario embebido (sobre
+  pip install en primer run / tarball PBS custom per-user). El
+  launcher embebe DOS tarballs (PBS base compartido + pip per-
+  proyecto), separación de concerns limpia. Reusa ~95% de la
+  infra 8.b.
+- **Smoke**: requests (~500 KB) para tests rápidos + sqlalchemy
+  como caso real de boilerplates 5/6 (con #[ignore] por costo
+  CI). Validado smoke manual con requests; sqlalchemy queda
+  como deuda derivada.
+- **Boilerplates 5/6 simplificación**: entra al mismo release
+  v0.9.41 vía actualización de READMEs con plan concreto.
+  Dockerfiles funcionando se mantienen sin cambios; smoke
+  Docker real es deuda derivada nueva.
+
+**Sub-pasos cerrados** (8 sub-pasos):
+
+- ✅ **8.c.1** — Flag CLI `--bundle-pip <PACKAGE>` repetible en
+  `Commands::Build`. Acepta version pin nativo de pip
+  (`"sqlalchemy==2.0.0"`). Implica `--bundle-python` (ambos
+  rutean a `build_file_with_bundle`).
+- ✅ **8.c.3** — Launcher template extendido con 2 placeholders
+  nuevos (`PIP_DECL_BLOCK` + `PIP_EXTRACT_BLOCK`).
+  `gen_launcher_main_rs(...)` suma param
+  `pip_packages_path: Option<&str>`. None = backward compat con
+  8.b (template bit-a-bit idéntico). Bloque de extracción
+  cubre Windows (`python/Lib/site-packages`) y Unix
+  (`python/lib/python3.X/site-packages` buscado dinámico).
+- ✅ **8.c.2 + 8.c.4** — Pipeline pip install integrado en
+  `build_file_with_bundle`. Si `bundle_pip` no vacío: extrae
+  PBS a cache local del proyecto, ejecuta `pip install --target`
+  con `--quiet` + `--no-warn-script-location`, empaca el
+  resultado en `<bin>_pip_packages.tar.gz`. Hash combinado
+  (PBS bytes + pip bytes) para que dos proyectos con distintos
+  pkgs tengan TMP dirs distintos.
+- ✅ **8.c.5** — Tests E2E nuevos
+  (`bundle_pip_implica_bundle_python_y_aborta_sin_from_python_import`,
+  `bundle_pip_repetible_acepta_varios_paquetes`). Validación
+  temprana sin red ni Python. Smoke manual real con requests
+  validado: 22.9 MB binario Windows + cold ~5s + warm ~50ms +
+  `requests.__version__ = "2.34.2"` sin Python en PATH.
+- ✅ **8.c.6** — Cap 21.12 nuevo "`fitz build --bundle-pip` —
+  empaquetar paquetes pip" en `docs/guide.md` + ejemplo
+  runnable `examples/python-interop-8.c.fitz`. Renumeración:
+  21.12 (CRUD)→21.13, 21.12 (Limitaciones)→21.14 (fix de bug
+  de doble 21.12 que quedó de la renumeración previa en 8.b.7).
+- ✅ **8.c.7** — READMEs boilerplates 5/6 actualizados con plan
+  concreto de simplificación: builder Python 3.14 +
+  `--bundle-pip sqlalchemy psycopg2-binary` + runtime
+  `gcr.io/distroless/cc-debian12`. Imagen ~150 MB → ~80-100 MB.
+  Dockerfiles actuales mantenidos sin cambios (smoke real
+  Docker como deuda residual nueva — el primer user que lo
+  pruebe confirma el flow Linux completo).
+- ✅ **8.c.8** — Cierre formal: CHANGELOG v0.9.41, esta
+  sección, deudas actualizadas (Fase 8.b suma marca de cierre
+  del bullet "Bundling pip packages"), CLAUDE.md actualizado,
+  README footnote § actualizado con énfasis fuerte del flag
+  como diferencial único.
+
+**Tests al cierre**:
+
+- **4 tests nuevos** específicos de Fase 8.c: 2 unit (launcher
+  template pip placeholders + Windows path escape) + 2 E2E
+  (flag CLI validation + repetible). Acumulado con 8.b: **29
+  tests** del bundling entero.
+- **2263 unit tests totales** sin feature (smoke regresión
+  verde). Smoke `GUIDE_EXAMPLES_COMPILE` sigue verde.
+
+**Smoke manual end-to-end validado** (Windows):
+
+```
+$ fitz build --bundle-pip requests examples/python-interop-8.c.fitz
+→ compilando real binary…
+→ asegurando PBS tarball (cpython 3.14.5 / x86_64-pc-windows-msvc)…
+→ extrayendo PBS al cache local para correr pip (1 paquete(s))…
+→ pip install --target (1 paquete(s))…
+→ empacando pip_packages.tar.gz…
+→ compilando launcher…
+✓ binario standalone (CPython 3.14.5 + 1 pip pkg(s) embebidos):
+  python-interop-8.c.exe (22.9 MB)
+
+# Sin Python en PATH:
+$ ./python-interop-8.c.exe
+Módulo requests cargado desde el bundle pip:
+requests
+2.34.2
+```
+
+**Deuda residual de Fase 8.c** (NO bloquea uso real):
+
+- **Smoke real Docker de boilerplates 5/6 con --bundle-pip**:
+  hoy validado solo en Windows con programa simple (requests).
+  La combinación `--bundle-pip sqlalchemy + psycopg2-binary`
+  adentro de un Dockerfile Linux multi-stage es deuda derivada.
+  El primer user que pruebe el plan documentado en los READMEs
+  confirma.
+- **Constraint Linux/macOS heredado**: builder requiere Python
+  3.14.x (R.bug-pyo3-abi3-portable-link componente Linux/macOS
+  pendiente). Cuando cierre, `--bundle-pip` es independiente
+  del Python del builder en las 3 plataformas.
+- **C extensions cross-platform**: `pip install` al build time
+  baja wheels específicos del triple del builder. Buildear
+  Linux desde Windows requiere `cross` o Docker (igual que
+  todo cross-compile Rust).
+- **`--bundle-pip-requirements <file>`** (sub-paso futuro): hoy
+  hay que listar paquetes uno por uno. Leer requirements.txt
+  automático sería ergonomía pura.
+- **Cache key por lista de paquetes**: hoy el pip_packages dir
+  se borra antes de cada build (rm -rf + mkdir). Optimizable
+  con hash de la lista de pkgs como cache key.
 
 ### Decisiones cross-cutting
 

@@ -66,10 +66,23 @@ pub const PLACEHOLDER_TARBALL_PATH: &str = "__FITZ_REPLACE_PBS_TARBALL_PATH__";
 pub const PLACEHOLDER_REAL_BINARY_PATH: &str = "__FITZ_REPLACE_REAL_BINARY_PATH__";
 
 /// Placeholder reemplazado con un hash corto del tarball (16 chars
-/// hex). Identifica el extract dir en `$TMPDIR`.
+/// hex). Identifica el extract dir en `$TMPDIR`. Cuando hay pip
+/// packages, este hash combina PBS + pip para que dos proyectos con
+/// distintos packages tengan extract dirs distintos.
 pub const PLACEHOLDER_TARBALL_HASH: &str = "__FITZ_REPLACE_TARBALL_HASH__";
 
-/// Template Rust del `main.rs` del launcher. Los tres placeholders se
+/// Placeholder donde se inyecta la declaración del tarball de paquetes
+/// pip (Fase 8.c). Sin `--bundle-pip` queda como string vacío. Con
+/// `--bundle-pip`, se reemplaza por una línea adicional:
+/// `const PIP_PACKAGES: &[u8] = include_bytes!("<path>");`
+pub const PLACEHOLDER_PIP_DECL_BLOCK: &str = "__FITZ_REPLACE_PIP_DECL_BLOCK__";
+
+/// Placeholder donde se inyecta la extracción de los paquetes pip
+/// adentro de `python/Lib/site-packages/`. Sin `--bundle-pip` queda
+/// vacío. Con `--bundle-pip`, se inyecta el bloque de extracción.
+pub const PLACEHOLDER_PIP_EXTRACT_BLOCK: &str = "__FITZ_REPLACE_PIP_EXTRACT_BLOCK__";
+
+/// Template Rust del `main.rs` del launcher. Los placeholders se
 /// reemplazan vía `gen_launcher_main_rs()` antes de escribirlo al
 /// Cargo project del launcher.
 pub const LAUNCHER_MAIN_RS_TEMPLATE: &str = r#"// Auto-generado por `fitz build --bundle-python`.
@@ -87,6 +100,7 @@ use std::process::{exit, Command};
 const PBS_TARBALL: &[u8] = include_bytes!("__FITZ_REPLACE_PBS_TARBALL_PATH__");
 const REAL_BINARY: &[u8] = include_bytes!("__FITZ_REPLACE_REAL_BINARY_PATH__");
 const TARBALL_HASH: &str = "__FITZ_REPLACE_TARBALL_HASH__";
+__FITZ_REPLACE_PIP_DECL_BLOCK__
 
 #[cfg(windows)]
 const REAL_BINARY_NAME: &str = "fitz-real.exe";
@@ -167,6 +181,7 @@ fn ensure_extracted() -> std::io::Result<PathBuf> {
     }
 
     let _ = fs::remove_file(&tarball_path);
+__FITZ_REPLACE_PIP_EXTRACT_BLOCK__
 
     let real_binary_dest = tmp.join(REAL_BINARY_NAME);
     fs::write(&real_binary_dest, REAL_BINARY)?;
@@ -240,14 +255,107 @@ pub const PLACEHOLDER_BIN_NAME: &str = "__FITZ_REPLACE_BIN_NAME__";
 ///
 /// Los paths se escapan para que sean string literales Rust válidos
 /// (backslashes de Windows → `\\`, doble quotes → `\"`).
-pub fn gen_launcher_main_rs(tarball_path: &str, real_binary_path: &str, tarball_hash: &str) -> String {
+///
+/// Fase 8.c — Si `pip_packages_path` es `Some(<path>)`, el launcher
+/// embebe un segundo tarball con paquetes pip pre-instalados y los
+/// extrae adentro de `python/Lib/site-packages/` después del PBS
+/// base extract. Si es `None` (sin `--bundle-pip`), los bloques de
+/// pip se reemplazan por string vacío — el launcher resultante es
+/// bit-a-bit idéntico al 8.b.
+pub fn gen_launcher_main_rs(
+    tarball_path: &str,
+    real_binary_path: &str,
+    tarball_hash: &str,
+    pip_packages_path: Option<&str>,
+) -> String {
+    let (pip_decl_block, pip_extract_block) = match pip_packages_path {
+        Some(path) => (
+            format!(
+                "const PIP_PACKAGES: &[u8] = include_bytes!(\"{}\");",
+                escape_rust_string_literal(path)
+            ),
+            // Bloque emitido después del `let _ = fs::remove_file(&tarball_path);`.
+            // Escribe el tarball pip a un .tar.gz temp + extrae a
+            // python/Lib/site-packages/. Asume que `python/` ya existe
+            // tras el extract del PBS base. El strip-components=0
+            // preserva la jerarquía relativa del tarball (debe
+            // contener directamente los dirs de los paquetes).
+            r#"
+    // Fase 8.c — extracción de paquetes pip embebidos.
+    let pip_tarball_path = tmp.join("__fitz_pip.tar.gz");
+    fs::write(&pip_tarball_path, PIP_PACKAGES)?;
+
+    let site_packages = tmp.join("python").join("Lib").join("site-packages");
+    if !site_packages.exists() {
+        // Linux/macOS: el dir vive en python/lib/python3.X/site-packages/.
+        // Buscamos cualquier python3* dir adentro de python/lib/.
+        let py_lib = tmp.join("python").join("lib");
+        if py_lib.exists() {
+            for entry in fs::read_dir(&py_lib)? {
+                let entry = entry?;
+                let name = entry.file_name();
+                let name_str = name.to_string_lossy();
+                if name_str.starts_with("python3") {
+                    let sp = entry.path().join("site-packages");
+                    if !sp.exists() {
+                        fs::create_dir_all(&sp)?;
+                    }
+                    let tar_status = Command::new("tar")
+                        .args([
+                            "-xzf",
+                            &pip_tarball_path.to_string_lossy(),
+                            "-C",
+                            &sp.to_string_lossy(),
+                        ])
+                        .status()?;
+                    if !tar_status.success() {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::Other,
+                            "pip packages tar extraction failed",
+                        ));
+                    }
+                    break;
+                }
+            }
+        }
+    } else {
+        // Windows: python/Lib/site-packages/ ya existe en el PBS.
+        let tar_status = Command::new("tar")
+            .args([
+                "-xzf",
+                &pip_tarball_path.to_string_lossy(),
+                "-C",
+                &site_packages.to_string_lossy(),
+            ])
+            .status()?;
+        if !tar_status.success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "pip packages tar extraction failed",
+            ));
+        }
+    }
+    let _ = fs::remove_file(&pip_tarball_path);"#
+                .to_string(),
+        ),
+        None => (String::new(), String::new()),
+    };
+
     LAUNCHER_MAIN_RS_TEMPLATE
-        .replace(PLACEHOLDER_TARBALL_PATH, &escape_rust_string_literal(tarball_path))
+        .replace(
+            PLACEHOLDER_TARBALL_PATH,
+            &escape_rust_string_literal(tarball_path),
+        )
         .replace(
             PLACEHOLDER_REAL_BINARY_PATH,
             &escape_rust_string_literal(real_binary_path),
         )
-        .replace(PLACEHOLDER_TARBALL_HASH, &escape_rust_string_literal(tarball_hash))
+        .replace(
+            PLACEHOLDER_TARBALL_HASH,
+            &escape_rust_string_literal(tarball_hash),
+        )
+        .replace(PLACEHOLDER_PIP_DECL_BLOCK, &pip_decl_block)
+        .replace(PLACEHOLDER_PIP_EXTRACT_BLOCK, &pip_extract_block)
 }
 
 /// Personaliza el template del Cargo.toml del launcher con el nombre
@@ -311,17 +419,24 @@ mod tests {
 
     #[test]
     fn gen_launcher_main_rs_sustituye_los_3_placeholders() {
-        let result = gen_launcher_main_rs("/tmp/tarball.tar.gz", "/tmp/fitz-real", "abc123");
+        let result =
+            gen_launcher_main_rs("/tmp/tarball.tar.gz", "/tmp/fitz-real", "abc123", None);
 
         // Los placeholders ya no deben aparecer en el output.
         assert!(!result.contains(PLACEHOLDER_TARBALL_PATH));
         assert!(!result.contains(PLACEHOLDER_REAL_BINARY_PATH));
         assert!(!result.contains(PLACEHOLDER_TARBALL_HASH));
+        // Sin pip, los bloques de pip también deben estar reemplazados (por vacío).
+        assert!(!result.contains(PLACEHOLDER_PIP_DECL_BLOCK));
+        assert!(!result.contains(PLACEHOLDER_PIP_EXTRACT_BLOCK));
 
         // Los valores reemplazados deben aparecer.
         assert!(result.contains("/tmp/tarball.tar.gz"));
         assert!(result.contains("/tmp/fitz-real"));
         assert!(result.contains("abc123"));
+
+        // Sin pip, NO debe haber referencia a PIP_PACKAGES en el output.
+        assert!(!result.contains("PIP_PACKAGES"));
     }
 
     #[test]
@@ -330,6 +445,7 @@ mod tests {
             r"C:\Users\test\tarball.tar.gz",
             r"C:\Users\test\fitz-real.exe",
             "abc123",
+            None,
         );
 
         // En Rust source, los backslashes deben aparecer escapados.
@@ -353,8 +469,61 @@ mod tests {
     fn gen_launcher_main_rs_escapa_double_quotes() {
         // Edge case improbable pero posible (paths con espacios y
         // comillas en Windows — no es típico pero válido).
-        let result = gen_launcher_main_rs("/tmp/a\"b.tar.gz", "/tmp/real", "h");
+        let result = gen_launcher_main_rs("/tmp/a\"b.tar.gz", "/tmp/real", "h", None);
         assert!(result.contains("/tmp/a\\\"b.tar.gz"));
+    }
+
+    #[test]
+    fn gen_launcher_main_rs_con_pip_packages_inyecta_bloques() {
+        let result = gen_launcher_main_rs(
+            "/tmp/pbs.tar.gz",
+            "/tmp/fitz-real",
+            "abc123",
+            Some("/tmp/pip_packages.tar.gz"),
+        );
+
+        // Placeholders deben estar resueltos.
+        assert!(!result.contains(PLACEHOLDER_PIP_DECL_BLOCK));
+        assert!(!result.contains(PLACEHOLDER_PIP_EXTRACT_BLOCK));
+
+        // Bloque de declaración: const PIP_PACKAGES + include_bytes!.
+        assert!(
+            result.contains("const PIP_PACKAGES: &[u8] = include_bytes!"),
+            "debe declarar PIP_PACKAGES como include_bytes!"
+        );
+        assert!(
+            result.contains("/tmp/pip_packages.tar.gz"),
+            "debe incluir el path del tarball pip"
+        );
+
+        // Bloque de extracción: writes + tar.
+        assert!(
+            result.contains("__fitz_pip.tar.gz"),
+            "debe escribir el tarball pip a un archivo temp"
+        );
+        assert!(
+            result.contains("site-packages"),
+            "debe mencionar el target site-packages para extracción"
+        );
+    }
+
+    #[test]
+    fn gen_launcher_main_rs_pip_packages_escapa_windows_path() {
+        let result = gen_launcher_main_rs(
+            "/tmp/pbs.tar.gz",
+            "/tmp/fitz-real",
+            "abc123",
+            Some(r"C:\Users\test\pip_packages.tar.gz"),
+        );
+
+        // El path Windows del pip debe estar escapado adentro del include_bytes!.
+        assert!(result.contains(r"C:\\Users\\test\\pip_packages.tar.gz"));
+        // Backslash raw NO debe aparecer en el código generado.
+        let pip_line = result
+            .lines()
+            .find(|l| l.contains("PIP_PACKAGES: &[u8]"))
+            .expect("debe haber línea include_bytes! del pip tarball");
+        assert!(!pip_line.contains(r"C:\Users"));
     }
 
     #[test]

@@ -125,9 +125,12 @@ match esperita().await {
 //   - `.await` split (`let fut = py_call()?; fut.await` con binding
 //     intermedio): hoy solo el patrón `<py_call>.await` o
 //     `<py_call>?.await` inmediato. Deuda menor.
-//   - Bundling CPython embebido (`fitz build --bundle-python`):
-//     queda como sub-paso ortogonal post-8.7 / sub-fase futura.
-//     Hoy el binario asume Python instalado en el destino.
+//   - Bundling CPython embebido (`fitz build --bundle-python` —
+//     Fase 8.b CERRADA 2026-05-23) + paquetes pip embebidos
+//     (`fitz build --bundle-pip` — Fase 8.c CERRADA 2026-05-23):
+//     producen binarios standalone que NO requieren Python instalado
+//     en el destino. Ver `examples/python-interop-8.b.fitz` y
+//     `examples/python-interop-8.c.fitz` + cap 21.11/21.12.
 // ---------------------------------------------------------------------
 
 print("")

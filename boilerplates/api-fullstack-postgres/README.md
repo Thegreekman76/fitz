@@ -494,21 +494,25 @@ del proyecto Fitz.
 
 ## Roadmap del boilerplate
 
-- **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)**:
-  hoy el feature empaqueta CPython base + stdlib adentro del
-  binario, sin paquetes pip. Para este boilerplate aún no aplica
-  directamente — `psycopg2-binary` + `sqlalchemy` viven en
-  `requirements.txt`. Cuando el sub-paso futuro `--bundle-pip`
-  aterrice, este Dockerfile podrá:
-  - Pasar de `FROM python:3.12-slim` (runtime) a `FROM
-    gcr.io/distroless/cc-debian12` o `FROM scratch`.
-  - Eliminar la sección `pip install -r requirements.txt` y el
-    `apt-get install libpq5`.
-  - Imagen final: ~80-100 MB (CPython 30 MB + psycopg2 + sqlalchemy
-    + real binary) en vez de ~150 MB hoy.
-  - **Deploy independiente de la versión Python del runtime**: hoy
-    el match builder/runtime es obligatorio (R.bug-pyo3-abi3-portable-link),
-    con bundle desaparece.
+- **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)** +
+  **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)**:
+  el segundo flag empaqueta paquetes pip junto al CPython base.
+  Este boilerplate puede simplificarse adoptándolo (mismo plan
+  que el boilerplate hermano `api-postgres-python`). Plan
+  concreto en el README de ese boilerplate; aplica idéntico acá.
+
+  **Beneficios** sobre este boilerplate (3 servicios):
+  - Container `api`: de imagen ~150 MB (python:3.12-slim +
+    SQLAlchemy + psycopg2 + libpq) a ~80-100 MB (distroless +
+    binary con CPython embebido).
+  - El frontend nginx y el Postgres siguen igual (no afecta).
+  - Cero `requirements.txt` en runtime.
+  - Cero `pip install` en runtime.
+  - Constraint heredado: builder Linux/macOS requiere Python 3.14.x.
+
+  **Smoke real Docker pendiente**: validar end-to-end con
+  docker compose up + ejercicio del frontend. Deuda nueva
+  derivada de v0.9.41.
 - **DB nativa Fitz (Fase 10)**: reemplazo de la layer Python
   cuando llegue. Mismo API HTTP + mismo frontend, sin interop
   ni `requirements.txt`.

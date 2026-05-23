@@ -4,6 +4,10 @@
 //   # Setup (una vez):
 //   pip install sqlalchemy
 //
+//   # Alternativa standalone (Fase 8.c, sin pip install en runtime):
+//   #   fitz build --bundle-pip sqlalchemy app.fitz
+//   #   ./app   # corre sin Python ni sqlalchemy instalados
+//
 //   # Correr (server HTTP en 127.0.0.1:3000) — desde la raíz del repo:
 //   #
 //   # Linux/macOS:

@@ -1,0 +1,59 @@
+// Fase 8.c — Empaquetar paquetes pip junto al CPython embebido.
+//
+// Este ejemplo demuestra `fitz build --bundle-pip`. Extiende lo
+// que vimos en `examples/python-interop-8.b.fitz` (CPython base
+// + stdlib): además del intérprete CPython, embebe paquetes pip
+// adentro del binario standalone.
+//
+// === Comando para buildear ===
+//
+// fitz build --bundle-pip requests examples/python-interop-8.c.fitz
+//
+// El primer build:
+// - Descarga el tarball PBS al cache (igual que 8.b).
+// - Extrae PBS localmente para correr pip.
+// - Ejecuta `pip install --target` con los paquetes pedidos.
+// - Empaca todo en un tarball secundario.
+// - Compila el launcher con DOS tarballs embebidos.
+//
+// === Output esperado en máquina SIN Python instalado ===
+//
+// Módulo requests cargado desde el bundle pip:
+// requests
+// 2.34.2
+//
+// === Múltiples paquetes ===
+//
+// El flag es repetible:
+//
+//   fitz build \
+//     --bundle-pip sqlalchemy \
+//     --bundle-pip psycopg2-binary \
+//     --bundle-pip "redis==5.0.0" \
+//     mi_app.fitz
+//
+// === Tamaños observados ===
+//
+// Solo --bundle-python (stdlib):              ~22 MB
+// + requests (pure python):                   ~23 MB
+// + sqlalchemy + psycopg2-binary (con C ext): ~50 MB
+//
+// === Cuándo usar este flag ===
+//
+// - Cuando tu programa usa paquetes pip (no solo stdlib).
+// - Caso canónico: SQLAlchemy + Postgres en deploys minimalistas
+//   (FROM scratch o distroless en lugar de FROM python:3.X-slim).
+// - Distribución de tooling CLI con dependencies Python ricas
+//   (yt-dlp, beautifulsoup4, etc.).
+//
+// === Caveats ===
+//
+// - Paquetes con C extensions son específicos del triple del
+//   builder. Pure-Python son cross-platform.
+// - Build time requiere red (pip install). Runtime no.
+
+from python import requests
+
+print("Módulo requests cargado desde el bundle pip:")
+print(requests.__name__)
+print(requests.__version__)

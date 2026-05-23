@@ -39,6 +39,7 @@ fn template_launcher_compila_con_paths_dummies() {
         &tarball_path.to_string_lossy(),
         &real_binary_path.to_string_lossy(),
         "abc123def4567890",
+        None,
     );
     let cargo_toml = launcher_template::gen_launcher_cargo_toml("smoke_launcher");
 
@@ -82,6 +83,7 @@ fn template_launcher_compila_con_path_windows_y_espacios() {
         &tarball_path.to_string_lossy(),
         &real_binary_path.to_string_lossy(),
         "0123456789abcdef",
+        None,
     );
     let cargo_toml = launcher_template::gen_launcher_cargo_toml("smoke_win");
 

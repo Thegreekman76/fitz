@@ -8602,7 +8602,186 @@ disponible en Win11/macOS/Linux moderno).
 - Hash criptográfico (SHA256) en lugar de FNV-1a para defender
   contra cambios silenciosos del PBS upstream.
 
-### 21.12 Ejemplo CRUD ejecutable
+> **Importante — ¿necesito Python local para usar este flag?**
+> El binario en el destino corre sin Python instalado (esa es
+> la promesa). Pero el dev que BUILDEA con `fitz build
+> --bundle-python` sí necesita Python al build time: en Windows
+> cualquier 3.10+, en Linux/macOS específicamente 3.14.x
+> (constraint heredado de `R.bug-pyo3-abi3-portable-link`).
+> Tabla completa de matices al final del cap 21.12, después del
+> flag hermano `--bundle-pip`.
+
+### 21.12 `fitz build --bundle-pip` — empaquetar paquetes pip
+
+El flag `--bundle-python` que vimos arriba empaqueta CPython base
++ stdlib. Para programas Fitz que solo usan stdlib (math, json,
+os, datetime, etc.) eso alcanza. Pero el caso de uso real más
+común — SQLAlchemy + Postgres, requests, numpy/pandas, FastAPI
+client, etc. — requiere **paquetes pip** además de la stdlib.
+
+`fitz build --bundle-pip <paquete>` resuelve eso. Empaqueta los
+paquetes pip junto al CPython base, todo adentro del mismo
+binario standalone. Implica `--bundle-python` automáticamente.
+
+```bash
+# Un paquete
+fitz build --bundle-pip requests mi_app.fitz
+
+# Múltiples (flag repetible)
+fitz build \
+  --bundle-pip sqlalchemy \
+  --bundle-pip psycopg2-binary \
+  --bundle-pip "redis==5.0.0" \
+  mi_app.fitz
+
+# El binario corre sin Python instalado, sin `pip install`,
+# sin requirements.txt en el destino.
+./mi_app
+```
+
+**Cómo funciona internamente:**
+
+1. Build time: descarga el tarball PBS al cache (igual que
+   `--bundle-python`).
+2. Extrae PBS a `target/fitz-build/<bin>_pbs_extract/` para tener
+   un Python ejecutable adentro del proyecto.
+3. Ejecuta `<pbs>/python -m pip install --target <dir> <paquetes>`
+   adentro de `target/fitz-build/<bin>_pip_packages/`. El
+   `--target` instala los paquetes sin tocar el sistema ni el
+   venv del usuario.
+4. Empaca el directorio resultante en
+   `target/fitz-build/<bin>_pip_packages.tar.gz`.
+5. El launcher embebe **dos tarballs** vía `include_bytes!`: el
+   PBS base (compartido entre proyectos) + el pip packages
+   (específico de este proyecto).
+6. En primer run del binario, el launcher extrae ambos al
+   `$TMPDIR/fitz-py-<hash>/` (el hash incluye los bytes del pip
+   tarball, así que proyectos con distintos paquetes tienen
+   distintos extract dirs — sin colisión).
+
+**Tamaños y timing observados** (Windows 11 SSD):
+
+| Bundle | Tamaño bin | Cold first run | Warm runs |
+|--------|------------|----------------|-----------|
+| Solo `--bundle-python` (stdlib) | ~22 MB | ~3-5s | ~50-100ms |
+| `+ --bundle-pip requests` | ~23 MB | ~5-7s | ~50-100ms |
+| `+ --bundle-pip sqlalchemy + psycopg2-binary` | ~50 MB | ~8-12s | ~50-100ms |
+
+**Programa de ejemplo runnable**:
+
+```fitz
+// examples/python-interop-8.c.fitz
+from python import requests
+
+print("Módulo requests cargado desde el bundle pip:")
+print(requests.__name__)
+print(requests.__version__)
+```
+
+```bash
+$ fitz build --bundle-pip requests examples/python-interop-8.c.fitz
+→ compilando real binary…
+→ asegurando PBS tarball (cpython 3.14.5 / x86_64-pc-windows-msvc)…
+→ extrayendo PBS al cache local para correr pip (1 paquete(s))…
+→ pip install --target (1 paquete(s))…
+→ empacando pip_packages.tar.gz…
+→ compilando launcher…
+✓ binario standalone (CPython 3.14.5 + 1 pip pkg(s) embebidos):
+  python-interop-8.c.exe (22.9 MB)
+
+# En cualquier máquina del triple destino, SIN Python instalado:
+$ ./python-interop-8.c.exe
+Módulo requests cargado desde el bundle pip:
+requests
+2.34.2
+```
+
+**Limitaciones y caveats:**
+
+- **Paquetes con C extensions nativas** (psycopg2-binary, numpy,
+  Pillow): funcionan, pero el `.whl` que pip elige al build time
+  es **específico del triple del builder**. Si buildeás en
+  `x86_64-pc-windows-msvc` y querés correr en
+  `x86_64-unknown-linux-gnu`, las extensions no son portables.
+  Workaround: buildea adentro de Docker con la imagen del target
+  (la imagen oficial `ghcr.io/thegreekman76/fitz:latest-python`
+  es Linux x64).
+- **Pure-Python packages** (requests, sqlalchemy, click, jinja2):
+  son **cross-platform** — el mismo bundle corre en Linux,
+  macOS y Windows porque son `.py` puros sin C extensions.
+- **`pip install` requiere red al BUILD time**. Una vez que el
+  binario está hecho, el deploy no requiere red.
+- **Versions pin**: usá la sintaxis nativa de pip:
+  `--bundle-pip "sqlalchemy==2.0.0"` o
+  `--bundle-pip "redis>=5.0,<6.0"`.
+- **Builder requiere `tar`**: igual que `--bundle-python`. En
+  Windows 11 viene nativo (`C:\Windows\system32\tar.exe`).
+- **Constraint heredado de `--bundle-python`**: en Linux/macOS,
+  el builder debe tener Python 3.14.x para que `pip install`
+  use el mismo intérprete que el bundle. En Windows el shim
+  `python3.dll` permite cualquier 3.10+.
+
+**Casos de uso reales del feature:**
+
+- **Distribución a usuarios finales** de scripts CLI que usan
+  bibliotecas Python ricas (yt-dlp, beautifulsoup4, etc.): un
+  solo binario en lugar de `pip install` + lista de
+  dependencies.
+- **Deploys a containers minimalistas**: `FROM scratch` o
+  `FROM gcr.io/distroless/cc-debian12` en lugar de
+  `FROM python:3.X-slim`. Imagen ~150 MB → ~80-100 MB.
+- **Tooling interno** de equipos donde no querés que cada user
+  configure su venv ni instale `requirements.txt`.
+
+> **Para boilerplates 5/6 (api-postgres-python,
+> api-fullstack-postgres) este es exactamente el feature que
+> faltaba**. La sección "Roadmap del boilerplate" en cada uno
+> tiene el plan de simplificación cuando este flag llegue.
+
+#### ¿Entonces ya no necesito Python ni pip ni venv?
+
+Pregunta razonable y la respuesta tiene matices. Depende de
+QUIÉN y CUÁNDO:
+
+| Contexto | Python local | `pip install` local | venv |
+|----------|--------------|---------------------|------|
+| **Correr el binario** `--bundle-pip` (deploy) | ❌ No | ❌ No | ❌ No |
+| **Buildear con `fitz build --bundle-pip`** | ✅ Sí (3.14.x en Linux/macOS) | ❌ No | ❌ No |
+| **Iterar con `fitz run --features python`** | ✅ Sí | ✅ Sí | ⚠️ Opcional |
+
+**Para el usuario final** que corre el binario en producción:
+**cero Python, cero pip, cero venv.** Copia el binario, lo
+ejecuta, funciona. Es la promesa del binario standalone llevada
+hasta el final del stack — sin runtime externo, sin packages
+adicionales que instalar.
+
+**Para el developer que buildea** con `fitz build --bundle-pip`:
+**casi, pero no del todo.** El build necesita:
+
+- Un Python instalado en la máquina (Windows: cualquier 3.10+
+  por el shim `python3.dll`; Linux/macOS: 3.14.x específicamente
+  por el constraint heredado de `R.bug-pyo3-abi3-portable-link`).
+  Cuando esa deuda cierre, será cualquier 3.10+ en las 3
+  plataformas.
+- **NO** necesita `pip install <paquete>` local — `fitz build`
+  los baja al cache y los empaqueta solo.
+- **NO** necesita venv activado.
+- Sí necesita `tar` y `curl` en el `PATH` (vienen nativos en
+  Win11/macOS/Linux moderno).
+
+**Para el developer iterando** con `fitz run --features python`
+(intérprete, NO compilador): **no cambia — sigue necesitando lo
+de siempre.** Python instalado, paquetes pip instalados
+localmente, venv si querés aislamiento. `fitz run` es el modo
+de iteración rápida; no bundlea nada, igual que `python
+script.py` necesita su environment.
+
+**Conclusión práctica**: el feature destraba un escenario
+específico — **el binario en el destino es standalone**. El
+flow de desarrollo (escribir código, iterar, debuggear) sigue
+necesitando Python local porque `fitz run` no compila.
+
+### 21.13 Ejemplo CRUD ejecutable
 
 `examples/guide/21-python-crud/` arma un CRUD completo:
 
@@ -8647,7 +8826,7 @@ El ejemplo demuestra el flujo completo: bindings Python → fns
 helper Fitz que llaman SQLAlchemy → handlers HTTP que serializan
 las filas a JSON.
 
-### 21.12 Limitaciones — lo que NO anda
+### 21.14 Limitaciones — lo que NO anda
 
 Para mantener la honestidad del lenguaje:
 

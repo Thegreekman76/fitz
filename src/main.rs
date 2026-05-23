@@ -57,6 +57,17 @@ enum Commands {
         /// Suma ~30 MB (Windows) / ~45 MB (Linux x64) al binario.
         #[arg(long = "bundle-python")]
         bundle_python: bool,
+        /// Fase 8.c — Bundlear paquetes pip junto al CPython embebido.
+        /// Flag repetible: `--bundle-pip sqlalchemy --bundle-pip psycopg2`.
+        /// Acepta version pin nativa de pip:
+        /// `--bundle-pip "sqlalchemy==2.0.0"`. Implica `--bundle-python`
+        /// automáticamente. Builder ejecuta `pip install --target` al
+        /// build time, empaqueta el resultado en un tarball secundario
+        /// embebido en el launcher. En primer run del binario, los
+        /// paquetes se extraen a `<TMPDIR>/fitz-py-<hash>/python/Lib/
+        /// site-packages/` (Windows) o equivalente Unix.
+        #[arg(long = "bundle-pip", value_name = "PACKAGE")]
+        bundle_pip: Vec<String>,
     },
     /// Verificar tipos y sintaxis. Sin archivo, lee el manifest
     /// (Fase 9.y.2) y chequea el `[bin].main`.
@@ -256,6 +267,7 @@ fn main() {
         Commands::Build {
             file,
             bundle_python,
+            bundle_pip,
         } => {
             let resolved = resolve_entry(file);
             sync_lockfile_if_needed(&resolved);
@@ -274,11 +286,14 @@ fn main() {
                     .join(filename)
             });
             let dep_registry = dep_registry_from(&resolved);
-            if bundle_python {
+            // Fase 8.c: --bundle-pip implica --bundle-python.
+            // Cualquiera de los dos rutea al pipeline de bundling.
+            if bundle_python || !bundle_pip.is_empty() {
                 build_file_with_bundle(
                     &resolved.entry,
                     override_dest.as_deref(),
                     dep_registry,
+                    bundle_pip,
                 );
             } else {
                 build_file(&resolved.entry, override_dest.as_deref(), dep_registry);
@@ -1029,6 +1044,7 @@ fn build_file_with_bundle(
     path: &PathBuf,
     override_dest: Option<&std::path::Path>,
     dep_registry: manifest::DepRegistry,
+    bundle_pip: Vec<String>,
 ) {
     // --- Validación temprana: host triple soportado ---
     let triple = match pbs::host_triple() {
@@ -1215,7 +1231,173 @@ fn build_file_with_bundle(
             std::process::exit(1);
         }
     };
-    let tarball_hash = launcher_template::tarball_hash_short(&tarball_bytes);
+
+    // --- Fase 8.c — Pip install + tarball secundario (si --bundle-pip) ---
+    //
+    // Si el usuario pasó `--bundle-pip <pkg>` (uno o más veces), instalamos
+    // esos paquetes con pip al build time adentro de un dir local del
+    // proyecto y los empacamos en un tarball secundario que el launcher
+    // va a embeber como segundo `include_bytes!`. Al primer run del
+    // binario, el launcher extrae los paquetes adentro de
+    // `python/Lib/site-packages/` (Windows) o `python/lib/python3.X/
+    // site-packages/` (Unix) del extract dir TMP, automáticamente
+    // accesibles via `import` desde el código Python del usuario.
+    //
+    // Para correr `pip install` necesitamos un Python ejecutable; usamos
+    // el python embebido del PBS tarball, extraído al cache local del
+    // proyecto. El extract es ~60 MB pero se reusa entre builds.
+    let pip_tarball_abs: Option<PathBuf> = if !bundle_pip.is_empty() {
+        println!(
+            "→ extrayendo PBS al cache local para correr pip ({} paquete(s))…",
+            bundle_pip.len()
+        );
+        let pbs_extract_dir = PathBuf::from("target")
+            .join("fitz-build")
+            .join(format!("{}_pbs_extract", project.bin_name));
+        if !pbs_extract_dir.join("python").exists() {
+            if let Err(e) = fs::create_dir_all(&pbs_extract_dir) {
+                eprintln!("Error creando {}: {}", pbs_extract_dir.display(), e);
+                std::process::exit(1);
+            }
+            // Extraer PBS tarball usando `tar -xzf` (mismo subprocess que
+            // usa el launcher en runtime).
+            let tar_status = std::process::Command::new("tar")
+                .args([
+                    "-xzf",
+                    &tarball_abs.to_string_lossy(),
+                    "-C",
+                    &pbs_extract_dir.to_string_lossy(),
+                ])
+                .status();
+            match tar_status {
+                Ok(s) if s.success() => {}
+                Ok(s) => {
+                    eprintln!(
+                        "✗ tar -xzf del PBS tarball falló (exit code: {:?})",
+                        s.code()
+                    );
+                    std::process::exit(1);
+                }
+                Err(e) => {
+                    eprintln!("✗ no se pudo invocar `tar` para extraer PBS: {}", e);
+                    eprintln!(
+                        "  Necesitás `tar` en el PATH (bsdtar en Win11/macOS, GNU tar en Linux)."
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        // Path del ejecutable Python adentro del PBS extract.
+        let python_exe = if cfg!(windows) {
+            pbs_extract_dir.join("python").join("python.exe")
+        } else {
+            pbs_extract_dir.join("python").join("bin").join("python3")
+        };
+        if !python_exe.exists() {
+            eprintln!("✗ no se encontró python en el PBS extract: {}", python_exe.display());
+            std::process::exit(1);
+        }
+
+        // Dir del pip install. Limpiar previo si existe para builds
+        // reproducibles (pip install --target es additive, sin clean
+        // los paquetes acumulan entre builds).
+        let pip_install_dir = PathBuf::from("target")
+            .join("fitz-build")
+            .join(format!("{}_pip_packages", project.bin_name));
+        if pip_install_dir.exists() {
+            let _ = fs::remove_dir_all(&pip_install_dir);
+        }
+        if let Err(e) = fs::create_dir_all(&pip_install_dir) {
+            eprintln!("Error creando {}: {}", pip_install_dir.display(), e);
+            std::process::exit(1);
+        }
+
+        println!("→ pip install --target ({} paquete(s))…", bundle_pip.len());
+        let mut pip_args = vec![
+            "-m".to_string(),
+            "pip".to_string(),
+            "install".to_string(),
+            "--target".to_string(),
+            pip_install_dir.to_string_lossy().to_string(),
+            "--no-warn-script-location".to_string(),
+            // Quiet para evitar ruido en CI; los errores siguen
+            // visibles en stderr.
+            "--quiet".to_string(),
+        ];
+        pip_args.extend(bundle_pip.iter().cloned());
+        let pip_out = std::process::Command::new(&python_exe).args(&pip_args).output();
+        let pip_out = match pip_out {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("✗ no se pudo invocar pip: {}", e);
+                std::process::exit(1);
+            }
+        };
+        if !pip_out.status.success() {
+            eprintln!("✗ pip install falló:");
+            eprintln!("--- stderr ---");
+            eprintln!("{}", String::from_utf8_lossy(&pip_out.stderr));
+            std::process::exit(1);
+        }
+
+        // Crear tarball secundario desde el pip_install_dir. Usamos
+        // `tar -czf` con `-C <dir>` para que las paths internas sean
+        // relativas (sin el prefijo del cwd).
+        let pip_tarball_path = PathBuf::from("target")
+            .join("fitz-build")
+            .join(format!("{}_pip_packages.tar.gz", project.bin_name));
+        println!("→ empacando pip_packages.tar.gz…");
+        let tar_status = std::process::Command::new("tar")
+            .args([
+                "-czf",
+                &pip_tarball_path.to_string_lossy(),
+                "-C",
+                &pip_install_dir.to_string_lossy(),
+                ".",
+            ])
+            .status();
+        match tar_status {
+            Ok(s) if s.success() => {}
+            Ok(s) => {
+                eprintln!(
+                    "✗ tar -czf del pip_packages tarball falló (exit code: {:?})",
+                    s.code()
+                );
+                std::process::exit(1);
+            }
+            Err(e) => {
+                eprintln!("✗ no se pudo invocar `tar` para empacar pip: {}", e);
+                std::process::exit(1);
+            }
+        }
+        match pip_tarball_path.canonicalize() {
+            Ok(p) => Some(p),
+            Err(e) => {
+                eprintln!("✗ canonicalize del pip tarball falló: {}", e);
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
+    // Hash combinado: si hay pip, incluir los bytes del pip tarball en
+    // el hash para que dos proyectos con distintos paquetes tengan
+    // distintos extract dirs en TMP (cache hit-or-miss correcto).
+    let tarball_hash = if let Some(ref pip_path) = pip_tarball_abs {
+        let pip_bytes = match fs::read(pip_path) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("✗ leer pip tarball para hash combinado: {}", e);
+                std::process::exit(1);
+            }
+        };
+        let mut combined = tarball_bytes.clone();
+        combined.extend_from_slice(&pip_bytes);
+        launcher_template::tarball_hash_short(&combined)
+    } else {
+        launcher_template::tarball_hash_short(&tarball_bytes)
+    };
 
     // --- Generar + buildear launcher ---
     println!("→ compilando launcher…");
@@ -1229,10 +1411,12 @@ fn build_file_with_bundle(
         std::process::exit(1);
     }
 
+    let pip_tarball_str = pip_tarball_abs.as_ref().map(|p| p.to_string_lossy().into_owned());
     let launcher_main_rs = launcher_template::gen_launcher_main_rs(
         &tarball_abs.to_string_lossy(),
         &real_bin_abs.to_string_lossy(),
         &tarball_hash,
+        pip_tarball_str.as_deref(),
     );
     let launcher_cargo_toml = launcher_template::gen_launcher_cargo_toml(&launcher_bin_name);
 
@@ -1321,9 +1505,18 @@ fn build_file_with_bundle(
     let bin_size_mb = fs::metadata(&bin_out)
         .map(|m| m.len() as f64 / 1024.0 / 1024.0)
         .unwrap_or(0.0);
+    let bundle_summary = if bundle_pip.is_empty() {
+        format!("CPython {} embebido", pbs::PYTHON_VERSION)
+    } else {
+        format!(
+            "CPython {} + {} pip pkg(s) embebidos",
+            pbs::PYTHON_VERSION,
+            bundle_pip.len()
+        )
+    };
     println!(
-        "✓ binario standalone (CPython {} embebido): {} ({:.1} MB)",
-        pbs::PYTHON_VERSION,
+        "✓ binario standalone ({}): {} ({:.1} MB)",
+        bundle_summary,
         bin_out.display(),
         bin_size_mb
     );

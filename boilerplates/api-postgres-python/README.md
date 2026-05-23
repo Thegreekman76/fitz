@@ -370,21 +370,64 @@ service `api` del compose.
   python`, el Dockerfile se simplifica a `FROM
   ghcr.io/.../fitz:latest-python AS builder` y el build inicial
   baja a ~3 min (en lugar de 8-12).
-- **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)**:
-  hoy el feature empaqueta CPython base + stdlib adentro del
-  binario, sin paquetes pip. Para este boilerplate aún no aplica
-  directamente — `psycopg2-binary` + `sqlalchemy` viven en
-  `requirements.txt`. Cuando el sub-paso futuro `--bundle-pip`
-  aterrice, este Dockerfile podrá:
-  - Pasar de `FROM python:3.12-slim` (runtime) a `FROM
-    gcr.io/distroless/cc-debian12` o `FROM scratch`.
-  - Eliminar la sección `pip install -r requirements.txt` y el
-    `apt-get install libpq5`.
-  - Imagen final: ~80-100 MB (CPython 30 MB + psycopg2 + sqlalchemy
-    + real binary) en vez de ~150 MB hoy.
-  - **Deploy independiente de la versión Python del runtime**: hoy
-    el match builder/runtime es obligatorio (R.bug-pyo3-abi3-portable-link),
-    con bundle desaparece.
+- **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)** +
+  **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)**:
+  el segundo flag empaqueta paquetes pip junto al CPython base.
+  Este boilerplate puede simplificarse adoptándolo. El plan
+  concreto (smoke local en Linux pendiente):
+
+  Reemplazar el Dockerfile actual por algo así:
+
+  ```dockerfile
+  # Stage 1: builder con Python 3.14 (constraint del builder en
+  # Linux por R.bug-pyo3-abi3-portable-link).
+  FROM python:3.14-slim AS builder
+  RUN apt-get update && apt-get install -y --no-install-recommends \
+        curl ca-certificates git tar \
+        python3-dev pkg-config libssl-dev build-essential && \
+      rm -rf /var/lib/apt/lists/*
+  RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+      sh -s -- -y --default-toolchain 1.95.0 --profile minimal
+  ENV PATH="/root/.cargo/bin:${PATH}"
+  RUN cargo install --git https://github.com/Thegreekman76/fitz \
+      --tag v0.9.41 --features python --bin fitz --locked
+  WORKDIR /app
+  COPY fitz.toml ./
+  COPY src/ ./src/
+  COPY python/ ./python/
+  RUN fitz build \
+      --bundle-pip sqlalchemy \
+      --bundle-pip psycopg2-binary \
+      src/main.fitz
+
+  # Stage 2: runtime sin Python ni libpq ni pip.
+  FROM gcr.io/distroless/cc-debian12
+  COPY --from=builder /app/main /usr/local/bin/app
+  ENV PYTHONPATH=/app/python
+  EXPOSE 3000
+  CMD ["/usr/local/bin/app"]
+  ```
+
+  **Beneficios**:
+  - Imagen final: ~80-100 MB (CPython 30 MB + sqlalchemy +
+    psycopg2-binary + binary) vs ~150 MB hoy con `python:3.12-slim`.
+  - Sin `requirements.txt` en el runtime.
+  - Sin `apt-get install libpq5` en el runtime (libpq viene
+    adentro del wheel `psycopg2-binary`).
+  - Sin `pip install` en el runtime.
+  - Deploy con la imagen base más chica de la industria.
+
+  **Constraint que sigue (heredado de `--bundle-python`)**: el
+  builder en Linux/macOS requiere Python 3.14.x para que el
+  linking de PyO3 coincida con el bundle PBS 3.14.5
+  (R.bug-pyo3-abi3-portable-link componente Linux/macOS pendiente).
+  En Windows el shim `python3.dll` evita este constraint.
+
+  **Smoke real Docker pendiente**: el approach está validado en
+  Windows con programas simples (`requests`). La validación
+  end-to-end de `--bundle-pip sqlalchemy + psycopg2-binary`
+  adentro de un Dockerfile multi-stage Linux es deuda nueva
+  derivada de v0.9.41 — el primer user que lo pruebe confirma.
 - **Auto-generar `types/user.fitz` con `fitz py-types`**: hoy
   está hardcoded. Sumar un step `fitz py-types python/models.py
   --out src/types/user.fitz` en el Dockerfile para regenerarlo

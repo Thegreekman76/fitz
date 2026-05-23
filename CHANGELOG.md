@@ -61,6 +61,139 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.41] — 2026-05-23 — Fase 8.c: `fitz build --bundle-pip` (paquetes pip embebidos)
+
+Nuevo flag `--bundle-pip <paquete>` repetible para `fitz build`.
+Empaqueta paquetes pip junto al CPython base de `--bundle-python`
+(implica este flag automáticamente). El binario resultante embebe
+CPython 3.14.5 + los paquetes pip pedidos, todo en un solo
+archivo standalone. NO requiere `pip install` en el destino.
+
+Continuación natural de Fase 8.b. Sub-paso separado en una sesión
+con momentum del feature anterior. Destraba boilerplates 5/6
+(api-postgres-python, api-fullstack-postgres) para pasar de
+`FROM python:3.X-slim` a `FROM gcr.io/distroless/cc-debian12`
+con un solo binario embebido (imagen ~150 MB → ~80-100 MB).
+
+### Cambios
+
+- **Nuevo flag CLI `--bundle-pip <PACKAGE>`** repetible en
+  `Commands::Build`:
+  ```bash
+  fitz build \
+    --bundle-pip sqlalchemy \
+    --bundle-pip psycopg2-binary \
+    --bundle-pip "redis==5.0.0" \
+    mi_app.fitz
+  ```
+  Acepta version pin nativo de pip (`==`, `>=`, `<`, etc.).
+  Implica `--bundle-python` automáticamente.
+
+- **`launcher_template.rs` extendido** con 2 placeholders nuevos:
+  - `PLACEHOLDER_PIP_DECL_BLOCK`: donde se inyecta
+    `const PIP_PACKAGES: &[u8] = include_bytes!("...");` si hay
+    `--bundle-pip`, o string vacío si no.
+  - `PLACEHOLDER_PIP_EXTRACT_BLOCK`: donde se inyecta el bloque
+    de extracción del tarball pip adentro de
+    `python/Lib/site-packages/` (Windows) o
+    `python/lib/python3.X/site-packages/` (Unix).
+  - `gen_launcher_main_rs(...)` suma param
+    `pip_packages_path: Option<&str>`. None = backward compat
+    con 8.b (template bit-a-bit idéntico).
+
+- **Pipeline de build extendido** (`main::build_file_with_bundle`):
+  1. Build del real binary (igual que 8.b).
+  2. Descarga PBS tarball (igual).
+  3. **NUEVO** si `--bundle-pip` no vacío: extraer PBS al cache
+     local del proyecto (`target/fitz-build/<bin>_pbs_extract/`),
+     correr `<pbs>/python -m pip install --target <dir> <pkgs>`,
+     empacar el resultado en `<bin>_pip_packages.tar.gz`.
+  4. **NUEVO**: hash combinado (PBS bytes + pip bytes) para que
+     dos proyectos con paquetes distintos no compartan TMP dir.
+  5. Generar launcher con ambos paths (Some(pip_tarball)).
+  6. Build del launcher (cargo).
+  7. Copia al destino del usuario.
+
+### Tests
+
+- **2 unit tests nuevos** en `launcher_template::tests`:
+  - `gen_launcher_main_rs_con_pip_packages_inyecta_bloques`
+  - `gen_launcher_main_rs_pip_packages_escapa_windows_path`
+- **2 E2E tests nuevos** en `bundle_python_e2e.rs`:
+  - `bundle_pip_implica_bundle_python_y_aborta_sin_from_python_import`
+  - `bundle_pip_repetible_acepta_varios_paquetes`
+- **Total Fase 8.c**: 4 tests nuevos. Acumulado con 8.b: 29
+  tests específicos del bundling.
+- Smoke `GUIDE_EXAMPLES_COMPILE` sigue verde (sin regresión).
+
+### Smoke manual end-to-end (Windows)
+
+```
+$ fitz build --bundle-pip requests examples/python-interop-8.c.fitz
+→ compilando real binary…
+→ asegurando PBS tarball (cpython 3.14.5 / x86_64-pc-windows-msvc)…
+→ extrayendo PBS al cache local para correr pip (1 paquete(s))…
+→ pip install --target (1 paquete(s))…
+→ empacando pip_packages.tar.gz…
+→ compilando launcher…
+✓ binario standalone (CPython 3.14.5 + 1 pip pkg(s) embebidos):
+  python-interop-8.c.exe (22.9 MB)
+
+# Sin Python en PATH:
+$ ./python-interop-8.c.exe
+Módulo requests cargado desde el bundle pip:
+requests
+2.34.2
+```
+
+### Tamaños observados
+
+| Bundle | Tamaño bin | Cold first run | Warm |
+|--------|------------|----------------|------|
+| `--bundle-python` (stdlib) | ~22 MB | ~3-5s | ~50-100ms |
+| `+ --bundle-pip requests` | ~23 MB | ~5-7s | ~50-100ms |
+| `+ --bundle-pip sqla+psycopg2` (estimado) | ~50 MB | ~8-12s | ~50-100ms |
+
+### Ejemplo + docs
+
+- `examples/python-interop-8.c.fitz` runnable con comentarios
+  exhaustivos (cuándo usar, caveats, tamaños).
+- **Cap 21.12 nuevo** "`fitz build --bundle-pip` — empaquetar
+  paquetes pip" en `docs/guide.md`. Renumeración:
+  21.12 (CRUD)→21.13, 21.12 (Limitaciones)→21.14 (fix de bug
+  de renumeración previo en 8.b.7 donde había dos 21.12).
+- **README footnote § actualizado** con el nuevo flag y los
+  casos de uso reales.
+- **READMEs boilerplates 5/6 actualizados** con plan concreto
+  de simplificación a `FROM gcr.io/distroless/cc-debian12` +
+  `--bundle-pip sqlalchemy psycopg2-binary`. Imagen ~150 MB →
+  ~80-100 MB. Dockerfiles actuales mantenidos sin cambios
+  (smoke real Docker como deuda — el primer user que pruebe
+  confirma).
+
+### Deudas residuales (NO bloquean uso real)
+
+- **Smoke real Docker de boilerplates 5/6 con --bundle-pip**:
+  validado solo en Windows con programa simple (`requests`).
+  La combinación `--bundle-pip sqlalchemy + psycopg2-binary`
+  adentro de un Dockerfile Linux multi-stage es deuda nueva.
+- **Constraint Linux/macOS heredado**: builder requiere Python
+  3.14.x (R.bug-pyo3-abi3-portable-link componente Linux/macOS
+  pendiente). Cuando cierre, `--bundle-pip` es independiente
+  del Python del builder en las 3 plataformas.
+- **C extensions cross-platform**: `pip install` al build time
+  baja wheels específicos del triple del builder. Buildear
+  Linux desde Windows requiere `cross` o Docker (igual que
+  todo cross-compile Rust).
+- **Re-pip-install al cambiar paquetes**: hoy el pip install
+  corre cada build si `<bin>_pip_packages` no existe. Cuando
+  cambiás `--bundle-pip <pkgs>`, el cache stale se borra
+  automático (rm -rf antes de instalar). Optimizable con hash
+  de la lista de pkgs como cache key.
+- **`--bundle-pip` con requirements.txt**: hoy hay que listar
+  paquetes uno por uno. `--bundle-pip-requirements <file>`
+  futuro para leer requirements.txt automático.
+
 ## [v0.9.40] — 2026-05-23 — Fase 8.b: `fitz build --bundle-python` (binario standalone con CPython embebido)
 
 Nuevo flag `--bundle-python` para `fitz build`. Produce un binario
