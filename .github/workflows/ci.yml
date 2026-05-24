@@ -42,17 +42,19 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
-      # `cargo fmt --check` queda pendiente: el código del repo
-      # nunca fue formateado con rustfmt canónico (preferencias del
-      # autor difieren del default). Sub-paso futuro: commit aparte
-      # "style: cargo fmt --all across the codebase" + reactivar el
-      # check acá. Mientras tanto, no bloquea CI.
-      - name: cargo clippy --lib
-        # `--lib` en lugar de `--all-targets`: warnings en tests/
-        # examples (assert!(x.is_none()) en lugar de !x.contains_key(...))
-        # son patterns idiomáticos y aceptables. Clippy strict sobre
-        # lib code captura el 99% de los issues reales.
-        run: cargo clippy --lib -- -D warnings
+      # v0.9.48 — `cargo fmt --check` reactivado tras el cleanup
+      # masivo `cargo fmt --all` de v0.9.48 (mini-tanda Cleanup-D).
+      # Pre-fix: el código del repo nunca había pasado por rustfmt
+      # canónico. Post-fix: 14 archivos reformateados + el step
+      # bloquea diff a futuro.
+      - name: cargo fmt --check
+        run: cargo fmt --all -- --check
+      - name: cargo clippy --all-targets
+        # v0.9.48 — `--all-targets` reactivado tras confirmar que la
+        # suite (lib + tests + examples) pasa limpia. Pre-fix había
+        # 11 errores en tests; cerraron a lo largo de mini-tandas
+        # previas. El step strict captura cualquier regresión nueva.
+        run: cargo clippy --all-targets -- -D warnings
 
   # Tests unitarios en matriz multi-plataforma. ~3-5 min por runner.
   # Catch regressions de plataforma (Windows file locking, macOS

@@ -1887,8 +1887,7 @@ fn py_stubs_out_a_archivo() {
 fn py_stubs_archivo_inexistente_es_error() {
     let tmpdir = tempfile::tempdir().unwrap();
     let bogus = tmpdir.path().join("nope.pyi");
-    let (_stdout, stderr, code) =
-        run_fitz(&["py-stubs", bogus.to_str().unwrap()], tmpdir.path());
+    let (_stdout, stderr, code) = run_fitz(&["py-stubs", bogus.to_str().unwrap()], tmpdir.path());
     assert_ne!(code, 0);
     assert!(stderr.contains("py-stubs") || stderr.contains("no se pudo"));
 }

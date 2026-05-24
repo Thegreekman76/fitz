@@ -1165,9 +1165,7 @@ fn build_file_with_bundle(
     };
 
     if !program_uses_from_python_import(&program) {
-        eprintln!(
-            "✗ `--bundle-python` solo aplica a programas que usan `from python import ...`."
-        );
+        eprintln!("✗ `--bundle-python` solo aplica a programas que usan `from python import ...`.");
         eprintln!(
             "  Si tu programa no usa interop Python, usá `fitz build` sin el flag — el binario \
              resultante ya es standalone (no requiere ningún runtime externo)."
@@ -1440,7 +1438,10 @@ fn build_file_with_bundle(
                 pbs_extract_dir.join("python").join("bin").join("python3")
             };
             if !python_exe.exists() {
-                eprintln!("✗ no se encontró python en el PBS extract: {}", python_exe.display());
+                eprintln!(
+                    "✗ no se encontró python en el PBS extract: {}",
+                    python_exe.display()
+                );
                 std::process::exit(1);
             }
 
@@ -1479,7 +1480,9 @@ fn build_file_with_bundle(
                 pip_args.push(req_path.to_string_lossy().into_owned());
             }
             pip_args.extend(bundle_pip.iter().cloned());
-            let pip_out = std::process::Command::new(&python_exe).args(&pip_args).output();
+            let pip_out = std::process::Command::new(&python_exe)
+                .args(&pip_args)
+                .output();
             let pip_out = match pip_out {
                 Ok(o) => o,
                 Err(e) => {
@@ -1574,7 +1577,9 @@ fn build_file_with_bundle(
         std::process::exit(1);
     }
 
-    let pip_tarball_str = pip_tarball_abs.as_ref().map(|p| p.to_string_lossy().into_owned());
+    let pip_tarball_str = pip_tarball_abs
+        .as_ref()
+        .map(|p| p.to_string_lossy().into_owned());
     let launcher_main_rs = launcher_template::gen_launcher_main_rs(
         &tarball_abs.to_string_lossy(),
         &real_bin_abs.to_string_lossy(),
@@ -3766,10 +3771,7 @@ mod tests {
     #[test]
     fn pip_inputs_hash_cambia_si_agregas_un_paquete() {
         let h1 = pip_inputs_hash(&["requests".to_string()], &[]);
-        let h2 = pip_inputs_hash(
-            &["requests".to_string(), "httpx".to_string()],
-            &[],
-        );
+        let h2 = pip_inputs_hash(&["requests".to_string(), "httpx".to_string()], &[]);
         assert_ne!(h1, h2);
     }
 
@@ -3817,14 +3819,8 @@ mod tests {
         // los procesa en orden y dos archivos con conflicts/overrides
         // pueden producir distintos paquetes resueltos según el orden.
         // Tratamos cada permutación como input distinto, conservadora.
-        let h1 = pip_inputs_hash(
-            &[],
-            &[b"requests\n".to_vec(), b"httpx\n".to_vec()],
-        );
-        let h2 = pip_inputs_hash(
-            &[],
-            &[b"httpx\n".to_vec(), b"requests\n".to_vec()],
-        );
+        let h1 = pip_inputs_hash(&[], &[b"requests\n".to_vec(), b"httpx\n".to_vec()]);
+        let h2 = pip_inputs_hash(&[], &[b"httpx\n".to_vec(), b"requests\n".to_vec()]);
         assert_ne!(h1, h2);
     }
 }

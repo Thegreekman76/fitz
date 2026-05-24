@@ -703,10 +703,7 @@ fn detect_completion_context(text: &str, line: u32, character: u32) -> Option<Co
             let recv_name = std::str::from_utf8(&bytes[j..dot_pos])
                 .unwrap_or("")
                 .to_string();
-            if recv_name.starts_with('.')
-                || recv_name.ends_with('.')
-                || recv_name.contains("..")
-            {
+            if recv_name.starts_with('.') || recv_name.ends_with('.') || recv_name.contains("..") {
                 // No es un chain válido — fallback ScopeLevel.
             } else {
                 let (recv_line_lsp, recv_col_lsp) = offset_to_position(text, j);
@@ -1534,10 +1531,7 @@ fn after_dot_completions(
                 ),
                 (
                     "broadcast",
-                    format!(
-                        "fn(msg: {}) -> Result<Null>{}",
-                        send_disp, bcast_note,
-                    ),
+                    format!("fn(msg: {}) -> Result<Null>{}", send_disp, bcast_note,),
                 ),
                 ("close", "fn() -> Result<Null>".into()),
             ])
@@ -1804,11 +1798,26 @@ fn scope_level_completions(
         ("assert_ne", "fn(a, b) -> Null"),
         ("assert_throws", "fn(callback: fn() -> Any) -> Null"),
         // Mini-tanda Bits-extras — ops sobre Int como builtins globales.
-        ("popcount", "fn(n: Int) -> Int  // population count (bits=1)"),
-        ("leading_zeros", "fn(n: Int) -> Int  // count leading 0-bits"),
-        ("trailing_zeros", "fn(n: Int) -> Int  // count trailing 0-bits"),
-        ("rotate_left", "fn(n: Int, k: Int) -> Int  // rotate bits izq"),
-        ("rotate_right", "fn(n: Int, k: Int) -> Int  // rotate bits der"),
+        (
+            "popcount",
+            "fn(n: Int) -> Int  // population count (bits=1)",
+        ),
+        (
+            "leading_zeros",
+            "fn(n: Int) -> Int  // count leading 0-bits",
+        ),
+        (
+            "trailing_zeros",
+            "fn(n: Int) -> Int  // count trailing 0-bits",
+        ),
+        (
+            "rotate_left",
+            "fn(n: Int, k: Int) -> Int  // rotate bits izq",
+        ),
+        (
+            "rotate_right",
+            "fn(n: Int, k: Int) -> Int  // rotate bits der",
+        ),
         // Mini-tanda Math — builtins numéricos polimórficos.
         ("abs", "fn(n: Int|Float) -> Int|Float"),
         ("min", "fn(a, b) -> Int|Float  // mismo tipo"),
@@ -2535,10 +2544,7 @@ mod tests {
         }
         // `recv` detail debe tipear `Result<Bytes>` y mencionar el
         // modo binary.
-        let recv = items
-            .iter()
-            .find(|i| i.label == "recv")
-            .expect("recv item");
+        let recv = items.iter().find(|i| i.label == "recv").expect("recv item");
         let detail = recv.detail.as_deref().unwrap_or("");
         assert!(
             detail.contains("Result<Bytes>"),
@@ -2567,10 +2573,7 @@ mod tests {
                    }";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 3, 13);
-        let recv = items
-            .iter()
-            .find(|i| i.label == "recv")
-            .expect("recv item");
+        let recv = items.iter().find(|i| i.label == "recv").expect("recv item");
         let recv_detail = recv.detail.as_deref().unwrap_or("");
         assert!(
             recv_detail.contains("Result<Str>"),
@@ -2596,10 +2599,7 @@ mod tests {
                    }";
         let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
         let items = completion_at_position(src, &program, &type_info, &env, 2, 13);
-        let recv = items
-            .iter()
-            .find(|i| i.label == "recv")
-            .expect("recv item");
+        let recv = items.iter().find(|i| i.label == "recv").expect("recv item");
         let detail = recv.detail.as_deref().unwrap_or("");
         assert!(detail.contains("Result<Str>"));
         assert!(

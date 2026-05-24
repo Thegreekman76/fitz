@@ -52,8 +52,7 @@ print(x)
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Mensaje específico debe mencionar el flag y la condición.
     assert!(
-        stderr.contains("--bundle-python")
-            && stderr.contains("from python import"),
+        stderr.contains("--bundle-python") && stderr.contains("from python import"),
         "mensaje debe explicar el constraint del flag. Got stderr:\n{}",
         stderr
     );
@@ -130,8 +129,7 @@ fn bundle_pip_repetible_acepta_varios_paquetes() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Sin error de clap (error de parsing del CLI).
     assert!(
-        !stderr.contains("error: invalid value")
-            && !stderr.contains("error: the argument"),
+        !stderr.contains("error: invalid value") && !stderr.contains("error: the argument"),
         "clap NO debería rechazar el flag repetido. Got stderr:\n{}",
         stderr
     );
@@ -187,11 +185,7 @@ fn bundle_pip_requirements_archivo_inexistente_aborta_con_mensaje_claro() {
     std::fs::create_dir_all(&dir).expect("crear tempdir");
 
     let fitz_src = dir.join("prog.fitz");
-    std::fs::write(
-        &fitz_src,
-        "from python import math\nprint(math.pi)\n",
-    )
-    .expect("escribir .fitz");
+    std::fs::write(&fitz_src, "from python import math\nprint(math.pi)\n").expect("escribir .fitz");
 
     let missing = dir.join("no-existe.txt");
 
@@ -249,8 +243,7 @@ fn bundle_pip_requirements_combinable_con_bundle_pip() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     // Sin error de CLI parsing — clap aceptó ambos.
     assert!(
-        !stderr.contains("error: invalid value")
-            && !stderr.contains("error: the argument"),
+        !stderr.contains("error: invalid value") && !stderr.contains("error: the argument"),
         "clap NO debería rechazar la combinación. Got stderr:\n{}",
         stderr
     );

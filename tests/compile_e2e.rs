@@ -6075,14 +6075,7 @@ fn ws_codegen_binary_echo_compila_y_responde() {
         .build()
         .unwrap();
     let resp = rt.block_on(async {
-        ws_build_send_recv_binary(
-            "ws_codegen_binary",
-            src,
-            43973,
-            "/raw",
-            payload.clone(),
-        )
-        .await
+        ws_build_send_recv_binary("ws_codegen_binary", src, 43973, "/raw", payload.clone()).await
     });
     assert_eq!(resp, payload);
 }

@@ -562,7 +562,10 @@ mod tests {
         // Dos messages: msg_in y msg_out, sin `msg` único.
         assert!(messages["msg_in"].is_object());
         assert!(messages["msg_out"].is_object());
-        assert!(messages["msg"].is_null(), "no debería existir `msg` único en bidir asimétrico");
+        assert!(
+            messages["msg"].is_null(),
+            "no debería existir `msg` único en bidir asimétrico"
+        );
         // msg_in payload es Str (recv).
         assert_eq!(messages["msg_in"]["payload"]["type"], json!("string"));
         // msg_out payload es ChatMsg (send, nominal $ref).

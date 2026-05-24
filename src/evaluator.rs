@@ -5101,9 +5101,7 @@ async fn ws_conn_broadcast(receiver: Value, args: Vec<Value>, span: Span) -> Eva
                 )))));
             }
         };
-        handle
-            .broadcaster
-            .broadcast_text(&handle.endpoint, payload);
+        handle.broadcaster.broadcast_text(&handle.endpoint, payload);
     }
     Ok(Value::Result(ResultVariant::Ok(Box::new(Value::Null))))
 }

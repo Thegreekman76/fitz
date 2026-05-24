@@ -61,6 +61,55 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.48] — 2026-05-24 — Mini-tanda Cleanup-D: cargo fmt --all masivo + clippy --all-targets reactivado en CI
+
+### Changed
+
+- **`cargo fmt --all` aplicado masivamente** (14 archivos
+  reformateados: `src/asyncapi.rs`, `src/codegen.rs`,
+  `src/evaluator.rs`, `src/http.rs`, `src/launcher_template.rs`,
+  `src/lib.rs`, `src/lsp.rs`, `src/main.rs`, `src/pbs.rs`,
+  `src/pyi_stub.rs`, `src/types.rs`, `tests/bundle_python_e2e.rs`,
+  `tests/cli_e2e.rs`, `tests/compile_e2e.rs`). El repo nunca había
+  pasado por rustfmt canónico desde el inicio del proyecto; el
+  CI lo tenía deshabilitado con nota de "preferencias del autor
+  difieren del default". Cleanup-D aplica el formato canónico
+  para alinear con la convención del ecosistema Rust y desbloquear
+  el step `fmt --check` en CI.
+- **`ci.yml` actualizado**:
+  - `cargo fmt --check` reactivado (bloquea diff a futuro).
+  - `cargo clippy --all-targets` reactivado (era `--lib` solo).
+    La deuda original de "11 errores en tests" cerró a lo largo
+    de mini-tandas previas; al verificar con `cargo clippy
+    --all-targets --all-features -- -D warnings` la suite pasa
+    limpia en los 3 modos (default, `python`, `lsp`).
+
+### Notes
+
+- **Cero cambios funcionales**: `cargo fmt` solo modifica
+  whitespace/line breaks. Toda la lógica del lenguaje +
+  comportamiento generado es idéntico bit-a-bit.
+- **Suite verde post-fmt** en los 3 modos:
+  - Sin features: **2282 unit** (igual que antes del fmt).
+  - Con `python`: **2373 unit**.
+  - Con `lsp`: **2383 unit**.
+  - Clippy `-D warnings` limpio en los 3 modos + `--all-targets`.
+- **`cargo outdated` skipeado**: el plugin `cargo-outdated` no
+  está instalado en la máquina dev. Sin presión real de
+  vulnerabilidad, dejamos el audit de bumps para una sesión
+  futura cuando aparezca caso de uso concreto (ej. CVE en una
+  dep transitiva). Las deps principales del repo (`pyo3`,
+  `axum`, `tokio`, `serde`) están en versiones recientes según
+  Cargo.toml.
+- **Mini-tanda Cleanup-D — cierre del último ítem del bundle D
+  del inventario de deudas post-v0.9.46**: junto con los cierres
+  parciales de v0.9.45 (4 deudas chicas del lenguaje) y v0.9.47
+  (LSP completion + chain), el repo queda en estado profesional
+  para colaboradores. Bundle D estaba siendo pospuesto release
+  tras release ("sin presión") — su cierre saca ruido del
+  inventario y permite enfocar las próximas mini-fases en
+  features reales.
+
 ## [v0.9.47] — 2026-05-24 — Mini-tanda LSPz: completion en `from mod import` + chain `a.b.c.`
 
 ### Added

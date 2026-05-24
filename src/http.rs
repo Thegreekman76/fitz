@@ -1766,9 +1766,7 @@ fn headers_to_map(hm: &axum::http::HeaderMap) -> HashMap<String, String> {
 ///
 /// Devuelve `Some((subprotocol_completo, token))` si encontró un
 /// subprotocol que matchea `bearer.*`, `None` si no.
-pub fn extract_ws_bearer_subprotocol(
-    headers: &axum::http::HeaderMap,
-) -> Option<(String, String)> {
+pub fn extract_ws_bearer_subprotocol(headers: &axum::http::HeaderMap) -> Option<(String, String)> {
     let raw = headers
         .get("sec-websocket-protocol")
         .or_else(|| headers.get("Sec-WebSocket-Protocol"))?
@@ -3609,7 +3607,11 @@ impl WsReadStreamTrait for WsReadStreamImpl {
     fn next_frame<'a>(
         &'a mut self,
     ) -> std::pin::Pin<
-        Box<dyn std::future::Future<Output = Result<Option<crate::value::IncomingFrame>, String>> + Send + 'a>,
+        Box<
+            dyn std::future::Future<Output = Result<Option<crate::value::IncomingFrame>, String>>
+                + Send
+                + 'a,
+        >,
     > {
         use futures_util::StreamExt;
         Box::pin(async move {
@@ -5840,10 +5842,7 @@ mod tests {
     #[test]
     fn ws_bearer_subprotocol_single_proto() {
         let mut h = axum::http::HeaderMap::new();
-        h.insert(
-            "sec-websocket-protocol",
-            "bearer.abc123".parse().unwrap(),
-        );
+        h.insert("sec-websocket-protocol", "bearer.abc123".parse().unwrap());
         let r = extract_ws_bearer_subprotocol(&h);
         assert_eq!(r, Some(("bearer.abc123".to_string(), "abc123".to_string())));
     }
@@ -5858,7 +5857,10 @@ mod tests {
             "some.other, bearer.tok-xyz, third.proto".parse().unwrap(),
         );
         let r = extract_ws_bearer_subprotocol(&h);
-        assert_eq!(r, Some(("bearer.tok-xyz".to_string(), "tok-xyz".to_string())));
+        assert_eq!(
+            r,
+            Some(("bearer.tok-xyz".to_string(), "tok-xyz".to_string()))
+        );
     }
 
     #[test]
@@ -5872,10 +5874,7 @@ mod tests {
     fn ws_bearer_subprotocol_sin_match() {
         // Header presente pero ningún subprotocol matchea `bearer.*`.
         let mut h = axum::http::HeaderMap::new();
-        h.insert(
-            "sec-websocket-protocol",
-            "chat.v1, app.v2".parse().unwrap(),
-        );
+        h.insert("sec-websocket-protocol", "chat.v1, app.v2".parse().unwrap());
         assert_eq!(extract_ws_bearer_subprotocol(&h), None);
     }
 
@@ -6269,7 +6268,7 @@ mod tests {
             is_ws: false,
             ws_conn_param_name: None,
             ws_msg_type: None,
-                ws_send_type: None,
+            ws_send_type: None,
         });
         std::sync::Arc::new(reg)
     }
@@ -7243,8 +7242,7 @@ fn me(user: User) -> Str => \"x\"\n\
             .expect("ok");
         match resp {
             tungstenite::Message::Text(t) => {
-                let v: serde_json::Value =
-                    serde_json::from_str(t.as_str()).expect("JSON valid");
+                let v: serde_json::Value = serde_json::from_str(t.as_str()).expect("JSON valid");
                 assert_eq!(v["user"], serde_json::json!("system"));
                 assert_eq!(v["text"], serde_json::json!("got:hola"));
             }

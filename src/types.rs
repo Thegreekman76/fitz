@@ -3010,7 +3010,9 @@ fn infer_method_call(
         Type::WsConn { recv, send } => {
             let recv = (**recv).clone();
             let send = (**send).clone();
-            Some(infer_wsconn_method(ctx, &recv, &send, method, args_ty, span))
+            Some(infer_wsconn_method(
+                ctx, &recv, &send, method, args_ty, span,
+            ))
         }
         // Mini-tanda Mb9 — métodos sobre primitivos Int/Float.
         Type::Int => Some(infer_int_method(ctx, method, args_ty, span)),
@@ -4410,12 +4412,15 @@ fn infer_wsconn_method(
             check_method_arity(ctx, "send", args_ty, 1, span);
             if let Some(arg) = args_ty.first() {
                 if !is_compatible(arg, send_ty) {
-                    ctx.error_at(span, format!(
+                    ctx.error_at(
+                        span,
+                        format!(
                         "el método `{}.send(msg)` espera un argumento de tipo `{}`, recibió `{}`",
                         conn_disp,
                         send_ty.display(ctx.types),
                         arg.display(ctx.types),
-                    ));
+                    ),
+                    );
                 }
             }
             Type::Result {
@@ -4445,11 +4450,14 @@ fn infer_wsconn_method(
             Type::Null
         }
         _ => {
-            ctx.error_at(span, format!(
+            ctx.error_at(
+                span,
+                format!(
                 "el tipo `{}` no tiene el método `{}` (soportados: recv, send, broadcast, close)",
                 conn_disp,
                 method,
-            ));
+            ),
+            );
             Type::Any
         }
     }
@@ -11906,10 +11914,7 @@ print(total)
         let env = TypeEnv::new();
         let te = TypeExpr::Generic {
             name: "WsConn".into(),
-            args: vec![
-                TypeExpr::Named("Int".into()),
-                TypeExpr::Named("Str".into()),
-            ],
+            args: vec![TypeExpr::Named("Int".into()), TypeExpr::Named("Str".into())],
         };
         let ty = resolve_type_expr(&te, &env).expect("WsConn<Int, Str>");
         assert_eq!(

@@ -1349,6 +1349,8 @@ estado real).
 
 **L1 entero CERRADO** — `cargo clippy --all-targets --all-features -- -D warnings` queda limpio. Los items originales L1a-L1f se resolvieron a lo largo de los sub-pasos post-5b; el último pase (3 warnings residuales: doc lazy continuation, let_and_return, expect_fun_call) cerró en una mini-sesión dedicada tras T1 batch 3. Re-correr `cargo clippy` antes de cualquier commit grande.
 
+**v0.9.48 Cleanup-D — `cargo fmt --all` aplicado masivamente + CI strict reactivado**: el repo nunca había pasado por rustfmt canónico desde el inicio. La mini-tanda Cleanup-D aplica el formato (14 archivos reformateados, cero cambios funcionales), reactiva `cargo fmt --check` en `ci.yml` (estaba comentado), y promueve `cargo clippy --lib` → `cargo clippy --all-targets` (la deuda original de "11 errores en tests" ya había cerrado en mini-tandas previas — verificado con audit). Esto sacó el último ítem del bundle D del inventario y deja el repo en estado profesional para colaboradores.
+
 ---
 
 ## Qué NO entró en la auditoría

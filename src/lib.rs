@@ -21,12 +21,12 @@ pub mod fmt; // Fase 9.z.1 — formatter `fitz fmt` (pretty-printer del AST)
 pub mod format; // Mini-tanda Fm — aplicación de FormatSpec en runtime
 pub mod git_dep; // Fase 9.y.3.c — git deps + cache local
 pub mod http; // Fase 4 — HTTP nativo (registry + runtime)
+pub mod launcher_template; // Fase 8.b.3 — template del launcher para `--bundle-python`
 pub mod lexer; // Fase 2.1 — tokenización
 pub mod lint;
 pub mod lockfile; // Fase 9.y.3.a — lockfile `fitz.lock` (path deps)
 pub mod manifest; // Fase 9.y.1 — manifest `fitz.toml` del package manager
 pub mod openapi; // Fase 7.1 — generador OpenAPI 3.1
-pub mod launcher_template; // Fase 8.b.3 — template del launcher para `--bundle-python`
 pub mod parser; // Fase 2.3 — construcción del AST
 pub mod pbs; // Fase 8.b.1 — python-build-standalone download + cache para `--bundle-python`
 pub mod pyi_stub; // pyi-stubs (v0.9.39) — parser .pyi (subset PEP 484/561)

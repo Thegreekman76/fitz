@@ -167,13 +167,7 @@ fn download_tarball(triple: &str, target: &Path) -> Result<(), PbsError> {
     //         "exitosamente" descarga la página 404 de GitHub).
     // -o: archivo destino.
     let output = Command::new("curl")
-        .args([
-            "-sL",
-            "--fail",
-            "-o",
-            &tmp.to_string_lossy(),
-            url.as_str(),
-        ])
+        .args(["-sL", "--fail", "-o", &tmp.to_string_lossy(), url.as_str()])
         .output()
         .map_err(PbsError::CurlNotFound)?;
 
@@ -348,12 +342,11 @@ mod tests {
         let p = cache_path_for("x86_64-pc-windows-msvc").unwrap();
         assert!(p.starts_with(tmp.path()));
         assert!(p.to_string_lossy().contains("pbs"));
-        assert!(
-            p.file_name()
-                .unwrap()
-                .to_string_lossy()
-                .ends_with(".tar.gz")
-        );
+        assert!(p
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .ends_with(".tar.gz"));
 
         match prev {
             Some(v) => std::env::set_var(CACHE_DIR_ENV, v),

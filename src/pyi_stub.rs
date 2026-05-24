@@ -191,10 +191,11 @@ fn parse_fn_sig(s: &str, line_no: usize, is_async: bool) -> Result<StubFn, StubP
         line: line_no + 1,
         message: format!("esperaba `(` después de `def {}`", name),
     })?;
-    let (params_str, after_paren) = take_balanced(rest, '(', ')').ok_or_else(|| StubParseError {
-        line: line_no + 1,
-        message: "paréntesis sin cerrar en signature".to_string(),
-    })?;
+    let (params_str, after_paren) =
+        take_balanced(rest, '(', ')').ok_or_else(|| StubParseError {
+            line: line_no + 1,
+            message: "paréntesis sin cerrar en signature".to_string(),
+        })?;
     let params = parse_params(params_str, line_no)?;
     // Ret type: `-> type`.
     let after = after_paren.trim_start();
@@ -459,12 +460,11 @@ fn parse_type_atom(s: &str, line_no: usize) -> Result<(StubType, &str), StubPars
     // Generic params: `[args]`.
     let after = after.trim_start();
     if let Some(after_bracket) = after.strip_prefix('[') {
-        let (inner, after_close) = take_balanced(after_bracket, '[', ']').ok_or_else(|| {
-            StubParseError {
+        let (inner, after_close) =
+            take_balanced(after_bracket, '[', ']').ok_or_else(|| StubParseError {
                 line: line_no + 1,
                 message: "brackets de generic sin cerrar".to_string(),
-            }
-        })?;
+            })?;
         let args = parse_type_args(inner, line_no)?;
         return Ok((StubType::Generic(full_name, args), after_close));
     }
@@ -639,9 +639,7 @@ fn named_to_fitz_type(name: &str, env: &mut TypeEnv) -> Type {
 
 fn generic_to_fitz_type(name: &str, args: &[StubType], env: &mut TypeEnv) -> Type {
     match (name, args.len()) {
-        ("list" | "List", 1) => {
-            Type::List(Box::new(stub_type_to_fitz_type(&args[0], env)))
-        }
+        ("list" | "List", 1) => Type::List(Box::new(stub_type_to_fitz_type(&args[0], env))),
         ("dict" | "Dict", 2) => Type::Map(
             Box::new(stub_type_to_fitz_type(&args[0], env)),
             Box::new(stub_type_to_fitz_type(&args[1], env)),
@@ -830,10 +828,7 @@ mod tests {
                 f.ret,
                 StubType::Generic(
                     "dict".into(),
-                    vec![
-                        StubType::Named("str".into()),
-                        StubType::Named("int".into()),
-                    ]
+                    vec![StubType::Named("str".into()), StubType::Named("int".into()),]
                 )
             );
         }
@@ -923,10 +918,7 @@ mod tests {
         let mut env = TypeEnv::new();
         let t = StubType::Generic(
             "dict".into(),
-            vec![
-                StubType::Named("str".into()),
-                StubType::Named("int".into()),
-            ],
+            vec![StubType::Named("str".into()), StubType::Named("int".into())],
         );
         let fitz_ty = stub_type_to_fitz_type(&t, &mut env);
         assert_eq!(fitz_ty, Type::Map(Box::new(Type::Str), Box::new(Type::Int)));

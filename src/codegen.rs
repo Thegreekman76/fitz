@@ -148,8 +148,8 @@ pub fn generate_project(
     // módulo cargado. Si solo módulos transitivos usan Python, el main
     // igual emite el preludio para que los `use crate::__fitz_py_*` de
     // los módulos resuelvan, y el Cargo.toml suma pyo3 igual.
-    let uses_python = !python_imports.is_empty()
-        || loader.modules.iter().any(|m| !m.python_imports.is_empty());
+    let uses_python =
+        !python_imports.is_empty() || loader.modules.iter().any(|m| !m.python_imports.is_empty());
 
     // Fase 9.w.1.d — auth nativa. Habilita el preludio de helpers
     // `__fitz_jwt_*` / `__fitz_hash_*` y suma `jsonwebtoken` + `argon2`
@@ -2151,8 +2151,7 @@ impl ModuleLoader {
         // comparten root_segment "types", y `mod types;` solo se
         // declara una vez en main.rs (el `mod.rs` del subdir
         // declara `pub mod user; pub mod api;`).
-        let mut seen: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in &self.modules {
             let root = root_segment_of(&m.rel_path);
             if !seen.insert(root.clone()) {
@@ -2839,8 +2838,8 @@ fn generate_main_rs(
     // módulo cargado. Si solo módulos transitivos usan Python, el main
     // igual emite el preludio entero (los `use crate::__fitz_py_*` de
     // los módulos lo requieren).
-    let uses_python = !python_imports.is_empty()
-        || loader.modules.iter().any(|m| !m.python_imports.is_empty());
+    let uses_python =
+        !python_imports.is_empty() || loader.modules.iter().any(|m| !m.python_imports.is_empty());
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
     let uses_fitz_value = program_uses_fitz_value(program);
     let uses_auth = program_uses_auth(program);
@@ -5982,11 +5981,7 @@ where
     /// `__fitz_py_to_list_<Name>` (PyList → List<Instance>). Reusable
     /// para tipos locales del main Y para tipos definidos en módulos
     /// transitivos (`emit_python_helpers_for_imported_types`).
-    fn gen_python_helpers_for_type(
-        &mut self,
-        name: &str,
-        sig: &TypeSig,
-    ) -> Result<(), FitzError> {
+    fn gen_python_helpers_for_type(&mut self, name: &str, sig: &TypeSig) -> Result<(), FitzError> {
         let data_name = format!("{}Data", name);
         write!(
             &mut self.output,
@@ -6099,8 +6094,7 @@ where
         // dos módulos definen tipos con el mismo nombre (raro pero
         // posible), emitimos los helpers UNA vez. Caso típico: nombres
         // únicos en el proyecto.
-        let mut emitted: std::collections::HashSet<String> =
-            std::collections::HashSet::new();
+        let mut emitted: std::collections::HashSet<String> = std::collections::HashSet::new();
         for m in &loader.modules {
             let qualifier = mod_qualifier_of(&m.rel_path);
             // Orden determinista para que el output sea estable entre
@@ -8556,9 +8550,7 @@ where
                 Type::Int,
             ));
         }
-        if matches!(name.as_str(), "rotate_left" | "rotate_right")
-            && !self.is_user_callable(name)
-        {
+        if matches!(name.as_str(), "rotate_left" | "rotate_right") && !self.is_user_callable(name) {
             if args.len() != 2 {
                 return Err(self.err_at(
                     call_span,
@@ -9392,7 +9384,14 @@ where
         // (`let r = conn.recv()`) se traduzca a Rust válido. `close`
         // es sync. El checker (9.w.2.a) ya validó aridad y tipos de
         // args; acá nos limitamos a emitir el Rust.
-        if let Ok((obj_code, Type::WsConn { recv: recv_box, send: send_box })) = self.gen_expr(object) {
+        if let Ok((
+            obj_code,
+            Type::WsConn {
+                recv: recv_box,
+                send: send_box,
+            },
+        )) = self.gen_expr(object)
+        {
             let recv_t: &Type = &recv_box;
             let send_t: &Type = &send_box;
             {
@@ -13767,11 +13766,7 @@ where
     /// `impl __FromFitzJson` para un tipo nominal, dado el `name` y la
     /// `TypeSig`. Reusable para tipos del main Y para tipos importados
     /// de módulos transitivos (`emit_http_impls_for_imported_types`).
-    fn gen_type_http_impls_for_sig(
-        &mut self,
-        name: &str,
-        sig: &TypeSig,
-    ) -> Result<(), FitzError> {
+    fn gen_type_http_impls_for_sig(&mut self, name: &str, sig: &TypeSig) -> Result<(), FitzError> {
         let data_name = format!("{}Data", name);
 
         // impl __ToFitzJson for <Foo>Data
@@ -23201,7 +23196,10 @@ mod tests {
         assert!(ast_test::vis_is_pub(&xs.vis), "esperaba `pub fn xs`");
         let ret = ast_test::fn_return_type(xs).unwrap_or_default();
         assert!(
-            ret.contains("Arc") && ret.contains("Mutex") && ret.contains("Vec") && ret.contains("i64"),
+            ret.contains("Arc")
+                && ret.contains("Mutex")
+                && ret.contains("Vec")
+                && ret.contains("i64"),
             "esperaba return type `Arc<Mutex<Vec<i64>>>` para xs(), got: {}",
             ret
         );
@@ -23216,7 +23214,10 @@ mod tests {
         assert!(ast_test::vis_is_pub(&m.vis), "esperaba `pub fn m`");
         let ret = ast_test::fn_return_type(m).unwrap_or_default();
         assert!(
-            ret.contains("Arc") && ret.contains("Mutex") && ret.contains("Vec") && ret.contains("i64"),
+            ret.contains("Arc")
+                && ret.contains("Mutex")
+                && ret.contains("Vec")
+                && ret.contains("i64"),
             "esperaba return type basado en Vec<(String, i64)> para m(), got: {}",
             ret
         );
@@ -23232,8 +23233,7 @@ mod tests {
         )
         .unwrap();
         let file = ast_test::parse(&code);
-        let f = ast_test::find_item_fn(&file, "default_user")
-            .expect("falta fn default_user");
+        let f = ast_test::find_item_fn(&file, "default_user").expect("falta fn default_user");
         assert!(
             ast_test::vis_is_pub(&f.vis),
             "esperaba `pub fn default_user`"
@@ -23840,12 +23840,16 @@ mod tests {
         let utils_src = "type User { id: Int, name: Str }\n";
         let (_tmp, project, _mod_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
-            project.main_rs.contains("pub(crate) fn __fitz_py_to_instance_User"),
+            project
+                .main_rs
+                .contains("pub(crate) fn __fitz_py_to_instance_User"),
             "esperaba helper pub(crate) __fitz_py_to_instance_User en main, got:\n{}",
             project.main_rs
         );
         assert!(
-            project.main_rs.contains("pub(crate) fn __fitz_py_to_list_User"),
+            project
+                .main_rs
+                .contains("pub(crate) fn __fitz_py_to_list_User"),
             "esperaba helper pub(crate) __fitz_py_to_list_User en main, got:\n{}",
             project.main_rs
         );
@@ -23957,7 +23961,8 @@ mod tests {
             project.main_rs
         );
         assert!(
-            !project.main_rs.contains("(16f64).sqrt()") && !project.main_rs.contains("(16f64) . sqrt ()"),
+            !project.main_rs.contains("(16f64).sqrt()")
+                && !project.main_rs.contains("(16f64) . sqrt ()"),
             "NO esperaba `(16f64).sqrt()` (método nativo de f64), got main_rs:\n{}",
             project.main_rs
         );
@@ -23970,7 +23975,8 @@ mod tests {
         let utils_src = "fn pow(b: Int, e: Int) -> Int { return b * e }\n"; // user-fn falsa
         let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
         assert!(
-            project.main_rs.contains("pow(2i64, 8i64)") || project.main_rs.contains("pow (2i64 , 8i64)"),
+            project.main_rs.contains("pow(2i64, 8i64)")
+                || project.main_rs.contains("pow (2i64 , 8i64)"),
             "esperaba call a fn importada `pow(2, 8)`, NO `(2i64).pow(...)`. main_rs:\n{}",
             project.main_rs
         );
@@ -23981,7 +23987,8 @@ mod tests {
         // Sanity check: el caso PRE-existente — fn LOCAL con nombre de
         // builtin — sigue shadeando correctamente (`fn_sigs` lo cubre
         // como antes del fix).
-        let main_src = "fn sqrt(x: Float) -> Float { return x + 1.0 }\nlet v: Float = sqrt(4.0)\nprint(v)\n";
+        let main_src =
+            "fn sqrt(x: Float) -> Float { return x + 1.0 }\nlet v: Float = sqrt(4.0)\nprint(v)\n";
         let code = gen(main_src).expect("compila");
         assert!(
             code.contains("sqrt(4f64)"),
@@ -24595,7 +24602,11 @@ mod tests {
         let tokens = tokenize(src).unwrap();
         let mut program = parse(tokens).unwrap();
         let (env, type_info, _defs, errs) = crate::types::check_program(&program);
-        assert!(errs.is_empty(), "esperaba 0 errores del checker, fueron {:?}", errs);
+        assert!(
+            errs.is_empty(),
+            "esperaba 0 errores del checker, fueron {:?}",
+            errs
+        );
         fill_inferred_param_types(&mut program, &type_info, &env);
         // El param `u` de `greet` ahora tiene anotación TypeExpr::Named("User").
         let greet = program
@@ -24607,7 +24618,10 @@ mod tests {
             .expect("fn greet en el program");
         let u_param = &greet[0];
         assert_eq!(u_param.name, "u");
-        let te = u_param.type_.as_ref().expect("type_ debería estar populado tras fill_inferred");
+        let te = u_param
+            .type_
+            .as_ref()
+            .expect("type_ debería estar populado tras fill_inferred");
         // Path #1 ahora cubre Nominal: el TypeExpr es Named("User").
         match te {
             TypeExpr::Named(n) => assert_eq!(n, "User"),

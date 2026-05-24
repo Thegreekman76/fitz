@@ -375,7 +375,9 @@ pub fn gen_launcher_cargo_toml(bin_name: &str) -> String {
 /// Escapa una string para que sea un string literal Rust válido.
 /// Maneja backslash (Windows paths), double quote, y newlines.
 fn escape_rust_string_literal(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n")
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
 }
 
 /// Calcula un hash corto (16 chars hex) determinístico del tarball PBS.
@@ -479,8 +481,7 @@ mod tests {
 
     #[test]
     fn gen_launcher_main_rs_sustituye_los_3_placeholders() {
-        let result =
-            gen_launcher_main_rs("/tmp/tarball.tar.gz", "/tmp/fitz-real", "abc123", None);
+        let result = gen_launcher_main_rs("/tmp/tarball.tar.gz", "/tmp/fitz-real", "abc123", None);
 
         // Los placeholders ya no deben aparecer en el output.
         assert!(!result.contains(PLACEHOLDER_TARBALL_PATH));
