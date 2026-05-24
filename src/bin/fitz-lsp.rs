@@ -32,7 +32,7 @@ use tower_lsp::{Client, LanguageServer, LspService, Server};
 
 use fitz::ast::Program;
 use fitz::lsp::{
-    check_source_with_types, completion_at_position, definition_for_position,
+    check_source_with_types, completion_at_position_with_uri, definition_for_position,
     fitz_errors_to_diagnostics_with_source, hover_for_position,
     make_definition_location_with_source, make_hover_with_range, resolve_cross_module_definition,
 };
@@ -266,13 +266,17 @@ impl LanguageServer for Backend {
             Some(s) => s,
             None => return Ok(None),
         };
-        let items = completion_at_position(
+        let items = completion_at_position_with_uri(
             &state.text,
             &state.program,
             &state.type_info,
             &state.type_env,
             pos.line,
             pos.character,
+            // v0.9.47 — pasa el doc_uri para que el contexto
+            // `from <mod> import |` resuelva el archivo del módulo
+            // target y enumere sus exports.
+            Some(&uri),
         );
         Ok(Some(CompletionResponse::Array(items)))
     }

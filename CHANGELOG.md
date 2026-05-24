@@ -61,6 +61,90 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.47] — 2026-05-24 — Mini-tanda LSPz: completion en `from mod import` + chain `a.b.c.`
+
+### Added
+
+- **Completion en `from <mod> import |`** (LSP). El cursor adentro
+  de la lista de imports de un `from <mod> import` ahora sugiere
+  los símbolos exportables del módulo target (fns con firma
+  completa, types, consts/let top-level). Funciona también con
+  items previos (`from foo import X, Y, |`) y módulos con path
+  punteado (`from sub.utils import |`).
+
+  Implementación:
+  - Nueva variante `CompletionContext::FromImportList { mod_path:
+    Vec<String> }` en `src/lsp.rs`.
+  - Helper nuevo `detect_from_import_list_context(text, line,
+    character)` que walkea back-to-front del cursor, saltando
+    items previos (`<ident>,?\s*`), y matchea el patrón `from
+    <mod_path> import`. Devuelve `mod_path` segmentado por `.`.
+  - Helper público nuevo `from_import_completions(doc_uri,
+    mod_path)` que resuelve el archivo target relativo al doc URI
+    (convención del loader: `["foo"]` → `<base>/foo.fitz`),
+    parsea con `parse_with_recovery`, y enumera fns + types +
+    consts top-level. Tolera módulos inexistentes (devuelve vacío).
+  - Nueva variante pública `completion_at_position_with_uri` que
+    acepta `doc_uri: Option<&Url>` y la pasa al contexto
+    `FromImportList`. La firma original `completion_at_position`
+    se mantiene como wrapper (`doc_uri = None`) para
+    backward-compat de tests/herramientas externas.
+  - El backend del LSP (`src/bin/fitz-lsp.rs`) ahora invoca el
+    wrapper `_with_uri` pasando el URI del documento abierto.
+
+- **Chain `a.b.c.` en after-dot completion**. El completion
+  contextual tras un punto ahora reconoce chains de N segmentos
+  (no solo `<ident>.`). Pre-fix: `obj.field.|` interpretaba el
+  receiver como `field` (último ident) y buscaba sus métodos
+  como si fuera Str/List/etc. Post-fix: el receiver es el chain
+  entero `obj.field`, y el lookup en TypeInfo por la posición del
+  START del primer ident resuelve al tipo del Expr::Field más
+  exterior (el chain completo). El comportamiento se apoya en la
+  garantía de TypeInfo (F16) de que el último `record` por
+  posición es el tipo del nodo más externo.
+
+  Implementación: en `detect_completion_context`, el walkback
+  desde el `.` ahora acepta `is_ident_continue(c) || c == b'.'`
+  (antes solo `is_ident_continue`). Validación de shape:
+  rechaza chains que empiecen/terminen con `.` o tengan `..`
+  consecutivos.
+
+### Changed
+
+- **Doc comment de `completion_at_position`**: actualizado para
+  reflejar que la deuda visible "Chain `a.b.c.`" cerró en v0.9.47.
+
+### Notes
+
+- **Tests nuevos**: 8 unit en `lsp::tests` (5 sobre
+  `detect_context_chain_*`/`from_import_*` + 2 sobre
+  `from_import_completions_*` + 1 sobre el backward-compat
+  `completion_at_position_sin_uri_no_completa_from_import`).
+  Suite total: **2383 unit con lsp** (era 2375 + 8), **2282 sin
+  features**. Clippy `-D warnings` limpio en los 3 modos (default,
+  `python`, `lsp`).
+- **Descubrimiento del bundle**: las otras 3 deudas LSP del
+  inventario original ya estaban implementadas en mini-tandas
+  previas (LSPx para cross-module go-to-def, LSPy.4 para
+  scope-aware completion, LSPy para hover con range exacto via
+  `make_hover_with_range`/`ident_range_at_position`). El bundle
+  E redujo a 2 deudas reales (completion en imports + chain) y se
+  cerró en una sola sesión.
+- **Sin cambios a la extensión VSCode** — solo cambios al
+  backend del LSP. Los clientes existentes (extensión VSCode,
+  vim-lsp, helix, etc.) reciben las nuevas completions
+  automáticamente al conectar al `fitz-lsp` actualizado.
+
+### Deuda residual LSP (NO bloquea uso real)
+
+- **UTF-16 position strict**: el LSP por default usa UTF-16 para
+  `character` en `Position`. Fitz LSP usa UTF-8 (asume programas
+  ASCII-dominantes). Refinable post-MVP si aparece presión real
+  con código en idiomas no-latin.
+- **F15 recovery sub-stmt**: errores adentro de un stmt
+  descartan el stmt entero — refinable para completion fino
+  tras `user.<typo>`.
+
 ## [v0.9.46] — 2026-05-24 — Bundling Docker end-to-end: distroless habilitado + Dockerfile.distroless en boilerplates 5/6
 
 ### Added

@@ -469,6 +469,101 @@ fn find_top_level_decl(program: &Program, name: &str) -> Option<Span> {
 }
 
 // ---------------------------------------------------------------------------
+// Mini-tanda LSPz (v0.9.47) — Completion en `from <mod> import |`
+// ---------------------------------------------------------------------------
+
+/// Enumera los símbolos exportables (fns, tipos, consts) del módulo
+/// identificado por `mod_path`, relativos al `doc_uri`. Convención del
+/// loader: `mod_path = ["foo"]` → `<base>/foo.fitz`; `["sub", "utils"]`
+/// → `<base>/sub/utils.fitz` (1 dir nesting). Devuelve lista vacía si
+/// el archivo no existe o no parsea.
+pub fn from_import_completions(doc_uri: &Url, mod_path: &[String]) -> Vec<CompletionItem> {
+    use crate::ast::AssignTarget;
+    if mod_path.is_empty() {
+        return Vec::new();
+    }
+    let doc_path = match doc_uri.to_file_path() {
+        Ok(p) => p,
+        Err(_) => return Vec::new(),
+    };
+    let Some(base_dir) = doc_path.parent() else {
+        return Vec::new();
+    };
+    let mut target_path = base_dir.to_path_buf();
+    for (i, comp) in mod_path.iter().enumerate() {
+        if i + 1 == mod_path.len() {
+            target_path.push(format!("{}.fitz", comp));
+        } else {
+            target_path.push(comp);
+        }
+    }
+    let source = match std::fs::read_to_string(&target_path) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let tokens = match tokenize(&source) {
+        Ok(t) => t,
+        Err(_) => return Vec::new(),
+    };
+    let (program, _errs) = parse_with_recovery(tokens);
+    let mut items: Vec<CompletionItem> = Vec::new();
+    for stmt in &program {
+        match stmt {
+            Stmt::FnDef {
+                name,
+                params,
+                return_type,
+                is_async,
+                ..
+            } => {
+                let params_str = params
+                    .iter()
+                    .map(|p| {
+                        let ty = p
+                            .type_
+                            .as_ref()
+                            .map(|t| t.display_name())
+                            .unwrap_or_else(|| "Any".into());
+                        format!("{}: {}", p.name, ty)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let ret_str = return_type
+                    .as_ref()
+                    .map(|t| t.display_name())
+                    .unwrap_or_else(|| "Any".into());
+                let prefix = if *is_async { "async fn" } else { "fn" };
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(format!("{}({}) -> {}", prefix, params_str, ret_str)),
+                    ..CompletionItem::default()
+                });
+            }
+            Stmt::TypeDef { name, .. } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CLASS),
+                    ..CompletionItem::default()
+                });
+            }
+            Stmt::Assign {
+                target: AssignTarget::Ident(name),
+                ..
+            } => {
+                items.push(CompletionItem {
+                    label: name.clone(),
+                    kind: Some(CompletionItemKind::CONSTANT),
+                    ..CompletionItem::default()
+                });
+            }
+            _ => {}
+        }
+    }
+    items
+}
+
+// ---------------------------------------------------------------------------
 // Autocomplete contextual (Fase 9.x.4)
 // ---------------------------------------------------------------------------
 
@@ -489,6 +584,12 @@ enum CompletionContext {
         recv_line: usize,
         recv_col: usize,
     },
+    /// Mini-tanda LSPz (v0.9.47) — `from <mod> import |` o
+    /// `from <mod> import X, |` — el cursor está dentro de la lista
+    /// de imports de un `from`. Listamos los símbolos exportables del
+    /// módulo target. `mod_path` son los segmentos del módulo
+    /// (`["foo"]` o `["sub", "utils"]`).
+    FromImportList { mod_path: Vec<String> },
     /// Cualquier otro contexto — listamos top-level + builtins + keywords.
     ScopeLevel,
 }
@@ -524,6 +625,26 @@ pub fn completion_at_position(
     line: u32,
     character: u32,
 ) -> Vec<CompletionItem> {
+    completion_at_position_with_uri(text, program, type_info, type_env, line, character, None)
+}
+
+/// Mini-tanda LSPz (v0.9.47) — variante con `doc_uri` opcional para
+/// resolver el archivo del módulo target en el contexto
+/// `from <mod> import |`. El backend del bin (`fitz-lsp.rs`) la usa
+/// para pasar el URI del documento abierto; el resto de los
+/// consumidores (tests existentes, herramientas externas) pueden
+/// usar `completion_at_position` directamente — con `doc_uri = None`,
+/// el contexto `FromImportList` devuelve lista vacía (sin URI no
+/// podemos resolver el archivo del módulo).
+pub fn completion_at_position_with_uri(
+    text: &str,
+    program: &Program,
+    type_info: &TypeInfo,
+    type_env: &TypeEnv,
+    line: u32,
+    character: u32,
+    doc_uri: Option<&Url>,
+) -> Vec<CompletionItem> {
     let ctx = match detect_completion_context(text, line, character) {
         Some(c) => c,
         None => return Vec::new(),
@@ -536,6 +657,10 @@ pub fn completion_at_position(
         } => after_dot_completions(
             program, type_info, type_env, &recv_name, recv_line, recv_col,
         ),
+        CompletionContext::FromImportList { mod_path } => match doc_uri {
+            Some(uri) => from_import_completions(uri, &mod_path),
+            None => Vec::new(),
+        },
         CompletionContext::ScopeLevel => {
             // Mini-tanda LSPy.4 — pasar la línea del cursor (1-based)
             // para incluir vars locales/params del scope contenedor.
@@ -562,24 +687,131 @@ fn detect_completion_context(text: &str, line: u32, character: u32) -> Option<Co
     if i > 0 && bytes[i - 1] == b'.' {
         let dot_pos = i - 1;
         let mut j = dot_pos;
-        while j > 0 && is_ident_continue(bytes[j - 1]) {
+        // v0.9.47 — chain a.b.c.: walkea back-to-front capturando
+        // `<ident>(.<ident>)*` para soportar receivers compuestos.
+        // Pre-fix: solo `<ident>` (un solo segmento). Post-fix:
+        // chains de N segmentos. El `after_dot_completions` resuelve
+        // el tipo del chain entero via TypeInfo lookup por la
+        // posición del START del primer ident.
+        while j > 0 && (is_ident_continue(bytes[j - 1]) || bytes[j - 1] == b'.') {
             j -= 1;
         }
+        // Validar shape: el receiver no debe empezar con `.` ni tener
+        // `..` consecutivos. Si pasa, devolvemos `None` para chain
+        // (cae a ScopeLevel).
         if j < dot_pos {
-            // Receiver: bytes[j..dot_pos]. Convertimos j a (line, col)
-            // Fitz 1-based para lookup en TypeInfo.
             let recv_name = std::str::from_utf8(&bytes[j..dot_pos])
                 .unwrap_or("")
                 .to_string();
-            let (recv_line_lsp, recv_col_lsp) = offset_to_position(text, j);
-            return Some(CompletionContext::AfterDot {
-                recv_name,
-                recv_line: (recv_line_lsp as usize) + 1,
-                recv_col: (recv_col_lsp as usize) + 1,
-            });
+            if recv_name.starts_with('.')
+                || recv_name.ends_with('.')
+                || recv_name.contains("..")
+            {
+                // No es un chain válido — fallback ScopeLevel.
+            } else {
+                let (recv_line_lsp, recv_col_lsp) = offset_to_position(text, j);
+                return Some(CompletionContext::AfterDot {
+                    recv_name,
+                    recv_line: (recv_line_lsp as usize) + 1,
+                    recv_col: (recv_col_lsp as usize) + 1,
+                });
+            }
         }
     }
+    // Mini-tanda LSPz (v0.9.47) — `from <mod> import |` o
+    // `from <mod> import X, |`. Walkeamos hacia atrás del cursor
+    // saltando whitespace + identifiers + comas hasta el primer
+    // token que no encaje. Si lo que precede es `import` (con
+    // espacio antes) precedido por `from <mod_path>`, contexto
+    // FromImportList con `mod_path` segmentado por `.`.
+    if let Some(mod_path) = detect_from_import_list_context(text, line, character) {
+        return Some(CompletionContext::FromImportList { mod_path });
+    }
     Some(CompletionContext::ScopeLevel)
+}
+
+/// Mini-tanda LSPz — detecta el patrón `from <mod_path> import ...|`.
+/// Walkea hacia atrás desde la posición del cursor saltando el
+/// prefix tipeado + cualquier `<ident>,?\s*` previo, hasta encontrar
+/// el keyword `import` y un `from <ident(.<ident>)*>` antes. Devuelve
+/// el `mod_path` segmentado por `.` o `None` si el contexto no
+/// matchea.
+fn detect_from_import_list_context(text: &str, line: u32, character: u32) -> Option<Vec<String>> {
+    let offset = position_to_offset(text, line, character)?;
+    let bytes = text.as_bytes();
+    // Saltar prefix tipeado.
+    let mut i = offset;
+    while i > 0 && is_ident_continue(bytes[i - 1]) {
+        i -= 1;
+    }
+    // Saltar items previos de la lista: `<ident>,?\s*`.
+    loop {
+        // Skip whitespace.
+        while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+            i -= 1;
+        }
+        // Skip coma opcional.
+        if i > 0 && bytes[i - 1] == b',' {
+            i -= 1;
+            // Después de coma debe haber whitespace + ident hacia
+            // atrás (otro item de la lista).
+            while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+                i -= 1;
+            }
+            let id_end = i;
+            while i > 0 && is_ident_continue(bytes[i - 1]) {
+                i -= 1;
+            }
+            if i == id_end {
+                // No hay ident antes de la coma — patrón inválido.
+                return None;
+            }
+            continue;
+        }
+        break;
+    }
+    // Acá debe haber `import` + whitespace.
+    if i < 6 || &bytes[i - 6..i] != b"import" {
+        return None;
+    }
+    i -= 6;
+    // Whitespace + módulo path: `<ident>(.<ident>)*`.
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    let mod_end = i;
+    // Walkea el path back-to-front: chars de ident + `.`.
+    while i > 0 {
+        let c = bytes[i - 1];
+        if is_ident_continue(c) || c == b'.' {
+            i -= 1;
+        } else {
+            break;
+        }
+    }
+    let mod_start = i;
+    if mod_start == mod_end {
+        return None;
+    }
+    let mod_str = std::str::from_utf8(&bytes[mod_start..mod_end]).ok()?;
+    // Validar shape: ident(.ident)* (no empezar/terminar con `.`,
+    // ni dos puntos seguidos).
+    if mod_str.starts_with('.') || mod_str.ends_with('.') || mod_str.contains("..") {
+        return None;
+    }
+    // Whitespace + `from`.
+    while i > 0 && matches!(bytes[i - 1], b' ' | b'\t') {
+        i -= 1;
+    }
+    if i < 4 || &bytes[i - 4..i] != b"from" {
+        return None;
+    }
+    // El `from` debe estar al principio de la línea (o precedido de
+    // whitespace solo). No imponemos esto estrictamente; en Fitz
+    // `from` solo aparece como stmt top-level, así que en práctica
+    // siempre matchea.
+    let mod_path: Vec<String> = mod_str.split('.').map(|s| s.to_string()).collect();
+    Some(mod_path)
 }
 
 /// Convierte una `(line, character)` LSP (0-based) a un offset en
@@ -2056,6 +2288,135 @@ mod tests {
         let text = "obj";
         let ctx = detect_completion_context(text, 0, 3).unwrap();
         assert_eq!(ctx, CompletionContext::ScopeLevel);
+    }
+
+    // ---- v0.9.47 Mini-tanda LSPz — chain a.b.c. + from import ----
+
+    #[test]
+    fn detect_context_chain_de_dos_segmentos_captura_recv_completo() {
+        // `a.b.|` con cursor justo después del segundo `.` → AfterDot
+        // con recv_name = "a.b" (chain, no solo "b").
+        let text = "a.b.";
+        let ctx = detect_completion_context(text, 0, 4).unwrap();
+        match ctx {
+            CompletionContext::AfterDot {
+                recv_name,
+                recv_line,
+                recv_col,
+            } => {
+                assert_eq!(recv_name, "a.b", "recv_name debería ser el chain completo");
+                assert_eq!(recv_line, 1);
+                assert_eq!(recv_col, 1, "start del chain es col 1 (el `a`)");
+            }
+            other => panic!("esperaba AfterDot con chain, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_context_chain_de_tres_segmentos_con_prefix_partial() {
+        // `obj.field.method.upper` con cursor al final — chain de 3
+        // segmentos + prefix "upper" tipeado.
+        let text = "obj.field.method.upper";
+        let ctx = detect_completion_context(text, 0, text.len() as u32).unwrap();
+        match ctx {
+            CompletionContext::AfterDot { recv_name, .. } => {
+                assert_eq!(
+                    recv_name, "obj.field.method",
+                    "recv_name debería ser chain hasta antes del último `.`"
+                );
+            }
+            other => panic!("esperaba AfterDot, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_context_from_import_con_cursor_tras_import_keyword() {
+        // `from foo import |` → FromImportList con mod_path = ["foo"].
+        let text = "from foo import ";
+        let ctx = detect_completion_context(text, 0, 16).unwrap();
+        match ctx {
+            CompletionContext::FromImportList { mod_path } => {
+                assert_eq!(mod_path, vec!["foo".to_string()]);
+            }
+            other => panic!("esperaba FromImportList, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_context_from_import_con_items_previos() {
+        // `from foo import X, Y, |` → FromImportList igual (items previos
+        // se saltean walkeando back-to-front por coma + ident + ws).
+        let text = "from foo import X, Y, ";
+        let ctx = detect_completion_context(text, 0, 22).unwrap();
+        match ctx {
+            CompletionContext::FromImportList { mod_path } => {
+                assert_eq!(mod_path, vec!["foo".to_string()]);
+            }
+            other => panic!("esperaba FromImportList, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn detect_context_from_import_con_mod_path_punteado() {
+        // `from sub.utils import |` → mod_path = ["sub", "utils"].
+        let text = "from sub.utils import ";
+        let ctx = detect_completion_context(text, 0, 22).unwrap();
+        match ctx {
+            CompletionContext::FromImportList { mod_path } => {
+                assert_eq!(mod_path, vec!["sub".to_string(), "utils".to_string()]);
+            }
+            other => panic!("esperaba FromImportList, dio {other:?}"),
+        }
+    }
+
+    #[test]
+    fn from_import_completions_devuelve_exports_del_modulo() {
+        // Setup: tempdir con un main.fitz y un utils.fitz. El helper
+        // resuelve utils.fitz a partir del URI de main.fitz y lista
+        // fns/types/consts del módulo.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main_path = tmp.path().join("main.fitz");
+        let utils_path = tmp.path().join("utils.fitz");
+        std::fs::write(&main_path, "from utils import \n").unwrap();
+        std::fs::write(
+            &utils_path,
+            "fn double(n: Int) -> Int { return n * 2 }\n\
+             type User { id: Int, name: Str }\n\
+             let MAX: Int = 100\n",
+        )
+        .unwrap();
+        let main_uri = Url::from_file_path(&main_path).unwrap();
+        let items = from_import_completions(&main_uri, &["utils".to_string()]);
+        let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+        assert!(labels.contains(&"double"), "falta fn `double`: {labels:?}");
+        assert!(labels.contains(&"User"), "falta type `User`: {labels:?}");
+        assert!(labels.contains(&"MAX"), "falta const `MAX`: {labels:?}");
+    }
+
+    #[test]
+    fn from_import_completions_modulo_inexistente_devuelve_vacio() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let main_path = tmp.path().join("main.fitz");
+        std::fs::write(&main_path, "from no_existe import \n").unwrap();
+        let main_uri = Url::from_file_path(&main_path).unwrap();
+        let items = from_import_completions(&main_uri, &["no_existe".to_string()]);
+        assert!(items.is_empty());
+    }
+
+    #[test]
+    fn completion_at_position_sin_uri_no_completa_from_import() {
+        // El wrapper `completion_at_position` (sin URI) NO puede
+        // resolver el archivo del módulo target — para
+        // FromImportList devuelve vacío. Solo el wrapper con
+        // `_with_uri` lo cubre. Garantía: tests existentes no se
+        // rompen porque siguen usando la signature original.
+        let src = "from foo import \n";
+        let (program, env, type_info, _defs, _errs) = check_source_with_types(src);
+        let items = completion_at_position(src, &program, &type_info, &env, 0, 16);
+        assert!(
+            items.is_empty(),
+            "sin URI, FromImportList debe devolver vacío. Got: {items:?}"
+        );
     }
 
     #[test]

@@ -1151,6 +1151,22 @@
 >   pow, abs, ceil, floor, round, clamp, min, max, popcount,
 >   leading_zeros, trailing_zeros, spawn, len, bytes, sleep,
 >   env, env_or, load_env). 3 tests nuevos.
+> - ~~**LSP — completion en `from <mod> import |` + chain
+>   `a.b.c.`**~~ ✓ **CERRADO 2026-05-24 (v0.9.47 mini-tanda
+>   LSPz)**. Completion contextual del LSP ahora cubre dos
+>   patrones nuevos: (1) cursor adentro de la lista de imports
+>   de un `from` enumera fns + types + consts del módulo target
+>   (helper público `from_import_completions(doc_uri, mod_path)`
+>   + nueva variante `CompletionContext::FromImportList` +
+>   wrapper `completion_at_position_with_uri`), (2) chain de N
+>   segmentos `a.b.c.` reconocido como receiver completo (el
+>   walkback acepta `.` además de chars ident; el lookup en
+>   TypeInfo por posición del START resuelve al tipo del chain
+>   exterior gracias a la garantía de F16). Al revisar el
+>   inventario, las otras 3 deudas LSP que listé inicialmente
+>   (cross-module go-to-def, range exacto en hover, scope-aware
+>   completion) **ya estaban implementadas** en mini-tandas
+>   previas (LSPx + LSPy + LSPy.4). 8 tests nuevos.
 > - **GLIBC mismatch builder/runtime**: fix con
 >   `python:3.14-slim-bookworm` (Debian bookworm-aligned).
 >   Documentado en los READMEs.
