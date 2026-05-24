@@ -61,6 +61,72 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.49] — 2026-05-24 — Audit-G: audit completo del inventario + 4 deudas confirmadas como ya cerradas
+
+### Changed
+
+- **Dockerfiles distroless**: `FITZ_TAG` default actualizado de
+  `v0.9.46` → `v0.9.48` (boilerplates 5 + 6) — usar el release
+  más reciente con CI strict (`cargo fmt --check` + `cargo
+  clippy --all-targets`) ya activado en `ci.yml`.
+
+### Audit del inventario (sin cambios funcionales)
+
+Después de descubrir 2 sesiones consecutivas con deudas stale
+(v0.9.47 — 3 LSP ya cerradas; v0.9.48 — 11 errores clippy ya
+cerrados), Audit-G dedicó la sesión a verificar el resto del
+inventario. **4 deudas más confirmadas como YA cerradas**:
+
+- **F13 — heterogéneos en codegen** (Baja): SPIKE `__FitzValue`
+  con variantes Int/Float/Str/Bool/Null + Bytes + Nominal. Smoke
+  `[1, "dos", true]` (List<Any>) compila con `fitz build` y
+  produce `[1, "dos", true]` bit-a-bit con `fitz run`.
+  Auto-detectado en `gen_list_lit` cuando aparece un `List<Any>`
+  literal.
+- **8.7-await-binding-split** (Python interop): cerrado con
+  dispatch al helper `__fitz_py_await_obj` cuando el inner del
+  `.await` tiene `inner_ty == PyAny`. Tiene test
+  `py_await_split_emite_fitz_py_await_obj`.
+- **multi-arch-docker**: ya implementado en `release.yml` Job 3
+  `docker-image` con buildx `--platform linux/amd64,linux/arm64`.
+- **fitz-python-image**: ya implementado en `release.yml` Job 3b
+  con tag `:latest-python`.
+
+**Inventario depurado**: deudas reales restantes ahora bajan a
+7 (de 13+ que figuraban en los documentos):
+
+| ID | Categoría | Esfuerzo |
+|----|-----------|----------|
+| 8.7-ok-propagation | Python interop codegen | 3-5h |
+| dict→Map<K,V> no primitivos | Python interop codegen | 4-6h |
+| UTF-16 position strict | LSP | 2-3h |
+| F15 recovery sub-stmt | LSP | 1-2h |
+| R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h |
+| 8-pyi-stubs | Stubs Python | 1-2 días |
+| Smoke real Docker boilerplate 5/6 | Validación | 2-3h |
+
+### Notes
+
+- **Convención nueva** (tercera vez consecutiva que aparece
+  inventario stale — pattern claro): antes de prometer trabajo
+  en un bundle de deudas, hacer audit rápido (10-15 min) con
+  comandos directos (`grep` por nombres de fns/features, `cargo
+  clippy --all-targets`, reproducir con `.fitz` mínimo +
+  `fitz build`). Documentado en `docs/deudas-post-5b.md`.
+- **Smoke real Docker boilerplate 5 (`Dockerfile.distroless`)**:
+  el build con `cargo install fitz --features python` desde
+  source toma 10+ min adentro del container. Esta sesión lo dejó
+  arrancado pero no esperó el resultado. Queda como **deuda
+  menor explícita** con plan claro: ejecutar `docker build -f
+  Dockerfile.distroless -t test:distroless .` en el boilerplate
+  5/6 + validar imagen final ~80-100 MB + smoke con
+  docker-compose contra Postgres. Sin presión real porque el
+  Dockerfile actual (`python:3.12-slim` + `fitz run`) sigue
+  funcionando.
+- **Sin cambios de código** en este release excepto el bump del
+  `FITZ_TAG` default en los 2 Dockerfile.distroless. Suite
+  intacta: 2282 default / 2373 python / 2383 lsp.
+
 ## [v0.9.48] — 2026-05-24 — Mini-tanda Cleanup-D: cargo fmt --all masivo + clippy --all-targets reactivado en CI
 
 ### Changed

@@ -44,7 +44,7 @@ RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
     sh -s -- -y --default-toolchain 1.95.0 --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
 
-ARG FITZ_TAG=v0.9.46
+ARG FITZ_TAG=v0.9.48
 
 RUN cargo install --git https://github.com/Thegreekman76/fitz \
     --tag "$FITZ_TAG" --features python --bin fitz --locked
