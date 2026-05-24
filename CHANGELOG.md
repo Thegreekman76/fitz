@@ -61,6 +61,80 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.53] — 2026-05-24 — Cierre 8.7-ok-propagation + fix fmt regression v0.9.51
+
+### Fixed
+
+- **8.7-ok-propagation — codegen propaga expected type adentro
+  de `Ok(...)`/`Err(...)` en `return`** ✓. Deuda residual de
+  Fase 8.7 que ya era blocker concreto del boilerplate 6
+  (v0.9.52 aplicó workaround temporal con binding intermedio
+  anotado). Pre-fix: `return Ok(json.dumps(raw)?)` adentro de
+  fn `-> Result<Str>` fallaba en rustc con `expected String,
+  found __FitzPyObject` porque `gen_ok` devolvía
+  `Result<PyAny>` sin coerción al expected `Str` y el `coerce`
+  general no maneja `Result<A> → Result<B>`. Post-fix:
+  `gen_return` detecta `Expr::Ok(inner)` / `Expr::Err(inner)`
+  cuando `ret_expected` es `Result<T, E>` y coerce `inner`
+  directo al T (Ok) o E (Err) ANTES de envolver. El gate
+  `!self.response_mode && !self.in_middleware_fn` lo aísla de
+  los paths HTTP que ya manejan Ok/Err específicamente. (`src/
+  codegen.rs::gen_return`)
+
+  Casos cubiertos:
+  - `return Ok(json.dumps(...)?)` con `-> Result<Str>` →
+    coerce PyAny → Str via `__fitz_py_extract_string`.
+  - `return Ok(math.floor(...)?)` con `-> Result<Int>` →
+    coerce PyAny → Int via `__fitz_py_extract_i64`.
+  - `return Ok(T { ... })` con `-> Result<T>` → no emite
+    coerce innecesario (inner ya tipa T).
+
+  **Workaround removido en boilerplate 6**: los 5 helpers
+  (`create_raw`/`find_raw`/`list_raw`/`update_raw`/
+  `delete_raw`) vuelven al patrón inline original
+  `return Ok(json.dumps(raw)?)`. El v0.9.52 los había
+  modificado a binding intermedio anotado como workaround
+  explícito.
+
+- **Fmt regression de v0.9.51 (`src/parser.rs`)** ✓. El cambio
+  del F15 recovery sub-stmt en v0.9.51 introdujo formato
+  no-canonical en el `match self.expect_ident(...)` que
+  `cargo fmt --check` (activado en v0.9.48) detectó en CI.
+  Aplicado `cargo fmt` al archivo. CI strict ahora pasa.
+
+### Notes
+
+- **Tests nuevos**: 3 unit en `codegen::tests`:
+  - `ok_propagation_coerce_pyany_a_str_adentro_de_return_ok`
+  - `ok_propagation_coerce_pyany_a_int_adentro_de_return_ok`
+  - `ok_propagation_inner_ya_correcto_no_emite_coerce_innecesario`
+- Suite total: **2285 default** (era 2282 + 3), **2376 python**
+  (era 2373 + 3), **2390 lsp** (era 2387 + 3). Clippy
+  `--all-targets -D warnings` limpio en los 3 modos.
+  `cargo fmt --check` ahora pasa (la regresión de v0.9.51
+  estaba bloqueando CI desde v0.9.52).
+- **Sin cambios a la extensión VSCode** — fix puramente del
+  codegen.
+
+### Bundle B parcialmente cerrado
+
+Con v0.9.53, 1 de las 2 deudas restantes del bundle B (Python
+interop codegen) cierra:
+
+| Deuda | Estado |
+|-------|--------|
+| ~~8.7-ok-propagation~~ | ✓ **CERRADO v0.9.53** |
+| dict→Map<K,V> no primitivos | sigue pendiente (4-6h) |
+
+**Inventario depurado** post-v0.9.53: **3 deudas reales
+restantes**:
+
+| ID | Categoría | Esfuerzo |
+|----|-----------|----------|
+| dict→Map<K,V> no primitivos | Python interop | 4-6h |
+| R.bug-pyo3-abi3 Linux/macOS | Bundling Python | 4-6h |
+| 8-pyi-stubs | Stubs Python | 1-2 días |
+
 ## [v0.9.52] — 2026-05-24 — Smoke real Docker boilerplate 6 (Dockerfile.distroless) end-to-end VERDE
 
 ### Added

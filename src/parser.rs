@@ -664,19 +664,18 @@ impl Parser {
                     // stmt entero. Habilita completion fino tras
                     // `user.<typo o EOF>` — el LSP usa el tipo del
                     // `object` para mostrar fields/métodos sugeridos.
-                    let field = match self
-                        .expect_ident("se esperaba nombre de campo después de '.'")
-                    {
-                        Ok(f) => f,
-                        Err(e) => {
-                            if self.recovery_mode {
-                                self.push_recovered(e);
-                                String::new()
-                            } else {
-                                return Err(e);
+                    let field =
+                        match self.expect_ident("se esperaba nombre de campo después de '.'") {
+                            Ok(f) => f,
+                            Err(e) => {
+                                if self.recovery_mode {
+                                    self.push_recovered(e);
+                                    String::new()
+                                } else {
+                                    return Err(e);
+                                }
                             }
-                        }
-                    };
+                        };
                     expr = Expr::Field {
                         object: Box::new(expr),
                         field,

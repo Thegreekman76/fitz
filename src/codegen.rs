@@ -7269,6 +7269,53 @@ where
     }
 
     fn gen_return(&mut self, e: &Expr, ret_expected: &Type) -> Result<(), FitzError> {
+        // v0.9.53 8.7-ok-propagation: cuando ret_expected es Result<T, E>
+        // y `e` es `Expr::Ok(inner)` / `Expr::Err(inner)`, propagamos
+        // el T/E adentro del constructor — coercemos `inner` directo
+        // al tipo esperado (T para Ok, E para Err) ANTES de envolver
+        // en `Ok(...)`/`Err(...)`. Pre-fix: `gen_ok` devolvía
+        // `Result<inner_ty>` sin coerción al expected, y el `coerce`
+        // del path general (línea ~7375) no maneja `Result<A> →
+        // Result<B>`. Resultado: rustc fallaba con `expected B,
+        // found A` adentro del Ok/Err.
+        //
+        // Casos cubiertos:
+        // - `return Ok(json.dumps(...)?)` adentro de fn `-> Result<Str>`
+        //   ahora coerce `PyAny → Str` via `coerce` (`__fitz_py_extract_string`).
+        // - `return Err(42)` adentro de fn `-> Result<_, String>` ya
+        //   andaba (gen_err normaliza a String), pero acá lo cubrimos
+        //   uniforme por completitud.
+        //
+        // El path `response_mode` HTTP de abajo ya desempaca Ok/Err
+        // específicamente; nuestro chequeo está GATEADO antes de
+        // emit_indent + por `!self.response_mode && !self.in_middleware_fn`
+        // para no interferir con esos paths.
+        if !self.response_mode && !self.in_middleware_fn {
+            if let Type::Result { ok: tok, err: terr } = ret_expected {
+                if let Expr::Ok(inner, _) = e {
+                    let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                    let coerced = coerce(&inner_code, &inner_ty, tok, self.env);
+                    self.emit_indent();
+                    self.emit("return Ok(");
+                    self.emit(&coerced);
+                    self.emit(");\n");
+                    return Ok(());
+                }
+                if let Expr::Err(inner, _) = e {
+                    let (inner_code, inner_ty) = self.gen_expr(inner)?;
+                    // `gen_err` mantiene el constructor `Err(<code>)`
+                    // sin coerción explícita; replicamos esa semántica
+                    // PERO con expected propagado: si terr es Str y el
+                    // inner es Str también, queda directo; si no, coerce.
+                    let coerced = coerce(&inner_code, &inner_ty, terr, self.env);
+                    self.emit_indent();
+                    self.emit("return Err(");
+                    self.emit(&coerced);
+                    self.emit(");\n");
+                    return Ok(());
+                }
+            }
+        }
         let (code, ty) = self.gen_expr(e)?;
         self.emit_indent();
         // MW.3: en el body de un middleware, `return` sin valor (o
@@ -24326,6 +24373,70 @@ mod tests {
     // ---------------------------------------------------------------
     // 8.7-await-binding-split — binding intermedio entre call y await
     // ---------------------------------------------------------------
+
+    #[test]
+    fn ok_propagation_coerce_pyany_a_str_adentro_de_return_ok() {
+        // v0.9.53 8.7-ok-propagation — `return Ok(json.dumps(...)?)`
+        // adentro de fn `-> Result<Str>` antes fallaba en rustc con
+        // `expected String, found __FitzPyObject` porque `gen_ok`
+        // devolvía `Result<PyAny>` sin coerción al expected `Str` y
+        // el `coerce` general no maneja `Result<A> → Result<B>`.
+        // Post-fix: `gen_return` detecta `Expr::Ok(inner)` cuando
+        // ret_expected es `Result<T>` y coerce `inner` directo a T
+        // (en este caso PyAny → Str via __fitz_py_extract_string).
+        let src = "from python import json\n\
+                   fn parse(raw: Str) -> Result<Str> {\n  \
+                       return Ok(json.dumps(raw)?)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El return debe coercer el inner via __fitz_py_extract_string,
+        // NO emitir el Ok envuelto sin coerción.
+        assert!(
+            code.contains("__fitz_py_extract_string"),
+            "esperaba __fitz_py_extract_string adentro del return Ok, output:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ok_propagation_coerce_pyany_a_int_adentro_de_return_ok() {
+        // Variante: PyAny → Int (via __fitz_py_extract_i64).
+        let src = "from python import math\n\
+                   fn answer() -> Result<Int> {\n  \
+                       return Ok(math.floor(42.5)?)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_py_extract_i64"),
+            "esperaba __fitz_py_extract_i64 adentro del return Ok, output:\n{}",
+            code
+        );
+    }
+
+    #[test]
+    fn ok_propagation_inner_ya_correcto_no_emite_coerce_innecesario() {
+        // Sanity: si `inner` ya tipa al expected `T`, no debe emitir
+        // coerce (`coerce` devuelve el code tal cual cuando `from == to`).
+        // El return queda `return Ok(<inner code>);` sin wrapping extra.
+        let src = "type T { v: Int }\n\
+                   fn make() -> Result<T> {\n  \
+                       return Ok(T { v: 1 })\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // El fix NO debe sumar `__fitz_py_extract_*` ni envoltorios
+        // adicionales — el inner ya es `T` puro.
+        assert!(
+            !code.contains("__fitz_py_extract"),
+            "NO esperaba __fitz_py_extract para inner ya tipado correcto, output:\n{}",
+            code
+        );
+        // El return existe (con el shape esperado).
+        assert!(
+            code.contains("return Ok("),
+            "esperaba `return Ok(...)` en el body, output:\n{}",
+            code
+        );
+    }
 
     #[test]
     fn py_await_split_emite_fitz_py_await_obj() {

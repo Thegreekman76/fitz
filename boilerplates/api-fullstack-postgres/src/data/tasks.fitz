@@ -14,43 +14,36 @@ from python import db
 
 // CRUD completo:
 
-// Workaround v0.9.52 — `Ok(json.dumps(raw)?)` dispara el bug
-// 8.7-ok-propagation del codegen Python (expected type adentro de
-// `Ok(...)` no propaga al inner). Binding intermedio anotado
-// `let s: Str = ...?` fuerza la coerción PyAny → Str antes del Ok.
-// Cuando 8.7-ok-propagation cierre, los 5 helpers vuelven a la
-// forma inline original. NO bloquea `fitz run`; solo el `fitz build`
-// con --features python (codegen) requiere el workaround.
+// v0.9.53 — el workaround del v0.9.52 ya no es necesario: la deuda
+// 8.7-ok-propagation cerró. `gen_return` propaga el expected type
+// `Result<Str>` adentro de `Ok(...)` y coerce `PyAny → Str` via
+// `__fitz_py_extract_string` automáticamente. Los 5 helpers vuelven
+// al patrón inline original.
 
 fn create_raw(title: Str, description: Str, priority: Str) -> Result<Str> {
     let raw = db.add_task(title, description, priority)?
-    let s: Str = json.dumps(raw)?
-    return Ok(s)
+    return Ok(json.dumps(raw)?)
 }
 
 fn find_raw(id: Int) -> Result<Str> {
     let raw = db.get_task(id)?
-    let s: Str = json.dumps(raw)?
-    return Ok(s)
+    return Ok(json.dumps(raw)?)
 }
 
 fn list_raw(filter: Str) -> Result<Str> {
     // filter: "all", "pending", "done". Pasado al SQL del lado Python.
     let raw = db.list_tasks(filter)?
-    let s: Str = json.dumps(raw)?
-    return Ok(s)
+    return Ok(json.dumps(raw)?)
 }
 
 fn update_raw(id: Int, title: Str, description: Str, priority: Str, done: Bool) -> Result<Str> {
     let raw = db.update_task(id, title, description, priority, done)?
-    let s: Str = json.dumps(raw)?
-    return Ok(s)
+    return Ok(json.dumps(raw)?)
 }
 
 fn delete_raw(id: Int) -> Result<Str> {
     let raw = db.delete_task(id)?
-    let s: Str = json.dumps(raw)?
-    return Ok(s)
+    return Ok(json.dumps(raw)?)
 }
 
 // Init de schema — idempotente.
