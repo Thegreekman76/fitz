@@ -499,8 +499,11 @@ del proyecto Fitz.
   **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
   el flag empaqueta paquetes pip junto al CPython base. **Blocker
   #1 (rechazo del codegen 8.7.1 transitiva) CERRADO en v0.9.43**
-  + **Sub-deuda #1.5/#1.6 CERRADAS en v0.9.44**. Quedan 2
-  caveats menores (no bloqueantes):
+  + **Sub-deuda #1.5/#1.6 CERRADAS en v0.9.44** + **deuda
+  distroless-tar-embedded CERRADA en v0.9.46** (launcher con
+  `tar`+`flate2` inline destraba `gcr.io/distroless/cc-debian12`).
+  Variante `Dockerfile.distroless` disponible con el flow nuevo.
+  Quedan 2 caveats menores (no bloqueantes):
 
   1. ~~Rechazo del codegen — `from python import` en módulos
      transitivos NO soportado~~ **CERRADO en v0.9.43**.

@@ -377,9 +377,15 @@ service `api` del compose.
   binario standalone. **Blocker #1 (rechazo del codegen 8.7.1
   transitiva) CERRADO en v0.9.43** (2026-05-23) + **Sub-deuda
   #1.5/#1.6 (coerción `__fitz_py_to_*_T` + impls HTTP para tipos
-  importados) CERRADAS en v0.9.44** (2026-05-24). El `fitz build`
-  del boilerplate compila limpio end-to-end. Quedan 2 caveats
-  menores (no bloqueantes):
+  importados) CERRADAS en v0.9.44** (2026-05-24) + **deuda
+  distroless-tar-embedded CERRADA en v0.9.46** (2026-05-24 — el
+  launcher del binario standalone usa crates `tar` + `flate2`
+  inline en lugar de `Command::new("tar")` subprocess; destraba
+  runtimes minimalistas tipo `gcr.io/distroless/cc-debian12`
+  ~22 MB base). El `fitz build` del boilerplate compila limpio
+  end-to-end y el flow distroless está disponible como
+  `Dockerfile.distroless` separado (smoke real funcional pendiente
+  como deuda menor). Quedan 2 caveats menores:
 
   1. ~~**Rechazo del codegen — `from python import` en módulos
      transitivos NO soportado**~~ **CERRADO en v0.9.43**.
@@ -463,15 +469,17 @@ service `api` del compose.
   - Sin `apt-get install libpq5` en runtime (libpq viene en
     el wheel `psycopg2-binary` embebido).
 
-  **Con el cierre v0.9.44, el `fitz build` del boilerplate
-  compila limpio end-to-end** (validado a mano: `fitz build`
-  produce un binario `fitz-api-postgres-python.exe` de ~1.4 MB en
-  modo debug que bootea Python correctamente; falla solo en
-  runtime por `psycopg2` no instalado, lo cual es configuración
-  del runtime, no del codegen). El adopt al flow
-  `--bundle-pip-requirements` con `--bundle-python` + el ajuste
-  del Dockerfile (fix GLIBC) es viable hoy — los blockers
-  técnicos del codegen están todos cerrados.
+  **Con los cierres v0.9.44 + v0.9.46, el `fitz build` del
+  boilerplate compila limpio end-to-end Y produce un binario
+  apto para distroless**. Validado a mano: `fitz build` produce
+  un binario `fitz-api-postgres-python.exe` de ~1.4 MB en modo
+  debug que bootea Python correctamente; falla solo en runtime
+  por `psycopg2` no instalado, lo cual es configuración del
+  runtime no del codegen. **Variante `Dockerfile.distroless`
+  disponible** con el flow `--bundle-pip-requirements` + runtime
+  `gcr.io/distroless/cc-debian12` (~80-100 MB imagen final vs
+  ~155 MB del Dockerfile actual). Validación smoke funcional con
+  Postgres real es deuda menor (path técnico ya correcto).
 - **Auto-generar `types/user.fitz` con `fitz py-types`**: hoy
   está hardcoded. Sumar un step `fitz py-types python/models.py
   --out src/types/user.fitz` en el Dockerfile para regenerarlo

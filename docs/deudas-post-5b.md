@@ -1154,13 +1154,21 @@
 > - **GLIBC mismatch builder/runtime**: fix con
 >   `python:3.14-slim-bookworm` (Debian bookworm-aligned).
 >   Documentado en los READMEs.
-> - **Distroless requiere tar embebido en Rust**: el launcher
+> - ~~**Distroless requiere tar embebido en Rust**: el launcher
 >   de `--bundle-python` invoca `Command::new("tar")` subprocess
->   → `gcr.io/distroless/cc-debian12` NO trae tar.
->   `debian:bookworm-slim` (~85 MB base con tar) es el runtime
->   mínimo viable hoy. Sub-paso futuro de la deuda menor del
->   launcher: usar un crate de tar inline (`tar` + `flate2`)
->   para destrabar distroless.
+>   → `gcr.io/distroless/cc-debian12` NO trae tar.~~ ✓ **CERRADO
+>   2026-05-24 (v0.9.46)**. El launcher usa crates `tar = "0.4"` +
+>   `flate2 = "1"` inline (helper `extract_tar_gz`) en lugar de
+>   subprocess. Los 3 sitios reemplazados: PBS extract + pip
+>   extract Linux/macOS + pip extract Windows. ~80-100 KB
+>   sumados al binario final del launcher (LTO + strip activos)
+>   vs ~60 MB ahorrados en la imagen de container final.
+>   `Dockerfile.distroless` agregado a boilerplates 5/6 con
+>   builder `python:3.14-slim-bookworm` (fix GLIBC) + runtime
+>   `gcr.io/distroless/cc-debian12`. 3 tests unit nuevos. Smoke
+>   real Docker end-to-end con sqlalchemy + Postgres queda como
+>   deuda menor (path técnico correcto, validación funcional
+>   pendiente).
 > - **Beneficio real de imagen ~10-20 MB**: no 50-70 MB que
 >   prometía el plan original. Argumento del approach se mueve
 >   de "ahorro de deploy size" a "simplificación de runtime".

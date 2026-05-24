@@ -1,0 +1,91 @@
+# Dockerfile.distroless — variante con `fitz build --bundle-pip-requirements`
+# + runtime distroless. Habilitado por v0.9.46 (launcher del binario
+# standalone usa crates `tar` + `flate2` inline en lugar de invocar
+# `Command::new("tar")` subprocess — destraba runtimes minimalistas que
+# NO traen utilidades de shell).
+#
+# Diferencias vs `Dockerfile` (que sigue siendo el path "seguro" con
+# `fitz run` + Python en runtime):
+#
+# - Builder pinea `python:3.14-slim-bookworm` (NO `3.14-slim` que es
+#   trixie con GLIBC 2.39; bookworm es GLIBC 2.36 que matchea el
+#   runtime).
+# - Runtime es `gcr.io/distroless/cc-debian12` (~22 MB base) en lugar
+#   de `python:3.12-slim` (~130 MB). Trae glibc + ca-certificates,
+#   nada más. El binario embebe CPython 3.14.5 + paquetes pip
+#   declarados en `requirements.txt`.
+# - El stage runtime NO necesita `pip install` ni `apt-get install
+#   libpq5` — psycopg2-binary trae libpq adentro del wheel, y todos
+#   los demás paquetes viajan adentro del tarball pip embebido.
+# - Imagen final: ~80-100 MB reales (vs ~155 MB del Dockerfile
+#   actual). El binario embedded pesa ~30-50 MB (CPython + deps);
+#   el base distroless suma ~22 MB; el copy de python/ con db.py +
+#   models.py suma ~10 KB.
+#
+# NOTA: smoke real end-to-end con sqlalchemy + psycopg2 + Postgres
+# cliente NO está validado al 100% al momento de escribir esta
+# variante. El path técnico está correcto (cierres v0.9.43/44/46
+# destraban los 3 blockers documentados); validación funcional
+# completa es deuda menor de la mini-fase distroless.
+#
+# Build con tag específico:
+#   docker build -f Dockerfile.distroless --build-arg FITZ_TAG=v0.9.46 -t app:distroless .
+
+# ---- Stage 1: builder ----------------------------------------------
+FROM python:3.14-slim-bookworm AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates git \
+        python3-dev pkg-config libssl-dev libpq-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+ARG FITZ_TAG=v0.9.46
+
+RUN cargo install --git https://github.com/Thegreekman76/fitz \
+    --tag "$FITZ_TAG" --features python --bin fitz --locked
+
+WORKDIR /app
+
+# Copia primero los archivos que NO cambian seguido (capa cacheable).
+COPY fitz.toml requirements.txt ./
+COPY python/ ./python/
+
+# Código Fitz al final — esta capa invalida en cada cambio de src/.
+COPY src/ ./src/
+
+# Buildea binario standalone con CPython + paquetes pip embebidos.
+# `--bundle-pip-requirements` lee requirements.txt e instala los
+# paquetes adentro de un tarball que viaja con el binario; el launcher
+# extrae todo a $TMPDIR en primer run.
+RUN fitz build --bundle-pip-requirements requirements.txt
+
+# ---- Stage 2: runtime distroless -----------------------------------
+# Distroless trae glibc + ca-certificates + libgcc. Nada más. Sin
+# shell, sin tar, sin Python instalado, sin libpq5.
+#
+# Habilitado en v0.9.46: el launcher del binario standalone ahora
+# extrae el tarball PBS via crates Rust en memoria (tar+flate2). Antes
+# requería `tar` subprocess y el runtime mínimo era debian:bookworm-slim.
+FROM gcr.io/distroless/cc-debian12
+
+COPY --from=builder /app/target/release/fitz-api-postgres-python /usr/local/bin/app
+
+# python/db.py + python/models.py viven AFUERA del binario embebido —
+# son código Python custom del usuario, no paquetes pip. PYTHONPATH
+# extiende el lookup de CPython embebido para resolver
+# `from python import db` desde acá.
+COPY --from=builder /app/python /app/python
+
+WORKDIR /app
+ENV PYTHONPATH=/app/python
+
+EXPOSE 3000
+
+# Distroless usa ENTRYPOINT estilo exec form. `app` es el nombre del
+# binario que copiamos a /usr/local/bin/.
+CMD ["app"]

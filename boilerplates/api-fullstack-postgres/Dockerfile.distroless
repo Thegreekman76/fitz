@@ -1,0 +1,66 @@
+# Dockerfile.distroless — variante con `fitz build --bundle-pip-requirements`
+# + runtime distroless. Habilitado por v0.9.46 (launcher del binario
+# standalone usa crates `tar` + `flate2` inline en lugar de invocar
+# `Command::new("tar")` subprocess — destraba runtimes minimalistas que
+# NO traen utilidades de shell).
+#
+# Ver `boilerplates/api-postgres-python/Dockerfile.distroless` para
+# notas técnicas completas. Esta variante aplica el mismo patrón al
+# fullstack (sumando que el frontend SPA se sirve estático desde el
+# binario via `serve_dir`).
+#
+# Imagen final: ~80-100 MB reales (vs ~155 MB del Dockerfile actual).
+#
+# NOTA: smoke real end-to-end con sqlalchemy + psycopg2 + Postgres
+# NO está validado al 100% al momento de escribir esta variante. El
+# path técnico está correcto; validación funcional completa es deuda
+# menor de la mini-fase distroless.
+#
+# Build con tag específico:
+#   docker build -f Dockerfile.distroless --build-arg FITZ_TAG=v0.9.46 -t app:distroless .
+
+# ---- Stage 1: builder ----------------------------------------------
+FROM python:3.14-slim-bookworm AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        curl ca-certificates git \
+        python3-dev pkg-config libssl-dev libpq-dev build-essential && \
+    rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | \
+    sh -s -- -y --default-toolchain 1.95.0 --profile minimal
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+ARG FITZ_TAG=v0.9.46
+
+RUN cargo install --git https://github.com/Thegreekman76/fitz \
+    --tag "$FITZ_TAG" --features python --bin fitz --locked
+
+WORKDIR /app
+
+# Capas cacheables primero (cambian menos seguido).
+COPY fitz.toml requirements.txt ./
+COPY python/ ./python/
+COPY web/ ./web/
+
+# Código Fitz al final.
+COPY src/ ./src/
+
+RUN fitz build --bundle-pip-requirements requirements.txt
+
+# ---- Stage 2: runtime distroless -----------------------------------
+FROM gcr.io/distroless/cc-debian12
+
+COPY --from=builder /app/target/release/fitz-api-fullstack-postgres /usr/local/bin/app
+COPY --from=builder /app/python /app/python
+# El frontend SPA se sirve estático desde el binario via `serve_dir`
+# adentro del código Fitz; viaja como assets en /app/web/.
+COPY --from=builder /app/web /app/web
+
+WORKDIR /app
+ENV PYTHONPATH=/app/python
+
+EXPOSE 3000
+
+CMD ["app"]

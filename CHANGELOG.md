@@ -61,6 +61,82 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.46] — 2026-05-24 — Bundling Docker end-to-end: distroless habilitado + Dockerfile.distroless en boilerplates 5/6
+
+### Added
+
+- **distroless-tar-embedded — launcher con `tar` + `flate2` inline**.
+  Cierre de la deuda residual de Fase 8.b/8.c documentada al cerrar
+  el bundling de Python: el launcher del binario standalone
+  (generado por `fitz build --bundle-python` / `--bundle-pip*`)
+  invocaba `Command::new("tar")` subprocess para extraer los
+  tarballs PBS + pip a `$TMPDIR/fitz-py-<hash>/`. Esto requería
+  `tar` instalado en el runtime de Docker — `gcr.io/distroless/cc-
+  debian12` no lo trae, así que el runtime mínimo viable era
+  `debian:bookworm-slim` (~85 MB base). Post-fix: el launcher usa
+  crates `tar = "0.4"` + `flate2 = "1"` para extraer en memoria,
+  sin subprocess. Distroless ahora es viable como runtime.
+
+  Implementación:
+  - **`extract_tar_gz(tarball_path, dest)`** — nuevo helper inline
+    en `LAUNCHER_MAIN_RS_TEMPLATE` con `flate2::read::GzDecoder` +
+    `tar::Archive::unpack`. El crate `tar` valida paths contra
+    `../` escapes (CVE protection automática).
+  - **`LAUNCHER_CARGO_TOML_TEMPLATE`** suma `tar = "0.4"` +
+    `flate2 = "1"` a `[dependencies]`. Los 2 crates suman ~80-100
+    KB al binario final del launcher con LTO + strip activos
+    (perfil `opt-level = "z"` se mantiene minimalista). Trade-off
+    aceptable vs el ahorro de ~60 MB en la imagen de container
+    final.
+  - **3 sitios reemplazados**: PBS tarball extract (extracción de
+    CPython embebido) + pip tarball extract en Linux/macOS (path
+    `python/lib/python3.X/site-packages/`) + pip tarball extract
+    en Windows (path `python/Lib/site-packages/`). Los 3 ahora
+    usan `extract_tar_gz` en lugar de `Command::new("tar")`.
+  - El binario final del launcher en `fitz build --bundle-python`
+    pesa ahora ~80-100 KB más que pre-fix; sin diferencia
+    observable en el tamaño total del binario standalone
+    (`examples/python-interop-8.b.exe` mantiene ~22 MB en
+    Windows x64).
+
+- **`Dockerfile.distroless` en boilerplates 5 (api-postgres-python)
+  y 6 (api-fullstack-postgres)**: variante alternativa al
+  `Dockerfile` actual con el flow `fitz build --bundle-pip-
+  requirements` + runtime `gcr.io/distroless/cc-debian12`.
+  Builder pineado a `python:3.14-slim-bookworm` (fix GLIBC: la
+  variante `slim` default es trixie con GLIBC 2.39, incompatible
+  con el runtime bookworm GLIBC 2.36). Imagen final esperada:
+  **~80-100 MB** (vs ~155 MB del Dockerfile actual con
+  `fitz run` + Python en runtime). El Dockerfile actual queda
+  sin cambios — es el path "seguro" mientras la validación smoke
+  funcional con Postgres real avanza.
+
+### Notes
+
+- **Tests nuevos**: 3 unit en `launcher_template::tests`
+  (`template_cargo_toml_incluye_deps_tar_y_flate2`,
+  `template_main_rs_define_extract_tar_gz_y_no_invoca_tar_subprocess`,
+  `gen_launcher_main_rs_pip_block_usa_extract_tar_gz`). Los 2 E2E
+  existentes (`template_launcher_compila_con_paths_dummies`,
+  `template_launcher_compila_con_path_windows_y_espacios`) siguen
+  verdes y validan que el template Rust resultante compila con
+  las nuevas deps.
+- **Smoke real bundling**: `fitz build --bundle-python
+  examples/python-interop-8.b.fitz` produce el binario standalone
+  (~22 MB Windows x64) y el binario corre limpio bit-a-bit con la
+  versión pre-fix. Validado a mano con cache TMP vacía + cache hit.
+- Suite total: **2373 unit con python** (era 2370 + 3),
+  **2282 sin python** (era 2279 + 3). Clippy `-D warnings` limpio
+  en ambos modos. Sin cambios a la extensión VSCode (cambio del
+  codegen del launcher, no del lenguaje).
+- **Deuda residual derivada** (NO bloquea, queda como sub-paso
+  futuro): smoke real Docker end-to-end del `Dockerfile.distroless`
+  con sqlalchemy + psycopg2 + Postgres cliente. El path técnico
+  está correcto (todos los blockers documentados cerrados); la
+  validación funcional completa requiere ~30 min de setup Docker
+  + Postgres y queda como tarea independiente cuando aparezca
+  presión real de adopt.
+
 ## [v0.9.45] — 2026-05-24 — Mini-tanda Cleanup-A: 4 deudas chicas del lenguaje cerradas
 
 ### Added

@@ -97,6 +97,25 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{exit, Command};
 
+/// v0.9.46 — Extracción de tar.gz en memoria sin invocar subprocess
+/// del sistema. Habilita runtimes minimalistas estilo distroless
+/// (`gcr.io/distroless/cc-debian12` ~22 MB base) que NO traen
+/// utilidades de shell. Pre-fix la extracción era subprocess y el
+/// runtime mínimo viable era `debian:bookworm-slim` (~85 MB base).
+/// `tar` crate + `flate2` suman ~80-100 KB al binario final del
+/// launcher (LTO + strip activos en release).
+fn extract_tar_gz(tarball_path: &Path, dest: &Path) -> std::io::Result<()> {
+    let f = fs::File::open(tarball_path)?;
+    let gz = flate2::read::GzDecoder::new(f);
+    let mut archive = tar::Archive::new(gz);
+    // `unpack` valida paths: rechaza absolutos y `../` que escapen
+    // del dest (CVE protection del crate `tar`). El PBS y los pip
+    // tarballs son trusted (generados por `fitz build`), pero el
+    // chequeo defensivo no daña.
+    archive.unpack(dest)?;
+    Ok(())
+}
+
 const PBS_TARBALL: &[u8] = include_bytes!("__FITZ_REPLACE_PBS_TARBALL_PATH__");
 const REAL_BINARY: &[u8] = include_bytes!("__FITZ_REPLACE_REAL_BINARY_PATH__");
 const TARBALL_HASH: &str = "__FITZ_REPLACE_TARBALL_HASH__";
@@ -164,21 +183,15 @@ fn ensure_extracted() -> std::io::Result<PathBuf> {
     let tarball_path = tmp.join("__fitz_pbs.tar.gz");
     fs::write(&tarball_path, PBS_TARBALL)?;
 
-    let tar_status = Command::new("tar")
-        .args([
-            "-xzf",
-            &tarball_path.to_string_lossy(),
-            "-C",
-            &tmp.to_string_lossy(),
-        ])
-        .status()?;
-
-    if !tar_status.success() {
-        return Err(std::io::Error::new(
+    // v0.9.46 — extract via crates `tar` + `flate2` inline (sin
+    // subprocess `tar`). Habilita runtimes minimalistas estilo
+    // distroless que NO traen `tar` ni shell.
+    extract_tar_gz(&tarball_path, &tmp).map_err(|e| {
+        std::io::Error::new(
             std::io::ErrorKind::Other,
-            "tar extraction failed",
-        ));
-    }
+            format!("PBS tar extraction failed: {e}"),
+        )
+    })?;
 
     let _ = fs::remove_file(&tarball_path);
 __FITZ_REPLACE_PIP_EXTRACT_BLOCK__
@@ -236,6 +249,15 @@ edition = "2021"
 [[bin]]
 name = "__FITZ_REPLACE_BIN_NAME__"
 path = "src/main.rs"
+
+# v0.9.46 — Deps para extraer tar.gz embebido sin subprocess `tar`.
+# Habilita `gcr.io/distroless/cc-debian12` como runtime (~22 MB base
+# vs ~85 MB de `debian:bookworm-slim` que era requisito por la
+# dependencia de `tar` nativo). Costo: ~80-100 KB sumados al binario
+# final del launcher con LTO + strip activos.
+[dependencies]
+tar = "0.4"
+flate2 = "1"
 
 [profile.release]
 opt-level = "z"
@@ -300,40 +322,26 @@ pub fn gen_launcher_main_rs(
                     if !sp.exists() {
                         fs::create_dir_all(&sp)?;
                     }
-                    let tar_status = Command::new("tar")
-                        .args([
-                            "-xzf",
-                            &pip_tarball_path.to_string_lossy(),
-                            "-C",
-                            &sp.to_string_lossy(),
-                        ])
-                        .status()?;
-                    if !tar_status.success() {
-                        return Err(std::io::Error::new(
+                    // v0.9.46 — extract via tar+flate2 inline (sin subprocess).
+                    extract_tar_gz(&pip_tarball_path, &sp).map_err(|e| {
+                        std::io::Error::new(
                             std::io::ErrorKind::Other,
-                            "pip packages tar extraction failed",
-                        ));
-                    }
+                            format!("pip packages tar extraction failed: {e}"),
+                        )
+                    })?;
                     break;
                 }
             }
         }
     } else {
         // Windows: python/Lib/site-packages/ ya existe en el PBS.
-        let tar_status = Command::new("tar")
-            .args([
-                "-xzf",
-                &pip_tarball_path.to_string_lossy(),
-                "-C",
-                &site_packages.to_string_lossy(),
-            ])
-            .status()?;
-        if !tar_status.success() {
-            return Err(std::io::Error::new(
+        // v0.9.46 — extract via tar+flate2 inline (sin subprocess).
+        extract_tar_gz(&pip_tarball_path, &site_packages).map_err(|e| {
+            std::io::Error::new(
                 std::io::ErrorKind::Other,
-                "pip packages tar extraction failed",
-            ));
-        }
+                format!("pip packages tar extraction failed: {e}"),
+            )
+        })?;
     }
     let _ = fs::remove_file(&pip_tarball_path);"#
                 .to_string(),
@@ -415,6 +423,58 @@ mod tests {
     #[test]
     fn template_cargo_toml_contiene_bin_name_placeholder() {
         assert!(LAUNCHER_CARGO_TOML_TEMPLATE.contains(PLACEHOLDER_BIN_NAME));
+    }
+
+    // ---- v0.9.46 distroless-tar-embedded ----
+
+    #[test]
+    fn template_cargo_toml_incluye_deps_tar_y_flate2() {
+        // El launcher precisa `tar` + `flate2` para extraer el PBS
+        // (y opcionalmente el pip tarball) sin invocar el binario
+        // `tar` del sistema. Habilita runtimes minimalistas distroless.
+        assert!(
+            LAUNCHER_CARGO_TOML_TEMPLATE.contains("tar = \"0.4\""),
+            "Cargo.toml del launcher debe declarar `tar = \"0.4\"`"
+        );
+        assert!(
+            LAUNCHER_CARGO_TOML_TEMPLATE.contains("flate2 = \"1\""),
+            "Cargo.toml del launcher debe declarar `flate2 = \"1\"`"
+        );
+    }
+
+    #[test]
+    fn template_main_rs_define_extract_tar_gz_y_no_invoca_tar_subprocess() {
+        // El helper debe existir.
+        assert!(
+            LAUNCHER_MAIN_RS_TEMPLATE.contains("fn extract_tar_gz"),
+            "template debe definir `fn extract_tar_gz`"
+        );
+        // Y NO debe quedar ningún `Command::new("tar")` — ese era el
+        // patrón pre-fix que rompía en distroless.
+        assert!(
+            !LAUNCHER_MAIN_RS_TEMPLATE.contains("Command::new(\"tar\")"),
+            "template NO debe invocar `Command::new(\"tar\")` (subprocess fallaría en distroless)"
+        );
+    }
+
+    #[test]
+    fn gen_launcher_main_rs_pip_block_usa_extract_tar_gz() {
+        // Cuando hay pip embebido, el bloque inyectado debe usar el
+        // helper Rust nativo, no subprocess.
+        let result = gen_launcher_main_rs(
+            "/tmp/pbs.tar.gz",
+            "/tmp/fitz-real",
+            "abc123",
+            Some("/tmp/pip_packages.tar.gz"),
+        );
+        assert!(
+            result.contains("extract_tar_gz(&pip_tarball_path"),
+            "bloque pip debe invocar `extract_tar_gz` para extraer el tarball pip"
+        );
+        assert!(
+            !result.contains("Command::new(\"tar\")"),
+            "bloque pip NO debe invocar `Command::new(\"tar\")`"
+        );
     }
 
     #[test]
