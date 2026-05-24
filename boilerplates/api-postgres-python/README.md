@@ -374,20 +374,30 @@ service `api` del compose.
   **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)** +
   **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
   el flag empaqueta paquetes pip junto al CPython base en un
-  binario standalone. **Smoke real Docker corrido en v0.9.42 reveló
-  3 blockers que bloquean simplificar ESTE boilerplate adoptándolo**:
+  binario standalone. **Blocker #1 (rechazo del codegen 8.7.1
+  transitiva) CERRADO en v0.9.43** (2026-05-23) — pero el smoke
+  end-to-end reveló una sub-deuda adicional (1.5) que sigue
+  bloqueando. Quedan 3 issues:
 
-  1. **Deuda del codegen Fase 8.7.1 — `from python import` en
-     módulos transitivos NO soportado**. Este boilerplate usa
-     `from python import db` adentro de `src/data/users.fitz`
-     (módulo transitivo del main). El codegen aborta con error
-     claro: `el módulo "data.users" usa "from python import ...":
-     imports Python dentro de módulos transitivos no se soportan
-     todavía`. Workaround documentado: poner el `from python
-     import` en el main. Refactorear el boilerplate para satisfacer
-     ese constraint es invasivo (rompe la separation of concerns
-     donde el data layer encapsula el wrapper Python). Esta deuda
-     del codegen tiene que cerrar primero.
+  1. ~~**Rechazo del codegen — `from python import` en módulos
+     transitivos NO soportado**~~ **CERRADO en v0.9.43**.
+     Cada módulo puede declarar sus propios imports Python; el
+     codegen reusa los helpers del preludio Python del crate root
+     via `use crate::__fitz_py_*` y emite statics + getters
+     locales. `src/data/users.fitz` mantiene `from python import db`
+     adentro sin refactor.
+  1.5. **Sub-deuda derivada de Fase 8 — coerción Python `dict
+     → Instance<T>` y `list → List<T>` en `fitz build` para
+     tipos `T` importados de otro módulo**. Al pasar el rechazo
+     del 1, el smoke real del boilerplate dispara errores del
+     tipo `cannot find function __fitz_py_to_instance_User in
+     this scope` cuando el data layer hace `let u: User = ...?`.
+     Los helpers tipa-específicos solo se emiten para tipos
+     definidos en el main; tipos importados (como `User` desde
+     `types/user.fitz`) no los heredan. Esta deuda ya está
+     documentada en el roadmap como "coerción Python list/dict
+     → Fitz List/Map/Instance en `fitz build`" y es la próxima
+     prioridad concreta para destrabar los boilerplates.
   2. **GLIBC mismatch entre `python:3.14-slim` (trixie, GLIBC
      2.39) y `debian:bookworm-slim` (GLIBC 2.36)**. El binario
      linkea contra GLIBC del builder y crashea en runtime con
@@ -404,7 +414,8 @@ service `api` del compose.
      Python, sin libpq instalados) más que como argumento de
      deploy size.
 
-  Cuando los 3 blockers cierren, el reemplazo del Dockerfile
+  Cuando los 2 caveats restantes se resuelvan (fix GLIBC trivial,
+  el de tamaño es solo expectativa), el reemplazo del Dockerfile
   sería más o menos:
 
   ```dockerfile
@@ -423,8 +434,8 @@ service `api` del compose.
   COPY fitz.toml requirements.txt ./
   COPY src/ ./src/
   COPY python/ ./python/
-  # Requiere: refactor de data/users.fitz subiendo `from python
-  # import db` al main (deuda del codegen Fase 8.7.1).
+  # `from python import db` puede vivir adentro de `data/users.fitz`
+  # — Fase 8.7.1 transitiva CERRADA en v0.9.43, sin refactor.
   RUN fitz build --bundle-pip-requirements requirements.txt
 
   # Stage 2: runtime debian-slim (NO distroless: el launcher de
@@ -451,9 +462,12 @@ service `api` del compose.
   **El smoke alternativo en v0.9.42 con un programa flat (solo
   `from python import` en main, sin módulos transitivos) corrió
   end-to-end OK** — el flow `--bundle-pip-requirements` está
-  validado para programas con estructura simple. Cuando cierre
-  la deuda del codegen + se refactorize este boilerplate, está
-  listo para adoptarlo.
+  validado para programas con estructura simple. **Con el
+  rechazo de 8.7.1 transitiva CERRADO en v0.9.43**, el `fitz
+  build` del boilerplate avanza más lejos en el pipeline pero
+  ahora dispara la sub-deuda 1.5 (coerción `__fitz_py_to_*` para
+  tipos importados). El cierre de esa sub-deuda es la próxima
+  prioridad concreta para destrabar el adopt real.
 - **Auto-generar `types/user.fitz` con `fitz py-types`**: hoy
   está hardcoded. Sumar un step `fitz py-types python/models.py
   --out src/types/user.fitz` en el Dockerfile para regenerarlo

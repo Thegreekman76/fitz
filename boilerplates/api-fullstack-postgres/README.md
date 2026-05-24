@@ -497,29 +497,37 @@ del proyecto Fitz.
 - **`fitz build --bundle-python` (Fase 8.b cerrada 2026-05-23)** +
   **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)** +
   **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
-  el flag empaqueta paquetes pip junto al CPython base. Este
-  boilerplate **comparte los mismos 3 blockers identificados en
-  el smoke real Docker** que el hermano `api-postgres-python`
-  (detalle completo en su README):
+  el flag empaqueta paquetes pip junto al CPython base. **Blocker
+  #1 (rechazo del codegen 8.7.1 transitiva) CERRADO en v0.9.43**.
+  Quedan 3 issues (sub-deuda 1.5 emergió al pasar el rechazo
+  original — detalle completo en el README del boilerplate
+  hermano `api-postgres-python`):
 
-  1. Deuda del codegen Fase 8.7.1 — `from python import` en
-     módulos transitivos NO soportado. Este boilerplate también
-     usa `from python import db` en `src/data/tasks.fitz`.
+  1. ~~Rechazo del codegen — `from python import` en módulos
+     transitivos NO soportado~~ **CERRADO en v0.9.43**.
+     `src/data/tasks.fitz` mantiene `from python import db`
+     adentro sin refactor.
+  1.5. **Sub-deuda derivada de Fase 8 — coerción Python `dict
+     → Instance<T>` y `list → List<T>` en `fitz build` para
+     tipos `T` importados** (ver README hermano para detalle).
+     Es la próxima prioridad concreta para destrabar el adopt.
   2. GLIBC mismatch builder/runtime — fix con
      `python:3.14-slim-bookworm`.
   3. Beneficio real ~10-20 MB (no 50-70 MB) — argumento queda
      como simplificación de runtime, no como ahorro de deploy size.
 
-  Cuando esos 3 blockers cierren + se refactorize este boilerplate,
-  el plan concreto del Dockerfile está documentado en el README
-  del boilerplate hermano y aplica idéntico acá (cambia solo el
-  nombre del binario: `fitz-api-fullstack-postgres`).
+  El plan concreto del Dockerfile está documentado en el README
+  del boilerplate hermano `api-postgres-python` y aplica idéntico
+  acá (cambia solo el nombre del binario:
+  `fitz-api-fullstack-postgres`).
 
   **El smoke alternativo en v0.9.42 con un programa flat** (solo
   `from python import` en main, sin módulos transitivos) corrió
   end-to-end OK — el flow está validado para programas con
-  estructura simple. Este boilerplate (multi-archivo con data
-  layer separado) NO se puede adoptar hoy.
+  estructura simple. **Con el rechazo de 8.7.1 transitiva CERRADO
+  en v0.9.43**, el `fitz build` de este boilerplate avanza más
+  lejos en el pipeline pero ahora dispara la sub-deuda 1.5
+  (coerción `__fitz_py_to_*` para tipos importados).
 - **DB nativa Fitz (Fase 10)**: reemplazo de la layer Python
   cuando llegue. Mismo API HTTP + mismo frontend, sin interop
   ni `requirements.txt`.

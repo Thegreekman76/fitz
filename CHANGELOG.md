@@ -61,6 +61,104 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.43] — 2026-05-23 — Cierre deuda codegen 8.7.1: `from python import` en módulos transitivos
+
+### Added
+
+- **Codegen — `from python import` adentro de módulos Fitz
+  transitivos**. Cierre de la deuda residual de Fase 8.7.1
+  documentada al cerrar la fase ("imports Python adentro de
+  módulos transitivos no se soportan todavía. Workaround: poné el
+  `from python import` en el main"). Cada módulo puede declarar
+  sus propios imports Python sin obligar al main a participar.
+  Patrón canónico: librerías Fitz que delegan operaciones a Python
+  (numpy/scipy/sqlalchemy/redis-py) sin filtrar el detalle a quien
+  las usa.
+
+  Implementación:
+  - `LoadedModule` gana `python_imports: Vec<PythonImport>`.
+  - `ModuleLoader::load_module_inner` recolecta los imports
+    Python del módulo con `collect_python_imports` antes del loop
+    de procesado de imports Fitz.
+  - `generate_module_rs_with_bindings` recibe los python_imports
+    como nuevo parámetro, llama a `install_python_bindings`,
+    emite `use crate::{__FitzPyObject, __fitz_py_*}` (reusa los
+    helpers del preludio Python del crate root) y emite sus
+    propios statics + getters locales con
+    `emit_python_bindings_top_level`.
+  - Nuevo método `emit_module_python_use_decls` orquesta los
+    `use crate::__fitz_py_*` que el módulo necesita; gated por
+    `uses_async` para `__fitz_py_invoke_await`/`__fitz_py_await_obj`.
+  - Los helpers del preludio Python pasan de `fn` a `pub(crate)
+    fn` (`__fitz_py_import`, `__fitz_py_get_attr_obj`,
+    `__fitz_py_extract_*`, `__fitz_py_err_to_string`,
+    `__fitz_py_invoke`, `__fitz_py_marshal_map_key`,
+    `__fitz_py_invoke_await`, `__fitz_py_await_obj`,
+    `__fitz_py_to_list_*`) para ser accesibles desde módulos
+    del crate generado. El prefix `__` mantiene la convención de
+    privacidad visual.
+  - `uses_python` global = `main OR cualquier módulo transitivo`.
+    Si solo módulos transitivos usan Python, el main igual emite
+    el preludio entero (los `use crate::__fitz_py_*` lo requieren)
+    y Cargo.toml suma pyo3 igual.
+
+  pyo3 cachea via `sys.modules`, así que dos módulos importando
+  el mismo módulo Python (`from python import math` en main y en
+  utils) no pagan doble inicialización — solo el OnceLock
+  duplicado (casi cero overhead real).
+
+  6 tests nuevos cubren el comportamiento (5 unit + 1 E2E con
+  feature `python`): no falla cuando antes fallaba, emite
+  `use crate::__fitz_py_*` + statics locales en el módulo, main
+  emite preludio + Cargo.toml suma pyo3 cuando solo módulos
+  transitivos usan Python, y `fase_8_7_1_transitiva_build_from_
+  python_en_modulo_compila_y_corre` valida el caso completo
+  end-to-end (programa con `pymath.fitz` que importa
+  `python.math`, main que lo importa, paridad bit-a-bit
+  `fitz run` ↔ `fitz build`).
+
+  Ejemplo runnable nuevo:
+  [examples/python-interop-modular.fitz](examples/python-interop-modular.fitz)
+  + [examples/python_math_utils.fitz](examples/python_math_utils.fitz)
+  (validado a mano: `área(r=2) = 12.566370614359172`,
+  `sqrt(16) = 4.0`, `sqrt(-1) → ValueError: ...`).
+
+### Changed
+
+- **Guía cap 16 (Módulos) — `from python import` transitivo**:
+  la sección "Detalles del loader" pasa de listar la restricción
+  como deuda a documentar el patrón canónico con pointer al
+  ejemplo runnable.
+- **Guía cap 21.10 (Interop Python en `fitz build`)**: sumada
+  nota explícita sobre el caso transitivo.
+- **READMEs de los boilerplates 5 (api-postgres-python) y 6
+  (api-fullstack-postgres)**: blocker #1 (rechazo del codegen
+  transitiva) marcado como CERRADO. Smoke real del boilerplate 5
+  con `fitz build` reveló que la coerción `dict → Instance<T>` y
+  `list → List<T>` para tipos `T` importados (helpers
+  `__fitz_py_to_instance_T`/`__fitz_py_to_list_T` que hoy solo
+  se emiten para tipos del main) es la próxima sub-deuda concreta
+  para destrabar el adopt — documentada como blocker #1.5 en
+  ambos READMEs. Ya estaba mencionada en el roadmap como deuda
+  residual derivada de Fase 8.
+
+### Notes
+
+- **Smoke validado**: `cargo test --lib --features python` →
+  2359 unit (+5 nuevos) sin regresiones; `cargo test --test
+  compile_e2e fase_8_7_1_transitiva --features python` → 1 E2E
+  nuevo OK; smoke `GUIDE_EXAMPLES_COMPILE` (sin feature python)
+  → verde. Clippy `-D warnings` limpio. Sin cambios a la
+  extensión VSCode (no se introduce sintaxis nueva — solo se
+  levanta una restricción semántica del codegen).
+- **Deuda residual derivada**: la coerción `__fitz_py_to_*_T`
+  para tipos importados (blocker #1.5 de los boilerplates 5/6)
+  queda como próxima prioridad concreta para destrabar el adopt
+  real del flow `--bundle-pip-requirements` en proyectos con
+  data layer separado. NO bloquea el caso de `fitz build` con
+  programas simples donde el binding del tipo retornado por
+  Python vive en el mismo archivo o solo es PyAny opaco.
+
 ## [v0.9.42] — 2026-05-23 — Cosecha 8.c + cache key del pip_packages tarball + smoke real Docker + VSCode drift audit
 
 Release consolida cuatro piezas trabajadas en sesiones

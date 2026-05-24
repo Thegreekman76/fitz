@@ -6382,9 +6382,16 @@ Detalles del loader:
   -> ...\a.fitz` (paralelo bit-a-bit al evaluator).
 - **Cache compartida**: si dos módulos transitivos importan el
   mismo archivo, se carga una sola vez.
-- **`from python import` adentro de módulos transitivos no se
-  soporta todavía**: tiene que estar en el main. Workaround si
-  hace falta: re-exportar la fachada desde el main.
+- **`from python import` adentro de módulos transitivos sí se
+  soporta**: cada módulo puede declarar sus propios imports Python
+  sin obligar al main a participar. El codegen reusa los helpers
+  del preludio Python del crate root via `use crate::__fitz_py_*`
+  y emite statics + getters locales por módulo (pyo3 cachea via
+  `sys.modules`, así que el OnceLock duplicado es cero overhead
+  real). Patrón canónico: librerías Fitz que delegan operaciones a
+  Python (numpy/scipy/sqlalchemy/redis-py) sin filtrar el detalle
+  a quien las usa. Ver
+  [examples/python-interop-modular.fitz](../examples/python-interop-modular.fitz).
 
 ### Qué no se puede hacer todavía
 
@@ -8479,6 +8486,17 @@ filas como instancias Fitz tipadas, usá `fitz run` por ahora.
 `fitz build` cubre handlers HTTP CRUD si no necesitás esa
 coerción (pasar dict opaco al cliente vía `serde_json` también
 funciona).
+
+**`from python import` en módulos transitivos**: soportado.
+Cada `.fitz` puede declarar sus propios imports Python sin
+obligar al main a participar. El codegen reusa los helpers del
+preludio Python del crate root via `use crate::__fitz_py_*` y
+emite statics + getters locales por módulo. Útil para librerías
+Fitz que delegan a Python (sqlalchemy/numpy/redis-py) y quieren
+encapsular el detalle. Ver
+[examples/python-interop-modular.fitz](../examples/python-interop-modular.fitz)
++ [examples/python_math_utils.fitz](../examples/python_math_utils.fitz)
+para el patrón canónico.
 
 Para producir un binario que NO requiera Python en el destino
 (realmente standalone), usá `--bundle-python` — sección siguiente.

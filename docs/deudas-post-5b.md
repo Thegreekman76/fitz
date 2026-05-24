@@ -1109,14 +1109,26 @@
 > Docker** (NO bloquea uso real del lenguaje; ver detalle en
 > CHANGELOG):
 >
-> - **Codegen Fase 8.7.1 — `from python import` en módulos
->   transitivos**: pasó de deuda menor genérica a blocker
->   explícito de los boilerplates 5/6. Bloquea su
->   simplificación a `--bundle-pip-requirements` + binario
->   standalone. Workaround del codegen: poner el `from python
->   import` en el main (implica refactor invasivo del
->   boilerplate). Cuando cierre + se refactorize, los
->   Dockerfiles 5/6 pueden adoptar el flow.
+> - ~~**Codegen Fase 8.7.1 — `from python import` en módulos
+>   transitivos**~~ ✓ **CERRADO 2026-05-23 (v0.9.43)**. Cada
+>   módulo puede declarar sus propios imports Python sin obligar
+>   al main a participar. El codegen reusa los helpers del
+>   preludio Python del crate root via `use crate::__fitz_py_*`
+>   y emite statics + getters locales por módulo (pyo3 cachea
+>   via `sys.modules`, así que el OnceLock duplicado es cero
+>   overhead real). 6 tests nuevos (5 unit + 1 E2E), ejemplo
+>   runnable `examples/python-interop-modular.fitz` +
+>   `examples/python_math_utils.fitz` validado bit-a-bit
+>   `fitz run` ↔ `fitz build`. Sin cambios a la extensión
+>   VSCode (no se introduce sintaxis nueva). Smoke real del
+>   boilerplate 5 con `fitz build` post-fix avanza más lejos
+>   en el pipeline pero revela una **sub-deuda 1.5**: coerción
+>   `__fitz_py_to_instance_T`/`__fitz_py_to_list_T` para tipos
+>   `T` importados (helpers solo se emiten para tipos del main).
+>   Es la próxima prioridad concreta para destrabar el adopt
+>   real de los boilerplates al flow `--bundle-pip-requirements`
+>   — ya estaba documentada en este archivo como deuda residual
+>   derivada de Fase 8.
 > - **GLIBC mismatch builder/runtime**: fix con
 >   `python:3.14-slim-bookworm` (Debian bookworm-aligned).
 >   Documentado en los READMEs.

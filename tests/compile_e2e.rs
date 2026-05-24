@@ -3395,6 +3395,42 @@ fn fase_8_7_3_build_pipeline_con_multiples_awaits() {
     assert_eq!(stdout.trim(), "result = 122");
 }
 
+// ---- Fase 8.7.1 transitiva: `from python import` en módulos ----
+//
+// Pre-fix (deuda residual de Fase 8.7): el codegen rechazaba `from
+// python import` adentro de módulos Fitz transitivos con error
+// explícito. El workaround documentado era poner los imports Python
+// en el main. Post-fix: cada módulo emite sus propios statics +
+// getters locales y reusa los helpers del preludio Python del crate
+// root via `use crate::__fitz_py_*`.
+//
+// Smoke E2E: programa con `main.fitz` + `pymath.fitz`. El módulo
+// transitivo importa `python.math` y expone una fn `area(r)` que
+// calcula `π * r²`. El main no tiene contacto con Python directo —
+// solo usa la fn del módulo. El binario standalone corre y produce
+// el resultado esperado bit-a-bit con `fitz run`.
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_1_transitiva_build_from_python_en_modulo_compila_y_corre() {
+    let main_src = "from pymath import area\n\
+                    let a: Float = area(2.0)\n\
+                    print(\"area = {a}\")\n";
+    let pymath_src = "from python import math\n\
+                      fn area(r: Float) -> Float {\n  \
+                          let pi: Float = math.pi\n  \
+                          return pi * r * r\n\
+                      }\n";
+    let (stdout, exit) = build_and_run_multi(
+        "fase_8_7_1_transitiva_pymath",
+        main_src,
+        &[("pymath.fitz", pymath_src)],
+    );
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    // π * 2² = 12.566370614359172 (15 dígitos del math.pi de Python).
+    assert_eq!(stdout.trim(), "area = 12.566370614359172");
+}
+
 // ---- Mini-tanda C — list comprehensions ----
 
 #[test]

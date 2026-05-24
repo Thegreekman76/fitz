@@ -1,0 +1,50 @@
+// examples/python-interop-modular.fitz — Fase 8.7.1 transitiva:
+// `from python import` adentro de un módulo Fitz.
+//
+//   # con `fitz run` (intérprete con feature `python`):
+//   cargo run --features python -- run examples/python-interop-modular.fitz
+//
+//   # con `fitz build` (binario nativo standalone + pyo3 linkeado):
+//   cargo run --features python -- build examples/python-interop-modular.fitz
+//   ./examples/python-interop-modular
+//
+// Necesita Python 3.10+ disponible en el sistema (`PYO3_PYTHON` o
+// `python3` en PATH).
+//
+// Pre-fix (deuda residual de Fase 8.7): el codegen rechazaba
+// `from python import` dentro de módulos transitivos con error
+// explícito; el workaround documentado era poner los imports
+// Python en el main. Eso obligaba a que cualquier librería Fitz
+// que usara Python internamente filtrara el detalle a sus usuarios.
+//
+// Post-fix: cada módulo emite sus propios statics + getters locales
+// y reusa los helpers del preludio Python del crate root via
+// `use crate::__fitz_py_*`. El main de ESTE programa no tiene
+// `from python import` — solo importa fns regulares del módulo
+// `python_math_utils`, y el detalle Python queda encapsulado.
+//
+// Boilerplates 5/6 (api-postgres-python, api-fullstack-postgres)
+// son el caso de uso real que destraba esto: pueden importar
+// sqlalchemy/asyncio dentro de su módulo de DB sin que main.fitz
+// vea el detalle.
+
+from python_math_utils import area, safe_sqrt
+
+// 1. Constante geométrica via módulo: `area(r)` adentro hace
+//    `math.pi * r * r`. El main no sabe que toca Python.
+let a: Float = area(2.0)
+print("área(r=2) = {a}")
+
+// 2. Llamada que puede fallar: `safe_sqrt(-1)` devuelve Err(ValueError)
+//    propagado por el módulo. Acá lo destranclamos con match.
+let raw1 = safe_sqrt(16.0)
+match raw1 {
+  Ok(v) => print("sqrt(16) = {v}"),
+  Err(e) => print("err: {e}")
+}
+
+let raw2 = safe_sqrt(-1.0)
+match raw2 {
+  Ok(v) => print("sqrt(-1) = {v}"),
+  Err(e) => print("sqrt(-1) → {e}")
+}

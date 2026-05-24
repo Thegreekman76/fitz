@@ -4156,19 +4156,27 @@ requests
   `/version` devuelve `"2.34.2"` (versión de `requests`) sin
   Python en el runtime. **3 blockers descubiertos** en el path
   de los boilerplates originales (5/6) que bloquean su
-  simplificación directa: (a) **deuda del codegen Fase 8.7.1**
-  rechaza `from python import` en módulos transitivos —
-  boilerplates usan `from python import db` en
-  `src/data/*.fitz` y abortan con error claro; (b) **GLIBC
-  mismatch** entre `python:3.14-slim` (trixie 2.39) y
-  `debian:bookworm-slim` (2.36) → fix pinear builder a
-  `python:3.14-slim-bookworm`; (c) **beneficio real ~10-20 MB
-  de imagen** (no 50-70 MB del plan original) — binario
-  embedded con CPython pesa ~37 MB que compensa el ahorro de
-  no tener Python en runtime. Dockerfiles de boilerplates 5/6
-  NO simplificados — quedan con `python:3.12-slim` + `fitz
-  run`. READMEs actualizados con los 3 blockers y plan
-  concreto para cuando cierren.
+  simplificación directa: (a) ~~**deuda del codegen Fase 8.7.1**
+  rechaza `from python import` en módulos transitivos~~ ✓
+  **CERRADO 2026-05-23 (v0.9.43)** — el codegen reusa los helpers
+  del preludio Python del crate root via `use crate::__fitz_py_*`
+  y emite statics + getters locales por módulo. Smoke real del
+  boilerplate 5 con `fitz build` post-fix avanza más lejos en el
+  pipeline pero revela una **sub-deuda 1.5**: coerción
+  `__fitz_py_to_instance_T`/`__fitz_py_to_list_T` para tipos `T`
+  importados (los helpers tipa-específicos solo se emiten para
+  tipos del main; tipos importados no los heredan). Es la
+  próxima prioridad concreta para destrabar el adopt — ya estaba
+  documentada en este roadmap como deuda residual derivada de
+  Fase 8; (b) **GLIBC mismatch** entre `python:3.14-slim`
+  (trixie 2.39) y `debian:bookworm-slim` (2.36) → fix pinear
+  builder a `python:3.14-slim-bookworm`; (c) **beneficio real
+  ~10-20 MB de imagen** (no 50-70 MB del plan original) —
+  binario embedded con CPython pesa ~37 MB que compensa el
+  ahorro de no tener Python en runtime. Dockerfiles de
+  boilerplates 5/6 NO simplificados — quedan con
+  `python:3.12-slim` + `fitz run`. READMEs actualizados con el
+  estado de los blockers + sub-deuda 1.5 emergente.
 - **Constraint Linux/macOS heredado**: builder requiere Python
   3.14.x (R.bug-pyo3-abi3-portable-link componente Linux/macOS
   pendiente). Cuando cierre, `--bundle-pip` es independiente

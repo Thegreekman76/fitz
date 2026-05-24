@@ -143,7 +143,13 @@ pub fn generate_project(
     // `__FitzPyObject` + helpers, suma `pyo3` con `abi3-py310` +
     // `auto-initialize` al Cargo.toml. Los programas sin
     // `from python import` no pagan el costo de bajar/linkear pyo3.
-    let uses_python = !python_imports.is_empty();
+    //
+    // Fase 8.7.1 transitiva — `uses_python` global = main OR cualquier
+    // módulo cargado. Si solo módulos transitivos usan Python, el main
+    // igual emite el preludio para que los `use crate::__fitz_py_*` de
+    // los módulos resuelvan, y el Cargo.toml suma pyo3 igual.
+    let uses_python = !python_imports.is_empty()
+        || loader.modules.iter().any(|m| !m.python_imports.is_empty());
 
     // Fase 9.w.1.d — auth nativa. Habilita el preludio de helpers
     // `__fitz_jwt_*` / `__fitz_hash_*` y suma `jsonwebtoken` + `argon2`
@@ -1776,6 +1782,16 @@ struct LoadedModule {
     /// `from foo import User` + `u.greet()` falla en `fitz build` con
     /// "el tipo `User` no tiene un método llamado `greet`".
     type_methods: HashMap<String, Vec<crate::ast::MethodDef>>,
+    /// Fase 8.7.1 transitiva — imports Python que el módulo declaró
+    /// (`from python import math`, `import python.os.path`, etc.).
+    /// El codegen del módulo emite sus propios statics + getters
+    /// locales (`__FITZ_PY_BIND_MATH` + `fn __fitz_py_bind_math()`)
+    /// y los referencia desde las expresiones del módulo. Los
+    /// helpers del preludio Python (`__fitz_py_import`,
+    /// `__fitz_py_get_attr_obj`, etc.) viven en el main del crate
+    /// y se importan vía `use crate::{...}`. Vacío para módulos
+    /// sin imports Python.
+    python_imports: Vec<PythonImport>,
 }
 
 /// Binding visible en el archivo importer. Producido por el loader
@@ -1998,28 +2014,28 @@ impl ModuleLoader {
         // del módulo, resolvemos cada `Stmt::Import` / `Stmt::FromImport`
         // del módulo y armamos su tabla de bindings locales. Si alguno
         // dispara un ciclo, `load_module` lo detecta vía `loading_stack`.
-        // Imports Python adentro de módulos transitivos: NO soportados
-        // todavía (deuda residual menor — se rechaza explícito).
+        //
+        // Fase 8.7.1 transitiva — los `from python import` adentro de
+        // módulos se separan acá con `collect_python_imports` (igual
+        // que el main en `generate_project`). El loader NO baja a
+        // disco para ellos; el codegen del módulo emite sus propios
+        // statics + getters locales y referencia los helpers del
+        // preludio Python del crate root via `use crate::__fitz_py_*`.
+        let module_python_imports = collect_python_imports(&module_program);
+        validate_python_imports_for_codegen(&module_program)?;
         let mut local_bindings: HashMap<String, ResolvedBinding> = HashMap::new();
         for stmt in &module_program {
             match stmt {
                 Stmt::Import { path, .. } if path.first().map(|s| s.as_str()) == Some("python") => {
-                    return Err(loader_err(format!(
-                        "el módulo `{}` usa `from python import ...`: imports Python \
-                         dentro de módulos transitivos no se soportan todavía. \
-                         Workaround: poné el `from python import` en el main.",
-                        segments.join(".")
-                    )));
+                    // Fase 8.7.1 transitiva — ya recolectado arriba en
+                    // `module_python_imports`; skip acá para no caer al
+                    // arm `Stmt::Import` que haría `self.load_module(...)`
+                    // sobre un path Python (que no es archivo en disk).
                 }
                 Stmt::FromImport { path, .. }
                     if path.first().map(|s| s.as_str()) == Some("python") =>
                 {
-                    return Err(loader_err(format!(
-                        "el módulo `{}` usa `from python import ...`: imports Python \
-                         dentro de módulos transitivos no se soportan todavía. \
-                         Workaround: poné el `from python import` en el main.",
-                        segments.join(".")
-                    )));
+                    // Idem — recolectado arriba.
                 }
                 Stmt::Import {
                     path: nested,
@@ -2062,11 +2078,15 @@ impl ModuleLoader {
         // codegen recibe los bindings locales + las firmas de todos los
         // módulos ya cargados, así puede emitir `use crate::<other>::...`
         // y resolver expresiones cross-module adentro del módulo.
+        // Fase 8.7.1 transitiva — además se pasan los imports Python
+        // detectados arriba para que el módulo emita statics + getters
+        // locales y los `use crate::__fitz_py_*` necesarios.
         let rust_content = generate_module_rs_with_bindings(
             &module_program,
             &module_env,
             &local_bindings,
             &self.modules,
+            &module_python_imports,
         )?;
 
         let mod_name = segments.last().cloned().unwrap_or_default();
@@ -2099,6 +2119,7 @@ impl ModuleLoader {
             accessor_consts,
             local_bindings,
             type_methods,
+            python_imports: module_python_imports,
         });
         self.by_path.insert(canonical.to_path_buf(), idx);
         Ok(idx)
@@ -2311,6 +2332,7 @@ fn generate_module_rs_with_bindings(
     env: &TypeEnv,
     local_bindings: &HashMap<String, ResolvedBinding>,
     loaded_modules: &[LoadedModule],
+    python_imports: &[PythonImport],
 ) -> Result<String, FitzError> {
     // Hpx.2 — para módulos compilados via loader, computar TypeInfo
     // fresco. El loader corrió `resolve_program` antes pero no
@@ -2318,6 +2340,16 @@ fn generate_module_rs_with_bindings(
     // side-table; los errores ya fueron reportados arriba.
     let (_e, type_info, _d, _errs) = crate::types::check_program(program);
     let mut ctx = CodegenCtx::new_for_module(env, &type_info);
+    // Fase 8.7.1 transitiva — `uses_python` del módulo activa el
+    // registro de bindings PyAny en `gen_expr::Ident` (paralelo a
+    // `generate_main_rs`). Es per-módulo: el main puede o no usar
+    // Python independientemente.
+    ctx.uses_python = !python_imports.is_empty();
+    // Si el módulo usa `.await` (incluido el patrón canónico
+    // `<py_call>?.await` de 8.7.3), `emit_module_python_use_decls`
+    // necesita saberlo para emitir el `use crate::{__fitz_py_invoke_await,
+    // __fitz_py_await_obj}`.
+    ctx.uses_async = program_uses_async(program);
     // F15 — instalar firmas + bindings ANTES del pre-registro, porque
     // los pre-pases pueden tener que resolver tipos cross-module al
     // armar las firmas locales de fns/types/consts.
@@ -2334,11 +2366,27 @@ fn generate_module_rs_with_bindings(
     for (name, binding) in local_bindings {
         ctx.module_bindings.insert(name.clone(), binding.clone());
     }
+    // Fase 8.7.1 transitiva — registra los bindings Python locales
+    // del módulo (binding_name → dotted_path + tipo PyAny en el scope
+    // raíz). Paralelo a `install_python_bindings` del main.
+    ctx.install_python_bindings(python_imports);
     ctx.pre_register_types(program)?;
     ctx.pre_register_fns(program)?;
     ctx.pre_register_top_lets(program)?;
 
     ctx.emit_prelude();
+
+    // Fase 8.7.1 transitiva — si el módulo declara imports Python,
+    // emite `use crate::{__FitzPyObject, __fitz_py_*}` para reusar
+    // los helpers del preludio Python del main, y luego emite sus
+    // propios statics + getters locales (`__FITZ_PY_BIND_X` +
+    // `__fitz_py_bind_x()`). pyo3 cachea via `sys.modules`, así que
+    // dos módulos importando `math` no pagan doble inicialización
+    // (solo el OnceLock duplicado, casi cero overhead).
+    ctx.emit_module_python_use_decls(python_imports);
+    let py_imports_owned = std::mem::take(&mut ctx.python_imports_ordered);
+    ctx.emit_python_bindings_top_level(&py_imports_owned);
+    ctx.python_imports_ordered = py_imports_owned;
 
     // F15 — `use crate::<other>::...` lines para cada Named binding del
     // módulo. Para Namespace bindings (`import foo`) no hace falta
@@ -2700,7 +2748,12 @@ fn generate_main_rs(
     validate_python_imports_for_codegen(program)?;
     let has_http = has_http_routes(program);
     let uses_async = program_uses_async(program);
-    let uses_python = !python_imports.is_empty();
+    // Fase 8.7.1 transitiva — `uses_python` global = main OR cualquier
+    // módulo cargado. Si solo módulos transitivos usan Python, el main
+    // igual emite el preludio entero (los `use crate::__fitz_py_*` de
+    // los módulos lo requieren).
+    let uses_python = !python_imports.is_empty()
+        || loader.modules.iter().any(|m| !m.python_imports.is_empty());
     let uses_fmt_helpers = program_uses_fmt_helpers(program);
     let uses_fitz_value = program_uses_fitz_value(program);
     let uses_auth = program_uses_auth(program);
@@ -4178,18 +4231,18 @@ impl<'a> CodegenCtx<'a> {
              self.0.as_ptr() == other.0.as_ptr()\n    \
              }\n\
              }\n\n\
-             fn __fitz_py_err_to_string(py: Python<'_>, err: PyErr) -> String {\n    \
+             pub(crate) fn __fitz_py_err_to_string(py: Python<'_>, err: PyErr) -> String {\n    \
              let class = err.get_type(py).qualname().ok().map(|s| s.to_string()).unwrap_or_else(|| \"PyError\".to_string());\n    \
              let value = err.value(py).to_string();\n    \
              if value.is_empty() { class } else { format!(\"{}: {}\", class, value) }\n\
              }\n\n\
-             fn __fitz_py_import(dotted: &str) -> __FitzPyObject {\n    \
+             pub(crate) fn __fitz_py_import(dotted: &str) -> __FitzPyObject {\n    \
              Python::attach(|py| match py.import(dotted) {\n        \
              Ok(module) => __FitzPyObject(Arc::new(module.into_any().unbind())),\n        \
              Err(err) => panic!(\"error importando módulo Python `{}`: {}\", dotted, __fitz_py_err_to_string(py, err)),\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_get_attr_obj(obj: &__FitzPyObject, name: &str) -> __FitzPyObject {\n    \
+             pub(crate) fn __fitz_py_get_attr_obj(obj: &__FitzPyObject, name: &str) -> __FitzPyObject {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              match bound.getattr(name) {\n            \
@@ -4198,7 +4251,7 @@ impl<'a> CodegenCtx<'a> {
              }\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_extract_i64(obj: &__FitzPyObject) -> i64 {\n    \
+             pub(crate) fn __fitz_py_extract_i64(obj: &__FitzPyObject) -> i64 {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              if bound.is_instance_of::<PyBool>() {\n            \
@@ -4210,7 +4263,7 @@ impl<'a> CodegenCtx<'a> {
              bound.extract::<i64>().unwrap_or_else(|_| panic!(\"el int Python excede el rango de Int (i64) en Fitz\"))\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_extract_f64(obj: &__FitzPyObject) -> f64 {\n    \
+             pub(crate) fn __fitz_py_extract_f64(obj: &__FitzPyObject) -> f64 {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              if bound.is_instance_of::<PyFloat>() {\n            \
@@ -4222,7 +4275,7 @@ impl<'a> CodegenCtx<'a> {
              panic!(\"se esperaba un float Python para coercer a Float, llegó otro tipo\")\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_extract_string(obj: &__FitzPyObject) -> String {\n    \
+             pub(crate) fn __fitz_py_extract_string(obj: &__FitzPyObject) -> String {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              if !bound.is_instance_of::<PyString>() {\n            \
@@ -4231,7 +4284,7 @@ impl<'a> CodegenCtx<'a> {
              bound.extract::<String>().unwrap_or_default()\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_extract_bool(obj: &__FitzPyObject) -> bool {\n    \
+             pub(crate) fn __fitz_py_extract_bool(obj: &__FitzPyObject) -> bool {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              if !bound.is_instance_of::<PyBool>() {\n            \
@@ -4310,7 +4363,7 @@ impl<'a> CodegenCtx<'a> {
              Ok(list.into_any().unbind())\n    \
              }\n\
              }\n\n\
-             fn __fitz_py_marshal_map_key(py: Python<'_>, k: &(impl __FitzToPy + ?Sized), path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n    \
+             pub(crate) fn __fitz_py_marshal_map_key(py: Python<'_>, k: &(impl __FitzToPy + ?Sized), path: &str) -> Result<pyo3::Py<pyo3::PyAny>, String> {\n    \
              // Python `dict` exige `__hash__`. Los primitivos Fitz que pasan acá ya son hashables;\n    \
              // tipos compuestos (List/Map/Instance) como key fueron rechazados en build-time o no\n    \
              // se permiten en el subset Map<K,V> con K primitivo.\n    \
@@ -4336,7 +4389,7 @@ impl<'a> CodegenCtx<'a> {
              /// sitio destino vía `__fitz_py_extract_*` o `__fitz_py_to_*`).\n    \
              /// El closure de args corre adentro de `Python::attach` para que el marshaling\n    \
              /// `__fitz_to_py(py, path)` tenga el GIL disponible.\n\
-             fn __fitz_py_invoke<F>(callable: &__FitzPyObject, args_fn: F) -> Result<__FitzPyObject, String>\n\
+             pub(crate) fn __fitz_py_invoke<F>(callable: &__FitzPyObject, args_fn: F) -> Result<__FitzPyObject, String>\n\
              where\n    \
              F: FnOnce(Python<'_>) -> Result<Vec<pyo3::Py<pyo3::PyAny>>, String>,\n\
              {\n    \
@@ -4364,7 +4417,7 @@ impl<'a> CodegenCtx<'a> {
                  /// se evalúa con `tokio::task::spawn_blocking` + `asyncio.new_event_loop()`\n\
                  /// + `run_until_complete`. Si no es awaitable, se devuelve directo —\n\
                  /// permite `.await` ergonómico aún sobre fns Python sync sin error.\n\
-                 async fn __fitz_py_invoke_await<F>(callable: &__FitzPyObject, args_fn: F) -> Result<__FitzPyObject, String>\n\
+                 pub(crate) async fn __fitz_py_invoke_await<F>(callable: &__FitzPyObject, args_fn: F) -> Result<__FitzPyObject, String>\n\
                  where\n    \
                  F: FnOnce(Python<'_>) -> Result<Vec<pyo3::Py<pyo3::PyAny>>, String>,\n\
                  {\n    \
@@ -4416,7 +4469,7 @@ impl<'a> CodegenCtx<'a> {
                  /// (caso típico: el call retornó valor sync, no coroutine),\n\
                  /// devuelve el objeto sin tocar — paralelo al fallback de\n\
                  /// `__fitz_py_invoke_await`.\n\
-                 async fn __fitz_py_await_obj(coro: &__FitzPyObject) -> Result<__FitzPyObject, String> {\n    \
+                 pub(crate) async fn __fitz_py_await_obj(coro: &__FitzPyObject) -> Result<__FitzPyObject, String> {\n    \
                  let is_coro = Python::attach(|py| {\n        \
                  let bound = coro.0.bind(py);\n        \
                  let inspect = match py.import(\"inspect\") {\n            \
@@ -4454,7 +4507,7 @@ impl<'a> CodegenCtx<'a> {
              /// adentro de `Arc<Mutex<>>`. T es cualquier tipo Fitz primitivo o nominal:\n    \
              /// el codegen invoca la variante apropiada (`__fitz_py_to_list_i64`, etc.) según\n    \
              /// el tipo destino concreto del binding.\n\
-             fn __fitz_py_to_list_i64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<i64>>> {\n    \
+             pub(crate) fn __fitz_py_to_list_i64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<i64>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Int>\"));\n        \
@@ -4466,7 +4519,7 @@ impl<'a> CodegenCtx<'a> {
              Arc::new(Mutex::new(out))\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_to_list_f64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<f64>>> {\n    \
+             pub(crate) fn __fitz_py_to_list_f64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<f64>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Float>\"));\n        \
@@ -4484,7 +4537,7 @@ impl<'a> CodegenCtx<'a> {
              Arc::new(Mutex::new(out))\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_to_list_string(obj: &__FitzPyObject) -> Arc<Mutex<Vec<String>>> {\n    \
+             pub(crate) fn __fitz_py_to_list_string(obj: &__FitzPyObject) -> Arc<Mutex<Vec<String>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Str>\"));\n        \
@@ -4496,7 +4549,7 @@ impl<'a> CodegenCtx<'a> {
              Arc::new(Mutex::new(out))\n    \
              })\n\
              }\n\n\
-             fn __fitz_py_to_list_bool(obj: &__FitzPyObject) -> Arc<Mutex<Vec<bool>>> {\n    \
+             pub(crate) fn __fitz_py_to_list_bool(obj: &__FitzPyObject) -> Arc<Mutex<Vec<bool>>> {\n    \
              Python::attach(|py| {\n        \
              let bound = obj.0.bind(py);\n        \
              let list = bound.cast::<PyList>().unwrap_or_else(|_| panic!(\"se esperaba list Python para coercer a List<Bool>\"));\n        \
@@ -4759,6 +4812,54 @@ where
 
 ",
         );
+    }
+
+    /// Fase 8.7.1 transitiva — emite las `use crate::__fitz_py_*` que
+    /// el código del módulo necesita para usar los helpers Python que
+    /// viven en el preludio del main. Solo se llama desde
+    /// `generate_module_rs_with_bindings`, nunca desde el main (que
+    /// emite el preludio inline). Si no hay imports Python, no emite
+    /// nada.
+    ///
+    /// Reusa el preludio de main para no duplicar los helpers (~250
+    /// LoC); los statics + getters sí son locales al módulo (`pyo3`
+    /// cachea via `sys.modules` así que el costo del OnceLock
+    /// duplicado es nominal).
+    fn emit_module_python_use_decls(&mut self, imports: &[PythonImport]) {
+        if imports.is_empty() {
+            return;
+        }
+        // El struct opaco + helpers viven en el crate root (main.rs).
+        // `pyo3::prelude::*` se importa para que las signature de los
+        // helpers (`Python<'_>`, `PyAny`, etc.) que aparezcan adentro
+        // del módulo resuelvan. `Arc` ya viene del preludio base
+        // (`use std::sync::{Arc, Mutex};`), no lo re-importamos.
+        //
+        // Marcamos el bloque con `#[allow(unused_imports)]` porque
+        // un módulo puede importar `from python import math` y solo
+        // usar field access (sin `__fitz_py_invoke` ni extracciones
+        // concretas), o solo invocar un helper en particular. Mantener
+        // el `use` group homogéneo simplifica el codegen y deja a
+        // rustc/clippy ignorar lo no referenciado.
+        self.emit(
+            "// Fase 8.7.1 transitiva — preludio Python reusado del crate root.\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__FitzPyObject, __FitzToPy};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_py_import, __fitz_py_get_attr_obj, __fitz_py_invoke};\n\
+             #[allow(unused_imports)]\n\
+             use crate::{__fitz_py_extract_i64, __fitz_py_extract_f64, __fitz_py_extract_string, __fitz_py_extract_bool};\n\
+             #[allow(unused_imports)]\n\
+             use crate::__fitz_py_marshal_map_key;\n\
+             #[allow(unused_imports)]\n\
+             use pyo3::prelude::*;\n\n",
+        );
+        if self.uses_async {
+            self.emit(
+                "#[allow(unused_imports)]\n\
+                 use crate::{__fitz_py_invoke_await, __fitz_py_await_obj};\n\n",
+            );
+        }
     }
 
     fn emit_python_bindings_top_level(&mut self, imports: &[PythonImport]) {
@@ -18703,6 +18804,42 @@ mod tests {
         generate_rust(&program, &env)
     }
 
+    /// Fase 8.7.1 transitiva — helper para tests multi-archivo. Arma
+    /// un tempdir con un módulo `utils.fitz` y un `main.fitz` que lo
+    /// importa, corre `generate_project`, y devuelve los artifacts +
+    /// el contenido del `utils.rs` generado para inspección. El
+    /// tempdir se borra al droparse el TempDir devuelto.
+    fn gen_project_with_module(
+        main_src: &str,
+        utils_src: &str,
+    ) -> (tempfile::TempDir, super::ProjectArtifacts, String) {
+        let tmp = tempfile::tempdir().expect("tempdir OK");
+        let main_path = tmp.path().join("main.fitz");
+        let utils_path = tmp.path().join("utils.fitz");
+        std::fs::write(&main_path, main_src).expect("write main OK");
+        std::fs::write(&utils_path, utils_src).expect("write utils OK");
+        let tokens = tokenize(main_src).expect("lex main OK");
+        let program = parse(tokens).expect("parse main OK");
+        let (env, types_info, _defs, errs) = check_program(&program);
+        assert!(errs.is_empty(), "checker main errors: {:?}", errs);
+        let project = super::generate_project(
+            &main_path,
+            &program,
+            &env,
+            &types_info,
+            crate::manifest::DepRegistry::new(),
+        )
+        .expect("generate_project OK");
+        // Buscar el utils.rs entre los mod_files emitidos por el loader.
+        let utils_rs = project
+            .mod_files
+            .iter()
+            .find(|m| m.rel_path.to_string_lossy().contains("utils"))
+            .map(|m| m.content.clone())
+            .unwrap_or_default();
+        (tmp, project, utils_rs)
+    }
+
     // ---- Fase 6.6: codegen async (async fn / .await / sleep) ----
 
     #[test]
@@ -22661,7 +22798,7 @@ mod tests {
         if !errors.is_empty() {
             panic!("checker errors: {:?}", errors);
         }
-        generate_module_rs_with_bindings(&program, &env, &HashMap::new(), &[])
+        generate_module_rs_with_bindings(&program, &env, &HashMap::new(), &[], &[])
     }
 
     #[test]
@@ -23180,6 +23317,151 @@ mod tests {
             code.contains("\"arg0\""),
             "esperaba path \"arg0\", got:\n{}",
             code
+        );
+    }
+
+    // ---- Fase 8.7.1 transitiva: `from python import` en módulos ----
+    //
+    // Pre-fix: el loader rechazaba el caso con error explícito citando
+    // "deuda residual menor". Post-fix: cada módulo emite sus propios
+    // statics + getters locales y referencia los helpers del preludio
+    // Python del main via `use crate::__fitz_py_*`. El main emite el
+    // preludio Python entero aunque NO use Python directamente (los
+    // `use crate::` de los módulos lo requieren); Cargo.toml suma pyo3
+    // igual.
+
+    #[test]
+    fn build_modulo_transitivo_con_from_python_no_falla() {
+        // Pre-fix: este caso abortaba con
+        // "imports Python dentro de módulos transitivos no se soportan
+        // todavía. Workaround: poné el `from python import` en el main."
+        // Post-fix: compila limpio.
+        let main_src = "from utils import double_pi\nlet v: Float = double_pi()\nprint(v)\n";
+        let utils_src = "from python import math\n\
+                         fn double_pi() -> Float {\n  \
+                             let pi: Float = math.pi\n  \
+                             return pi * 2.0\n\
+                         }\n";
+        let (_tmp, project, utils_rs) = gen_project_with_module(main_src, utils_src);
+        // El módulo debe haberse generado con contenido (no vacío).
+        assert!(
+            !utils_rs.is_empty(),
+            "utils.rs vacío — el loader debería haberlo emitido. Cargo.toml:\n{}",
+            project.cargo_toml
+        );
+    }
+
+    #[test]
+    fn build_modulo_transitivo_emite_use_crate_fitz_py() {
+        // El módulo reusa los helpers del preludio Python via
+        // `use crate::__FitzPyObject; use crate::{__fitz_py_import, ...};`
+        // — no duplica el preludio.
+        let main_src = "from utils import double_pi\nlet v: Float = double_pi()\nprint(v)\n";
+        let utils_src = "from python import math\n\
+                         fn double_pi() -> Float {\n  \
+                             let pi: Float = math.pi\n  \
+                             return pi * 2.0\n\
+                         }\n";
+        let (_tmp, _project, utils_rs) = gen_project_with_module(main_src, utils_src);
+        assert!(
+            utils_rs.contains("__FitzPyObject"),
+            "esperaba `__FitzPyObject` importado en utils.rs, got:\n{}",
+            utils_rs
+        );
+        assert!(
+            utils_rs.contains("__fitz_py_import"),
+            "esperaba `use crate::{{..., __fitz_py_import, ...}}` en utils.rs, got:\n{}",
+            utils_rs
+        );
+        assert!(
+            utils_rs.contains("__fitz_py_get_attr_obj"),
+            "esperaba `__fitz_py_get_attr_obj` importado en utils.rs, got:\n{}",
+            utils_rs
+        );
+        // El módulo NO debe duplicar la definición del struct opaco
+        // (vive en main vía preludio).
+        assert!(
+            !utils_rs.contains("pub struct __FitzPyObject"),
+            "el módulo no debe redefinir __FitzPyObject — debe importarlo, got:\n{}",
+            utils_rs
+        );
+    }
+
+    #[test]
+    fn build_modulo_transitivo_emite_statics_locales() {
+        // Cada módulo emite sus propios statics + getters (`__FITZ_PY_BIND_X`
+        // + `__fitz_py_bind_x()`). pyo3 cachea via sys.modules, así que el
+        // OnceLock duplicado entre módulos es casi cero overhead.
+        let main_src = "from utils import double_pi\nlet v: Float = double_pi()\nprint(v)\n";
+        let utils_src = "from python import math\n\
+                         fn double_pi() -> Float {\n  \
+                             let pi: Float = math.pi\n  \
+                             return pi * 2.0\n\
+                         }\n";
+        let (_tmp, _project, utils_rs) = gen_project_with_module(main_src, utils_src);
+        assert!(
+            utils_rs.contains("static __FITZ_PY_BIND_MATH"),
+            "esperaba static __FITZ_PY_BIND_MATH local en utils.rs, got:\n{}",
+            utils_rs
+        );
+        assert!(
+            utils_rs.contains("fn __fitz_py_bind_math()"),
+            "esperaba getter local __fitz_py_bind_math en utils.rs, got:\n{}",
+            utils_rs
+        );
+        assert!(
+            utils_rs.contains("__fitz_py_import(\"math\")"),
+            "esperaba `__fitz_py_import(\"math\")` en el getter de utils.rs, got:\n{}",
+            utils_rs
+        );
+    }
+
+    #[test]
+    fn build_solo_modulo_transitivo_usa_python_main_emite_preludio() {
+        // Si el main NO importa Python directo pero un módulo transitivo
+        // sí, el preludio Python igual se emite en main.rs (los
+        // `use crate::__fitz_py_*` de los módulos lo requieren).
+        let main_src = "from utils import double_pi\nlet v: Float = double_pi()\nprint(v)\n";
+        let utils_src = "from python import math\n\
+                         fn double_pi() -> Float {\n  \
+                             let pi: Float = math.pi\n  \
+                             return pi * 2.0\n\
+                         }\n";
+        let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
+        assert!(
+            project.main_rs.contains("pub struct __FitzPyObject"),
+            "esperaba `pub struct __FitzPyObject` en main.rs (preludio Python), got main_rs:\n{}",
+            project.main_rs
+        );
+        assert!(
+            project.main_rs.contains("pub(crate) fn __fitz_py_import"),
+            "esperaba helper `__fitz_py_import` pub(crate) en main.rs, got main_rs:\n{}",
+            project.main_rs
+        );
+        // El main NO declara sus propios statics __FITZ_PY_BIND_X
+        // (no importa Python directo) — los statics viven en utils.rs.
+        assert!(
+            !project.main_rs.contains("static __FITZ_PY_BIND_MATH"),
+            "el main no debería emitir statics Python locales — solo utils los usa, got main_rs:\n{}",
+            project.main_rs
+        );
+    }
+
+    #[test]
+    fn build_solo_modulo_transitivo_usa_python_cargo_toml_incluye_pyo3() {
+        // Cargo.toml suma pyo3 si CUALQUIER módulo (main o transitivo)
+        // usa Python — paralelo a `uses_python` global.
+        let main_src = "from utils import double_pi\nlet v: Float = double_pi()\nprint(v)\n";
+        let utils_src = "from python import math\n\
+                         fn double_pi() -> Float {\n  \
+                             let pi: Float = math.pi\n  \
+                             return pi * 2.0\n\
+                         }\n";
+        let (_tmp, project, _utils_rs) = gen_project_with_module(main_src, utils_src);
+        assert!(
+            project.cargo_toml.contains("pyo3"),
+            "esperaba pyo3 en Cargo.toml (módulo transitivo usa Python), got:\n{}",
+            project.cargo_toml
         );
     }
 

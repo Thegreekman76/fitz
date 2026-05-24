@@ -1,0 +1,38 @@
+// examples/python_math_utils.fitz — módulo Fitz con interop Python.
+//
+// Cierra la deuda residual de Fase 8.7.1 ("imports Python adentro
+// de módulos transitivos no soportados todavía"). Hoy, este módulo
+// puede declarar su propio `from python import math` sin obligar al
+// main a importar Python. El codegen emite statics + getters locales
+// (`__FITZ_PY_BIND_MATH` + `__fitz_py_bind_math()`) y reusa los
+// helpers del preludio Python del crate root via `use crate::...`.
+//
+// Patrón ergonómico para librerías Fitz que delegan operaciones a
+// Python (NumPy, scipy, redis-py, etc.) sin obligar a quien las usa
+// a saber que adentro hay interop.
+
+from python import math
+
+// Calcula el área de un círculo `π * r²`. Usa `math.pi` directamente
+// (auto-coerción PyAny → Float via anotación destino del `let pi`).
+fn area(r: Float) -> Float {
+    let pi: Float = math.pi
+    return pi * r * r
+}
+
+// Calcula la raíz cuadrada. `math.sqrt(x)` es un call a Python que
+// devuelve `Result<Float>` (8.3). Propagamos el Err con `?`.
+//
+// Nombrada `safe_sqrt` para evitar shadowing del built-in `sqrt` del
+// codegen — deuda preexistente, no relacionada con 8.7.1 transitiva.
+fn safe_sqrt(x: Float) -> Result<Float> {
+    let raw = math.sqrt(x)?
+    // `raw` es PyAny opaco; bind anotado fuerza la extracción a Float.
+    let v: Float = raw
+    return Ok(v)
+}
+
+// Constante exportada — el binding `pi` arriba se construye dentro
+// del cuerpo de cada call. Si querés exponerla como `pub const`
+// del módulo, declarala como `let PI: Float = ...` afuera de la fn
+// y el codegen la hoistea (F12 fix).
