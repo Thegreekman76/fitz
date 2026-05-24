@@ -501,9 +501,12 @@ del proyecto Fitz.
   #1 (rechazo del codegen 8.7.1 transitiva) CERRADO en v0.9.43**
   + **Sub-deuda #1.5/#1.6 CERRADAS en v0.9.44** + **deuda
   distroless-tar-embedded CERRADA en v0.9.46** (launcher con
-  `tar`+`flate2` inline destraba `gcr.io/distroless/cc-debian12`).
-  Variante `Dockerfile.distroless` disponible con el flow nuevo.
-  Quedan 2 caveats menores (no bloqueantes):
+  `tar`+`flate2` inline destraba `gcr.io/distroless/cc-debian12`)
+  + **Smoke real Docker end-to-end VALIDADO en v0.9.52**
+  (imagen final 136 MB, POST/GET/CORS preflight todo OK, frontend
+  SPA + Postgres). Variante `Dockerfile.distroless` +
+  `docker-compose.distroless.yml` listos para production.
+  Caveat residual:
 
   1. ~~Rechazo del codegen — `from python import` en módulos
      transitivos NO soportado~~ **CERRADO en v0.9.43**.
@@ -528,11 +531,20 @@ del proyecto Fitz.
   acá (cambia solo el nombre del binario:
   `fitz-api-fullstack-postgres`).
 
-  **Con el cierre v0.9.44**, el `fitz build` de este boilerplate
-  (multi-archivo con data layer separado) compila limpio
-  end-to-end. El adopt al flow `--bundle-pip-requirements` con
-  `--bundle-python` + el ajuste del Dockerfile (fix GLIBC) es
-  viable hoy.
+  **Con el cierre v0.9.52**, el `fitz build` de este boilerplate
+  (multi-archivo con data layer separado + frontend SPA + CORS)
+  compila limpio end-to-end Y el smoke real Docker está
+  validado. Usar `docker compose -f docker-compose.distroless.yml
+  up --build` directo para production-ready.
+
+  **Workaround temporal aplicado en `src/data/tasks.fitz`**: los 5
+  helpers (`create_raw`/`find_raw`/`list_raw`/`update_raw`/
+  `delete_raw`) usan binding intermedio anotado `let s: Str =
+  json.dumps(raw)?` en lugar de `return Ok(json.dumps(raw)?)`
+  inline. Razón: bug **8.7-ok-propagation** del codegen Python
+  (expected type adentro de `Ok(...)` no propaga al inner).
+  NO afecta `fitz run`. Cuando 8.7-ok-propagation cierre como
+  mini-fase dedicada, los 5 helpers vuelven al patrón inline.
 - **DB nativa Fitz (Fase 10)**: reemplazo de la layer Python
   cuando llegue. Mismo API HTTP + mismo frontend, sin interop
   ni `requirements.txt`.

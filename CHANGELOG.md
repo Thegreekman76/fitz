@@ -61,6 +61,76 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.52] — 2026-05-24 — Smoke real Docker boilerplate 6 (Dockerfile.distroless) end-to-end VERDE
+
+### Added
+
+- **Smoke real Docker boilerplate 6 (`Dockerfile.distroless`)
+  validado END-TO-END** ✓. La deuda menor que v0.9.50 dejó como
+  "paralela al boilerplate 5" cierra acá. Stack completo de 3
+  servicios:
+  - **api** (distroless con binario standalone — `fitz build
+    --bundle-pip-requirements`): **imagen final 136 MB real**
+    (igual que boilerplate 5 — CPython 3.14.5 + sqlalchemy +
+    psycopg2-binary embebidos).
+  - **frontend** (nginx alpine) sirviendo el SPA estático
+    desde port 8080.
+  - **db** (postgres 16-alpine) con healthcheck.
+  - **CORS preflight** OPTIONS desde `Origin:
+    http://localhost:8080` responde HTTP 204 con
+    `access-control-allow-origin` + `access-control-allow-methods`
+    + `access-control-allow-headers` correctos (`@middleware
+    (cors({...}))` del api funciona en runtime distroless).
+  - **HTTP smoke**: POST `/tasks` crea (devuelve task tipado
+    desde Postgres), GET `/tasks?filter=all` lista, frontend
+    SPA HTTP 200 con 20679 bytes.
+
+- **`docker-compose.distroless.yml`** sumado al boilerplate 6
+  con los 3 servicios (api distroless + nginx + postgres).
+  Listo para `docker compose -f docker-compose.distroless.yml
+  up --build` directo.
+
+### Changed
+
+- **`Dockerfile.distroless` del boilerplate 6**: fix bug
+  preexistente (intentaba `COPY web/` que no existe — el dir
+  real es `frontend/`). Ahora copia solo lo necesario para el
+  api (sin frontend assets — el SPA vive en el container nginx
+  separado, consistente con el `Dockerfile` actual).
+- **`src/data/tasks.fitz` del boilerplate 6**: workaround
+  v0.9.52 para el bug **8.7-ok-propagation** (deuda residual
+  del codegen Python que SIGUE abierta). Los 5 helpers
+  `create_raw`/`find_raw`/`list_raw`/`update_raw`/`delete_raw`
+  ahora usan binding intermedio anotado `let s: Str = json.
+  dumps(raw)?` en lugar de `return Ok(json.dumps(raw)?)`
+  inline. Sin esto, `fitz build` falla con `expected String,
+  found __FitzPyObject` adentro del `Ok(...)`. Cuando
+  8.7-ok-propagation cierre, los 5 helpers vuelven al patrón
+  inline original. NO afecta `fitz run` (el intérprete tipa
+  correctamente).
+
+### Notes
+
+- **Sin cambios de código del lenguaje** — solo nuevo
+  `docker-compose.distroless.yml` + workaround del bug
+  8.7-ok-propagation en el boilerplate + actualizaciones de
+  docs. Suite intacta: 2282 default / 2373 python / 2387 lsp.
+- **Inventario depurado** post-v0.9.52: **4 deudas reales
+  restantes**:
+
+| ID | Categoría | Esfuerzo |
+|----|-----------|----------|
+| 8.7-ok-propagation | Python interop | 3-5h |
+| dict→Map<K,V> no primitivos | Python interop | 4-6h |
+| R.bug-pyo3-abi3 Linux/macOS | Bundling Python | 4-6h |
+| 8-pyi-stubs | Stubs Python | 1-2 días |
+
+  El bundle G del inventario original (3 deudas: smoke 5 +
+  multi-arch + python-image) entera CERRADA con los releases
+  v0.9.49 (audit + 2 ya cerradas) + v0.9.50 (smoke 5) +
+  v0.9.52 (smoke 6). Bundle B sigue como el más obvio para
+  destrabar el flow `--bundle-pip-requirements` sin workarounds.
+
 ## [v0.9.51] — 2026-05-24 — Mini-tanda J: LSP polish (UTF-8 capability + F15 recovery sub-stmt)
 
 ### Added
