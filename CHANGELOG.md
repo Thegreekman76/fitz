@@ -61,6 +61,115 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.44] — 2026-05-24 — Cierre sub-deuda 1.5/1.6: coerción + impls HTTP para tipos importados en `fitz build`
+
+### Added
+
+- **Codegen — helpers Python para tipos custom definidos en módulos
+  transitivos**. Cierre de la **sub-deuda 1.5** que emergió al cerrar
+  v0.9.43 (cuando el smoke real del boilerplate 5 con `fitz build`
+  pasó el rechazo del 8.7.1 transitiva y reveló que los helpers
+  `__fitz_py_to_instance_<T>`/`__fitz_py_to_list_<T>` solo se emitían
+  para tipos definidos en main, no para tipos importados desde otros
+  módulos). El error pre-fix era `cannot find function
+  __fitz_py_to_instance_User in this scope`.
+
+  Implementación:
+  - **`pub(crate)`** sobre los helpers `__fitz_py_to_instance_<T>` y
+    `__fitz_py_to_list_<T>` en main (antes `fn` privadas) — necesario
+    para que módulos los referencien con `crate::__fitz_py_to_*`.
+  - **`gen_python_helpers_for_type(name, &sig)`** — nuevo método del
+    `CodegenCtx` que extrae las 2 `impl __FitzToPy` + helpers
+    Python→Fitz desde `gen_type_def`. Reusable para tipos del main Y
+    para tipos importados.
+  - **`emit_helpers_for_imported_types(loader, do_python, do_http)`**
+    — pase unificado nuevo invocado desde `emit_main_rs_body` después
+    de emitir los tipos locales. Para cada tipo custom de cada módulo
+    cargado del proyecto: emite `#[allow(unused_imports)] use
+    crate::<qualifier>::{T, TData};` (si no está ya importado al
+    main) + opcionalmente los impls HTTP (`__ToFitzJson`/
+    `__FromFitzJson`) + opcionalmente los Python helpers
+    (`__FitzToPy` + `__fitz_py_to_instance_<T>` +
+    `__fitz_py_to_list_<T>`). Dedup por nombre para evitar emitir
+    helpers duplicados si dos módulos definen tipos con el mismo
+    nombre.
+  - **Post-procesamiento del output de cada módulo**
+    (`prefix_module_py_nominal_helpers`): pasada lineal sin regex que
+    prefija `crate::` a las referencias `__fitz_py_to_instance_<Cap>(`
+    y `__fitz_py_to_list_<Cap>(` (con `<Cap>` capitalizado = Nominal).
+    Los helpers primitivos `__fitz_py_to_list_i64/f64/string/bool`
+    (lowercase) NO se tocan — ya se importan via `use crate::{...}`.
+    Idempotente (no duplica `crate::crate::`).
+  - **`emit_module_python_use_decls`** ahora suma `use crate::
+    {__fitz_py_to_list_i64, __fitz_py_to_list_f64,
+    __fitz_py_to_list_string, __fitz_py_to_list_bool}` (helpers
+    primitivos del crate root) además de los helpers Python ya
+    importados antes.
+
+- **Codegen — impls HTTP (`__ToFitzJson`/`__FromFitzJson`) para
+  tipos importados de módulos**. Cierre de la **sub-deuda 1.6**
+  paralela a la 1.5 pero del lado HTTP: handlers que aceptan o
+  devuelven tipos `T` importados (e.g. `fn create(u: NewUser) ->
+  Result<User>`) fallaban en `fitz build` con `the trait bound
+  NewUserData: __FromFitzJson is not satisfied` y `method
+  __to_fitz_json exists for struct Arc<Mutex<UserData>>, but its
+  trait bounds were not satisfied`.
+
+  Implementación:
+  - **`gen_type_http_impls_for_sig(name, &sig)`** — extraído de
+    `gen_type_http_impls` para reusabilidad. Emite los 2 impls
+    `__ToFitzJson` + `__FromFitzJson` dado nombre + sig.
+  - El pase unificado `emit_helpers_for_imported_types` lo invoca
+    cuando `has_http = true` (sin requerir `uses_python`). Cubre
+    boilerplates HTTP que importan tipos de módulos sin tocar
+    Python.
+
+- **Bug fix preexistente — `mod types; mod types;` duplicado**.
+  `ModuleLoader::emit_mod_decls` emitía `mod <root>;` por cada
+  módulo cargado; cuando dos módulos compartían parent dir
+  (`types/user.rs` + `types/api.rs`), `mod types;` aparecía dos
+  veces y rustc fallaba con `E0428: the name 'types' is defined
+  multiple times`. Fix: dedup por root segment con `HashSet`. El
+  bug bloqueaba `fitz build` de cualquier proyecto multi-archivo
+  con dos módulos en la misma carpeta — descubierto al validar la
+  sub-deuda 1.5/1.6.
+
+### Changed
+
+- **READMEs de boilerplates 5 (api-postgres-python) y 6
+  (api-fullstack-postgres)**: blocker #1.5 (coerción
+  `__fitz_py_to_*_T` para tipos importados) marcado como CERRADO.
+  Quedan 2 caveats menores (GLIBC mismatch + tamaño real ~10-20 MB
+  vs 50-70 MB del plan original) — ambos no-bloqueantes para el
+  adopt real. Validado a mano: `fitz build` del boilerplate 5
+  produce un binario que compila limpio, bootea Python y falla
+  solo por `psycopg2` no instalado (config runtime, no del fix).
+- **Guía cap 21.10 (Interop Python en `fitz build`)**: nota
+  actualizada — la coerción `dict → Instance<T>` y `list →
+  List<T>` para tipos `T` importados de otro módulo ya funciona;
+  el caveat residual queda en tipos primitivos `Map<K,V>` opacos.
+
+### Notes
+
+- **Tests nuevos**: 4 unit en `codegen::tests::build_main_emite_
+  helpers_py_*`/`build_modulo_referencia_helper_*`/`build_modulo_
+  importa_helpers_py_*`/`build_emit_mod_decls_deduplica_*` + 1 E2E
+  `fase_8_7_1_transitiva_bis_modulo_coerce_pyany_a_tipo_importado`
+  (con feature `python`). El E2E valida end-to-end: módulo
+  `parser.fitz` define `type User` + `from python import json` +
+  `fn parse_default_user() -> Result<User>` que hace `let u: User
+  = json.loads(raw)?`, main importa la fn + el tipo, matchea sobre
+  `Ok(u)`, imprime `name=Fitz role=admin`.
+- **Sin cambios a la extensión VSCode** — no se introduce sintaxis
+  nueva.
+- **Sub-deuda residual descubierta** (no bloqueante, queda como
+  deuda menor del codegen): cuando una fn de módulo retorna
+  `Result<Str>` y el body hace `let s = json.dumps(...)?` + `return
+  Ok(s)`, el codegen infiere `s: PyAny` y no propaga la expectativa
+  de `Str` adentro de `Ok(...)`. Workaround usado en el E2E nuevo:
+  binding intermedio anotado `let raw: Str = raw_py`. Refinable
+  con propagación de expected type adentro de `Ok(...)`.
+
 ## [v0.9.43] — 2026-05-23 — Cierre deuda codegen 8.7.1: `from python import` en módulos transitivos
 
 ### Added

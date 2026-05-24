@@ -4158,25 +4158,24 @@ requests
   de los boilerplates originales (5/6) que bloquean su
   simplificación directa: (a) ~~**deuda del codegen Fase 8.7.1**
   rechaza `from python import` en módulos transitivos~~ ✓
-  **CERRADO 2026-05-23 (v0.9.43)** — el codegen reusa los helpers
-  del preludio Python del crate root via `use crate::__fitz_py_*`
-  y emite statics + getters locales por módulo. Smoke real del
-  boilerplate 5 con `fitz build` post-fix avanza más lejos en el
-  pipeline pero revela una **sub-deuda 1.5**: coerción
-  `__fitz_py_to_instance_T`/`__fitz_py_to_list_T` para tipos `T`
-  importados (los helpers tipa-específicos solo se emiten para
-  tipos del main; tipos importados no los heredan). Es la
-  próxima prioridad concreta para destrabar el adopt — ya estaba
-  documentada en este roadmap como deuda residual derivada de
-  Fase 8; (b) **GLIBC mismatch** entre `python:3.14-slim`
-  (trixie 2.39) y `debian:bookworm-slim` (2.36) → fix pinear
-  builder a `python:3.14-slim-bookworm`; (c) **beneficio real
-  ~10-20 MB de imagen** (no 50-70 MB del plan original) —
-  binario embedded con CPython pesa ~37 MB que compensa el
-  ahorro de no tener Python en runtime. Dockerfiles de
-  boilerplates 5/6 NO simplificados — quedan con
-  `python:3.12-slim` + `fitz run`. READMEs actualizados con el
-  estado de los blockers + sub-deuda 1.5 emergente.
+  **CERRADO 2026-05-23 (v0.9.43)** + ~~**sub-deuda 1.5/1.6**
+  coerción y impls HTTP para tipos importados~~ ✓ **CERRADO
+  2026-05-24 (v0.9.44)** — el codegen reusa helpers del preludio
+  Python del crate root via `use crate::__fitz_py_*`, emite
+  statics + getters locales por módulo, Y emite los helpers
+  `__fitz_py_to_instance_<T>` + impls `__ToFitzJson`/
+  `__FromFitzJson` también para tipos custom definidos en módulos
+  transitivos (los módulos los referencian con `crate::__fitz_py_*`
+  vía post-procesamiento del output). Smoke validado: `fitz
+  build` del boilerplate 5 compila limpio end-to-end. (b) **GLIBC
+  mismatch** entre `python:3.14-slim` (trixie 2.39) y
+  `debian:bookworm-slim` (2.36) → fix pinear builder a
+  `python:3.14-slim-bookworm`; (c) **beneficio real ~10-20 MB
+  de imagen** (no 50-70 MB del plan original) — binario embedded
+  con CPython pesa ~37 MB que compensa el ahorro de no tener
+  Python en runtime. Dockerfiles de boilerplates 5/6 quedan con
+  `python:3.12-slim` + `fitz run` hasta que se aplique el ajuste
+  GLIBC del builder. READMEs actualizados.
 - **Constraint Linux/macOS heredado**: builder requiere Python
   3.14.x (R.bug-pyo3-abi3-portable-link componente Linux/macOS
   pendiente). Cuando cierre, `--bundle-pip` es independiente

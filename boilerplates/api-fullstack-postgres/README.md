@@ -498,19 +498,23 @@ del proyecto Fitz.
   **`fitz build --bundle-pip` (Fase 8.c cerrada 2026-05-23)** +
   **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
   el flag empaqueta paquetes pip junto al CPython base. **Blocker
-  #1 (rechazo del codegen 8.7.1 transitiva) CERRADO en v0.9.43**.
-  Quedan 3 issues (sub-deuda 1.5 emergió al pasar el rechazo
-  original — detalle completo en el README del boilerplate
-  hermano `api-postgres-python`):
+  #1 (rechazo del codegen 8.7.1 transitiva) CERRADO en v0.9.43**
+  + **Sub-deuda #1.5/#1.6 CERRADAS en v0.9.44**. Quedan 2
+  caveats menores (no bloqueantes):
 
   1. ~~Rechazo del codegen — `from python import` en módulos
      transitivos NO soportado~~ **CERRADO en v0.9.43**.
      `src/data/tasks.fitz` mantiene `from python import db`
      adentro sin refactor.
-  1.5. **Sub-deuda derivada de Fase 8 — coerción Python `dict
-     → Instance<T>` y `list → List<T>` en `fitz build` para
-     tipos `T` importados** (ver README hermano para detalle).
-     Es la próxima prioridad concreta para destrabar el adopt.
+  1.5. ~~Coerción Python `dict → Instance<T>` y `list → List<T>`
+     en `fitz build` para tipos `T` importados~~ **CERRADO en
+     v0.9.44**. Main emite los helpers `__fitz_py_to_instance_<T>`
+     /`__fitz_py_to_list_<T>` también para tipos custom de
+     módulos transitivos.
+  1.6. ~~Impls HTTP (`__ToFitzJson`/`__FromFitzJson`) para tipos
+     importados~~ **CERRADO en v0.9.44**. El mismo pase
+     unificado emite los impls HTTP — handlers que aceptan/
+     devuelven `Task`, `NewTask`, etc. importados compilan.
   2. GLIBC mismatch builder/runtime — fix con
      `python:3.14-slim-bookworm`.
   3. Beneficio real ~10-20 MB (no 50-70 MB) — argumento queda
@@ -521,13 +525,11 @@ del proyecto Fitz.
   acá (cambia solo el nombre del binario:
   `fitz-api-fullstack-postgres`).
 
-  **El smoke alternativo en v0.9.42 con un programa flat** (solo
-  `from python import` en main, sin módulos transitivos) corrió
-  end-to-end OK — el flow está validado para programas con
-  estructura simple. **Con el rechazo de 8.7.1 transitiva CERRADO
-  en v0.9.43**, el `fitz build` de este boilerplate avanza más
-  lejos en el pipeline pero ahora dispara la sub-deuda 1.5
-  (coerción `__fitz_py_to_*` para tipos importados).
+  **Con el cierre v0.9.44**, el `fitz build` de este boilerplate
+  (multi-archivo con data layer separado) compila limpio
+  end-to-end. El adopt al flow `--bundle-pip-requirements` con
+  `--bundle-python` + el ajuste del Dockerfile (fix GLIBC) es
+  viable hoy.
 - **DB nativa Fitz (Fase 10)**: reemplazo de la layer Python
   cuando llegue. Mismo API HTTP + mismo frontend, sin interop
   ni `requirements.txt`.

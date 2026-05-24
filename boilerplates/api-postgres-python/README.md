@@ -375,9 +375,11 @@ service `api` del compose.
   **`fitz build --bundle-pip-requirements` (cosecha 8.c v0.9.42)**:
   el flag empaqueta paquetes pip junto al CPython base en un
   binario standalone. **Blocker #1 (rechazo del codegen 8.7.1
-  transitiva) CERRADO en v0.9.43** (2026-05-23) — pero el smoke
-  end-to-end reveló una sub-deuda adicional (1.5) que sigue
-  bloqueando. Quedan 3 issues:
+  transitiva) CERRADO en v0.9.43** (2026-05-23) + **Sub-deuda
+  #1.5/#1.6 (coerción `__fitz_py_to_*_T` + impls HTTP para tipos
+  importados) CERRADAS en v0.9.44** (2026-05-24). El `fitz build`
+  del boilerplate compila limpio end-to-end. Quedan 2 caveats
+  menores (no bloqueantes):
 
   1. ~~**Rechazo del codegen — `from python import` en módulos
      transitivos NO soportado**~~ **CERRADO en v0.9.43**.
@@ -386,18 +388,20 @@ service `api` del compose.
      via `use crate::__fitz_py_*` y emite statics + getters
      locales. `src/data/users.fitz` mantiene `from python import db`
      adentro sin refactor.
-  1.5. **Sub-deuda derivada de Fase 8 — coerción Python `dict
+  1.5. ~~**Sub-deuda derivada de Fase 8 — coerción Python `dict
      → Instance<T>` y `list → List<T>` en `fitz build` para
-     tipos `T` importados de otro módulo**. Al pasar el rechazo
-     del 1, el smoke real del boilerplate dispara errores del
-     tipo `cannot find function __fitz_py_to_instance_User in
-     this scope` cuando el data layer hace `let u: User = ...?`.
-     Los helpers tipa-específicos solo se emiten para tipos
-     definidos en el main; tipos importados (como `User` desde
-     `types/user.fitz`) no los heredan. Esta deuda ya está
-     documentada en el roadmap como "coerción Python list/dict
-     → Fitz List/Map/Instance en `fitz build`" y es la próxima
-     prioridad concreta para destrabar los boilerplates.
+     tipos `T` importados de otro módulo**~~ **CERRADO en v0.9.44**.
+     Main emite los helpers `__fitz_py_to_instance_<T>` /
+     `__fitz_py_to_list_<T>` como `pub(crate)` también para tipos
+     custom definidos en módulos transitivos; los módulos los
+     referencian via `crate::__fitz_py_to_*` mediante
+     post-procesamiento del output.
+  1.6. ~~**Sub-deuda paralela del lado HTTP — impls
+     `__ToFitzJson`/`__FromFitzJson` para tipos importados**~~
+     **CERRADO en v0.9.44**. El mismo pase unificado del codegen
+     emite los impls HTTP para tipos custom de módulos transitivos
+     (necesarios para handlers que aceptan/devuelven `User`,
+     `NewUser`, etc. importados).
   2. **GLIBC mismatch entre `python:3.14-slim` (trixie, GLIBC
      2.39) y `debian:bookworm-slim` (GLIBC 2.36)**. El binario
      linkea contra GLIBC del builder y crashea en runtime con
@@ -459,15 +463,15 @@ service `api` del compose.
   - Sin `apt-get install libpq5` en runtime (libpq viene en
     el wheel `psycopg2-binary` embebido).
 
-  **El smoke alternativo en v0.9.42 con un programa flat (solo
-  `from python import` en main, sin módulos transitivos) corrió
-  end-to-end OK** — el flow `--bundle-pip-requirements` está
-  validado para programas con estructura simple. **Con el
-  rechazo de 8.7.1 transitiva CERRADO en v0.9.43**, el `fitz
-  build` del boilerplate avanza más lejos en el pipeline pero
-  ahora dispara la sub-deuda 1.5 (coerción `__fitz_py_to_*` para
-  tipos importados). El cierre de esa sub-deuda es la próxima
-  prioridad concreta para destrabar el adopt real.
+  **Con el cierre v0.9.44, el `fitz build` del boilerplate
+  compila limpio end-to-end** (validado a mano: `fitz build`
+  produce un binario `fitz-api-postgres-python.exe` de ~1.4 MB en
+  modo debug que bootea Python correctamente; falla solo en
+  runtime por `psycopg2` no instalado, lo cual es configuración
+  del runtime, no del codegen). El adopt al flow
+  `--bundle-pip-requirements` con `--bundle-python` + el ajuste
+  del Dockerfile (fix GLIBC) es viable hoy — los blockers
+  técnicos del codegen están todos cerrados.
 - **Auto-generar `types/user.fitz` con `fitz py-types`**: hoy
   está hardcoded. Sumar un step `fitz py-types python/models.py
   --out src/types/user.fitz` en el Dockerfile para regenerarlo

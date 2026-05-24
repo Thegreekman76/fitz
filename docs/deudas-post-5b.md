@@ -1120,15 +1120,26 @@
 >   runnable `examples/python-interop-modular.fitz` +
 >   `examples/python_math_utils.fitz` validado bit-a-bit
 >   `fitz run` ↔ `fitz build`. Sin cambios a la extensión
->   VSCode (no se introduce sintaxis nueva). Smoke real del
->   boilerplate 5 con `fitz build` post-fix avanza más lejos
->   en el pipeline pero revela una **sub-deuda 1.5**: coerción
->   `__fitz_py_to_instance_T`/`__fitz_py_to_list_T` para tipos
->   `T` importados (helpers solo se emiten para tipos del main).
->   Es la próxima prioridad concreta para destrabar el adopt
->   real de los boilerplates al flow `--bundle-pip-requirements`
->   — ya estaba documentada en este archivo como deuda residual
->   derivada de Fase 8.
+>   VSCode (no se introduce sintaxis nueva).
+>
+>   **Follow-up — sub-deuda 1.5/1.6 ✓ CERRADO 2026-05-24
+>   (v0.9.44)**: la coerción `__fitz_py_to_instance_T` /
+>   `__fitz_py_to_list_T` para tipos `T` importados (los
+>   helpers tipa-específicos solo se emitían en main para tipos
+>   del main; tipos importados no los heredaban) + los impls
+>   HTTP `__ToFitzJson`/`__FromFitzJson` para tipos importados
+>   (mismo bug paralelo del lado HTTP). Fix: main emite helpers
+>   y impls también para tipos custom de módulos transitivos
+>   (vía nuevo pase unificado `emit_helpers_for_imported_types`);
+>   módulos los referencian con `crate::__fitz_py_*` mediante
+>   post-procesamiento del output. Bonus: bug preexistente
+>   `mod types; mod types;` duplicado en `emit_mod_decls`
+>   también cerrado (HashSet dedup). 5 tests nuevos (4 unit +
+>   1 E2E `fase_8_7_1_transitiva_bis_modulo_coerce_pyany_a_
+>   tipo_importado`). Smoke real del boilerplate 5 con `fitz
+>   build` post-fix compila limpio end-to-end — el adopt al
+>   flow `--bundle-pip-requirements` es viable hoy con el
+>   ajuste GLIBC del builder.
 > - **GLIBC mismatch builder/runtime**: fix con
 >   `python:3.14-slim-bookworm` (Debian bookworm-aligned).
 >   Documentado en los READMEs.

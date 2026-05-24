@@ -3431,6 +3431,61 @@ fn fase_8_7_1_transitiva_build_from_python_en_modulo_compila_y_corre() {
     assert_eq!(stdout.trim(), "area = 12.566370614359172");
 }
 
+// ---- Fase 8.7.1 transitiva-bis (v0.9.44): coerción PyAny → Nominal
+//      para tipos importados de otro módulo ----
+//
+// Pre-fix (v0.9.43): el código del módulo `data/users.fitz` que hacía
+// `let u: User = json.loads(raw)?` con `User` importado de
+// `types/user.fitz` fallaba en `fitz build` con
+// `cannot find function __fitz_py_to_instance_User in this scope`.
+//
+// Post-fix (v0.9.44): main emite los helpers Python para tipos custom
+// de módulos transitivos (pub(crate)). Los módulos los referencian
+// con prefijo `crate::__fitz_py_to_instance_<T>` via post-procesamiento
+// del output.
+
+#[cfg(feature = "python")]
+#[test]
+fn fase_8_7_1_transitiva_bis_modulo_coerce_pyany_a_tipo_importado() {
+    // El módulo `parser` define `type User` y `from python import
+    // json`. Hace `let u: User = json.loads(raw)?` adentro de una fn.
+    // Main importa `parse_user` del módulo y la invoca.
+    // El módulo `parser` define `type User`, construye el dict
+    // Python directamente y lo coerce. Main solo invoca y matchea
+    // — no toca Python. Evitamos JSON crudo para no chocar con la
+    // interpolación de strings de Fitz adentro del literal.
+    let main_src = r#"from parser import parse_default_user, User
+let res: Result<User> = parse_default_user()
+match res {
+  Ok(u) => print("name={u.name} role={u.role}"),
+  Err(e) => print("err: {e}")
+}
+"#;
+    // `User` con campos Str solo para simplificar la construcción del
+    // dict Python (Fitz Map debe ser homogéneo). El test valida que
+    // la coerción `PyAny → User` funciona end-to-end con User vivo en
+    // el módulo, no en main.
+    let parser_src = r#"from python import json
+type User { name: Str, role: Str }
+
+fn parse_default_user() -> Result<User> {
+  let m: Map<Str, Str> = {"name": "Fitz", "role": "admin"}
+  let raw_py = json.dumps(m)?
+  let raw: Str = raw_py
+  let parsed = json.loads(raw)?
+  let u: User = parsed
+  return Ok(u)
+}
+"#;
+    let (stdout, exit) = build_and_run_multi(
+        "fase_8_7_1_transitiva_bis_coerce",
+        main_src,
+        &[("parser.fitz", parser_src)],
+    );
+    assert_eq!(exit, 0, "exit code esperado 0, fue {}", exit);
+    assert_eq!(stdout.trim(), "name=Fitz role=admin");
+}
+
 // ---- Mini-tanda C — list comprehensions ----
 
 #[test]

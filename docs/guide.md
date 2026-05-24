@@ -8474,18 +8474,27 @@ fitz build mi_app.fitz
 ./mi_app  # requiere Python 3.10+ en el PATH
 ```
 
-Bit-a-bit con `fitz run` para los patrones cubiertos. Lo que
-**falta** vs `fitz run` (deuda residual de 8.7):
+Bit-a-bit con `fitz run` para los patrones cubiertos. Coerción
+soportada por `fitz build`:
 
-- Coerción Python `list` → Fitz `List<T>`, `dict` → `Map<K,V>`,
-  `dict` → `Instance` (con anotaciones del 21.7). En `fitz build`
-  estos casos siguen quedando como `PyObject` opaco.
+- **`PyAny → primitivo`** (Int/Float/Str/Bool): `let pi: Float =
+  math.pi`.
+- **`PyAny → List<primitivo>`**: `let xs: List<Int> = json.
+  loads(raw)?`.
+- **`PyAny → Instance<T>`** y **`PyAny → List<Instance<T>>`**:
+  funciona también cuando `T` está **definido en otro módulo Fitz**
+  (cerrado v0.9.44). Main emite los helpers
+  `__fitz_py_to_instance_<T>` para tipos custom de módulos
+  transitivos; cada módulo los referencia con `crate::__fitz_py_*`.
 
-Para el caso canónico de CRUD con SQLAlchemy + recuperación de
-filas como instancias Fitz tipadas, usá `fitz run` por ahora.
-`fitz build` cubre handlers HTTP CRUD si no necesitás esa
-coerción (pasar dict opaco al cliente vía `serde_json` también
-funciona).
+Lo que **falta** vs `fitz run` (deuda residual menor de 8.7):
+
+- Coerción Python `dict` → Fitz `Map<K,V>` con K/V no primitivos
+  (queda como PyObject opaco; raro en práctica).
+- Propagación de expected type adentro de `Ok(...)`: una fn que
+  retorna `Result<Str>` y hace `let s = py_call()?; return Ok(s)`
+  necesita binding intermedio anotado `let s: Str = py_call()?`.
+  Refinable en una pasada futura del checker.
 
 **`from python import` en módulos transitivos**: soportado.
 Cada `.fitz` puede declarar sus propios imports Python sin
