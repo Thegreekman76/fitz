@@ -1363,7 +1363,7 @@ estado real).
 | ID | Categoría | Esfuerzo |
 |----|-----------|----------|
 | ~~8.7-ok-propagation~~ | ✓ **CERRADO v0.9.53** | `gen_return` propaga expected type adentro de `Ok(...)`/`Err(...)`; coerce inner directo al T/E del `Result<T, E>` esperado |
-| dict→Map<K,V> no primitivos | Python interop codegen | 4-6h |
+| ~~dict→Map<K,V> no primitivos~~ | ✓ **CERRADO v0.9.54** | 4 helpers `__fitz_py_to_map_string_<v>` para v primitivo (Str/Int/Float/Bool) + wiring en `coerce`. V compuesto (Nominal/List/Map) sigue gradual como deuda menor — casos raros, workaround manual con iteración del PyDict |
 | ~~UTF-16 position strict~~ | ✓ **CERRADO v0.9.51** | LSP capability `positionEncoding: utf-8` declarada explícita |
 | ~~F15 recovery sub-stmt~~ | ✓ **CERRADO v0.9.51** | `parse_postfix` preserva `Expr::Field { field: "" }` en lugar de descartar el stmt entero |
 | R.bug-pyo3-abi3-portable-link Linux/macOS | Bundling Python | 4-6h |

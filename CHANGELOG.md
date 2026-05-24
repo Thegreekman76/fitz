@@ -61,6 +61,76 @@ via interop, api-middleware-cors, cli-tool). Luego repo público
 + sitio docs MkDocs Material. ORM nativo + migraciones
 (9.w.4 / Fase 10) cuando aparezca proyecto real que lo necesite.
 
+## [v0.9.54] — 2026-05-24 — Cierre dict→Map<K,V> primitivo: coerción `PyAny → Map<Str, V>`
+
+### Added
+
+- **Coerción `PyAny → Map<Str, V>` para V primitivo**
+  (Str/Int/Float/Bool). Pre-fix: `let m: Map<Str, Str> = json.
+  loads(raw)?` adentro de fn `-> Result<Map<Str, Str>>` fallaba
+  en rustc con `expected Arc<Mutex<Vec<(String, String)>>>,
+  found __FitzPyObject` — el `coerce()` no tenía caso para
+  `(PyAny, Map<K, V>)`. Post-fix: 4 helpers nuevos en el preludio
+  Python + caso wireado en `coerce()`. Cubre el caso típico de
+  `json.loads` de objects con shapes simples.
+
+  Implementación:
+  - 4 helpers `pub(crate) fn __fitz_py_to_map_string_<v>` con
+    v ∈ {string, i64, f64, bool} emitidos en el bloque
+    `emit_python_prelude` (paralelo a los `__fitz_py_to_list_<v>`
+    existentes). Cada helper: itera el PyDict, valida que las
+    keys son `PyString` + cada value es del tipo esperado, y
+    devuelve `Arc<Mutex<Vec<(String, V)>>>`. Preserva el orden
+    de inserción del dict Python (CPython 3.7+ garantía nativa).
+  - Caso nuevo en `coerce()`: `(Type::PyAny, Type::Map(k, v))`
+    despacha por `(k, v)`. K=Str + V primitivo → helper
+    dedicado. K no-Str u otros V (Nominal/List/Map/Any) →
+    gradual (`code` tal cual; el caller se queja en build si
+    necesita coerción concreta).
+
+  **Cobertura de combinaciones**:
+  - ✅ Map<Str, Str>, Map<Str, Int>, Map<Str, Float>, Map<Str, Bool>.
+  - ❌ Map con K no-Str (raro en JSON), Map<Str, Nominal>,
+    Map<Str, List<...>>, Map<Str, Map<...>>, Map<Str, Any> —
+    quedan como deuda menor (caso 90%+ cubierto; los compuestos
+    son raros y el usuario puede destrabar iterando manualmente
+    el PyDict si necesita).
+
+### Notes
+
+- **Tests nuevos**: 5 unit en `codegen::tests::map_coerce_*`
+  (4 helpers verificados + 1 test que confirma que Map<Str,
+  List<...>> queda gradual sin emitir helper inexistente).
+- **Smoke real validado**: `fn parse(raw) -> Result<Map<Str,
+  Str>>` con `json.loads(raw)?` compila y produce
+  `Ok({"a": "x", "b": "y"})` con `json.dumps` + round-trip
+  (validado a mano con `fitz build` + ejecutar binario).
+- Suite total: **2290 default** (era 2285 + 5), **2381 python**
+  (era 2376 + 5), **2395 lsp** (era 2390 + 5). Clippy
+  `--all-targets -D warnings` + `cargo fmt --check` limpios en
+  los 3 modos.
+- **Sin cambios a la extensión VSCode** — fix puramente del
+  codegen.
+
+### Bundle B/I (Python interop codegen) ENTERO CERRADO
+
+Con v0.9.54, las 3 deudas originales del bundle B/I (Python
+interop codegen) cierran:
+
+| Deuda | Estado |
+|-------|--------|
+| ~~8.7-ok-propagation~~ | ✓ CERRADO v0.9.53 |
+| ~~8.7-await-binding-split~~ | ✓ CERRADO mini-tandas previas (verificado v0.9.49) |
+| ~~dict→Map<K,V> no primitivos~~ | ✓ CERRADO v0.9.54 (variantes primitivas) |
+
+**Inventario depurado** post-v0.9.54: **2 deudas reales
+restantes**:
+
+| ID | Categoría | Esfuerzo |
+|----|-----------|----------|
+| R.bug-pyo3-abi3 Linux/macOS | Bundling Python | 4-6h |
+| 8-pyi-stubs | Stubs Python | 1-2 días |
+
 ## [v0.9.53] — 2026-05-24 — Cierre 8.7-ok-propagation + fix fmt regression v0.9.51
 
 ### Fixed

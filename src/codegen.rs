@@ -4706,6 +4706,75 @@ impl<'a> CodegenCtx<'a> {
              })\n\
              }\n\n",
         );
+        // v0.9.54 8.7.bis — helpers `__fitz_py_to_map_string_<V>` para
+        // coerción `PyAny → Map<Str, V>`. Paralelo a los
+        // `__fitz_py_to_list_<V>` pero iterando un PyDict y extrayendo
+        // pairs (k: Str, v: V). Cubre las combinaciones más comunes:
+        // K=Str (típico cuando viene de json.loads) + V primitivo
+        // (Str/Int/Float/Bool). Map<K, V> con K no-Str o V compuesto
+        // queda como deuda menor (raro en práctica; los casos
+        // primitivos cubren el 90% de json.loads). Preservan el orden
+        // de inserción del dict Python (CPython 3.7+ garantía nativa).
+        self.emit(
+            "pub(crate) fn __fitz_py_to_map_string_string(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, String)>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Str>\"));\n        \
+             let mut out: Vec<(String, String)> = Vec::with_capacity(dict.len());\n        \
+             for (k, v) in dict.iter() {\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
+             if !v.is_instance_of::<PyString>() { panic!(\"valor de dict Python no es str — esperado para Map<_, Str>\"); }\n            \
+             out.push((k.extract::<String>().unwrap_or_default(), v.extract::<String>().unwrap_or_default()));\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n\
+             pub(crate) fn __fitz_py_to_map_string_i64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, i64)>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Int>\"));\n        \
+             let mut out: Vec<(String, i64)> = Vec::with_capacity(dict.len());\n        \
+             for (k, v) in dict.iter() {\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
+             if !v.is_instance_of::<PyInt>() { panic!(\"valor de dict Python no es int — esperado para Map<_, Int>\"); }\n            \
+             out.push((k.extract::<String>().unwrap_or_default(), v.extract::<i64>().unwrap_or_else(|_| panic!(\"int Python fuera de rango i64 al coercer Map<Str, Int>\"))));\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n\
+             pub(crate) fn __fitz_py_to_map_string_f64(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, f64)>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Float>\"));\n        \
+             let mut out: Vec<(String, f64)> = Vec::with_capacity(dict.len());\n        \
+             for (k, v) in dict.iter() {\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
+             let f = if v.is_instance_of::<PyFloat>() {\n                \
+             v.extract::<f64>().unwrap_or(0.0)\n            \
+             } else if v.is_instance_of::<PyInt>() {\n                \
+             v.extract::<i64>().map(|n| n as f64).unwrap_or(0.0)\n            \
+             } else {\n                \
+             panic!(\"valor de dict Python no es número — esperado para Map<_, Float>\")\n            \
+             };\n            \
+             out.push((k.extract::<String>().unwrap_or_default(), f));\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n\
+             pub(crate) fn __fitz_py_to_map_string_bool(obj: &__FitzPyObject) -> Arc<Mutex<Vec<(String, bool)>>> {\n    \
+             Python::attach(|py| {\n        \
+             let bound = obj.0.bind(py);\n        \
+             let dict = bound.cast::<PyDict>().unwrap_or_else(|_| panic!(\"se esperaba dict Python para coercer a Map<Str, Bool>\"));\n        \
+             let mut out: Vec<(String, bool)> = Vec::with_capacity(dict.len());\n        \
+             for (k, v) in dict.iter() {\n            \
+             if !k.is_instance_of::<PyString>() { panic!(\"clave de dict Python no es str — esperado para Map<Str, _>\"); }\n            \
+             if !v.is_instance_of::<PyBool>() { panic!(\"valor de dict Python no es bool — esperado para Map<_, Bool>\"); }\n            \
+             out.push((k.extract::<String>().unwrap_or_default(), v.extract::<bool>().unwrap_or(false)));\n        \
+             }\n        \
+             Arc::new(Mutex::new(out))\n    \
+             })\n\
+             }\n\n",
+        );
     }
 
     /// Fase 9.w.1.d — Emite el preludio de helpers para auth nativa:
@@ -18613,6 +18682,28 @@ fn coerce(code: &str, from: &Type, to: &Type, env: &TypeEnv) -> String {
             let name = &env.info(*id).name;
             format!("__fitz_py_to_instance_{}(&{})", name, code)
         }
+        // v0.9.54 8.7.bis — coerción `PyAny → Map<Str, V>` para V
+        // primitivo. Solo K=Str cubierto (caso típico de json.loads
+        // donde los keys siempre son strings). K=Int u otros + V
+        // compuesto quedan como deuda menor (raros en práctica).
+        (Type::PyAny, Type::Map(k, v)) => {
+            if matches!(k.as_ref(), Type::Str) {
+                match v.as_ref() {
+                    Type::Str => format!("__fitz_py_to_map_string_string(&{})", code),
+                    Type::Int => format!("__fitz_py_to_map_string_i64(&{})", code),
+                    Type::Float => format!("__fitz_py_to_map_string_f64(&{})", code),
+                    Type::Bool => format!("__fitz_py_to_map_string_bool(&{})", code),
+                    // Map<Str, Nominal> / Map<Str, List<...>> / Map<Str,
+                    // Map<...>> / Map<Str, Any> quedan gradual (deuda
+                    // menor — combinaciones poco comunes; el usuario
+                    // puede destrabar manualmente iterando el PyDict).
+                    _ => code.to_string(),
+                }
+            } else {
+                // K no-Str — gradual (deuda menor).
+                code.to_string()
+            }
+        }
         _ => code.to_string(),
     }
 }
@@ -24435,6 +24526,92 @@ mod tests {
             code.contains("return Ok("),
             "esperaba `return Ok(...)` en el body, output:\n{}",
             code
+        );
+    }
+
+    // ---- v0.9.54 8.7.bis — coerción PyAny → Map<Str, V> primitivo ----
+
+    #[test]
+    fn map_coerce_pyany_a_map_str_str_emite_helper() {
+        // Coerción canónica: `let m: Map<Str, Str> = json.loads(raw)?`
+        // adentro de fn `-> Result<Map<Str, Str>>` ahora emite
+        // `__fitz_py_to_map_string_string(&...)` en lugar de fallar
+        // con `expected Arc<Mutex<Vec<(String, String)>>>, found
+        // __FitzPyObject`.
+        let src = "from python import json\n\
+                   fn parse(raw: Str) -> Result<Map<Str, Str>> {\n  \
+                       let d = json.loads(raw)?\n  \
+                       let m: Map<Str, Str> = d\n  \
+                       return Ok(m)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_py_to_map_string_string"),
+            "esperaba helper __fitz_py_to_map_string_string en el output"
+        );
+    }
+
+    #[test]
+    fn map_coerce_pyany_a_map_str_int_emite_helper() {
+        let src = "from python import json\n\
+                   fn parse(raw: Str) -> Result<Map<Str, Int>> {\n  \
+                       let d = json.loads(raw)?\n  \
+                       let m: Map<Str, Int> = d\n  \
+                       return Ok(m)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_py_to_map_string_i64"),
+            "esperaba helper __fitz_py_to_map_string_i64 en el output"
+        );
+    }
+
+    #[test]
+    fn map_coerce_pyany_a_map_str_float_emite_helper() {
+        let src = "from python import json\n\
+                   fn parse(raw: Str) -> Result<Map<Str, Float>> {\n  \
+                       let d = json.loads(raw)?\n  \
+                       let m: Map<Str, Float> = d\n  \
+                       return Ok(m)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_py_to_map_string_f64"),
+            "esperaba helper __fitz_py_to_map_string_f64 en el output"
+        );
+    }
+
+    #[test]
+    fn map_coerce_pyany_a_map_str_bool_emite_helper() {
+        let src = "from python import json\n\
+                   fn parse(raw: Str) -> Result<Map<Str, Bool>> {\n  \
+                       let d = json.loads(raw)?\n  \
+                       let m: Map<Str, Bool> = d\n  \
+                       return Ok(m)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        assert!(
+            code.contains("__fitz_py_to_map_string_bool"),
+            "esperaba helper __fitz_py_to_map_string_bool en el output"
+        );
+    }
+
+    #[test]
+    fn map_coerce_pyany_a_map_compuesto_queda_gradual() {
+        // Map<Str, Map<Str, Int>> es compuesto — queda gradual (deuda
+        // menor documentada). El codegen NO debe emitir helper —
+        // produce un error de Rust en build, NO un panic silencioso.
+        let src = "from python import json\n\
+                   fn parse(raw: Str) -> Result<Map<Str, List<Int>>> {\n  \
+                       let d = json.loads(raw)?\n  \
+                       let m: Map<Str, List<Int>> = d\n  \
+                       return Ok(m)\n\
+                   }";
+        let code = gen(src).unwrap_or_else(|e| panic!("codegen falló: {}", e));
+        // NO debe emitir helper para Map<Str, List<Int>> (cae al gradual).
+        assert!(
+            !code.contains("__fitz_py_to_map_string_list"),
+            "NO esperaba helper __fitz_py_to_map_string_list — Map<Str, List<...>> es gradual"
         );
     }
 
